@@ -107,6 +107,7 @@ import {
   etDateString,
   formatETDate,
   formatETDateTime,
+  formatETTime,
 } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
@@ -1277,7 +1278,7 @@ export default function AdminInvoicesPage() {
   );
 }
 
-// ── Zelle payments to review (GATE_ZELLE_NOTICE_RECONCILE lane) ──
+// ── Zelle payments to review (parked by the bank-feed reconciler) ──
 // The park queue for Capital One Zelle notices the reconciler could not
 // settle on its own: one row per notice — payer · amount · memo · reason —
 // with the invoice candidates it found. Apply settles the chosen invoice
@@ -1330,7 +1331,15 @@ export function noticeCandidateLabel(c = {}) {
 // its source instead. Exported for the vitest.
 export function noticeMemoLine(n = {}) {
   if (n.memo) return `Memo: ${n.memo}`;
-  return n.source === "plaid_zelle" ? "From the bank feed" : "No memo";
+  if (n.source === "plaid_zelle") return "From the bank feed";
+  // A notice from an email: name the email, so two notices from one day can be told apart.
+  return n.email_subject ? `Email: ${n.email_subject}` : "No memo";
+}
+// A notice from an email names its source email by the last six characters of its id (with the
+// subject above), so two notices received the same day can be told apart. Exported for the vitest.
+export function noticeEmailTag(n = {}) {
+  if (n.source === "plaid_zelle" || !n.email_id) return "";
+  return ` · email …${String(n.email_id).slice(-6)}`;
 }
 function noticeAmount(n) {
   return n?.amount_cents == null
@@ -1530,8 +1539,9 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
                   ? ` · ${formatETDate(n.received_at, {
                       month: "short",
                       day: "numeric",
-                    })}`
+                    })}${n.email_id ? ` ${formatETTime(n.received_at)}` : ""}`
                   : ""}
+                {noticeEmailTag(n)}
               </div>
               <div
                 style={{

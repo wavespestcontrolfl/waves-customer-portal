@@ -1,6 +1,6 @@
 /**
  * /admin/invoices/payment-notices — the park queue for Zelle notices the
- * reconciler could not settle (GATE_ZELLE_NOTICE_RECONCILE lane). Pins:
+ * reconciler could not settle. Pins:
  *   - the static paths win over /:id (Express order) and are admin-only
  *     (listed in NAMED_INVOICE_GETS, so the single-invoice staff exemption
  *     never applies);
@@ -110,6 +110,18 @@ describe('GET /payment-notices', () => {
     });
     expect(requireAdmin).toHaveBeenCalled();
     expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { status: 'parked' }]);
+  });
+
+  // Legacy rows from the removed email path; prod had 0 on 2026-11-26.
+  test('an email notice carries its source email subject; a bank notice carries none', async () => {
+    tables.inbound_payment_notices = { firsts: [], selects: [[parked({ email_id: 'email-1' }), parked({ id: 'notice-2', email_id: null, source: 'plaid_zelle' })]], updates: [], calls: [] };
+    tables.emails = { firsts: [], selects: [[{ id: 'email-1', subject: 'Someone sent you money with Zelle' }]], updates: [], calls: [] };
+    await withServer(async (call) => {
+      const r = await call('GET', '/payment-notices');
+      expect(r.body.notices[0]).toMatchObject({ id: 'notice-1', email_subject: 'Someone sent you money with Zelle' });
+      expect(r.body.notices[1]).not.toHaveProperty('email_subject');
+    });
+    expect(tables.emails.calls).toContainEqual(['whereIn', 'id', ['email-1']]);
   });
 
   test('?status=all lifts the parked filter', async () => {

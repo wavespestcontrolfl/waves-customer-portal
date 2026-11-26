@@ -13,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TimeTrackingPage, { EntriesTab } from "./TimeTrackingPage";
 
 vi.mock("../../hooks/useStaffDocumentsAvailable", () => ({ default: () => false }));
-vi.mock("../../hooks/usePayGrowthAvailable", () => ({ default: () => false }));
 vi.mock("../../hooks/usePayrollAvailable", () => ({ default: () => false }));
 vi.mock("../../hooks/useTechPayStubs", () => ({ default: () => ({ status: "off" }) }));
 vi.mock("../../hooks/useTechScoreboardAvailability", () => ({ default: () => ({ status: "off" }) }));

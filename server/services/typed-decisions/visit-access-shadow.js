@@ -1,7 +1,7 @@
 /**
- * Visit access and safety flags, shadow leg (visit_access.v1; dark behind
- * GATE_VISIT_ACCESS_FLAGS=shadow, honoured only while GATE_TYPED_DECISIONS is
- * live).
+ * Visit access and safety flags, sweep leg (visit_access.v1; dark behind
+ * GATE_VISIT_ACCESS_FLAGS=shadow or on, honoured only while GATE_TYPED_DECISIONS
+ * is live).
  *
  * For each of today's and tomorrow's open visits the sweep builds one small
  * state (the visit's service line, how many visits came before it, a few
@@ -10,9 +10,9 @@
  * questions to each live provider and records every answer in
  * decision_reviews (subject_type 'scheduled_services').
  *
- * SHADOW ONLY: nothing here is shown to a technician, written to a visit, a
- * brief or a customer record, belled or sent. The rows are evidence for the
- * later card flags.
+ * Nothing here is shown to a technician, written to a visit, a brief or a
+ * customer record, belled or sent. The rows are the evidence services/
+ * visit-access-flags.js reads for the technician's flags (GATE_VISIT_ACCESS_FLAGS=on).
  *
  * What leaves, exactly. The saved codes never do: the state says only
  * WHETHER codes are on file (`structured.has_codes`). The two fields whose
@@ -40,11 +40,12 @@
  */
 const crypto = require('crypto');
 const logger = require('../logger');
-const { visitAccessShadowLive, typedDecisionsClefLive } = require('../../config/feature-gates');
+const { visitAccessSweepLive, typedDecisionsClefLive } = require('../../config/feature-gates');
 
 const PACKAGE_ID = 'visit_access.v1';
 const SUBJECT_TYPE = 'scheduled_services';
 const STATES_TABLE = 'visit_access_states';
+const VERDICTS_TABLE = 'visit_access_verdicts';
 // Visits asked per pass; the rest wait for the next hourly pass. Visits whose
 // state is already answered cost reads only and never count against it.
 const MAX_ASKED_VISITS = 80;
@@ -199,6 +200,52 @@ async function singlePremises(svc, dbh) {
   const primary = linkage.normalizedStampedStreet(svc.customer_address_line1, svc.customer_address_line2, svc.customer_city, svc.customer_zip);
   if (!primary || linkage.scopeKeyLacksLocality(primary)) return false;
   return customerHasOnlyPrimaryPremises(dbh, svc.customer_id, { has_multi_home: svc.has_multi_home }, primary, { unresolvedFails: true });
+}
+
+// Each provider's complete current answers for a digest: those on the state
+// row, else (a row stored before the column) those its review rows for the
+// SAME digest hold. `backfill` is what came from review rows and is not on the
+// state row yet.
+function currentAnswers({ providers, questionIds, stateRow, existing, subjectHash }) {
+  const parseJson = (value) => (typeof value === 'string' ? JSON.parse(value) : value);
+  const onState = (stateRow && parseJson(stateRow.answers)) || {};
+  const complete = (map) => Boolean(map) && questionIds.every((id) => typeof map[id] === 'boolean');
+  const known = {};
+  const backfill = {};
+  for (const provider of providers) {
+    const fromReviews = {};
+    for (const row of existing.filter((r) => r.provider === provider && r.subject_hash === subjectHash)) {
+      const yes = parseJson(row.jev_answer)?.yes;
+      if (typeof yes === 'boolean') fromReviews[row.question_id] = yes;
+    }
+    if (complete(onState[provider])) known[provider] = onState[provider];
+    else if (complete(fromReviews)) { known[provider] = fromReviews; backfill[provider] = fromReviews; }
+  }
+  const onStateProviders = Object.keys(onState).filter((provider) => Object.keys(onState[provider] || {}).length);
+  return { known, backfill, onStateProviders };
+}
+
+// One writer at a time per visit across the sweep's state publish and a
+// technician's tap: transaction-scoped, released at commit or rollback. The one
+// place the key is built; callers pass the visit id the DATABASE returned (the
+// canonical lowercase UUID), never a request's spelling of it.
+function lockVisitAccess(trx, visitId) {
+  return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`visit_access:${String(visitId).toLowerCase()}`]);
+}
+
+// Whether a visit is still PROVEN to be at its customer's one premises: what the
+// sweep requires before it judges a visit, asked again by the technician's flags
+// (a stored state outlives the proof when the customer gains a second property
+// or the visit moves). Any failure to prove it, or an error, is false.
+async function visitSinglePremises(visitId, dbh) {
+  try {
+    const svc = await dbh('scheduled_services as s').join('customers as c', 's.customer_id', 'c.id')
+      .whereNull('c.deleted_at').where('s.id', visitId).first(VISIT_COLUMNS);
+    return Boolean(svc) && await singlePremises(svc, dbh);
+  } catch (err) {
+    logger.warn(`[typed-decisions] visit access premises check failed for ${visitId}: ${err.message}`);
+    return false;
+  }
 }
 
 // What is saved for the property: the structured facts, the two baselines
@@ -406,24 +453,70 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
   const built = await buildVisitAccessState(svc, dbh);
   if (!built) { out.skipped += 1; return; }
 
-  // A provider is done with this state once it holds a row for every
-  // question under the current digest (a labeled or held-out row counts: it
-  // is never re-answered).
+  // A provider is done with this state once the CURRENT answers it gave for
+  // this exact digest are on the state row (`answers`: what the technician's
+  // flags read), or, for a row stored before that column existed, once its
+  // decision_reviews rows for this digest hold every question. A review row
+  // preserved under an OLDER digest (labeled or held out) settles nothing
+  // here: new evidence is asked again whatever happened to the old answers,
+  // and the recorder then follows its own rules for the review rows.
   const existing = await dbh(TABLE)
     .where({ package_id: pkg.id, subject_type: SUBJECT_TYPE, subject_id: svc.id })
     .select('provider', 'question_id', 'subject_hash', 'label_status', 'sampled_for', 'jev_answer');
   const questionIds = Object.keys(pkg.questions);
-  const settled = (row) => row.subject_hash === built.subjectHash || row.label_status !== 'unreviewed' || row.sampled_for === 'heldout';
-  const done = (provider) => questionIds.every((id) => existing.some((row) => row.provider === provider && row.question_id === id && settled(row)));
-  const due = providers.filter((provider) => !done(provider));
+  const stateRow = await dbh(STATES_TABLE).where({ scheduled_service_id: svc.id, subject_hash: built.subjectHash }).first('answers');
+  const { known, backfill, onStateProviders } = currentAnswers({ providers, questionIds, stateRow, existing, subjectHash: built.subjectHash });
+  const due = providers.filter((provider) => !known[provider]);
+  // A provider's review row for a question is stale when it describes another state and nothing has frozen it, or is missing.
+  const staleRows = (provider) => questionIds.some((id) => {
+    const rows = existing.filter((r) => r.provider === provider && r.question_id === id);
+    return !rows.some((r) => r.subject_hash === built.subjectHash) && rows.every((r) => r.label_status === 'unreviewed' && r.sampled_for !== 'heldout');
+  });
   // The state is kept before anyone is asked or any row is requeued, so every
   // stored answer has the exact text it was judged on, whatever is edited
   // later; an unchanged visit whose state was pruned gets it back here.
-  const keepState = () => dbh(STATES_TABLE).insert({ scheduled_service_id: svc.id, subject_hash: built.subjectHash, state: JSON.stringify(built.state) })
-    .onConflict(['scheduled_service_id', 'subject_hash']).ignore();
+  // created_at is moved to now on every pass, so the newest row is always the
+  // state the sweep last built: a visit that goes A -> B -> A shows A's flags
+  // to the technician (visit-access-flags.js reads the newest), not B's.
+  // Retention then counts from the last pass that saw the state. The row names
+  // the customer it describes (the texts, notes and profile it was built from
+  // are that customer's), and answers are merged in per provider. Both writes
+  // take the visit's advisory lock, the same one a technician's tap takes, so
+  // publishing the current state and committing a verdict never interleave.
+  const publishOn = (trx, answers) => trx(STATES_TABLE)
+    .insert({ scheduled_service_id: svc.id, subject_hash: built.subjectHash, state: JSON.stringify(built.state), customer_id: svc.customer_id, ...(answers ? { answers: JSON.stringify(answers) } : {}) })
+    .onConflict(['scheduled_service_id', 'subject_hash'])
+    .merge({
+      created_at: trx.fn.now(),
+      // The same digest restamped for a different customer (a merge or undo) is new evidence: the row takes a new id,
+      // so a technician's card read for the previous customer names an id that no longer exists.
+      id: trx.raw(`CASE WHEN ${STATES_TABLE}.customer_id IS DISTINCT FROM ?::uuid THEN gen_random_uuid() ELSE ${STATES_TABLE}.id END`, [svc.customer_id]),
+      customer_id: svc.customer_id,
+      ...(answers ? { answers: trx.raw(`COALESCE(${STATES_TABLE}.answers, '{}'::jsonb) || ?::jsonb`, [JSON.stringify(answers)]) } : {}),
+    });
+  // `restore`: providers whose answers for THIS state are cached on the state row but whose unreviewed review rows
+  // still describe another state (a visit that went A -> B -> A). They are written again with the recorder's own rule
+  // (labeled and held-out rows are never touched), from the cached yes / no answers: the model's p is not kept on the
+  // state row, so a restored row carries `restored: true` and no p, and never counts as a confident answer.
+  const keepState = (restore = []) => dbh.transaction(async (trx) => {
+    await lockVisitAccess(trx, svc.id);
+    await publishOn(trx, Object.keys(backfill).length ? backfill : null);
+    for (const provider of restore) {
+      const answers = Object.fromEntries(questionIds.map((id) => [id, { yes: known[provider][id], restored: true }]));
+      const siblingAnswers = {};
+      for (const id of questionIds) {
+        const others = Object.keys(known).filter((other) => other !== provider).map((other) => ({ yes: known[other][id] }));
+        if (others.length) siblingAnswers[id] = others;
+      }
+      await recordDecisions({
+        capability: pkg.capability, pkg, provider, subjectType: SUBJECT_TYPE, subjectId: svc.id,
+        result: { ok: true, answers }, baselines: built.baselines, siblingAnswers, subjectHash: built.subjectHash, conn: trx,
+      });
+    }
+  });
   if (!due.length) {
     out.unchanged += 1;
-    await keepState();
+    await keepState(providers.filter((provider) => staleRows(provider)));
     // The refresh is idempotent and runs on unchanged passes too, so one
     // that failed after its rows were written is made good an hour later.
     await settleCohorts({ dbh, pkg, svc, built });
@@ -433,9 +526,17 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
   // answered for this state is a first attempt; one that already holds any
   // provider's answer for it is a retry, whichever provider is down. So an
   // outage of either provider never keeps later visits from being asked.
-  const retry = existing.some((row) => row.subject_hash === built.subjectHash);
+  // A provider whose current answers sit only on the state row (its review rows are frozen under an older digest) has
+  // answered too.
+  const retry = existing.some((row) => row.subject_hash === built.subjectHash) || onStateProviders.length > 0;
   const budget = retry ? 'retryVisits' : 'askedVisits';
-  if (out[budget] >= (retry ? MAX_RETRY_VISITS : MAX_ASKED_VISITS)) { out.deferred += 1; return; }
+  if (out[budget] >= (retry ? MAX_RETRY_VISITS : MAX_ASKED_VISITS)) {
+    // The changed state is still published (no answers, so no card shows for it) before the visit waits for the next pass:
+    // the previous state's cards stop being the newest, and their evidence ids stop authorizing a verdict.
+    await keepState();
+    out.deferred += 1;
+    return;
+  }
   out[budget] += 1;
   await keepState();
 
@@ -473,11 +574,24 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
         const list = others.map((other) => other.answers[id]).filter(Boolean);
         if (list.length) siblingAnswers[id] = list;
       }
-      const recorded = await recordDecisions({
-        capability: pkg.capability, pkg, provider: leg.provider, subjectType: SUBJECT_TYPE, subjectId: svc.id,
-        result: leg.result, baselines: built.baselines, siblingAnswers, subjectHash: built.subjectHash, conn: dbh,
+      // The answers the technician's flags read go on the state row in the SAME
+      // transaction as this provider's review rows, under the visit lock: if
+      // recording throws, the answers roll back too and the next pass asks again,
+      // so a provider is never skipped with its review rows missing.
+      const yes = Object.fromEntries(questionIds.filter((id) => typeof leg.answers?.[id]?.yes === 'boolean').map((id) => [id, leg.answers[id].yes]));
+      const recorded = await dbh.transaction(async (trx) => {
+        await lockVisitAccess(trx, svc.id);
+        await publishOn(trx, { [leg.provider]: yes });
+        return recordDecisions({
+          capability: pkg.capability, pkg, provider: leg.provider, subjectType: SUBJECT_TYPE, subjectId: svc.id,
+          result: leg.result, baselines: built.baselines, siblingAnswers, subjectHash: built.subjectHash, conn: trx,
+        });
       });
-      if (recorded.recorded > 0) out.recorded += 1; else out.failed += 1;
+      // A review row preserved under an older state (labeled or held out) is never
+      // replaced, so the recorder may store nothing: the answers are on the state
+      // row, so log it and carry on.
+      if (recorded.recorded > 0) out.recorded += 1;
+      else { out.failed += 1; logger.info(`[typed-decisions] visit access (${leg.provider}) stored no review row for ${svc.id}; the answers are on the state`); }
     } catch (err) {
       out.failed += 1;
       logger.warn(`[typed-decisions] visit access (${leg.provider}) record failed: ${err.message}`);
@@ -529,7 +643,7 @@ async function settleCohorts({ dbh, pkg, svc, built }) {
  */
 async function runVisitAccessSweep({ dbh = null, now = new Date() } = {}) {
   const out = { considered: 0, asked: 0, recorded: 0, unchanged: 0, skipped: 0, failed: 0, deferred: 0, askedVisits: 0, retryVisits: 0 };
-  if (!visitAccessShadowLive()) return { ...out, skippedReason: 'gate_off' };
+  if (!visitAccessSweepLive()) return { ...out, skippedReason: 'gate_off' };
   try {
     const conn = dbh || require('../../models/db');
     const { etDateString, addETDays } = require('../../utils/datetime-et');
@@ -604,11 +718,16 @@ async function storedVisitAccess(pairs, dbh) {
 const STATE_RETENTION_DAYS = 180;
 
 // Retention is NOT gated: the stored states hold customer words, so they are
-// dropped on schedule even after the shadow is switched off. Never throws.
+// dropped on schedule even after the shadow is switched off. The technicians'
+// verdicts on those states (visit_access_verdicts) go on the same day count.
+// Never throws.
 async function pruneVisitAccessStates({ dbh = null, now = new Date() } = {}) {
   try {
     const conn = dbh || require('../../models/db');
-    return await conn(STATES_TABLE).where('created_at', '<', new Date(now.getTime() - STATE_RETENTION_DAYS * 24 * 60 * 60 * 1000)).del();
+    const cutoff = new Date(now.getTime() - STATE_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const dropped = await conn(STATES_TABLE).where('created_at', '<', cutoff).del();
+    await conn(VERDICTS_TABLE).where('created_at', '<', cutoff).del();
+    return dropped;
   } catch (err) {
     logger.warn(`[typed-decisions] visit access state prune failed: ${err.message}`);
     return 0;
@@ -617,5 +736,5 @@ async function pruneVisitAccessStates({ dbh = null, now = new Date() } = {}) {
 
 module.exports = {
   runVisitAccessSweep, pruneVisitAccessStates, buildVisitAccessState, storedVisitAccess, renderVisitAccessState, visitAccessSubjectHash,
-  redactForState, stateCutoff, PACKAGE_ID, SUBJECT_TYPE,
+  redactForState, stateCutoff, visitSinglePremises, lockVisitAccess, PACKAGE_ID, SUBJECT_TYPE,
 };

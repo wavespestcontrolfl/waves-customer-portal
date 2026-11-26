@@ -2,7 +2,6 @@
  * The Intelligence Bar cancel recovery cron: every 5 minutes, under runExclusive, no gate of its own (the rows exist only
  * after the gated card path ran). A clean pass is a successful run; a pass where a bundle failed is a failed run in
  * job health (the row stays pending for the next tick); a lost lease (the request finished first) is not a failure.
- * Same mocking shape as scheduler-day-agreement-shadow.test.js.
  */
 jest.mock('../utils/scheduled-cron', () => ({ schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn() }));
 jest.mock('../models/db', () => {

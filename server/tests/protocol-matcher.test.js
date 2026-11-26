@@ -46,22 +46,18 @@ describe('protocol matcher specialty routing', () => {
     expect(match('Commercial Lawn Treatment').programKey).toBe('lawn');
   });
 
-  test('routes mosquito IGR and station service labels to source reduction', () => {
-    expect(match('Mosquito Treatment - IGR')).toEqual({
-      programKey: 'mosquito',
-      visit: 2,
-      reason: 'mosquito_source_reduction',
-    });
-    expect(match('Mosquito Stations')).toEqual({
-      programKey: 'mosquito',
-      visit: 2,
-      reason: 'mosquito_source_reduction',
-    });
-    expect(match('Mosquito Treatment - Stations')).toEqual({
-      programKey: 'mosquito',
-      visit: 2,
-      reason: 'mosquito_source_reduction',
-    });
+  test('routes mosquito dunk labels to source reduction, IGR to the barrier (Tekko Pro is in its tank), and station labels to the station visit', () => {
+    expect(match('Mosquito Treatment - Dunks')).toEqual({ programKey: 'mosquito', visit: 2, reason: 'mosquito_source_reduction' });
+    expect(match('Mosquito Treatment - IGR')).toEqual({ programKey: 'mosquito', visit: 1, reason: 'mosquito_barrier' });
+    // A booked In2Care station service gets its own card, never the larvicide visit's Bti dunk default (owner 2026-11-25, D7).
+    for (const label of ['Mosquito Stations', 'Mosquito Treatment - Stations']) {
+      expect(match(label)).toEqual({ programKey: 'mosquito', visit: 5, reason: 'mosquito_stations' });
+    }
+    // A callback word anywhere in a mosquito name opens the callback card; a pest callback stays pest.
+    for (const label of ['Mosquito Callback', 'Mosquito Misting Callback', 'Mosquito Control Re-Service', 'Mosquito Follow-Up']) {
+      expect(match(label)).toEqual({ programKey: 'mosquito', visit: 4, reason: 'mosquito_followup' });
+    }
+    expect(match('Pest Callback').programKey).toBe('pest');
   });
 
   test('routes mosquito event service labels to the event protocol', () => {

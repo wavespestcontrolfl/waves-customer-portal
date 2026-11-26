@@ -368,9 +368,8 @@ const KEYWORD_SERVICE_RULES = [
   { serviceKey: 'rodent_general_one_time', matches: (h) => hasAffirmativeRodentMention(h) },
 ];
 
-// `strict`: a caller that must tell "the read failed" from "nothing is bookable" (the
-// day-agreement shadow, which records a decision from the list) gets the error instead
-// of the legacy empty list.
+// `strict`: a caller that must tell "the read failed" from "nothing is bookable" gets the
+// error instead of the legacy empty list.
 async function loadBookableCallServices(conn, { strict = false } = {}) {
   try {
     // Stable order matters beyond display: these rows render the prompt's

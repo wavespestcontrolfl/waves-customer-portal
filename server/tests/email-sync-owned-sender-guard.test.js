@@ -16,12 +16,7 @@ jest.mock('../services/email/spam-blocker', () => ({
   isBlocked: jest.fn(async () => false),
   domainFromAddress: (a) => String(a || '').split('@')[1] || '',
 }));
-jest.mock('../services/zelle-notice-reconciler', () => ({
-  ZELLE_RETRY_MARK: 'zelle_notice_retry',
-  isZelleReconcileEnabled: () => false,
-  sweepStaleClaims: jest.fn(async () => 0),
-}));
-jest.mock('../services/zelle-notice', () => ({ isZelleNoticeCandidate: () => false }));
+jest.mock('../services/zelle-notice-reconciler', () => ({ sweepStaleClaims: jest.fn(async () => 0) }));
 
 const db = require('../models/db');
 const { upsertEmail, customerEmailBellEligible } = require('../services/email/email-sync');

@@ -17,6 +17,7 @@ const knex = require('knex');
 const { randomUUID } = require('crypto');
 const subjectMigration = require('../models/migrations/20261003101500_decision_reviews_scheduled_services_subject');
 const statesMigration = require('../models/migrations/20261003140000_visit_access_states');
+const verdictsMigration = require('../models/migrations/20261126170000_visit_access_verdicts');
 const { packageFor, packageHash } = require('../services/typed-decisions/packages');
 const access = require('../services/typed-decisions/visit-access-shadow');
 
@@ -48,6 +49,21 @@ describe('visit access shadow: rules that need no database', () => {
     process.env.GATE_VISIT_ACCESS_FLAGS = 'true';
     await expect(access.runVisitAccessSweep({ dbh: never })).resolves.toMatchObject({ skippedReason: 'gate_off' });
     expect(mockAsk).not.toHaveBeenCalled();
+  });
+
+  test('the sweep runs under shadow and on; the technician cards run under on alone (and only with GATE_TYPED_DECISIONS)', () => {
+    const gatesModule = require('../config/feature-gates');
+    const read = (typed, value) => {
+      gates(false);
+      if (typed) process.env.GATE_TYPED_DECISIONS = 'true';
+      if (value !== undefined) process.env.GATE_VISIT_ACCESS_FLAGS = value;
+      return [gatesModule.visitAccessSweepLive(), gatesModule.visitAccessCardsLive()];
+    };
+    expect(read(true, 'shadow')).toEqual([true, false]);
+    expect(read(true, ' ON ')).toEqual([true, true]);
+    expect(read(true, 'true')).toEqual([false, false]);
+    expect(read(true, undefined)).toEqual([false, false]);
+    expect(read(false, 'on')).toEqual([false, false]);
   });
 
   test.each([
@@ -124,7 +140,7 @@ describe('visit access shadow: rules that need no database', () => {
     .first('s.*', 'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2', 'c.zip as customer_zip', 'c.city as customer_city', 'c.has_multi_home'), database);
 
   beforeAll(async () => {
-    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
+    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 4 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
     await database.raw(`CREATE TABLE ??.customers (id uuid PRIMARY KEY, deleted_at timestamptz, address_line1 text, address_line2 text, zip text, city text, has_multi_home boolean)`, [schema]);
     await database.raw(`CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY, customer_id uuid, service_type varchar(200),
@@ -154,6 +170,7 @@ describe('visit access shadow: rules that need no database', () => {
       CONSTRAINT decision_reviews_subject_type_check CHECK (subject_type IN ('call_log','sms_log','social_post')))`, [schema]);
     await subjectMigration.up(database);
     await statesMigration.up(database);
+    await verdictsMigration.up(database);
     await database('customers').insert({ id: customerId, address_line1: '100 Example St', zip: '34200', city: 'Bradenton' });
   });
   afterAll(async () => {
@@ -165,7 +182,27 @@ describe('visit access shadow: rules that need no database', () => {
     gates(true);
     mockAsk.mockReset();
     mockAsk.mockResolvedValue(reply());
-    for (const t of ['visit_access_states', 'decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services', 'customer_properties', 'neighborhood_access', 'neighborhoods']) await database(t).del();
+    for (const t of ['visit_access_verdicts', 'visit_access_states', 'decision_reviews', 'sms_log', 'service_records', 'property_preferences', 'scheduled_services', 'customer_properties', 'neighborhood_access', 'neighborhoods']) await database(t).del();
+  });
+
+  test('the verdicts table takes one verdict per visit, question and evidence, only right or wrong, and its down drops it', async () => {
+    const visitId = await visit();
+    const row = { scheduled_service_id: visitId, customer_id: customerId, question_id: 'dog_on_property', subject_hash: 'a'.repeat(64), verdict: 'right' };
+    await database('visit_access_verdicts').insert(row);
+    await expect(database('visit_access_verdicts').insert({ ...row, verdict: 'wrong' })).rejects.toThrow(/uniq/);
+    // the digest does not name who it is about, so another customer on the same visit and digest is its own verdict
+    await database('visit_access_verdicts').insert({ ...row, customer_id: randomUUID(), verdict: 'wrong' });
+    await expect(database('visit_access_verdicts').insert({ ...row, subject_hash: 'b'.repeat(64), verdict: 'maybe' })).rejects.toThrow(/verdict_check/);
+    await database('visit_access_verdicts').insert({ ...row, subject_hash: 'b'.repeat(64), verdict: 'wrong' });
+    await expect(database('visit_access_verdicts').insert({ ...row, customer_id: null, subject_hash: 'c'.repeat(64) })).rejects.toThrow(/customer_id/);
+    await verdictsMigration.up(database); // a second run changes nothing
+    expect(await database('visit_access_verdicts').where({ scheduled_service_id: visitId })).toHaveLength(3);
+    await verdictsMigration.down(database);
+    expect(await database.schema.hasTable('visit_access_verdicts')).toBe(false);
+    expect(await database.schema.hasColumn('visit_access_states', 'answers')).toBe(false);
+    expect(await database.schema.hasColumn('visit_access_states', 'customer_id')).toBe(false);
+    await verdictsMigration.up(database);
+    expect(await database.schema.hasColumn('visit_access_states', 'answers')).toBe(true);
   });
 
   test('the migration keeps a value another migration added, and its down refuses while a visit row exists', async () => {
@@ -298,6 +335,13 @@ describe('visit access shadow: rules that need no database', () => {
     expect(second[0].subject_hash).not.toBe(first[0].subject_hash);
   });
 
+  test('GATE_VISIT_ACCESS_FLAGS=on runs the same sweep as shadow', async () => {
+    process.env.GATE_VISIT_ACCESS_FLAGS = 'on';
+    const visitId = await visit();
+    expect(await sweep()).toMatchObject({ considered: 1, asked: 1, recorded: 1 });
+    expect(await rows(visitId)).toHaveLength(Object.keys(pkg.questions).length);
+  });
+
   test('with the Clef gate on both providers answer, and a case where they differ queues both rows', async () => {
     process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
     mockAsk.mockImplementation(async (_id, _state, opts) => reply(opts && opts.provider === 'cloudflare' ? { past_access_problem: yes } : {}));
@@ -359,6 +403,172 @@ describe('visit access shadow: rules that need no database', () => {
     await database('customers').where({ id: customerId }).update({ has_multi_home: true });
     expect(await build(home)).toBeNull();
     await database('customers').where({ id: customerId }).update({ has_multi_home: false });
+  });
+
+  test('new evidence is answered even when every older review row is labeled: the state row carries the current answers and the card shows', async () => {
+    const home = await visit({ service_address_line1: '100 Example Street', service_address_zip: '34200', service_address_city: 'Bradenton' });
+    await sweep();
+    const before = await database('visit_access_states').where({ scheduled_service_id: home }).first();
+    expect(before).toMatchObject({ customer_id: customerId });
+    expect(before.answers.typesafe).toEqual(Object.fromEntries(Object.keys(pkg.questions).map((id) => [id, false])));
+    // every review row is now preserved (labeled) under the old state; a customer then reports a loose dog
+    await database('decision_reviews').where({ subject_id: home }).update({ label_status: 'confirmed_correct' });
+    await text('Our dog Biscuit is loose in the yard', '2026-10-05T13:00:00Z');
+    mockAsk.mockResolvedValue(reply({ dog_on_property: yes }));
+    expect(await sweep()).toMatchObject({ asked: 1 });
+    const states = await database('visit_access_states').where({ scheduled_service_id: home }).orderBy('created_at', 'desc');
+    expect(states).toHaveLength(2);
+    expect(states[0].answers.typesafe.dog_on_property).toBe(true);
+    expect(states[0].customer_id).toBe(customerId);
+    // the review rows keep the older state they were judged on
+    expect((await rows(home)).every((r) => r.label_status === 'confirmed_correct' && r.subject_hash === before.subject_hash)).toBe(true);
+    const found = await require('../services/visit-access-flags').accessFlagsFor(database, { id: home, customer_id: customerId });
+    expect(found.map((f) => f.questionId)).toEqual(['dog_on_property']);
+    // a second pass asks nobody: the answers are on the state
+    expect(await sweep()).toMatchObject({ asked: 0, unchanged: 1 });
+  });
+
+  test('a state stored with review rows but no answers column value is backfilled from those rows without asking again', async () => {
+    const home = await visit();
+    await sweep();
+    await database('visit_access_states').update({ answers: null, customer_id: null });
+    mockAsk.mockClear();
+    expect(await sweep()).toMatchObject({ asked: 0, unchanged: 1 });
+    expect(mockAsk).not.toHaveBeenCalled();
+    const row = await database('visit_access_states').where({ scheduled_service_id: home }).first();
+    expect(row.customer_id).toBe(customerId);
+    expect(row.answers.typesafe.dog_on_property).toBe(false);
+  });
+
+  test('a provider whose review rows could not be recorded is not skipped: the answers roll back with them and the next pass asks again', async () => {
+    const home = await visit();
+    const recorder = require('../services/typed-decisions/shadow-recorder');
+    const spy = jest.spyOn(recorder, 'recordDecisions').mockRejectedValueOnce(new Error('recorder down'));
+    expect(await sweep()).toMatchObject({ asked: 1, failed: 1, recorded: 0 });
+    spy.mockRestore();
+    const stuck = await database('visit_access_states').where({ scheduled_service_id: home }).first();
+    expect(stuck.answers?.typesafe ?? null).toBeNull();
+    expect(await rows(home)).toHaveLength(0);
+    mockAsk.mockClear();
+    expect(await sweep()).toMatchObject({ asked: 1, recorded: 1 });
+    expect(mockAsk).toHaveBeenCalledTimes(1);
+    const done = await database('visit_access_states').where({ scheduled_service_id: home }).first();
+    expect(Object.keys(done.answers.typesafe)).toHaveLength(Object.keys(pkg.questions).length);
+    expect(await rows(home)).toHaveLength(Object.keys(pkg.questions).length);
+  });
+
+  test('the same digest restamped for a different customer is new evidence: the state row takes a new id', async () => {
+    const home = await visit();
+    await sweep();
+    const [before] = await database('visit_access_states').where({ scheduled_service_id: home });
+    // an unchanged pass keeps the row's id
+    await sweep();
+    expect((await database('visit_access_states').where({ scheduled_service_id: home }))[0].id).toBe(before.id);
+    // a customer merge or undo: the visit now belongs to a customer with the same address and no texts, so the digest is identical
+    const next = randomUUID();
+    await database('customers').insert({ id: next, address_line1: '100 Example St', zip: '34200', city: 'Bradenton' });
+    await database('scheduled_services').where({ id: home }).update({ customer_id: next });
+    await sweep();
+    const after = await database('visit_access_states').where({ scheduled_service_id: home });
+    expect(after).toHaveLength(1);
+    expect(after[0].subject_hash).toBe(before.subject_hash);
+    expect(after[0].customer_id).toBe(next);
+    expect(after[0].id).not.toBe(before.id);
+  });
+
+  test('a visit whose other provider is down counts as a retry when the first provider answered only on the state row', async () => {
+    const home = await visit();
+    await sweep();
+    // Jev's review rows are labeled (frozen under this digest), then new evidence arrives
+    await database('decision_reviews').where({ subject_id: home }).update({ label_status: 'confirmed_correct' });
+    await text('Our dog Biscuit is loose in the yard', '2026-10-05T13:00:00Z');
+    expect(await sweep()).toMatchObject({ asked: 1 });
+    const [newest] = await database('visit_access_states').where({ scheduled_service_id: home }).orderBy('created_at', 'desc');
+    expect(newest.answers.typesafe).toBeTruthy();
+    expect(await rows(home)).toHaveLength(Object.keys(pkg.questions).length);
+    expect((await rows(home)).every((r) => r.subject_hash !== newest.subject_hash)).toBe(true);
+    // the second provider is switched on and down: only the state row says anyone answered this digest
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_id, _state, opts) => (opts && opts.provider === 'cloudflare' ? { ok: false } : reply()));
+    expect(await sweep()).toMatchObject({ asked: 1, failed: 1, retryVisits: 1, askedVisits: 0 });
+  });
+
+  test('a visit returning to a state it already answered gets that state\'s unreviewed review rows back; labeled rows are left alone', async () => {
+    const home = await visit();
+    await sweep();
+    const [first] = await database('visit_access_states').where({ scheduled_service_id: home });
+    await text('Our dog Biscuit is loose in the yard', '2026-10-05T13:00:00Z');
+    mockAsk.mockResolvedValue(reply({ dog_on_property: yes }));
+    await sweep();
+    const second = (await database('visit_access_states').where({ scheduled_service_id: home }).orderBy('created_at', 'desc'))[0];
+    expect(second.subject_hash).not.toBe(first.subject_hash);
+    expect((await rows(home)).every((r) => r.subject_hash === second.subject_hash)).toBe(true);
+    // a reviewer labels one row of the second state
+    await database('decision_reviews').where({ subject_id: home, question_id: 'past_access_problem' }).update({ label_status: 'confirmed_correct' });
+    // the text goes away: the visit is back at the first state, whose answers are cached on its state row
+    await database('sms_log').where({ message_body: 'Our dog Biscuit is loose in the yard' }).del();
+    mockAsk.mockClear();
+    expect(await sweep()).toMatchObject({ asked: 0, unchanged: 1 });
+    expect(mockAsk).not.toHaveBeenCalled();
+    const back = await rows(home);
+    for (const row of back) {
+      if (row.question_id === 'past_access_problem') expect(row).toMatchObject({ label_status: 'confirmed_correct', subject_hash: second.subject_hash });
+      else expect(row.subject_hash).toBe(first.subject_hash);
+    }
+    expect(back.find((r) => r.question_id === 'dog_on_property').jev_answer).toMatchObject({ yes: false, restored: true });
+    expect(back.find((r) => r.question_id === 'dog_on_property').jev_answer.p).toBeUndefined();
+    // another pass changes nothing
+    expect(await sweep()).toMatchObject({ asked: 0, unchanged: 1 });
+  });
+
+  test('a visit deferred by an exhausted budget still publishes its changed state, so the old card stops authorizing a verdict', async () => {
+    const flagsService = require('../services/visit-access-flags');
+    mockAsk.mockResolvedValue(reply({ dog_on_property: yes }));
+    // the visit, answered alone on its first state: a dog card shows
+    const home = await visit();
+    await sweep();
+    const card = (await flagsService.accessFlagsFor(database, { id: home, customer_id: customerId }))[0];
+    expect(card).toMatchObject({ questionId: 'dog_on_property', status: 'open' });
+    // 80 other visits use up the first-attempt budget before this one (its id sorts last) when the evidence changes
+    const lastId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    await database('scheduled_services').where({ id: home }).update({ id: lastId });
+    await database('visit_access_states').where({ scheduled_service_id: home }).update({ scheduled_service_id: lastId });
+    await database('decision_reviews').where({ subject_id: home }).update({ subject_id: lastId });
+    for (let i = 0; i < 80; i += 1) await visit();
+    await text('We have a new puppy', '2026-10-05T13:00:00Z');
+    const result = await sweep();
+    expect(result).toMatchObject({ askedVisits: 80, deferred: 1 });
+    // the changed state is the newest, with no answers: no card, and the old card's id is refused
+    const newest = (await database('visit_access_states').where({ scheduled_service_id: lastId }).orderBy('created_at', 'desc'))[0];
+    expect(newest.id).not.toBe(card.evidenceId);
+    expect(newest.answers).toBeNull();
+    expect(await flagsService.accessFlagsFor(database, { id: lastId, customer_id: customerId })).toEqual([]);
+    await expect(flagsService.tapAccessFlag(database, { visitId: lastId, scope: (q) => q, questionId: 'dog_on_property', verdict: 'right', evidenceId: card.evidenceId }, { labeledBy: 'tech', actorId: null, ip: null, userAgent: null }))
+      .resolves.toEqual({ conflict: true });
+  });
+
+  test('publishing a state waits for the visit lock a technician\'s tap holds', async () => {
+    const home = await visit();
+    const holder = await database.transaction();
+    await access.lockVisitAccess(holder, home);
+    let done = false;
+    const running = sweep().then((result) => { done = true; return result; });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(done).toBe(false);
+    expect(await database('visit_access_states').where({ scheduled_service_id: home })).toHaveLength(0);
+    await holder.commit();
+    await running;
+    expect(await database('visit_access_states').where({ scheduled_service_id: home })).toHaveLength(1);
+  });
+
+  test('visitSinglePremises is the sweep\'s own proof, asked again for the technician: false once a second home appears, for an unknown visit, and on an error', async () => {
+    const home = await visit({ service_address_line1: '100 Example Street', service_address_zip: '34200', service_address_city: 'Bradenton' });
+    expect(await access.visitSinglePremises(home, database)).toBe(true);
+    expect(await access.visitSinglePremises(randomUUID(), database)).toBe(false);
+    const rental = await visit({ service_address_line1: '77 Sample Rd', service_address_zip: '34201', service_address_city: 'Bradenton' });
+    expect(await access.visitSinglePremises(home, database)).toBe(false);
+    expect(await access.visitSinglePremises(rental, database)).toBe(false);
+    expect(await access.visitSinglePremises(home, () => { throw new Error('db down'); })).toBe(false);
   });
 
   test('long preference notes never push out the visit note or the sensitivity', async () => {
@@ -563,9 +773,13 @@ describe('visit access shadow: rules that need no database', () => {
     await sweep();
     await database('decision_reviews').where({ subject_id: visitId, provider: 'cloudflare' }).update({ label_status: 'confirmed_correct' });
     await text('We will be home all day', '2026-10-05T13:40:00Z');
-    // Both are asked on the new state only if due: the labeled provider is settled, so only Jev is.
+    // Both are asked on the new state: a label preserves the old review row, but the new state's current answers
+    // (what the technician's flags read) are needed from every provider, so the labeled provider is asked too.
+    // Its fresh answer is refused by the recorder (the row is labeled) and still lands on the state row.
     mockAsk.mockImplementation(async (_id, _state, opts) => reply(opts && opts.provider === 'cloudflare' ? { contact_before_arrival: yes } : {}));
-    expect(await sweep()).toMatchObject({ asked: 1 });
+    expect(await sweep()).toMatchObject({ asked: 2 });
+    const [newest] = await database('visit_access_states').where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc');
+    expect(newest.answers.cloudflare.contact_before_arrival).toBe(true);
     const { sampleFor, stableDraw } = require('../services/typed-decisions/shadow-recorder');
     for (const row of (await rows(visitId)).filter((r) => r.provider === 'typesafe')) {
       expect(row.sampled_for).toBe(sampleFor(row.jev_answer, row.baseline_answers, () => stableDraw(row), []));
@@ -599,10 +813,25 @@ describe('visit access shadow: rules that need no database', () => {
     await text('We got a puppy', '2026-10-05T13:50:00Z');
     await sweep();
     expect(await database('visit_access_states').where({ scheduled_service_id: visitId })).toHaveLength(2);
-    // Retention is its own, ungated step.
+    // Back to the first state (the text is gone): still two rows, and the
+    // first state is the newest again, so the technician sees its flags.
+    const [first] = await database('visit_access_states').where({ scheduled_service_id: visitId }).orderBy('created_at', 'asc');
+    await database('visit_access_states').where({ id: first.id }).update({ created_at: new Date('2026-10-01T00:00:00Z') });
+    await database('visit_access_states').whereNot({ id: first.id }).update({ created_at: new Date('2026-10-02T00:00:00Z') });
+    await database('sms_log').where({ message_body: 'We got a puppy' }).del();
+    await sweep();
+    const rows = await database('visit_access_states').where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].subject_hash).toBe(first.subject_hash);
+    // Retention is its own, ungated step, and covers the technicians' verdicts on those states too.
     await database('visit_access_states').update({ created_at: new Date('2026-01-01T00:00:00Z') });
+    await database('visit_access_verdicts').insert([
+      { scheduled_service_id: visitId, customer_id: customerId, question_id: 'dog_on_property', subject_hash: first.subject_hash, verdict: 'right', created_at: new Date('2026-01-01T00:00:00Z') },
+      { scheduled_service_id: visitId, customer_id: customerId, question_id: 'past_access_problem', subject_hash: first.subject_hash, verdict: 'wrong', created_at: new Date('2026-10-04T00:00:00Z') },
+    ]);
     gates(false);
     expect(await access.pruneVisitAccessStates({ dbh: database, now: NOW })).toBe(2);
     expect(await database('visit_access_states')).toHaveLength(0);
+    expect((await database('visit_access_verdicts')).map((v) => v.question_id)).toEqual(['past_access_problem']);
   });
 });

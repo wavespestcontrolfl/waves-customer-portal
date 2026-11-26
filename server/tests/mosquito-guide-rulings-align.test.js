@@ -57,8 +57,8 @@ describe('mosquito guide follows the protocol and the owner rulings', () => {
     expect(content.safety.bullets).toContain('Blooming plants with active pollinators, edible plants, and open water are not sprayed. Larvicides are the one deliberate water application, used only on eligible sites. Tell us about beehives, butterfly gardens, edible plants, and fish ponds before service.');
   });
 
-  test('no Bifen I/T bottle on the mosquito guide', () => {
-    expect(mosquito.productImages.images.map((image) => image.file)).toEqual(['product-scion.png', 'product-tekko-pro.png']);
+  test('no Bifen I/T bottle and no Scion on the mosquito guide (Scion is off the mosquito card, owner 2026-11-25, D7)', () => {
+    expect(mosquito.productImages.images.map((image) => image.file)).toEqual(['product-tekko-pro.png']);
   });
 
   test('Bti dunks and mosquito stations only when the estimate includes them', () => {

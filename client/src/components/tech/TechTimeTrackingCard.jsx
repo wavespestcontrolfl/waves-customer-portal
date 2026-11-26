@@ -68,19 +68,6 @@ function actionStyle(disabled) {
 const SECTION_STYLE = { background: P.card, border: `0.5px solid ${P.border}`, borderRadius: 6, padding: '12px 14px', marginBottom: 12 };
 const TITLE_STYLE = { color: P.text, fontSize: 14, fontWeight: 500 };
 
-// "No lunch" waives only the automatic 30-minute deduction. A meal break the
-// tech recorded (30 minutes or more) stays unpaid either way.
-function lunchCopy(noLunchToday, recordedMeal) {
-  if (recordedMeal > 0) {
-    return noLunchToday
-      ? `No lunch today waives only the automatic 30 minutes. Recorded lunch ${recordedMeal} min stays unpaid.`
-      : `Recorded lunch ${recordedMeal} min stays unpaid.`;
-  }
-  return noLunchToday
-    ? 'No lunch today: the automatic 30-minute deduction is waived.'
-    : '30 minutes of lunch come off a day over 6 hours.';
-}
-
 function customerLabel(service) {
   return service?.customerName || service?.customer_name || 'next stop';
 }
@@ -141,24 +128,6 @@ export default function TechTimeTrackingCard({ nextStop }) {
   // reload until it settles, at any page move (lib/reloadHolds.js).
   const act = (...args) => holdReloadWhileSending('time-clock', () => sendPunch(...args));
 
-  // "No lunch today": the unpaid 30-minute lunch comes off a day over 6 hours
-  // unless the tech taps this. Hidden while GATE_AUTO_LUNCH is off (the status
-  // read says so), so the card is unchanged then.
-  const setNoLunch = async (value) => {
-    if (busy) return;
-    setBusy('No lunch');
-    setFeedback(null);
-    try {
-      await request('/no-lunch', { method: 'POST', body: JSON.stringify({ noLunch: value }) });
-      setFeedback({ text: value ? 'No lunch recorded for today' : 'Lunch restored for today', isError: false });
-      await load();
-    } catch (error) {
-      setFeedback({ text: error.message, isError: true });
-    } finally {
-      setBusy('');
-    }
-  };
-
   if (loading) return null;
   if (!status) {
     return (
@@ -176,10 +145,6 @@ export default function TechTimeTrackingCard({ nextStop }) {
   const clockedIn = status?.clockedIn === true;
   const currentJob = status?.currentJob || null;
   const onBreak = status?.onBreak === true;
-  const autoLunchOn = status?.autoLunch?.enabled === true;
-  const noLunchToday = status?.autoLunch?.noLunch === true;
-  const recordedMeal = Math.round(Number(status?.autoLunch?.recordedMealMinutes || 0));
-  const showNoLunch = autoLunchOn && (clockedIn || Number(status?.todaySummary?.shiftMinutes || 0) > 0);
   const nextStopIsOnSite = nextStop?.status === 'on_site';
   // Each disabled state decided once for its button's disabled + style.
   const breakBlocked = !!busy || !!currentJob;
@@ -243,22 +208,6 @@ export default function TechTimeTrackingCard({ nextStop }) {
                   : 'Mark on site before starting timer'}
             </button>
           )}
-        </div>
-      )}
-
-      {showNoLunch && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-          <div style={{ flex: 1, color: P.muted, fontSize: 14 }}>
-            {lunchCopy(noLunchToday, recordedMeal)}
-          </div>
-          <button
-            type="button"
-            disabled={!!busy}
-            onClick={() => setNoLunch(!noLunchToday)}
-            style={{ ...actionStyle(!!busy), flex: '0 0 auto' }}
-          >
-            {noLunchToday ? 'Undo no lunch' : 'No lunch today'}
-          </button>
         </div>
       )}
 

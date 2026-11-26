@@ -78,7 +78,6 @@ function fixture(url) {
   if (path.endsWith("/job-card/mix")) return { enabled: true, amount: 1.5, unit: "oz", gallons: 110, sprayCheck: { verdict: "ok" }, rotationWarnings: [], tank: { calibrated: true } };
   if (path.includes("/protocols/job-card/")) return jobCardOff ? { enabled: false } : cardFor(url);
   if (path.includes("/treatment-plans/")) return { plan: planFor(url) };
-  if (path.endsWith("/pay-growth/availability")) return { available: false };
   if (path.endsWith("/turf-profile")) return { profile: { track_key: "A_St_Aug_Sun", lawn_sqft: 10000 } };
   if (path.endsWith("/photos/relevant")) return { photos: [] };
   if (path.endsWith("/seasonal-index")) return { pests: [] };

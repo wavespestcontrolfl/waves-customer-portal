@@ -32,9 +32,6 @@ jest.mock('../services/sms-template-renderer', () => ({
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
 }));
-jest.mock('../services/email-template-automation-executor', () => ({
-  processTrigger: jest.fn(async () => ({ automation_count: 0, results: [] })),
-}));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
 }));

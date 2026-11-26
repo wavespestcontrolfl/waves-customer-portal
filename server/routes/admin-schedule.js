@@ -24872,11 +24872,9 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     };
     // GATE_AWAY_WATCH: the Away Watch lines the job card carries for this visit (a WaveGuard member away, the visit's
     // own day inside the window, at home) ride every answer to the tech's Visit Brief, so the tech knows about the
-    // 3-photo closeout rule and the Welcome Home sweep before the visit. The lookup runs after the facts block's
-    // reassignment recheck, so whatever it answers (lines, nothing, an error) one more recheck covers the whole answer,
-    // and a reassignment it catches withholds everything like the facts block does (the payload may already hold live
-    // access codes and the cached brief). Gate off: no lookup and no recheck, the answer exactly as before. Fail-soft:
-    // a lookup or recheck outage omits the key.
+    // 3-photo closeout rule and the Welcome Home sweep before the visit. Gate off: no lookup, the answer exactly as
+    // before. Fail-soft: a lookup outage omits the key. The reassignment / customer recheck that covers the whole
+    // answer is the one final check below (finalRecheck), after every lookup.
     const withAwayWatch = async (payload) => {
       const AwayWatch = require('../services/away-watch');
       if (!AwayWatch.awayWatchLive()) return payload;
@@ -24886,19 +24884,34 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief Away Watch lines failed for ${svc.id}: ${err.message}`);
       }
-      try {
-        const stillOwned = await db('scheduled_services')
-          .where({ 'scheduled_services.id': svc.id })
-          .modify((q) => technicianCurrentVisitFilter(req, q))
-          .first('scheduled_services.id');
-        if (!stillOwned) return { brief: null };
-      } catch (err) {
-        logger.warn(`[admin-schedule] visit-brief Away Watch recheck failed for ${svc.id}: ${err.message}`);
-        return payload;
-      }
       return awayWatch ? { ...payload, awayWatch } : payload;
     };
-    const answer = async (payload) => res.json(await withAwayWatch(await withFacts(payload)));
+    // GATE_VISIT_ACCESS_FLAGS=on: the flags the hourly access sweep found for this visit (services/visit-access-flags.js),
+    // with their Right / Wrong status. Gate off (or shadow): no read. A failed flag read alone only omits the key.
+    const withAccessFlags = async (payload) => {
+      if (!require('../config/feature-gates').visitAccessCardsLive()) return payload;
+      const accessFlags = await require('../services/visit-access-flags').accessFlagsFor(db, svc);
+      return accessFlags && accessFlags.length ? { ...payload, accessFlags } : payload;
+    };
+    // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
+    // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
+    // access codes, the cached brief and a customer's quoted texts, so it must still be this technician's visit AND the
+    // customer the brief was built for (a merge changes the visit's customer while the technician stays assigned).
+    // No longer so, or the check itself failing: the whole answer is withheld. All three gates off: no extra read.
+    const finalRecheck = async (payload) => {
+      if (!(PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
+      try {
+        const stillOwned = await db('scheduled_services')
+          .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
+          .modify((q) => technicianCurrentVisitFilter(req, q))
+          .first('scheduled_services.id');
+        return stillOwned ? payload : { brief: null };
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief final recheck failed for ${svc.id}: ${err.message}`);
+        return { brief: null };
+      }
+    };
+    const answer = async (payload) => res.json(await finalRecheck(await withAwayWatch(await withAccessFlags(await withFacts(payload)))));
     if (!svc.pre_service_brief) return answer({ brief: null });
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
@@ -24928,6 +24941,39 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a gate code changed since generation must reach the tech from the
     // live facts, not the cached copy.
     await answer(served);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/access-flags/:questionId   body { verdict: 'right' | 'wrong', evidenceId }
+// The technician's tap on one visit access flag (GATE_VISIT_ACCESS_FLAGS=on; off or shadow = 404). `evidenceId` is
+// the stored state row the card was read from (it belongs to one customer): when it is no longer the visit's newest
+// state for its current customer, or the question no longer shows an OPEN card (a carried Right has none), the answer
+// is 409 flag_changed and nothing is written. Writes one visit_access_verdicts row (never a
+// decision_reviews label), and when that insert created a Right for a dog flag with no pets on file, one pet line on the
+// profile, all in one transaction that holds a FOR SHARE lock on the visit row (services/visit-access-flags.js). Sends
+// nothing to a customer. Same assignment check as GET /:id/visit-brief: a technician reaches only a visit assigned to
+// them; a visit no longer proven to be at one premises is 404.
+router.post('/:id/access-flags/:questionId', async (req, res, next) => {
+  try {
+    const { visitAccessCardsLive } = require('../config/feature-gates');
+    if (!visitAccessCardsLive()) return res.status(404).json({ error: 'Not found' });
+    const { packageFor } = require('../services/typed-decisions/packages');
+    const { questionId } = req.params;
+    if (!Object.prototype.hasOwnProperty.call(packageFor('visit_access.v1').questions, questionId)) {
+      return res.status(400).json({ error: 'Unknown flag' });
+    }
+    const verdict = req.body && req.body.verdict;
+    if (verdict !== 'right' && verdict !== 'wrong') return res.status(400).json({ error: "verdict must be 'right' or 'wrong'" });
+    const evidenceId = req.body && req.body.evidenceId;
+    if (typeof evidenceId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(evidenceId)) return res.status(400).json({ error: 'evidenceId is required' });
+    const result = await require('../services/visit-access-flags').tapAccessFlag(db, {
+      visitId: req.params.id, scope: (q) => technicianCurrentVisitFilter(req, q), questionId, verdict, evidenceId,
+    }, {
+      labeledBy: String(req.technician?.email || req.technicianId || 'admin').slice(0, 120), actorId: req.technicianId ? String(req.technicianId) : null, ip: req.ip, userAgent: req.get('user-agent') || null,
+    });
+    if (result.notFound) return res.status(404).json({ error: 'Scheduled service not found' });
+    if (result.conflict) return res.status(409).json({ error: 'flag_changed', code: 'flag_changed' });
+    res.json(result.saved ? { status: result.status, saved: true } : { status: result.status });
   } catch (err) { next(err); }
 });
 

@@ -1,14 +1,16 @@
 /**
  * Seven-day overdue-reminder spacing rule — OBSERVE ONLY (owner
- * re-sequencing 2026-09-27/28, GATE_DUNNING_SPACING_SHADOW). This is PR 1
+ * re-sequencing 2026-09-27/28). This was PR 1
  * of the dunning-unification spacing work, rebuilt NARROW and
  * shadow-only after the wide version (#5108: locks, a ledger
  * reservation-time re-check, retry re-arm, spacing episodes) drew five
  * review rounds. The ladder (#5126) and orphan adoption (#5179) remove
  * the handoffs behind most double contacts, so this PR only needs to
  * OBSERVE what the rule would have held — nothing here locks, holds,
- * denies, or changes what any rail sends. See contact-policy.js's shadow
- * evaluation and dunning-spacing-replay.js, the only two callers.
+ * denies, or changes what any rail sends. The contact-policy shadow
+ * evaluation was removed 2026-11-26;
+ * review-ask-holds.js and the dunning-spacing-replay / dunning-customer-timeline
+ * scripts still use this module.
  *
  * An "overdue reminder" row is a specific narrow shape, not every
  * collections_contact_ledger row: one of the five automated dunning

@@ -1216,7 +1216,6 @@ app.use('/api/admin/health', require('./routes/admin-health'));
 app.use('/api/admin/timetracking', require('./routes/admin-timetracking'));
 app.use('/api/admin/timesheets', require('./routes/admin-timesheet-approval'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
-app.use('/api/tech/pay-growth', require('./routes/tech-pay-growth'));
 app.use('/api/tech/payroll', require('./routes/tech-payroll'));
 app.use('/api/tech/rewards-scoreboard', require('./routes/tech-rewards-scoreboard'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));

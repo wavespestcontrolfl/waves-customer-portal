@@ -11,8 +11,13 @@ const { _internals: { buildCompletionActions } } = require('../routes/admin-prot
 const TEKKO = { id: 't', name: 'Tekko Pro IGR', active: true, default_rate: '1', default_unit: 'fl_oz/gal', epa_reg_number: '53883-335' };
 const homeCard = () => protocols.cockroach.visits.find((visit) => visit.visit === 1);
 
-// program, visit, product, amount, unit: label source.
+// program, visit, product, amount, unit: label source. In protocols.json order.
 const REVIEWED = [
+  // Suspend PolyZone, EPA 101563-143 (label read 2026-11-26), outdoor use rate "0.25 to 1.5 fl oz of this product per 1,000 sq ft of
+  // surfaces"; mosquitoes: "Treat with spray or mist around landscape plants ... and other places where mosquitoes may rest". The card's
+  // 1.1 fl oz per gallon at 1 gallon per 1,500 sq ft is 0.73 fl oz per 1,000 (owner 2026-11-25, D7). Barrier visit and event visit.
+  ['mosquito', 1, 'Suspend Polyzone', 1.1, 'fl_oz'],
+  ['mosquito', 3, 'Suspend Polyzone', 1.1, 'fl_oz'],
   // Tekko Pro IGR, EPA 53883-335, "CONTROL OF COCKROACHES AND CRICKETS": 2 oz per gallon of water, 1 gallon per 1,000 sq ft.
   ['cockroach', 1, 'Tekko Pro IGR', 2, 'fl_oz'],
 ];

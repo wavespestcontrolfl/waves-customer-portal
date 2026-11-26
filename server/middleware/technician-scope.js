@@ -169,7 +169,6 @@ const TECHNICIAN_ALLOW_LIST = [
 
   // Documents, pay and growth.
   { bucket: 'documents', methods: ANY, pattern: /^\/api\/tech\/staff-documents(\/.*)?$/ },
-  { bucket: 'pay-growth', methods: ANY, pattern: /^\/api\/tech\/pay-growth(\/.*)?$/ },
   // A technician's own finalized pay stubs (GATE_TECH_PAY_STUBS, owner 2026-10-28; inside "pay and growth" of the
   // 2026-10-02 ruling). The router scopes both reads to req.technicianId. Pay runs, W-4s and tax forms stay admin-only.
   { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/payroll\/checks(\/[^/]+\/stub)?$/ },

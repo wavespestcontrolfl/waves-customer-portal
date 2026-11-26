@@ -361,7 +361,7 @@ test('an owner-planned stop with no stored estimate is not a default duration (C
     const result = measureDayQuality(Model, [planned], workday);
     expect(result.defaultDurations).toEqual([]);
     expect(result.serviceMinutes).toBe(35); // owner 2026-10-30: recurring pest plans 35
-    const unnamed = { ...stop(9, 1), window_end: null, estimated_duration_minutes: null, service_type: 'Mosquito' };
+    const unnamed = { ...stop(9, 1), window_end: null, estimated_duration_minutes: null, service_type: 'Wildlife Trapping Service' }; // unnamed in the owner 2026-11-26 per-service table
     expect(measureDayQuality(Model, [unnamed], workday).defaultDurations).toEqual(['visit-1']);
   } finally {
     delete process.env.GATE_SCHEDULING_CAPACITY;

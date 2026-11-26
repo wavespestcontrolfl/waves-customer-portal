@@ -133,7 +133,7 @@ function wordOfCall(row) {
 }
 
 // The extraction as jsonb in both storage eras: a jsonb object, or a JSON string inside the jsonb column (the unwrap
-// day-agreement-shadow.js uses; call-prepay-choice.js reads both eras too).
+// the retired day-agreement judge used; call-prepay-choice.js reads both eras too).
 const EXTRACTION_SQL = "(CASE WHEN jsonb_typeof(call_log.ai_extraction_enriched) = 'string' THEN (call_log.ai_extraction_enriched #>> '{}')::jsonb ELSE call_log.ai_extraction_enriched END)";
 
 // The customer's latest word on a call that began since `since`: the newest read, valid, two-party call whose

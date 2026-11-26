@@ -4,8 +4,7 @@
  * The customer-level reminder engine (dunning consolidation §5). runPending
  * calls `runCustomerSchedules` after its per-invoice loop while the live gate
  * is on (GATE_DUNNING_CUSTOMER_SCHEDULE + prerequisites, narrowed by the
- * allowlist), else `shadowRun` under GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW,
- * which writes nothing. `processSchedule` is also the office send-now
+ * allowlist). `processSchedule` is also the office send-now
  * (admin.sendNow, through wiring.js).
  *
  * processSchedule runs, in this order: CLAIM -> customer + prefs -> RECOVER
@@ -17,16 +16,7 @@
  * Every pre-send guard (customer, preferences, recover-first, autopay, set,
  * stage, templates) is split into a read-only `decide*` half, which returns
  * null or a decision, and a write half (`applyDecision`). The live run calls
- * both; the shadow run calls only the decide halves, so its verdicts can
- * never drift from the live path's.
- *
- * SHADOW SCOPE: shadow gives full verdicts (would send / hold / pause / close /
- * settle) ONLY for customers already on a customer_dunning_schedules row. For a
- * customer who is not yet promoted it reports only the promotion and its first due
- * date (`would promote ... step=<id> next=<iso>`, plus `would absorb`): no send,
- * hold or pause is judged for a schedule that does not exist. Send evidence for
- * unpromoted customers comes from the one-customer allowlist canary (owner
- * rollout plan D12), not from shadow.
+ * both.
  */
 
 const db = require('../../models/db');
@@ -35,10 +25,7 @@ const { redactContact } = require('../../utils/redact-contact');
 const Followups = require('../invoice-followups');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
 const { customerOnAutopay } = require('../autopay-eligibility');
-const {
-  reminderProgress, sendReminderChannels, verdictAllows, verdictDurablyDenied, pendingReminderChannels, reminderPolicyVerdicts,
-  findReminderReservation,
-} = require('../billing-reminder-delivery');
+const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
 const { dunningCustomerScheduleAllowlist } = require('../../config/feature-gates');
 const collectionHold = require('../collections/collection-hold');
 const { OPEN_STATUSES, SOURCE, eventKey } = require('./constants');
@@ -48,7 +35,6 @@ const Schedule = require('./schedule');
 const Render = require('./render');
 const Boundary = require('./boundary');
 const { makeSender } = require('./send');
-const { claimVerdict } = require('../collections/contact-ledger');
 
 const { STEPS, namedForFinal, parseIds } = Schedule;
 const FINAL_STEP_IDS = ['d60_reminder', 'd90_final_notice'];
@@ -259,13 +245,12 @@ function recoveryComplete(event, channels) {
 async function decideRecovery(run) {
   let progress;
   try {
-    // The shadow run reads the same view but must not repair (stamp) anything.
     run.step = STEPS[run.schedule.step_index];
     if (!run.step) return decision('close', 'no_step', { closeReason: 'released_prereq_off' });
     run.eventKey = eventKey(run.schedule, run.step.id);
     // This touch's keyed reservations are loaded without the 90-day window (see reminderProgress), so a schedule
     // paused longer than that still recovers an accepted email instead of holding unconfirmed for good.
-    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, { eventKey: run.eventKey, ...(run.readOnly ? { repair: false } : {}) });
+    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, { eventKey: run.eventKey });
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — delivery progress unreadable: ${redactContact(err.message)}`);
     return decision('hold', 'progress_unreadable');
@@ -531,7 +516,7 @@ async function sendPhase(run, set) {
 // judged BEFORE the autopay guard (an autopay hold parks a schedule, and nothing else would ever close it).
 const decideEmptySet = (set) => (set.kind !== 'hold' && !sendable(set) ? decideEndOfSet(set) : null);
 
-/** The guards after recover-first and the set read, shared by the live and the shadow run. */
+/** The guards after recover-first and the set read. */
 // A set HOLD (unused account credit, a paused member, ...) comes before the autopay guard: it is a hold the
 // office must hear about (markHeld alerts it), while an autopay hold only parks the schedule silently.
 async function decideAfterSet(run, set) {
@@ -613,232 +598,15 @@ async function runCustomerSchedules(now = new Date(), { clockStartedAt = Date.no
   return tally;
 }
 
-// ── shadow run: reads, logs, writes NOTHING ──────────────────────────────
-
-const line = (verb, fields) => logger.info(`[customer-dunning] SHADOW would ${verb} ${Object.entries(fields)
-  .map(([k, v]) => `${k}=${v}`).join(' ')}`);
-const iso = (d) => (d ? new Date(d).toISOString() : 'none');
-
-// The customers the canary allowlist names (empty = everyone): the ONE filter
-// for the live due-scan and the shadow scan alike.
+// The customers the canary allowlist names (empty = everyone): the filter for the live due-scan.
 function allowlisted(rows) {
   const allow = dunningCustomerScheduleAllowlist();
   return allow ? rows.filter((r) => allow.has(String(r.customer_id))) : rows;
 }
 
-/**
- * The collections-policy half of a send (what sendReminderChannels asks per owed
- * channel before it reserves anything), as a pure read: which channels the live
- * attempt would send and which it would deny. No reservation, claim or waiver is
- * written (persistPolicyWaivers is never reached). Every channel denied is a
- * hold on COLLECTIONS_POLICY (or, when the denials are durable and a sibling
- * already delivered, the step settles on the waiver, as it does live).
- */
-async function decideShadowPolicy(run, set) {
-  const event = currentEvent(run);
-  const delivered = event?.delivered || new Set();
-  const pending = pendingReminderChannels(run.sendChannels, delivered, event?.resolved || new Set());
-  run.policyDenied = [];
-  run.unclaimable = [];
-  run.deduped = [];
-  if (!pending.length) return null;
-  const memberIds = set.members.map((m) => m.invoice_id);
-  const verdicts = await reminderPolicyVerdicts({
-    customerId: run.schedule.customer_id, invoiceId: null, invoiceIds: memberIds, policyInvoiceIds: memberIds,
-    source: SOURCE, purpose: 'late_payment', entries: event?.entries || [],
-    ...(run.operatorInitiated ? { holdExempt: 'operator' } : {}),
-  }, pending);
-  if (verdicts.some((v) => v?.balanceIncomplete)) return decision('hold', 'COLLECTIONS_POLICY', { denied: pending });
-  const denied = pending.filter((_c, i) => !verdictAllows(verdicts[i]));
-  if (denied.length === pending.length) {
-    const waivable = delivered.size > 0 && denied.every((channel) => verdictDurablyDenied(verdicts[pending.indexOf(channel)]));
-    // The delivered legs' evidence rides along: a final notice settles only on readable named invoices (as live).
-    return waivable
-      ? decision('settle', 'policy_waived', { denied, facts: { event, delivered, deliveredNow: [] } })
-      : decision('hold', 'COLLECTIONS_POLICY', { denied });
-  }
-  // The keyed reservation of each owed leg, read by its key with NO time window (live recordContact /
-  // claimAttempt find a reservation of any age; reminderProgress forgets rows past 90 days). Judged by
-  // the ledger's own claim decision, read-only: an ambiguous one (a worker that died between the
-  // reservation and the handoff) is refused live as REMINDER_OUTCOME_UNCONFIRMED; a delivered one is
-  // deduped, not sent again.
-  const allowed = pending.filter((channel) => !denied.includes(channel));
-  const verdictOf = new Map();
-  const standing = new Map();
-  for (const channel of allowed) {
-    standing.set(channel, await standingReservation(run, channel));
-    verdictOf.set(channel, claimVerdict(standing.get(channel)));
-  }
-  const deduped = allowed.filter((channel) => verdictOf.get(channel).delivered);
-  // A leg the keyed reservation already resolved terminally (a suppression refusal, found past the 90-day
-  // window) is settled, never owed again: live restores it into the resolved set and moves on.
-  const resolvedOld = allowed.filter((channel) => verdictOf.get(channel).resolved);
-  const owed = allowed.filter((channel) => !deduped.includes(channel) && !resolvedOld.includes(channel));
-  const unclaimable = owed.filter((channel) => !verdictOf.get(channel).allowed);
-  if (unclaimable.length === owed.length && unclaimable.length) {
-    return decision('hold', 'REMINDER_OUTCOME_UNCONFIRMED', { denied, unclaimable });
-  }
-  if (!owed.length) return settledDisposition(event, { deduped, denied, pending, verdicts, standing });
-  run.policyDenied = denied; // a partial send: the claimable allowed channels go, these do not
-  run.unclaimable = unclaimable;
-  run.deduped = deduped;
-  return null;
-}
-
-// Every owed channel that was not denied is already settled (delivered, or terminally resolved). Judged by
-// the SAME disposition live uses on the facts the send would produce: a durably denied leg is waived (the
-// touch settles), a transiently denied one stays owed (live leaves the step TOLD and retries it), so shadow
-// holds instead of settling; nothing delivered and nothing left owed is live's all_channels_terminal pause.
-function settledDisposition(event, { deduped, denied, pending, verdicts, standing }) {
-  const delivered = new Set([...(event?.delivered || []), ...deduped]);
-  const waived = new Set([...(event?.waived || []), ...denied.filter((c) => verdictDurablyDenied(verdicts[pending.indexOf(c)]))]);
-  const results = Object.fromEntries(denied.map((c) => [c, { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }]));
-  const complete = denied.every((c) => waived.has(c) && delivered.size > 0);
-  const verdict = Schedule.dispositionOf({ delivered, complete, results });
-  if (verdict.kind === 'advance') {
-    // The delivery evidence the settle rests on, as live's deliveryFacts restores it: the deduped legs' own reservations.
-    const entries = [...(event?.entries || []), ...deduped.map((c) => ({ channel: c, invoice_ids: standing.get(c)?.invoiceIds || [] }))];
-    return decision('settle', denied.length ? 'policy_waived' : 'already_delivered', {
-      denied, facts: { event: { ...(event || {}), entries }, delivered, deliveredNow: [] },
-    });
-  }
-  if (verdict.kind === 'paused') return decision('pause', verdict.reason === 'COLLECTIONS_POLICY' ? 'all_channels_terminal' : verdict.reason, { denied });
-  return decision('hold', 'COLLECTIONS_POLICY', { denied });
-}
-
-// The ledger row a channel's keyed reservation already has, shaped as recordContact returns a reused one.
-async function standingReservation(run, channel) {
-  const row = await findReminderReservation(run.schedule.customer_id, run.eventKey, channel);
-  if (!row) return { id: 'new', reused: false, metadata: {} };
-  // The read-only recovery view reflects a bound email row's durable verdict (send_failed / resolved) onto the
-  // progress entry without stamping the stored row; live repairs it first, so judge the keyed row WITH it.
-  const reflected = (currentEvent(run)?.entries || []).find((entry) => String(entry.id) === String(row.id));
-  let overlay = reflected?.metadata;
-  if (typeof overlay === 'string') { try { overlay = JSON.parse(overlay); } catch { overlay = {}; } }
-  const metadata = { ...row.metadata };
-  for (const key of ['send_failed', 'resolved', 'resolution', 'delivered']) if (overlay && key in overlay) metadata[key] = overlay[key];
-  return { id: row.id, reused: true, metadata, invoiceIds: row.invoiceIds };
-}
-
-/**
- * What the live run would do with a schedule: the SAME read-only guards
- * runClaimed runs (customer, preferences, recover-first, autopay, then the set,
- * stage and template checks), and only their decide halves — nothing is applied.
- * `schedule` is always a STORED row (shadow never judges a schedule that does not exist).
- */
-async function shadowStop(run, schedule, now) {
-  // The set is resolved at the SAME point live runClaimed resolves it: after the customer, recovery and
-  // reachability guards, so a schedule those guards settle never pays for (or fails on) the Stripe-backed read.
-  const early = await decideCustomer(run) || await decideRecovery(run) || decideReachable(run);
-  if (early) return { stop: early, set: null };
-  const set = await resolveDunnableSet(schedule.customer_id, { now });
-  return { stop: await decideAfterSet(run, set) || await decideSet(run, set) || await decideShadowPolicy(run, set), set };
-}
-
-// A final notice settles only on readable evidence of the invoices it named (finishDelivered holds otherwise).
-const shadowEvidenceUnreadable = (run, schedule, stop) => stop.kind === 'settle' && Schedule.isFinalIndex(schedule.step_index)
-  && (!stop.facts || namedForFinal(run, stop.facts).unreadable.length > 0);
-
-async function judgeShadowSchedule(schedule, { now }) {
-  const run = { schedule, now, operatorInitiated: false, claimStamp: null, readOnly: true };
-  const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
-  const { stop: decided, set } = await shadowStop(run, schedule, now);
-  if (!decided) {
-    line('send', {
-      ...fields, step: run.step?.id, kind: set.kind, members: set.members.length, total_cents: set.totalCents,
-      ...(run.policyDenied?.length ? { denied: run.policyDenied.join('+') } : {}),
-      ...(run.unclaimable?.length ? { unclaimable: run.unclaimable.join('+') } : {}),
-      ...(run.deduped?.length ? { deduped: run.deduped.join('+') } : {}),
-    });
-    return 'send';
-  }
-  const stop = shadowEvidenceUnreadable(run, schedule, decided) ? decision('hold', 'delivered_evidence_unreadable') : decided;
-  const verb = { hold: 'hold', autopay_hold: 'hold', pause: 'pause', close: 'close', settle: 'settle' }[stop.kind];
-  line(verb, {
-    ...fields, reason: stop.reason, ...(stop.denied?.length ? { denied: stop.denied.join('+') } : {}),
-    ...(stop.unclaimable?.length ? { unclaimable: stop.unclaimable.join('+') } : {}),
-  });
-  return verb;
-}
-
-// A customer with no schedule row yet: the promotion decision and its first due date, nothing more.
-// The set resolve makes Stripe calls (pay-combined's live PaymentIntent check), so it runs on the
-// pool with NO transaction held (a pinned connection would starve DB_POOL_MAX=2, as in promotion).
-// It is a documented pure read; only the member-row read below sits inside the READ ONLY transaction.
-async function shadowPromote(customerId, now) {
-  const set = await resolveDunnableSet(customerId, { now });
-  const rows = await Schedule.inReadOnlyTransaction(db, (trx) => Schedule.activeMemberRows(customerId, { database: trx }));
-  const d = Schedule.promotionDecision(set, rows, now);
-  if (!d.promote) { line('hold', { customer: customerId, reason: d.reason }); return ['hold']; }
-  line('promote', {
-    customer: customerId, members: set.members.length, active: d.active.length, step: d.seed.step_id,
-    next: iso(d.seed.next_touch_at), total_cents: set.totalCents,
-  });
-  for (const row of d.absorbed) {
-    line('absorb', { customer: customerId, seq: row.id, invoice: row.invoice_id, step: STEPS[row.step_index]?.id, next: iso(row.next_touch_at) });
-  }
-  // Promotion is all shadow says about a customer with no schedule row yet: what the first touch
-  // would be and when it is due. The schedule it would create is not judged (see SHADOW SCOPE).
-  return ['promote'];
-}
-
-const shadowSchedule = (schedule, now) => judgeShadowSchedule(schedule, { now });
-
-// The schedules shadowRun judges: due, in a status the live run would claim, within the allowlist.
-const SHADOW_STATUSES = Object.freeze(['active', 'held', 'autopay_hold']);
-const inShadowScope = (schedule, now) => SHADOW_STATUSES.includes(schedule.status)
-  && !!schedule.next_touch_at && new Date(schedule.next_touch_at).getTime() <= now.getTime()
-  && allowlisted([schedule]).length === 1;
-
-async function shadowJudge(schedule, now) {
-  try { return await shadowSchedule(schedule, now); } catch (err) {
-    logger.warn(`[customer-dunning] SHADOW schedule check failed for ${schedule.id}: ${redactContact(err.message)}`);
-    return 'failed';
-  }
-}
-
-/**
- * The full shadow verdict of ONE stored schedule, for the kill switch to log BEFORE it releases a dark
- * schedule (wiring.releaseIfDark under the shadow gate): released first, the schedule would never reach
- * shadowRun's scan. The same scope and the same read-only judge as shadowRun; writes nothing, never
- * throws. Returns the verdict ('send' | 'hold' | 'pause' | 'close' | 'settle' | 'failed'), or null when
- * the schedule is outside shadowRun's scope (not due, paused, outside the allowlist).
- */
-async function shadowVerdictBeforeRelease(schedule, now = new Date()) {
-  return inShadowScope(schedule, now) ? shadowJudge(schedule, now) : null;
-}
-
-/**
- * The shadow gate's whole job. It never calls a writer: no promotion, claim,
- * mint, reservation, send, or alert. Table reads go through a READ ONLY
- * transaction (PostgreSQL itself refuses a write); the set resolve is a pure
- * read outside it. It only logs `[customer-dunning] SHADOW would ...` lines.
- *
- * Scope: full verdicts only for customers already on a customer_dunning_schedules row
- * (shadowSchedule); for a customer not yet promoted, only the promotion and its first
- * due date (shadowPromote). Send evidence for unpromoted customers comes from the
- * one-customer allowlist canary (owner rollout plan D12).
- */
-async function shadowRun(now = new Date()) {
-  const tally = { promote: 0, hold: 0, send: 0, pause: 0, settle: 0, close: 0, failed: 0 };
-  const bump = (kind) => { tally[kind] += 1; };
-  for (const customerId of await Schedule.promotionCandidates()) {
-    try { (await shadowPromote(customerId, now)).forEach(bump); } catch (err) {
-      tally.failed += 1;
-      logger.warn(`[customer-dunning] SHADOW promote check failed for customer ${customerId}: ${redactContact(err.message)}`);
-    }
-  }
-  const open = allowlisted(await db(Schedule.TABLE).whereIn('status', SHADOW_STATUSES).where('next_touch_at', '<=', now));
-  for (const schedule of open) bump(await shadowJudge(schedule, now));
-  logger.info(`[customer-dunning] SHADOW summary: promote=${tally.promote} send=${tally.send} hold=${tally.hold} pause=${tally.pause} settle=${tally.settle} close=${tally.close} failed=${tally.failed}`);
-  return tally;
-}
-
 module.exports = {
   processSchedule,
   runCustomerSchedules,
-  shadowRun,
-  shadowVerdictBeforeRelease,
   // exported for tests
   namedInvoiceIds,
   snapshotMetadata,

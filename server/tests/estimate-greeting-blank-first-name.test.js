@@ -80,12 +80,6 @@ describe('greeting sites route through the shared helper', () => {
     expect(block).toContain("last_name: (greetingToken ? parts.slice(1) : parts).join(' ') || '',");
   });
 
-  test('the expired-estimate nurture email uses the shared rule (codex #5612 r2)', () => {
-    const nurture = read('services/email-division/payload-builders.js');
-    expect(nurture).toContain("first_name: firstToken(greetingFirstToken({ customerName: estimate.customer_name, customer })) || clean(customer.first_name) || 'there',");
-    expect(nurture).toContain(".first('id', 'first_name', 'last_name', 'email', 'latitude', 'longitude');");
-  });
-
   test('Ask Waves addresses a blank-first-name customer by no name, never the surname (codex #5612 r3)', () => {
     const { buildEstimateAssistantContext } = require('../services/estimate-assistant');
     const ctx = (estimate, greetingFirstName) => buildEstimateAssistantContext({ estimate, greetingFirstName });

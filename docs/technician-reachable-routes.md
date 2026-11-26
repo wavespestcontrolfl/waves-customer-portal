@@ -241,6 +241,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/review-requests/trigger` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/reviews/send-time-preview` | admin-reviews |
 | GET | `/api/admin/schedule` | admin-schedule |
+| POST | `/api/admin/schedule/:id/access-flags/:questionId` | admin-schedule |
 | GET | `/api/admin/schedule/:id/card-request` | admin-schedule |
 | GET | `/api/admin/schedule/:id/estimate-source` | admin-schedule |
 | POST | `/api/admin/schedule/:id/invoice` | admin-schedule |
@@ -323,9 +324,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/tech/notifications/:id/read` | tech-notifications |
 | POST | `/api/tech/notifications/dismiss-batch` | tech-notifications |
 | GET | `/api/tech/notifications/schedule-changes` | tech-notifications |
-| GET | `/api/tech/pay-growth` | tech-pay-growth |
-| GET | `/api/tech/pay-growth/availability` | tech-pay-growth |
-| GET | `/api/tech/pay-growth/services/:id/score` | tech-pay-growth |
 | GET | `/api/tech/payroll/checks` | tech-payroll |
 | GET | `/api/tech/payroll/checks/:id/stub` | tech-payroll |
 | GET | `/api/tech/rewards-scoreboard` | tech-rewards-scoreboard |
@@ -373,7 +371,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/tech/timetracking/end-job` | tech-timetracking |
 | GET | `/api/tech/timetracking/history` | tech-timetracking |
 | GET | `/api/tech/timetracking/my-hours` | tech-timetracking |
-| POST | `/api/tech/timetracking/no-lunch` | tech-timetracking |
 | GET | `/api/tech/timetracking/pending-signoff` | tech-timetracking |
 | POST | `/api/tech/timetracking/sign-week` | tech-timetracking |
 | POST | `/api/tech/timetracking/start-break` | tech-timetracking |

@@ -11,7 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TimeTrackingPage, { ApprovalsTab, TeamTab, TimesheetTab } from "./TimeTrackingPage";
 
 vi.mock("../../hooks/useStaffDocumentsAvailable", () => ({ default: () => false }));
-vi.mock("../../hooks/usePayGrowthAvailable", () => ({ default: () => false }));
 vi.mock("../../hooks/usePayrollAvailable", () => ({ default: () => false }));
 vi.mock("../../hooks/useTechPayStubs", () => ({ default: () => ({ status: "off" }) }));
 vi.mock("../../hooks/useTechScoreboardAvailability", () => ({ default: () => ({ status: "off" }) }));
@@ -56,7 +55,7 @@ describe("timesheet day entries", () => {
       if (u.pathname.endsWith("/entries")) {
         return u.searchParams.get("startDate") === "2026-10-26" ? monday() : tuesday();
       }
-      return json({ allTechs: [TECH], autoLunch: false });
+      return json({ allTechs: [TECH] });
     }));
   }
 
@@ -119,7 +118,7 @@ describe("timesheet week switch", () => {
         return json([{ technician_id: "tech-1", tech_name: "Field Tech", work_date: u.searchParams.get("startDate"), total_shift_minutes: 480, overtime_minutes: 0 }]);
       }
       if (u.pathname.endsWith("/entries")) return json({ entries: [] });
-      return json({ allTechs: [TECH], autoLunch: false });
+      return json({ allTechs: [TECH] });
     }));
     render(<TimesheetTab showToast={() => {}} onOpenApprovals={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: "Field Tech, Mon 2026-10-26: 8.0 hours" }));
@@ -134,33 +133,6 @@ describe("timesheet week switch", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("Field Tech")).toBeInTheDocument();
     expect(screen.queryByText(/Could not load the timesheet/)).not.toBeInTheDocument();
-  });
-});
-
-describe("timesheet same-week reload", () => {
-  it("a failed reload after a lunch change closes the open day with the rows", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-10-28T15:00:00Z"));
-    let dailyReads = 0;
-    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
-      const u = new URL(String(url), "http://localhost");
-      if (u.pathname.endsWith("/no-lunch")) return json({ noLunch: true });
-      if (u.pathname.endsWith("/daily")) {
-        dailyReads += 1;
-        if (dailyReads > 1) return json({ error: "Synthetic outage" }, 503);
-        return json([{ technician_id: "tech-1", tech_name: "Field Tech", work_date: "2026-10-26", total_shift_minutes: 510, unpaid_meal_minutes: 30, overtime_minutes: 0, status: "pending" }]);
-      }
-      if (u.pathname.endsWith("/entries")) return json({ entries: [] });
-      return json({ allTechs: [TECH], autoLunch: true });
-    }));
-    render(<TimesheetTab showToast={() => {}} onOpenApprovals={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: /^Field Tech, Mon 2026-10-26/ }));
-    fireEvent.change(await screen.findByLabelText("Reason for the lunch change"), { target: { value: "worked through" } });
-    fireEvent.click(screen.getByRole("button", { name: "Mark no lunch" }));
-
-    expect(await screen.findByText("Could not load the timesheet for 2026-10-26 to 2026-11-01.")).toBeInTheDocument();
-    expect(screen.queryByText("Field Tech")).not.toBeInTheDocument();
-    expect(screen.queryByText(/^Entries for /)).not.toBeInTheDocument();
   });
 });
 

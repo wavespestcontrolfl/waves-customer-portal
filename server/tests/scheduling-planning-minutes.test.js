@@ -1,12 +1,12 @@
-// Owner planning minutes (2026-09-25; recurring pest and lawn 35 minutes from
-// 2026-10-30, the owner ruling this file pins) and the capacity picker's stale-order
+// Owner planning minutes (2026-09-25; quarterly pest 35 from 2026-10-30; the
+// 2026-11-26 per-service table, the owner ruling this file pins) and the capacity picker's stale-order
 // fallback: the table itself, its gate, the placed-visit exemption, the
 // clock-order rescue of a leftover stored order, and the day_overcommitted
 // diagnosis.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { plannedWorkMinutes, placedVisitMinutes } = require('../services/scheduling/planning-minutes');
+const { plannedWorkMinutes, placedVisitMinutes, newVisitMinutes } = require('../services/scheduling/planning-minutes');
 const { workDuration } = require('../services/route-reorder-window-fit');
 const { evaluateArrivalPlacement, _internals: { clockOrder, storedOrderStale, buildPlacementTarget } } = require('../services/scheduling/arrival-route');
 const { ROUTE_WRITE_GUARD_COLUMNS } = require('../services/route-reorder');
@@ -16,7 +16,9 @@ const now = new Date('2027-01-01T12:00:00Z');
 const clock = minutes => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 const stop = (id, start, duration, extra = {}) => ({ id, scheduled_date: date, technician_id: 'tech',
   lat: 27.44, lng: -82.4, status: 'confirmed', window_start: clock(start), window_end: clock(start + duration),
-  estimated_duration_minutes: duration, service_type: 'Mosquito', ...extra });
+  estimated_duration_minutes: duration,
+  // An unnamed service (owner 2026-11-26 per-service table): keeps the legacy 60-minute charge.
+  service_type: 'Wildlife Trapping Service', ...extra });
 const travel = { lookup: () => ({ minutes: 0, source: 'google_traffic', reason: null }) };
 const context = rows => ({ date, now, rows, prospective: true, target: stop('__candidate__', 960, 30), travel });
 const options = (start, duration) => ({ windowStart: clock(start), windowEnd: clock(start + duration), durationMinutes: duration });
@@ -29,27 +31,87 @@ describe('planning minutes table', () => {
     estimated_duration_minutes: 60, ...extra });
 
   test.each([
-    // Owner 2026-10-30: recurring pest and lawn plan 35 (was 25 and 20).
+    // Owner 2026-10-30: quarterly pest plans 35.
     ['Quarterly Pest Control Service', {}, 35],
-    ['Bi-Monthly Pest Control Service', {}, 35],
     ['Pest Control Service', { is_recurring: true }, 35],
+    ['Semiannual Pest Control Service', {}, 35],
     ['One-Time Pest Control', { is_recurring: true }, 45],
     ['Pest Control Service', {}, 45],
-    ['Every 6 Weeks Lawn Care Service', {}, 35],
-    ['Monthly Lawn Care Service', {}, 35],
+    // Owner 2026-11-26 per-service table ("do this").
+    ['Bi-Monthly Pest Control Service', {}, 30],
+    ['Monthly Pest Control Service', {}, 25],
+    ['Every 6 Weeks Lawn Care Service', {}, 25],
+    ['Monthly Lawn Care Service', {}, 25],
+    ['One-Time Lawn Care Service', {}, 25],
+    ['Lawn Care', {}, 25],
     ['Quarterly Pest Control Service', { is_callback: true }, 15],
     ['Pest Re-Service', {}, 15],
+    ['Lawn Care Re-Service', {}, 15],
+    ['Fire Ant Yard Treatment', {}, 15],
+    ['Lawn Insect Spot Treatment', {}, 15],
+    ['Shell, Rock & Paver Weed Control', {}, 15],
+    ['Lawn Soil Test Service', {}, 15],
+    ['Lawn Fertilization & Weed Control', {}, 25],
+    ['Rodent Trapping Follow-Up Visit Service', { is_callback: true }, 20],
     ['Lawn Assessment', {}, 30],
+    ['Waves Assessment', {}, 30],
     ['Termite Inspection', {}, 30],
+    ['WDO Inspection Service', {}, 45],
     ['Rodent Control', {}, 30],
+    ['Rodent Trapping Service', {}, 45],
+    ['Rodent Trapping Follow-Up Visit Service', {}, 20],
+    ['Quarterly Rodent Bait Station Service', {}, 20],
+    ['Standard Trap-Only Retainer Service', {}, 20],
     ['Termite Bait Station Service', {}, 30],
+    ['Termite Spot Treatment Service', {}, 45],
+    ['Cockroach Treatment Service', {}, 40],
+    ['German Roach Cleanout Service', {}, 45],
+    ['German Cockroach Treatment', {}, 45],
+    ['Vehicle German Roach Treatment (2 Visits)', {}, 30],
+    ['Vehicle Roach Add-On', {}, 30],
+    ['Web Sweep', {}, 30],
+    ['Bee / Wasp Nest Removal Service', {}, 30],
+    ['Stinging Insect Removal', {}, 30],
+    ['Recurring Foam Treatment', {}, 45],
+    ['Rodent Trapping Follow Up', {}, 20],
+    ['Rodent Trapping Follow Up', { is_callback: true }, 20],
+    ['Trap-Only Monitoring', {}, 20],
+    ['Palmetto Roach Knockdown', {}, 40],
+    ['Pest Control Every Other Month', {}, 30],
+    ['Pest Control Every 2 Months', {}, 30],
+    ['Semiannual Palm Injection Service', {}, 30],
+    ['Flea Control Service', {}, 45],
+    ['Mosquito', {}, 30],
+    ['Monthly Mosquito Control Service', {}, 30],
+    ['Tree & Shrub Care', {}, 30],
+    ['Bi-Monthly Tree & Shrub Care Service', {}, 30],
   ])('%s %o plans %i minutes', (name, extra, minutes) => {
     expect(plannedWorkMinutes(row(name, extra))).toBe(minutes);
     expect(workDuration(row(name, extra))).toBe(minutes);
   });
 
-  test.each(['Tree & Shrub Care', 'Mosquito', 'Bed Bug Treatment', 'Lawn Care', 'Pest & Lawn Combo', null])(
-    '%s keeps the legacy window/estimate rule', (name) => {
+  test('a joined label keeps its stored long estimate', () => {
+    expect(plannedWorkMinutes(row('Quarterly Pest + Termite Bait Station Service', { estimated_duration_minutes: 120 }))).toBe(120);
+    expect(plannedWorkMinutes(row('Quarterly Pest + Termite Bait Station Service'))).toBeNull();
+  });
+
+  test('a new visit reads the engine key and the label alike', () => {
+    expect(newVisitMinutes('trap_only', 60)).toBe(newVisitMinutes('Trap-Only Monitoring', 60));
+    expect(newVisitMinutes('stinging_insect', 60)).toBe(newVisitMinutes('Bee / Wasp Nest Removal Service', 60));
+  });
+
+  test('owner 2026-11-26: roach plans 45 at most', () => {
+    for (const name of ['Cockroach Treatment Service', 'German Roach Cleanout Service', 'Vehicle Roach Add-On', 'Cockroach Control']) {
+      expect(plannedWorkMinutes(row(name))).toBeLessThanOrEqual(45);
+    }
+  });
+
+  test.each(['Bed Bug Treatment', 'Rodent Exclusion Service', 'Rodent Trapping, Exclusion & Sanitation Service',
+    'Termite Liquid Treatment Service', 'Slab Pre-Treat Termite Service', 'Lawn Dethatching Service',
+    'Mosquito Misting System Installation', 'Wildlife Trapping Service', 'Pest & Lawn Combo',
+    'Lawn + Tree & Shrub Service', 'Pest + Mosquito Service', 'Lawn Aeration Service', 'Lawn Plugging Service',
+    'Quarterly Lawn Care Service + Flea Control Service', 'Lawn Renovation', null])(
+    '%s keeps the legacy window/estimate rule (sized by its own estimate)', (name) => {
       expect(plannedWorkMinutes(row(name))).toBeNull();
       expect(workDuration(row(name))).toBe(60);
     });
@@ -60,7 +122,8 @@ describe('planning minutes table', () => {
     // its window ends off the hour or on it (Codex #4829 r3 P1).
     expect(plannedWorkMinutes(row('Quarterly Pest Control Service',
       { window_start: '09:00', window_end: '10:30', estimated_duration_minutes: 90 }))).toBe(90);
-    expect(plannedWorkMinutes(row('Termite Bait Installation',
+    // (owner 2026-11-26 per-service table: Termite Bait Station is a named 30-minute row)
+    expect(plannedWorkMinutes(row('Termite Bait Station Service',
       { window_start: '09:00', window_end: '11:00', estimated_duration_minutes: 120 }))).toBe(120);
     // A wide window with the default estimate charges the table, not the span.
     expect(plannedWorkMinutes(row('Quarterly Pest Control Service',
@@ -109,7 +172,7 @@ describe('planning minutes table', () => {
     // morning finishes before noon and a 12:00 visit fits.
     const day = (service_type) => [9, 9, 10, 10, 11, 11].map((h, i) => stop(`s${i}`, h * 60, 60,
       { route_order: i + 1, service_type }));
-    expect(evaluateArrivalPlacement(context(day('Mosquito')), options(12 * 60, 60)))
+    expect(evaluateArrivalPlacement(context(day('Wildlife Trapping Service')), options(12 * 60, 60)))
       .toMatchObject({ feasible: false, reason: 'day_overcommitted' });
     expect(evaluateArrivalPlacement(context(day('Quarterly Pest Control Service')), options(12 * 60, 60)).feasible)
       .toBe(true);
@@ -170,7 +233,7 @@ describe('stale stored order', () => {
     // REAL resolved window (effectiveWindowRange) rescues it.
     const legacy = (id, timeWindow, routeOrder) => ({ id, technician_id: 'tech', scheduled_date: date,
       lat: 27.44, lng: -82.4, status: 'confirmed', time_window: timeWindow, estimated_duration_minutes: 60,
-      service_type: 'Mosquito', route_order: routeOrder, created_at: '2020-01-01T00:00:00Z' });
+      service_type: 'Wildlife Trapping Service', route_order: routeOrder, created_at: '2020-01-01T00:00:00Z' });
     const rows = [legacy('afternoon', 'afternoon', 1), legacy('morning', 'morning', 2)];
     const fit = evaluateArrivalPlacement(context(rows), options(16 * 60, 30));
     expect(fit.feasible).toBe(true);
@@ -270,7 +333,8 @@ describe('placedVisitMinutes (the visit being placed)', () => {
   test('the table applies when it names the service and the allowance is the legacy hour or less', () => {
     expect(placedVisitMinutes(pest, 60)).toBe(35);
     expect(placedVisitMinutes(pest, 30)).toBe(35);
-    expect(placedVisitMinutes({ service_type: 'Lawn Care Service', is_recurring: true }, 60)).toBe(35);
+    // Owner 2026-11-26 per-service table: every lawn round plans 25.
+    expect(placedVisitMinutes({ service_type: 'Lawn Care Service', is_recurring: true }, 60)).toBe(25);
     expect(placedVisitMinutes({ service_type: 'One-Time Pest Control' }, 60)).toBe(45);
     expect(placedVisitMinutes({ service_type: 'Pest Re-Service' }, 60)).toBe(15);
     expect(placedVisitMinutes({ service_type: 'Rodent Control' }, 60)).toBe(30);
@@ -283,7 +347,9 @@ describe('placedVisitMinutes (the visit being placed)', () => {
   });
 
   test('an unnamed service, a combined visit, a bad allowance or no target keeps the caller allowance', () => {
-    expect(placedVisitMinutes({ service_type: 'Mosquito' }, 60)).toBeNull();
+    // Owner 2026-11-26 per-service table: Mosquito is named (30); a wildlife job is not.
+    expect(placedVisitMinutes({ service_type: 'Mosquito' }, 60)).toBe(30);
+    expect(placedVisitMinutes({ service_type: 'Wildlife Trapping Service' }, 60)).toBeNull();
     expect(placedVisitMinutes({ service_type: 'Pest & Lawn Combo' }, 60)).toBeNull();
     expect(placedVisitMinutes({ ...pest, combined_services: true }, 60)).toBeNull();
     expect(placedVisitMinutes(pest, 0)).toBeNull();
@@ -396,14 +462,18 @@ describe('newVisitMinutes (the visit a customer books online; owner 2026-11-09)'
     expect(newVisitMinutes('Lawn Care (Every 6 weeks)', 60)).toBe(45);
     expect(newVisitMinutes('Lawn Care', 60)).toBe(45);
     expect(newVisitMinutes('lawn_care', 60)).toBe(45);
-    expect(newVisitMinutes('One-Time Lawn Treatment', 60)).toBeNull();
-    expect(newVisitMinutes('one_time_lawn', 60)).toBeNull();
+    // Owner 2026-11-26 per-service table: a one-time lawn round is named (25), so it reads like the rest.
+    expect(newVisitMinutes('One-Time Lawn Treatment', 60)).toBe(45);
+    expect(newVisitMinutes('one_time_lawn', 60)).toBe(45);
     expect(newVisitMinutes('one_time_pest_control', 60)).toBe(45);
   });
 
   test('null keeps the caller\'s catalog: a service the table does not name, a long allowance, or the table off', () => {
-    expect(newVisitMinutes('Mosquito', 60)).toBeNull();
-    expect(newVisitMinutes('tree_shrub', 60)).toBeNull();
+    // Owner 2026-11-26 per-service table: Mosquito and Tree & Shrub are named now.
+    expect(newVisitMinutes('Mosquito', 60)).toBe(45);
+    expect(newVisitMinutes('tree_shrub', 60)).toBe(45);
+    expect(newVisitMinutes('Wildlife Trapping Service', 60)).toBeNull();
+    expect(newVisitMinutes('bed_bug', 60)).toBeNull();
     expect(newVisitMinutes('Pest & Lawn', 60)).toBeNull();
     expect(newVisitMinutes(null, 60)).toBeNull();
     expect(newVisitMinutes('Pest Control', 61)).toBeNull();

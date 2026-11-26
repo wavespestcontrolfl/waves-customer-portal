@@ -514,23 +514,6 @@ const SHAPES = {
     kept: { 'templates.0.status': 'published', 'templates.0.automation_count': 1 },
     content: { 'templates.0.description': 'Sent with the 30-day setup link.' },
   },
-  // admin-email-templates.js GET /automations: email_template_automations rows (a.*) with the template's name/mode/status,
-  // the active version number, parsed JSON settings and the 30-day counts.
-  '/admin/email-templates/automations': {
-    body: {
-      automations: [{
-        automation_key: 'autopay_setup_followup', name: 'Auto Pay follow-up', description: 'Reminds the customer once.', trigger_event_key: 'autopay.link_sent', trigger_description: 'When a setup link goes out.',
-        template_key: 'autopay.setup_link', template_name: 'Auto Pay setup link', template_status: 'published', delay_minutes: 2880, audience: 'customer', status: 'active',
-        frequency_cap: 'once_per_entity', timezone: 'America/New_York', send_count_30d: 4, would_send_30d: 0, would_block_30d: 0, last_published_at: '2026-10-01T00:00:00Z',
-        id: UUID, conditions: { min_days: 2 }, exit_conditions: {}, retry_policy: {}, quiet_hours: { start: 21 }, idempotency_key_template: 'k:{id}', owner: 'ops', dry_run_notes: LINK_NOTE,
-        template_mode: 'service', active_version_id: UUID, active_version_number: 3, can_delete: false,
-      }],
-    },
-    dropped: ['automations.0.automation_key', 'automations.0.trigger_event_key', 'automations.0.template_key', 'automations.0.id', 'automations.0.conditions.min_days', 'automations.0.quiet_hours.start', 'automations.0.idempotency_key_template', 'automations.0.owner', 'automations.0.dry_run_notes',
-      'automations.0.template_mode', 'automations.0.active_version_id', 'automations.0.active_version_number', 'automations.0.can_delete'],
-    kept: { 'automations.0.status': 'active', 'automations.0.delay_minutes': 2880 },
-    content: { 'automations.0.description': 'Reminds the customer once.', 'automations.0.trigger_description': 'When a setup link goes out.' },
-  },
   '/admin/dispatch/alerts': {
     body: { alerts: [{ id: UUID, type: 'tech_late', severity: 'warning', tech_id: UUID, tech_name: 'Tech A', job_id: UUID, address: '2 Example Way', payload: { minutes_late: 12 }, created_at: '2026-10-14T13:00:00Z', resolved_at: null }] },
     kept: { 'alerts.0.type': 'tech_late', 'alerts.0.severity': 'warning' },
@@ -878,11 +861,11 @@ describe('the default withholds a name-matched key that no row declared', () => 
 });
 
 describe('keep mode: only the listed fields reach the model, and a new column never does', () => {
-  test('the 21 rows added with the core screens and leads, the two email-template rows, the health, SMS template and tech tip rows, and the Ads campaigns, new-home mail list and time tracking rows, are in keep mode', () => {
+  test('the 21 rows added with the core screens and leads, the email-template row, the health, SMS template and tech tip rows, and the Ads campaigns, new-home mail list and time tracking rows, are in keep mode', () => {
     expect(KEEP_ENTRIES.map(entry => entry.endpoint).sort()).toEqual([
       '/admin/ads/campaigns', '/admin/customers', '/admin/customers/:id/cards', '/admin/customers/:id/collection-holds', '/admin/customers/:id/comms', '/admin/customers/:id/deposit-credit',
       '/admin/customers/:id/estimates-summary', '/admin/customers/:id/latest-scheduled-service', '/admin/customers/:id/timeline',
-      '/admin/dispatch/:serviceId/tech-tips', '/admin/dispatch/alerts', '/admin/dispatch/board', '/admin/dispatch/jobs/:id', '/admin/dispatch/techs/:id', '/admin/email-templates', '/admin/email-templates/automations', '/admin/estimates',
+      '/admin/dispatch/:serviceId/tech-tips', '/admin/dispatch/alerts', '/admin/dispatch/board', '/admin/dispatch/jobs/:id', '/admin/dispatch/techs/:id', '/admin/email-templates', '/admin/estimates',
       '/admin/health/scores/:customerId', '/admin/invoices', '/admin/invoices/:id', '/admin/invoices/:id/recipients', '/admin/leads', '/admin/leads/:id',
       '/admin/leads/analytics/by-source', '/admin/leads/analytics/overview', '/admin/prospects/mail', '/admin/schedule/list', '/admin/sms-templates',
       '/admin/timetracking/daily', '/admin/timetracking/entries',

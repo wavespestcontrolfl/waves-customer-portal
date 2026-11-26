@@ -10,10 +10,11 @@ const now = new Date('2027-01-01T12:00:00Z');
 const clock = minutes => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 // Capacity mechanics run on explicit durations: the fixture's service is one
 // the owner planning-minutes table does not name (scheduling-planning-minutes
-// .test.js covers the table), so each row's duration stays the input.
+// .test.js covers the table; owner 2026-11-26 per-service table), so each row's
+// duration stays the input.
 const stop = (id, start, duration, extra = {}) => ({ id, scheduled_date: date, technician_id: 'tech',
   lat: 27.44, lng: -82.4, status: 'confirmed', window_start: clock(start), window_end: clock(start + duration),
-  estimated_duration_minutes: duration, service_type: 'Mosquito', ...extra });
+  estimated_duration_minutes: duration, service_type: 'Wildlife Trapping Service', ...extra });
 const travel = (minutes = 0) => ({ lookup: () => ({ minutes, source: 'google_traffic', reason: null }) });
 const context = (rows = [], extra = {}) => ({ date, now, rows, prospective: true, target: stop('__candidate__', 960, 30), travel: travel(), ...extra });
 const options = (start = 960, duration = 30) => ({ windowStart: clock(start), windowEnd: clock(start + duration), durationMinutes: duration });
@@ -82,7 +83,7 @@ test('finds an insertion without changing the existing relative stop order', () 
 });
 
 test('complete visits sum member work while sharing one arrival anchor', () => {
-  const members = [stop('pest', 600, 30, { visit_id: 'visit', route_order: 1 }), stop('lawn', 600, 40, { visit_id: 'visit', route_order: 2, service_type: 'Lawn Care' })];
+  const members = [stop('pest', 600, 30, { visit_id: 'visit', route_order: 1 }), stop('lawn', 600, 40, { visit_id: 'visit', route_order: 2, service_type: 'Lawn Dethatching Service' })];
   const grouped = groupRouteStops(members);
   expect(grouped).toHaveLength(1);
   expect(grouped[0].estimated_duration_minutes).toBe(70);

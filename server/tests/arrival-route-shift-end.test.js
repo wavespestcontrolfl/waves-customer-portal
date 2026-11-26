@@ -301,9 +301,10 @@ describe('capacity mode', () => {
   const DAY = '2031-03-05';
   const capacity = (rows = []) => ({
     date: DAY, now: new Date('2031-03-01T12:00:00Z'), rows, prospective: true, travel,
-    target: stop('__candidate__', '14:00', 27.44, { scheduled_date: DAY, service_type: 'Mosquito' }),
+    // Unnamed in the owner 2026-11-26 per-service table, so it keeps the legacy hour.
+    target: stop('__candidate__', '14:00', 27.44, { scheduled_date: DAY, service_type: 'Wildlife Trapping Service' }),
   });
-  const booked = (id, windowStart) => stop(id, windowStart, 27.5, { scheduled_date: DAY, service_type: 'Mosquito', route_order: 1 });
+  const booked = (id, windowStart) => stop(id, windowStart, 27.5, { scheduled_date: DAY, service_type: 'Wildlife Trapping Service', route_order: 1 });
 
   test('the drive home is not held to the shift end: the visit ends at 15:00 and the van is home at 15:30', () => {
     const fit = evaluateArrivalPlacement(capacity(), { ...at('14:00'), shiftEndMin: 15 * 60 });

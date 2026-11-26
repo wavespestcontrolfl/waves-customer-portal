@@ -1737,7 +1737,7 @@ async function filterCollidingSlots(slots, {
   // from its resolved service profile; independent of `coords`.
   candidateExpectedMinutes = null,
   // Visits that are being MOVED by the caller: their own rows are not
-  // collisions for the slot they are moving to (day-agreement shadow).
+  // collisions for the slot they are moving to.
   excludeServiceIds = [],
   // Visits the caller moves LATER the same day (booking make-room): a Map of
   // scheduled_services id -> minutes. Each row counts at its own window shifted
@@ -3123,7 +3123,7 @@ module.exports = {
   formatServiceProfileLabel,
   // A new-home estimate's move-in date (no first visit before it): the page's and the fill list's read.
   estimateMoveInDate,
-  // The offer/commit collision guard, shared with the day-agreement shadow sweep.
+  // The offer/commit collision guard.
   filterCollidingSlots,
   // Shared with slot-reservation so holds can be geo-stamped as route anchors.
   resolveEstimateCoords,

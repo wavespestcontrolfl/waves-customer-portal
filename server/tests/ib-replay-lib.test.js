@@ -96,7 +96,7 @@ describe('replay safety', () => {
     const env = lib.replayEnv(caller, profile, { databaseUrl: 'postgresql://localhost/ib_replay' });
     expect(env).toEqual({
       PATH: '/bin', HOME: '/home/x', USER: 'owner', GATE_IB_PLATFORM: 'true', MODEL_FLAGSHIP: 'claude-opus-5-5', IB_FULL_ACCESS_EMAILS: 'owner@example.com',
-      GATE_IB_OWNER_DIRECT: 'false', GATE_IB_OPENAI_BACKUP: 'false', GATE_AI_CREDIT_KEYS: 'false',
+      GATE_IB_OWNER_DIRECT: 'false', GATE_AI_CREDIT_KEYS: 'false',
       NODE_ENV: 'development', WAVES_LOCAL_DEV: '1', JWT_SECRET: 'ib-replay-local',
       DATABASE_URL: 'postgresql://localhost/ib_replay', ANTHROPIC_API_KEY: 'ib-replay-dry-run',
     });
