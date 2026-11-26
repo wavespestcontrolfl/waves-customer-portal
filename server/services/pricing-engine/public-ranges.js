@@ -494,8 +494,14 @@ function buildRows() {
     key: 'wdo_inspection',
     name: 'WDO Inspection',
     unit: 'per inspection',
-    values: [150, 350].concat(sweepValues(TYPICAL_FOOTPRINTS, (f) => sp.priceWDO(f), (r) => r.price)),
-    notes: 'Wood-destroying organism inspection with official FDACS report.',
+    // Owner ruling 2026-11-26: $150 to $275 by home size and construction (SPECIALTY.wdo.sizeTable). The live table's own
+    // floor and ceiling anchor the range, and the sweep widens it if a value ever falls outside.
+    values: [150, 275].concat(sweepValues(
+      TYPICAL_HOMES.flatMap((homeSqFt) => [{ constructionMaterial: 'CBS' }, { constructionMaterial: 'WOOD_FRAME' }, { constructionMaterial: 'CBS', foundationType: 'CRAWLSPACE' }]
+        .map((construction) => ({ homeSqFt, ...construction }))),
+      (property) => sp.priceWDO(property),
+      (r) => r.price)),
+    notes: 'Wood-destroying organism inspection with official FDACS report. Price by home size and construction.',
   }));
 
   add('lawn_care_program', () => rangeRow({

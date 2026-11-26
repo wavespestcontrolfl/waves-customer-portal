@@ -330,6 +330,16 @@ function structuralFactIsTrustworthy({ record, field }) {
   return !record?._fieldEvidence?.[field]?.fieldVerify;
 }
 
+// The verdict the WDO price reads (owner 2026-11-26: unknown or untrusted construction prices as block plus a staff note): is this
+// structural fact on the merged profile backed by the property RECORD with no weak/conflicting-merge evidence? A value that came
+// only from the satellite photo, or one the record's own evidence marks fieldVerify, is not trusted. Only the false verdict is
+// carried to the pricer (an absent verdict reads as trusted, like palmCountTrusted).
+function structuralFactIsRecordBacked({ record, field }) {
+  const value = record?.[field];
+  const known = value != null && String(value).trim() !== '' && String(value).trim().toUpperCase() !== 'UNKNOWN';
+  return known && structuralFactIsTrustworthy({ record, field });
+}
+
 // 'address' alone marks a WRONG-PREMISE lookup: the geocoder snapped to a
 // different parcel, so the record's dimensions describe the neighbor. 'all'
 // is deliberately excluded here — its MEDIUM form marks an AI-web-search
@@ -410,5 +420,6 @@ module.exports = {
   lookupTreeCountIsTrustworthy,
   lookupPalmCountIsTrustworthy,
   structuralFactIsTrustworthy,
+  structuralFactIsRecordBacked,
   hasWrongPremiseFlag,
 };

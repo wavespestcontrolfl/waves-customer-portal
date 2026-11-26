@@ -481,6 +481,9 @@ function buildEngineInput({
     ...(!isCommercial && knownEnrichedValue(lookupEnriched?.foundationType)
       ? { foundationType: lookupEnriched.foundationType }
       : {}),
+    // The lookup's weak-evidence verdict on those two (only the WDO price reads it): false prices the construction as unknown.
+    ...(!isCommercial && lookupEnriched?.constructionTrusted === false ? { constructionTrusted: false } : {}),
+    ...(!isCommercial && lookupEnriched?.foundationTrusted === false ? { foundationTrusted: false } : {}),
     ...(!isCommercial && knownEnrichedValue(lookupEnriched?.roofType)
       ? { roofType: lookupEnriched.roofType }
       : {}),

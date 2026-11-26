@@ -935,6 +935,10 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   if (Object.keys(priorMarkers).length && !rebuildHasPestRows) {
     estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), ...priorMarkers };
   }
+  // The same for the WDO size rule (2026-11-26): an unstamped estimate, or one that kept only inputs asking for a WDO inspection,
+  // is a quote saved before the rule and reads legacy ($250 flat) on a first send and a resend alike.
+  const priorWdoFlat = require('../services/estimate-floor-signal-replay').savedLegacyWdoFlatSignal(estimateData).legacyWdoFlat;
+  if (typeof priorWdoFlat === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyWdoFlat: priorWdoFlat };
   const snapshotAt = now().toISOString();
   const sendSnapshot = {
     ...(estimateData.sendSnapshot || {}),
@@ -970,6 +974,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
     // live only in the snapshot and replays them under these rules. No evidence on the estimate = current rules (false).
     sendSnapshot.legacyPricingRules = priorRules === true;
     sendSnapshot.legacyTwoStoryRoof = priorTwoStory === true;
+    sendSnapshot.legacyWdoFlat = priorWdoFlat === true;
     sendSnapshot.legacyOneTimePestBuffer = priorPestBuffer === true;
     // Carry the frozen one-time pest evidence onto the new bundle when there were no rows to recompute it from (never frozen -> absent).
     if (!rebuildHasPestRows) {

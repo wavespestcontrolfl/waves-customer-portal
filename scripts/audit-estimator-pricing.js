@@ -555,15 +555,16 @@ function expectTreeShrub({ bedArea, treeCount = 0, palmCount = 0, access = 'easy
 }
 
 // WDO / German roach / foam drill / top dressing / plugging / palm — flat & cost-plus formulas
-// WDO is one terminal bracket in code ($250 flat), but the --db overlay can
-// install tiered onetime_wdo brackets (db-bridge); the expected price is the
-// first bracket whose maxSqFt covers the footprint (living area / stories, 2,000
-// when absent — resolvePestFootprint), else the last one (codex r19 P2).
+// WDO prices off the size + construction table for new quotes (owner 2026-11-26, SPECIALTY.wdo.sizeTable): the expected price is
+// the first tier whose maxSqFt covers the home's living area (footprint when none). The audit
+// runs pass no construction, which prices as concrete block on a slab (the table's block column) plus a staff note.
 function expectWdo(homeSqFt = 2000, stories = 1) {
   const fp = footprintOf(homeSqFt, stories) || 2000;
-  const brackets = constants.SPECIALTY.wdo.brackets;
-  const b = brackets.find((x) => fp <= x.maxSqFt) || brackets[brackets.length - 1];
-  return { footprint: fp, price: b.price, bracketMaxSqFt: b.maxSqFt, bracketsLive: brackets.length };
+  const tiers = constants.SPECIALTY.wdo.sizeTable.tiers;
+  // The size the table reads is the home's living area (the footprint only when none is given).
+  const size = Number(homeSqFt) > 0 ? Number(homeSqFt) : fp;
+  const b = tiers.find((x) => size <= x.maxSqFt) || tiers[tiers.length - 1];
+  return { footprint: fp, price: b.block, bracketMaxSqFt: b.maxSqFt, bracketsLive: tiers.length };
 }
 function expectGermanRoach(severity = 'light') {
   const cfg = constants.SPECIALTY.germanRoach;
@@ -1252,7 +1253,7 @@ function runSpecialtyMatrix() {
   // finite edge — so a tiered --db overlay exercises each band and the in-code
   // single-bracket run still prices the flat fee. The resolved footprint
   // (living area / stories) is asserted alongside the price.
-  const wdoBrackets = constants.SPECIALTY.wdo.brackets;
+  const wdoBrackets = constants.SPECIALTY.wdo.sizeTable.tiers;
   const wdoEdges = wdoBrackets.map((b) => b.maxSqFt).filter((m) => Number.isFinite(m));
   const wdoFootprints = [...new Set([BASE.homeSqFt, ...wdoEdges.flatMap((m) => [m, m + 1]), (wdoEdges.length ? Math.max(...wdoEdges) : 3500) + 1000])].sort((a, b) => a - b);
   for (const sqft of wdoFootprints) {

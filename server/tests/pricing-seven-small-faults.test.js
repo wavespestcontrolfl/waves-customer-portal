@@ -255,7 +255,7 @@ describe('fix 1: the palm per-visit minimum holds after the per-palm credit', ()
 
   test('adding a service to a palm estimate keeps the sold minimum (revision builder applies the saved signals)', () => {
     const request = require('fs').readFileSync(require('path').join(__dirname, '../services/estimate-add-service-request.js'), 'utf8');
-    expect(request).toContain("for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyOneTimePestBuffer', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay'])");
+    expect(request).toContain("for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyWdoFlat', 'legacyOneTimePestBuffer', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay'])");
   });
 
   test('an estimate priced before the fix keeps the credit it was quoted with', () => {

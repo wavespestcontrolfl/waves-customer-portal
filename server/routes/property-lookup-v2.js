@@ -76,7 +76,7 @@ const {
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { hasStructuredCommercialAiSignal } = require('../services/property-lookup/commercial-ai-signal');
-const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
+const { lookupPalmCountIsTrustworthy, structuralFactIsRecordBacked } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
@@ -3121,6 +3121,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       rc?.constructionMaterial, ai?.constructionVisible, 'UNKNOWN'
     ),
     foundationType: inferFoundation(rc, ai),
+    // The WDO price reads these (owner 2026-11-26): false = the value is satellite-only or the record's own evidence marks it weak.
+    // Stamped only as false; an absent verdict reads as trusted.
+    ...(structuralFactIsRecordBacked({ record: rc, field: 'constructionMaterial' }) ? {} : { constructionTrusted: false }),
+    ...(structuralFactIsRecordBacked({ record: rc, field: 'foundationType' }) ? {} : { foundationTrusted: false }),
     roofType: mergeField(rc?.roofType, ai?.roofMaterial, 'UNKNOWN'),
     // Roof-style evidence for a later barrel-vs-flat tile price (owner
     // 2026-11-19). Read-only: the county's own words (roofType above folds
@@ -6348,6 +6352,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     yearBuilt: p.yearBuilt,
     constructionMaterial: p.constructionMaterial,
     foundationType: p.foundationType,
+    constructionTrusted: p.constructionTrusted === false ? false : undefined,
+    foundationTrusted: p.foundationTrusted === false ? false : undefined,
     roofType: p.roofType,
     nearWater: p.nearWater,
     waterDistance: p.waterDistance,
