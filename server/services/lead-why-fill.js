@@ -47,6 +47,7 @@
 
 const db = require('../models/db');
 const { DEFAULT_EXCLUDE_STATUSES } = require('./scheduling/occupancy');
+const { eligibleCallsQuery } = require('./call-research-miner');
 const logger = require('./logger');
 
 const LOOKBACK_DAYS = 120;
@@ -150,6 +151,8 @@ function aboutPriorProvider(c) {
   return PRIOR_PROVIDER_RE.test(text) || RIVAL_USE.some(([, re]) => re.test(text));
 }
 
+const clearPatch = (lead) => Object.fromEntries(['previous_company', 'switch_reason', 'not_booked_reason']
+  .filter((k) => !isBlank(lead[k])).map((k) => [k, null]));
 const sameValue = (a, b) => (isBlank(a) ? null : String(a)) === (isBlank(b) ? null : String(b));
 
 /**
@@ -183,8 +186,17 @@ function planLeadWhy(lead, chunks, facts = {}) {
 
 const asUuidList = (rows, key) => [...new Set(rows.map((r) => r[key]).filter(Boolean))];
 
-const CALL_COLS = (conn) => ['id', 'customer_id', 'created_at', 'twilio_call_sid', 'call_sid', 'research_mined_at',
-  conn.raw("metadata->>'lead_id' AS stamp_lead_id"), conn.raw("metadata->>'relay_lead_id' AS stamp_relay_lead_id")];
+const CALL_COLS = (conn) => ['id', 'customer_id', 'created_at', 'twilio_call_sid', 'call_sid',
+  'processing_token', 'processing_status', conn.raw("metadata->>'lead_id' AS stamp_lead_id")];
+
+// Same rule as admin-leads.js (settledLeadStamp / settledDissentingStamp): a
+// metadata.lead_id stamp is SETTLED when no processing pass holds the call and
+// its status is processed (legacy NULL counts). A provisional stamp can still
+// be cleared or repointed, so the call is left alone until it settles.
+const stampState = (c) => {
+  if (!c.stamp_lead_id) return 'none';
+  return c.processing_token == null && (c.processing_status == null || c.processing_status === 'processed') ? 'settled' : 'provisional';
+};
 
 // Candidate calls for a page of leads: by the lead's sid, by the lead_id stamp
 // on call_log.metadata, and by the same customer.
@@ -193,34 +205,33 @@ async function candidateCalls(conn, leads) {
   const ids = leads.map((l) => l.id);
   const customerIds = asUuidList(leads, 'customer_id');
   const rows = await conn('call_log').where((w) => {
-    w.whereIn(conn.raw("metadata->>'lead_id'"), ids).orWhereIn(conn.raw("metadata->>'relay_lead_id'"), ids);
+    w.whereIn(conn.raw("metadata->>'lead_id'"), ids);
     if (sids.length) w.orWhereIn('twilio_call_sid', sids).orWhereIn('call_sid', sids);
     if (customerIds.length) w.orWhereIn('customer_id', customerIds);
   }).select(CALL_COLS(conn));
   return [...new Map(rows.map((r) => [r.id, r])).values()];
 }
 
-// call id -> Set of live lead ids that explicitly own it: a metadata stamp, or
-// any live lead (across ALL leads, not just this page) whose sid is the call's.
-async function explicitOwners(conn, calls) {
+// call id -> Set of live lead ids whose sid is the call's (across ALL leads).
+async function sidOwners(conn, calls) {
   const owners = new Map();
-  const add = (callId, leadId) => { if (leadId) owners.set(callId, (owners.get(callId) || new Set()).add(leadId)); };
-  for (const c of calls) { add(c.id, c.stamp_lead_id); add(c.id, c.stamp_relay_lead_id); }
   const sids = [...new Set(calls.flatMap((c) => [c.twilio_call_sid, c.call_sid]).filter(Boolean))];
-  if (sids.length) {
-    const sidLeads = await conn('leads').whereIn('twilio_call_sid', sids).whereNull('deleted_at').select('id', 'twilio_call_sid');
-    for (const c of calls) {
-      for (const l of sidLeads) if (l.twilio_call_sid === c.twilio_call_sid || l.twilio_call_sid === c.call_sid) add(c.id, l.id);
+  if (!sids.length) return owners;
+  const sidLeads = await conn('leads').whereIn('twilio_call_sid', sids).whereNull('deleted_at').select('id', 'twilio_call_sid');
+  for (const c of calls) {
+    for (const l of sidLeads) {
+      if (l.twilio_call_sid === c.twilio_call_sid || l.twilio_call_sid === c.call_sid) owners.set(c.id, (owners.get(c.id) || new Set()).add(l.id));
     }
   }
   return owners;
 }
 
-// Assign each call to at most ONE lead. Explicit owners win; two different
-// explicit owners = conflict = skipped. A call with no explicit owner falls back
-// to the customer window, only when exactly one live lead of that customer fits.
+// Assign each call to at most ONE lead: a settled stamp wins (and supersedes a
+// stale sid); a provisional stamp leaves the call unassigned; else a sid owned
+// by exactly one live lead; else the customer window, only when exactly one
+// live lead of that customer fits it.
 async function assignCalls(conn, leads, calls) {
-  const owners = await explicitOwners(conn, calls);
+  const bySid = await sidOwners(conn, calls);
   const customerIds = asUuidList(leads, 'customer_id');
   const custLeads = customerIds.length
     ? await conn('leads').whereIn('customer_id', customerIds).whereNull('deleted_at').select('id', 'customer_id', 'created_at')
@@ -231,8 +242,11 @@ async function assignCalls(conn, leads, calls) {
   };
   const owner = new Map(); // call id -> lead id
   for (const c of calls) {
-    const explicit = owners.get(c.id);
-    if (explicit) { if (explicit.size === 1) owner.set(c.id, [...explicit][0]); continue; }
+    const stamp = stampState(c);
+    if (stamp === 'settled') { owner.set(c.id, c.stamp_lead_id); continue; }
+    if (stamp === 'provisional') continue;
+    const sid = bySid.get(c.id);
+    if (sid) { if (sid.size === 1) owner.set(c.id, [...sid][0]); continue; }
     if (!c.customer_id) continue;
     const fits = custLeads.filter((l) => l.customer_id === c.customer_id && inWindow(c, l));
     if (fits.length === 1) owner.set(c.id, fits[0].id);
@@ -257,15 +271,19 @@ async function loadChunksByLead(conn, leads, now) {
       .select('call_log_id', 'speaker', 'tag', 'quote', 'context', 'topics');
     for (const c of chunks) chunksByCall.set(c.call_log_id, [...(chunksByCall.get(c.call_log_id) || []), c]);
   }
+  // Recent calls the miner WILL still process (its own eligibility query:
+  // inbound, transcribed, consented, not yet mined). An outbound follow-up is
+  // never mined, so it never holds no_response back.
+  const recent = [...calls.values()].filter((c) => now - new Date(c.created_at) < MINING_GRACE_DAYS * DAY_MS).map((c) => c.id);
+  const pending = new Set(recent.length
+    ? (await eligibleCallsQuery({ onlyUnmined: true }).whereIn('call_log.id', recent).select('call_log.id')).map((r) => r.id)
+    : []);
   const out = new Map();
   for (const [leadId, set] of byLead) {
     const ids = [...set];
     out.set(leadId, {
       chunks: ids.flatMap((cid) => chunksByCall.get(cid) || []),
-      miningPending: ids.some((cid) => {
-        const c = calls.get(cid);
-        return !c.research_mined_at && now - new Date(c.created_at) < MINING_GRACE_DAYS * DAY_MS;
-      }),
+      miningPending: ids.some((cid) => pending.has(cid)),
     });
   }
   return out;
@@ -280,7 +298,7 @@ async function bookedLeadIds(conn, leads) {
     .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
     .select('customer_id', 'created_at');
   return new Set(leads.filter((l) => rows.some((r) => r.customer_id === l.customer_id
-    && new Date(r.created_at) >= new Date(l.created_at) - EXISTING_CUSTOMER_MARGIN_DAYS * DAY_MS)).map((l) => l.id));
+    && new Date(r.created_at) >= new Date(l.created_at))).map((l) => l.id));
 }
 
 // Customers that existed before the lead are not prospects: skip their leads.
@@ -299,9 +317,12 @@ async function existingCustomerLeadIds(conn, leads) {
 // status, converted_at and customer link are the ones the values came from.
 async function writeLeadWhy(conn, lead, patch, now) {
   const q = conn('leads').where({ id: lead.id }).whereNull('deleted_at');
-  for (const col of ['status', 'customer_id', 'converted_at']) {
+  for (const col of ['status', 'customer_id']) {
     if (lead[col] == null) q.whereNull(col); else q.where(col, lead[col]);
   }
+  // The planner only reads whether the lead converted; an exact timestamp
+  // compare would fail on microseconds a JS Date drops.
+  if (lead.converted_at == null) q.whereNull('converted_at'); else q.whereNotNull('converted_at');
   return q.update({ ...patch, why_filled_at: now });
 }
 
@@ -313,7 +334,6 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
     const leads = await conn('leads')
       .whereNull('deleted_at')
       .where('created_at', '>=', cutoff)
-      .where((w) => w.whereNull('status').orWhere('status', '<>', 'duplicate'))
       .where((w) => w.whereNull('why_checked_at').orWhere('why_checked_at', '<', now))
       .orderByRaw('why_checked_at ASC NULLS FIRST, created_at DESC, id DESC')
       .limit(Math.min(PAGE_SIZE, maxLeads - stats.scanned))
@@ -321,14 +341,19 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
     if (!leads.length) break;
     stats.scanned += leads.length;
 
+    // Existing-customer and duplicate leads are out of scope: any value the job
+    // wrote while they were eligible is cleared.
     const existing = await existingCustomerLeadIds(conn, leads);
-    const candidates = leads.filter((l) => !existing.has(l.id));
+    const ineligible = (l) => existing.has(l.id) || l.status === 'duplicate';
+    const candidates = leads.filter((l) => !ineligible(l));
     const evidence = candidates.length ? await loadChunksByLead(conn, candidates, now) : new Map();
     const booked = await bookedLeadIds(conn, candidates);
 
-    for (const lead of candidates) {
+    for (const lead of leads) {
       const ev = evidence.get(lead.id) || { chunks: [], miningPending: false };
-      const patch = planLeadWhy(lead, ev.chunks, { booked: booked.has(lead.id), miningPending: ev.miningPending });
+      const patch = ineligible(lead)
+        ? clearPatch(lead)
+        : planLeadWhy(lead, ev.chunks, { booked: booked.has(lead.id), miningPending: ev.miningPending });
       if (!Object.keys(patch).length) continue;
       if (await writeLeadWhy(conn, lead, patch, now)) {
         stats.changed += 1;

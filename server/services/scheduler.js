@@ -4486,7 +4486,8 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 4:05AM ET — Lead "why" filler (no LLM). Fills leads.previous_company /
   // switch_reason / not_booked_reason from call_research_chunks with fixed
-  // keyword rules; only NULL fields, never an office-set value. Runs an hour
+  // keyword rules; the job owns the fields and recomputes them (it replaces or
+  // clears a stale value). Runs an hour
   // after the 3:05 call-research miner. Kill switch: LEAD_WHY_FILL=off (not a gate).
   // =========================================================================
   cron.schedule('5 4 * * *', async () => {
