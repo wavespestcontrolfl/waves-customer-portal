@@ -172,3 +172,15 @@ it('checks the landing technician and duration when confirming a cross-technicia
     technicianId: 'destination-tech', durationMinutes: 90,
   }));
 });
+
+// GATE_TECH_SHIFT_HOURS (D4): the confirm shows the shift line of the landing slot.
+it('shows the shift line of the landing slot, and nothing without one', () => {
+  useSlotConflicts.mockReturnValue({ conflicts: [], shiftWarning: "Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours." });
+  const view = renderModal({ technicianId: 'destination-tech', isRecurring: false });
+  expect(screen.getByTestId('slot-shift-warning')).toHaveTextContent("Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.");
+  view?.unmount?.();
+  cleanup();
+  useSlotConflicts.mockReturnValue({ conflicts: [] });
+  renderModal({ technicianId: 'destination-tech', isRecurring: false });
+  expect(screen.queryByTestId('slot-shift-warning')).not.toBeInTheDocument();
+});

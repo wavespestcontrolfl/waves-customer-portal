@@ -20,7 +20,7 @@ vi.mock('./useBestTimes', () => ({
 vi.mock('./useSlotConflicts', () => ({
   useSlotConflicts: (args) => {
     hooks.conflictsArgs = args;
-    return { conflicts: hooks.conflicts };
+    return { conflicts: hooks.conflicts, shiftWarning: hooks.shiftWarning };
   },
 }));
 
@@ -323,4 +323,45 @@ it('rain-out: a day option the server marks dayAlreadyLate shows the "already la
   expect(late).toHaveTextContent('already late');
   expect(screen.getByText(/Clean day/).closest('button')).not.toHaveTextContent('already late');
   expect(screen.getAllByTestId('already-late-tag')).toHaveLength(1);
+});
+
+// GATE_TECH_SHIFT_HOURS (D4): the pickers show the shift line of the picked slot (useSlotConflicts).
+it('new appointment: shows the shift line of the picked slot, and nothing without one', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => json({})));
+  hooks.availability = openTimesAt();
+  hooks.shiftWarning = "Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.";
+  const view = render(
+    <CreateAppointmentModal
+      defaultCustomer={{ id: 'cust-1', firstName: 'Fixture', lastName: 'Customer' }}
+      defaultDate={DATE} defaultWindowStart="09:00" onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
+    />,
+  );
+  expect(await screen.findByTestId('slot-shift-warning')).toHaveTextContent("Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.");
+  view.unmount();
+  hooks.shiftWarning = undefined;
+  render(
+    <CreateAppointmentModal
+      defaultCustomer={{ id: 'cust-1', firstName: 'Fixture', lastName: 'Customer' }}
+      defaultDate={DATE} defaultWindowStart="09:00" onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
+    />,
+  );
+  await screen.findByTestId('open-times-box');
+  expect(screen.queryByTestId('slot-shift-warning')).not.toBeInTheDocument();
+});
+
+it('new appointment opened to choose a time: no shift line for the default hour until a time is chosen', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => json({})));
+  hooks.availability = openTimesAt();
+  hooks.shiftWarning = "Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.";
+  render(
+    <CreateAppointmentModal
+      defaultCustomer={{ id: 'cust-1', firstName: 'Fixture', lastName: 'Customer' }}
+      defaultDate={DATE} defaultWindowStart="09:00" requireTimeChoice onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()}
+    />,
+  );
+  await screen.findByTestId('open-times-box');
+  expect(screen.getByRole('option', { name: 'Choose a time' })).toBeInTheDocument();
+  expect(screen.queryByTestId('slot-shift-warning')).not.toBeInTheDocument();
+  fireEvent.change(document.getElementById('new-appt-time'), { target: { value: '10:00' } });
+  expect(await screen.findByTestId('slot-shift-warning')).toHaveTextContent("Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.");
 });

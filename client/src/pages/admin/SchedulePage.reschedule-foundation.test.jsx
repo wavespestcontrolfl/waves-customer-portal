@@ -5,12 +5,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, expect, it, vi } from 'vitest';
 import { RescheduleModal } from './SchedulePage';
 
-vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
+const slotCheck = vi.hoisted(() => ({ shiftWarning: undefined }));
+vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [], shiftWarning: slotCheck.shiftWarning }) }));
 const bestTimes = vi.hoisted(() => ({ args: null }));
 vi.mock('../../components/schedule/useBestTimes', () => ({
   useBestTimes: (args) => { bestTimes.args = args; return { pickedByTech: [], availability: undefined }; },
 }));
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); slotCheck.shiftWarning = undefined; });
 const service = { id: 'fixture-visit', customerName: 'Fixture customer', serviceType: 'Pest service', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:30' };
 
 it('keeps the duration and notification choice when rescheduling through labeled fields', async () => {
@@ -50,4 +51,19 @@ it('the custom picker asks for the open-times box on the visit\'s own route (GAT
   expect(bestTimes.args).toMatchObject({ openTimes: true, technicianId: 'fixture-tech' });
   // The reschedule cannot change the technician: no tech pick.
   expect(bestTimes.args.techPick).toBeFalsy();
+});
+
+// GATE_TECH_SHIFT_HOURS (D4): the custom picker shows the shift line of the picked slot.
+it('the custom date picker shows the shift line of the picked slot, and nothing without one', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ options: [] }) })));
+  render(<RescheduleModal service={service} onClose={vi.fn()} onRescheduled={vi.fn()} />);
+  fireEvent.click(screen.getByRole('button', { name: /Pick Custom Date/ }));
+  expect(screen.queryByTestId('slot-shift-warning')).not.toBeInTheDocument();
+  cleanup();
+  slotCheck.shiftWarning = "Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.";
+  render(<RescheduleModal service={service} onClose={vi.fn()} onRescheduled={vi.fn()} />);
+  // The line belongs to the custom picker: nothing before it opens.
+  expect(screen.queryByTestId('slot-shift-warning')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /Pick Custom Date/ }));
+  expect(screen.getByTestId('slot-shift-warning')).toHaveTextContent("Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.");
 });

@@ -125,7 +125,7 @@ export default function RescheduleConfirmModal({
   // reschedule the check only covers this first occurrence (copy stays
   // singular by design).
   const [toStart, toEnd] = String(land.window || '').split('-');
-  const { conflicts } = useSlotConflicts({
+  const { conflicts, shiftWarning } = useSlotConflicts({
     serviceId,
     technicianId,
     durationMinutes,
@@ -314,6 +314,7 @@ export default function RescheduleConfirmModal({
             conflicts={stripCoversRouteWarning(availability, { currentDate: land.date, currentStart: toStart })
               ? (conflicts || []).filter((conflict) => !conflict.warning)
               : conflicts}
+            shiftWarning={shiftWarning}
           />
           {land.unmoved && (
             <p className="text-14 text-ink-secondary">That is the visit&rsquo;s current time.</p>
