@@ -8,7 +8,10 @@
  *    match is not a link, so it reads nobody's visits);
  *  - a waiver reaches the draft twice, as one answer: the mark on the engine result the draft stores (the page
  *    maps that result) and the waiver handed to the insert (the accept reads the stored operator waiver);
- *  - a failed history read costs the waiver, never the draft.
+ *  - a failed history read costs the waiver, never the draft, and a decision that fails half way leaves the
+ *    result as priced (never a result marked "no fee" with no waiver to bill by);
+ *  - a dry run (the replay harness) prices what the live draft stores;
+ *  - a lane that makes no draft reads nobody's visits.
  * The window, the visit history and the stored row are tested in returning-setup-fee-waiver.test.js and
  * returning-setup-fee-history-postgres.test.js.
  *
@@ -70,6 +73,14 @@ jest.mock('../services/notification-service', () => ({
   notifyAdmin: () => Promise.resolve({ id: 'bell-1' }),
 }));
 
+// The real mapper behind a handle, so one case can fail the map of a marked result.
+const mockMapper = jest.fn();
+jest.mock('../services/pricing-engine/v1-legacy-mapper', () => ({
+  ...jest.requireActual('../services/pricing-engine/v1-legacy-mapper'),
+  mapV1ToLegacyShape: (...args) => mockMapper(...args),
+}));
+const realMapper = jest.requireActual('../services/pricing-engine/v1-legacy-mapper').mapV1ToLegacyShape;
+
 // The history read is the rule module's own (real Postgres suite); the decision made on it is the real one.
 const mockHistory = jest.fn();
 jest.mock('../services/returning-setup-fee-waiver', () => ({
@@ -118,7 +129,7 @@ const intentFor = (services = { pest: { frequency: 'quarterly' } }) => ({
 });
 
 // A caller the draft links: a cancelled customer (no active plan, so the member waiver is not theirs).
-const run = (contextOver = {}) => runDraftPipeline({
+const run = (contextOver = {}, { dryRun = false } = {}) => runDraftPipeline({
   context: {
     call: { id: 'call-1', twilio_call_sid: 'CA-returning-1' },
     phone: '+19410000000',
@@ -133,7 +144,7 @@ const run = (contextOver = {}) => runDraftPipeline({
   },
   origin: ORIGIN,
   result: { lane: null, created: false },
-  dryRun: false,
+  dryRun,
   quotePromised: true,
 });
 
@@ -154,6 +165,7 @@ beforeEach(() => {
   });
   mockComposeIntent.mockResolvedValue({ intent: intentFor(), model: 'test-composer' });
   mockCreateDraft.mockResolvedValue({ created: true, estimate: { id: 'est-1', token: 'tok-1' } });
+  mockMapper.mockImplementation(realMapper);
   // As the real loader: no customer (or the gate off, or an active member) = no history.
   mockHistory.mockImplementation(async (_db, { customerId } = {}) => (customerId ? historyWithLastVisit('2026-10-01') : null));
 });
@@ -217,7 +229,44 @@ describe('a call draft decides the returning-customer setup fee rule when it is 
     const { engineResult, returningSetupFeeWaiver } = draftArgs();
     expect(returningSetupFeeWaiver).toBeNull();
     expect(pestLine(engineResult).initialFee).toBeGreaterThan(0);
-    expect(logger.warn).toHaveBeenCalledWith('[estimator-engine] returning setup fee read skipped: connection lost');
+    expect(logger.warn).toHaveBeenCalledWith('[estimator-engine] returning setup fee rule skipped: connection lost');
+  });
+
+  test('a decision that fails half way leaves the result as priced: the fee on the page and on the bill', async () => {
+    // The rule marks the result, then maps it again: fail that second map.
+    mockMapper.mockImplementation((v1) => {
+      if (v1.membershipSetupFeeWaived) throw new Error('map failed');
+      return realMapper(v1);
+    });
+    const result = await run();
+    expect(result.created).toBe(true);
+    const { engineResult, returningSetupFeeWaiver } = draftArgs();
+    // No waiver to bill by, so the stored result must not say "no fee" either.
+    expect(returningSetupFeeWaiver).toBeNull();
+    expect(engineResult.membershipSetupFeeWaived).toBeUndefined();
+    expect(pestLine(engineResult).initialFee).toBeGreaterThan(0);
+    expect(logger.warn).toHaveBeenCalledWith('[estimator-engine] returning setup fee rule skipped: map failed');
+  });
+
+  test('a dry run prices what the live draft stores, and writes nothing', async () => {
+    const inside = await run({}, { dryRun: true });
+    expect(inside.engineResult.membershipSetupFeeWaived).toBe(true);
+    expect(pestLine(inside.engineResult).initialFee).toBe(0);
+    mockHistory.mockResolvedValue(historyWithLastVisit('2026-06-01'));
+    const past = await run({}, { dryRun: true });
+    expect(past.engineResult.membershipSetupFeeWaived).toBeUndefined();
+    expect(pestLine(past.engineResult).initialFee).toBeGreaterThan(0);
+    expect(mockCreateDraft).not.toHaveBeenCalled();
+  });
+
+  test('a lane that makes no draft reads nobody\'s visits', async () => {
+    mockComposeIntent.mockResolvedValue({
+      intent: { ...intentFor(), decision: 'skip', skip_reason: 'the caller asked about an existing visit' },
+      model: 'test-composer',
+    });
+    const result = await run({}, { dryRun: true });
+    expect(result.lane).toBe(LANES.RED);
+    expect(mockHistory).not.toHaveBeenCalled();
   });
 });
 
