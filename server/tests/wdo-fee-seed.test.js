@@ -6,27 +6,44 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { acceptedWdoLineNet, seedWdoFeeFromVisit, wdoFeeNeedsEntry, resolveWdoInspectionFee } = require('../services/wdo-inspection-fee');
 
 const bundleWith = (items) => ({ sendSnapshot: { pricingBundle: { oneTimeBreakdown: { items } } } });
+const resultWith = (items) => ({ result: { oneTime: { items } } });
 
-describe('acceptedWdoLineNet', () => {
+describe('acceptedWdoLineNet reads the accepted work the way the accept card does', () => {
   test('an accepted $150 WDO line beside an add-on is isolated at $150', () => {
-    expect(acceptedWdoLineNet(bundleWith([
-      { service: 'wdo_inspection', amount: 150 },
-      { service: 'one_time_pest', amount: 80 },
+    expect(acceptedWdoLineNet(resultWith([
+      { service: 'wdo_inspection', name: 'WDO Inspection', price: 150 },
+      { service: 'one_time_pest', name: 'Pest', price: 80 },
     ]))).toBe(150);
   });
 
-  test('the net after discounts wins, and a JSON string works', () => {
-    expect(acceptedWdoLineNet(JSON.stringify(bundleWith([{ service: 'wdo_inspection', price: 175, priceAfterDiscount: 160 }])))).toBe(160);
+  test('a manual price change wins: a $175 line the office set to $150 seeds $150', () => {
+    expect(acceptedWdoLineNet(resultWith([{ service: 'wdo_inspection', name: 'WDO Inspection', price: 175, manualFinalOneTime: 150 }]))).toBe(150);
+    expect(acceptedWdoLineNet(JSON.stringify(resultWith([{ service: 'wdo_inspection', name: 'WDO Inspection', price: 175, manualFinalOneTime: 150 }])))).toBe(150);
   });
 
-  test('a stored result without a bundle is read too', () => {
-    expect(acceptedWdoLineNet({ result: { oneTime: { items: [{ service: 'wdo_inspection', price: 225 }, { service: 'one_time_lawn', price: 60 }] } } })).toBe(225);
+  test('a discount carried as the net after discount wins over the list price', () => {
+    expect(acceptedWdoLineNet(resultWith([{ service: 'wdo_inspection', name: 'WDO Inspection', price: 175, priceAfterDiscount: 160 }]))).toBe(160);
   });
 
-  test('no WDO line, a quote-required line, or two different WDO amounts cannot be isolated', () => {
-    expect(acceptedWdoLineNet(bundleWith([{ service: 'one_time_pest', amount: 80 }]))).toBeNull();
-    expect(acceptedWdoLineNet(bundleWith([{ service: 'wdo_inspection', quoteRequired: true, amount: null }]))).toBeNull();
-    expect(acceptedWdoLineNet(bundleWith([{ service: 'wdo_inspection', amount: 150 }, { service: 'wdo_inspection', amount: 200 }]))).toBeNull();
+  test('the raw engine twin of a manually priced mapped row does not disagree it away', () => {
+    expect(acceptedWdoLineNet({
+      result: { oneTime: { items: [{ service: 'wdo_inspection', name: 'WDO Inspection', price: 175, manualFinalOneTime: 150 }] } },
+      engineResult: { lineItems: [{ service: 'wdo_inspection', price: 175 }] },
+    })).toBe(150);
+  });
+
+  test('a snapshot-only estimate reads its sent pricing bundle', () => {
+    expect(acceptedWdoLineNet(bundleWith([{ service: 'wdo_inspection', name: 'WDO Inspection', amount: 225 }, { service: 'one_time_lawn', name: 'Lawn', amount: 60 }]))).toBe(225);
+  });
+
+  test('an explicit $0 (a comped inspection) seeds 0, never the default', () => {
+    expect(acceptedWdoLineNet(resultWith([{ service: 'wdo_inspection', name: 'WDO Inspection', price: 175, manualFinalOneTime: 0 }]))).toBe(0);
+    expect(acceptedWdoLineNet(resultWith([{ service: 'wdo_inspection', name: 'WDO Inspection', price: 175, priceAfterDiscount: 0 }]))).toBe(0);
+  });
+
+  test('no WDO line, two WDO lines, or unreadable data cannot be isolated', () => {
+    expect(acceptedWdoLineNet(resultWith([{ service: 'one_time_pest', name: 'Pest', price: 80 }]))).toBeNull();
+    expect(acceptedWdoLineNet(resultWith([{ service: 'wdo_inspection', name: 'WDO A', price: 150 }, { service: 'wdo_inspection', name: 'WDO B', price: 200 }]))).toBeNull();
     expect(acceptedWdoLineNet(null)).toBeNull();
     expect(acceptedWdoLineNet('not json')).toBeNull();
   });
@@ -48,12 +65,21 @@ describe('seedWdoFeeFromVisit', () => {
     const knex = fakeKnex({
       scheduled_services: [{ id: 'v1', estimated_price: '230.00', source_estimate_id: 'e1' }],
       scheduled_service_addons: [{ scheduled_service_id: 'v1', estimated_price: '80.00' }],
-      estimates: [{ id: 'e1', estimate_data: bundleWith([{ service: 'wdo_inspection', amount: 150 }, { service: 'one_time_pest', amount: 80 }]) }],
+      estimates: [{ id: 'e1', estimate_data: resultWith([{ service: 'wdo_inspection', name: 'WDO Inspection', price: 150 }, { service: 'one_time_pest', name: 'Pest', price: 80 }]) }],
     });
     expect(await seedWdoFeeFromVisit(knex, 'v1')).toBe(150);
   });
 
-  test('with no isolable WDO line and a billable add-on the fee stays blank (staff enter it)', async () => {
+  test('a manual $150 on a $175 accepted line seeds $150 through the visit', async () => {
+    const knex = fakeKnex({
+      scheduled_services: [{ id: 'v6', estimated_price: '230.00', source_estimate_id: 'e6' }],
+      scheduled_service_addons: [{ scheduled_service_id: 'v6', estimated_price: '80.00' }],
+      estimates: [{ id: 'e6', estimate_data: resultWith([{ service: 'wdo_inspection', name: 'WDO Inspection', price: 175, manualFinalOneTime: 150 }, { service: 'one_time_pest', name: 'Pest', price: 80 }]) }],
+    });
+    expect(await seedWdoFeeFromVisit(knex, 'v6')).toBe(150);
+  });
+
+  test('with no isolable WDO line and a billable add-on the fee stays blank (a successful read, bills the default as before)', async () => {
     const knex = fakeKnex({
       scheduled_services: [{ id: 'v2', estimated_price: '255.00', source_estimate_id: null }],
       scheduled_service_addons: [{ scheduled_service_id: 'v2', estimated_price: '80.00' }],
@@ -61,14 +87,30 @@ describe('seedWdoFeeFromVisit', () => {
     expect(await seedWdoFeeFromVisit(knex, 'v2')).toBeNull();
   });
 
-  test('a single-line visit seeds its own price; a zero price seeds zero; a failed read seeds nothing', async () => {
+  test('a single-line visit seeds its own price; a zero price seeds zero', async () => {
     const one = fakeKnex({ scheduled_services: [{ id: 'v3', estimated_price: '175.00' }], scheduled_service_addons: [] });
     expect(await seedWdoFeeFromVisit(one, 'v3')).toBe(175);
     const zero = fakeKnex({ scheduled_services: [{ id: 'v4', estimated_price: '0' }], scheduled_service_addons: [] });
     expect(await seedWdoFeeFromVisit(zero, 'v4')).toBe(0);
-    const broken = () => { throw new Error('db down'); };
-    expect(await seedWdoFeeFromVisit(broken, 'v5')).toBeNull();
     expect(await seedWdoFeeFromVisit(one, null)).toBeNull();
+    expect(await seedWdoFeeFromVisit(fakeKnex({ scheduled_services: [] }), 'missing')).toBeNull();
+  });
+
+  test('a read error is never a blank fee: it propagates so the create fails and the office retries', async () => {
+    const broken = () => { throw new Error('db down'); };
+    await expect(seedWdoFeeFromVisit(broken, 'v5')).rejects.toThrow('db down');
+    const addonsFail = (name) => {
+      if (name === 'scheduled_service_addons') throw new Error('addons read failed');
+      return { where() { return this; }, first: () => Promise.resolve({ id: 'v7', estimated_price: '175.00' }) };
+    };
+    await expect(seedWdoFeeFromVisit(addonsFail, 'v7')).rejects.toThrow('addons read failed');
+  });
+
+  test('the create route turns a failed seed read into a retryable 503 and creates nothing', () => {
+    const fs = require('fs');
+    const route = fs.readFileSync(require.resolve('../routes/admin-projects'), 'utf8');
+    expect(route).toContain("code: 'wdo_fee_seed_unavailable'");
+    expect(route).toMatch(/seedWdoFeeFromVisit\(db, linkedScheduledServiceId\);\s*\} catch \(err\) \{[\s\S]{0,400}res\.status\(503\)/);
   });
 });
 
@@ -91,7 +133,7 @@ describe('a blank fee keeps billing as before unless the accepted estimate pins 
       const rows = {
         scheduled_services: [{ id: 'v1', estimated_price: '230.00', source_estimate_id: 'e1' }],
         scheduled_service_addons: [{ scheduled_service_id: 'v1', estimated_price: '80.00' }],
-        estimates: [{ id: 'e1', estimate_data: bundleWith([{ service: 'wdo_inspection', amount: 150 }, { service: 'one_time_pest', amount: 80 }]) }],
+        estimates: [{ id: 'e1', estimate_data: resultWith([{ service: 'wdo_inspection', name: 'WDO Inspection', price: 150 }, { service: 'one_time_pest', name: 'Pest', price: 80 }]) }],
       }[name] || [];
       const chain = { where() { return chain; }, first() { return Promise.resolve(rows[0]); }, select() { return Promise.resolve(rows); } };
       return chain;

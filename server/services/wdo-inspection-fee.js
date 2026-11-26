@@ -36,50 +36,54 @@ const moneyOrNull = (value) => {
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
 };
 
-// The accepted estimate's own WDO line, net of its discounts: from the sent pricing bundle (what the customer accepted) or, failing
-// that, the stored result. null when there is no WDO row, or more than one row with different amounts (the line cannot be isolated).
+// The accepted estimate's own WDO line, net of its discounts and manual price changes. This is the estimate's accepted-work reader
+// (deriveCorrectiveWork, the extractor the accept card and the proposal draft use): it walks every stored shape, merges a mapped row
+// with its raw twin and lets the operator-accepted net (manualFinalOneTime) outrank the list price, so a $175 line the office set to
+// $150 reads $150. Never a second parallel reader. An explicit $0 (a comped line) reads 0. null when there is no WDO line, two WDO
+// lines, or the estimate cannot be read as accepted work (a review-gated or conflicting row).
 function acceptedWdoLineNet(estimateData) {
   let data = estimateData;
   if (typeof data === 'string') { try { data = JSON.parse(data); } catch { return null; } }
   if (!data || typeof data !== 'object') return null;
-  const bundle = data.sendSnapshot?.pricingBundle;
-  let container = null;
-  try { container = require('./estimate-result-container').storedEstimateContainer(data); } catch { container = null; }
-  const sources = [
-    bundle?.oneTimeBreakdown?.items,
-    container?.oneTime?.items, container?.oneTime?.specItems, container?.specItems, container?.lineItems,
-  ];
-  const nets = new Set();
-  for (const list of sources) {
-    for (const row of [].concat(list || [])) {
-      if (!row || row.service !== 'wdo_inspection' || row.quoteRequired) continue;
-      const net = moneyOrNull(row.priceAfterDiscount ?? row.manualFinalOneTime ?? row.amount ?? row.price);
-      if (net != null) nets.add(net);
-    }
-    if (nets.size) break;
+  const { deriveCorrectiveWork } = require('./estimate-proposal-generate');
+  const bundleItems = data.sendSnapshot?.pricingBundle?.oneTimeBreakdown?.items;
+  // The sent pricing bundle is what the customer accepted; a snapshot-only estimate holds its rows nowhere else.
+  const docs = [data, ...(Array.isArray(bundleItems) ? [{ result: { oneTime: { items: bundleItems } } }] : [])];
+  for (const doc of docs) {
+    const { correctiveWork } = deriveCorrectiveWork(doc, { onetime_total: null });
+    const wdo = (correctiveWork || []).filter((line) => line.service === 'wdo_inspection');
+    if (wdo.length === 1) return moneyOrNull(wdo[0].amount);
+    if (wdo.length > 1) return null;
   }
-  return nets.size === 1 ? [...nets][0] : null;
+  return explicitZeroWdoLine(data);
+}
+
+// A comped WDO line is held back by the extractor (it asks staff to author the work), so an explicit $0 is read the way the accept
+// card reads each row: the first number among its net fields decides (estimate-accept-effects lineAmount). Only when every WDO row
+// is $0 does the fee seed 0 (a deliberate no-charge inspection).
+function explicitZeroWdoLine(data) {
+  const { estimateOneTimeItemsFromData } = require('./estimate-converter');
+  const { lineAmount } = require('./estimate-accept-effects');
+  const rows = estimateOneTimeItemsFromData(data).filter((row) => row?.service === 'wdo_inspection' && !row.quoteRequired);
+  return rows.length && rows.every((row) => lineAmount(row) === 0) ? 0 : null;
 }
 
 // The WDO fee to seed on a new inspection project from its linked visit: the accepted estimate's WDO line net (it survives billable
 // add-ons on the visit), else the visit's own price when the visit has no billable add-on (then the visit total IS the inspection).
-// null when the line cannot be isolated: the fee stays blank and bills the flat default exactly as before.
+// null only for a SUCCESSFUL read with no isolable amount: the fee stays blank and bills the flat default exactly as before. A read
+// error is never swallowed into a blank fee: it propagates so the caller can fail the create and the office retries.
 async function seedWdoFeeFromVisit(knex, scheduledServiceId) {
   if (!scheduledServiceId) return null;
-  try {
-    const visit = await knex('scheduled_services').where({ id: scheduledServiceId }).first('id', 'estimated_price', 'source_estimate_id');
-    if (!visit) return null;
-    if (visit.source_estimate_id) {
-      const estimate = await knex('estimates').where({ id: visit.source_estimate_id }).first('estimate_data');
-      const accepted = acceptedWdoLineNet(estimate?.estimate_data);
-      if (accepted != null) return accepted;
-    }
-    const addons = await knex('scheduled_service_addons').where({ scheduled_service_id: scheduledServiceId }).select('estimated_price');
-    if (addons.some((a) => Number(a?.estimated_price) > 0)) return null;
-    return moneyOrNull(visit.estimated_price);
-  } catch {
-    return null;
+  const visit = await knex('scheduled_services').where({ id: scheduledServiceId }).first('id', 'estimated_price', 'source_estimate_id');
+  if (!visit) return null;
+  if (visit.source_estimate_id) {
+    const estimate = await knex('estimates').where({ id: visit.source_estimate_id }).first('estimate_data');
+    const accepted = acceptedWdoLineNet(estimate?.estimate_data);
+    if (accepted != null) return accepted;
   }
+  const addons = await knex('scheduled_service_addons').where({ scheduled_service_id: scheduledServiceId }).select('estimated_price');
+  if (addons.some((a) => Number(a?.estimated_price) > 0)) return null;
+  return moneyOrNull(visit.estimated_price);
 }
 
 module.exports = {

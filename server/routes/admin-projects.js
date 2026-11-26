@@ -2034,7 +2034,17 @@ router.post('/', async (req, res, next) => {
     if (project_type === 'wdo_inspection' && linkedScheduledServiceId) {
       const typed = normalizeFindings(findings) || {};
       if (wdoFeeNeedsEntry(typed)) {
-        const seededFee = await seedWdoFeeFromVisit(db, linkedScheduledServiceId);
+        let seededFee;
+        try {
+          seededFee = await seedWdoFeeFromVisit(db, linkedScheduledServiceId);
+        } catch (err) {
+          // A failed read is not a blank fee: nothing is created, and the office retries (a blank fee would bill the flat default).
+          logger.error(`[projects] WDO fee seed read failed for visit ${linkedScheduledServiceId}: ${err.message}`);
+          return res.status(503).json({
+            error: 'The accepted estimate could not be read to set the WDO inspection fee. Nothing was created. Try again.',
+            code: 'wdo_fee_seed_unavailable',
+          });
+        }
         if (seededFee != null) createFindings = { ...typed, inspection_fee: String(seededFee) };
       }
     }

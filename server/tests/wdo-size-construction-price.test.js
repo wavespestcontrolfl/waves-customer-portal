@@ -665,6 +665,18 @@ describe('a wrong-premise lookup makes machine readings untrusted; a person typi
   });
 });
 
+describe('the public lookup payload never carries the trust verdicts', () => {
+  test('publicEnrichedProfile strips constructionTrusted and foundationTrusted', () => {
+    const { publicEnrichedProfile } = require('../routes/public-property-lookup')._test;
+    const out = publicEnrichedProfile({ constructionMaterial: 'CBS', foundationType: 'SLAB', constructionTrusted: true, foundationTrusted: false, yearBuilt: 2001 });
+    expect(out).not.toHaveProperty('constructionTrusted');
+    expect(out).not.toHaveProperty('foundationTrusted');
+    expect(out).toMatchObject({ constructionMaterial: 'CBS', foundationType: 'SLAB', yearBuilt: 2001 });
+    // The lead snapshot and the response go through the same strip.
+    expect(JSON.stringify(publicEnrichedProfile({ constructionTrusted: false, foundationTrusted: true }))).not.toMatch(/Trusted/);
+  });
+});
+
 describe('one shared normalizer at every entry', () => {
   const { normalizeCountyConstruction } = require('../services/property-lookup/ai-property-lookup')._private;
   const { normalizeConstruction, normalizeFoundation } = require('../services/pricing-engine/structural-facts');
