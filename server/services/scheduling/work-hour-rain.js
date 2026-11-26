@@ -209,10 +209,20 @@ function stationsNear(point) {
  * reading, else the total of the hours read (see `missing`).
  */
 function spanWet(obs, point, startMin, endMin, afterHours) {
+  return spanWetAt(obs, stationsNear(point), startMin, endMin, afterHours);
+}
+
+/** The hours of a visit's span plus its drying hours: from the hour the work starts to afterHours past its end, to midnight. */
+function spanHours(startMin, endMin, afterHours) {
   const hours = [];
   const last = Math.min(24 * 60, endMin + afterHours * 60);
   for (let m = Math.floor(startMin / 60) * 60; m < last; m += 60) hours.push(m / 60);
-  const t = tallyHours(obs, stationsNear(point), hours);
+  return hours;
+}
+
+/** spanWet from stored gauge IDs (stationsNear, nearest first): grading never needs the visit's point again. */
+function spanWetAt(obs, stations, startMin, endMin, afterHours) {
+  const t = tallyHours(obs, stations, spanHours(startMin, endMin, afterHours));
   let wet = null;
   if (t.wet_hours > 0) wet = true;
   else if (t.missing === 0) wet = false;
@@ -222,11 +232,20 @@ function spanWet(obs, point, startMin, endMin, afterHours) {
 /** The forecast's chance for each work hour of `day`, as a compact array (null = no reading). Stored as read, never rounded:
  *  a replay compares these against the rule's thresholds (70, 40). */
 function workHourChances(hours, day) {
-  return WORK_HOURS.map((h) => {
+  return chancesFor(hours, day, WORK_HOURS);
+}
+
+function chancesFor(hours, day, hourNumbers) {
+  return hourNumbers.map((h) => {
     const key = `${day}T${String(h).padStart(2, '0')}`;
     const hour = (hours || []).find((x) => String(x?.startTime || '').slice(0, 13) === key);
     return hour && Number.isFinite(hour.rainChance) ? hour.rainChance : null;
   });
+}
+
+/** The chance for each hour of a visit's span plus drying hours (from the hour its work starts), as read; null = no reading. */
+function spanChances(hours, day, startMin, endMin, afterHours) {
+  return chancesFor(hours, day, spanHours(startMin, endMin, afterHours));
 }
 
 module.exports = {
@@ -241,6 +260,8 @@ module.exports = {
   wetDayFrom,
   stationsNear,
   spanWet,
+  spanWetAt,
+  spanChances,
   workHourChances,
   _clearCache: () => cache.clear(),
 };
