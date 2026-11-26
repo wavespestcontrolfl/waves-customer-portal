@@ -34,7 +34,10 @@ postgres('paid-visit anchor for annual renewals (real PostgreSQL)', () => {
 
   beforeAll(() => {
     const url = new URL(process.env.DATABASE_URL);
-    if (!['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use a local disposable database');
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use a local disposable database or this worktree\'s private QA database');
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
   });
 
