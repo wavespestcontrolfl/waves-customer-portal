@@ -215,13 +215,16 @@ const MATCH_RULES = [
     programKey: 'palm_injection',
     visit: 3,
     reason: 'palm_followup',
-    terms: ['palm injection follow', 'palm injection follow up', 'palm injection recheck', 'palm follow', 'palm recheck', 'injection follow'],
+    // A visit booked as a follow-up of a lethal bronzing dose is the next 3-month dose: it keeps the Arbor-OTC card (visit 4).
+    followupOf: ['palm_diagnosis', 'palm_injection_application', 'palm_followup'],
+    // Only palm rules are read for a palm name, so the bare stage words are enough ("Lethal Bronzing Follow Up").
+    terms: ['palm injection follow', 'palm injection follow up', 'palm injection recheck', 'palm follow', 'palm recheck', 'injection follow', 'follow up', 'followup', 'follow-up', 'recheck'],
   },
   {
     programKey: 'palm_injection',
     visit: 1,
     reason: 'palm_diagnosis',
-    terms: ['palm injection assessment', 'palm injection diagnosis', 'manganese injection', 'magnesium injection'],
+    terms: ['palm injection assessment', 'palm injection diagnosis', 'manganese injection', 'magnesium injection', 'assessment', 'diagnosis', 'sample', 'testing'],
   },
   // Lethal bronzing prevention, the main palm service (owner 2026-11-25, D8): its own Arbor-OTC card when the booking names it. After the
   // assessment and follow-up rules: a booking that names both a stage and the disease keeps its stage card.

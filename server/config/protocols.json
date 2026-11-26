@@ -2645,9 +2645,9 @@
     "notes": [
       "Every hole in a palm is permanent: palms cannot seal a wound. Every injection needs a reason (owner 2026-11-25, D8).",
       "Lethal bronzing prevention with Arbor-OTC is the main service: lethal bronzing on the property or nearby, on a susceptible palm (Sylvester, Canary Island date, pygmy date, queen, Sabal, Bismarck, Christmas, coconut). Every 3 months for at least 2 years.",
-      "Sell it as protection, never a cure and never a guarantee: no trial has tested Arbor-OTC on lethal bronzing yet (UF/IFAS PP163). A palm with symptoms or a positive test is removed, not treated.",
+      "Sell it as protection, never a cure and never a guarantee: no trial has tested Arbor-OTC on lethal bronzing yet (UF/IFAS PP163). A palm is removed only on its own positive test; a palm with symptoms is held and tested on its own first, since other problems look alike.",
       "Insects, palmetto weevil, coconut bud rot and nutrients: inject only after a diagnosis. Try a soil drench first for insects (no hole). Nutrients only after soil fertilizer fails.",
-      "First lethal bronzing visit: test before the first dose. UF Plant Diagnostic Center: $60 a palm, or $100 for a pool of up to 10 palms; the lab fee goes on the invoice. Results in about a week.",
+      "First lethal bronzing visit: test before the first dose. UF Plant Diagnostic Center: $60 a palm, or $100 for a pool of up to 10 palms; the lab fee goes on the invoice. Results in about a week. A pooled sample that tests positive names no palm: test each palm in that pool on its own before any removal.",
       "Confirm the Florida license category with FDACS before the first job (tree injection is reported to need Lawn & Ornamental).",
       "Store Arbor-OTC in the office below 77°F, never in the truck.",
       "Log each palm: palm ID, product, EPA number, mix, the amount the palm took (not the planned dose), hole position, plug, uptake time, next due date."
@@ -2811,7 +2811,7 @@
         "visit": 3,
         "month": "Any",
         "primary": "Palm Injection Follow-Up\nReinspect each tagged palm: spear, canopy, the hole and plug, new stress signs\nPhotograph the same angles as the assessment\nUpdate the next due date: every 3 months on the lethal bronzing plan",
-        "secondary": "Do not repeat an injection without its diagnosis and timing review\nNew lethal bronzing symptoms: stop injecting that palm and recommend removal\nTell the customer: the palm changes slowly, over months; the small plugs stay in the trunk",
+        "secondary": "Do not repeat an injection without its diagnosis and timing review\nNew lethal bronzing symptoms: stop injecting that palm, test it on its own, and recommend removal only on its own positive result\nTell the customer: the palm changes slowly, over months; the small plugs stay in the trunk",
         "material_cost": "0.00",
         "labor_cost": "follow_up",
         "tiers": {
@@ -2842,11 +2842,11 @@
             "scope": "plant",
             "treatmentApplied": false
           },
-          "New lethal bronzing symptoms: stop injecting that palm and recommend removal": {
+          "Tell the customer: the palm changes slowly, over months; the small plugs stay in the trunk": {
             "scope": "plant",
             "treatmentApplied": false
           },
-          "Tell the customer: the palm changes slowly, over months; the small plugs stay in the trunk": {
+          "New lethal bronzing symptoms: stop injecting that palm, test it on its own, and recommend removal only on its own positive result": {
             "scope": "plant",
             "treatmentApplied": false
           }
@@ -2856,7 +2856,7 @@
         "visit": 4,
         "month": "Any",
         "primary": "Lethal Bronzing Prevention\nConfirm the palm tested negative (first visit) or is on the 3-month plan\nScreen out: symptoms, a dead spear leaf, or fruit the family eats\nLethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
-        "secondary": "A palm with symptoms or a positive test: no dose; recommend removal\nTell the customer: keep the base of the palm clear; no dry time; the plugs stay in the trunk; we come back every 3 months",
+        "secondary": "A palm with symptoms: no dose; test that palm on its own, and recommend removal only on its own positive result\nTell the customer: keep the base of the palm clear; no dry time; the plugs stay in the trunk; we come back every 3 months",
         "lineMeta": {
           "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp": {
             "scope": "plant",
@@ -2891,15 +2891,15 @@
             "scope": "plant",
             "treatmentApplied": false
           },
-          "A palm with symptoms or a positive test: no dose; recommend removal": {
-            "scope": "plant",
-            "treatmentApplied": false
-          },
           "Tell the customer: keep the base of the palm clear; no dry time; the plugs stay in the trunk; we come back every 3 months": {
             "scope": "plant",
             "treatmentApplied": false
           },
           "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "A palm with symptoms: no dose; test that palm on its own, and recommend removal only on its own positive result": {
             "scope": "plant",
             "treatmentApplied": false
           }

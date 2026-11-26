@@ -46,7 +46,10 @@ describe('palm injection card', () => {
     expect((await card(PRODUCTS, 'Palm Injection Assessment')).lines).toEqual([]);
     const full = await card(PRODUCTS, 'Palm Injection Service');
     expect(full.lines.map((l) => [l.product.id, l.selected]).sort()).toEqual([['g4', false], ['ima10', false], ['mn', false], ['otc5', false], ['phos', false], ['pj', false]]);
-    // G-4 and IMA-jet 10 missing from the catalog: the card leaves them unresolved, never R10 or the 5% IMA-jet.
+    // G-4 and IMA-jet 10 missing from the catalog: the card leaves them unresolved, never R10 or the 5% IMA-jet, even when the 5%
+    // row carries the alias "IMA-jet" (a near name the text pass would otherwise match).
+    const aliased = PRODUCTS.filter((p) => !['g4', 'ima10'].includes(p.id)).map((p) => (p.id === 'ima5' ? { ...p, aliases: ['IMA-jet'] } : p));
+    expect((await card(aliased, 'Palm Injection Service')).lines.map((l) => l.product.id)).not.toContain('ima5');
     const partial = await card(PRODUCTS.filter((p) => !['g4', 'ima10'].includes(p.id)), 'Palm Injection Service');
     expect(partial.lines.map((l) => l.product.id)).not.toEqual(expect.arrayContaining(['r10']));
     expect(partial.lines.map((l) => l.product.id)).not.toContain('ima5');
@@ -63,6 +66,14 @@ describe('palm injection card', () => {
     expect(visit('Palm Injection Follow Up - Lethal Bronzing')).toBe(3);
     expect([program('Oxytetracycline Injection'), visit('Oxytetracycline Injection')]).toEqual(['palm_injection', 4]);
     expect([program('Palm Bronzing Prevention'), visit('Palm Bronzing Prevention')]).toEqual(['palm_injection', 4]);
+    expect(visit('Lethal Bronzing Assessment')).toBe(1);
+    expect(visit('Lethal Bronzing Follow Up')).toBe(3);
+    // A booked follow-up (it carries the source visit's name): the next 3-month lethal bronzing dose keeps the Arbor-OTC card; a
+    // follow-up of a plain injection is the re-inspection.
+    const { followupVisitMatch } = require('../services/protocol-matcher');
+    const booked = (name) => followupVisitMatch(matchServiceProtocol(protocols, name), true).matchedVisit.visit;
+    expect(booked('Lethal Bronzing Preventive OTC Program')).toBe(4);
+    expect(booked('Palm Injection Service')).toBe(3);
   });
 
   test('the assessment tests before the first Arbor-OTC dose and screens out food palms', () => {

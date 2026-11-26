@@ -1700,8 +1700,10 @@ function linesFromProtocolText(visit, catalog) {
   const parsed = [...parseProtocolLines(visit?.primary, 'base'), ...parseProtocolLines(visit?.secondary, 'conditional')];
   const out = [];
   for (const line of parsed) {
-    // A line its lineMeta marks as no treatment (an inspection, a screen-out, a trap) names no product, whatever its words say.
-    if (visit?.lineMeta?.[line.raw]?.treatmentApplied === false) continue;
+    // A line its lineMeta marks as no treatment (an inspection, a screen-out, a trap) names no product, whatever its words say; an
+    // exact-name line (an injection label's own bottle) was resolved above by that name alone and never falls back to a near name.
+    const meta = visit?.lineMeta?.[line.raw];
+    if (meta && (meta.treatmentApplied === false || meta.exactCatalogName)) continue;
     // The parser's own flag (secondary text, "if …") plus the wider
     // condition phrasing the protocols use: a primary line the tech has to
     // justify is conditional work, never selected base work.
