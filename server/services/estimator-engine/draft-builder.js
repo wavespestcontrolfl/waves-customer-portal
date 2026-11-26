@@ -1057,6 +1057,27 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
 // (blocked/anonymous caller who dictated a callback number); when the two
 // disagree, classifyLane parks the draft in yellow with the composer's
 // number quoted so the operator applies it deliberately.
+// Watch-only verdict of the call auto-send rule, as the stamp spread into
+// estimate_data.estimatorEngine ({} when there is none). The priced-line
+// facts come from the same checks the lane and the plan mint use, so the
+// shadow cannot grade a line more kindly than they do. Fail-soft: a shadow
+// verdict must never cost the draft itself.
+function callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone }) {
+  try {
+    const lines = engineResult?.lineItems || [];
+    const autoSendShadow = callAutoSendShadowVerdict({
+      origin, intent, propertyFacts, context, priorQualifyingServices,
+      draftPhone: customerPhone,
+      homeSizeDrivesPrice: lines.some((l) => l.pricingBasis !== UNIT_BAND_PRICING_BASIS),
+      pricedLineNeedsReview: lines.some((l) => lineNeedsReviewBeforeExactPrice(l)),
+    });
+    return autoSendShadow ? { autoSendShadow } : {};
+  } catch (shadowErr) {
+    logger.warn(`[estimator-engine] call auto-send shadow verdict failed: ${shadowErr.message}`);
+    return {};
+  }
+}
+
 function resolveDraftCustomerPhone(intent, context) {
   const validPhone = (v) => String(v || '').replace(/\D/g, '').length >= 10;
   return (validPhone(context?.phone) ? context.phone : null)
@@ -1181,15 +1202,8 @@ async function writeGuardedLeadEstimateLink(context, estimateId) {
   await q.update({ estimate_id: estimateId });
 }
 
-async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null, quotePromised = null }) {
+async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
   const token = crypto.randomBytes(16).toString('hex');
-  // Fail-soft: a shadow verdict must never cost the draft itself.
-  let autoSendShadow = null;
-  try {
-    autoSendShadow = callAutoSendShadowVerdict({ origin, quotePromised, intent, propertyFacts, context, priorQualifyingServices });
-  } catch (shadowErr) {
-    logger.warn(`[estimator-engine] call auto-send shadow verdict failed: ${shadowErr.message}`);
-  }
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
 
@@ -1199,6 +1213,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // never carry internal review material.
   const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call });
   const customerPhone = resolveDraftCustomerPhone(intent, context);
+  const autoSendShadowStamp = callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone });
   // priorQualifyingServices must NOT ride inside the stored engineInputs —
   // the public reconcile path clears only the TOP-LEVEL key on stale
   // membership snapshots, and a nested copy would keep replaying the
@@ -1549,7 +1564,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           reviewNotes,
           // Watch-only verdict of the call auto-send rule (owner 2026-11-25
           // *build*, step 1). Review data only: nothing reads it to send.
-          ...(autoSendShadow ? { autoSendShadow } : {}),
+          ...autoSendShadowStamp,
         },
       }),
       address: intent.address,

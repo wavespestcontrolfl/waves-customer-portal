@@ -8,14 +8,16 @@ const { callAutoSendShadowVerdict } = require('../services/estimator-engine/call
 
 const base = () => ({
   origin: { channel: 'call' },
-  quotePromised: true,
   intent: {
     decision: 'draft', services: { pest: { frequency: 'quarterly' } }, is_commercial: false,
     category: 'RESIDENTIAL', confidence: 'medium', constraint_flags: [], customer_phone: '+19415550100',
   },
   propertyFacts: { home: { value: 1850, source: 'county_roll' } },
-  context: { phone: '+19415550100', extraction: {} },
+  context: { phone: '+19415550100', extraction: { quote_promised: true } },
   priorQualifyingServices: [],
+  draftPhone: '+19415550100',
+  homeSizeDrivesPrice: true,
+  pricedLineNeedsReview: false,
 });
 const verdict = (mutate) => { const input = base(); if (mutate) mutate(input); return callAutoSendShadowVerdict(input); };
 
@@ -30,10 +32,12 @@ describe('callAutoSendShadowVerdict', () => {
   });
 
   test.each([
-    ['booked_on_call', (i) => { i.context.extraction = { appointment_confirmed: true }; }],
-    ['booked_on_call', (i) => { i.context.extraction = { scheduling: { status: 'confirmed' } }; }],
-    ['quote_not_promised', (i) => { i.quotePromised = false; }],
-    ['quote_not_promised', (i) => { i.quotePromised = null; }],
+    ['booked_on_call', (i) => { i.context.extraction.appointment_confirmed = true; }],
+    ['booked_on_call', (i) => { i.context.extraction.scheduling = { status: 'confirmed' }; }],
+    ['quote_not_promised', (i) => { i.context.extraction = { quote_requested: true }; }],
+    ['quote_not_promised', (i) => { i.context.extraction = null; }],
+    ['priced_line_needs_review', (i) => { i.pricedLineNeedsReview = true; }],
+    ['current_customer_reprice_pending', (i) => { i.context.isExistingCustomer = true; }],
     ['termite_hold', (i) => { i.intent.services.termite = { system: 'trelona' }; }],
     ['termite_hold', (i) => { i.intent.constraint_flags = [{ flag: 'possible_termite_swarmers', note: 'flying insects' }]; }],
     ['commercial_hold', (i) => { i.intent.is_commercial = true; }],
@@ -45,7 +49,8 @@ describe('callAutoSendShadowVerdict', () => {
     ['current_customer_reprice_pending', (i) => { i.priorQualifyingServices = ['pest_control']; }],
     ['low_confidence', (i) => { i.intent.confidence = 'low'; }],
     ['third_party_payer', (i) => { i.intent.constraint_flags = [{ flag: 'landlord_pays', note: 'realty company covers it' }]; }],
-    ['no_contact', (i) => { i.context.phone = null; i.intent.customer_phone = null; }],
+    // A caller ID exists, but the draft resolved no storable phone.
+    ['no_contact', (i) => { i.draftPhone = null; }],
   ])('holds with %s', (reason, mutate) => {
     const v = verdict(mutate);
     expect(v.verdict).toBe('would_hold');
@@ -60,8 +65,16 @@ describe('callAutoSendShadowVerdict', () => {
     expect(pestOnly.verdict).toBe('would_send');
   });
 
-  test('a unit scope with no individual home size is not a size miss', () => {
-    expect(verdict((i) => { i.propertyFacts = { home: { value: null, source: 'not_applicable:unit' } }; }).verdict).toBe('would_send');
+  test('a v2 extraction promise counts, and an email alone is a contact', () => {
+    expect(verdict((i) => { i.context.extraction = { service_request: { quote_promised: true } }; }).verdict).toBe('would_send');
+    expect(verdict((i) => { i.draftPhone = null; i.context.customer = { email: 'a@example.com' }; }).verdict).toBe('would_send');
+  });
+
+  test('a draft priced only by the bedroom band is not a home size miss', () => {
+    // The unit-scope model clears whole-building area to source "unresolved".
+    const unit = (i) => { i.propertyFacts = { home: { value: null, source: 'unresolved' } }; };
+    expect(verdict((i) => { unit(i); i.homeSizeDrivesPrice = false; }).verdict).toBe('would_send');
+    expect(verdict(unit).reasons).toContain('home_size_not_found');
   });
 
   test('a one-time pest ask with no plan line names the fix and still sends', () => {
