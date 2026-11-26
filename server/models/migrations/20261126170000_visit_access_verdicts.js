@@ -2,8 +2,10 @@
  * Visit access flags for the technician (services/visit-access-flags.js).
  *
  * visit_access_verdicts: a technician's Right / Wrong tap on one flag, one row
- * per visit, question and evidence digest (the visit_access_states.subject_hash
- * the card was read from), stamped with the customer the evidence described.
+ * per visit, customer, question and evidence digest (the
+ * visit_access_states.subject_hash the card was read from; the digest hashes the
+ * redacted state and not who it is about, so the customer is part of the key).
+ * The row is stamped with the customer the evidence described.
  * The tap writes only this row; it never touches decision_reviews, so the
  * provider answers and the review lane's labels stay as the sweep and the
  * reviewers left them.
@@ -40,7 +42,7 @@ exports.up = async function up(knex) {
     t.string('verdict', 8).notNullable();
     t.uuid('technician_id').nullable();
     t.timestamp('created_at').notNullable().defaultTo(knex.fn.now());
-    t.unique(['scheduled_service_id', 'question_id', 'subject_hash'], { indexName: 'visit_access_verdicts_visit_question_hash_uniq' });
+    t.unique(['scheduled_service_id', 'customer_id', 'question_id', 'subject_hash'], { indexName: 'visit_access_verdicts_visit_customer_question_hash_uniq' });
     t.index(['scheduled_service_id'], 'visit_access_verdicts_visit_idx');
     t.index(['created_at'], 'visit_access_verdicts_created_idx');
   });

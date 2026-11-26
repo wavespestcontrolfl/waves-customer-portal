@@ -24900,15 +24900,17 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     };
     // GATE_VISIT_ACCESS_FLAGS=on: the flags the hourly access sweep found for this visit (services/visit-access-flags.js),
     // with their Right / Wrong status. The answer may already hold live access codes, so after EVERY lookup (flags,
-    // none, or a failed read) the assignment is checked again, and when it cannot be verified (no longer assigned, or
-    // the check itself failed) the whole answer is withheld like the facts block does. Gate off (or shadow): no read
+    // none, or a failed read) the assignment is checked again, against the visit AND the customer the brief was built
+    // for (a customer merge or undo changes the visit's customer while the technician stays assigned), and when it
+    // cannot be verified (no longer assigned, a different customer, or the check itself failed) the whole answer is
+    // withheld like the facts block does. Gate off (or shadow): no read
     // and no recheck. A failed flag read alone only omits the key.
     const withAccessFlags = async (payload) => {
       if (!require('../config/feature-gates').visitAccessCardsLive()) return payload;
       const accessFlags = await require('../services/visit-access-flags').accessFlagsFor(db, svc);
       try {
         const stillOwned = await db('scheduled_services')
-          .where({ 'scheduled_services.id': svc.id })
+          .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
           .modify((q) => technicianCurrentVisitFilter(req, q))
           .first('scheduled_services.id');
         if (!stillOwned) return { brief: null };

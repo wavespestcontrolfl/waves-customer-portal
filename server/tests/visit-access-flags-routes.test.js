@@ -63,17 +63,20 @@ const HASH = 'a'.repeat(64);
 const FLAG = { questionId: 'dog_on_property', subjectHash: HASH, title: 'Dog or other animal may be loose', tone: 'amber', status: 'open' };
 
 // `owned` answers the atomic ownership-scoped fetch; `stillOwned` the recheck probe after the flags were read.
-function stubVisit({ owned = true, stillOwned = true, recheckThrows = false } = {}) {
+function stubVisit({ owned = true, stillOwned = true, recheckThrows = false, currentCustomer = 'cust-1' } = {}) {
   const row = { id: 'svc-1', customer_id: 'cust-1', pre_service_brief: null };
   db.mockImplementation(() => {
     const q = {};
-    q.where = jest.fn(() => q);
+    q.cond = {};
+    q.where = jest.fn((cond) => { Object.assign(q.cond, cond); return q; });
     q.whereNotIn = jest.fn(() => q);
     q.modify = jest.fn((cb) => { cb(q); return q; });
     q.first = jest.fn(async (...cols) => {
       if (cols[0] === 'scheduled_services.id' && cols.length === 1) {
         if (recheckThrows) throw new Error('db down');
-        return stillOwned ? { id: 'svc-1' } : undefined;
+        // the recheck names the customer the brief was built for; the visit's current customer decides
+        const named = q.cond['scheduled_services.customer_id'];
+        return stillOwned && (named === undefined || named === currentCustomer) ? { id: 'svc-1' } : undefined;
       }
       return owned ? row : undefined;
     });
@@ -142,6 +145,20 @@ describe('GET /:id/visit-brief access flags', () => {
     await withServer(async (base) => {
       const res = await call(base, '/admin/schedule/svc-1/visit-brief', { role: 'technician' });
       expect(await res.json()).toEqual({ brief: null });
+    });
+  });
+
+  test('a customer merge during the lookup (same visit, same technician, different customer) withholds the whole answer', async () => {
+    stubVisit({ currentCustomer: 'cust-2' });
+    mockAccessFlagsFor.mockResolvedValue([FLAG]);
+    await withServer(async (base) => {
+      const res = await call(base, '/admin/schedule/svc-1/visit-brief', { role: 'technician' });
+      expect(await res.json()).toEqual({ brief: null });
+    });
+    stubVisit({ currentCustomer: 'cust-1' });
+    await withServer(async (base) => {
+      const res = await call(base, '/admin/schedule/svc-1/visit-brief', { role: 'technician' });
+      expect(await res.json()).toEqual({ brief: null, accessFlags: [FLAG] });
     });
   });
 

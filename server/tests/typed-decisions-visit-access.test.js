@@ -190,11 +190,13 @@ describe('visit access shadow: rules that need no database', () => {
     const row = { scheduled_service_id: visitId, customer_id: customerId, question_id: 'dog_on_property', subject_hash: 'a'.repeat(64), verdict: 'right' };
     await database('visit_access_verdicts').insert(row);
     await expect(database('visit_access_verdicts').insert({ ...row, verdict: 'wrong' })).rejects.toThrow(/uniq/);
+    // the digest does not name who it is about, so another customer on the same visit and digest is its own verdict
+    await database('visit_access_verdicts').insert({ ...row, customer_id: randomUUID(), verdict: 'wrong' });
     await expect(database('visit_access_verdicts').insert({ ...row, subject_hash: 'b'.repeat(64), verdict: 'maybe' })).rejects.toThrow(/verdict_check/);
     await database('visit_access_verdicts').insert({ ...row, subject_hash: 'b'.repeat(64), verdict: 'wrong' });
     await expect(database('visit_access_verdicts').insert({ ...row, customer_id: null, subject_hash: 'c'.repeat(64) })).rejects.toThrow(/customer_id/);
     await verdictsMigration.up(database); // a second run changes nothing
-    expect(await database('visit_access_verdicts').where({ scheduled_service_id: visitId })).toHaveLength(2);
+    expect(await database('visit_access_verdicts').where({ scheduled_service_id: visitId })).toHaveLength(3);
     await verdictsMigration.down(database);
     expect(await database.schema.hasTable('visit_access_verdicts')).toBe(false);
     expect(await database.schema.hasColumn('visit_access_states', 'answers')).toBe(false);
@@ -436,6 +438,23 @@ describe('visit access shadow: rules that need no database', () => {
     const row = await database('visit_access_states').where({ scheduled_service_id: home }).first();
     expect(row.customer_id).toBe(customerId);
     expect(row.answers.typesafe.dog_on_property).toBe(false);
+  });
+
+  test('a provider whose review rows could not be recorded is not skipped: the answers roll back with them and the next pass asks again', async () => {
+    const home = await visit();
+    const recorder = require('../services/typed-decisions/shadow-recorder');
+    const spy = jest.spyOn(recorder, 'recordDecisions').mockRejectedValueOnce(new Error('recorder down'));
+    expect(await sweep()).toMatchObject({ asked: 1, failed: 1, recorded: 0 });
+    spy.mockRestore();
+    const stuck = await database('visit_access_states').where({ scheduled_service_id: home }).first();
+    expect(stuck.answers?.typesafe ?? null).toBeNull();
+    expect(await rows(home)).toHaveLength(0);
+    mockAsk.mockClear();
+    expect(await sweep()).toMatchObject({ asked: 1, recorded: 1 });
+    expect(mockAsk).toHaveBeenCalledTimes(1);
+    const done = await database('visit_access_states').where({ scheduled_service_id: home }).first();
+    expect(Object.keys(done.answers.typesafe)).toHaveLength(Object.keys(pkg.questions).length);
+    expect(await rows(home)).toHaveLength(Object.keys(pkg.questions).length);
   });
 
   test('publishing a state waits for the visit lock a technician\'s tap holds', async () => {

@@ -20,8 +20,8 @@
  * Evidence and verdicts belong to the customer they were built for: a state or
  * verdict that does not name the visit's CURRENT customer is no evidence.
  *
- * The tap writes ONE row to visit_access_verdicts, keyed by visit, question and
- * the evidence digest (`subjectHash`) the card was read from. It runs in one
+ * The tap writes ONE row to visit_access_verdicts, keyed by visit, customer,
+ * question and the evidence digest (`subjectHash`) the card was read from. It runs in one
  * transaction that takes the visit's advisory lock (the one the sweep takes to
  * publish a state, so the digest checked is still current at commit) and a FOR
  * SHARE lock on the visit row (so a reassignment cannot land between the
@@ -212,10 +212,14 @@ async function savePet(trx, visit, who) {
 async function tapAccessFlag(dbh, tap, who) {
   const { visitId, scope, questionId, verdict, subjectHash } = tap;
   return dbh.transaction(async (trx) => {
-    // One writer at a time per visit with the sweep's state publish: the digest
-    // checked below is still the current one when the verdict commits.
-    await lockVisitAccess(trx, visitId);
-    const visit = await scope(trx('scheduled_services').where({ 'scheduled_services.id': visitId }))
+    // The visit id from the request is only looked up; the lock is taken on the id the database returns, the same
+    // canonical string the sweep locks, so every spelling of a UUID takes the same lock. One writer at a time per visit
+    // with the sweep's state publish: the digest checked below is still the current one when the verdict commits.
+    if (!UUID_RE.test(String(visitId))) return { notFound: true };
+    const found = await scope(trx('scheduled_services').where({ 'scheduled_services.id': visitId })).first('scheduled_services.id');
+    if (!found) return { notFound: true };
+    await lockVisitAccess(trx, found.id);
+    const visit = await scope(trx('scheduled_services').where({ 'scheduled_services.id': found.id }))
       .forShare().first('scheduled_services.id', 'scheduled_services.customer_id');
     if (!visit || !(await visitSinglePremises(visit.id, trx))) return { notFound: true };
     const ev = await loadEvidence(trx, visit);
@@ -225,10 +229,10 @@ async function tapAccessFlag(dbh, tap, who) {
     if (!view.shown) return { conflict: true };
     const [created] = await trx(VERDICTS)
       .insert({ scheduled_service_id: visit.id, customer_id: visit.customer_id, question_id: questionId, subject_hash: subjectHash, verdict, technician_id: UUID_RE.test(String(who.actorId)) ? who.actorId : null })
-      .onConflict(['scheduled_service_id', 'question_id', 'subject_hash']).ignore().returning('id');
+      .onConflict(['scheduled_service_id', 'customer_id', 'question_id', 'subject_hash']).ignore().returning('id');
     // A concurrent tap on the same evidence won: its verdict stands.
     if (!created) {
-      const stored = await trx(VERDICTS).where({ scheduled_service_id: visit.id, question_id: questionId, subject_hash: subjectHash }).first('verdict');
+      const stored = await trx(VERDICTS).where({ scheduled_service_id: visit.id, customer_id: visit.customer_id, question_id: questionId, subject_hash: subjectHash }).first('verdict');
       return { status: stored.verdict, saved: false };
     }
     const saved = verdict === 'right' && questionId === 'dog_on_property' ? await savePet(trx, visit, who) : false;

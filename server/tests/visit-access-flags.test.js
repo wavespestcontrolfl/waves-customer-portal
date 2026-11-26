@@ -350,6 +350,34 @@ describe('visit access flags: the quote a technician reads', () => {
     await expect(tap('dog_on_property', 'right')).resolves.toEqual({ conflict: true });
   });
 
+  test('the same digest for a new customer takes its own verdict and its own pet save', async () => {
+    await seed({ answers: { typesafe: { dog_on_property: true } } });
+    await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'right', saved: true });
+    // the visit moves to another customer (a merge or undo) and the sweep restamps the identical state for them
+    const next = randomUUID();
+    await database('scheduled_services').update({ customer_id: next });
+    await database('visit_access_states').update({ customer_id: next });
+    expect((await flags.accessFlagsFor(database, { id: visitId, customer_id: next }))[0]).toMatchObject({ questionId: 'dog_on_property', status: 'open', saveToFile: 'pets' });
+    await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'right', saved: true });
+    expect((await verdicts()).map((v) => v.customer_id).sort()).toEqual([customerId, next].sort());
+    expect(await database('property_preferences').where({ customer_id: next }).first()).toMatchObject({ pet_details: expect.stringMatching(PET_LINE) });
+    // a replay for the new customer returns its own verdict and writes nothing
+    await expect(tap('dog_on_property', 'wrong')).resolves.toEqual({ status: 'right', saved: false });
+    expect(await verdicts()).toHaveLength(2);
+  });
+
+  test('every spelling of the visit id takes the same lock as the sweep, and a malformed id is not found', async () => {
+    await seed();
+    const holder = await lock();
+    let settled = false;
+    const racing = tap('dog_on_property', 'right', { visitId: visitId.toUpperCase() }).then((value) => { settled = true; return value; });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(settled).toBe(false);
+    await holder.commit();
+    await expect(racing).resolves.toEqual({ status: 'right', saved: true });
+    await expect(tap('dog_on_property', 'right', { visitId: 'not-a-uuid' })).resolves.toEqual({ notFound: true });
+  });
+
   test('a Right given for another customer never carries to this one', async () => {
     await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T09:00:00Z') });
     await database('visit_access_verdicts').insert({ scheduled_service_id: visitId, customer_id: randomUUID(), question_id: 'dog_on_property', subject_hash: lastHash, verdict: 'right' });

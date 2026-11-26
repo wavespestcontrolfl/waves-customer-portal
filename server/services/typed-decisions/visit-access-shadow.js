@@ -225,9 +225,11 @@ function currentAnswers({ providers, questionIds, stateRow, existing, subjectHas
 }
 
 // One writer at a time per visit across the sweep's state publish and a
-// technician's tap: transaction-scoped, released at commit or rollback.
+// technician's tap: transaction-scoped, released at commit or rollback. The one
+// place the key is built; callers pass the visit id the DATABASE returned (the
+// canonical lowercase UUID), never a request's spelling of it.
 function lockVisitAccess(trx, visitId) {
-  return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`visit_access:${visitId}`]);
+  return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`visit_access:${String(visitId).toLowerCase()}`]);
 }
 
 // Whether a visit is still PROVEN to be at its customer's one premises: what the
@@ -475,18 +477,18 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
   // are that customer's), and answers are merged in per provider. Both writes
   // take the visit's advisory lock, the same one a technician's tap takes, so
   // publishing the current state and committing a verdict never interleave.
-  const publish = (answers) => dbh.transaction(async (trx) => {
+  const publishOn = (trx, answers) => trx(STATES_TABLE)
+    .insert({ scheduled_service_id: svc.id, subject_hash: built.subjectHash, state: JSON.stringify(built.state), customer_id: svc.customer_id, ...(answers ? { answers: JSON.stringify(answers) } : {}) })
+    .onConflict(['scheduled_service_id', 'subject_hash'])
+    .merge({
+      created_at: trx.fn.now(),
+      customer_id: svc.customer_id,
+      ...(answers ? { answers: trx.raw(`COALESCE(${STATES_TABLE}.answers, '{}'::jsonb) || ?::jsonb`, [JSON.stringify(answers)]) } : {}),
+    });
+  const keepState = () => dbh.transaction(async (trx) => {
     await lockVisitAccess(trx, svc.id);
-    await trx(STATES_TABLE)
-      .insert({ scheduled_service_id: svc.id, subject_hash: built.subjectHash, state: JSON.stringify(built.state), customer_id: svc.customer_id, ...(answers ? { answers: JSON.stringify(answers) } : {}) })
-      .onConflict(['scheduled_service_id', 'subject_hash'])
-      .merge({
-        created_at: trx.fn.now(),
-        customer_id: svc.customer_id,
-        ...(answers ? { answers: trx.raw(`COALESCE(${STATES_TABLE}.answers, '{}'::jsonb) || ?::jsonb`, [JSON.stringify(answers)]) } : {}),
-      });
+    await publishOn(trx, Object.keys(backfill).length ? backfill : null);
   });
-  const keepState = () => publish(Object.keys(backfill).length ? backfill : null);
   if (!due.length) {
     out.unchanged += 1;
     await keepState();
@@ -510,10 +512,6 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
     try {
       const result = provider === 'typesafe' ? await askPackage(PACKAGE_ID, built.state) : await askPackage(PACKAGE_ID, built.state, { provider });
       if (!result || !result.ok) { out.failed += 1; return null; }
-      // The answers the technician's flags read, kept on the state row whatever
-      // happens to the review rows below.
-      const yes = Object.fromEntries(questionIds.filter((id) => typeof result.answers?.[id]?.yes === 'boolean').map((id) => [id, result.answers[id].yes]));
-      await publish({ [provider]: yes });
       return { provider, answers: result.answers, result };
     } catch (err) {
       out.failed += 1;
@@ -543,13 +541,22 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
         const list = others.map((other) => other.answers[id]).filter(Boolean);
         if (list.length) siblingAnswers[id] = list;
       }
-      const recorded = await recordDecisions({
-        capability: pkg.capability, pkg, provider: leg.provider, subjectType: SUBJECT_TYPE, subjectId: svc.id,
-        result: leg.result, baselines: built.baselines, siblingAnswers, subjectHash: built.subjectHash, conn: dbh,
+      // The answers the technician's flags read go on the state row in the SAME
+      // transaction as this provider's review rows, under the visit lock: if
+      // recording throws, the answers roll back too and the next pass asks again,
+      // so a provider is never skipped with its review rows missing.
+      const yes = Object.fromEntries(questionIds.filter((id) => typeof leg.answers?.[id]?.yes === 'boolean').map((id) => [id, leg.answers[id].yes]));
+      const recorded = await dbh.transaction(async (trx) => {
+        await lockVisitAccess(trx, svc.id);
+        await publishOn(trx, { [leg.provider]: yes });
+        return recordDecisions({
+          capability: pkg.capability, pkg, provider: leg.provider, subjectType: SUBJECT_TYPE, subjectId: svc.id,
+          result: leg.result, baselines: built.baselines, siblingAnswers, subjectHash: built.subjectHash, conn: trx,
+        });
       });
       // A review row preserved under an older state (labeled or held out) is never
-      // replaced, so the recorder may store nothing: the answers are already on the
-      // state row, so log it and carry on.
+      // replaced, so the recorder may store nothing: the answers are on the state
+      // row, so log it and carry on.
       if (recorded.recorded > 0) out.recorded += 1;
       else { out.failed += 1; logger.info(`[typed-decisions] visit access (${leg.provider}) stored no review row for ${svc.id}; the answers are on the state`); }
     } catch (err) {
