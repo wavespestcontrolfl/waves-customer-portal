@@ -284,6 +284,38 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
     expect(await visitRow(id)).toEqual(before);
   });
 
+  test('accept by appointment id from a page that showed a booked visit is refused when the row is now an unclaimed hold', async () => {
+    const { estimateId, token } = await fixture(mockTransaction);
+    const holdId = randomUUID();
+    await mockTransaction('scheduled_services').insert({
+      id: holdId, source_estimate_id: estimateId, scheduled_date: BOOKED_DATE, window_start: '09:00', window_end: '11:00',
+      service_type: 'Lawn Care', status: 'pending', estimated_duration_minutes: 60,
+      reservation_expires_at: mockTransaction.raw("NOW() + INTERVAL '10 minutes'"),
+    });
+    const before = await visitRow(holdId);
+    const res = await putAccept(token, { existingAppointmentId: holdId, existingAppointmentWasHold: false });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('SLOT_UNAVAILABLE');
+    expect(await visitRow(holdId)).toEqual(before);
+    expect(await estimateStatus(estimateId)).toBe('sent');
+  });
+
+  test('accept by slot is refused, and the stamp kept, when another visit overlaps the booking later in its window', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await staffBookedHold(mockTransaction, { customerId, estimateId });
+    const other = await newCustomer(mockTransaction, 'Neighbor');
+    await mockTransaction('scheduled_services').insert({
+      customer_id: other, scheduled_date: BOOKED_DATE, window_start: '10:00', window_end: '11:00',
+      service_type: 'Lawn Care', status: 'confirmed',
+    });
+    const before = await visitRow(id);
+    const res = await putAccept(token, { slotId: SLOT_ID });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('RESERVATION_EXPIRED');
+    expect(await visitRow(id)).toEqual(before);
+    expect(await estimateStatus(estimateId)).toBe('sent');
+  });
+
   test('control: an unclaimed hold still graduates for its own estimate', async () => {
     const { customerId, estimateId, token } = await fixture(mockTransaction);
     const holdId = randomUUID();
