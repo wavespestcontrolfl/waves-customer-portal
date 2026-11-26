@@ -1828,15 +1828,16 @@ function estimateRowsAtSlot(conn, estimate, slot) {
 
 // A staff booking at a submitted slot is recoverable only when it stands alone:
 // no other booking, from any estimate, and no unclaimed hold still live (or
-// inside the commit grace), at that date and start on the booking's technician
-// (or with none). Any booking that still occupies the slot counts, whether or
-// not the accept could adopt it. Run before the accept transaction and again
-// under the date lock, since either can appear in between.
+// inside the commit grace), at that date and start in the submitted slot's
+// technician scope (an assigned slot also counts unassigned rows; an unassigned
+// slot counts every technician). Any booking that still occupies the slot
+// counts, whether or not the accept could adopt it. Run before the accept
+// transaction and again under the date lock, since either can appear in between.
 async function recoveredSlotIsAmbiguous(conn, slot, booked, holdGraceMinutes) {
   const atStart = () => conn('scheduled_services')
     .where({ scheduled_date: slot.date, window_start: slot.windowStart })
     .modify((q) => {
-      if (booked.technician_id) q.where((b) => { b.where('technician_id', booked.technician_id).orWhereNull('technician_id'); });
+      if (slot.techId) q.where((b) => { b.where('technician_id', slot.techId).orWhereNull('technician_id'); });
     });
   const otherBooking = await atStart()
     .whereNotNull('customer_id')
@@ -13582,6 +13583,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
           }
           if (!lockedAdoptRow || lockedOwnerChanged || lockedAdoptRow.is_callback === true || !lockedFamilyOk || !lockedPropertyOk) {
+            // A visit recovered from a submitted slot that lost its eligibility
+            // is the slot-expiry answer, not the direct-adoption refusal.
+            if (recoveredSlot) throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
             assertExistingAppointmentUpdateApplied(0);
           }
           const updates = {
@@ -13643,6 +13647,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               builder.whereNull('source_estimate_id').orWhere('source_estimate_id', estimate.id);
             })
             .update(updates);
+          if (recoveredSlot && !updatedCount) throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
           assertExistingAppointmentUpdateApplied(updatedCount);
           reservationCommitted = true;
           await writeAdoptedAreaAddOnRows(trx, {

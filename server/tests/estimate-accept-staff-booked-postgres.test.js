@@ -224,6 +224,21 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
     expect(await visitRow(id)).toEqual(before);
   });
 
+  test('accept by an unassigned slot is refused when two technicians each have a booking at that start', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const first = await staffBookedHold(mockTransaction, { customerId, estimateId });
+    const second = await staffBookedHold(mockTransaction, { customerId, estimateId });
+    const techs = await mockTransaction('technicians').limit(2).select('id');
+    if (techs.length === 2) {
+      await mockTransaction('scheduled_services').where({ id: first }).update({ technician_id: techs[0].id });
+      await mockTransaction('scheduled_services').where({ id: second }).update({ technician_id: techs[1].id });
+    }
+    const before = await visitRow(first);
+    expect((await putAccept(token, { slotId: SLOT_ID })).status).toBe(409);
+    expect(await visitRow(first)).toEqual(before);
+    expect(await visitRow(second)).toBeTruthy();
+  });
+
   test('accept by slot recovers the staff booking the customer picked and keeps it as the first visit', async () => {
     const { customerId, estimateId, token } = await fixture(mockTransaction);
     const id = await staffBookedHold(mockTransaction, { customerId, estimateId });
