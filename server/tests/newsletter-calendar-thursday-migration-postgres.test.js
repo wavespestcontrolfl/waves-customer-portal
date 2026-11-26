@@ -7,9 +7,11 @@ const { randomUUID } = require('crypto');
 
 const migration = require('../models/migrations/20261126130000_newsletter_calendar_thursday_anchor');
 const companion = require('../models/migrations/20261126140000_newsletter_calendar_thursday_rollback_reset');
+const warmClear = require('../models/migrations/20261126150000_newsletter_weekly_warm_rollback_clear');
 
 // A rollback runs the newest migration's down() first, as knex does.
 const rollBack = async (database) => {
+  await warmClear.down(database);
   await companion.down(database);
   await migration.down(database);
 };
@@ -38,6 +40,7 @@ const PAST_THU = '2020-06-04';
         proof_approval_email_id text,
         proof_token text,
         proof_sent_at timestamptz,
+        segment_filter jsonb,
         updated_at timestamptz DEFAULT NOW()
       )`);
     await database.raw(`
@@ -142,7 +145,10 @@ const PAST_THU = '2020-06-04';
     test('pending weeks go back to Tuesday 6:00 AM ET, and a proofed draft and a queued send become plain drafts a fresh proof can claim', async () => {
       await database.raw('ALTER TABLE newsletter_calendar DROP CONSTRAINT chk_calendar_week_of_tuesday');
       await database.raw('ALTER TABLE newsletter_calendar ADD CONSTRAINT chk_calendar_week_of_thursday CHECK (EXTRACT(ISODOW FROM week_of) = 4)');
-      const proofed = await send('draft', { proof_token: 'ab12cd34', proof_sent_at: new Date() });
+      const proofed = await send('draft', {
+        proof_token: 'ab12cd34', proof_sent_at: new Date(),
+        segment_filter: JSON.stringify({ holdout: 'weekly-warm', subscriber_ids: ['x'], address_keys: ['k'] }),
+      });
       const queued = await send('scheduled', {
         scheduled_for: `${FUTURE_THU}T10:00:00Z`, proof_approved_at: new Date(), proof_approval_email_id: 'm1', proof_token: 'cd34ef56', proof_sent_at: new Date(),
       });
@@ -160,6 +166,8 @@ const PAST_THU = '2020-06-04';
       const cleared = { status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_approval_email_id: null };
       expect(await database('newsletter_sends').where({ id: proofed.id }).first()).toMatchObject(cleared);
       expect(await database('newsletter_sends').where({ id: queued.id }).first()).toMatchObject(cleared);
+      // the warm plan the older sender cannot read is cleared (older audience: every active reader)
+      expect((await database('newsletter_sends').where({ id: proofed.id }).first()).segment_filter).toBeNull();
       // the Tuesday CHECK is back
       await expect(week('2099-06-12', 'planned')).rejects.toThrow(/chk_calendar_week_of_tuesday/);
     });
