@@ -1,0 +1,46 @@
+/**
+ * ops/agents/ensure-review-count-codes.js — the pure planning half: which reserved review short codes a run wants.
+ * (The database half is a dry-run-default insert-only script and is not run here.)
+ */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/short-url', () => ({ resolveShortCode: jest.fn() }));
+
+const { planRows, parseTechArgs } = require('../../ops/agents/ensure-review-count-codes');
+const { WAVES_LOCATIONS } = require('../config/locations');
+const { TECH_SLUG_RE, reviewShortCodeForOffice, reviewShortCodeForTech } = require('../routes/review-geo-link');
+
+const plan = (techs = []) => planRows({ offices: WAVES_LOCATIONS, techs, techSlugRe: TECH_SLUG_RE });
+
+describe('planRows', () => {
+  test('wants one code per office, the same codes the route counts on', () => {
+    const rows = plan();
+    expect(rows.map((r) => r.code)).toEqual(WAVES_LOCATIONS.map((l) => reviewShortCodeForOffice(l.id)));
+    expect(rows.map((r) => r.target_url)).toEqual(WAVES_LOCATIONS.map((l) => l.googleReviewUrl));
+  });
+
+  test('adds one code per tech, lowercased and de-duplicated, matching the route code', () => {
+    const rows = plan(['Adam', 'adam', ' maria ']);
+    const techRows = rows.slice(WAVES_LOCATIONS.length);
+    expect(techRows.map((r) => r.code)).toEqual([reviewShortCodeForTech('adam'), reviewShortCodeForTech('maria')]);
+    expect(techRows[0].target_url).toBe('https://portal.wavespestcontrol.com/rv/adam');
+  });
+
+  test.each([['a'], ['1adam'], ['ad_am'], ['ad am'], ['adam/x'], ['']])('a bad slug %j is refused', (bad) => {
+    expect(() => plan([bad])).toThrow(/not a valid slug/);
+  });
+});
+
+describe('parseTechArgs', () => {
+  test('reads repeated --tech and --tech=', () => {
+    expect(parseTechArgs(['--execute', '--tech', 'adam', '--tech=maria'])).toEqual(['adam', 'maria']);
+  });
+
+  test('no flag gives none', () => {
+    expect(parseTechArgs(['--execute'])).toEqual([]);
+  });
+
+  test.each([[['--tech']], [['--tech', '--execute']]])('a --tech with no value is an error: %j', (argv) => {
+    expect(() => parseTechArgs(argv)).toThrow(/needs a value/);
+  });
+});
