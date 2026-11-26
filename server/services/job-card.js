@@ -519,13 +519,13 @@ const RODENT_PROCEDURE_ONLY_KEYS = new Set([
   'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
   'rodent_inspection', 'rodent_exclusion_only',
 ]);
-// The card's procedure (no product lines) for such a key, else null.
-function procedureOnlyResolve({ category, name, serviceKey, scheduledDate, isFollowup = false }, protocols) {
-  if (category !== 'rodent' || !RODENT_PROCEDURE_ONLY_KEYS.has(serviceKey) || !protocols?.rodent) return null;
-  const resolved = resolveProtocolLines(name, scheduledDate, protocols, [], { programKey: 'rodent', serviceKey, isFollowup });
-  return resolved.visit && resolved.procedure ? { visit: resolved.visit, procedure: resolved.procedure } : null;
-}
+// The card's visit and procedure (no product lines) for such a key, with its note, else null.
 const PROCEDURE_ONLY_NOTE = 'Trap and exclusion work: steps only, no products on this card';
+function procedureOnlyResolve({ category, name, serviceKey, scheduledDate, isFollowup }, protocols) {
+  if (category !== 'rodent' || !RODENT_PROCEDURE_ONLY_KEYS.has(serviceKey) || !protocols?.rodent) return null;
+  const resolved = resolveProtocolLines(name, scheduledDate, protocols, [], { programKey: 'rodent', serviceKey, isFollowup: isFollowup === true });
+  return resolved.visit && resolved.procedure ? { visit: resolved.visit, procedure: resolved.procedure, note: PROCEDURE_ONLY_NOTE } : null;
+}
 
 function addonProgramKey(category, name, protocols, serviceKey = null) {
   const rule = ADDON_PROGRAMS[category];
@@ -1359,9 +1359,8 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
   // name-based classification.
   const identityKey = facts.serviceCategory ? addonProgramKey(facts.serviceCategory, facts.serviceType, protocols, facts.serviceKey) : undefined;
   if (identityKey === null) {
-    const stepsOnly = procedureOnlyResolve({ category: facts.serviceCategory, name: facts.serviceType, serviceKey: facts.serviceKey, scheduledDate: facts.scheduledDate, isFollowup: facts.isFollowup === true }, protocols);
-    if (stepsOnly) return { ...stepsOnly, lines: [], blocks: [], note: PROCEDURE_ONLY_NOTE };
-    return { visit: null, lines: [], blocks: [], note: `No treatment protocol for this service (${facts.serviceCategory})` };
+    const stepsOnly = procedureOnlyResolve({ category: facts.serviceCategory, name: facts.serviceType, serviceKey: facts.serviceKey, scheduledDate: facts.scheduledDate, isFollowup: facts.isFollowup }, protocols);
+    return { visit: null, note: `No treatment protocol for this service (${facts.serviceCategory})`, ...stepsOnly, lines: [], blocks: [] };
   }
   const isLawn = identityKey === undefined ? facts.isLawn : identityKey === 'lawn';
   if (isLawn) {
@@ -1513,7 +1512,7 @@ function resolveAddOnLines({ name, category, serviceKey = null, areaAddOnScope =
   const programKey = addonProgramKey(category, name, protocols, serviceKey);
   if (!programKey) {
     const stepsOnly = procedureOnlyResolve({ category, name, serviceKey, scheduledDate: facts.scheduledDate }, protocols);
-    if (stepsOnly) return { lines: [], report: { name, products: 0, visit: { number: stepsOnly.visit.visit || null, month: stepsOnly.visit.month || null }, note: PROCEDURE_ONLY_NOTE, procedure: stepsOnly.procedure } };
+    if (stepsOnly) return { lines: [], report: { name, products: 0, visit: { number: stepsOnly.visit.visit || null, month: stepsOnly.visit.month || null }, note: stepsOnly.note, procedure: stepsOnly.procedure } };
     return { lines: [], report: { name, products: 0, visit: null, note: `No treatment protocol for this add-on (${category || 'no catalog identity'})` } };
   }
   if (programKey === 'lawn') return { lines: [], report: { name, products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' } };

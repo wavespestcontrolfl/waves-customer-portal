@@ -2018,7 +2018,7 @@
         "visit": 2,
         "month": "Any",
         "primary": "Rodent Trapping Setup\nAttic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched\nSet each on a top plate, joist, rafter, pipe or beam with rub marks or droppings; screw or zip-tie every trap\nOn a floor or ledge: the trap at a right angle to the wall, trigger end against it\nBait each trap with a pea-size amount: rotate peanut butter, nut meat, raisin or prune; hazelnut spread or dried fruit if anyone has a peanut allergy\nMap each trap (A1 to A8) and photograph it in place",
-        "secondary": "Outdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station. Use non-toxic blocks first when activity is unclear\nNo glue boards, and no open snap trap outdoors\nTell the customer: nobody goes into the attic, no children or pets near the traps, and call us on a snap or a dead-rat smell",
+        "secondary": "Outdoors when activity is unclear: non-toxic monitoring blocks in a locked station first, no rodenticide\nOutdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station\nNo glue boards, and no open snap trap outdoors\nTell the customer: nobody goes into the attic, no children or pets near the traps, and call us on a snap or a dead-rat smell",
         "lineMeta": {
           "Attic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched": {
             "scope": "interior",
@@ -2027,7 +2027,7 @@
               "Victor Expanded Trigger Rat Snap Trap"
             ]
           },
-          "Outdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station. Use non-toxic blocks first when activity is unclear": {
+          "Outdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
@@ -2082,22 +2082,22 @@
       {
         "visit": 5,
         "month": "Any",
-        "primary": "Rodent Bait Station Service\nOutdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station. Use non-toxic blocks first when activity is unclear\nCheck each station: lock, anchor, bait eaten, droppings; replace the bait and log the station count",
-        "secondary": "Commercial sites only: Contrac Blox in locked, anchored stations\nInspect the exterior for new entry points; quote exclusion when they are active",
+        "primary": "Rodent Bait Station Service\nCheck each station: lock, anchor, bait eaten, droppings; log the station count",
+        "secondary": "Replace the bait with the one this site uses:\nOutdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station\nCommercial sites only: Contrac Blox in locked, anchored stations\nOutdoors when activity is unclear: non-toxic monitoring blocks in a locked station first, no rodenticide\nInspect the exterior for new entry points; quote exclusion when they are active",
         "lineMeta": {
-          "Outdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station. Use non-toxic blocks first when activity is unclear": {
-            "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Tomcat Bait Chunx with Bromethalin"
-            ],
-            "completionApplicationMethod": "bait_placement"
-          },
           "Commercial sites only: Contrac Blox in locked, anchored stations": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
               "Contrac Blox"
+            ],
+            "completionApplicationMethod": "bait_placement"
+          },
+          "Outdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Tomcat Bait Chunx with Bromethalin"
             ],
             "completionApplicationMethod": "bait_placement"
           }

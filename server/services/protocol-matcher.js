@@ -127,6 +127,8 @@ const MATCH_RULES = [
     programKey: 'rodent',
     visit: 1,
     reason: 'rodent_exclusion_recheck',
+    // A follow-up booked from an exclusion visit carries its name: the re-inspection, never the sealing card again.
+    followupOf: ['rodent_exclusion'],
     terms: ['rodent exclusion follow up', 'rodent exclusion followup', 'exclusion follow up', 'exclusion followup'],
   },
   {
@@ -530,8 +532,10 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
 // whose own name already says its stage (a clearance check, a third treatment, a scope review) keeps that card.
 function followupVisitMatch(match, isFollowup) {
   if (!isFollowup || !match?.program) return match;
-  const rule = MATCH_RULES.find((entry) => entry.programKey === match.programKey && /_followup$/.test(entry.reason || ''));
-  if (!rule || (rule.followupOf && !rule.followupOf.includes(match.reason))) return match;
+  // The rule that lists this card in followupOf, else the program's catch-all *_followup rule (one with no followupOf).
+  const rules = MATCH_RULES.filter((entry) => entry.programKey === match.programKey && (entry.followupOf || /_followup$/.test(entry.reason || '')));
+  const rule = rules.find((entry) => entry.followupOf?.includes(match.reason)) || rules.find((entry) => !entry.followupOf);
+  if (!rule) return match;
   const visit = findVisit(match.program, rule.visit);
   return visit ? { ...match, matchedVisit: visit, matched: true, reason: rule.reason } : match;
 }
