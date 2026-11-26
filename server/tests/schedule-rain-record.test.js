@@ -525,7 +525,7 @@ describe('scoring against the measured rain in each visit\'s hours', () => {
     expect(out.scored).toEqual([WED]);
     const { score } = daysOf(conn)[WED];
     expect(score.partial).toBe(false);
-    expect(score.visits.a).toEqual({ inches: null, wet: null, cutoff: null, recheck: null });
+    expect(score.visits.a).toEqual({ inches: null, wet: null, missing: null, cutoff: null, recheck: null });
     expect(score.visits.c).toMatchObject({ wet: true, cutoff: 'miss' });
     expect(score.cutoff).toEqual({ hit: 0, false_alarm: 0, miss: 1, ok: 0, unread: 1 });
   });
@@ -614,6 +614,31 @@ describe('scoring against the measured rain in each visit\'s hours', () => {
     });
   });
 
+  test('a span nobody measured stores inches null, never 0; a partly read span stores its total and how many hours were missing', async () => {
+    const conn = seeded({}, [
+      { id: 'a', start: '14:00', span: [840, 900], decision: 'none', reason: 'no_dry_hour' },
+      { id: 'c', start: '14:00', span: [840, 900], decision: 'none', reason: 'no_dry_hour' },
+    ]);
+    // Venice gauges report nothing for the span (hours 14 to 16); Sarasota's gauges miss only hour 15 and read rain at 14.
+    const o = obsWith({ VNC: [], SRQ: [14] });
+    for (const h of [14, 15, 16]) delete o.VNC[h];
+    delete o.SRQ[15];
+    const out = await run({ now: parseETDateTime('2026-12-02T06:06'), conn, fetchObs: jest.fn(async () => o), deps: deps([], { loadPoints: pointsWithoutE }) });
+    expect(out.scored).toEqual([WED]);
+    const { score } = daysOf(conn)[WED];
+    // 'a' sits at 27.1 (Venice side): its nearest gauges are VNC then SRQ; SRQ fills 14 and 16 so it is not wholly unread.
+    expect(score.visits.c).toMatchObject({ wet: true, inches: 0.02, missing: 1 });
+    expect(score.partial).toBe(false);
+  });
+
+  test('a visit whose every hour is unread has inches null', async () => {
+    const conn = seeded({}, [{ id: 'a', start: '14:00', span: [840, 900], decision: 'none', reason: 'no_dry_hour' }]);
+    const o = obsWith({ VNC: [], SRQ: [] });
+    for (const h of [14, 15, 16]) { delete o.VNC[h]; delete o.SRQ[h]; }
+    await run({ now: parseETDateTime('2026-12-02T06:06'), conn, fetchObs: jest.fn(async () => o), deps: deps([], { loadPoints: pointsWithoutE }) });
+    expect(daysOf(conn)[WED].score.visits.a).toMatchObject({ wet: null, inches: null, missing: 3 });
+  });
+
   test('the day is also graded per forecast area: rain before work does not make a wet day (2026-11-25)', async () => {
     const conn = seeded();
     // 7 wet work hours at Venice, 2 at Sarasota: one wet area of six.
@@ -644,38 +669,59 @@ describe('scoring against the measured rain in each visit\'s hours', () => {
   });
 });
 
-describe('one forecast snapshot per visit decision', () => {
-  test('the hourly forecast of a visit is read once, whatever path the decision takes', async () => {
-    const reads = (rows, wet) => {
-      const read = jest.fn(async () => hoursFor(wet));
-      return run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(rows), read }).then((out) => ({ out, read }));
-    };
-    // Per visit point, the planning pass reads once (rain-pass) and the decision reads once: the reorder path, the day move
-    // path and the call list path all use that one read. Count the reads at each visit's own point.
-    const atPoint = (read, point) => read.mock.calls.filter(([lat, lng]) => lat === point.lat && lng === point.lng).length;
-    for (const [label, wet, decision] of [['reorder', MORNING, 'reorder'], ['day move', ALL_DAY, 'day_move'], ['call list', { ...ALL_DAY, [THU]: 'all' }, 'call_list']]) {
+describe('one forecast snapshot per visit point per run', () => {
+  const atPoint = (read, point) => read.mock.calls.filter(([lat, lng]) => lat === point.lat && lng === point.lng).length;
+
+  test('the visit\'s point is read once for the run, whatever path the decision takes: verdict and alternatives share it', async () => {
+    for (const [wet, decision] of [[MORNING, 'reorder'], [ALL_DAY, 'day_move'], [{ ...ALL_DAY, [THU]: 'all' }, 'call_list']]) {
       n = 0;
       const rows = [stop()];
-      const { out, read } = await reads(rows, wet);
+      const read = jest.fn(async () => hoursFor(wet));
+      const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(rows), read });
       expect(out.proposals[0].decision).toBe(decision);
-      // rain-pass's own read of the visit's point plus the decision's: two reads, never a third.
-      expect(atPoint(read, rows[0].point)).toBe(2);
-      expect(label).toBeTruthy();
+      expect(atPoint(read, rows[0].point)).toBe(1);
     }
   });
 
-  test('a forecast that changes between reads cannot split a decision: one snapshot judges the reorder and the next work day', async () => {
-    // The first read at the visit's point (rain-pass) and the second (the decision) differ; the decision never reads a third.
+  test('a forecast that goes from wet to dry between would-be reads cannot split a visit: the verdict and the alternatives use the first read', async () => {
     n = 0;
     const rows = [stop()];
     let calls = 0;
     const read = jest.fn(async (lat, lng) => {
       if (lat === rows[0].point.lat && lng === rows[0].point.lng) calls += 1;
-      return hoursFor(calls <= 1 ? ALL_DAY : MORNING);
+      return hoursFor(calls <= 1 ? ALL_DAY : {});
     });
     const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(rows), read });
-    expect(calls).toBe(2);
-    expect(out.proposals[0].decision).toBe('reorder'); // judged on the decision's snapshot (MORNING) throughout
+    expect(calls).toBe(1);
+    // Wet on the one snapshot (peak 80), and its alternatives judged on that same all-day rain: the next work day.
+    expect(out.proposals[0]).toMatchObject({ peak: 80, decision: 'day_move', to_date: THU });
+  });
+
+  test('two visits at one point share one read; a point that failed stays unread for the run', async () => {
+    n = 0;
+    const rows = [stop({ point: { lat: 27.41, lng: -82.4 } }), stop({ point: { lat: 27.41, lng: -82.4 } })];
+    const read = jest.fn(async () => hoursFor(MORNING));
+    await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps(rows), read });
+    expect(atPoint(read, rows[0].point)).toBe(1);
+  });
+});
+
+describe('proposals that failed to plan', () => {
+  test('an error proposal keeps the visit\'s own span (and stop ids), so it can still be graded', async () => {
+    const rows = [stop(), stop()];
+    const d = deps(rows);
+    d.rainOut.conflictsForTarget = jest.fn(() => { throw new Error('occupancy rows unreadable'); });
+    const { decideDay } = record;
+    const planned = rainPass._test.groupStops(rows);
+    const out = await decideDay(planned.map((visit) => ({ visit, start: '09:00', date: WED, wet: true, peak: 80, reason: 'wet', proposal: '12:00' })), {
+      day: WED, today: '2026-11-24', read: async () => { throw new Error('boom'); }, occupied: () => false,
+      blackouts: async () => new Set(), seriesRows: async () => new Map(), dayHours: { startMin: 480, endMin: 1020 }, earliestMin: 0,
+    });
+    expect(out.proposals).toHaveLength(2);
+    for (const p of out.proposals) {
+      expect(p).toMatchObject({ decision: 'none', reason: 'error', start: '09:00' });
+      expect(p.span).toEqual([540, expect.any(Number)]);
+    }
   });
 });
 

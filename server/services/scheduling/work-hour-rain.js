@@ -142,7 +142,11 @@ function readHour(obs, stations, hour) {
   return null;
 }
 
-/** { wet_hours, inches, missing } over `hours`: wet = MEASURABLE_IN or more; a missing hour is null, never dry. */
+/**
+ * { wet_hours, inches, missing } over `hours`: wet = MEASURABLE_IN or more; a missing hour is null, never dry. `inches` is the
+ * total of the hours READ, null when none was read (never 0 for a span nobody measured); with `missing` above 0 it is a
+ * partial total, and `missing` is its coverage gap.
+ */
 function tallyHours(obs, stations, hours) {
   let wet = 0;
   let missing = 0;
@@ -155,7 +159,7 @@ function tallyHours(obs, stations, hours) {
       if (v >= MEASURABLE_IN) wet += 1;
     }
   }
-  return { wet_hours: wet, inches: Math.round(inches * 100) / 100, missing };
+  return { wet_hours: wet, inches: missing === hours.length ? null : Math.round(inches * 100) / 100, missing };
 }
 
 /** Per forecast area: { wet_hours, inches, missing, wet } for the work hours. wet = rainHours or more wet hours; false when
@@ -201,7 +205,8 @@ function stationsNear(point) {
 /**
  * Rain over a visit's hours: from the hour its work starts through `afterHours` after it ends (the drying time, rain-fit
  * RAIN_AFTER_HOURS), at the visit's nearest stations. { wet, inches, missing }: wet true when any hour is measurable,
- * false only when every hour was read, null when an unread hour could still hide rain.
+ * false only when every hour was read, null when an unread hour could still hide rain. `inches` is null for a span with no
+ * reading, else the total of the hours read (see `missing`).
  */
 function spanWet(obs, point, startMin, endMin, afterHours) {
   const hours = [];

@@ -116,6 +116,14 @@ describe('spanWet', () => {
     expect(w.spanWet(obs, venice, 9 * 60, 10 * 60, 2)).toMatchObject({ wet: true, missing: 0 });
   });
 
+  test('inches is null for a span nobody read (never 0), and a partial total for a partly read one, with the missing count', () => {
+    const none = { SRQ: {}, VNC: {}, SPG: {}, PGD: {} };
+    expect(w.spanWet(none, ZONE_COORDS.sarasota, 15 * 60, 16 * 60, 2)).toEqual({ wet: null, inches: null, missing: 3 });
+    expect(w.tallyHours(none, ['SRQ'], [8, 9])).toEqual({ wet_hours: 0, inches: null, missing: 2 });
+    const some = { SRQ: { 15: 0.02 }, VNC: {}, SPG: {}, PGD: {} };
+    expect(w.spanWet(some, ZONE_COORDS.sarasota, 15 * 60, 16 * 60, 2)).toEqual({ wet: true, inches: 0.02, missing: 2 });
+  });
+
   test('false only when every hour was read; an unread hour with no rain found is unknown, not dry', () => {
     const o = { SRQ: { 15: 0, 16: 0, 17: 0 }, VNC: { 15: 0, 16: 0, 17: 0 }, SPG: {}, PGD: {} };
     expect(w.spanWet(o, ZONE_COORDS.sarasota, 15 * 60, 16 * 60, 2)).toMatchObject({ wet: false, missing: 0 });

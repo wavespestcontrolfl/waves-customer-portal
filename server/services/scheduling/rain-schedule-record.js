@@ -115,8 +115,17 @@ function targetDay(now) {
   return { day, kind, today };
 }
 
-// NWS only, the patient read (long wait, one retry; nobody waits on this cron).
-const nwsReader = (read) => (lat, lng) => getNwsHourlyRainPatient(lat, lng, { read });
+// NWS only, the patient read (long wait, one retry; nobody waits on this cron). One snapshot per visit point per run: rain-pass's
+// verdict (wet, peak) and this record's alternatives for the same visit read the same hours, so they cannot disagree. A read
+// that failed stays failed for the run (unread), and the next run asks again.
+function nwsReader(read) {
+  const snapshots = new Map();
+  return (lat, lng) => {
+    const key = `${lat},${lng}`;
+    if (!snapshots.has(key)) snapshots.set(key, Promise.resolve().then(() => getNwsHourlyRainPatient(lat, lng, { read })));
+    return snapshots.get(key);
+  };
+}
 
 const overlaps = (a, b) => a.start < b.end && b.start < a.end;
 const techOf = (row) => (row.visit.technician_id == null ? null : String(row.visit.technician_id));
@@ -228,14 +237,19 @@ function laterHourUnread(row, hourly, ctx) {
   });
 }
 
+/** What every proposal of a visit carries. `span`: the visit's own minutes, so a past day can be graded on the rain in its hours. */
+function baseOf(row) {
+  const base = { id: String(row.visit.id), start: row.start, span: [row.visit.reach.startMin, row.visit.reach.endMin] };
+  if (row.visit.memberIds?.length > 1) base.stop_ids = row.visit.memberIds;
+  return base;
+}
+
 /**
  * One visit's proposal (a dry visit is none/forecast_dry), or null when it is not outdoor. `open` is false once the day's cap is used.
  */
 async function proposeFor(row, ctx) {
   const { day, read, open, taken } = ctx;
-  // `span`: the visit's own minutes, so a past day can be graded on the rain in its hours.
-  const base = { id: String(row.visit.id), start: row.start, span: [row.visit.reach.startMin, row.visit.reach.endMin] };
-  if (row.visit.memberIds?.length > 1) base.stop_ids = row.visit.memberIds;
+  const base = baseOf(row);
   if (['no_point', 'no_forecast', 'error'].includes(row.reason)) {
     return { ...base, decision: 'none', reason: row.reason === 'no_forecast' ? 'unread_forecast' : row.reason };
   }
@@ -248,8 +262,8 @@ async function proposeFor(row, ctx) {
   base.peak = row.peak;
   const { reach } = row.visit;
   const length = reach.endMin - reach.startMin;
-  // ONE forecast snapshot for this visit's whole decision (the NWS read is cached by grid cell, but a cache can expire between
-  // two reads): the same hours judge the reorder, the unread check and the next work day.
+  // ONE forecast snapshot for this visit's whole decision AND its verdict: the reader keeps one read per visit point for the
+  // run, so rain-pass's wet verdict and these alternatives judge the same hours.
   const hourly = await read(row.visit.point.lat, row.visit.point.lng);
   // A hour already taken by an earlier proposal is never offered, over the cap or not.
   const own = await reorderStart(row, ctx, hourly);
@@ -294,7 +308,8 @@ async function decideDay(rows, ctx) {
     } catch (err) {
       if (err.planning) throw err;
       logger.warn(`[schedule-rain-record] visit ${row.visit.id} proposal failed: ${err.message}`);
-      proposal = { id: String(row.visit.id), start: row.start, decision: 'none', reason: 'error' };
+      // The error proposal keeps the visit's own span, so the day can still grade it.
+      proposal = { ...baseOf(row), decision: 'none', reason: 'error' };
     }
     if (!proposal) continue;
     if (ACTIONS.has(proposal.decision)) used += 1;
@@ -429,7 +444,7 @@ const spanWetOf = (obs, point, span) => (obs ? workHours.spanWet(obs, point, spa
 
 /**
  * Each visit's verdicts, every one graded against its own run's reading. `wet` and `inches` are the first run's reading; a
- * run over a different span (or one that read differently) adds `<run>_wet` and `<run>_inches`.
+ * run over a different span (or one that read differently) adds `<run>_wet`, `<run>_inches` and `<run>_missing`.
  */
 function gradeVisits(row, measured) {
   const visits = {};
@@ -438,9 +453,11 @@ function gradeVisits(row, measured) {
       if (p.reason === 'no_point') continue;
       const { wet } = measured[field][p.id];
       const inches = Number.isFinite(measured[field][p.id].inches) ? measured[field][p.id].inches : null;
-      const v = visits[p.id] || (visits[p.id] = { inches, wet, cutoff: null, recheck: null });
+      // `missing`: hours of the span no gauge reported; with it above 0 `inches` is a partial total.
+      const missing = Number.isFinite(measured[field][p.id].missing) ? measured[field][p.id].missing : null;
+      const v = visits[p.id] || (visits[p.id] = { inches, wet, missing, cutoff: null, recheck: null });
       v[field] = verdictOf(p.decision, wet);
-      if (v.wet !== wet || v.inches !== inches) Object.assign(v, { [`${field}_wet`]: wet, [`${field}_inches`]: inches });
+      if (v.wet !== wet || v.inches !== inches || v.missing !== missing) Object.assign(v, { [`${field}_wet`]: wet, [`${field}_inches`]: inches, [`${field}_missing`]: missing });
     }
   }
   return visits;
