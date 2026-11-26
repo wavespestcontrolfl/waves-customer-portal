@@ -37,6 +37,9 @@ const BELL_BANNER_KINDS = Object.freeze({
   // The owner steps in on a live call whose caller sounds upset (live-call-upset-alert.js, GATE_LIVE_CALL_UPSET_ALERT,
   // owner 2026-11-16): any hour, the call is live now. Its own gate.
   live_call_upset: Object.freeze({ nightQuiet: false, gate: 'liveCallUpsetAlertLive' }),
+  // The next step after a call an office person answered (live-call-early-summary.js, GATE_CALL_EARLY_SUMMARY, owner
+  // 2026-11-26 "build both"): the call is over, so no banner at night. No gate of its own.
+  live_call_next_step: Object.freeze({ nightQuiet: true }),
   // A customer stuck booking from an estimate (estimate-stuck-alert.js, owner 2026-11-05 "1, 2 and 3").
   estimate_stuck: Object.freeze({ nightQuiet: true }),
   // A call booked a visit on an open estimate: its card filed, or time runs short on it (call-phone-yes-bell.js, owner

@@ -773,6 +773,8 @@ browsers and the office network never raise it. The 5-minute estimate tick close
 declined or archived. Each date search, hold start and hold end is an `audit_log` row (`estimate_slot_search`,
 `estimate_hold_started`, `estimate_hold_ended`) for the next booking audit. It sends nothing to a customer.
 
+`server/services/live-call-early-summary.js` raises one bell row per call an office person (not the owner) answered, after it saves the call's early summary (category `live_call_next_step`, dedupeKey `live-call-next-step:<callSid>`, area Comms, who person; needs-you when the call left a next step, else an FYI row, written with `fyiRow`). Fixed words only, never call text (a spoken gate code, card or address has too many shapes to screen for a lock screen): headline "Comms — next step on Virginia's call" (or "read Virginia's call summary" when no next step), why "Open the call to see the next step and what was promised." Skipped when every admin turned its Bell switch off (bellWanted), and an internal test customer's call rings nobody (customerId in the metadata). The link opens the call in Communications. Phone banner (`bell-banners.js` kind `live_call_next_step`, 7:00 AM to 9:00 PM Eastern); no gate of its own (it rides `GATE_CALL_EARLY_SUMMARY`). Nobody is raised when the owner answered, the answerer's number is unknown, or the call has no `forward_acceptance`.
+
 Held technician estimate (owner 2026-11-09, technician estimate tool step 2b; under `GATE_TECH_ESTIMATES`, no gate of its own):
 `server/services/tech-estimate-office-bell.js` raises one bell when a technician saves a NEW estimate that the office must check
 first (`tech_estimates.office_first_reasons` is not empty), after the save commits. Category `estimate` with `bell: true`, headline

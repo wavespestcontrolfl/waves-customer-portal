@@ -565,6 +565,23 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/communications#tab=calls',
     }),
   },
+  // The phone banner after a call an office person (not the owner) answered (live-call-early-summary.js, owner
+  // 2026-11-26 "build both"; it rides GATE_CALL_EARLY_SUMMARY, no gate of its own). The writer raises the bell row
+  // (category live_call_next_step, one per call: needs-you when the call left a next step, else an FYI row) and names
+  // this kind with notifyAdmin's bannerKind; `build` takes the row's own words. Retention expiry closes it. Admin-only.
+  live_call_next_step: {
+    label: 'Next step after an office call',
+    category: 'live_call_next_step',
+    priority: 'normal',
+    group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'Comms — read the office call summary',
+      body: p.alertBody || 'An office call just ended. Open it to see the next step.',
+      link: p.alertLink || '/admin/communications#tab=calls',
+    }),
+  },
   // The reminder banner for a lead's call request (owner 2026-11-05, "remind"). A missed
   // press-1 ring ("Missed call request") and a night call-back bell reach only the portal bell; one still open after
   // one business hour, with nobody reaching the lead since, sends this ONE banner (services/lead-call-reminder.js,

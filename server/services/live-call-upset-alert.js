@@ -63,6 +63,15 @@ function ownerAnswered(acceptance) {
   return !!owner && !!answered && owner === answered;
 }
 
+// A known staff number that is not the owner's answered. An unknown or malformed answerer, or a missing or malformed
+// ADAM_PHONE, is not proof (toE164 hands a value it cannot read back unchanged).
+const US_E164_RE = /^\+1\d{10}$/;
+function staffAnswered(acceptance) {
+  const owner = toE164(process.env.ADAM_PHONE);
+  const answered = toE164(acceptance?.answered_by_number);
+  return US_E164_RE.test(owner || '') && US_E164_RE.test(answered || '') && owner !== answered;
+}
+
 // Decides whether a check is due, then stamps it with a compare-and-swap on upset_checks: of two webhooks that read
 // the same count, one UPDATE matches and wins. Cheap checks first, so most utterances cost no query beyond the row.
 async function claimCheck(callSid, live, now) {
@@ -138,6 +147,9 @@ function whyFrom(reason) {
   return words && !breaksAlertRules(words) ? words : FALLBACK_WHY;
 }
 
+// The staff member's name for a bell headline: letters, digits and a few marks, at most 20 characters.
+const staffNameOf = (acceptance) => String(acceptance?.csr_name || '').replace(/[^\p{L}\p{N} '.-]/gu, '').trim().slice(0, 20);
+
 async function raiseAlert(call, acceptance, reason) {
   const callSid = call.twilio_call_sid;
   // The call may have ended while the model ran: one fresh read, so the owner is not paged to join a dead call.
@@ -155,7 +167,7 @@ async function raiseAlert(call, acceptance, reason) {
     });
   if (!stamped) return false;
   try {
-    const name = String(acceptance?.csr_name || '').replace(/[^\p{L}\p{N} '.-]/gu, '').trim().slice(0, 20);
+    const name = staffNameOf(acceptance);
     const written = await raiseAdminAlert('live_call_upset', {
       area: 'Comms',
       action: name ? `step in on ${name}'s upset caller` : 'step in on an upset caller',
@@ -208,4 +220,5 @@ function afterCallerUtterance(callSid) {
   checkCall(callSid).catch(() => {});
 }
 
-module.exports = { afterCallerUtterance, checkCall, _test: { whyFrom, ownerAnswered, callEnded } };
+// staffAnswered and staffNameOf are also read by live-call-early-summary.js (the next-step alert after an office call).
+module.exports = { afterCallerUtterance, checkCall, ownerAnswered, staffAnswered, staffNameOf, _test: { whyFrom, callEnded } };

@@ -20,6 +20,7 @@ const ALERT_SOUNDS = Object.freeze({
   relay_hot_lead: 'waves-missed-call.caf',
   lead_call_reminder: 'waves-missed-call.caf',
   live_call_upset: 'waves-missed-call.caf',
+  live_call_next_step: 'waves-reminder.caf',
   customer_voicemail_callback: 'waves-voicemail.caf',
   new_lead: 'waves-lead.caf',
   new_lead_email: 'waves-lead.caf',
