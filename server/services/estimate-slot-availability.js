@@ -32,6 +32,7 @@ const { applyAssignable, absentTechDays, loadTechShifts, shiftBounds } = require
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { capacityEnabled, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
+const { bookedVisitOrLiveHold } = require('./scheduling/reservation-occupancy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -1775,9 +1776,9 @@ async function filterCollidingSlots(slots, {
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    .andWhere((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    });
+    // A visit staff booked keeps its old hold timestamp until cleanup runs;
+    // it is a booked stop, not a lapsed hold, so it still blocks its hour.
+    .andWhere(bookedVisitOrLiveHold);
   if (excludeServiceIds.length) collisionQuery = collisionQuery.whereNotIn('scheduled_services.id', excludeServiceIds);
   if (ownEstimateId) {
     // This estimate's own UNCOMMITTED hold is not a collision for itself
@@ -2037,9 +2038,8 @@ async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
       .whereBetween('scheduled_date', [dateFrom, dateTo])
       .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
       .whereNotNull('window_start')
-      .where((q) => {
-        q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
-      });
+      // Same rule as the collision filter: a staff-booked visit stays a stop.
+      .where(bookedVisitOrLiveHold);
     if (ownEstimateId) {
       query = query.whereNot((own) => {
         own.where('source_estimate_id', ownEstimateId)
