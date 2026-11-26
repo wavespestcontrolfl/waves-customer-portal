@@ -215,13 +215,22 @@ const MATCH_RULES = [
     programKey: 'palm_injection',
     visit: 3,
     reason: 'palm_followup',
-    terms: ['palm injection follow', 'palm injection follow up', 'palm injection recheck', 'palm follow', 'palm recheck', 'injection follow'],
+    // Only palm rules are read for a palm name, so the bare stage words are enough ("Lethal Bronzing Follow Up").
+    terms: ['palm injection follow', 'palm injection follow up', 'palm injection recheck', 'palm follow', 'palm recheck', 'injection follow', 'follow up', 'followup', 'follow-up', 'recheck'],
   },
   {
     programKey: 'palm_injection',
     visit: 1,
     reason: 'palm_diagnosis',
-    terms: ['palm injection assessment', 'palm injection diagnosis', 'manganese injection', 'magnesium injection'],
+    terms: ['palm injection assessment', 'palm injection diagnosis', 'manganese injection', 'magnesium injection', 'assessment', 'diagnosis', 'sample', 'sampling', 'test', 'testing', 'inspection', 'inspect', 'evaluation'],
+  },
+  // Lethal bronzing prevention, the main palm service (owner 2026-11-25, D8): its own Arbor-OTC card when the booking names it. After the
+  // assessment and follow-up rules: a booking that names both a stage and the disease keeps its stage card.
+  {
+    programKey: 'palm_injection',
+    visit: 4,
+    reason: 'palm_lethal_bronzing',
+    terms: ['lethal bronzing', 'bronzing', 'arbor otc', 'arbor-otc', 'oxytetracycline'],
   },
   {
     programKey: 'palm_injection',
@@ -418,7 +427,12 @@ function programKeyForService(serviceType) {
     normalized.includes('magnesium injection') ||
     normalized.includes('injection follow') ||
     normalized.includes('palm follow') ||
-    normalized.includes('palm recheck')
+    normalized.includes('palm recheck') ||
+    // Lethal bronzing prevention (D8): its own palm card.
+    normalized.includes('lethal bronzing') ||
+    normalized.includes('bronzing prevention') ||
+    normalized.includes('arbor otc') ||
+    normalized.includes('oxytetracycline')
   ) return 'palm_injection';
   if (
     normalized.includes('termite') ||

@@ -61,7 +61,7 @@ const { stripPriceTokensFromText, deepStripPriceTokens, stripOwnerOnlyProtocolCo
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
 const roundsCatchUp = require('../services/lawn-rounds-catchup');
 const { completionRateFields } = require('../utils/protocol-label-rate');
-const { addonCardHints, labelRateFor } = require('../services/completion-product-defaults');
+const { addonCardHints, labelRateFor, resolveCatalogProductForName } = require('../services/completion-product-defaults');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -639,20 +639,25 @@ function buildCompletionActions({ lines, products, programKey, visit, addonHints
   // existing string consumer — protocol UI tabs, /match — still works) and
   // carry per-line metadata here, keyed by the exact de-branded line text.
   const lineMeta = (visit && typeof visit.lineMeta === 'object' && visit.lineMeta) || {};
-  return lines.map((line, index) => {
+  return lines.flatMap((line, index) => {
     const meta = lineMeta[line.raw] || null;
     // Feed the catalog matcher the brand hints (the display text is de-branded),
     // so the right product still attaches.
     const lineForMatch = meta && Array.isArray(meta.catalogProductHints)
       ? { ...line, catalogProductHints: meta.catalogProductHints }
       : line;
-    const product = matchCatalogProduct(lineForMatch, products);
+    // A line flagged exactCatalogName (an injection label's own bottle) takes that row or none: a near name is another formulation.
+    const product = meta?.exactCatalogName
+      ? resolveCatalogProductForName(meta.catalogProductHints?.[0], products, { exactOnly: true })
+      : matchCatalogProduct(lineForMatch, products);
+    // Its bottle is not in the catalog: no action to pick. Picked, it would record an injection with no product on the materials record.
+    if (meta?.exactCatalogName && meta.treatmentApplied !== false && !product) return [];
     const kind = actionKindForLine(line, product);
     // De-branded lines (have lineMeta) display their own text — do NOT run
     // actionLabel, which appends the matched product's brand name and re-leaks
     // it. Product stays attached below for selection/material tracking.
     const label = meta ? line.raw : actionLabel(kind, line, product);
-    return {
+    return [{
       id: `${programKey || 'protocol'}_${visit?.visit || 'visit'}_${index}`,
       kind,
       label,
@@ -672,7 +677,7 @@ function buildCompletionActions({ lines, products, programKey, visit, addonHints
         // A blank rate when a booked add-on's card lists the product too (completion-product-defaults.js labelRateFor).
         ...completionRateFields(labelRateFor(meta, addonHints), product),
       } : null,
-    };
+    }];
   });
 }
 

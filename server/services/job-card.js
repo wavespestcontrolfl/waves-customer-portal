@@ -1431,8 +1431,8 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
 // The safety rules of the misting, mosquito, flea and bed bug programs as a procedure field ({ safety: [...] }), or {} for any other
 // program (they keep their procedure). Flea and bed bug are indoor sprays: people and pets out until dry, fish tanks covered, nothing
 // fogged. Mosquito: the wind limit, the strips from water and storm drains, and no fogger (owner 2026-11-25, D7). Rodent: gloves, the
-// bleach spray before bagging, the P100 fit test, no glue boards, bats before sealing (D9).
-const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent'];
+// bleach spray before bagging, the P100 fit test, no glue boards, bats before sealing (D9). Palm injection: PPE, no food palms, disinfect the bit between palms (D8).
+const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent', 'palm_injection'];
 function mistingSafetyField(program, effectiveProgramKey) {
   if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};
   return { safety: program.safety_rules.map((rule) => String(rule)) };
@@ -1462,7 +1462,7 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
     ...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),
     // The misting program has no field guide, so its weather-shutdown, nozzle-placement and exposure-response rules ride the generic
     // procedure as a Safety section (the SOP and its text download). Keyed to the misting program on purpose: other programs that
-    // declare safety_rules without a field guide get it only when SAFETY_ON_CARD_PROGRAMS lists them (palm injection does not).
+    // declare safety_rules without a field guide get it only when SAFETY_ON_CARD_PROGRAMS lists them.
     ...(fieldGuide ? {} : mistingSafetyField(program, programKey || match?.programKey)),
     source: 'Service template',
     title: visit.visit_type || `Visit ${visit.visit}${visit.month && visit.month !== 'Any' ? ` · ${visit.month}` : ''}`,
@@ -1607,7 +1607,10 @@ function linesFromLineMeta(visit, catalog) {
     for (const hint of meta?.catalogProductHints || []) {
       // An area add-on visit (labelFacts) finds its product through the one resolver the feed, the picker and the
       // yearly limit use (area-addon-governed-rate.js), so a renamed product is the same row on every surface.
-      const product = visit?.labelFacts ? resolveProductIn(hint, catalog).product : matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
+      // A line flagged exactCatalogName (an injection label's own bottle) takes that row or none: a near name is another formulation.
+      const product = visit?.labelFacts ? resolveProductIn(hint, catalog).product
+        : meta?.exactCatalogName ? resolveCatalogProductForName(hint, catalog, { exactOnly: true })
+          : matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
       if (!product || lines.some((l) => l.raw === raw && l.product.id === product.id)) continue;
       // Conditional when the line sits in the visit's secondary text OR is
       // phrased as a condition (isConditionalLine).
@@ -1697,6 +1700,10 @@ function linesFromProtocolText(visit, catalog) {
   const parsed = [...parseProtocolLines(visit?.primary, 'base'), ...parseProtocolLines(visit?.secondary, 'conditional')];
   const out = [];
   for (const line of parsed) {
+    // A line its lineMeta marks as no treatment (an inspection, a screen-out, a trap) names no product, whatever its words say; an
+    // exact-name line (an injection label's own bottle) was resolved above by that name alone and never falls back to a near name.
+    const meta = visit?.lineMeta?.[line.raw];
+    if (meta && (meta.treatmentApplied === false || meta.exactCatalogName)) continue;
     // The parser's own flag (secondary text, "if …") plus the wider
     // condition phrasing the protocols use: a primary line the tech has to
     // justify is conditional work, never selected base work.
