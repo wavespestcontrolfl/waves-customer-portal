@@ -1169,6 +1169,21 @@ async function applyAnnualPrepayOptions(trx, ctx, updatedEstimate, annualPrepayA
     'Customer already has an annual prepay term through',
     updatedEstimate.id,
   );
+  // The converter re-reads linked visits after this preflight. Dispatch can
+  // cancel or move the anchor meanwhile, making createTermForAnnualPrepay
+  // normalize a different start (often today). Re-check that exact final
+  // value under the advisory lock this transaction already holds.
+  convertOptions.verifyAnnualPrepayTermStart = async (normalizedStart) => {
+    if (dateOnlyString(normalizedStart) === termStart) return;
+    await lockAndAssertNoAnnualPrepayOverlap(
+      trx,
+      updatedEstimate.customer_id,
+      dateOnlyString(normalizedStart),
+      false,
+      'Customer already has an annual prepay term through',
+      updatedEstimate.id,
+    );
+  };
 }
 
 // Manual Mark Won keeps scheduling under operator control. Standard verbal

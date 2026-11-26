@@ -13765,26 +13765,29 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         }).first('scheduled_services.scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
-        try {
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx,
-            customerId,
-            overlapTermStart,
-            false,
-            'Customer already has an annual prepay term through',
-            estimate.id,
-          );
-        } catch (overlapErr) {
-          if (overlapErr && overlapErr.annualPrepayOverlap) {
-            const conflict = estimateAcceptError(
-              'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
-              409,
+        const assertAnnualPrepayStart = async (termStart) => {
+          try {
+            await lockAndAssertNoAnnualPrepayOverlap(
+              trx,
+              customerId,
+              termStart,
+              false,
+              'Customer already has an annual prepay term through',
+              estimate.id,
             );
-            conflict.code = 'ANNUAL_PREPAY_OVERLAP';
-            throw conflict;
+          } catch (overlapErr) {
+            if (overlapErr && overlapErr.annualPrepayOverlap) {
+              const conflict = estimateAcceptError(
+                'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
+                409,
+              );
+              conflict.code = 'ANNUAL_PREPAY_OVERLAP';
+              throw conflict;
+            }
+            throw overlapErr;
           }
-          throw overlapErr;
-        }
+        };
+        await assertAnnualPrepayStart(overlapTermStart);
         // Quote revalidation INSIDE the accept transaction (Codex r15):
         // the acknowledged total projected the balance + inspection offer +
         // deposit credit as of the 402 round-trip — credit consumed by
@@ -13860,6 +13863,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
           autoSendInvoice: false,
+          // The converter re-reads the paid visits. If dispatch cancels or
+          // moves the anchor after the check above, verify the exact
+          // normalized start the term is about to be written on while this
+          // transaction still holds the same customer overlap lock.
+          verifyAnnualPrepayTermStart: async (normalizedStart) => {
+            if (dateOnly(normalizedStart) === overlapTermStart) return;
+            await assertAnnualPrepayStart(dateOnly(normalizedStart));
+          },
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
           // Genuinely ADOPTED pre-existing appointment (not a reservation

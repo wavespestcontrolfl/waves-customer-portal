@@ -97,11 +97,13 @@ function paidEstimateVisitsQuery(database, { estimateId, customerId }) {
     })
     .whereNull('scheduled_services.reservation_expires_at')
     .whereRaw('scheduled_services.is_callback IS NOT TRUE')
-    // Same classifier as annual-prepay-renewals: catalog key first, then the re-service label.
+    // Same classifier as annual-prepay-renewals: catalog key, the key stored on the visit (a legacy visit with no
+    // catalog link keeps only that), then the re-service label.
     .whereRaw(
       `NOT (COALESCE(services.service_key, '') = ANY(?)
+        OR COALESCE(scheduled_services.service_key_snapshot, '') = ANY(?)
         OR (COALESCE(services.name, '') || ' ' || COALESCE(scheduled_services.service_type, '')) ~* ?)`,
-      [Array.from(RE_SERVICE_SERVICE_KEYS), '\\mre-?service\\M'],
+      [Array.from(RE_SERVICE_SERVICE_KEYS), Array.from(RE_SERVICE_SERVICE_KEYS), '\\mre-?service\\M'],
     )
     .whereNotIn('scheduled_services.status', RETAINED_HISTORY_STATUSES);
   return excludeAssessmentBookings(query)
