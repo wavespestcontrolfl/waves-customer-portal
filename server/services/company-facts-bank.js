@@ -3,8 +3,8 @@
 /**
  * Company facts bank (owner 2026-11-25 "all rec"): owner-approved lines the agents may state beside the code lines
  * in COMPANY_FACTS (services/sms-company-facts.js). The DB row is the source of truth, the opposite of
- * knowledge_base mirroring code. PR 1: the writer, the checks and the runtime snapshot. NO reader yet: nothing in
- * this release calls getApprovedBankFacts or renderBankFactsLines, and an empty bank changes nothing, so there is
+ * knowledge_base mirroring code. PR 1: the writer, the checks and the runtime snapshot. Readers: the voice agent (relay-conversation buildBasePrompt, per call) and email
+ * drafts (email-actions companyFactsSystemEntry, per draft); texting comes later. An empty bank changes nothing, so there is
  * no gate (the off switch is retiring the row).
  *
  * Life cycle: draft -> approved -> retired. A retired line comes back only as a NEW draft (restoreAsDraft). An edit
@@ -261,6 +261,16 @@ function checkFactText(rawText, ctx = {}) {
 function renderBankFactsLines(facts = getApprovedBankFacts()) {
   const list = Array.isArray(facts) ? facts : [];
   return list.length ? list.map((f) => `- ${f.text}`).join('\n') : '';
+}
+
+/**
+ * The section a reader appends right after the code lines of COMPANY_FACTS: one header line, then `- line` per fact.
+ * '' for an empty bank (the reader's prompt or entry is then byte-identical to before). One header for voice and email.
+ */
+const BANK_SECTION_HEADER = 'More company facts (approved by the owner; state these plainly, same as the company facts above):';
+function renderBankFactsSection(facts = getApprovedBankFacts()) {
+  const lines = renderBankFactsLines(facts);
+  return lines ? `${BANK_SECTION_HEADER}\n${lines}` : '';
 }
 
 /** Hash of the approved ids and text hashes, in approval order: '' for an empty bank. For readers that stamp a version. */
@@ -783,6 +793,7 @@ module.exports = {
   STALE_MS,
   STATUSES,
   SOURCES,
+  BANK_SECTION_HEADER,
   checkFactText,
   createDraft,
   editFact,
@@ -797,6 +808,7 @@ module.exports = {
   readVerifiedFacts,
   refreshBankFacts,
   renderBankFactsLines,
+  renderBankFactsSection,
   bankVersionHash,
   invalidate,
   startBankRefresh,

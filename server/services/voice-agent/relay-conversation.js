@@ -996,7 +996,21 @@ function transferPromptAddendum(officeOpen) {
   ].join('\n');
 }
 
-function buildBasePrompt(contextEnabled, language = null, { officeOpen = null } = {}) {
+// The owner-approved bank lines (company-facts-bank) ride a call's prompt right after the code lines of COMPANY_FACTS,
+// ahead of the speech framing that governs both. Built per call, never at module load: SYSTEM_PROMPT stays the constant.
+// An empty bank (or an anchor that moved) returns the prompt untouched.
+const BANK_FACTS_ANCHOR = '\nThese facts answer general questions.';
+function withBankFacts(prompt, bankFacts) {
+  const section = bankFacts && bankFacts.length ? require('../company-facts-bank').renderBankFactsSection(bankFacts) : '';
+  const at = section ? prompt.indexOf(BANK_FACTS_ANCHOR) : -1;
+  return at < 0 ? prompt : `${prompt.slice(0, at)}\n${section}${prompt.slice(at)}`;
+}
+
+// The version stamp for a call's bank lines: null for an empty bank.
+const bankFactsStamp = (bankFacts) => require('../company-facts-bank').bankVersionHash(bankFacts) || null;
+
+// `bankFacts`: the approved bank snapshot this call froze (the relay passes it; the GPT-Live session builder does not).
+function buildBasePrompt(contextEnabled, language = null, { officeOpen = null, bankFacts = null } = {}) {
   // Spanish session (GATE_VOICE_SPANISH_MENU — the caller pressed 2): the
   // language addendum is appended LAST so it governs everything above it.
   // No/English language ⇒ byte-identical to before.
@@ -1004,8 +1018,9 @@ function buildBasePrompt(contextEnabled, language = null, { officeOpen = null } 
   const { isTransferGateOn } = require('./relay-transfer');
   const transferSuffix = isTransferGateOn() ? '\n' + transferPromptAddendum(officeOpen) : '';
   const langSuffix = isSpanish(language) ? '\n' + LANGUAGE_ADDENDUM_ES : '';
-  if (!contextEnabled) return SYSTEM_PROMPT + transferSuffix + langSuffix;
-  const base = SYSTEM_PROMPT.replace(PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT) + '\n' + contextPromptAddendum();
+  const system = withBankFacts(SYSTEM_PROMPT, bankFacts);
+  if (!contextEnabled) return system + transferSuffix + langSuffix;
+  const base = system.replace(PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT) + '\n' + contextPromptAddendum();
   const { isBookingEnabled } = require('./relay-booking');
   return (isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base) + transferSuffix + langSuffix;
 }
@@ -1271,6 +1286,7 @@ class RelayConversation {
     // prompt (see _runLoop) so a bake-off or an audit can tell two calls'
     // prompts apart without storing them.
     this._promptSha = null;
+    this._bankFactsSha = null;
     this._contextSnapshotSha = null;
     this._toolSchemaSha = null;
 
@@ -1769,6 +1785,7 @@ class RelayConversation {
       model_switch: this._modelSwitch || null,
       effort: this._stampedEffort,
       prompt_sha: this._promptSha,
+      bank_facts_sha: this._bankFactsSha,
       context_snapshot_sha: this._contextSnapshotSha,
       tool_schema_sha: this._toolSchemaSha,
       policy_pack_sha: null,
@@ -3845,7 +3862,9 @@ class RelayConversation {
       // its prompt rules for the whole call (the prompt and tool list are
       // frozen per session — cache-prefix stability).
       const officeOpen = toolCtx.officeOpenNow();
-      const bareBase = buildBasePrompt(contextEnabled, this.language, { officeOpen }) + (this._practiceLine ? `\n\n${PRACTICE_LINE_ADDENDUM}` : '');
+      // The approved bank lines at freeze time: this call keeps them to its end (an approve or retire reaches the NEXT call).
+      const bankFacts = require('../company-facts-bank').getApprovedBankFacts();
+      const bareBase = buildBasePrompt(contextEnabled, this.language, { officeOpen, bankFacts }) + (this._practiceLine ? `\n\n${PRACTICE_LINE_ADDENDUM}` : '');
       const basePrompt = bareBase + (callerBlock ? `\n\n${callerBlock}` : '');
       const profileText = getVoiceProfileTextNonBlocking();
       this._systemBlocks = [{
@@ -3860,6 +3879,7 @@ class RelayConversation {
       // on the same prompt hash alike), the caller block on its own, and the
       // tool schemas the model saw. Hashes only — nothing is stored twice.
       this._promptSha = sha256(composeSystemPrompt(bareBase, profileText));
+      this._bankFactsSha = bankFactsStamp(bankFacts);
       this._contextSnapshotSha = this._snapshotSha(callerBlock);
       this._toolSchemaSha = sha256(JSON.stringify(this._tools));
     }

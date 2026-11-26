@@ -809,11 +809,13 @@ describe("Company facts tab", () => {
     await waitFor(() => expect(reads.length).toBeGreaterThan(0));
   });
 
-  it("labels the preview as not read by the agents yet", async () => {
+  it("labels the preview as read by voice calls and email drafts, not texting", async () => {
     serve({ owner: true, pages: { approved: { first: { facts: [fact({ status: "approved", approved_at: "2026-11-25T16:00:00Z" })], nextCursor: null } } } });
     mount();
     fireEvent.click(screen.getByRole("button", { name: "Approved" }));
-    expect(await screen.findByText("Preview — agents do not read these facts yet")).toBeInTheDocument();
+    expect(await screen.findByText("Preview — voice calls and email drafts use these facts")).toBeInTheDocument();
+    expect(screen.getByText(/Texting does not use them yet/)).toBeInTheDocument();
+    expect(screen.queryByText(/agents do not read/)).not.toBeInTheDocument();
     expect(screen.queryByText(/as the agents get them now/)).not.toBeInTheDocument();
   });
 });
