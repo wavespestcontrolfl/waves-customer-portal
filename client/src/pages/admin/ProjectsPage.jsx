@@ -3949,14 +3949,16 @@ async function fetchSendWithInvoicePreview({ projectId, holdReport, overrideReas
   const pv = await call(dryRun);
   // No draft is prepared for a held send that cannot email its invoice: the caller stops on the refusal.
   if (!(holdReport && pv.invoice && !pv.invoice.id) || pv.email_routing?.recipient_refused) return pv;
-  await call({ prepare_invoice: true });
+  // The hold intent rides along: the server checks the hold before it makes the draft.
+  await call({ prepare_invoice: true, ...holdBody(holdReport) });
   return call(dryRun);
 }
 
 function sendWithInvoiceNotice(d) {
   const number = d.invoice?.invoice_number || "";
   const summary = deliverySummary(d.channels);
-  if (d.channels?.email?.uncertain) {
+  // Only a hold the server confirmed: a plain send whose email outcome is unknown already sent its link by text.
+  if (d.channels?.email?.uncertain && d.report_held) {
     return `Invoice ${number}: the invoice email outcome is unknown. Check that the customer got it before resending. The report stays held until the invoice is paid. ${summary}`.trim();
   }
   return d.report_held

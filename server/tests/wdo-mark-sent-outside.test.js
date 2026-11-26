@@ -212,6 +212,8 @@ describe('POST /:id/mark-sent-outside', () => {
     const { write } = wire({ current: baseProject({ report_hold_status: null }) });
     await withServer(async (baseUrl) => { expect((await post(baseUrl, { note: 'x' })).status).toBe(200); });
     expect(write.whereRaw).toHaveBeenCalledWith("coalesce(report_hold_status, '') <> 'releasing'");
+    // ...and not while a manual Send report of a held report holds a live delivery claim
+    expect(write.whereRaw).toHaveBeenCalledWith(expect.stringMatching(/report_hold_status, ''\) = 'held' AND delivery_status IS NOT DISTINCT FROM 'sending' AND updated_at > now\(\) - interval '10 minutes'/));
     expect(write.update.mock.calls[0][0]).toHaveProperty('report_hold_status');
   });
 

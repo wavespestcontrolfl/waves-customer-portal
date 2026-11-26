@@ -88,7 +88,8 @@ describe("WDO report hold on the project page", () => {
     await waitFor(() => expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/send-with-invoice")).length).toBe(4));
     const bodies = fetch.mock.calls.filter(([url]) => String(url).endsWith("/send-with-invoice")).map(([, opts]) => JSON.parse(opts.body));
     expect(bodies.map((b) => (b.prepare_invoice ? "prepare" : b.dry_run ? "dry_run" : "send"))).toEqual(["dry_run", "prepare", "dry_run", "send"]);
-    expect(bodies[1]).not.toHaveProperty("hold_report_until_paid");
+    // the hold intent rides on the preparation, so the server checks the hold before it makes the draft
+    expect(bodies[1]).toEqual(expect.objectContaining({ prepare_invoice: true, hold_report_until_paid: true }));
     expect(bodies[3]).toEqual(expect.objectContaining({ invoice_id: "inv-1", hold_report_until_paid: true, expected_billing_fingerprint: "0123456789abcdef" }));
   });
 
@@ -97,6 +98,14 @@ describe("WDO report hold on the project page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Invoice now, report after payment" }));
     fireEvent.click(await screen.findByRole("button", { name: "Send" }));
     expect(await screen.findByText(/invoice email outcome is unknown\. Check that the customer got it before resending\. The report stays held/)).toBeInTheDocument();
+  });
+
+  it("a plain send whose email outcome is unknown never says the report is held", async () => {
+    stubProject({ ...baseProject, report_payment_hold_available: true }, { emailOutcome: { ok: false, uncertain: true, error: "timeout" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Send report + invoice" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Send" }));
+    expect(await screen.findByText(/Report \+ invoice WPC-1 delivered/)).toBeInTheDocument();
+    expect(screen.queryByText(/report stays held/)).not.toBeInTheDocument();
   });
 
   it("a held report on a closed project still offers Send report now, and no other send button", async () => {

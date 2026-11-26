@@ -4847,7 +4847,12 @@ router.post('/:id/mark-sent-outside', requireAdmin, async (req, res, next) => {
         .whereNotNull('wdo_signature')
         .whereNull('sent_at')
         .whereNull('sent_outside_portal_at');
-      if (hasHoldColumns) query.whereRaw("coalesce(report_hold_status, '') <> 'releasing'");
+      // Not while a held report is being sent: the paid release, or a manual Send report holding a live claim
+      // (a claim past the 10-minute takeover window is a crashed send and does not block).
+      if (hasHoldColumns) {
+        query.whereRaw("coalesce(report_hold_status, '') <> 'releasing'")
+          .whereRaw("NOT (coalesce(report_hold_status, '') = 'held' AND delivery_status IS NOT DISTINCT FROM 'sending' AND updated_at > now() - interval '10 minutes')");
+      }
       const rows = await query
         .update({
           sent_outside_portal_at: db.fn.now(),
@@ -4898,10 +4903,11 @@ router.post('/:id/mark-sent-outside', requireAdmin, async (req, res, next) => {
 // from the inline version these replaced.
 // ---------------------------------------------------------------------------
 
-// Prepare mode never arms a hold.
-function sendHoldFlag(body, prepareInvoice) {
-  return !prepareInvoice
-    && (body?.hold_report_until_paid === true || body?.hold_report_until_paid === 'true');
+// The hold intent. Prepare mode carries it too, so the hold's checks (the preflight, and the payer check where a
+// draft would be created) run before a draft is made; preparation still never arms a hold (it answers before any
+// stamp) and sends nothing.
+function sendHoldFlag(body) {
+  return body?.hold_report_until_paid === true || body?.hold_report_until_paid === 'true';
 }
 
 // Answers the request and returns true when the hold cannot be armed (no invoice needed yet).
@@ -5060,6 +5066,12 @@ async function armReportHold({ hold, project, invoice, customer, expectedFingerp
     const lockedCustomer = await trx('customers').where({ id: ownerId }).forUpdate().first('id', 'account_credits');
     const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
     assertHoldArmable({ locked, lockedInvoice, intendedCustomerIds: [project.customer_id, invoice.customer_id] });
+    // Known before any refusal below: a refused resend of an existing hold must leave that hold in place.
+    hold.wasHeld = locked.report_hold_status === 'held';
+    // The no-charge rule on the LOCKED project: a fee changed to $0 since this send read the project bills nothing.
+    if (resolveWdoInspectionFee(parseFindings(locked)) === 0) {
+      throw holdRefusal(422, 'wdo_no_charge', 'This WDO inspection is now recorded as no charge ($0 inspection fee). Nothing was sent. Use "Send report".');
+    }
     // The email, the PDF and the pay link all show the invoice as it is NOW: if it changed since this send read it,
     // nothing is sent (a stale amount in the email beside a different amount on the pay link).
     // ...and the locked invoice is the one the operator confirmed: a held send must carry the preview's fingerprint
@@ -5070,12 +5082,12 @@ async function armReportHold({ hold, project, invoice, customer, expectedFingerp
     }
     const notReleasable = await holdReleasabilityRefusal(locked, customer);
     if (notReleasable) throw holdRefusal(notReleasable.status, notReleasable.code, notReleasable.error);
-    if (locked.report_hold_status !== 'held' && (!lockedCustomer || Number(lockedCustomer.account_credits) > 0)) {
+    // On every held send, a first send and a resend alike: credit issued since the preflight would settle the bill.
+    if (!lockedCustomer || Number(lockedCustomer.account_credits) > 0) {
       throw holdRefusal(409, 'hold_has_credit', 'This customer has account credit, which would settle the invoice before the report is held. Use Send report + invoice.');
     }
     await assertHoldMintable(locked, true, { database: trx });
     await require('../services/project-report-hold').assertNoPaymentStarted(lockedInvoice, trx);
-    hold.wasHeld = locked.report_hold_status === 'held';
     const written = await trx('projects')
       .where({ id: project.id, delivery_claim_token: deliveryClaimToken })
       .whereRaw(REPORT_UNSHARED_SQL)
@@ -5484,12 +5496,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     const prepareInvoice = req.body?.prepare_invoice === true || req.body?.prepare_invoice === 'true';
 
     // Report hold (GATE_WDO_REPORT_HOLD): send the invoice and pay link only, and send the report
-    // by itself once the invoice is paid. Prepare mode never arms a hold.
-    const holdRequested = sendHoldFlag(req.body, prepareInvoice);
+    // by itself once the invoice is paid. Prepare mode checks the hold but never arms it.
+    const holdRequested = sendHoldFlag(req.body);
     if (await holdRequestRefused(res, project, customer, holdRequested)) return;
     // A held send bills an invoice that already exists (the drawer prepares the draft first and the operator confirms ITS
     // amount): it never creates the invoice itself, so the amount confirmed is the amount sent.
-    if (holdRequested && !dryRun && !req.body?.invoice_id) {
+    if (holdRequested && !dryRun && !prepareInvoice && !req.body?.invoice_id) {
       return res.status(422).json({ error: 'A held send needs the invoice the operator confirmed. Prepare the invoice first.', code: 'hold_invoice_required' });
     }
 

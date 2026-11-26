@@ -1294,6 +1294,57 @@ describe('audit fixes', () => {
       expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(false);
     });
 
+    test('credit issued before a RESEND of an existing hold refuses the resend and keeps the hold', async () => {
+      const { updates } = mockTables({
+        project: wdoProject({ report_hold_status: 'held', invoice_id: 'inv-1' }),
+        customer: { ...CUSTOMER, account_credits: 12.5 },
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('hold_has_credit');
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      // the earlier hold is not taken back
+      expect((updates.projects || []).some((u) => u.report_hold_status === null)).toBe(false);
+    });
+
+    test('an inspection fee changed to $0 after the send read the project refuses on the locked row', async () => {
+      const { updates } = mockTables();
+      const base = db.getMockImplementation();
+      let projectReads = 0;
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'projects') {
+          const original = c.first;
+          c.forUpdate = jest.fn(() => {
+            c.first = jest.fn(async () => wdoProject({ findings: { ...FINDINGS, inspection_fee: '0' } }));
+            return c;
+          });
+          c.first = jest.fn(async (...a) => { projectReads += 1; return original(...a); });
+        }
+        return c;
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        expect((await res.json()).code).toBe('wdo_no_charge');
+      });
+      expect(projectReads).toBeGreaterThan(0);
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(false);
+    });
+
+    test('preparing the draft with the hold intent runs the hold preflight first (a refused hold makes no draft)', async () => {
+      mockTables({ project: wdoProject({ report_token: 'already-shared' }) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), { prepare_invoice: true, hold_report_until_paid: true });
+        expect(res.status).toBe(422);
+        expect((await res.json()).code).toBe('hold_after_send');
+      });
+      const InvoiceService = require('../services/invoice');
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+    });
+
     test('an unreadable balance counts as credit (fail closed) in the preflight', async () => {
       const { getBalance } = require('../services/customer-credit');
       mockTables();
