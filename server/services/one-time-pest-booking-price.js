@@ -24,12 +24,27 @@ function fallback(customerId, reason) {
   return null;
 }
 
+// Is this saved property the home the customer row describes? Street (with unit), city and ZIP must agree, both sides
+// must have a street; anything uncertain is "no", the safe direction (the property's own facts, or no price).
+const fold = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+function sameHome(property, customer) {
+  const { streetKey, normalizeZip } = require('./customer-properties');
+  const propertyStreet = streetKey(property.address_line1);
+  const customerStreet = streetKey(customer.address_line1);
+  if (!propertyStreet || !customerStreet || propertyStreet !== customerStreet) return false;
+  if (fold(property.address_line2) !== fold(customer.address_line2)) return false;
+  if (!fold(property.city) || !fold(customer.city) || fold(property.city) !== fold(customer.city)) return false;
+  const propertyZip = normalizeZip(property.zip);
+  const customerZip = normalizeZip(customer.zip);
+  return !!propertyZip && !!customerZip && propertyZip === customerZip;
+}
+
 // The customer as the property resolver reads one, for the property the visit is booked at, and whether the stored records
-// call that place commercial. No property named: the customer's primary property (its row is read too). A named property
-// that is the primary: the customer row as it is. Any other saved property: that property's own address and measurements,
-// and none of the primary's (a second home never gets the primary home's facts). Commercial = the account tier, the
-// property's occupancy or type, or (for the primary) the customer's own property type. null when the named property is not
-// one of the customer's active properties.
+// call that place commercial. No property named: the customer's primary property (its row is read too). The customer row's
+// own measurements (lot, type, ...) are used ONLY when the property's address is the customer row's address; any other
+// property, a second home or a primary whose row names a different address, is read with that row's own address and
+// measurements and none of the customer row's. Commercial = the account tier, the property's occupancy or type, or (for the
+// primary) the customer's own property type. null when the named property is not one of the customer's active properties.
 async function customerAtBookingProperty(customer, propertyId, conn) {
   const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
   const rows = conn('customer_properties');
@@ -42,7 +57,7 @@ async function customerAtBookingProperty(customer, propertyId, conn) {
     || property?.occupancy_type === 'commercial'
     || normalizePropertyType(property?.property_type) === 'commercial'
     || (isPrimary && normalizePropertyType(customer.property_type) === 'commercial');
-  if (isPrimary) return { customer, otherProperty: false, commercial };
+  if (!property || sameHome(property, customer)) return { customer, otherProperty: false, commercial };
   return {
     otherProperty: true,
     commercial,
@@ -63,11 +78,20 @@ async function customerAtBookingProperty(customer, propertyId, conn) {
   };
 }
 
-// False when a due refresh of the pricing settings failed (syncConstantsFromDB answers false): the engine would then
-// quote stale or built-in rates.
-async function settingsAreCurrent(pricingEngine) {
-  if (!(pricingEngine.needsSync && pricingEngine.needsSync())) return true;
-  return (await pricingEngine.syncConstantsFromDB(db)) !== false;
+// The one-time pest row of pricing_config must carry its floor and multiplier as numbers: the engine otherwise quotes the
+// in-code defaults for them.
+async function oneTimePestRowIsStored() {
+  const row = await db('pricing_config').where({ config_key: 'onetime_pest' }).first('data');
+  const data = typeof row?.data === 'string' ? JSON.parse(row.data) : row?.data;
+  return Number(data?.floor) > 0 && Number(data?.multiplier) > 0;
+}
+
+// The one-time pest line's price when the engine quotes it cleanly (a number above 0, no quote-required or hand-check mark).
+function cleanOneTimePestPrice(estimate) {
+  const line = (estimate?.lineItems || []).find((l) => l?.service === 'one_time_pest');
+  const price = Number(line?.price);
+  if (!line || line.quoteRequired || line.requiresManualReview || !Number.isFinite(price) || price <= 0) return null;
+  return Math.round(price * 100) / 100;
 }
 
 // The engine's own one-time pest line for the property the visit is booked at (the customer's own property when no
@@ -86,18 +110,19 @@ async function oneTimePestBookingPrice(customerId, { conn = db, propertyId = nul
     const turfProfile = at.otherProperty ? null : await loadTurfProfile(conn, customer.id).catch(() => null);
     const context = await resolvePropertyContext({ customer, turfProfile, propertyLookup: strictCacheOnlyPropertyLookup });
     if (!context.hasHomeSqFt) return fallback(customer.id, 'no home square footage on file');
-    if (!(await settingsAreCurrent(pricingEngine))) return fallback(customer.id, 'the pricing settings could not be refreshed');
-    const estimate = pricingEngine.generateEstimate({
+    if (!(await oneTimePestRowIsStored())) return fallback(customer.id, 'the one-time pest settings row (floor and multiplier) is not in the database');
+    // The engine prices from this process's constants. The bridge reloads the committed rows for this call and answers
+    // only when the standard pest price rows (base and floor, footprint ladder, features, property types, tiers) were
+    // all carried by the rows; the price is computed in the same step.
+    const priced = await require('./pricing-engine/db-bridge').withSettingsForUnattendedPrice(() => pricingEngine.generateEstimate({
       ...context.propertyInput,
       recurringCustomer: false,
       services: { oneTimePest: { urgency: 'NONE', afterHours: false } },
-    });
-    const line = (estimate?.lineItems || []).find((l) => l?.service === 'one_time_pest');
-    const price = Number(line?.price);
-    if (!line || line.quoteRequired || line.requiresManualReview || !Number.isFinite(price) || price <= 0) {
-      return fallback(customer.id, 'the engine did not return a clean one-time pest price');
-    }
-    return Math.round(price * 100) / 100;
+    }));
+    if (!priced.priced) return fallback(customer.id, `the pricing settings did not come from the database (${priced.reason})`);
+    const estimate = priced.value;
+    const price = cleanOneTimePestPrice(estimate);
+    return price === null ? fallback(customer.id, 'the engine did not return a clean one-time pest price') : price;
   } catch (err) {
     return fallback(customerId, `price lookup failed (${err.message})`);
   }

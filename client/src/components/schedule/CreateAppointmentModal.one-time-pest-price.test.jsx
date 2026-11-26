@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * One-time pest hint on the Create Appointment modal (owner ruling 2026-11-26 "say the one time price when asked").
- * Under a one-time pest line the modal shows "System price for this home: $N", the server's price for the property the
+ * Under a one-time pest line the modal shows "System one-time price for this home: $N (list price)", the server's price for the property the
  * visit is booked at, so staff can quote it. READ ONLY: it never changes a line price, the total, the preview or the
  * booking. The answer belongs to one customer, property and linked estimate; a change of any of them, or a cleared
  * customer, discards it, and a late answer for an older request is ignored.
@@ -25,6 +25,7 @@ const json = (body, { ok = true, status = 200 } = {}) => ({ ok, status, json: vi
 const CUSTOMER = { id: 'customer-a', firstName: 'Ada', lastName: 'Lovelace' };
 const OTHER_CUSTOMER = { id: 'customer-b', firstName: 'Bob', lastName: 'Barker' };
 const PEST_ONE_TIME = { id: 'svc-otp', service_key: 'one_time_pest_control', name: 'One-Time Pest Control Service', billing_type: 'one_time', base_price: 250, default_duration_minutes: 45 };
+const SEEDED_CLEANOUT = { id: 'svc-pic', service_key: 'pest_initial_cleanout', name: 'Pest Initial Cleanout Service', billing_type: 'one_time', base_price: 199, default_duration_minutes: 45 };
 const GENERAL = { id: 'svc-gen', service_key: 'general_one_time', name: 'General Treatment Service', billing_type: 'one_time', base_price: 50, default_duration_minutes: 30 };
 
 function futureDate(days = 30) {
@@ -34,7 +35,7 @@ function futureDate(days = 30) {
 }
 
 // `quote(customerId)` answers the hint's request; it may return a promise to hold the answer back.
-function installFetch({ quote }) {
+function installFetch({ quote, properties = () => json({ properties: [] }) }) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.includes('/admin/schedule/one-time-pest-quote?')) return Promise.resolve(quote(new URL(url, 'http://test').searchParams.get('customerId')));
@@ -47,9 +48,9 @@ function installFetch({ quote }) {
     if (url.includes('/admin/triage?')) return Promise.resolve(json({ items: [] }));
     if (url.includes('/admin/services?')) {
       const q = (new URL(url, 'http://test').searchParams.get('search') || '').toLowerCase();
-      return Promise.resolve(json({ services: [PEST_ONE_TIME, GENERAL].filter((c) => c.name.toLowerCase().includes(q)) }));
+      return Promise.resolve(json({ services: [PEST_ONE_TIME, SEEDED_CLEANOUT, GENERAL].filter((c) => c.name.toLowerCase().includes(q)) }));
     }
-    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
+    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(properties());
     if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
@@ -110,9 +111,36 @@ describe('the one-time pest hint', () => {
     expect(quoteCalls(fetcher)).toEqual([]);
     await addService('One-Time Pest', /One-Time Pest Control Service/i);
     await waitFor(() => expect(hint()).not.toBeNull());
-    expect(hint().textContent).toBe('System price for this home: $238');
+    expect(hint().textContent).toBe('System one-time price for this home: $238 (list price)');
     expect(quoteCalls(fetcher)).toHaveLength(1);
     expect(quoteCalls(fetcher)[0]).toContain('/admin/schedule/one-time-pest-quote?customerId=customer-a');
+  });
+
+  it('recognizes both catalog keys that map to the one-time pest engine line, including the seeded pest_initial_cleanout', async () => {
+    const fetcher = installFetch({ quote: () => json({ price: 238 }) });
+    mount();
+    await addService('Initial Cleanout', /Pest Initial Cleanout Service/i);
+    await waitFor(() => expect(hint()?.textContent).toBe('System one-time price for this home: $238 (list price)'));
+    expect(quoteCalls(fetcher)).toHaveLength(1);
+    cleanup();
+    installFetch({ quote: () => json({ price: 238 }) });
+    mount();
+    await addService('One-Time Pest', /One-Time Pest Control Service/i);
+    await waitFor(() => expect(hint()).not.toBeNull());
+  });
+
+  it('is not asked while the property picker is still loading, then asks once it has settled', async () => {
+    let releaseProperties;
+    const heldProperties = new Promise((resolve) => { releaseProperties = resolve; });
+    const fetcher = installFetch({ quote: () => json({ price: 238 }), properties: () => heldProperties });
+    mount();
+    await addService('One-Time Pest', /One-Time Pest Control Service/i);
+    await settle(60);
+    expect(quoteCalls(fetcher)).toEqual([]);
+    expect(hint()).toBeNull();
+    await act(async () => { releaseProperties(json({ properties: [] })); await new Promise((r) => setTimeout(r, 40)); });
+    await waitFor(() => expect(hint()).not.toBeNull());
+    expect(quoteCalls(fetcher)).toHaveLength(1);
   });
 
   it('shows nothing when the server has no price or the request fails', async () => {
@@ -135,11 +163,11 @@ describe('the one-time pest hint', () => {
     installFetch({ quote: (id) => (id === 'customer-a' ? json({ price: 238 }) : heldB) });
     mount();
     await addService('One-Time Pest', /One-Time Pest Control Service/i);
-    await waitFor(() => expect(hint()?.textContent).toBe('System price for this home: $238'));
+    await waitFor(() => expect(hint()?.textContent).toBe('System one-time price for this home: $238 (list price)'));
     await switchToOtherCustomer();
     await waitFor(() => expect(hint()).toBeNull());
     await act(async () => { releaseB(json({ price: 199 })); await new Promise((r) => setTimeout(r, 30)); });
-    expect(hint().textContent).toBe('System price for this home: $199');
+    expect(hint().textContent).toBe('System one-time price for this home: $199 (list price)');
   });
 
   it('ignores a late answer for an older customer, and one that arrives after the customer was cleared', async () => {
@@ -154,7 +182,7 @@ describe('the one-time pest hint', () => {
     // Selecting another customer: A's late 238 stays out, B's own answer shows.
     fireEvent.change(screen.getByPlaceholderText('Search by name or phone...'), { target: { value: 'Bob' } });
     fireEvent.click(await screen.findByRole('button', { name: /Bob Barker/i }));
-    await waitFor(() => expect(hint()?.textContent).toBe('System price for this home: $199'));
+    await waitFor(() => expect(hint()?.textContent).toBe('System one-time price for this home: $199 (list price)'));
   });
 });
 

@@ -3180,6 +3180,28 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Which property does the one-time pest hint price? The create path's own rule (callBookingGuardPropertyId: the chosen
+// property, else the linked estimate's property_id, else none = the customer's primary), plus one more case it cannot
+// settle: a linked estimate with NO property_id that quotes an address. That address is the primary only when it
+// matches (estimateQuotesCustomerAddress); otherwise it must name exactly ONE of the customer's saved properties.
+// { unsure: true } when the home cannot be told: the hint then shows nothing, never a guess.
+async function oneTimePestHintProperty({ customerId, propertyId, estimateId }) {
+  const chosen = await callBookingGuardPropertyId(db, {
+    bookingProperty: propertyId ? { property_id: propertyId } : null,
+    linkedEstimateId: estimateId || null,
+  });
+  if (chosen || propertyId || !estimateId) return { propertyId: chosen || null };
+  const estimate = await db('estimates').where({ id: estimateId }).first('address', 'customer_id');
+  if (!estimate) return { unsure: true };
+  if (estimate.customer_id && String(estimate.customer_id) !== String(customerId)) return { unsure: true };
+  const { estimateQuotesCustomerAddress } = require('../services/estimate-property-linkage');
+  const customer = await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+  if (!customer || estimateQuotesCustomerAddress(estimate.address, customer)) return { propertyId: null };
+  const saved = await db('customer_properties').where({ customer_id: customerId, active: true }).select('id', 'address_line1', 'address_line2', 'city', 'zip');
+  const matches = (Array.isArray(saved) ? saved : []).filter((row) => estimateQuotesCustomerAddress(estimate.address, row));
+  return matches.length === 1 ? { propertyId: matches[0].id } : { unsure: true };
+}
+
 // GET /one-time-pest-quote?customerId=&propertyId=&estimateId= — the system's one-time pest price for the home the visit
 // is booked at, for the create-appointment modal's hint under a one-time pest line (owner 2026-11-26 "say the one time price
 // when asked"). READ ONLY: it changes no booking, line price or invoice, and answers { price: null } when the engine has no
@@ -3195,11 +3217,8 @@ router.get('/one-time-pest-quote', requireAdmin, async (req, res, next) => {
     const estimateId = req.query.estimateId == null ? '' : String(req.query.estimateId).trim();
     if (propertyId && !uuid.test(propertyId)) throw httpError(400, 'propertyId must be a valid property id');
     if (estimateId && !uuid.test(estimateId)) throw httpError(400, 'estimateId must be a valid estimate id');
-    const bookingPropertyId = await callBookingGuardPropertyId(db, {
-      bookingProperty: propertyId ? { property_id: propertyId } : null,
-      linkedEstimateId: estimateId || null,
-    });
-    res.json({ price: await oneTimePestBookingPrice(customerId, { propertyId: bookingPropertyId || null }) });
+    const home = await oneTimePestHintProperty({ customerId, propertyId, estimateId });
+    res.json({ price: home.unsure ? null : await oneTimePestBookingPrice(customerId, { propertyId: home.propertyId || null }) });
   } catch (err) { next(err); }
 });
 

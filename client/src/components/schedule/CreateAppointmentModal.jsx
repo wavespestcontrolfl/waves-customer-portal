@@ -3039,9 +3039,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // for the home this visit is booked at, so staff can quote it. READ ONLY: it never changes a line price, the total, the
   // preview or the booking; staff type the number if they quote it. The answer belongs to one customer, property and linked
   // estimate: a change of any of them, or a cleared customer, discards it, and a late answer for an older request is ignored.
-  const isOneTimePestHintLine = (svc) => (svc?.service_key ?? svc?.serviceKey) === 'one_time_pest_control';
+  // Both catalog keys the one-time pest engine line serves (services/public-services-menu.js PUBLIC_QUOTE_REQUESTS).
+  const isOneTimePestHintLine = (svc) => ['one_time_pest_control', 'pest_initial_cleanout'].includes(svc?.service_key ?? svc?.serviceKey);
   const hasOneTimePestLine = services.some(isOneTimePestHintLine);
-  const pestHintKey = selectedCustomer?.id && hasOneTimePestLine
+  // Asked only once the property picker has settled (as the rodent notice does): until then the booking property is not known.
+  const pestHintKey = selectedCustomer?.id && hasOneTimePestLine && ['ready', 'hidden', 'error'].includes(bookingPropertyState)
     ? [selectedCustomer.id, propertyPickerActive && selectedPropertyId ? selectedPropertyId : '', linkedEstimate?.id || ''].join('|')
     : '';
   const [pestHint, setPestHint] = useState(null);
@@ -3065,7 +3067,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return () => { current = false; };
   }, [pestHintKey]);
   const pestHintText = pestHint?.key === pestHintKey && pestHintKey
-    ? `System price for this home: $${Number.isInteger(pestHint.price) ? pestHint.price : pestHint.price.toFixed(2)}`
+    ? `System one-time price for this home: $${Number.isInteger(pestHint.price) ? pestHint.price : pestHint.price.toFixed(2)} (list price)`
     : '';
 
   // Rodent trapping notice (rodentTrappingNoticeText). The address is the
