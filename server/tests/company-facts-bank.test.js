@@ -38,10 +38,23 @@ describe('hard blocks', () => {
     ['another currency symbol', 'The initial application is \u20AC50.', 'dollar_amount'],
     ['a percent', 'We take 10% off for members.', 'percent'],
     ['a product name', 'We apply Zorbex Pro 4L along the foundation.', 'product_brand'],
-    ['a product first word', 'We apply Zorbex along the foundation.', 'product_brand'],
+    ['a distinctive brand alias', 'We apply Bifen along the foundation.', 'product_brand'],
     ['a phone number', 'Call the office at 941-555-0100.', 'phone_number'],
     ['an email', 'Write to someone@example.test for details.', 'email_address'],
     ['a link', 'See wavespestcontrol.com for details.', 'link'],
+    ['a bare host outside any short suffix list', 'You can book at example.services.', 'link'],
+    ['an uncommon suffix', 'Visit studio.photography to book.', 'link'],
+    ['a host with a path', 'Go to shop.co.uk/book now.', 'link'],
+    ['a suffix of 24 letters', 'Go to example.abcdefghijklmnopqrstuvwx today.', 'link'],
+    ['a www host', 'Go to www.example today.', 'link'],
+    ['pesticide safety wording', 'We use safe pesticides at every visit.', 'safety_claim'],
+    ['safely', 'Our team works safely around your home.', 'safety_claim'],
+    ['non-toxic', 'Our products are non-toxic.', 'safety_claim'],
+    ['harmless', 'The treatment is harmless to pets.', 'safety_claim'],
+    ['all natural', 'We use all natural treatments.', 'safety_claim'],
+    ['no chemicals', 'Our visits use no chemicals indoors.', 'safety_claim'],
+    ['chemical free', 'Our visits are chemical-free.', 'safety_claim'],
+    ['pet friendly', 'We offer a pet friendly plan.', 'safety_claim'],
     ['a web link', 'Open https://example.test/page to book.', 'link'],
     ['a handle', 'Follow @wavespest for tips.', 'handle'],
     ['a line break', 'We service Palmetto.\nWe service Parrish.', 'line_break'],
@@ -51,6 +64,32 @@ describe('hard blocks', () => {
     ['a re-entry time as a standing claim', 'You can re-enter the lawn after 30 minutes.', 'banned_copy'],
   ])('refuses %s', (_label, text, code) => {
     expect(blocksOf(text)).toContain(code);
+  });
+
+  test('ordinary words that are the first word of a catalog name are not product mentions', () => {
+    const productNames = ['Advance Termite Bait Station', 'Demand CS', 'Drive XLR8 Herbicide Crabgrass Killer', 'Bifen I/T'];
+    expect(blocksOf('You can book in advance.', { productNames })).toEqual([]);
+    expect(blocksOf('We drive to every town on demand.', { productNames })).toEqual([]);
+    expect(blocksOf('We apply Bifen along the foundation.', { productNames })).toContain('product_brand');
+    expect(blocksOf('We set an Advance Termite Bait Station at the corner.', { productNames })).toContain('product_brand');
+    expect(blocksOf('You can book in advance.', { productNames: ['Advance'] })).toContain('product_brand'); // a catalog name that IS that word, whole
+  });
+
+  test.each([
+    'We open at 8 a.m. to start the first visit.',
+    'Examples, e.g. ants and roaches, are covered.',
+    'That is, i.e. every visit, included.',
+    'Most U.S. customers book online.',
+    'The yard can be 3.5 acres or more.',
+    'We visit at 5 p.m. on Tuesdays.',
+    'Thanks.Then we come out.',
+    'We service Parrish.',
+  ])('not a link: %s', (text) => {
+    expect(blocksOf(text)).not.toContain('link');
+  });
+
+  test('"safety" alone is not a safety claim, and the label-safety wording passes the claim screen', () => {
+    expect(blocksOf('We follow every label and safety rule on each visit.')).not.toContain('safety_claim');
   });
 
   test('a link is not also reported as injection shaped', () => {
@@ -120,17 +159,20 @@ describe('approve is owner only in the service too', () => {
 
 describe('snapshot', () => {
   const approved = (n, text, over = {}) => ({
-    id: `00000000-0000-4000-8000-00000000000${n}`, topic: `Topic ${n}`, fact_text: text, text_sha256: sha256(text), approved_at: new Date(2026, 10, 25, 10, n), ...over,
+    id: `00000000-0000-4000-8000-00000000000${n}`, topic: `Topic ${n}`, fact_text: text, text_sha256: sha256(text), approved_at: new Date(2026, 10, 25, 10, n), approved_by: OWNER, ...over,
   });
   // A database handle that answers only the two reads the loader makes.
-  const fakeDb = (rows, products = []) => (table) => {
+  // `events` are the 'approved' history rows; by default each row has one by its own approver.
+  const fakeDb = (rows, products = [], events = rows.map((r) => ({ fact_id: r.id, actor_id: r.approved_by }))) => (table) => {
+    const answers = { products_catalog: products.map((name) => ({ name })), company_fact_bank_events: events };
     const chain = {
       where: () => chain, orderBy: () => chain, whereIn: () => chain, whereNotIn: () => chain,
-      select: () => Promise.resolve(table === 'products_catalog' ? products.map((name) => ({ name })) : rows),
+      select: () => Promise.resolve(answers[table] || rows),
     };
     return chain;
   };
   const T0 = 1_800_000_000_000;
+  const OWNER = 'bbbbbbbb-0000-4000-8000-000000000001';
 
   beforeEach(() => { Bank._test.resetSnapshot(); jest.clearAllMocks(); });
 
@@ -207,6 +249,29 @@ describe('snapshot', () => {
     expect(await Bank.refreshBankFacts({ dbi: failing, now: () => T0 + Bank.STALE_MS + 1 })).toEqual([]);
   });
 
+  test('a row without approval provenance is dropped: no approver, no approval time, no matching history event', async () => {
+    const rows = [
+      approved(1, CLEAN),
+      approved(2, 'We service Ruskin on Thursdays.', { approved_by: null }),
+      approved(3, 'We service Wimauma on Fridays.', { approved_at: null }),
+      approved(4, 'We service Gibsonton on Mondays.'),
+      approved(5, 'We service Riverview on Wednesdays.'),
+    ];
+    // Row 4 has no 'approved' event at all; row 5's event names another person.
+    const events = [
+      { fact_id: rows[0].id, actor_id: OWNER }, { fact_id: rows[1].id, actor_id: OWNER }, { fact_id: rows[2].id, actor_id: OWNER },
+      { fact_id: rows[4].id, actor_id: 'cccccccc-0000-4000-8000-000000000002' },
+    ];
+    const facts = await Bank._test.loadVerifiedFacts(fakeDb(rows, [], events));
+    expect(facts.map((f) => f.id)).toEqual([rows[0].id]);
+    expect(JSON.stringify(logger.error.mock.calls)).toContain('no_approval_record');
+  });
+
+  test('"We use safe pesticides" written around the service is dropped at load', async () => {
+    const rows = [approved(1, CLEAN), approved(2, 'We use safe pesticides at every visit.')];
+    expect((await Bank._test.loadVerifiedFacts(fakeDb(rows))).map((f) => f.id)).toEqual([rows[0].id]);
+  });
+
   test('keeps at most 20 lines', async () => {
     const rows = Array.from({ length: 22 }, (_, i) => approved(i % 10, `We service zone number ${String.fromCharCode(97 + i)} today.`, { id: `00000000-0000-4000-8000-0000000001${String(i).padStart(2, '0')}` }));
     const facts = await Bank._test.loadVerifiedFacts(fakeDb(rows));
@@ -218,7 +283,7 @@ describe('snapshot', () => {
     const gate = new Promise((resolve) => { release = resolve; });
     const slow = (table) => {
       const real = fakeDb([approved(1, CLEAN)])(table);
-      if (table === 'company_facts') real.select = () => gate.then(() => [approved(1, CLEAN)]);
+      if (table === 'company_fact_bank') real.select = () => gate.then(() => [approved(1, CLEAN)]);
       return real;
     };
     const older = Bank.refreshBankFacts({ dbi: slow, now: () => T0 });
@@ -234,7 +299,7 @@ describe('snapshot', () => {
     const gate = new Promise((resolve) => { release = resolve; });
     const slow = (table) => {
       const real = fakeDb([approved(1, CLEAN)])(table);
-      if (table === 'company_facts') real.select = () => gate.then(() => [approved(1, CLEAN)]);
+      if (table === 'company_fact_bank') real.select = () => gate.then(() => [approved(1, CLEAN)]);
       return real;
     };
     const read = Bank.refreshBankFacts({ dbi: slow, now: () => T0 });
@@ -251,7 +316,7 @@ describe('snapshot', () => {
     // The first read (started before the retire) is held open; the old row comes back when it is released.
     const slow = (table) => {
       const real = fakeDb([approved(1, CLEAN)])(table);
-      if (table === 'company_facts') real.select = () => gate.then(() => [approved(1, CLEAN)]);
+      if (table === 'company_fact_bank') real.select = () => gate.then(() => [approved(1, CLEAN)]);
       return real;
     };
     const inflight = Bank.refreshBankFacts({ dbi: slow, now: () => T0 });

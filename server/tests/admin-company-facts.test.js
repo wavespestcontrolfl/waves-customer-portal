@@ -128,7 +128,7 @@ describe('errors', () => {
   });
 
   test('an unexpected failure is a 500 and the log carries a code only', async () => {
-    mockBank.createDraft.mockRejectedValueOnce(Object.assign(new Error('insert into company_facts values (secret fact words)'), { code: '23502' }));
+    mockBank.createDraft.mockRejectedValueOnce(Object.assign(new Error('insert into company_fact_bank values (secret fact words)'), { code: '23502' }));
     const res = await call(url(), 'POST', { topic: 'a', factText: 'secret fact words' });
     expect(res.status).toBe(500);
     const logged = JSON.stringify(logger.error.mock.calls);

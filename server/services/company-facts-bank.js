@@ -64,13 +64,20 @@ const normalise = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9]+
 
 const PHONE_RE = /(?:\+?1[-.\s]?)?\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|\b\d{3}[-.\s]\d{4}\b/;
 const EMAIL_RE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
-const LINK_RE = /\bhttps?:|\bwww\.|\b[a-z0-9-]+\.(?:com|net|org|io|co|us|gov|edu|info|biz|app|ly|me)\b/i;
+// https: and www. forms, or any host name: dot-separated labels ending in a 2 to 24 letter suffix (all lower or all upper case, so
+// "ok.Then" is not one), not part of a longer word or an email. "e.g.", "a.m.", "U.S." and "3.5" have no such suffix.
+const LINK_RE = /\bhttps?:|\bwww\.|(?<![\w@.-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+(?:[a-z]{2,24}|[A-Z]{2,24})(?![A-Za-z0-9-])/;
 const HANDLE_RE = /(?:^|\s)[@#]\w+/;
 // Any currency symbol, a USD code before or after a number ("USD 99", "99 USD", "usd99"), or an amount written in words.
 const MONEY_RE = /[$€£¥]|(?<![a-z])usd(?![a-z])|\b(?:dollars?|bucks|cents?)\b/i;
 const PERCENT_RE = /%|\bper ?cent\b/i;
 const LINE_BREAK_RE = /[\r\n\u2028\u2029]/;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+(?=[A-Z0-9"'(])/;
+
+// Pesticide safety and "natural" claims (AGENTS.md compliance language). The SMS screen (SMS_COMPLIANCE_CLAIM_RE) only reads "safe"
+// near a treatment word, so "We use safe pesticides" slipped past it; the bank refuses the claim anywhere, as the owner ruled
+// ("safe" is a hard block).
+const SAFETY_CLAIM_RE = /\bsafe(?:r|st|ly)?\b|\bnon[\s-]?toxic\b|\bharmless\b|\ball[\s-]?natural\b|\b(?:no|zero|without)\s+(?:harsh\s+|harmful\s+)?(?:chemicals?|toxins?|pesticides?)\b|\b(?:chemical|toxin|poison|pesticide)[\s-]?free\b|\b(?:eco|environmentally|child|kid|pet|family)[\s-]?friendly\b|\b(?:organic|green)\s+(?:pest|treatment|product|spray)/i;
 
 // [code, regex]: each is a hard block on its own.
 const SHAPE_BLOCKS = Object.freeze([
@@ -81,12 +88,17 @@ const SHAPE_BLOCKS = Object.freeze([
   ['email_address', EMAIL_RE],
   ['link', LINK_RE],
   ['handle', HANDLE_RE],
+  ['safety_claim', SAFETY_CLAIM_RE],
 ]);
 
-// A product's first word counts as a brand mention unless it is one of these generic words.
-const GENERIC_PRODUCT_WORDS = new Set([
-  'granular', 'insecticide', 'fertilizer', 'herbicide', 'fungicide', 'general', 'liquid', 'professional', 'concentrate', 'surfactant',
-]);
+// Distinctive coined brand words of the catalog's products. A brand is also refused by its full catalog name, but a name's first
+// word is NOT an alias by default: several are ordinary words ("Advance Termite Bait Station", "Demand CS", "Drive XLR8") and a line
+// like "book in advance" must pass. Add a word here when a new coined brand joins products_catalog.
+const BRAND_ALIASES = Object.freeze([
+  'acelepryn', 'advion', 'anuew', 'artavia', 'atticus', 'azatin', 'bifen', 'bora-care', 'contrac', 'cyzmic', 'dylox', 'espoma',
+  'fusilade', 'gentrol', 'gravex', 'hydretain', 'lesco', 'prodiamine', 'sedgehammer', 'sequestar', 'speedzone', 'suffoil', 'talpirid',
+  'talstar', 'tekko', 'termidor', 'tetrino', 'topchoice', 'trelona', 'tritek', 'velista', 'dithiopyr', 'fipronil', 'bifenthrin',
+].map((word) => word.replace(/-/g, ' ')));
 
 // The SMS prompt patch screens (sms-prompt-patch.js: the same words the other agent guards treat as risky), read on first
 // use so that merely loading this module (the scheduler boot hook) needs nothing else loaded.
@@ -107,13 +119,12 @@ function countSentences(text) {
   return String(text).split(SENTENCE_SPLIT_RE).filter((part) => part.trim()).length;
 }
 
+/** The full catalog names (4+ characters, normalised) plus the explicit brand aliases. */
 function productTokens(names) {
-  const tokens = new Set();
+  const tokens = new Set(BRAND_ALIASES);
   for (const name of names || []) {
     const full = normalise(name);
     if (full.length >= 4) tokens.add(full);
-    const first = full.split(' ')[0];
-    if (first.length >= 6 && !GENERIC_PRODUCT_WORDS.has(first)) tokens.add(first);
   }
   return tokens;
 }
@@ -204,7 +215,7 @@ async function readProductNames(dbi) {
 
 async function readBankKeys(dbi, { statuses, excludeIds }) {
   if (!statuses.length) return new Set();
-  const rows = await dbi('company_facts').whereIn('status', statuses).whereNotIn('id', excludeIds.filter(Boolean)).select('fact_text');
+  const rows = await dbi('company_fact_bank').whereIn('status', statuses).whereNotIn('id', excludeIds.filter(Boolean)).select('fact_text');
   return new Set(rows.map((r) => normalise(r.fact_text)));
 }
 
@@ -252,11 +263,11 @@ function cleanFields(input, { requireAll }) {
 const mapWriteError = (err) => (err && err.code === '23505' ? new FactError('DUPLICATE', 409) : err);
 
 async function addEvent(trx, factId, action, actor, detail = {}) {
-  await trx('company_fact_events').insert({ fact_id: factId, action, actor_id: actor.id || null, detail });
+  await trx('company_fact_bank_events').insert({ fact_id: factId, action, actor_id: actor.id || null, detail });
 }
 
 async function lockFact(trx, id) {
-  const row = await trx('company_facts').where({ id }).forUpdate().first();
+  const row = await trx('company_fact_bank').where({ id }).forUpdate().first();
   if (!row) throw new FactError('NOT_FOUND', 404);
   return row;
 }
@@ -264,7 +275,7 @@ async function lockFact(trx, id) {
 async function insertDraft(trx, values, actor, { action, detail }) {
   let row;
   try {
-    [row] = await trx('company_facts').insert(values).returning('*');
+    [row] = await trx('company_fact_bank').insert(values).returning('*');
   } catch (err) {
     throw mapWriteError(err);
   }
@@ -298,7 +309,7 @@ async function editDraftRow(trx, row, f, actor) {
   if ('sourceRef' in f) patch.source_ref = f.sourceRef;
   let updated;
   try {
-    [updated] = await trx('company_facts').where({ id: row.id }).update(patch).returning('*');
+    [updated] = await trx('company_fact_bank').where({ id: row.id }).update(patch).returning('*');
   } catch (err) {
     throw mapWriteError(err);
   }
@@ -308,7 +319,7 @@ async function editDraftRow(trx, row, f, actor) {
 
 async function editApprovedRow(trx, row, f, actor) {
   if (!('factText' in f) || f.factText === row.fact_text) throw new FactError('TEXT_UNCHANGED', 409);
-  const pending = await trx('company_facts').where({ supersedes_id: row.id, status: 'draft' }).first('id');
+  const pending = await trx('company_fact_bank').where({ supersedes_id: row.id, status: 'draft' }).first('id');
   if (pending) throw new FactError('EDIT_IN_PROGRESS', 409, { draftId: pending.id });
   const check = checkFactText(f.factText, await loadCheckContext(trx, { excludeIds: [row.id] }));
   return insertDraft(trx, {
@@ -358,7 +369,7 @@ async function discardDraft(id, actor, { dbi = db } = {}) {
   return dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status !== 'draft') throw new FactError('NOT_A_DRAFT', 409);
-    await trx('company_facts').where({ id }).del();
+    await trx('company_fact_bank').where({ id }).del();
     await addEvent(trx, id, 'discarded', actor, { text_sha256: row.text_sha256 });
     return { id, discarded: true };
   });
@@ -367,7 +378,7 @@ async function discardDraft(id, actor, { dbi = db } = {}) {
 /* ── Approve and retire ───────────────────────────────────────────────── */
 
 async function approvedTextsExcept(trx, excludeId) {
-  const q = trx('company_facts').where({ status: 'approved' }).orderBy('approved_at', 'asc').select('fact_text');
+  const q = trx('company_fact_bank').where({ status: 'approved' }).orderBy('approved_at', 'asc').select('fact_text');
   if (excludeId) q.whereNot('id', excludeId);
   return (await q).map((r) => ({ text: r.fact_text }));
 }
@@ -391,7 +402,7 @@ async function retireSuperseded(trx, row, actor) {
   const old = await lockFact(trx, row.supersedes_id);
   // The original was retired after this replacement was drafted: approving it would publish a stale replacement as a standalone line.
   if (old.status !== 'approved') throw new FactError('ORIGINAL_NOT_APPROVED', 409, { originalId: old.id });
-  await trx('company_facts').where({ id: old.id }).update({
+  await trx('company_fact_bank').where({ id: old.id }).update({
     status: 'retired', retired_by: actor.id || null, retired_at: trx.fn.now(), retire_reason: 'superseded', updated_at: trx.fn.now(),
   });
   await addEvent(trx, old.id, 'retired', actor, { reason: 'superseded', superseded_by: row.id });
@@ -404,7 +415,7 @@ async function retireSuperseded(trx, row, actor) {
 
 /** Owner only. Re-runs every hard block, retires the line this one supersedes, and audits, in ONE transaction. */
 async function approveFact(id, input, actor, { dbi = db } = {}) {
-  if (!actor || !actor.isOwner) throw new FactError('OWNER_ONLY', 403);
+  if (!actor || !actor.isOwner || !actor.id) throw new FactError('OWNER_ONLY', 403);
   const ownerWords = cleanLine(input && input.ownerWords, 500) || null;
   const acknowledgeWarnings = Boolean(input) && input.acknowledgeWarnings === true;
   const reviewedSha = input && typeof input.textSha256 === 'string' ? input.textSha256.trim().toLowerCase() : '';
@@ -419,7 +430,7 @@ async function approveFact(id, input, actor, { dbi = db } = {}) {
     if (row.text_sha256 !== reviewedSha) throw new FactError('STALE_TEXT', 409);
     const check = await approveChecks(trx, row, { acknowledgeWarnings });
     const supersededId = await retireSuperseded(trx, row, actor);
-    const [updated] = await trx('company_facts').where({ id }).update({
+    const [updated] = await trx('company_fact_bank').where({ id }).update({
       status: 'approved',
       approved_by: actor.id || null,
       approved_at: trx.fn.now(),
@@ -446,7 +457,7 @@ async function retireFact(id, input, actor, { dbi = db } = {}) {
   const retired = await dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status !== 'approved') throw new FactError('NOT_APPROVED', 409);
-    const [updated] = await trx('company_facts').where({ id }).update({
+    const [updated] = await trx('company_fact_bank').where({ id }).update({
       status: 'retired', retired_by: actor.id || null, retired_at: trx.fn.now(), retire_reason: reason, updated_at: trx.fn.now(),
     }).returning('*');
     await addEvent(trx, id, 'retired', actor, { reason });
@@ -464,20 +475,20 @@ async function retireFact(id, input, actor, { dbi = db } = {}) {
 
 async function listFacts({ status } = {}, { dbi = db } = {}) {
   if (status && status !== 'all' && !STATUSES.includes(status)) throw new FactError('INVALID_STATUS', 400);
-  const q = dbi('company_facts').orderBy('created_at', 'desc').limit(500).select('*');
+  const q = dbi('company_fact_bank').orderBy('created_at', 'desc').limit(500).select('*');
   if (status && status !== 'all') q.where({ status });
   return q;
 }
 
 async function getFact(id, { dbi = db } = {}) {
-  const row = await dbi('company_facts').where({ id }).first();
+  const row = await dbi('company_fact_bank').where({ id }).first();
   if (!row) throw new FactError('NOT_FOUND', 404);
   return row;
 }
 
 /** Every event of one fact, oldest first. Also answers for a discarded draft (events outlive the row). */
 async function factHistory(id, { dbi = db } = {}) {
-  return dbi('company_fact_events').where({ fact_id: id }).orderBy('at', 'asc').select('*');
+  return dbi('company_fact_bank_events').where({ fact_id: id }).orderBy('at', 'asc').select('*');
 }
 
 /* ── Snapshot ─────────────────────────────────────────────────────────── */
@@ -489,26 +500,41 @@ let appliedRead = 0; // the newest-started read whose result is in `state`
 let refreshTimer = null;
 let lastDropKey = '';
 
-function loadDropReason(check, shaOk, unacknowledged) {
-  if (!shaOk) return 'hash_mismatch';
-  if (check.blocks.length) return check.blocks.join('+');
-  return unacknowledged ? 'warnings_not_acknowledged' : 'bank_full';
+/** Who approved each row, from the history: Map of fact id -> Set of actor ids on an 'approved' event. */
+async function readApprovers(dbi, ids) {
+  const approvers = new Map();
+  if (!ids.length) return approvers;
+  const events = await dbi('company_fact_bank_events').where({ action: 'approved' }).whereIn('fact_id', ids).select('fact_id', 'actor_id');
+  for (const e of events) {
+    if (!approvers.has(e.fact_id)) approvers.set(e.fact_id, new Set());
+    approvers.get(e.fact_id).add(e.actor_id);
+  }
+  return approvers;
 }
 
-/** The approved rows that still pass every hard block, in approval order, at most MAX_ACTIVE_FACTS. */
+/** Why a stored approved row must not be served, or '' when it may be. Codes only. */
+function loadProblem(row, check, approvers) {
+  if (row.text_sha256 !== sha256(String(row.fact_text || '').trim())) return 'hash_mismatch';
+  // Provenance: a named approver, an approval time, and the approval event of that same person in the history.
+  if (!row.approved_by || !row.approved_at || !(approvers.get(row.id) || new Set()).has(row.approved_by)) return 'no_approval_record';
+  if (check.blocks.length) return check.blocks.join('+');
+  // Warning words need the owner's tick; a row without it (written around the service, or newly matched by a widened screen) is not served.
+  if (check.warnings.length > 0 && row.warnings_acknowledged !== true) return 'warnings_not_acknowledged';
+  return '';
+}
+
+/** The approved rows that still pass every hard block and carry their approval, in approval order, at most MAX_ACTIVE_FACTS. */
 async function loadVerifiedFacts(dbi) {
-  const rows = await dbi('company_facts').where({ status: 'approved' }).orderBy([{ column: 'approved_at', order: 'asc' }, { column: 'id', order: 'asc' }]).select('*');
+  const rows = await dbi('company_fact_bank').where({ status: 'approved' }).orderBy([{ column: 'approved_at', order: 'asc' }, { column: 'id', order: 'asc' }]).select('*');
   const base = await loadCheckContext(dbi, { statuses: [], excludeIds: [] });
+  const approvers = await readApprovers(dbi, rows.map((r) => r.id));
   const seen = new Set();
   const kept = [];
   const dropped = [];
   for (const row of rows) {
-    const check = checkFactText(row.fact_text, { ...base, bankKeys: seen });
-    const shaOk = row.text_sha256 === sha256(String(row.fact_text || '').trim());
-    // Warning words need the owner's tick; a row without it (written around the service, or newly matched by a widened screen) is not served.
-    const unacknowledged = check.warnings.length > 0 && row.warnings_acknowledged !== true;
-    if (check.blocks.length || !shaOk || unacknowledged || kept.length >= MAX_ACTIVE_FACTS) {
-      dropped.push(`${row.id}:${loadDropReason(check, shaOk, unacknowledged)}`);
+    const problem = loadProblem(row, checkFactText(row.fact_text, { ...base, bankKeys: seen }), approvers) || (kept.length >= MAX_ACTIVE_FACTS ? 'bank_full' : '');
+    if (problem) {
+      dropped.push(`${row.id}:${problem}`);
       continue;
     }
     seen.add(normalise(row.fact_text));

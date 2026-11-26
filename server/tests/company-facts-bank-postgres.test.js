@@ -36,7 +36,7 @@ jest.setTimeout(120000);
     return Bank.approveFact(id, { textSha256: shown, ...input }, actor, opts());
   };
   const live = async (text = line()) => approve((await draft(text)).id);
-  const row = (id) => root('company_facts').where({ id }).first();
+  const row = (id) => root('company_fact_bank').where({ id }).first();
   const events = async (id) => (await Bank.factHistory(id, opts())).map((e) => e.action);
 
   // A statement the database must refuse; its savepoint rolls back and the root transaction carries on.
@@ -63,8 +63,8 @@ jest.setTimeout(120000);
   beforeEach(async () => {
     mockAudit.mockImplementation((...args) => jest.requireActual('../services/audit-log').recordAuditEvent(...args));
     Bank._test.resetSnapshot();
-    await root('company_facts').update({ status: 'retired', retired_at: root.fn.now(), retire_reason: 'test reset' }).where({ status: 'approved' });
-    await root('company_facts').where({ status: 'draft' }).del();
+    await root('company_fact_bank').update({ status: 'retired', retired_at: root.fn.now(), retire_reason: 'test reset' }).where({ status: 'approved' });
+    await root('company_fact_bank').where({ status: 'draft' }).del();
   });
 
   // FIRST in the file on purpose: the suite's root transaction takes the bank-wide lock at its first approve and keeps it until it
@@ -234,7 +234,7 @@ jest.setTimeout(120000);
         expect(text.length).toBeGreaterThan(300);
         await live(text);
       }
-      const total = (await root('company_facts').where({ status: 'approved' }).select('fact_text')).reduce((sum, r) => sum + r.fact_text.length, 0);
+      const total = (await root('company_fact_bank').where({ status: 'approved' }).select('fact_text')).reduce((sum, r) => sum + r.fact_text.length, 0);
       expect(total).toBeGreaterThan(2000);
     });
 
@@ -257,23 +257,23 @@ jest.setTimeout(120000);
 
     test('the trigger refuses an UPDATE of fact_text or text_sha256 on an approved or retired row, whoever writes the SQL', async () => {
       const a = await live();
-      const err = await refused((sp) => sp('company_facts').where({ id: a.id }).update({ fact_text: 'We changed it.' }));
+      const err = await refused((sp) => sp('company_fact_bank').where({ id: a.id }).update({ fact_text: 'We changed it.' }));
       expect(err.message).toContain('fact_text of a approved row cannot change');
-      await refused((sp) => sp('company_facts').where({ id: a.id }).update({ text_sha256: 'a'.repeat(64) }));
+      await refused((sp) => sp('company_fact_bank').where({ id: a.id }).update({ text_sha256: 'a'.repeat(64) }));
       await Bank.retireFact(a.id, { reason: 'not needed' }, admin, opts());
-      await refused((sp) => sp('company_facts').where({ id: a.id }).update({ fact_text: 'We changed it.' }));
+      await refused((sp) => sp('company_fact_bank').where({ id: a.id }).update({ fact_text: 'We changed it.' }));
       expect((await row(a.id)).fact_text).toBe(a.fact_text);
     });
 
     test('the trigger refuses an illegal status move and a delete of a non-draft row; a draft stays editable and deletable', async () => {
       const a = await live();
-      await refused((sp) => sp('company_facts').where({ id: a.id }).update({ status: 'draft' }));
-      await refused((sp) => sp('company_facts').where({ id: a.id }).del());
+      await refused((sp) => sp('company_fact_bank').where({ id: a.id }).update({ status: 'draft' }));
+      await refused((sp) => sp('company_fact_bank').where({ id: a.id }).del());
       await Bank.retireFact(a.id, { reason: 'not needed' }, admin, opts());
-      await refused((sp) => sp('company_facts').where({ id: a.id }).update({ status: 'approved' }));
+      await refused((sp) => sp('company_fact_bank').where({ id: a.id }).update({ status: 'approved' }));
       const d = await draft();
-      await refused((sp) => sp('company_facts').where({ id: d.id }).update({ status: 'retired', retired_at: sp.fn.now(), retire_reason: 'skip' }));
-      await root('company_facts').where({ id: d.id }).update({ fact_text: line(' edited') });
+      await refused((sp) => sp('company_fact_bank').where({ id: d.id }).update({ status: 'retired', retired_at: sp.fn.now(), retire_reason: 'skip' }));
+      await root('company_fact_bank').where({ id: d.id }).update({ fact_text: line(' edited') });
     });
 
     test('an in-place edit of a draft updates it, clears the acknowledgement and logs one event', async () => {
@@ -296,10 +296,10 @@ jest.setTimeout(120000);
 
     test('history is append-only', async () => {
       const d = await draft();
-      const event = await root('company_fact_events').where({ fact_id: d.id }).first();
-      await refused((sp) => sp('company_fact_events').where({ id: event.id }).update({ action: 'retired' }));
-      await refused((sp) => sp('company_fact_events').where({ id: event.id }).del());
-      await refused((sp) => sp('company_fact_events').insert({ fact_id: d.id, action: 'made_up' }));
+      const event = await root('company_fact_bank_events').where({ fact_id: d.id }).first();
+      await refused((sp) => sp('company_fact_bank_events').where({ id: event.id }).update({ action: 'retired' }));
+      await refused((sp) => sp('company_fact_bank_events').where({ id: event.id }).del());
+      await refused((sp) => sp('company_fact_bank_events').insert({ fact_id: d.id, action: 'made_up' }));
     });
   });
 
@@ -345,11 +345,59 @@ jest.setTimeout(120000);
     test('an approved row written around the service is dropped, not served', async () => {
       const good = await live();
       const sha = Bank._test.sha256('Today only the setup visit is $99.');
-      await root('company_facts').insert({
-        topic: 'Bad', fact_text: 'Today only the setup visit is $99.', text_sha256: sha, status: 'approved', approved_at: root.fn.now(),
+      await root('company_fact_bank').insert({
+        topic: 'Bad', fact_text: 'Today only the setup visit is $99.', text_sha256: sha, status: 'approved', approved_at: root.fn.now(), approved_by: owner.id,
       });
       await Bank.refreshBankFacts(opts());
       expect(Bank.getApprovedBankFacts().map((f) => f.id)).toEqual([good.id]);
+    });
+    test('an approved row with a named approver but no approval event in the history is not served; with the event it is', async () => {
+      const text = 'We service Ruskin on Thursdays.';
+      const [inserted] = await root('company_fact_bank').insert({
+        topic: 'Import', fact_text: text, text_sha256: Bank._test.sha256(text), status: 'approved', approved_at: root.fn.now(), approved_by: owner.id, source: 'import',
+      }).returning('*');
+      await Bank.refreshBankFacts(opts());
+      expect(Bank.getApprovedBankFacts()).toEqual([]);
+      await root('company_fact_bank_events').insert({ fact_id: inserted.id, action: 'approved', actor_id: owner.id });
+      await Bank.refreshBankFacts(opts());
+      expect(Bank.getApprovedBankFacts().map((f) => f.id)).toEqual([inserted.id]);
+    });
+
+    test('the database refuses an approved row with no approver', async () => {
+      const text = 'We service Gibsonton on Mondays.';
+      const err = await refused((sp) => sp('company_fact_bank').insert({
+        topic: 'Import', fact_text: text, text_sha256: Bank._test.sha256(text), status: 'approved', approved_at: sp.fn.now(),
+      }));
+      expect(err.message).toContain('company_fact_bank_approver_chk');
+    });
+
+    test('"We use safe pesticides" can be drafted but not approved', async () => {
+      const d = await draft('We use safe pesticides at every visit.');
+      expect(d.check_result.blocks).toContain('safety_claim');
+      await expect(approve(d.id)).rejects.toMatchObject({ detail: { blocks: expect.arrayContaining(['safety_claim']) } });
+    });
+  });
+
+  describe('the bank is permanent (migrations 20261125120000 and 20261125130000)', () => {
+    const counts = async (conn) => [
+      Number((await conn('company_fact_bank').count('* as n'))[0].n),
+      Number((await conn('company_fact_bank_events').count('* as n'))[0].n),
+    ];
+
+    test("the newest migration refuses to roll back and the old file's down() is a no-op on the renamed tables: no row is lost", async () => {
+      await live();
+      const before = await counts(root);
+      expect(before[0]).toBeGreaterThan(0);
+      expect(before[1]).toBeGreaterThan(0);
+      await expect(require('../models/migrations/20261125130000_company_facts_bank_permanent').down(root)).rejects.toThrow(/permanent: roll forward/);
+      expect(await counts(root)).toEqual(before);
+      // The pushed first migration's down() names the OLD tables, which no longer exist: nothing to drop.
+      await root.transaction((sp) => require('../models/migrations/20261125120000_company_facts_bank').down(sp));
+      expect(await counts(root)).toEqual(before);
+      const regs = await root.raw("SELECT to_regclass('company_fact_bank') AS a, to_regclass('company_fact_bank_events') AS b, to_regclass('company_facts') AS c");
+      expect(regs.rows[0]).toMatchObject({ a: 'company_fact_bank', b: 'company_fact_bank_events', c: null });
+      // The guard triggers still sit on the renamed tables.
+      await refused((sp) => sp('company_fact_bank_events').del());
     });
   });
 });
