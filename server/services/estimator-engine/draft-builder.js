@@ -1062,20 +1062,16 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
 // disagree, classifyLane parks the draft in yellow with the composer's
 // number quoted so the operator applies it deliberately.
 // Watch-only verdict of the call auto-send rule, as the stamp spread into
-// estimate_data.estimatorEngine ({} when there is none). The priced-line
-// facts come from the same checks the lane and the plan mint use, so the
-// shadow cannot grade a line more kindly than they do. Fail-soft: a shadow
-// verdict must never cost the draft itself.
-function callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone }) {
+// estimate_data.estimatorEngine ({} when there is none). It is handed the
+// lane's own review reasons, so the shadow cannot grade a price more kindly
+// than the lane does. Fail-soft: a shadow verdict must never cost the draft.
+function callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone, laneReasons }) {
   try {
-    // Only lines that carry money: an unpriced manual item is the "partial
-    // draft" case, which the owner ruled is not a hold.
-    const lines = (engineResult?.lineItems || []).filter(lineCarriesMoney);
+    const moneyLines = (engineResult?.lineItems || []).filter(lineCarriesMoney);
     const autoSendShadow = callAutoSendShadowVerdict({
-      origin, intent, propertyFacts, context, priorQualifyingServices,
+      origin, intent, propertyFacts, context, priorQualifyingServices, laneReasons,
       draftPhone: customerPhone,
-      homeSizeDrivesPrice: lines.some((l) => l.pricingBasis !== UNIT_BAND_PRICING_BASIS),
-      pricedLineNeedsReview: lines.some((l) => lineNeedsReviewBeforeExactPrice(l)),
+      homeSizeDrivesPrice: moneyLines.some((l) => l.pricingBasis !== UNIT_BAND_PRICING_BASIS),
     });
     return autoSendShadow ? { autoSendShadow } : {};
   } catch (shadowErr) {
@@ -1219,7 +1215,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // never carry internal review material.
   const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call });
   const customerPhone = resolveDraftCustomerPhone(intent, context);
-  const autoSendShadowStamp = callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone });
+  const autoSendShadowStamp = callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone, laneReasons });
   // priorQualifyingServices must NOT ride inside the stored engineInputs —
   // the public reconcile path clears only the TOP-LEVEL key on stale
   // membership snapshots, and a nested copy would keep replaying the

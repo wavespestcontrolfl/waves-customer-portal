@@ -17,7 +17,7 @@ const base = () => ({
   priorQualifyingServices: [],
   draftPhone: '+19415550100',
   homeSizeDrivesPrice: true,
-  pricedLineNeedsReview: false,
+  laneReasons: [],
 });
 const verdict = (mutate) => { const input = base(); if (mutate) mutate(input); return callAutoSendShadowVerdict(input); };
 
@@ -36,7 +36,8 @@ describe('callAutoSendShadowVerdict', () => {
     ['booked_on_call', (i) => { i.context.extraction.scheduling = { status: 'confirmed' }; }],
     ['quote_not_promised', (i) => { i.context.extraction = { quote_requested: true }; }],
     ['quote_not_promised', (i) => { i.context.extraction = null; }],
-    ['priced_line_needs_review', (i) => { i.pricedLineNeedsReview = true; }],
+    ['lane_review_reason', (i) => { i.laneReasons = ['lot sqft from fallback source (subdivision_median)']; }],
+    ['lane_review_reason', (i) => { i.laneReasons = ['engine low pricing confidence: lawn_care']; }],
     ['current_customer_reprice_pending', (i) => { i.context.isExistingCustomer = true; }],
     ['termite_hold', (i) => { i.intent.services.termite = { system: 'trelona' }; }],
     ['termite_hold', (i) => { i.intent.constraint_flags = [{ flag: 'possible_termite_swarmers', note: 'flying insects' }]; }],
@@ -82,6 +83,23 @@ describe('callAutoSendShadowVerdict', () => {
     expect(verdict(v1Only).verdict).toBe('would_send');
     const invalidV2 = (i) => { i.context.extraction = {}; i.context.call = { v2_extraction_status: 'invalid', ai_extraction_enriched: { service_request: { quote_promised: true } } }; };
     expect(verdict(invalidV2).reasons).toContain('quote_not_promised');
+  });
+
+  test('lane reasons the owner ruled out, or that a named rule grades, are not holds', () => {
+    const v = verdict((i) => {
+      i.laneReasons = [
+        'pest visit count: monthly (12 a year) was discussed, and this draft prices quarterly (4 a year)',
+        'partial draft: rodent still needs manual scoping', "constraints the engine can't express: gate_code",
+        'composer confidence medium', 'open questions: which gate',
+      ];
+    });
+    expect(v).toEqual({ version: 1, verdict: 'would_send', reasons: [], fixes: [] });
+    const held = verdict((i) => { i.laneReasons = ['partial draft: x', 'monthly $90 sits outside the comps band']; });
+    expect(held.laneHolds).toEqual(['monthly $90 sits outside the comps band']);
+  });
+
+  test('termite in the treatment history alone is not a termite request', () => {
+    expect(verdict((i) => { i.context.extraction.service_request = { quote_promised: true, primary_category: 'ants', prior_treatment_attempts: ['termite tenting in 2019'] }; }).verdict).toBe('would_send');
   });
 
   test('a landlord named for access only is not a payer', () => {

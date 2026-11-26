@@ -19,9 +19,10 @@
  *                                             the 90-day backtest was this);
  *                                             a draft priced only by the
  *                                             bedroom band is exempt
- *   - a priced line needs review           -> hold (the estimator authority
- *                                             rule: fallback turf, low pricing
- *                                             confidence, guessed footprint)
+ *   - any other lane review reason         -> hold (the draft lane is the
+ *                                             pricing authority: fallback lot,
+ *                                             heuristic turf, low pricing
+ *                                             confidence, comps band, ...)
  *   - current customer                     -> hold until re-pricing ships
  *   - yard changed recently / lawn dying   -> hold, book an assessment
  *   - landlord or realty company pays      -> hold until the wording ships
@@ -99,11 +100,35 @@ function smsBlocked(extractions) {
 }
 
 // Termite or WDO work the call asked for, even when the composed intent
-// carries no termite key (WDO has none) and no flag names it.
+// carries no termite key (WDO has none) and no flag names it. Requested
+// scope only: a termite job in the caller's treatment history is not a
+// termite request.
 function termiteRequested(extractions) {
-  return extractions.some((x) => /termite|wdo/i.test([
-    JSON.stringify(x.service_request || {}), x.requested_service, x.matched_service, x.service_interest,
-  ].filter((v) => typeof v === 'string').join(' ')));
+  return extractions.some((x) => {
+    const sr = x.service_request || {};
+    const scope = [
+      sr.primary_category, sr.category, sr.service_name, sr.requested_service,
+      ...(Array.isArray(sr.secondary_categories) ? sr.secondary_categories : []),
+      x.requested_service, x.matched_service, x.service_interest,
+    ].filter((v) => typeof v === 'string');
+    return /termite|wdo/i.test(scope.join(' '));
+  });
+}
+
+// The draft lane is the pricing authority: every review reason it raised is
+// a hold, except the ones the owner ruled are not (visit count, an unpriced
+// manual item) and the ones a named rule below already grades (composer
+// confidence, constraint flags, open questions, current customer, home
+// size, new construction). New lane reasons therefore hold by default.
+const LANE_REASONS_NOT_HOLDS = [
+  /^pest visit count:/, /^partial draft:/, /^constraints the engine can't express:/,
+  /^composer confidence (medium|high)$/, /^open questions:/, /^existing active customer/,
+  /^home\/building sqft from fallback source/, /^new construction/,
+];
+
+function laneReviewHolds(laneReasons) {
+  return (Array.isArray(laneReasons) ? laneReasons : [])
+    .filter((r) => typeof r === 'string' && !LANE_REASONS_NOT_HOLDS.some((re) => re.test(r)));
 }
 
 function homeSizeFound(propertyFacts) {
@@ -111,6 +136,9 @@ function homeSizeFound(propertyFacts) {
   return positive(home.value) && !FALLBACK_SQFT_SOURCES.has(home.source);
 }
 
+// Whether a channel exists at all. Recipient-specific SMS consent and
+// number ownership are decided by the send path at send time (step 2);
+// this only rules out drafts that have nothing to send to.
 // The contact the draft row actually stores: the resolved draft phone (a
 // blocked caller ID or a short callback number resolves to none) or a
 // post-quarantine email. A phone the caller cannot or will not get texts on
@@ -137,7 +165,7 @@ const HOLD_RULES = [
     || termiteRequested(f.extractions)],
   ['commercial_hold', (f) => f.intent.is_commercial === true || f.intent.category === 'COMMERCIAL'],
   ['home_size_not_found', (f) => f.homeSizeDrivesPrice !== false && !homeSizeFound(f.propertyFacts)],
-  ['priced_line_needs_review', (f) => f.pricedLineNeedsReview === true],
+  ['lane_review_reason', (f) => f.laneHolds.length > 0],
   ['new_construction', (f) => !!f.propertyFacts?.newConstruction],
   ['ambiguous_phone', (f) => !!f.context?.customerPhoneAmbiguous],
   // context.isExistingCustomer is the classification: an active customer
@@ -157,16 +185,17 @@ const HOLD_RULES = [
  */
 function callAutoSendShadowVerdict({
   origin = null, intent = null, propertyFacts = null, context = null, priorQualifyingServices = [],
-  draftPhone = null, homeSizeDrivesPrice = true, pricedLineNeedsReview = false,
+  draftPhone = null, homeSizeDrivesPrice = true, laneReasons = [],
 } = {}) {
   if (origin?.channel && origin.channel !== 'call') return null;
   if (!intent || intent.decision !== 'draft') return null;
 
-  const services = intent.services && typeof intent.services === 'object' ? intent.services : {};
+  const services = intent.services || {};
   const serviceKeys = Object.keys(services);
   const facts = {
     intent, propertyFacts, context, priorQualifyingServices, serviceKeys,
-    draftPhone, homeSizeDrivesPrice, pricedLineNeedsReview,
+    draftPhone, homeSizeDrivesPrice,
+    laneHolds: laneReviewHolds(laneReasons),
     extractions: callExtractions(context),
     flags: flagText(intent),
     hasLawn: serviceKeys.some((k) => /lawn/i.test(k)),
@@ -179,6 +208,8 @@ function callAutoSendShadowVerdict({
     verdict: reasons.length ? 'would_hold' : 'would_send',
     reasons,
     fixes,
+    // The lane reasons behind lane_review_reason, for the shadow report.
+    ...(facts.laneHolds.length ? { laneHolds: facts.laneHolds } : {}),
   };
 }
 
