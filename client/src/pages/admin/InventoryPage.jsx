@@ -3618,6 +3618,18 @@ function RestockStatusCell({
           )}
         </div>
       )}
+      {/* Legacy rows from the removed email path; prod had 0 on 2026-11-26. Read-only warning: SiteOne has this order (or may), so it is not ordered by hand again. */}
+      {request.emailOrder && (
+        <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
+          {request.emailOrder.status === "sending"
+            ? "Email to SiteOne may have gone out"
+            : "Emailed to SiteOne"}
+          {request.emailOrder.po ? ` · PO ${request.emailOrder.po}` : ""}
+          {request.emailOrder.status === "sending"
+            ? ". Check with SiteOne before ordering it again."
+            : ""}
+        </div>
+      )}
       {canAct && (
         <Button
           onClick={() => runAction(request, "mark_ordered")}

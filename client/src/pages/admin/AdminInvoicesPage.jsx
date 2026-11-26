@@ -1330,7 +1330,9 @@ export function noticeCandidateLabel(c = {}) {
 // its source instead. Exported for the vitest.
 export function noticeMemoLine(n = {}) {
   if (n.memo) return `Memo: ${n.memo}`;
-  return n.source === "plaid_zelle" ? "From the bank feed" : "No memo";
+  if (n.source === "plaid_zelle") return "From the bank feed";
+  // A notice from an email: name the email, so two notices from one day can be told apart.
+  return n.email_subject ? `Email: ${n.email_subject}` : "No memo";
 }
 function noticeAmount(n) {
   return n?.amount_cents == null

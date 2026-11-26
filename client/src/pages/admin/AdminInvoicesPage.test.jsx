@@ -52,6 +52,8 @@ describe("AdminInvoicesPage Zelle notice candidates", () => {
     expect(noticeMemoLine({ source: "plaid_zelle", memo: null })).toBe("From the bank feed");
     expect(noticeMemoLine({ source: "capitalone_zelle", memo: null })).toBe("No memo");
     expect(noticeMemoLine({ source: "capitalone_zelle", memo: "WPC-2026-0001" })).toBe("Memo: WPC-2026-0001");
+    // A legacy retired-email notice has no memo: its source email's subject tells it apart.
+    expect(noticeMemoLine({ source: "capitalone_zelle", memo: null, email_subject: "Someone sent you money with Zelle" })).toBe("Email: Someone sent you money with Zelle");
   });
 });
 

@@ -41,10 +41,10 @@ describe('restock list office detail', () => {
 
   // Legacy rows from the removed email path; prod had 0 on 2026-11-26.
   test('the office list carries a sent or sending order email\'s package quantity; a failed row and a technician list carry none', async () => {
-    global.__restockRow = { ...ROW, email_status: 'sent', email_ordered_quantity: 350 };
-    expect((await listRestockRequests({ status: 'open', showSpend: true })).requests[0].emailOrder).toEqual({ status: 'sent', orderedQuantity: 350 });
-    global.__restockRow = { ...ROW, email_status: 'sending', email_ordered_quantity: 350 };
-    expect((await listRestockRequests({ status: 'open', showSpend: true })).requests[0].emailOrder).toEqual({ status: 'sending', orderedQuantity: 350 });
+    global.__restockRow = { ...ROW, email_status: 'sent', email_po: 'WAVES-R1', email_ordered_quantity: 350 };
+    expect((await listRestockRequests({ status: 'open', showSpend: true })).requests[0].emailOrder).toEqual({ status: 'sent', po: 'WAVES-R1', orderedQuantity: 350 });
+    global.__restockRow = { ...ROW, email_status: 'sending', email_po: 'WAVES-R1', email_ordered_quantity: 350 };
+    expect((await listRestockRequests({ status: 'open', showSpend: true })).requests[0].emailOrder).toEqual({ status: 'sending', po: 'WAVES-R1', orderedQuantity: 350 });
     global.__restockRow = { ...ROW, email_status: 'failed', email_ordered_quantity: 350 };
     expect((await listRestockRequests({ status: 'open', showSpend: true })).requests[0].emailOrder).toBeNull();
     global.__restockRow = { ...ROW };

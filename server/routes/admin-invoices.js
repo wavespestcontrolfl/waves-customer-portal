@@ -718,7 +718,14 @@ router.get('/payment-notices', requireAdmin, async (req, res, next) => {
     const q = db('inbound_payment_notices').orderBy('received_at', 'desc').limit(limit);
     if (status) q.where({ status });
     const rows = await q.select('*');
-    res.json({ notices: rows });
+    // The source email's subject, so a notice with no payer or amount (a legacy retry-marked email
+    // retired from the removed email path; prod had 0 on 2026-11-26) can be told apart and checked.
+    const emailIds = rows.map((r) => r.email_id).filter(Boolean);
+    const subjects = new Map();
+    if (emailIds.length) {
+      for (const e of await db('emails').whereIn('id', emailIds).select('id', 'subject')) subjects.set(String(e.id), e.subject || null);
+    }
+    res.json({ notices: rows.map((r) => (r.email_id ? { ...r, email_subject: subjects.get(String(r.email_id)) || null } : r)) });
   } catch (err) { next(err); }
 });
 
