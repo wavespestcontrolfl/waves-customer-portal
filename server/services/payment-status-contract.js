@@ -630,7 +630,7 @@ const PLAN_SERVICES = [/\bpest/i, /\blawn/i, /\bmosquito/i, /\btermite/i, /\b(?:
 function prepaidCountOffTarget(sentence, inbound) {
   const label = String(/^Your prepaid (.+) plan has /.exec(sentence)?.[1] || '');
   const asked = PLAN_SERVICES.filter((service) => service.test(inbound));
-  return asked.length > 0 && !asked.some((service) => service.test(label));
+  return asked.length > 0 && !asked.every((service) => service.test(label)); // naming two services ("Lawn Pest Control") needs a plan that names both
 }
 function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
@@ -695,7 +695,7 @@ const COUNT_NUM = '(?:\\d{1,3}|zero|one|two|three|four|five|six|seven|eight|nine
 const PREPAID_COUNT_RE = new RegExp(`\\b(?:visits?|applications?|treatments?)\\s+(?:are\\s+|is\\s+)?(?:still\\s+)?(?:left|remaining|remain)\\b|\\b(?:left|remaining)\\s+(?:prepaid\\s+)?(?:visits?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+prepaid\\s+(?:\\w+\\s+)?(?:visits?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+more\\s+(?:visits?|applications?|treatments?)\\b`, 'i');
 // ...and a short answer to a question that ASKS for the count ("Three more.", "Three.", "3.", "None left.") carries no
 // count word in its own words either. The question decides: an unknown customer message counts as asking (unknown is scoped).
-const COUNT_ASK_RE = /\b(?:how many|number of)\b[^.?!]{0,30}\b(?:prepaid|visits?|appointments?|applications?|treatments?|services?|times)\b[^.?!]{0,40}\b(?:left|remaining|remain|prepaid|paid|used|more|on (?:my|our|the) (?:plan|account)|(?:do|did|have|has) (?:i|we)\b|(?:i|we) (?:have|get|got))|\b(?:visits?|appointments?|applications?|treatments?)\b[^.?!]{0,30}\b(?:left|remaining|remain)\b|\b(?:left|remaining)\b[^.?!]{0,20}\b(?:visits?|appointments?|applications?|treatments?)\b|\bprepaid\b[^.?!]{0,40}\b(?:left|remaining|remain)\b|\b(?:left|remaining)\b[^.?!]{0,40}\bprepaid\b|\b(?:how many|number of)\b[^.?!]{0,20}\bprepaid\b/i;
+const COUNT_ASK_RE = /\b(?:how many|number of)\b[^.?!]{0,30}\b(?:prepaid|visits?|appointments?|applications?|treatments?|services?|times)\b[^.?!]{0,40}\b(?:left|remaining|remain|prepaid|paid|used|covered|more|on (?:my|our|the) (?:plan|account)|(?:do|did|have|has) (?:i|we)\b|(?:i|we) (?:have|get|got))|\b(?:visits?|appointments?|applications?|treatments?)\s+(?:(?:are|is|do i have|do we have)\s+)?(?:still\s+)?(?:left|remaining|remain|covered)\b|\b(?:left|remaining)\s+(?:prepaid\s+)?(?:visits?|appointments?|applications?|treatments?)\b|\bprepaid\b[^.?!]{0,40}\b(?:left|remaining|remain)\b|\b(?:left|remaining)\b[^.?!]{0,40}\bprepaid\b|\b(?:how many|number of)\b[^.?!]{0,20}\bprepaid\b/i;
 const COUNT_ANSWER_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:more|left|remaining|total|(?:\\w+\\s+)?(?:visits?|appointments?|applications?|treatments?|services?|times))\\b|\\b(?:no|none|nothing)\\s+(?:more|left|remaining)\\b|(?:^|[.!?]\\s+)(?:(?:about|just|only)\\s+)?${COUNT_NUM}\\s*(?:[.!?]|$)`, 'i');
 // A question that asks for the count is answered by the rendered sentence ALONE: once the copies are removed only inert text (a greeting,
 // thanks) may remain, whatever words an invented count would use ("You have three.", "Three.", "a couple left"). With the question unknown,

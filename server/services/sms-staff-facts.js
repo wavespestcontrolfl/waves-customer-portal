@@ -45,7 +45,7 @@ function sectionsOfBlocks(blocks) {
 }
 
 // What reads as a usable sentence of a guide: no merge tags, links, addresses, em dashes, nor wording that points at the email or page itself.
-const usableSentence = (sentence) => sentence.length >= 12 && sentence.length <= 260
+const usableSentence = (sentence) => sentence.length >= 4 && sentence.length <= 260 // (a list item can be one word: "Houseplants.")
   && !/\{\{|\]\(|https?:|www\.|@|\u2014/.test(sentence)
   && !/\b(?:e-?mail|inbox|button|below|above|this (?:guide|page))\b/i.test(sentence);
 

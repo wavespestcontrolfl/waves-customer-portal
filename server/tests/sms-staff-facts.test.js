@@ -71,6 +71,9 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(ask('Three.', 'How many appointments do I have left?')).toBe(false);
     expect(ask('Three.', 'How many do I have left on my prepaid plan?')).toBe(false);
     expect(ask('Four.', 'How many prepaid visits are on my plan?')).toBe(false);
+    expect(ask('Three.', 'How many visits are still covered?')).toBe(false);
+    // a complaint about the last visit is not a count question
+    expect(ask('I am sorry about the gate, we will make sure it is closed.', 'At the last visit you left the gate open')).toBe(true);
     // not a count question about the plan: a scheduling reply or a different quantity
     expect(ask('We can move your prepaid visit to Tuesday.', 'Can I reschedule my prepaid visit?')).toBe(true);
     expect(ask('Two hours.', 'How many hours are left before you arrive?')).toBe(true);
@@ -93,6 +96,8 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(check(LAWN, 'How many pest control visits do I have left?')).toBe(false);
     expect(check(LAWN, 'How many lawn visits do I have left?')).toBe(true);
     expect(check(LAWN, 'How many cockroach treatments do I have left?')).toBe(false);
+    // two services named: only a plan that names both answers ("Lawn Pest Control" is turf service, not the pest plan)
+    expect(check(LEFT, 'How many Lawn Pest Control visits do I have left?')).toBe(false);
     expect(check(LAWN, 'How many visits are left on my street?')).toBe(true);
     expect(check(`${LEFT} ${LAWN}`, 'How many pest control visits do I have left?')).toBe(false);
     // no service named: either plan's sentence may answer
@@ -252,5 +257,20 @@ describe('sms-staff-facts loaders', () => {
     jest.resetModules();
     jest.doMock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
     expect(await require('../services/sms-staff-facts').loadPrepaidPlanFacts('c1', { db: {} })).toBeNull();
+  });
+});
+
+describe('short guide items', () => {
+  test('a one-word list item under a heading is kept (the heat guide lists "Houseplants." among the items to remove)', async () => {
+    jest.resetModules();
+    jest.doMock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
+    jest.doMock('../services/prep-guide-sender', () => ({ PREP_CONFIG: { heat: { label: 'Bed Bug Heat Treatment', emailTemplateKey: 'prep.bed_bug_heat' } }, nextGuideVisit: jest.fn(async () => ({ key: 'heat', visit: {} })) }));
+    const blocks = [{ type: 'heading', content: 'Take heat-sensitive items out of the home' }, { type: 'list', items: ['Candles.', 'Houseplants.', 'Vinyl records.'] }];
+    jest.doMock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn(async () => ({ activeVersion: { blocks } })) }));
+    const guide = await require('../services/sms-staff-facts').loadPrepGuideFacts('c1', { db: 'db' });
+    expect(guide.sections).toEqual([{ heading: 'Take heat-sensitive items out of the home', sentences: ['Candles.', 'Houseplants.', 'Vinyl records.'] }]);
+    jest.dontMock('../services/email-template-library');
+    jest.dontMock('../services/prep-guide-sender');
+    jest.resetModules();
   });
 });
