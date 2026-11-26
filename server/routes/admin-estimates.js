@@ -552,6 +552,13 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     // group claim would refuse it at delivery, so a schedule hears it now.
     if (['draft', 'scheduled', 'send_failed'].includes(sibling.status)) {
       try { assertSatellitePalmCountTyped(sibling, palmCountGateFor(sibling)); } catch (err) { return { sibling, statusCode: 409, code: err.code }; }
+      // …and a never-issued sibling with a barrel tile roof and no eave footage: delivery's assertEstimateSendable
+      // refuses it, so the schedule hears it now (pre-push P1).
+      const siblingData = parseEstimateData(sibling.estimate_data);
+      if (siblingData?.proposal?.enabled !== true && estimateNeverIssued(sibling)
+        && require('../services/estimate-roof-style-replay').estimateHasUnmeasuredBarrelExclusion(siblingData)) {
+        return { sibling, statusCode: 409, code: 'BARREL_EAVE_FOOTAGE_REQUIRED' };
+      }
     }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
     // time — schedule and immediate alike — so the operator hears it now,

@@ -74,3 +74,29 @@ test('a measured revision is not held by a stale unmeasured engineResult', () =>
   const stale = { lineItems: [{ service: 'rodent_exclusion', name: 'Rodent Exclusion', price: 900, roofStyle: 'barrel_tile', barrelClosureNeedsMeasurement: true }] };
   expect(estimateHasUnmeasuredBarrelExclusion({ result: current, engineResult: stale, pricingAuthorityAtLock: 'SERVER' })).toBe(false);
 });
+
+test('the request that priced a revision wins over stale engine inputs (same order as the server recompute)', () => {
+  const staleInputs = { services: { exclusion: { roofStyle: 'barrel_tile' } } };
+  const removed = { engineRequest: { profile: {}, selectedServices: ['PEST'], options: {} }, engineInputs: staleInputs };
+  const measured = { engineRequest: { profile: {}, selectedServices: ['EXCLUSION'], options: { exclRoofStyle: 'barrel_tile', exclBarrelEaveFt: 60 } }, engineInputs: staleInputs };
+  expect(estimateHasUnmeasuredBarrelExclusion(removed)).toBe(false);
+  expect(estimateHasUnmeasuredBarrelExclusion(measured)).toBe(false);
+});
+
+test('a mapped estimate (the persisted shape) with a priced closure is not held', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+  const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+  const input = { homeSqFt: 2000, stories: 1, lotSqFt: 8000, propertyType: 'single_family',
+    services: { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 4, roofStyle: 'barrel_tile', barrelEaveFt: 60 } } };
+  const prior = process.env.GATE_EXCLUSION_ROOF_STYLE_PRICING;
+  process.env.GATE_EXCLUSION_ROOF_STYLE_PRICING = 'true';
+  try {
+    const mapped = mapV1ToLegacyShape(generateEstimate(input));
+    expect(estimateHasUnmeasuredBarrelExclusion({ result: mapped })).toBe(false);
+    const unmeasured = mapV1ToLegacyShape(generateEstimate({ ...input, services: { exclusion: { ...input.services.exclusion, barrelEaveFt: 0 } } }));
+    expect(estimateHasUnmeasuredBarrelExclusion({ result: unmeasured })).toBe(true);
+  } finally {
+    if (prior === undefined) delete process.env.GATE_EXCLUSION_ROOF_STYLE_PRICING;
+    else process.env.GATE_EXCLUSION_ROOF_STYLE_PRICING = prior;
+  }
+});
