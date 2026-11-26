@@ -355,37 +355,47 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
   // Migration 20261125200000 (owner 2026-11-25, "YES THEY DID"): the Beehiiv import rows that still
   // hold their sign-up get the reader proof; a source label alone, or any opt-out, sunset or
   // comeback stamp, does not.
-  test('the Beehiiv sign-up step writes the proof only on import-day rows that still hold the sign-up', async () => {
+  test('the Beehiiv sign-up step writes the proof only on import-day rows nobody wrote since, with the sign-up intact', async () => {
     const migration = require('../models/migrations/20261125200000_newsletter_beehiiv_signup_proof');
     const day = new Date('2026-04-19T16:00:00Z');
     const confirmed = new Date('2026-04-19T16:00:01Z');
-    const bee = (over = {}) => insert({
-      email: addr(), source: 'beehiiv_migration', status: 'active', created_at: day, confirmed_at: confirmed, ...over,
-    });
-    const rows = {
-      kept: await bee(),
-      orphan: await bee({ source: 'beehiiv_migration_orphan' }),
-      upper: await bee({ email: addr().toUpperCase() }),
-      lateLabel: await bee({ created_at: new Date('2026-06-01T12:00:00Z') }),
-      website: await bee({ source: 'newsletter_footer' }),
-      optedOut: await bee({ status: 'unsubscribed', unsubscribed_at: day }),
-      unsubStamp: await bee({ unsubscribed_at: day }),
-      sunset: await bee({ deactivated_at: day }),
-      cameBack: await bee({ resubscribed_at: day }),
-      noConfirm: await bee({ confirmed_at: null }),
-      clicked: await bee({ reader_confirmed_at: new Date('2026-11-24T12:00:00Z'), reader_confirmed_email: 'clicked@example.com' }),
-    };
-    made.push(rows.upper.email);
-    await migration.up(db);
-    await migration.up(db);
-    const after = {};
-    for (const [name, r] of Object.entries(rows)) after[name] = await reload(r.id);
-    const proofed = Object.keys(rows).filter((name) => after[name].reader_confirmed_at !== null);
-    expect(proofed.sort()).toEqual(['clicked', 'kept', 'orphan', 'upper']);
-    expect(after.kept.reader_confirmed_at.getTime()).toBe(confirmed.getTime());
-    expect(after.kept.reader_confirmed_email).toBe(rows.kept.email.toLowerCase());
-    expect(after.upper.reader_confirmed_email).toBe(rows.upper.email.toLowerCase());
-    // A reader's own earlier click is left as it was.
-    expect(after.clicked.reader_confirmed_email).toBe('clicked@example.com');
+    // Everything runs in one transaction that always rolls back: the step updates every
+    // matching row of the database, not only these fixtures.
+    const trx = await db.transaction();
+    try {
+      const bee = async (over = {}) => {
+        const [r] = await trx('newsletter_subscribers').insert({
+          email: addr(), source: 'beehiiv_migration', status: 'active', created_at: day, updated_at: day, confirmed_at: confirmed, ...over,
+        }).returning('*');
+        return r;
+      };
+      const rows = {
+        kept: await bee(),
+        orphan: await bee({ source: 'beehiiv_migration_orphan' }),
+        upper: await bee({ email: `UPPER-${addr()}`.toUpperCase() }),
+        written: await bee({ updated_at: new Date('2026-08-01T12:00:00Z') }),
+        lateLabel: await bee({ created_at: new Date('2026-06-01T12:00:00Z'), updated_at: new Date('2026-06-01T12:00:00Z') }),
+        website: await bee({ source: 'newsletter_footer' }),
+        optedOut: await bee({ status: 'unsubscribed', unsubscribed_at: day }),
+        unsubStamp: await bee({ unsubscribed_at: day }),
+        sunset: await bee({ deactivated_at: day }),
+        cameBack: await bee({ resubscribed_at: day }),
+        noConfirm: await bee({ confirmed_at: null }),
+        clicked: await bee({ reader_confirmed_at: new Date('2026-11-24T12:00:00Z'), reader_confirmed_email: 'clicked@example.com' }),
+      };
+      await migration.up(trx);
+      await migration.up(trx);
+      const after = {};
+      for (const [name, r] of Object.entries(rows)) after[name] = await trx('newsletter_subscribers').where({ id: r.id }).first();
+      const proofed = Object.keys(rows).filter((name) => after[name].reader_confirmed_at !== null);
+      expect(proofed.sort()).toEqual(['clicked', 'kept', 'orphan', 'upper']);
+      expect(after.kept.reader_confirmed_at.getTime()).toBe(confirmed.getTime());
+      expect(after.kept.reader_confirmed_email).toBe(rows.kept.email.toLowerCase());
+      expect(after.upper.reader_confirmed_email).toBe(rows.upper.email.toLowerCase());
+      // A reader's own earlier click is left as it was.
+      expect(after.clicked.reader_confirmed_email).toBe('clicked@example.com');
+    } finally {
+      await trx.rollback();
+    }
   });
 });

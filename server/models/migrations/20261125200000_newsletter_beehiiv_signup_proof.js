@@ -13,19 +13,18 @@
  *     import day (2026-04-19 ET; every such row in production was created that day). A
  *     source label alone is not evidence: the public sign-up route stores the caller's
  *     source, and a re-signup rewrites it. A row created after the import cannot match;
+ *   - the row was never written after the import: updated_at within an hour of
+ *     created_at. Every later writer stamps updated_at (an opt-out, a sunset or its
+ *     comeback, a trusted resubscribe, and the email fanout that moves a row to a
+ *     corrected address), so this proves the address on the row is the address the
+ *     reader signed up with. Production read 2026-11-25: 596 of the 597 active import
+ *     rows were never written again; the one that was gets no proof here;
  *   - status active, confirmed_at set, and no opt-out or comeback stamp
  *     (unsubscribed_at, deactivated_at, resubscribed_at all NULL);
  *   - no proof on the row yet (a reader who already clicked keeps that click).
  * reader_confirmed_at takes the row's confirmed_at (so the send rule's order check holds:
  * an opt-out or a trusted re-activation after it voids it, as for a click), and
  * reader_confirmed_email the row's address, lowercased.
- *
- * Accepted: a sunset comeback (the reader answered the win-back quiz) clears
- * deactivated_at and leaves no stamp, so such a row also gets the proof. The reader's own
- * quiz answer brought it back; the send rule accepts the same case for a click.
- * Accepted: the email fanout can move an active row to a corrected address and keeps no
- * copy of the imported one; such a row gets the proof for the corrected address (a staff
- * correction of the reader's own address).
  *
  * Runs once (knex records it). Idempotent anyway: the proof-is-NULL condition skips
  * every row it already wrote. down does nothing: the rows cannot be told apart from a
@@ -49,6 +48,7 @@ exports.up = async function up(knex) {
     .whereNull('deactivated_at')
     .whereNull('resubscribed_at')
     .whereNull('reader_confirmed_at')
+    .whereRaw("updated_at < created_at + interval '1 hour'")
     .update({
       reader_confirmed_at: knex.ref('confirmed_at'),
       reader_confirmed_email: knex.raw('LOWER(email)'),
