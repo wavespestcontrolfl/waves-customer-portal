@@ -65,7 +65,7 @@ beforeEach(() => {
   mockRenewClaim.mockReset().mockImplementation(async () => new Date());
 });
 
-const { propagateCustomerEmailChange, resendPendingConfirmation, emailKey } = require('../services/customer-email-fanout');
+const { propagateCustomerEmailChange, propagateSelfServiceEmailChange, resendPendingConfirmation, emailKey } = require('../services/customer-email-fanout');
 
 /**
  * Minimal knex-shaped stub. Per-table config:
@@ -320,22 +320,27 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls).toHaveLength(0);
   });
 
-  test('moveNewsletter:false: no subscriber row is locked, merged, moved or claimed; leads and estimates still follow; delivered tokens still rotate', async () => {
+  test('self-service: the old address subscriber is unlinked (status, tokens and delivered links untouched), nothing moves, leads still follow', async () => {
     const conn = makeConn({
       newsletter_subscribers: {
         firstQueue: [
-          { id: 739 }, // the customer's own subscriber at the old address
-          { id: 900, email: 'chriswsample@example.com', customer_id: null }, // an unlinked subscriber at the typed address: someone else's
+          null, // after the unlink the customer has no linked subscriber at the old address
+          { id: 900, email: 'chriswsample@example.com', customer_id: null }, // someone else's unlinked subscriber at the typed address
         ],
       },
     });
-    const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER, moveNewsletter: false }, conn);
-    expect(counts.newsletter).toBe(0);
-    expect(counts.leads).toBe(1);
-    expect(conn.__updates('leads')[0].arg.email).toBe('chriswsample@example.com');
-    expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+    const result = await propagateSelfServiceEmailChange({ before: BEFORE, after: AFTER, reviewReasonCodes: ['customer_email_missing'] }, conn);
+    const subUpdates = conn.__updates('newsletter_subscribers');
+    expect(subUpdates).toHaveLength(1);
+    expect(subUpdates[0].arg).toMatchObject({ customer_id: null, first_name: null, last_name: null });
+    expect(Object.keys(subUpdates[0].arg).sort()).toEqual(['customer_id', 'first_name', 'last_name', 'updated_at']);
+    // The unlink runs before the shared fan-out and is the ONLY newsletter write: no status, token or email change, no delete, no lock.
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && (c.op === 'del' || c.op === 'forUpdate'))).toBe(false);
-    expect(conn.__updates('newsletter_send_deliveries')[0].arg.engagement_token).toBeDefined();
+    expect(conn.__updates('newsletter_send_deliveries')).toHaveLength(0);
+    expect(result.newsletter).toBe(0);
+    expect(result.leads).toBe(1);
+    expect(result.unlinkedSubscribers).toBe(1);
+    expect(conn.__updates('leads')[0].arg.email).toBe('chriswsample@example.com');
   });
 
   test('newsletter: deletes the misspelled row when the corrected spelling already subscribes', async () => {

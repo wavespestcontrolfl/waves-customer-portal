@@ -209,10 +209,6 @@ async function repointNewsletterDeliveries(conn, { fromId, toId, customerId, now
  */
 async function propagateCustomerEmailChange({
   before, after, source = 'customer edit', reviewReasonCodes = EMAIL_REVIEW_REASON_CODES,
-  // false = never move, merge or claim a newsletter subscriber row for the new address. The customer-app profile
-  // edit passes false: the address is typed by the customer and not proven, so it must not take over (or merge
-  // into) a subscriber that belongs to someone else. Delivered engagement tokens of the old row still rotate.
-  moveNewsletter = true,
 }, conn = db) {
   const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, emailRetries: 0, reviewCards: 0, heldDripResumed: 0 };
   let pendingConfirmation = null;
@@ -529,12 +525,10 @@ async function propagateCustomerEmailChange({
       counts.newsletterDeliveries += await conn('newsletter_send_deliveries')
         .where({ subscriber_id: oldSubSnapshot.id })
         .update({ engagement_token: conn.raw('gen_random_uuid()'), updated_at: now });
-      if (moveNewsletter) {
-        oldSub = await conn('newsletter_subscribers')
-          .where({ id: oldSubSnapshot.id })
-          .forUpdate()
-          .first();
-      }
+      oldSub = await conn('newsletter_subscribers')
+        .where({ id: oldSubSnapshot.id })
+        .forUpdate()
+        .first();
     }
     if (oldSub) {
       const targetSub = await conn('newsletter_subscribers')
@@ -629,7 +623,6 @@ async function propagateCustomerEmailChange({
   // or the DOI/unsubscribe bearer links delivered to the rejected mailbox
   // stay valid after the record moves to the corrected address.
   const retargetSubscribersAtRejectedTargets = async (targets) => {
-    if (!moveNewsletter) return;
     // Unlocked snapshot → deliveries → FOR UPDATE re-read (Codex #3084
     // r43/r46): the retarget and delete act on the LOCKED read's status,
     // so an unsubscribe committing after our lock waits and one before it
@@ -1804,8 +1797,39 @@ async function backfillCustomerEmailInTrx(trx, { customerId, email, source = 'in
   }
 }
 
+/**
+ * The email fan-out for an address the CUSTOMER typed themselves in the app (routes/customer-profile.js). The address
+ * is not proven, so the newsletter gets ONE rule: the old address's subscriber row is UNLINKED from the customer and
+ * nothing moves to the new address (the customer re-subscribes it).
+ *   - The row keeps its status (an opt-out stays an opt-out), tokens and delivered links, so the old mailbox's own
+ *     subscription and its unsubscribe and quiz links keep working. Nothing is rotated for this source.
+ *   - customer_id, first_name and last_name are cleared, so a newsletter, a pending quote-lead confirmation or an
+ *     automation can never again personalize or link that mailbox to this customer's record.
+ *   - The unlink runs BEFORE the shared fan-out, which only ever selects customer-linked subscriber rows, so every
+ *     newsletter step in it (token rotation, merge, move, prior-target retarget) finds nothing and does nothing.
+ *     It touches only the subscriber row, never its deliveries, so the webhook's delivery-then-subscriber lock order
+ *     is unchanged. Everything else (leads, estimates, queued sends, automations, contracts, review scope) is the
+ *     shared fan-out, unchanged. Call inside the edit's transaction.
+ * @returns the shared fan-out's result, plus `unlinkedSubscribers` (rows unlinked)
+ */
+async function propagateSelfServiceEmailChange({ before, after, source = 'customer app edit', reviewReasonCodes }, conn = db) {
+  const customerId = (after && after.id) || (before && before.id);
+  const oldEmail = emailKey(before && before.email)
+    || String((before && before.email) ?? '').trim().toLowerCase();
+  let unlinked = 0;
+  if (customerId && oldEmail) {
+    unlinked = await conn('newsletter_subscribers')
+      .where({ customer_id: customerId })
+      .whereRaw('LOWER(email) = ?', [oldEmail])
+      .update({ customer_id: null, first_name: null, last_name: null, updated_at: new Date() });
+  }
+  const result = await propagateCustomerEmailChange({ before, after, source, ...(reviewReasonCodes ? { reviewReasonCodes } : {}) }, conn);
+  return { ...result, unlinkedSubscribers: Number(unlinked) || 0 };
+}
+
 module.exports = {
   propagateCustomerEmailChange,
+  propagateSelfServiceEmailChange,
   resolveOpenEmailReviewCards,
   resendPendingConfirmation,
   emailKey,

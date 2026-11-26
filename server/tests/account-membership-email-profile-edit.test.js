@@ -44,3 +44,16 @@ test('contactOverride sends to the old address', async () => {
   expect(mockSendTemplate.mock.calls[0][0]).toMatchObject({ to: 'old@example.test', idempotencyKey: 'k-old' });
   expect(mockSendTemplate.mock.calls[0][0].payload.changed_items_summary).toBe('Email address: old@example.test to current@example.test');
 });
+
+test('greetingName greets a former address with a neutral name, not the current first name', async () => {
+  await Email.sendAccountUpdated({
+    customerId: 'c1', actorCustomerId: 'c1', alwaysNotify: true, changedItems: [{ key: 'email', label: 'Email address' }],
+    contactOverride: { email: 'old@example.test', name: '' }, greetingName: 'there', idempotencyKey: 'k-old2',
+  });
+  expect(mockSendTemplate.mock.calls[0][0].payload.first_name).toBe('there');
+});
+
+test('without greetingName the greeting is the contact name or the customer first name', async () => {
+  await Email.sendAccountUpdated({ customerId: 'c1', actorCustomerId: 'c1', alwaysNotify: true, changedItems: items });
+  expect(mockSendTemplate.mock.calls[0][0].payload.first_name).toBe('Pat');
+});

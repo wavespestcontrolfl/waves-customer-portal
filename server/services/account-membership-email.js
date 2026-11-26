@@ -372,6 +372,9 @@ async function sendAccountUpdated({
   // Send even when the actor is the recipient. Set only for an identity change
   // (name or email edited in the portal), where the notice is the takeover alarm.
   alwaysNotify = false,
+  // A neutral greeting name for a notice that goes to an address the customer just left: the template would
+  // otherwise greet it with the customer's CURRENT first name (the new one, after a rename).
+  greetingName = null,
 } = {}) {
   // The account.updated template is a security-style "was this you?" notice.
   // Skip it when the recipient is the same person who made the change — a
@@ -404,6 +407,7 @@ async function sendAccountUpdated({
     eventType: 'account.updated',
     contactOverride,
     payload: {
+      ...(greetingName ? { first_name: greetingName } : {}),
       account_section: accountSection,
       change_summary: summary,
       changed_items_summary: itemSummary(changedItems) || summary,

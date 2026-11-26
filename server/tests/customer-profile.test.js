@@ -14,6 +14,7 @@ jest.mock('../middleware/auth', () => {
     ...real,
     authenticateAllowInactive: (req, _res, next) => {
       req.customerId = mockSession.customerId;
+      req.accountId = mockSession.accountId || mockSession.customerId;
       req.customerInactive = mockSession.inactive === true;
       req.contactSession = mockSession.contact || null;
       next();
@@ -41,7 +42,7 @@ const mockLockEmails = jest.fn(async () => { mockOrder.push('lock'); return []; 
 jest.mock('../utils/customer-comms-lock', () => ({ lockAssignedCustomerEmails: (...a) => mockLockEmails(...a) }));
 const mockEmailFanout = jest.fn(async () => { mockOrder.push('emailFanout'); return { pendingConfirmation: null, heldNewsletterResume: null }; });
 const mockResend = jest.fn(async () => {});
-jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: (...a) => mockEmailFanout(...a), resendPendingConfirmation: (...a) => mockResend(...a) }));
+jest.mock('../services/customer-email-fanout', () => ({ propagateSelfServiceEmailChange: (...a) => mockEmailFanout(...a), resendPendingConfirmation: (...a) => mockResend(...a) }));
 const mockNameFanout = jest.fn(async () => { mockOrder.push('nameFanout'); });
 jest.mock('../services/customer-contact-fanout', () => ({ propagateCustomerNameChange: (...a) => mockNameFanout(...a) }));
 const mockConflict = jest.fn(async () => null);
@@ -176,7 +177,9 @@ describe('PUT /api/customer/profile', () => {
     expect(JSON.stringify(toOld)).not.toContain('new.address@example.test');
     expect(toNew.changedItems).toEqual([{ key: 'email', label: 'Email address', newValue: 'new.address@example.test' }]);
     expect(JSON.stringify(toNew.changedItems)).not.toContain(OLD_EMAIL);
-    expect(toOld.contactOverride).toEqual({ email: OLD_EMAIL, name: 'Pat' });
+    expect(toOld.contactOverride).toEqual({ email: OLD_EMAIL, name: '' });
+    expect(toOld.greetingName).toBe('there');
+    expect(toNew.greetingName).toBeUndefined();
     expect(toNew.contactOverride).toEqual({ email: 'new.address@example.test', name: 'Pat' });
     for (const call of [toOld, toNew]) expect(call).toMatchObject({ customerId: CUSTOMER_ID, actorCustomerId: CUSTOMER_ID, alwaysNotify: true });
     expect(toOld.idempotencyKey).not.toBe(toNew.idempotencyKey);
@@ -201,6 +204,32 @@ describe('PUT /api/customer/profile', () => {
     expect(mockSend.mock.calls[0][0].contactOverride).toEqual({ email: 'first.address@example.test', name: 'Pat' });
   });
 
+  test('a rename and an email change together: the old mailbox gets neither name, the new mailbox gets the new one', async () => {
+    await put({ firstName: 'Sam', email: 'new.address@example.test' });
+    await flush();
+    const [toOld, toNew] = mockSend.mock.calls.map((c) => c[0]);
+    expect(toOld).toMatchObject({ greetingName: 'there', contactOverride: { email: OLD_EMAIL, name: '' } });
+    expect(JSON.stringify(toOld)).not.toMatch(/Sam|Pat/);
+    expect(toNew.contactOverride).toEqual({ email: 'new.address@example.test', name: 'Sam' });
+  });
+
+  test('a profile that moved to another account after authenticate (locked row account differs from the session) is refused 403, nothing written', async () => {
+    mockRow.account_id = '99999999-9999-4999-8999-999999999999';
+    const res = await put({ firstName: 'Sam', email: 'new.address@example.test' });
+    expect(res.status).toBe(403);
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockAudit).not.toHaveBeenCalled();
+    expect(mockEmailFanout).not.toHaveBeenCalled();
+    await flush();
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('a row whose account matches the session account is edited (session account differs from its own id)', async () => {
+    mockRow.account_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    mockSession.accountId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    expect((await put({ firstName: 'Sam' })).status).toBe(200);
+  });
+
   test('a name-only edit for a customer with no email on file saves and sends nothing', async () => {
     mockRow.email = null;
     const res = await put({ firstName: 'Sam' });
@@ -219,7 +248,6 @@ describe('PUT /api/customer/profile', () => {
     expect(args.before).toMatchObject({ email: OLD_EMAIL, first_name: 'Pat' });
     expect(args.after).toMatchObject({ email: 'new.address@example.test', first_name: 'Pat' });
     expect(args.reviewReasonCodes).toEqual(['customer_email_missing']);
-    expect(args.moveNewsletter).toBe(false);
     expect(mockNameFanout).not.toHaveBeenCalled();
   });
 

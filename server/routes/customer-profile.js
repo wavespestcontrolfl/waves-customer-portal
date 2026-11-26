@@ -109,15 +109,17 @@ function changedItems(current, changes) {
 // with the LOCKED before/after rows: open leads, estimates and queued sends follow the new address; open records
 // follow the new name. The address is typed by the customer and not proven, so: the email scope is the call path's
 // narrow one ('customer_email_missing', it never releases a held first-touch send or settles a staff read-back
-// card), and moveNewsletter:false keeps it from moving, merging or claiming any newsletter subscriber row (the
-// customer can re-subscribe the new address).
+// card), and the newsletter gets one rule (propagateSelfServiceEmailChange): the old address's subscriber row is
+// unlinked from the customer and nothing moves to the new address (the customer can re-subscribe it).
 const SELF_SERVICE_EMAIL_SCOPE = ['customer_email_missing'];
 
 async function commitProfileEdit(trx, { customerId, input, req }) {
   // Row lock first, then the shared per-address advisory key: the admin editor's order. Active is judged on the
   // LOCKED row, so a cancellation that committed after authenticate() cannot be edited past.
   const before = await trx('customers').where({ id: customerId, active: true }).whereNull('deleted_at').forUpdate().first();
-  if (!before) return null;
+  // Ownership is judged on the LOCKED row: the profile may have moved to another account between authenticate()
+  // reading it and this lock (the row's effective account is account_id, else its own id).
+  if (!before || String(before.account_id || before.id) !== String(req.accountId)) return null;
   const changes = diffProfile(before, input);
   if (!Object.keys(changes).length) return { before, after: before, changes, items: [], emailSync: null };
   if (await savedChangesInLastHour(trx, customerId) >= MAX_SAVED_CHANGES_PER_HOUR) throw httpError(429, 'Too many profile changes. Please try again later.');
@@ -131,8 +133,8 @@ async function commitProfileEdit(trx, { customerId, input, req }) {
   const after = { ...before, ...changes };
   let emailSync = null;
   if (changes.email !== undefined) {
-    emailSync = await require('../services/customer-email-fanout').propagateCustomerEmailChange(
-      { before, after, source: 'Customer app profile edit', reviewReasonCodes: SELF_SERVICE_EMAIL_SCOPE, moveNewsletter: false }, trx,
+    emailSync = await require('../services/customer-email-fanout').propagateSelfServiceEmailChange(
+      { before, after, source: 'Customer app profile edit', reviewReasonCodes: SELF_SERVICE_EMAIL_SCOPE }, trx,
     );
   }
   if (changes.first_name !== undefined || changes.last_name !== undefined) {
@@ -176,6 +178,7 @@ function noticeItems(kind, items) {
   return items;
 }
 const OLD_ADDRESS_SUMMARY = 'The email address on your Waves account was changed in the customer app. If this was not you, call or text us right away.';
+const OLD_ADDRESS_GREETING = 'there';
 const CHANGE_SUMMARY = 'Your name or email address on your Waves account was changed in the customer app.';
 
 // Fire-and-forget after the save: a notice that fails to send never undoes the change. Every recipient is the
@@ -187,9 +190,9 @@ function sendChangeNotices({ customerId, before, after, changes, items }) {
   const name = clean(after.first_name);
   const recipients = [];
   const oldEmail = clean(before.email);
-  if (emailMoved && oldEmail) recipients.push({ key: 'old', kind: 'old', email: oldEmail, summary: OLD_ADDRESS_SUMMARY });
-  if (clean(after.email)) recipients.push({ key: 'current', kind: emailMoved ? 'new' : 'same', email: clean(after.email), summary: CHANGE_SUMMARY });
-  for (const { key, kind, email, summary } of recipients) {
+  if (emailMoved && oldEmail) recipients.push({ key: 'old', kind: 'old', email: oldEmail, summary: OLD_ADDRESS_SUMMARY, greeting: OLD_ADDRESS_GREETING });
+  if (clean(after.email)) recipients.push({ key: 'current', kind: emailMoved ? 'new' : 'same', email: clean(after.email), summary: CHANGE_SUMMARY, greeting: null });
+  for (const { key, kind, email, summary, greeting } of recipients) {
     void Promise.resolve(AccountMembershipEmail.sendAccountUpdated({
       customerId,
       actorCustomerId: customerId,
@@ -197,7 +200,9 @@ function sendChangeNotices({ customerId, before, after, changes, items }) {
       changedItems: noticeItems(kind, items),
       changeSummary: summary,
       accountSection: 'Account profile',
-      contactOverride: { email, name },
+      // The old address is greeted with no name at all: neither the old nor the new one belongs in that mailbox.
+      contactOverride: { email, name: greeting ? '' : name },
+      ...(greeting ? { greetingName: greeting } : {}),
       idempotencyKey: `account.profile_edit:${customerId}:${stamp}:${key}`,
     })).catch((err) => logger.warn(`[customer-profile] account.updated email failed for ${customerId}: ${err.message}`));
   }
