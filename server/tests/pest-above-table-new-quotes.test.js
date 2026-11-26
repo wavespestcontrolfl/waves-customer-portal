@@ -341,6 +341,21 @@ describe('a save the server cannot price: no pest row above 5,500 sq ft (admin-e
     passes({ result: { results: {} }, inputs: { homeSqFt: 9000, svcPest: true }, engineInputs: { homeSqFt: 9000, services: { pest: { frequency: 'quarterly' } } } });
   });
 
+  test('only footprint-priced residential pest is refused: a commercial pest row and a bedroom-band unit row are saved as on main', () => {
+    const building = { inputs: { homeSqFt: 20000, stories: '1' }, engineInputs: { buildingSqFt: 20000, footprintSqFt: 20000 } };
+    // Commercial pest has its own pricer: the mapped row, the engine line, and a row with only a name.
+    passes({ result: { recurring: { services: [{ name: 'Commercial Pest Control', service: 'commercial_pest', mo: 180 }] } }, ...building });
+    passes({ engineResult: { lineItems: [{ service: 'commercial_pest', price: 2160 }] }, ...building });
+    passes({ result: { recurring: { services: [{ name: 'Commercial Pest Control', monthly: 180 }] } }, ...building });
+    // A unit priced by its bedroom count says so on the row (the engine line and its mapped copies); the building's size is not its basis.
+    const band = { footprintSource: 'bedroom_band', pricingBasis: 'caller_stated_bedroom_count' };
+    passes({ result: { lineItems: [{ service: 'pest_control', price: 99, ...band }] }, ...building });
+    passes({ result: { results: { pest: { ...row(99), ...band }, pestTiers: [{ ...row(99), ...band }] }, recurring: { services: [{ name: 'Pest (Quarterly)', service: 'pest_control', mo: 33, ...band }] } }, ...building });
+    // A footprint-priced pest row beside either of them is still refused.
+    refused({ result: { recurring: { services: [{ name: 'Commercial Pest Control', service: 'commercial_pest', mo: 180 }, { name: 'Pest (Quarterly)', service: 'pest_control', mo: 42.67 }] } }, ...building });
+    refused({ result: { lineItems: [{ service: 'pest_control', price: 99, ...band }, { service: 'one_time_pest', price: 250 }] }, ...building });
+  });
+
   test('there is no unchanged-resave exception: the same rows and size as the stored estimate are refused too', () => {
     const stored = browser(128, { inputs: { homeSqFt: 10000, stories: '1' } }, { legacyPestAboveTable: true });
     refused(browser(128, { inputs: { homeSqFt: 10000, stories: '1' } }, { legacyPestAboveTable: true }), { storedEstimateData: stored });
