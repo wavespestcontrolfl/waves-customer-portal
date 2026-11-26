@@ -715,7 +715,7 @@ describe('paymentStatusSendBlockReason - the prepaid visits left sentence', () =
   const LEFT = 'Your prepaid Quarterly Pest Control plan has 3 of 4 prepaid visits left.';
   const SNAP = { customer_id: 'c1', sentences: [LEFT] };
   const ctx = (plans) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, hasDepositActivity: false }, prepaidPlans: plans });
-  const run = (body, extra = {}) => paymentStatusSendBlockReason({ customerId: 'c1', body, snapshot: SNAP, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'When is my next visit?', ...extra });
+  const run = (body, extra = {}) => paymentStatusSendBlockReason({ customerId: 'c1', body, snapshot: SNAP, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'How many visits do I have left?', ...extra });
 
   test('the copy goes out while the plan still reads 3 of 4, read with the staff facts; a changed count is payment_status_changed', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]));

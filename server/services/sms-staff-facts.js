@@ -44,16 +44,23 @@ function sectionsOfBlocks(blocks) {
   return sections;
 }
 
-// What reads as a usable sentence of a guide: no merge tags, links, addresses, em dashes, nor wording that points at the email or page itself.
+// What reads as a usable sentence of a guide: no merge tags, bare links, addresses, em dashes, nor wording that points at the email or page itself.
 const usableSentence = (sentence) => sentence.length >= 4 && sentence.length <= 260 // (a list item can be one word: "Houseplants.")
-  && !/\{\{|\]\(|https?:|www\.|@|\u2014/.test(sentence)
+  && !/\{\{|https?:|www\.|@|\u2014/.test(sentence)
   && !/\b(?:e-?mail|inbox|button|below|above|this (?:guide|page))\b/i.test(sentence);
+// The sentences of ONE paragraph or list item, or none. A link keeps its label as plain text ("[Product](url)" reads "Product"). A part with
+// any sentence that cannot be kept is dropped WHOLE: a sentence left standing without its neighbour can lose its subject ("Apply 48 hours
+// away from any bath" without the product it names).
+const sentencesOfPart = (part) => {
+  const sentences = String(part).replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/).map((raw) => raw.trim()).filter(Boolean);
+  return sentences.every(usableSentence) ? sentences : [];
+};
 
 /**
  * The prep guide of the customer's booked visit: the soonest upcoming visit a guide covers, chosen by the prep senders' own eligibility
  * (prep-guide-sender.nextGuideVisit: one helper for the senders and for this lookup, so a visit the senders would not prep is never
  * read here). Only that visit's guide: its published email template as { key, label, sections: [{ heading, sentences }] }, in the guide's
- * own order. Merge tags and links are dropped here; the drafter screens what is left (banned claims, prompt-control text) and caps the
+ * own order. Merge tags and bare links are dropped here (a part with one is dropped whole); the drafter screens what is left (banned claims, prompt-control text) and caps the
  * section. null when no booked visit has a guide or the template cannot be read. Never reads notes.
  */
 async function loadPrepGuideFacts(customerId, { db } = {}) {
@@ -70,7 +77,7 @@ async function loadPrepGuideFacts(customerId, { db } = {}) {
     if (!loaded?.activeVersion) return null;
     const blocks = typeof loaded.activeVersion.blocks === 'string' ? JSON.parse(loaded.activeVersion.blocks) : loaded.activeVersion.blocks;
     const sections = sectionsOfBlocks(blocks)
-      .map(({ heading, parts }) => ({ heading, sentences: parts.flatMap((part) => String(part).replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/)).map((raw) => raw.trim()).filter(usableSentence) }))
+      .map(({ heading, parts }) => ({ heading, sentences: parts.flatMap(sentencesOfPart) }))
       .filter((section) => section.sentences.length);
     return sections.length ? { key, label: config.label, sections } : null;
   } catch (err) {

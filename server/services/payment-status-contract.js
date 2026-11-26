@@ -636,7 +636,9 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
   if (!inbound || !copied.length) return false;
   // a question about the customer's own remaining count is answered only by a prepaid-count copy, never by another true billing sentence
-  if (COUNT_ASK_RE.test(inbound) && !copied.some((t) => SHAPES.prepaid_visits_left.test(t))) return true;
+  if (asksCount(inbound) && !copied.some((t) => SHAPES.prepaid_visits_left.test(t))) return true;
+  // ...and a prepaid count answers only a question about the plan's count, never a payment, receipt or invoice question
+  if (copied.some((t) => SHAPES.prepaid_visits_left.test(t)) && !asksCount(inbound) && !/\bprepaid\b/i.test(inbound)) return true;
   const { invoiceNumbersNamed } = require('./zelle-target-invoice');
   const named = invoiceNumbersNamed(inbound);
   const stripZeros = (v) => String(v).replace(/^0+/, '') || '0';
@@ -692,7 +694,7 @@ const ZELLE_WORD_RE = /\bzelle\b/i;
 // The visit COUNT of a prepaid plan ("3 visits left", "seven prepaid visits") is a plan status like an amount: only the rendered
 // prepaid sentence may state it. Broad on purpose; a false hold goes to staff, a missed count would state a plan status unchecked.
 const COUNT_NUM = '(?:\\d{1,3}|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|couple|few|several|once|twice)';
-const PREPAID_COUNT_RE = new RegExp(`\\b(?:visits?|applications?|treatments?)\\s+(?:are\\s+|is\\s+)?(?:still\\s+)?(?:left|remaining|remain)\\b|\\b(?:left|remaining)\\s+(?:prepaid\\s+)?(?:visits?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+prepaid\\s+(?:\\w+\\s+)?(?:visits?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+more\\s+(?:visits?|applications?|treatments?)\\b`, 'i');
+const PREPAID_COUNT_RE = new RegExp(`\\b(?:visits?|appointments?|applications?|treatments?)\\s+(?:are\\s+|is\\s+)?(?:still\\s+)?(?:left|remaining|remain)\\b|\\b(?:left|remaining)\\s+(?:prepaid\\s+)?(?:visits?|appointments?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+prepaid\\s+(?:\\w+\\s+)?(?:visits?|appointments?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+more\\s+(?:visits?|appointments?|applications?|treatments?)\\b`, 'i');
 // ...and a short answer to a question that ASKS for the count ("Three more.", "Three.", "3.", "None left.") carries no
 // count word in its own words either. The question decides: an unknown customer message counts as asking (unknown is scoped).
 const COUNT_ASK_RE = /\b(?:how many|number of)\b[^.?!]{0,30}\b(?:prepaid|visits?|appointments?|applications?|treatments?|services?|times)\b[^.?!]{0,40}\b(?:left|remaining|remain|prepaid|paid|used|covered|more|on (?:my|our|the) (?:plan|account)|(?:do|did|have|has) (?:i|we)\b|(?:i|we) (?:have|get|got))|\b(?:visits?|appointments?|applications?|treatments?)\s+(?:(?:are|is|do i have|do we have)\s+)?(?:still\s+)?(?:left|remaining|remain|covered)\b|\b(?:left|remaining)\s+(?:prepaid\s+)?(?:visits?|appointments?|applications?|treatments?)\b|\bprepaid\b[^.?!]{0,40}\b(?:left|remaining|remain)\b|\b(?:left|remaining)\b[^.?!]{0,40}\bprepaid\b|\b(?:how many|number of)\b[^.?!]{0,20}\bprepaid\b/i;
@@ -700,12 +702,16 @@ const COUNT_ANSWER_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:more|left|remaining|to
 // A question that asks for the count is answered by the rendered sentence ALONE: once the copies are removed only inert text (a greeting,
 // thanks) may remain, whatever words an invented count would use ("You have three.", "Three.", "a couple left"). With the question unknown,
 // the count words themselves are the detector.
+// "Do you have any appointments left on Friday?" asks for an open slot, not for the visits left on the plan, unless it also names the plan.
+const SLOT_ASK_RE = /\b(?:any|openings?|slots?|available|availability|open)\b[^.?!]{0,30}\b(?:appointments?|visits?)\b|\b(?:appointments?|visits?)\b[^.?!]{0,30}\b(?:available|open|(?:on |this |next )?(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|this week|next week)\b/i;
+const PLAN_WORD_RE = /\b(?:prepaid|my plan|my account|paid for|covered|remaining)\b/i;
+const asksCount = (inbound) => COUNT_ASK_RE.test(String(inbound ?? '')) && !(SLOT_ASK_RE.test(String(inbound)) && !PLAN_WORD_RE.test(String(inbound)));
 const claimsPrepaidCount = (text, inboundText = null) => {
   const body = String(text ?? '');
   if (PREPAID_COUNT_RE.test(body)) return true;
   if (inboundText == null) return COUNT_ANSWER_RE.test(body);
   // (a digit-only clause reads as inert, so any digit counts as text here)
-  return COUNT_ASK_RE.test(String(inboundText)) && (!remainderIsInert(body) || /\d/.test(body));
+  return asksCount(inboundText) && (!remainderIsInert(body) || /\d/.test(body));
 };
 function remainderHasMoney(remainder, inboundText = null) {
   const text = String(remainder ?? '');

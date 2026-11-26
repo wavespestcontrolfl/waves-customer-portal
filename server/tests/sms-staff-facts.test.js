@@ -48,6 +48,8 @@ describe('prepaid visits left (payment-status contract)', () => {
     const check = (reply) => paymentStatus.checkPaymentStatusReply({ reply, sentences, inboundText: 'How many visits do I have left?' }).ok;
     expect(check(`Hi Dana, ${LEFT}`)).toBe(true);
     expect(check('Your prepaid Quarterly Pest Control plan has 2 of 4 prepaid visits left.')).toBe(false);
+    // the claim detector uses the question's visit nouns: appointments count too
+    expect(check('You have three appointments left.')).toBe(false);
     for (const own of ['You have 3 visits left.', 'Three treatments remain on your plan.', 'You have two prepaid visits.', 'There are 3 left visits.',
       // short answers to the count question: no count word in the model's own words
       'You have three more visits.', 'Three more.', 'None left.', 'A couple more.', 'Three.', '3.', 'Just two!', 'Happy to help. Four', 'You have three.']) expect(check(own)).toBe(false);
@@ -72,6 +74,9 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(ask('Three.', 'How many do I have left on my prepaid plan?')).toBe(false);
     expect(ask('Four.', 'How many prepaid visits are on my plan?')).toBe(false);
     expect(ask('Three.', 'How many visits are still covered?')).toBe(false);
+    // availability questions are not plan-count questions (unless the plan is named)
+    expect(ask('We can move it to Friday.', 'Do you have any appointments left on Friday?')).toBe(true);
+    expect(ask('Three.', 'How many appointments do I have left on my prepaid plan?')).toBe(false);
     // a complaint about the last visit is not a count question
     expect(ask('I am sorry about the gate, we will make sure it is closed.', 'At the last visit you left the gate open')).toBe(true);
     // not a count question about the plan: a scheduling reply or a different quantity
@@ -98,6 +103,9 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(check(LAWN, 'How many cockroach treatments do I have left?')).toBe(false);
     // two services named: only a plan that names both answers ("Lawn Pest Control" is turf service, not the pest plan)
     expect(check(LEFT, 'How many Lawn Pest Control visits do I have left?')).toBe(false);
+    // a count answers a count question, never a payment or receipt question
+    expect(check(LEFT, 'Did you receive my payment?')).toBe(false);
+    expect(check(LEFT, 'Do I still have prepaid visits on my plan?')).toBe(true);
     expect(check(LAWN, 'How many visits are left on my street?')).toBe(true);
     expect(check(`${LEFT} ${LAWN}`, 'How many pest control visits do I have left?')).toBe(false);
     // no service named: either plan's sentence may answer
@@ -183,8 +191,9 @@ describe('sms-staff-facts loaders', () => {
     { type: 'heading', content: 'Why fleas are different in Florida' },
     { type: 'paragraph', content: 'Fleas thrive in warm, humid homes all year long.' },
     { type: 'heading', content: 'How to prepare' },
-    { type: 'paragraph', content: 'Vacuum every carpet before we arrive. Reply to this email with questions. See [the brand](https://example.com/x) for more.' },
-    { type: 'list', items: ['Wash all pet bedding on the hottest cycle the fabric allows.', 'Call (941) 555-0100 or mail someone@example.com.'] },
+    { type: 'paragraph', content: 'Vacuum every carpet before we arrive.' },
+    { type: 'paragraph', content: 'Reply to this email with questions. Vacuum twice if you can.' },
+    { type: 'list', items: ['Wash all pet bedding on the hottest cycle the fabric allows.', 'Call (941) 555-0100 or mail someone@example.com.', 'Apply [Topical Product](https://example.com/x) 48 hours away from any bath.', 'Order it at https://example.com/y when you can.'] },
     { type: 'heading', content: 'What we do on the day' },
     { type: 'paragraph', content: 'Our technician treats baseboards and cracks along the floor.' },
     { type: 'signature', content: 'The team signs here with a sentence.' },
@@ -212,7 +221,8 @@ describe('sms-staff-facts loaders', () => {
     // (the opening paragraph carries a merge tag and is dropped; "Reply to this email", the link and the address sentences are dropped)
     expect(guide.sections).toEqual([
       { heading: 'Why fleas are different in Florida', sentences: ['Fleas thrive in warm, humid homes all year long.'] },
-      { heading: 'How to prepare', sentences: ['Vacuum every carpet before we arrive.', 'Wash all pet bedding on the hottest cycle the fabric allows.'] },
+      // a link keeps its label; a part with a bare link, an address or email wording is dropped WHOLE ("Reply to this email ... Vacuum twice")
+      { heading: 'How to prepare', sentences: ['Vacuum every carpet before we arrive.', 'Wash all pet bedding on the hottest cycle the fabric allows.', 'Apply Topical Product 48 hours away from any bath.'] },
       { heading: 'What we do on the day', sentences: ['Our technician treats baseboards and cracks along the floor.'] },
     ]);
   });
