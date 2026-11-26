@@ -5,7 +5,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { EditServiceModal } from './SchedulePage';
 
-vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
+const slotCheckState = vi.hoisted(() => ({}));
+vi.mock('../../components/schedule/useSlotConflicts', () => ({
+  useSlotConflicts: (args) => { slotCheckState.args = args; return { conflicts: [] }; },
+}));
 const bestTimesState = vi.hoisted(() => ({ availability: undefined }));
 vi.mock('../../components/schedule/useBestTimes', () => ({
   useBestTimes: (args) => {
@@ -241,6 +244,13 @@ it('choosing Separate is the same one request with that choice', async () => {
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(1));
   expect(body(0)).toMatchObject({ comboMove: 'separate', scheduledDate: '2035-01-03' });
+});
+
+it('the slot check and the best-times hint are both told that this save writes the length (durationEdit)', () => {
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  expect(slotCheckState.args).toMatchObject({ serviceId: 'fixture-visit', durationEdit: true });
+  expect(bestTimesState.args).toMatchObject({ serviceId: 'fixture-visit', durationEdit: true });
 });
 
 it('the best-times rows rank for the form\'s services and carry the move choice; the server adds the shared stop', () => {

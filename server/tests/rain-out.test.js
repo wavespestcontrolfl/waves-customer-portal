@@ -5008,6 +5008,196 @@ describe('rain-out service', () => {
       expect(empty).toEqual({ ok: false, reason: 'bad_target' });
       expect(listOccupiedWindows).not.toHaveBeenCalled();
     });
+
+    // GATE_TECH_SHIFT_HOURS (D4): the pickers' check states, before the save, the shift line the office's
+    // save would state for the picked hour (shiftWarning, pickedShiftLines), from the office's own reader.
+    describe('the office\'s shift line for a picked slot', () => {
+      const LINE = "Synthetic Tech's shift is 8:00 AM to 12:00 PM. This visit is outside those hours.";
+      const [TECH_A, TECH_B] = ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'];
+      const eligibility = require('../services/technician-eligibility');
+      let reader;
+      beforeEach(() => { reader = jest.spyOn(eligibility, 'shiftLinesFor').mockImplementation(async (_id, asks) => asks.map(() => null)); });
+      afterEach(() => { reader.mockRestore(); delete process.env.GATE_TECH_SHIFT_HOURS; });
+      const slot = (start, end, extra) => ({ date: '2026-08-20', window: { start, end }, ...extra });
+      const block = (start, end, minutes) => ({ window_start: start, window_end: end, estimated_duration_minutes: minutes });
+
+      test('each technician is asked once about every slot that names it, and each line rides its own result', async () => {
+        // TECH_A's second slot is outside the shift, TECH_B's only slot too.
+        reader.mockImplementation(async (technicianId, asks) => asks.map((ask) => (
+          ask.block.window_start === '13:00' ? `${technicianId === TECH_A ? 'A' : 'B'}: ${LINE}` : null)));
+        const result = await RainOut.checkSlots({
+          targets: [
+            slot('09:00', '10:00', { technicianId: TECH_A }),
+            slot('13:00', '14:00', { technicianId: TECH_B }),
+            slot('13:00', '14:00'),
+            slot('13:00', '13:30', { technicianId: TECH_A, durationMinutes: 90, date: '2026-08-21' }),
+          ],
+          caller: ADMIN,
+        });
+        expect(result.results).toEqual([
+          { conflicts: [] }, { conflicts: [], shiftWarning: `B: ${LINE}` }, { conflicts: [] }, { conflicts: [], shiftWarning: `A: ${LINE}` },
+        ]);
+        // Each slot's own day, its picked window and the length sent; a slot with no technician is not asked about.
+        expect(reader.mock.calls).toEqual([
+          [TECH_A, [
+            { technicianId: TECH_A, date: '2026-08-20', block: block('09:00', '10:00', undefined) },
+            { technicianId: TECH_A, date: '2026-08-21', block: block('13:00', '13:30', 90) },
+          ]],
+          [TECH_B, [{ technicianId: TECH_B, date: '2026-08-20', block: block('13:00', '14:00', undefined) }]],
+        ]);
+      });
+
+      test('no slot names a technician (the bulk bar): the reader is not asked', async () => {
+        const result = await RainOut.checkSlots({ targets: [slot('13:00', '14:00'), slot('15:00', '16:00', { technicianId: null })], caller: ADMIN });
+        expect(result.results).toEqual([{ conflicts: [] }, { conflicts: [] }]);
+        expect(reader).not.toHaveBeenCalled();
+      });
+
+      // The route takes a technician-role login too: the line names a technician and the shift's hours, so
+      // such a caller is answered about itself only, whatever GATE_TECH_LOGIN_PRIVACY says (mayAskShiftOf).
+      test('a technician caller is answered about itself only, and no caller about no one', async () => {
+        reader.mockImplementation(async (_id, asks) => asks.map(() => LINE));
+        const targets = [slot('13:00', '14:00', { technicianId: TECH_A }), slot('13:00', '14:00', { technicianId: TECH_B })];
+        // Its own id in any spelling the check takes: capitals, braces, no hyphens.
+        for (const spelled of [TECH_B.toUpperCase(), `{${TECH_B}}`, TECH_B.replace(/-/g, '')]) {
+          reader.mockClear();
+          const own = await RainOut.checkSlots({ targets, caller: { isAdmin: false, technicianId: spelled } });
+          expect(own.results).toEqual([{ conflicts: [] }, { conflicts: [], shiftWarning: LINE }]);
+          expect(reader.mock.calls.map(([id]) => id)).toEqual([TECH_B]);
+        }
+        reader.mockClear();
+        // The slot's id in another spelling is the caller's own too, and still not the other technician's.
+        const braced = [slot('13:00', '14:00', { technicianId: `{${TECH_A}}` }), slot('13:00', '14:00', { technicianId: TECH_B.replace(/-/g, '') })];
+        expect((await RainOut.checkSlots({ targets: braced, caller: { isAdmin: false, technicianId: TECH_B } })).results)
+          .toEqual([{ conflicts: [] }, { conflicts: [], shiftWarning: LINE }]);
+        reader.mockClear();
+        for (const caller of [null, undefined, {}, { isAdmin: false, technicianId: null }, { isAdmin: 'true', technicianId: 'admin-1' }]) {
+          expect((await RainOut.checkSlots({ targets, caller })).results).toEqual([{ conflicts: [] }, { conflicts: [] }]);
+        }
+        expect(reader).not.toHaveBeenCalled();
+      });
+
+      test('the line is beside the overlap answer, never a row of it', async () => {
+        reader.mockResolvedValue([LINE]);
+        listOccupiedWindows.mockResolvedValue(occ('2026-08-20', [{
+          id: 'svc-9', customer_id: 'cust-9', status: 'confirmed', service_type: 'Mosquito Treatment',
+          window_start: '13:00:00', window_end: '14:00:00', estimated_duration_minutes: 60, reservation_expires_at: null,
+        }]));
+        wireDb({ customers: [chain({ rows: [{ id: 'cust-9', first_name: 'cust-9a', last_name: 'cust-9b' }] })] });
+        const { results } = await RainOut.checkSlots({ targets: [slot('13:30', '14:30', { technicianId: TECH_A })], caller: ADMIN });
+        expect(results[0].shiftWarning).toBe(LINE);
+        expect(results[0].conflicts).toHaveLength(1);
+        expect(results[0].conflicts[0]).not.toHaveProperty('warning');
+      });
+
+      test('one technician\'s reader fails: no line for its slots, logged, and the other technician\'s line stands', async () => {
+        const logger = require('../services/logger');
+        reader.mockImplementation(async (technicianId, asks) => {
+          if (technicianId === TECH_A) throw new Error('hours unread');
+          return asks.map(() => LINE);
+        });
+        const result = await RainOut.checkSlots({
+          targets: [slot('13:00', '14:00', { technicianId: TECH_A }), slot('13:00', '14:00', { technicianId: TECH_B })], caller: ADMIN,
+        });
+        expect(result).toEqual({ ok: true, results: [{ conflicts: [] }, { conflicts: [], shiftWarning: LINE }] });
+        expect(logger.info).toHaveBeenCalledWith(`[rain-out] picked-hour shift line failed for technician ${TECH_A}: hours unread`);
+      });
+
+      // A move keeps the visit's stored length, and the calendars send the booked window's span as the length
+      // (pickedSlotAsks, storedLengths).
+      describe('the length of a visit that exists', () => {
+        const VISIT = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+        const STORED_90 = [{ id: VISIT, estimated_duration_minutes: 90 }];
+        beforeEach(() => { process.env.GATE_TECH_SHIFT_HOURS = 'true'; });
+        // 16:00 to 17:00 slots of TECH_A: the length the reader is asked about for each, and the read of the visit.
+        const askedAll = async (targets, { stored = STORED_90, caller = ADMIN, read = chain({ rows: stored }) } = {}) => {
+          db.mockClear();
+          reader.mockClear();
+          wireDb({ scheduled_services: [read] });
+          const result = await RainOut.checkSlots({ targets: targets.map((target) => slot('16:00', '17:00', { technicianId: TECH_A, ...target })), caller });
+          expect(result.ok).toBe(true);
+          const lengths = (reader.mock.calls[0]?.[1] || []).map((ask) => ask.block.estimated_duration_minutes);
+          return { lengths, length: lengths[0], read, visitRead: db.mock.calls.some(([table]) => table === 'scheduled_services') };
+        };
+        const asked = (target, opts) => askedAll([target], opts);
+
+        test('a moved visit is judged on its stored length, not on the span the calendar sent', async () => {
+          const { length, read } = await asked({ serviceId: VISIT, durationMinutes: 60 });
+          expect(length).toBe(90);
+          expect(read.whereIn).toHaveBeenCalledWith('id', [VISIT]);
+          expect(read.select).toHaveBeenCalledWith('id', 'technician_id', 'estimated_duration_minutes');
+          // The id in another spelling the check takes finds the same row.
+          expect((await asked({ serviceId: `{${VISIT.toUpperCase()}}`, durationMinutes: 60 })).length).toBe(90);
+        });
+
+        test('an edit of the length (durationEdit) is judged on the length sent, and the visit is not read', async () => {
+          const { length, visitRead } = await asked({ serviceId: VISIT, durationMinutes: 120, durationEdit: true });
+          expect(length).toBe(120);
+          expect(visitRead).toBe(false);
+          // Only a strict true is an edit, as on the best-times read.
+          expect((await asked({ serviceId: VISIT, durationMinutes: 120, durationEdit: 'true' })).length).toBe(90);
+        });
+
+        test('an edit and a move of one visit in one check: each on its own length, on one read', async () => {
+          const { lengths, read } = await askedAll([
+            { serviceId: VISIT, durationMinutes: 120, durationEdit: true },
+            { serviceId: VISIT, durationMinutes: 60 },
+            { serviceId: VISIT, durationMinutes: 45 },
+          ]);
+          expect(lengths).toEqual([120, 90, 90]);
+          expect(read.whereIn).toHaveBeenCalledWith('id', [VISIT]);
+        });
+
+        test('a visit with no stored length is judged on its window alone, and one that is not found on the length sent', async () => {
+          expect((await asked({ serviceId: VISIT, durationMinutes: 120 }, { stored: [{ id: VISIT, estimated_duration_minutes: null }] })).length).toBeNull();
+          expect((await asked({ serviceId: VISIT, durationMinutes: 60 }, { stored: [] })).length).toBe(60);
+        });
+
+        test('no visit (a new appointment): the length sent, and nothing is read', async () => {
+          const { length, visitRead } = await asked({ durationMinutes: 45 });
+          expect(length).toBe(45);
+          expect(visitRead).toBe(false);
+        });
+
+        test('the visit is not read with the gate off, for a slot with no technician, or for one the caller may not ask about', async () => {
+          const move = { serviceId: VISIT, durationMinutes: 60 };
+          expect((await asked({ ...move, technicianId: null })).visitRead).toBe(false);
+          expect((await asked(move, { caller: { isAdmin: false, technicianId: TECH_B } })).visitRead).toBe(false);
+          expect((await asked(move, { caller: { isAdmin: false, technicianId: TECH_A } })).visitRead).toBe(true);
+          delete process.env.GATE_TECH_SHIFT_HOURS;
+          expect((await asked(move)).visitRead).toBe(false);
+        });
+
+        test('a technician caller is judged on the stored length of its own visit only', async () => {
+          const move = { serviceId: VISIT, durationMinutes: 60 };
+          const visitOf = (technicianId) => ({ stored: [{ id: VISIT, technician_id: technicianId, estimated_duration_minutes: 90 }] });
+          const own = { isAdmin: false, technicianId: TECH_A };
+          expect((await asked(move, { ...visitOf(TECH_A), caller: own })).length).toBe(90);
+          expect((await asked(move, { ...visitOf(TECH_A.toUpperCase()), caller: own })).length).toBe(90);
+          // Another technician's visit, and one with no technician: the length sent.
+          expect((await asked(move, { ...visitOf(TECH_B), caller: own })).length).toBe(60);
+          expect((await asked(move, { ...visitOf(null), caller: own })).length).toBe(60);
+          // The office reads any visit's length.
+          expect((await asked(move, visitOf(TECH_B))).length).toBe(90);
+          expect((await asked(move, visitOf(null))).length).toBe(90);
+        });
+
+        test('a read of the visit that fails is logged, and the slot is judged on the length sent', async () => {
+          const logger = require('../services/logger');
+          const read = chain({ then: (resolve, reject) => Promise.reject(new Error('lengths unread')).then(resolve, reject) });
+          expect((await asked({ serviceId: VISIT, durationMinutes: 60 }, { read })).length).toBe(60);
+          expect(logger.info).toHaveBeenCalledWith('[slot-check] stored visit lengths not read: lengths unread');
+        });
+      });
+
+      test('gate off: the real reader reads nothing and no result has the key', async () => {
+        reader.mockRestore();
+        wireDb({});
+        const result = await RainOut.checkSlots({ targets: [slot('13:00', '14:00', { technicianId: TECH_A })], caller: ADMIN });
+        expect(result).toEqual({ ok: true, results: [{ conflicts: [] }] });
+        expect(db.mock.calls.map(([table]) => table)).not.toContain('technicians');
+      });
+    });
   });
 });
 

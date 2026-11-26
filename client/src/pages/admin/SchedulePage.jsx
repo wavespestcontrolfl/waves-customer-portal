@@ -2092,6 +2092,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     windowStart: form.windowStart,
     windowEnd: form.windowEnd,
     durationMinutes: slotCheckDuration,
+    // update-details writes this duration (as for the best-times hint below), so the check judges the
+    // visit on it; a move's check reads the stored length.
+    durationEdit: true,
     excludeServiceIds: [service.id],
   });
   // The Service address picker's state lives ahead of the hint hook: a
