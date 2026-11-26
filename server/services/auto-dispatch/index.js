@@ -43,6 +43,7 @@ const reminderOff = require('./reminder-off');
 const needsPerson = require('./needs-person-notice');
 const moveCheck = require('./proofreader/nightly');
 const checkDown = require('./check-down-notice');
+const rainTerm = require('./rain-term');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -1358,6 +1359,8 @@ async function evaluateServiceForRun(service, run) {
 
   const evalResult = await evaluatePlacement(service, prefs, ctx, config, run.lockBoundary);
   await noteArrivalShadow(evalResult, { service, prefs, ctx, config, lockBoundary: run.lockBoundary });
+  // GATE_AUTO_DISPATCH_RAIN_TERM='shadow': what the rain term would do, on the audit row only (rain-term.js).
+  await rainTerm.note(run.rainTerm, { service, prefs, ctx, guard, evalResult, run });
   totals.evaluated++;
   noteEvaluation(run, service, evalResult, ctx);
 
@@ -1546,6 +1549,7 @@ async function applyPlannedMove(pm, run, attempt) {
   const fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
   attempt.fresh = fresh;
   noteEvaluation(run, pm.service, fresh, pm.ctx);
+  rainTerm.carry(pm.result, fresh);
   if (fresh.kind !== 'move') {
     // Re-scoring against the live schedule no longer clears the bar (an
     // earlier apply this run captured the gain, or the row changed).
@@ -1638,7 +1642,7 @@ async function applyPlannedMove(pm, run, attempt) {
     scores: appliedAudit.scores,
     prefsSnapshot: fresh.audit.prefsSnapshot,
     routeMetrics: { ...appliedAudit.routeMetrics, attempts: appliedAudit.attempts },
-    constraints: checked ? { ...appliedAudit.constraints, proofreader: checked.audit } : appliedAudit.constraints,
+    constraints: { ...appliedAudit.constraints, ...rainTerm.kept(fresh), ...(checked ? { proofreader: checked.audit } : {}) },
     appliedBy: 'auto_dispatch',
   });
 }
@@ -1822,6 +1826,7 @@ async function runAutoDispatch(opts = {}) {
     run.guardReadDegraded = run.guardCtx.degraded;
     await loadRunMoveCounts(run, services);
     await loadRunReminderOff(run, services);
+    run.rainTerm = await rainTerm.start(run); // null unless GATE_AUTO_DISPATCH_RAIN_TERM='shadow'
 
     for (const service of services) {
       try {
@@ -1866,6 +1871,7 @@ async function runAutoDispatch(opts = {}) {
   // Every check of the night broke: one notice that the tool is stopped, and
   // why (owner audit 2026-10-22, finding 1). Best-effort; never throws.
   await checkDown.noteRun(run.proofreader, { enabled: config.proofreaderEnabled === true, nowDate: run.nowDate });
+  await rainTerm.finish(run.rainTerm, run);
   runStatus = moveCheck.statusAfterNotices(runStatus, noticesClosed);
   try {
     await audit.completeRun(runId, { status: runStatus, totals, error: runError });

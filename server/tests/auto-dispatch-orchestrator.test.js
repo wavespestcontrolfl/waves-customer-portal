@@ -54,6 +54,9 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   maintainMissingGeoNotices: jest.fn(async () => {}),
 }));
 
+// The rain term's forecast read (GATE_AUTO_DISPATCH_RAIN_TERM) and its run-summary audit row: faked, never the network.
+jest.mock('../services/weather-forecast', () => ({ getNwsHourlyRain: jest.fn(async () => null) }));
+jest.mock('../services/audit-log', () => ({ ...jest.requireActual('../services/audit-log'), recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/auto-dispatch/check-down-notice', () => ({ noteRun: jest.fn(async () => ({ action: 'none' })) }));
 // The van's departure (GATE_AUTO_DISPATCH_DAY_RULES): read only when the run's day rules are on.
 jest.mock('../services/scheduling/departure-time', () => ({ dayDepartureMinutes: jest.fn(async () => 450) }));
@@ -2386,5 +2389,76 @@ describe('dry time audit (GATE_AUTO_DISPATCH_DRY_TIME_ORDER)', () => {
     const result = await _internals.evaluatePlacement(svc(), { ...BASE, dry_time: dryTime('true') }, {}, CONFIG, '2026-06-20');
     expect(result.audit.constraints.dry_time).toMatchObject({ mode: 'true', current: { date: '2026-08-04', start: '09:00' } });
     expect(result.audit.constraints.dry_time).not.toHaveProperty('shadow_best');
+  });
+});
+
+describe('rain term shadow (GATE_AUTO_DISPATCH_RAIN_TERM, owner 2026-11-26)', () => {
+  const { getNwsHourlyRain } = require('../services/weather-forecast');
+  const { recordAuditEvent } = require('../services/audit-log');
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const ENV = 'GATE_AUTO_DISPATCH_RAIN_TERM';
+  let prevEnv;
+  let day3;
+  beforeEach(() => {
+    prevEnv = process.env[ENV];
+    day3 = etDateString(addETDays(new Date(), 3));
+    servicesResult = [svc({ scheduled_date: day3, zone: 'sarasota', service_type: 'Pest Control Service' })];
+    getNwsHourlyRain.mockReset().mockImplementation(async () => Array.from({ length: 24 }, (_, h) => ({
+      startTime: `${day3}T${String(h).padStart(2, '0')}:00:00-05:00`, rainChance: 90,
+    })));
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [], drops: {} });
+  });
+  afterEach(() => {
+    if (prevEnv === undefined) delete process.env[ENV]; else process.env[ENV] = prevEnv;
+  });
+
+  test('off (unset or true): no forecast call, no rain_term on any row, no summary row', async () => {
+    for (const value of [undefined, 'true']) {
+      if (value === undefined) delete process.env[ENV]; else process.env[ENV] = value;
+      audit.logDecision.mockClear();
+      await runAutoDispatch({ mode: 'dry_run' });
+      expect(getNwsHourlyRain).not.toHaveBeenCalled();
+      const rows = audit.logDecision.mock.calls.map((c) => c[1]);
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) expect(row.constraints || {}).not.toHaveProperty('rain_term');
+    }
+    expect(recordAuditEvent).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_dispatch.rain_term_shadow' }));
+  });
+
+  test('shadow: the evaluated visit gets a rain_term row beside an unchanged decision, and the run writes one summary', async () => {
+    const offRun = await runAutoDispatch({ mode: 'dry_run' });
+    const offRow = audit.logDecision.mock.calls.map((c) => c[1]).pop();
+    audit.logDecision.mockClear();
+    process.env[ENV] = 'shadow';
+    const res = await runAutoDispatch({ mode: 'dry_run' });
+    expect(res).toMatchObject({ evaluated: offRun.evaluated, recommended: offRun.recommended, changed: offRun.changed });
+    const row = audit.logDecision.mock.calls.map((c) => c[1]).pop();
+    expect(row.action).toBe(offRow.action);
+    expect(row.reason_code).toBe(offRow.reason_code);
+    const { rain_term: rainTerm, ...rest } = row.constraints;
+    expect(rest).toEqual(offRow.constraints);
+    expect(rainTerm).toMatchObject({ mode: 'shadow', area: 'sarasota', lead_days: 3, would_move: false });
+    expect(getNwsHourlyRain).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), { fetchTimeoutMs: 10000 });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'auto_dispatch.rain_term_shadow', resource_id: 'run1', metadata: expect.objectContaining({ in_range: 1 }),
+    }));
+  });
+
+  test('shadow: a skipped visit gets no rain row, and apply mode keeps the row on the changed decision', async () => {
+    process.env[ENV] = 'shadow';
+    const prevApply = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'X', reason_description: 'x' });
+      await runAutoDispatch({ mode: 'dry_run' });
+      expect(audit.logDecision.mock.calls.map((c) => c[1]).every((r) => !(r.constraints || {}).rain_term)).toBe(true);
+      eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
+      audit.logDecision.mockClear();
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+      await runAutoDispatch({ mode: 'apply' });
+      expect(lastDecision('changed').constraints.rain_term).toMatchObject({ mode: 'shadow', lead_days: 3 });
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prevApply;
+    }
   });
 });
