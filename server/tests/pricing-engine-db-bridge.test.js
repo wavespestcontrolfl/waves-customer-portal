@@ -748,7 +748,7 @@ describe('pricing engine DB bridge', () => {
         data: {
           warrantyTiers: {
             three_year_repair_retreat: { label: '3-Year Repair + Retreat Warranty', priceAdderPct: 0.15, allowedChemistryTypes: ['non_repellent'] },
-            five_year_repair_retreat: { label: '5-Year Repair + Retreat Warranty', priceAdderPct: 0.25, allowedChemistryTypes: ['non_repellent'] },
+            five_year_repair_retreat: { label: '5-Year Repair & Retreat Warranty', priceAdderPct: 0.25, allowedChemistryTypes: ['non_repellent'] },
           },
           products: {
             talstar_p: { warnings: ['Do not attach long repair-and-retreat warranty without admin approval.'] },

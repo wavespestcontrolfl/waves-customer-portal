@@ -105,6 +105,15 @@ const TRENCHING_PRODUCT_OPTIONS = [
   { value: "talstar_p", label: "Crosscheck Plus - Bifenthrin, repellent barrier" },
 ];
 
+
+// Termite trenching warranty names (owner 2026-11-25: retreatment only, no damage repair). The tier keys keep
+// "repair_retreat" so saved estimates replay; only the label shown to staff changed.
+const TRENCHING_WARRANTY_LABELS = {
+  one_year_retreat: "1-Year Retreat",
+  three_year_repair_retreat: "3-Year Retreat Warranty",
+  five_year_repair_retreat: "5-Year Retreat Warranty",
+};
+
 const TRENCHING_PRODUCT_META = {
   termidor_sc: {
     warning: "Premium fipronil non-repellent trench treatment. Eligible for longer warranty tiers with product premium surcharge.",
@@ -7958,9 +7967,7 @@ export default function EstimateToolViewV2({
                             k="trenchingWarrantyTier"
                             options={[
                               { value: "none", label: "None" },
-                              { value: "one_year_retreat", label: "1-Year Retreat" },
-                              { value: "three_year_repair_retreat", label: "3-Year Retreat" },
-                              { value: "five_year_repair_retreat", label: "5-Year Retreat" },
+                              ...Object.entries(TRENCHING_WARRANTY_LABELS).map(([value, label]) => ({ value, label })),
                             ]}
                           />
                         </Field>
@@ -9660,7 +9667,7 @@ export default function EstimateToolViewV2({
                                   {item.warrantyAdder > 0 && (
                                     <TierRowV2
                                       name="Warranty"
-                                      detail={item.warrantyTier || "Warranty"}
+                                      detail={TRENCHING_WARRANTY_LABELS[item.warrantyTier] || item.warrantyTier || "Warranty"}
                                       price={`+$${item.warrantyAdder}`}
                                     />
                                   )}

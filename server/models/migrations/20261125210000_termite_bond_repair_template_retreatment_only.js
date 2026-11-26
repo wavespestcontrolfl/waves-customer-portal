@@ -11,7 +11,8 @@
 // admin edit made since the seed is kept), insert the result as a NEW version at the next number (FOR UPDATE on
 // the template row) and repoint active_version_id. Open and signed sends froze their text at issue time and keep
 // the version they were signed on. The coverage paragraph is the one required anchor: when an admin rewrote it,
-// the repair promise cannot be proven gone, so the template is PAUSED (its text kept as edited) until the office
+// the repair promise cannot be proven gone, and the same holds when any other sentence still promises repair
+// after the swaps, so the template is PAUSED (its text kept as edited) until the office
 // fixes it in the document library; the retreatment bond stays available. The title, the customer-responsibilities clause
 // and the e-signature sentence are rewritten when they still carry the seeded wording.
 //
@@ -44,14 +45,31 @@ const NEW_NAME = 'Termite Retreatment Bond Agreement (former repair bond)';
 const OLD_DESCRIPTION_START = 'Signable termite bond covering retreatment plus repair of new covered termite damage.';
 const NEW_DESCRIPTION_START = 'Signable termite bond covering retreatment only (no repair of termite damage; repair coverage stopped 2026-11-25 until insurance confirms a cap).';
 
-/** Rewrite one bond body. Returns { body, changed, reason }. */
+// A sentence that mentions repair must deny it ("does NOT include repair", "no repair"). Anything else is a promise.
+function promisesRepair(body) {
+  return String(body || '')
+    .split(/(?<=[.;])\s+|\n/)
+    .some((sentence) => /repair/i.test(sentence) && !/\b(not|no|nor|without)\b/i.test(sentence));
+}
+
+/**
+ * Rewrite one bond body. Returns { body, changed, reason }. changed=false with reason 'already_present' when the
+ * body is already retreatment only and clean, 'anchor_missing' when the seeded coverage paragraph is gone, and
+ * 'repair_remains' when the result (or an already-converted body) still promises repair somewhere. Both of the
+ * last two pause the template.
+ */
 function toRetreatmentOnly(body) {
   const text = String(body || '');
-  if (text.includes(NEW_COVERAGE)) return { body: text, changed: false, reason: 'already_present' };
+  if (text.includes(NEW_COVERAGE)) {
+    return promisesRepair(text) || text.includes(OLD_COVERAGE)
+      ? { body: text, changed: false, reason: 'repair_remains' }
+      : { body: text, changed: false, reason: 'already_present' };
+  }
   if (!text.includes(OLD_COVERAGE)) return { body: text, changed: false, reason: 'anchor_missing' };
   let next = text.replace(OLD_COVERAGE, () => NEW_COVERAGE);
   if (next.startsWith(OLD_TITLE)) next = NEW_TITLE + next.slice(OLD_TITLE.length);
   for (const [from, to] of SWAPS) next = next.replace(from, () => to);
+  if (promisesRepair(next)) return { body: text, changed: false, reason: 'repair_remains' };
   return { body: next, changed: true, reason: null };
 }
 
@@ -72,9 +90,10 @@ exports.up = async function up(knex) {
   if (!active) return;
 
   const result = toRetreatmentOnly(active.body);
-  if (result.reason === 'anchor_missing') {
-    // The coverage paragraph was edited, so the repair promise cannot be proven gone. Pause the template (the
-    // body stays as the admin left it) so no new bond goes out with it; the retreatment bond stays available.
+  if (result.reason === 'anchor_missing' || result.reason === 'repair_remains') {
+    // The coverage paragraph was edited, or a repair promise sits outside the three phrases swapped here, so the
+    // repair promise cannot be proven gone. Pause the template (the body stays as the admin left it) so no new
+    // bond goes out with it; the retreatment bond stays available.
     if (template.status === 'active') {
       await knex('document_templates').where({ id: template.id }).update({ status: 'paused', updated_at: knex.fn.now() });
     }
@@ -122,3 +141,4 @@ exports.down = async function down() {
 exports.TEMPLATE_KEY = TEMPLATE_KEY;
 exports.NEW_COVERAGE = NEW_COVERAGE;
 exports.toRetreatmentOnly = toRetreatmentOnly;
+exports.promisesRepair = promisesRepair;

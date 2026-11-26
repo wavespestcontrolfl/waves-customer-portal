@@ -57,6 +57,16 @@ describe('repair bond becomes retreatment only (pure)', () => {
     expect(mig.toRetreatmentOnly(once.body)).toMatchObject({ changed: false, reason: 'already_present' });
     expect(mig.toRetreatmentOnly('Edited by an admin.')).toMatchObject({ changed: false, reason: 'anchor_missing' });
   });
+
+  test('a repair promise added elsewhere is never published: the result pauses for review', () => {
+    const extra = `${SEEDED_BODY}\n\nAdditional coverage: Waves will repair damaged fascia caused by termites.`;
+    expect(mig.toRetreatmentOnly(extra)).toMatchObject({ changed: false, reason: 'repair_remains' });
+    // An already-converted body that still carries the old coverage paragraph, or a repair promise, is not clean.
+    const once = mig.toRetreatmentOnly(SEEDED_BODY).body;
+    expect(mig.toRetreatmentOnly(`${once}\n\n${SEEDED_BODY.split('\n')[4]}`)).toMatchObject({ reason: 'repair_remains' });
+    expect(mig.toRetreatmentOnly(`${once}\n\nWe will repair the damage.`)).toMatchObject({ reason: 'repair_remains' });
+    expect(mig.promisesRepair(once)).toBe(false);
+  });
 });
 
 const describeDb = SKIP ? describe.skip : describe;
