@@ -6,7 +6,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { plannedWorkMinutes, placedVisitMinutes } = require('../services/scheduling/planning-minutes');
+const { plannedWorkMinutes, placedVisitMinutes, newVisitMinutes } = require('../services/scheduling/planning-minutes');
 const { workDuration } = require('../services/route-reorder-window-fit');
 const { evaluateArrivalPlacement, _internals: { clockOrder, storedOrderStale, buildPlacementTarget } } = require('../services/scheduling/arrival-route');
 const { ROUTE_WRITE_GUARD_COLUMNS } = require('../services/route-reorder');
@@ -72,6 +72,10 @@ describe('planning minutes table', () => {
     ['Web Sweep', {}, 30],
     ['Bee / Wasp Nest Removal Service', {}, 30],
     ['Stinging Insect Removal', {}, 30],
+    ['Recurring Foam Treatment', {}, 45],
+    ['Rodent Trapping Follow Up', {}, 20],
+    ['Rodent Trapping Follow Up', { is_callback: true }, 20],
+    ['Trap-Only Monitoring', {}, 20],
     ['Palmetto Roach Knockdown', {}, 40],
     ['Pest Control Every Other Month', {}, 30],
     ['Pest Control Every 2 Months', {}, 30],
@@ -84,6 +88,16 @@ describe('planning minutes table', () => {
   ])('%s %o plans %i minutes', (name, extra, minutes) => {
     expect(plannedWorkMinutes(row(name, extra))).toBe(minutes);
     expect(workDuration(row(name, extra))).toBe(minutes);
+  });
+
+  test('a joined label keeps its stored long estimate', () => {
+    expect(plannedWorkMinutes(row('Quarterly Pest + Termite Bait Station Service', { estimated_duration_minutes: 120 }))).toBe(120);
+    expect(plannedWorkMinutes(row('Quarterly Pest + Termite Bait Station Service'))).toBeNull();
+  });
+
+  test('a new visit reads the engine key and the label alike', () => {
+    expect(newVisitMinutes('trap_only', 60)).toBe(newVisitMinutes('Trap-Only Monitoring', 60));
+    expect(newVisitMinutes('stinging_insect', 60)).toBe(newVisitMinutes('Bee / Wasp Nest Removal Service', 60));
   });
 
   test('owner 2026-11-26: roach plans 45 at most', () => {

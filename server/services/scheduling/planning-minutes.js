@@ -116,7 +116,7 @@ function rodentTermiteMinutes(name) {
   if (/wdo/.test(name)) return PLANNING_MINUTES.wdoInspection;
   if (/inspection|assessment/.test(name)) return PLANNING_MINUTES.assessment;
   if (/rodent/.test(name)) {
-    if (/follow-?up|trap check|trap-only|retainer|bait station/.test(name)) return PLANNING_MINUTES.rodentCheck;
+    if (/follow[- ]?up|trap check|trap[- ]only|retainer|bait station/.test(name)) return PLANNING_MINUTES.rodentCheck;
     if (/trapping/.test(name)) return PLANNING_MINUTES.rodentTrapping;
     return PLANNING_MINUTES.rodentTermite;
   }
@@ -130,7 +130,7 @@ function specialtyMinutes(stop, name) {
   if (/\bbees?\b|wasp|hornet|yellow ?jacket|mud dauber|stinging insect/.test(name)) return PLANNING_MINUTES.stingingInsect;
   if (/flea|tick/.test(name)) return PLANNING_MINUTES.fleaTick;
   if (/roach|web sweep/.test(name)) return pestMinutes(stop, name);
-  if (/trap-only|trap check/.test(name)) return PLANNING_MINUTES.rodentCheck;
+  if (/trap[- ]only|trap check/.test(name)) return PLANNING_MINUTES.rodentCheck;
   return null;
 }
 
@@ -141,12 +141,12 @@ function tableMinutes(stop) {
   if (/\s\+\s/.test(name)) return null;
   // A rodent trap check is flagged is_callback by the scheduler; it still
   // plans the trap-check row, not the 15-minute re-service.
-  if (/rodent/.test(name) && /follow-?up|trap check/.test(name)) return PLANNING_MINUTES.rodentCheck;
+  if (/rodent/.test(name) && /follow[- ]?up|trap check/.test(name)) return PLANNING_MINUTES.rodentCheck;
   if (stop.is_callback === true || /re-?service|callback/.test(name)) {
     return /lawn|turf/.test(name) ? PLANNING_MINUTES.lawnSpot : PLANNING_MINUTES.reService;
   }
   if (SIZED_JOB.test(name)) return null;
-  if (/wdo|rodent|termite/.test(name)) return rodentTermiteMinutes(name);
+  if (/wdo|rodent|termite|foam/.test(name)) return rodentTermiteMinutes(name);
   if (/assessment|inspection/.test(name)) return PLANNING_MINUTES.assessment;
   const pest = /pest/.test(name);
   const lawn = /lawn|turf/.test(name);
@@ -186,7 +186,11 @@ function plannedWorkMinutes(stop) {
   if (!stop.preserveCapacity && !planningTableLive()) return null;
   if (stop.memberIds) return Number(stop.estimated_duration_minutes) || null;
   const planned = tableMinutes(stop);
-  return planned == null ? null : Math.max(planned, deliberateEstimate(stop));
+  if (planned != null) return Math.max(planned, deliberateEstimate(stop));
+  // A joined label ("Quarterly Pest + Termite Bait Station Service") names no
+  // single row, but its stored long estimate is still real work (as before
+  // the 2026-11-26 table, when its first program matched and kept it).
+  return /\s\+\s/.test(String(stop.service_type || '')) && deliberateEstimate(stop) ? deliberateEstimate(stop) : null;
 }
 
 /** Planned minutes for the visit BEING PLACED, or null to keep its caller's
