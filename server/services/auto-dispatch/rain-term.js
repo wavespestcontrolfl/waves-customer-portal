@@ -37,7 +37,9 @@
  *     returns before any fetch). Same technician only.
  * Two answers are kept: with the current 5-day landing floor
  * (route-tiers.js MIN_DESTINATION_DAYS_OUT) and with a 73-hour floor (an owner
- * decision pending). Nothing changes a placement, a score, a move, a text or
+ * decision pending). A visit that shares a stop with other live visits is not verified (the
+ * grouped-move guard in apply.js writes, so no apply.js function is called here): its slot is
+ * recorded as a `candidate` with would_move false. Nothing changes a placement, a score, a move, a text or
  * the change cap. Every function here never throws into the run.
  */
 const logger = require('../logger');
@@ -70,9 +72,6 @@ const FLOOR_HOURS_PENDING = 73;
 const MAX_SEARCHES_PER_RUN = 60;
 // The search lifts the legacy first-80 cap (candidate-slots.js SCORE_CAP) to this; reaching it means the list may be cut.
 const SEARCH_SCORE_CAP = 1000;
-// Grouped-move checks asked per answer, and refusals kept on the row.
-const MAX_PREVIEWS_PER_ANSWER = 6;
-const MAX_REFUSALS_SHOWN = 4;
 const HOUR_MIN = 60;
 
 const REASONS = {
@@ -86,7 +85,7 @@ const REASONS = {
   ERROR: 'error',
   NONE: 'no_drier_date',
   CAPPED: 'uncertain_capped',
-  GROUP_REFUSED: 'group_refused',
+  GROUPED: 'grouped_unverified',
   FOUND: 'drier_date_found',
   FOUND_73H: 'drier_date_only_with_73h_floor',
 };
@@ -252,35 +251,26 @@ function drierOptions(candidates, {
   return out.sort((a, b) => a.expected - b.expected || a.dist - b.dist || String(a.slot.start_time).localeCompare(String(b.slot.start_time)));
 }
 
-// The run's own grouped-move check (apply.js previewGroupMove, the one pass 1 runs on
-// every move) on one slot: null = the visit and everything that moves with it may go.
-async function groupRefusal(slot, { service, prefs, run, memo }) {
-  const key = `${slot.date}|${slot.start_time}|${slot.technician_id}`;
-  if (!memo.has(key)) {
-    try {
-      const { previewGroupMove } = require('./apply');
-      memo.set(key, await previewGroupMove(service, slot, { ...run.config, prefs, lockBoundary: run.lockBoundary }));
-    } catch (err) {
-      memo.set(key, { code: 'GROUP_CHECK_UNREADABLE', description: String(err && err.message).slice(0, 160) });
-    }
+// Whether other live rows move with this visit (its shared stop). A shadow never runs the
+// grouped-move guard (apply.js previewGroupMove): that guard writes, and it does not read
+// sibling occupancy. A grouped visit's slot is recorded unverified instead. Read-only; an
+// unreadable group reads as grouped (fail closed).
+async function movesWithOthers(service) {
+  if (!service.visit_id) return false;
+  try {
+    const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
+    const other = await db('scheduled_services').where({ visit_id: service.visit_id }).whereNot('id', service.id)
+      .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_ROW_STATUSES))
+      .first('id');
+    return !!other;
+  } catch {
+    return true;
   }
-  return memo.get(key);
 }
 
-// The first option the grouped-move check allows; refusals are kept for the row.
-async function firstAllowed(options, ctx, refusals) {
-  let asked = 0;
-  for (const opt of options) {
-    if (asked >= MAX_PREVIEWS_PER_ANSWER) break;
-    const refusal = await groupRefusal(opt.slot, ctx);
-    asked += 1;
-    if (!refusal) return { date: opt.date, start_time: opt.slot.start_time, wetness: opt.wetness, lead_days: opt.lead_days, expected: opt.expected };
-    refusals.set(`${opt.date}|${opt.slot.start_time}`, {
-      date: opt.date, start_time: opt.slot.start_time, code: refusal.code, description: String(refusal.description || '').slice(0, 200),
-    });
-  }
-  return null;
-}
+const shownSlot = (opt) => opt && {
+  date: opt.date, start_time: opt.slot.start_time, wetness: opt.wetness, lead_days: opt.lead_days, expected: opt.expected,
+};
 
 // Free slots in the wider window (same technician only when the visit has one), read-only.
 async function freeSlots(service, prefs, ctx, bands) {
@@ -304,17 +294,21 @@ function rowFor(service, area, lead, wet, extra) {
   };
 }
 
-function verdictReason({ best5, best73, capped, refused }) {
+function verdictReason({
+  best5, best73, capped, candidate,
+}) {
   if (best5) return REASONS.FOUND;
   if (best73) return REASONS.FOUND_73H;
-  if (capped) return REASONS.CAPPED;
-  return refused ? REASONS.GROUP_REFUSED : REASONS.NONE;
+  if (candidate) return REASONS.GROUPED;
+  return capped ? REASONS.CAPPED : REASONS.NONE;
 }
 
 // The verdict for a visit already known wet and outdoor: searches once, answers twice.
+// A visit that moves with others (`grouped`) cannot be verified here, so its best drier
+// slot is a `candidate` only and nothing would move.
 async function searchVerdict({
   service, prefs, ctx, guard, run,
-}, state, base, wetByDate) {
+}, state, base, wetByDate, grouped) {
   const bands = bandsFor(service, guard, run);
   if (!bands) return { ...base, reason: REASONS.NO_BAND };
   if (state.searches >= MAX_SEARCHES_PER_RUN) return { ...base, reason: REASONS.BUDGET };
@@ -323,24 +317,21 @@ async function searchVerdict({
   const common = {
     service, run, currentWet: base.current.wetness, wetByDate,
   };
-  const check = {
-    service, prefs, run, memo: new Map(),
-  };
-  const refusals = new Map();
-  const best5 = await firstAllowed(drierOptions(slots, { ...common, band: bands.current }), check, refusals);
-  const best73 = await firstAllowed(drierOptions(slots, { ...common, band: bands.pending73h, afterFloor: true }), check, refusals);
-  const floor5 = shiftDateStr(run.today, MIN_DESTINATION_DAYS_OUT);
-  const shown = [...refusals.values()].slice(0, MAX_REFUSALS_SHOWN).map((r) => (r.date < floor5 ? { ...r, below_5day_floor: true } : r));
+  const top5 = drierOptions(slots, { ...common, band: bands.current })[0] || null;
+  let top73 = drierOptions(slots, { ...common, band: bands.pending73h, afterFloor: true })[0] || null;
+  // Any slot valid under the 5-day floor is valid under 73 hours when it also starts 73 hours out.
+  if (!top73 && top5 && startsAfterFloor(top5.slot, run)) top73 = top5;
+  if (grouped) {
+    const first = top5 || top73;
+    const candidate = first && { floor: top5 ? '5day' : '73h', ...shownSlot(first) };
+    return {
+      ...base, would_move_73h: false, ...(candidate ? { candidate } : {}), reason: verdictReason({ capped, candidate }),
+    };
+  }
+  const best5 = shownSlot(top5);
+  const best73 = shownSlot(top73);
   return {
-    ...base,
-    best_5day: best5,
-    best_73h: best73,
-    would_move: !!best5,
-    would_move_73h: !!best73,
-    ...(shown.length ? { group_refusals: shown } : {}),
-    reason: verdictReason({
-      best5, best73, capped, refused: refusals.size > 0,
-    }),
+    ...base, best_5day: best5, best_73h: best73, would_move: !!best5, would_move_73h: !!best73, reason: verdictReason({ best5, best73, capped }),
   };
 }
 
@@ -357,7 +348,7 @@ async function judge(args, state) {
   base.current.score = round2(wet * trustFor(lead));
   if (wet * trustFor(lead) < WET_SCORE) return { row: { ...base, reason: REASONS.DRY } };
   if (!(await isOutdoor(service))) return { row: { ...base, reason: REASONS.INDOOR } };
-  return { row: await searchVerdict(args, state, base, state.forecast.get(area)) };
+  return { row: await searchVerdict(args, state, base, state.forecast.get(area), await movesWithOthers(service)) };
 }
 
 /**

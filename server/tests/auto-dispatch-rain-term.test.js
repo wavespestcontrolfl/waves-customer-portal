@@ -10,11 +10,15 @@ jest.mock('../services/scheduling/rain-fit', () => ({
   ...jest.requireActual('../services/scheduling/rain-fit'),
   bookingRainPlan: jest.fn(async ({ serviceType }) => ({ services: [serviceType], rainSpan: null })),
 }));
-// The run's grouped-move check (apply.js previewGroupMove): allows everything unless a test says otherwise.
-jest.mock('../services/auto-dispatch/apply', () => ({ previewGroupMove: jest.fn(async () => null) }));
+// A shadow never calls apply.js (its grouped-move guard writes): every export is a spy the tests expect untouched.
+jest.mock('../services/auto-dispatch/apply', () => ({
+  previewGroupMove: jest.fn(), applyAutoDispatchMove: jest.fn(), makeMemberGuard: jest.fn(), makeMoveGuard: jest.fn(),
+  unitMoveSize: jest.fn(), revalidatePlacement: jest.fn(),
+}));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 
 const candidateSlots = require('../services/auto-dispatch/candidate-slots');
+const db = require('../models/db');
 const flexTier = require('../services/auto-dispatch/flex-tier');
 const apply = require('../services/auto-dispatch/apply');
 const rainFit = require('../services/scheduling/rain-fit');
@@ -328,31 +332,44 @@ describe('review fixes (Codex pre-push)', () => {
     expect((await noteVisit(state, visit({ service_type: 'WaveGuard Assessment' }))).reason).toBe('not_outdoor');
   });
 
-  test('a destination the grouped-move check refuses is not a move: the next slot is tried, refusals are kept', async () => {
+  // The row is for a visit whose stop has another live member.
+  const groupedDb = (other) => db.mockImplementation(() => {
+    const chain = {
+      where: (arg) => { if (typeof arg === 'function') arg({ whereNull: () => ({ orWhereNotIn: () => {} }) }); return chain; },
+      whereNot: () => chain,
+      first: async () => other,
+    };
+    return chain;
+  });
+
+  test('a visit that moves with others records its best slot as a candidate only: nothing would move, apply.js is never called', async () => {
     const state = await allWet();
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-11-30'), cand('2026-12-02')] });
-    apply.previewGroupMove.mockImplementation(async (_svc, slot) => (slot.date === '2026-12-02'
-      ? { code: 'GROUP_MEMBER_GUARD', description: 'Grouped visit would be refused at apply - member frozen' } : null));
+    groupedDb({ id: 'sibling' });
+    const row = await noteVisit(state, visit({ visit_id: 'vis1' }));
+    expect(row).toMatchObject({
+      would_move: false, would_move_73h: false, best_5day: null, best_73h: null, reason: 'grouped_unverified',
+      candidate: { floor: '5day', date: '2026-12-02', start_time: '09:00' },
+    });
+    // A visit with a visit_id and no other live member is ungrouped: answered as before.
+    groupedDb(undefined);
+    expect(await noteVisit(state, visit({ visit_id: 'vis1' }))).toMatchObject({ would_move: true, reason: 'drier_date_found' });
+    // An unreadable group fails closed to grouped.
+    db.mockImplementation(() => { throw new Error('read failed'); });
+    expect((await noteVisit(state, visit({ visit_id: 'vis1' }))).reason).toBe('grouped_unverified');
+    db.mockReset();
+    // Whatever happened, rain-term never touched apply.js (its group guard writes).
+    for (const fn of Object.values(apply)) expect(fn).not.toHaveBeenCalled();
+    expect(require('fs').readFileSync(require.resolve('../services/auto-dispatch/rain-term'), 'utf8')).not.toMatch(/previewGroupMove\(|require\('\.\/apply'\)/);
+  });
+
+  test('the 73-hour answer falls back to the verified 5-day slot when it starts 73 hours out', async () => {
+    const state = await allWet();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')] });
     const row = await noteVisit(state, visit());
-    expect(row.best_5day).toBeNull();
-    expect(row.would_move).toBe(false);
-    expect(row.best_73h.date).toBe('2026-11-30');
-    expect(row.reason).toBe('drier_date_only_with_73h_floor');
-    expect(row.group_refusals).toEqual([expect.objectContaining({ date: '2026-12-02', code: 'GROUP_MEMBER_GUARD' })]);
-    // The check ran with the run's config, the visit's prefs and the lock boundary, on the slot itself.
-    expect(apply.previewGroupMove).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'v1' }),
-      expect.objectContaining({ date: '2026-12-02', start_time: '09:00' }),
-      expect.objectContaining({ guardMode: 'flex', prefs: { p: 1 }, lockBoundary: '2026-11-28' }),
-    );
-    // Everything refused: group_refused, never a move.
-    apply.previewGroupMove.mockResolvedValue({ code: 'GROUP_MEMBER_GUARD', description: 'no' });
-    const refused = await noteVisit(state, visit());
-    expect(refused).toMatchObject({ would_move: false, best_5day: null, best_73h: null, reason: 'group_refused' });
-    // An unreadable group is a refusal too, not a throw.
-    apply.previewGroupMove.mockRejectedValue(new Error('read failed'));
-    expect((await noteVisit(state, visit())).group_refusals[0].code).toBe('GROUP_CHECK_UNREADABLE');
-    apply.previewGroupMove.mockReset().mockResolvedValue(null);
+    expect(row.best_5day).toMatchObject({ date: '2026-12-02' });
+    expect(row.best_73h).toMatchObject({ date: '2026-12-02' });
+    expect(row.would_move_73h).toBe(true);
   });
 
   test('the search keeps the visit\'s technician at generation and lifts the legacy cap; a full list is uncertain, not "none"', async () => {
