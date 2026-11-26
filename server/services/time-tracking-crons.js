@@ -280,6 +280,26 @@ function initTimeTrackingCrons() {
     }
   }, { timezone: 'America/New_York' });
 
+  // -------------------------------------------------------------------------
+  // 5. Every 2 minutes — the truck sets the shift start (GATE_TRUCK_CLOCK_IN=start,
+  //    owner 2026-11-26). Reads the truck_clock_in_shadow rows of today's Eastern work day
+  //    and writes the shift (services/truck-start-apply.js). The tick does nothing unless
+  //    the gate reads exactly `start`, and nothing while staff maintenance mode is on. No
+  //    runExclusive: each row is claimed with FOR UPDATE SKIP LOCKED, so an overlapping tick
+  //    (a deploy overlap, a second instance) never takes the same row twice.
+  // -------------------------------------------------------------------------
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      const { applyTruckStarts } = require('./truck-start-apply');
+      const result = await applyTruckStarts();
+      if (result.applied || result.skipped || result.bells || result.errors) {
+        logger.info(`[time-tracking-cron] truck start tick: ${JSON.stringify(result)}`);
+      }
+    } catch (err) {
+      logger.error(`[time-tracking-cron] truck start tick failed: ${errTag(err)}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('[time-tracking-cron] All time tracking cron jobs initialized');
 }
 

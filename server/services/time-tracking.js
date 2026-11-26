@@ -19,6 +19,7 @@ const { paidLineCoveringWeeks, finalRunClosesWeeks } = require('./payroll-paid-l
 const { unpaidMealUnits } = require('../utils/unpaid-meal');
 const { autoLunchLive, shiftCloseReviewLive } = require('../config/feature-gates');
 const { recordAuditEvent } = require('./audit-log');
+const { formatETTime } = require('../utils/datetime-et');
 
 const UNDO_STOP_WINDOW_MINUTES = 30;
 const AUTO_LUNCH_OFF_MESSAGE = 'Auto lunch is not turned on, so there is no lunch to change.';
@@ -81,13 +82,13 @@ async function lockActiveTechnician(trx, technicianId) {
   }
 }
 
-async function insertShift(trx, technicianId, { lat, lng, notes, source } = {}) {
+async function insertShift(trx, technicianId, { lat, lng, notes, source, clockInAt } = {}) {
   const [created] = await trx('time_entries')
     .insert({
       technician_id: technicianId,
       entry_type: 'shift',
       status: 'active',
-      clock_in: new Date(),
+      clock_in: clockInAt || new Date(),
       clock_in_lat: lat || null,
       clock_in_lng: lng || null,
       notes: notes || null,
@@ -781,7 +782,9 @@ async function assertNoShiftOverlap(trx, technicianId, clockIn, clockOut) {
     .where((q) => q.whereNull('clock_out').orWhere('clock_out', '>', clockIn))
     .first('id');
   if (clash) {
-    throw staffTimeHttpError(409, 'That time overlaps a shift already on this technician. Edit that shift instead.');
+    const error = staffTimeHttpError(409, 'That time overlaps a shift already on this technician. Edit that shift instead.');
+    error.code = 'SHIFT_OVERLAP';
+    throw error;
   }
 }
 
@@ -848,6 +851,122 @@ async function adminAddEntry({
 
   logger.info(`[time-tracking] Shift ${created.id} added by ${edited_by}`, { edit_reason });
   return created;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Truck sets the shift start (GATE_TRUCK_CLOCK_IN = start, services/truck-start-apply.js).
+// The three functions below run INSIDE the caller's transaction, so the shift write and the
+// truck_clock_in_shadow outcome commit or roll back together. They are the only writers the job
+// uses: same locks, same approved/paid-week guards and same overlap rule as adminAddEntry and
+// adminEditEntry, and the shift row is written by insertShift like a tap on Clock in.
+// ---------------------------------------------------------------------------------------------
+const TRUCK_START_SOURCE = 'truck_gps';
+const TRUCK_START_EDIT_REASON = 'Start set to the truck first-arrival time';
+
+/**
+ * Lock one technician's work day: the Staff week, the payroll lock (shared), the technician row
+ * and every time entry of that Eastern work day (voided ones too), in the order the other
+ * writers take them. Returns { technician, entries } ordered by clock_in.
+ */
+async function lockTruckStartDay(trx, technicianId, workDate) {
+  const validDate = validateWorkDate(workDate);
+  await lockStaffWeeks(trx, technicianId, [staffWeekStartForWorkDate(validDate)]);
+  await lockPayrollMutationsShared(trx);
+  const technician = await trx('technicians').where({ id: technicianId }).forUpdate().first('id', 'name', 'active');
+  const entries = await trx('time_entries')
+    .where({ technician_id: technicianId })
+    .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [validDate])
+    .orderBy('clock_in')
+    .orderBy('created_at')
+    .forUpdate();
+  return { technician: technician || null, entries };
+}
+
+/**
+ * Start a shift at the truck's first-arrival time (an active shift, clocked out by hand or by the
+ * 11 PM close like any other). Refuses an approved or paid day, and any shift (open or closed)
+ * that touches the span from `at` to `now`. Throws the same 409 errors as an admin added shift.
+ */
+async function createTruckStartShift(trx, technicianId, { at, now = new Date(), lat = null, lng = null }) {
+  const clockInAt = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(clockInAt.getTime())) throw new Error('Invalid truck start time');
+  const workDate = staffWorkDate(clockInAt);
+  await assertEntryMutable(trx, {
+    technician_id: technicianId, clock_in: clockInAt, status: 'completed', approval_status: 'pending',
+  }, 'add', [workDate], workDate);
+  await assertNoShiftOverlap(trx, technicianId, clockInAt, now);
+  const shift = await insertShift(trx, technicianId, {
+    lat, lng, source: TRUCK_START_SOURCE, clockInAt,
+    notes: `Start set from the truck's first arrival at ${formatETTime(clockInAt)}`,
+  });
+  await recordAuditEvent({
+    trx,
+    critical: true,
+    actor_type: 'system',
+    action: 'payroll.time_entry_truck_start_created',
+    resource_type: 'time_entries',
+    resource_id: shift.id,
+    metadata: { technician_id: technicianId, work_date: workDate, clock_in: clockInAt.toISOString() },
+  });
+  return shift;
+}
+
+/**
+ * Move a shift's start BACK to the truck's first-arrival time (the technician's favor). The
+ * original start is kept in original_clock_in and the audit log. Refuses an approved, disputed
+ * or paid day and any other shift in the gap. An open shift stays open (status active); a closed
+ * one becomes `edited` with its duration and day summaries recomputed. `shift` is a row read
+ * under lockTruckStartDay.
+ */
+async function moveShiftStartToTruck(trx, shift, { at, now = new Date() }) {
+  const newStart = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(newStart.getTime())) throw new Error('Invalid truck start time');
+  const oldStart = new Date(shift.clock_in);
+  if (newStart.getTime() >= oldStart.getTime()) throw staffTimeHttpError(409, 'The truck time is not before the shift start.');
+  const workDate = staffWorkDate(oldStart);
+  if (staffWorkDate(newStart) !== workDate) throw staffTimeHttpError(409, 'The truck time is on another work day.');
+  if (!['active', 'completed'].includes(shift.status) || (shift.approval_status && shift.approval_status !== 'pending')) {
+    throw staffTimeHttpError(409, 'That shift is not open to a start change.');
+  }
+  await assertEntryMutable(trx, {
+    technician_id: shift.technician_id, clock_in: oldStart, status: 'completed', approval_status: shift.approval_status || 'pending',
+  }, 'edit', [workDate], workDate);
+  await assertNoShiftOverlap(trx, shift.technician_id, newStart, oldStart);
+
+  const updates = {
+    clock_in: newStart,
+    original_clock_in: shift.original_clock_in || oldStart,
+    edit_reason: TRUCK_START_EDIT_REASON,
+    edited_at: now,
+    updated_at: now,
+    notes: appendEntryNote(shift.notes, `Start moved from ${formatETTime(oldStart)} to ${formatETTime(newStart)} (truck first arrival)`),
+  };
+  if (shift.status === 'completed') {
+    updates.status = 'edited';
+    updates.original_clock_out = shift.original_clock_out || shift.clock_out;
+    updates.duration_minutes = Math.round(((new Date(shift.clock_out) - newStart) / 60000) * 100) / 100;
+  }
+  const [saved] = await trx('time_entries')
+    .where({ id: shift.id, status: shift.status })
+    .update(updates)
+    .returning('*');
+  if (!saved) throw staffTimeHttpError(409, 'The shift changed; nothing was moved.');
+  await recordAuditEvent({
+    trx,
+    critical: true,
+    actor_type: 'system',
+    action: 'payroll.time_entry_truck_start_moved',
+    resource_type: 'time_entries',
+    resource_id: shift.id,
+    metadata: {
+      technician_id: shift.technician_id,
+      work_date: workDate,
+      from: oldStart.toISOString(),
+      to: newStart.toISOString(),
+    },
+  });
+  if (saved.status !== 'active') await recomputeEntryMutationSummaries(trx, shift.technician_id, [workDate]);
+  return saved;
 }
 
 /**
@@ -1603,4 +1722,8 @@ module.exports = {
   getDailySummaries,
   getWeeklySummaries,
   autoClockOutCheck,
+  lockTruckStartDay,
+  createTruckStartShift,
+  moveShiftStartToTruck,
+  TRUCK_START_SOURCE,
 };

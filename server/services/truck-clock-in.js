@@ -1,6 +1,7 @@
 /**
- * Truck clock-in, SHADOW ONLY (GATE_TRUCK_CLOCK_IN=shadow, owner 2026-10-25,
- * "this works").
+ * Truck clock-in recorder (GATE_TRUCK_CLOCK_IN=shadow or start, owner 2026-10-25,
+ * "this works"). This file only records. In `start` mode (owner 2026-11-26) the small
+ * follow-up job services/truck-start-apply.js reads each row and sets the shift start.
  *
  * The rule: a technician's shift starts at the truck's first GPS arrival at a
  * stop, when the technician is not clocked in and has signed the Vehicle Use &
@@ -9,7 +10,7 @@
  * under the agreement. Training days stay by hand: a trainee rides in the
  * trainer's truck, so no Bouncie device maps to the trainee.
  *
- * THIS RELEASE ONLY RECORDS. It decides what the rule would do and writes one
+ * This file ONLY RECORDS. It decides what the rule would do and writes one
  * truck_clock_in_shadow row; it never writes time_entries and never calls
  * time-tracking. Live clock-in (the shift write, the GPS time as clock_in, an
  * atomic claim and a persisted retry) is a separate later change.
@@ -25,7 +26,9 @@
  *                      AND the truck's first trip-start of the Eastern work day (no
  *                      earlier trip-start in bouncie_webhook_log for the same truck).
  *
- * Modes (truckClockInMode()): off = nothing runs; shadow = decide and record.
+ * Modes (truckClockInMode()): off = nothing runs; shadow and start = decide and record
+ * (the row is written with the real GPS time whether or not the technician is already
+ * clocked in or the agreement is unsigned; event_time_known says the GPS time was real).
  * Clock-out, the 9 PM reminder and the 11 PM close are not touched. Sends nothing.
  */
 const db = require('../models/db');
@@ -185,6 +188,7 @@ function claimRow(techId, workDate, fired, decision) {
     skip_reason: decision.skipReason,
     lat: fired.lat,
     lng: fired.lng,
+    event_time_known: fired.eventKnown === true,
   };
 }
 
@@ -206,7 +210,8 @@ async function insertClaim(conn, row) {
  */
 async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, logId = null, payload = null, now = new Date() } = {}) {
   const mode = truckClockInMode();
-  if (mode !== 'shadow') return { action: 'off' };
+  // shadow and start both record; only start also lets truck-start-apply write the shift.
+  if (mode !== 'shadow' && mode !== 'start') return { action: 'off' };
   if (!tech?.id) return { action: 'no_trigger' };
   if (isStaffMaintenanceEnabled()) return { action: 'maintenance' };
 
