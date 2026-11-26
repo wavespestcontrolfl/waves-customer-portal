@@ -233,6 +233,21 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await findingsFor(unpriced({ line: { ...twenty, perApplicationPrice: null } }))).toEqual([]);
   });
 
+  // Pre-push audit P1: a lawn row that saved only its net shows no saving to the invoice unless its tier reading recovers
+  // the engine's list price. When that reading misses (here the estimate's column and block name no tier), the engine's
+  // record is the witness, and the invoice's own pricing of the line with that tier names it: a finding.
+  test('a net-only row the invoice prints as one line, whose engine record names the tier, is a finding', async () => {
+    const netOnly = { service: 'lawn_care', name: 'Lawn Care', perTreatment: 112, annual: 1008, annualAfterDiscount: 1008, visitsPerYear: 9,
+      discount: { effectiveDiscount: 0.2, appliedDiscountPercent: 0.2 } };
+    const lawnLine = scheduleLine(netOnly, { serviceKey: 'lawn_care', cadence: 'every_6_weeks', perApplicationPrice: 112 });
+    const missed = (lineItems) => ({ breakdown: null, reason: 'no_discount', estimate: estimate({ lineItems, tier: null, recurring: {} }), line: lawnLine });
+    const lawnVisit = visit({ service_type: 'Lawn Care', estimated_price: '112.00' });
+    expect(await findingsFor(missed([lawnItem()]), lawnVisit)).toEqual([
+      { visitId: 'v1', estimateId: 'e1', serviceKey: 'lawn_care', lineKey: 'recurring:0', tier: 'gold' }]);
+    // The engine's figures disagree with the row's (another net annual): the line keeps one line by design.
+    expect(await findingsFor(missed([lawnItem({ annualAfterDiscount: 1007.91 })]), lawnVisit)).toEqual([]);
+  });
+
   test.each(['no_discount', 'price_changed', 'not_priced', 'own_price_or_discount', 'prepaid', 'line_unmatched', 'line_ambiguous'])(
     'a visit that keeps one line for %s is not read', async (reason) => {
       expect(await findingsFor({ breakdown: null, reason })).toEqual([]);

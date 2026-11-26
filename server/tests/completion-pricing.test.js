@@ -184,6 +184,9 @@ describe('completion estimate evidence', () => {
     // Both annuals agree with each other but not with the tier rate on the list annual ($1,068 at 10% is $961.20).
     expect(quote(lawnRow({ annual: 961.23, annualAfterDiscount: 961.23 }), silver([engineLawn({ annualAfterDiscount: 961.23 })])))
       .toEqual(oneLine);
+    // A row that records another discount of its own is not the tier's saving.
+    expect(quote(lawnRow({ discount: { effectiveDiscount: 0.1, appliedDiscounts: [{ type: 'military', amount: 0.1 }] } }), silver()))
+      .toEqual(oneLine);
     // A malformed discount record on the row keeps one line and does not throw.
     expect(quote(lawnRow({ discount: { effectiveDiscount: 0.1, appliedDiscounts: 'silver' } }), silver())).toEqual(oneLine);
     // Only the invoice's context carries the engine lines: the Complete Service card prices from the estimate's context

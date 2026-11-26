@@ -12,7 +12,9 @@
 //   tier row name the tier the estimate's records agree on (printedLabelMiss)? A row whose own tier record names no
 //   tier prints a bare "WaveGuard". Reading a label needs no rate. The tier names are written out here
 //   (TIER_LINE_NAMES), so a fault in the invoice's own label code cannot pass its own output.
-// - The invoice keeps the saving unnamed (reason discount_unnamed, or a breakdown with no tier share): would its own pricing
+// - The invoice keeps the saving unnamed (reason discount_unnamed, a breakdown with no tier share, or no saving at all on
+//   a line the visit bills at its accepted price, the net-only lawn shape whose list price the invoice's tier reading
+//   recovers from the engine line, completion-pricing.js engineListBasis): would its own pricing
 //   of the matched line name the tier, if its tier reading had found what the estimate's records hold
 //   (unnamedSavingMiss)? The witness is the engine's record: the tier and the rate it applied to that line, which the
 //   estimate's other records must not contradict. An estimate saved with no engine lines (the admin estimate tool's
@@ -30,7 +32,7 @@
 //   the line holds that net. Priced by the reader's own per-application derivation, it must be the visit's own price;
 //   the line is then priced at it and asked the second question.
 // A visit whose invoice keeps one line for another reason (no price of its own, its own price or discount, add-ons,
-// prepaid, no single matched line, a price that moved after acceptance, no saving on the line) is not read. Off gate =
+// prepaid, no single matched line, a price that moved after acceptance) is not read. Off gate =
 // one line by design: no finding.
 // Only a new bill of the visit at its own price is judged (pre-push audit round 14): what completing the visit bills,
 // by the shared prediction the schedule board, the close-out sheet and the cash forecast use (billsVisitAtItsPrice). A
@@ -196,7 +198,7 @@ function unpricedLineMiss(records, visit) {
 // service key (a monthly and a seasonal mosquito line), never a line key.
 async function visitFinding(conn, visit) {
   const { breakdown, reason, estimate, line } = await require('./completion-pricing').acceptedVisitBreakdown(visit, { database: conn });
-  if ((!breakdown && !['discount_unnamed', 'no_breakdown'].includes(reason)) || !estimate) return null;
+  if ((!breakdown && !['discount_unnamed', 'no_breakdown', 'no_discount'].includes(reason)) || !estimate) return null;
   const serviceKey = matchedServiceKey(line);
   if (!serviceKey) return null;
   const data = parsed(estimate.estimate_data);

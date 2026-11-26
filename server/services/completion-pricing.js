@@ -318,12 +318,13 @@ function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDisco
 // (acceptedDiscountRows: namingTier, tierPricedRow and each row rule) names the whole saving as the tier, and nothing
 // else. A row with a WaveGuard record of its own is not this shape. Any other row, or a disagreement, returns null:
 // the row keeps its own net as its base, no saving, and one invoice line.
-// The net-only shape: no net or list figure of its own beside the base, and no WaveGuard record of its own.
+// The net-only shape: no net or list figure of its own beside the base, and no applied discount record of its own (a
+// WaveGuard record names its own tier, another discount is not the tier's, and a record that is not a list is
+// malformed): the row keeps its own net.
 function netOnlyRow(raw) {
   const applied = object(raw.discount).appliedDiscounts;
-  // A discount record that is not a list (malformed) is not the shape either: the row keeps its own net.
   return money(raw.priceAfterDiscount) === null && money(raw.annualBeforeDiscount) === null
-    && (applied == null || (Array.isArray(applied) && !applied.some((item) => item?.type === 'waveguard')));
+    && (applied == null || (Array.isArray(applied) && applied.length === 0));
 }
 
 function engineListBasis(raw, line, amount, ownBase, context = {}) {
@@ -669,7 +670,7 @@ function visitPriceDecisionRecorded(service) {
 // `firstApplication`: the first bill at acceptance, which also bills the first visits a multi-program accept leaves
 // unpriced (the bill covers them) at the accepted price, and a visit with no saving at its own price (discounts: []),
 // so one undiscounted program does not keep a bundle's discounts off that bill; that caller reconciles its total.
-// A breakdown, and reasons no_breakdown and discount_unnamed, also carry `estimate` (the accepted estimate row read
+// A breakdown, and reasons no_breakdown, no_discount and discount_unnamed, also carry `estimate` (the accepted estimate row read
 // here) and `line` (the schedule line the visit matched, by service id or key: its saved row is `line.sourceLine`, the
 // key it matched `line.serviceKey`), so a check of the estimate's own records prices the same line
 // (invoice-tier-line-check.js).
@@ -688,8 +689,10 @@ async function acceptedVisitBreakdown(service, { database = db, firstApplication
   const quote = acceptedPricing(match.line, invoiceDiscountContext(source.estimate));
   if (quote.unit !== 'application') return none('not_per_application');
   if (!quote.breakdownAvailable) return { ...none('no_breakdown'), ...matched };
-  if (!(quote.savings > 0) && !firstApplication) return none('no_discount');
   if (!unpricedFirst && !sameMoney(service.estimated_price, quote.amount)) return none('price_changed');
+  // A line with no saving, that the visit bills at its accepted price, carries the match too, so the nightly check can
+  // ask whether the engine's tier record names a saving this reading missed (invoice-tier-line-check.js).
+  if (!(quote.savings > 0) && !firstApplication) return { ...none('no_discount'), ...matched };
   if (!quote.discounts.every((row) => row.named)) return { ...none('discount_unnamed'), ...matched };
   return { breakdown: { base: quote.base, amount: quote.amount, discounts: quote.discounts.map(({ name, dollars }) => ({ name, dollars })) }, ...matched };
 }
