@@ -1033,6 +1033,29 @@ describe('image labels, Gemini thinking level + usage, GPT-6 reasoning', () => {
     expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'LOW' });
   });
 
+  // The call sound check (ROUTES.callSoundCheck) is the one caller: the model must HEAR the clip, so the clip has to
+  // reach the wire on the Gemini leg and a leg that cannot take it must fail instead of answering from the prompt.
+  test('Gemini: an audio clip is an inline part ahead of the images and the prompt', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }) });
+    const r = await dispatch(ROUTES.callSoundCheck, { text: 'listen', audio: [{ mimeType: 'audio/mpeg', data: 'QUJD' }, { data: 'REVG' }], images: [{ data: 'BBB', mimeType: 'image/png' }], jsonMode: true });
+    expect(r.ok).toBe(true);
+    expect(JSON.parse(global.fetch.mock.calls.at(-1)[1].body).contents[0].parts).toEqual([
+      { inline_data: { mime_type: 'audio/mpeg', data: 'QUJD' } },
+      { inline_data: { mime_type: 'audio/mpeg', data: 'REVG' } },
+      { inline_data: { mime_type: 'image/png', data: 'BBB' } },
+      { text: 'listen' },
+    ]);
+  });
+
+  test.each(['openai', 'anthropic', 'typesafe', 'cloudflare'])('a %s route refuses an audio clip before any network call', async (provider) => {
+    const fetchSpy = jest.spyOn(global, 'fetch');
+    mockAnthropicCreate.mockClear();
+    expect(await dispatch({ provider, model: 'any-model' }, { text: 'listen', questions: { q1: { type: 'yes_no' } }, audio: [{ mimeType: 'audio/mpeg', data: 'QUJD' }] }))
+      .toEqual({ ok: false, reason: 'unsupported_audio_provider' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+
   test('Gemini: no thinkingLevel or an unknown one leaves thinkingConfig off', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }) });
     await callGemini({ model: GEMINI_VISION_BEST, text: 'a', jsonMode: true });
