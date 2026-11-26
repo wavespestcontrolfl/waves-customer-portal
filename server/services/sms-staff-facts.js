@@ -102,58 +102,69 @@ async function loadPrepaidPlanFacts(customerId, { db } = {}) {
 
 // ---- Prep guide ----------------------------------------------------------------------------------------------------------------------
 
-// The sections of a published guide that read as prose: paragraphs, callouts and list items under the heading they sit below (never the
-// service details rows, the button or the signature: the page itself drops the last two for the same reason). A guide's steps often hold
-// only for one case ("Prep for a German roach cleanout", "Prep for palmetto bugs"), so every step stays tied to its heading. What the
-// guide tells the customer to DO comes first and its background (why, what we do, the FAQ) after it, each in guide order: the drafter's
-// budget is spent on the steps the customer asks about, not on the introduction.
+// The sections of a published guide that read as prose: each paragraph, callout, list item and FAQ row WHOLE (a published item is never cut
+// into sentences: a cut can strand a step from the sentence that names its subject, or split "St. Augustine"), under the heading it sits
+// below. A guide's steps often hold only for one case ("Prep for a German roach cleanout", "Prep for palmetto bugs"), so every step stays tied
+// to its heading. What the guide tells the customer to DO comes first and its background (why, what we do, the FAQ) after it, each in guide
+// order: the drafter's budget is spent on the steps the customer asks about, not on the introduction.
 const BACKGROUND_HEADING = /^(?:why|what we do|how (?:we|it)|about|meet|faq|frequently|questions?)\b/i;
+const FAQ_HEADING = 'Frequently asked questions';
 function guideSections(blocks) {
   const groups = [];
+  const add = (heading, parts) => {
+    if (!parts.length) return;
+    if (!groups.length || heading !== null) groups.push({ heading: heading ?? '', parts: [] });
+    groups[groups.length - 1].parts.push(...parts);
+  };
   for (const block of Array.isArray(blocks) ? blocks : []) {
     if (!block || typeof block !== 'object') continue;
     if (block.type === 'heading') { groups.push({ heading: String(block.content || '').replace(/\s+/g, ' ').trim(), parts: [] }); continue; }
-    const parts = [];
-    if (['paragraph', 'callout'].includes(block.type) && typeof block.content === 'string') parts.push(block.content);
-    if (block.type === 'list' && Array.isArray(block.items)) parts.push(...block.items.filter((item) => typeof item === 'string'));
-    if (!parts.length) continue;
-    if (!groups.length) groups.push({ heading: '', parts: [] });
-    groups[groups.length - 1].parts.push(...parts);
+    if (['paragraph', 'callout'].includes(block.type) && typeof block.content === 'string') add(null, [block.content]);
+    if (block.type === 'list' && Array.isArray(block.items)) add(null, block.items.filter((item) => typeof item === 'string'));
+    // the FAQ rows of a guide (its question and the answer, in the guide's own words); the service details rows are not prose
+    if (block.type === 'details' && block.variant === 'faq' && Array.isArray(block.rows)) {
+      add(FAQ_HEADING, block.rows.filter((row) => typeof row?.label === 'string' && typeof row?.value === 'string').map((row) => `${row.label} ${row.value}`));
+    }
   }
   const aside = (group) => BACKGROUND_HEADING.test(group.heading);
   return [...groups.filter((group) => !aside(group)), ...groups.filter(aside)];
 }
 
-// Whether a line of a guide may be repeated: the company facts bank's own text rules (checkFactText: no link, address, price, product or
-// brand name, "safe" or other safety claim, banned copy or prompt-control shape; it also bans any number, which a guide needs: "12 to 18
-// inches"), no merge tag, no em dash, and no wording that points at the email or page itself. The drafter screens the rest (prepGuideSection).
+// A street address the bank's phone and email rules do not see ("Meet us at 123 Example Lane"): a house number, one to three words, a street word.
+const ADDRESS_RE = /\b\d{1,6}\s+(?:[A-Za-z.']+\s+){0,3}(?:street|st|avenue|ave|road|rd|lane|ln|drive|dr|boulevard|blvd|way|court|ct|circle|cir|terrace|ter|place|pl|parkway|pkwy|highway|hwy|trail|trl)\b/i;
+// A published item is cut at the drafter's own limits, never mid-item: one longer than this is left out whole.
+const MAX_ITEM_CHARS = 700;
+
+// Whether a line of a guide may be repeated: the company facts bank's own text rules (checkFactText: no link, phone number, email, price,
+// product or brand name, "safe" or other safety claim, banned copy or prompt-control shape), no street address, no merge tag, no em dash, and
+// no wording that points at the email or page itself. The bank's amount rules (no number, at most three sentences, 400 characters) are
+// waived: a guide says "12 to 18 inches" in as many sentences as it needs. The drafter screens the rest (prepGuideSection).
+const WAIVED = new Set(['number_in_fact', 'too_many_sentences', 'too_long']);
 function plainLine(text, bank, ctx) {
-  if (/\{\{|\]\(|\u2014/.test(text) || /\b(?:e-?mail|inbox|button|below|above|this (?:guide|page))\b/i.test(text)) return false;
-  return bank.checkFactText(text, ctx).blocks.every((code) => code === 'number_in_fact');
+  if (ADDRESS_RE.test(text) || /\{\{|\]\(|\u2014/.test(text) || /\b(?:e-?mail|inbox|button|below|above|this (?:guide|page))\b/i.test(text)) return false;
+  return bank.checkFactText(text, ctx).blocks.every((code) => WAIVED.has(code));
 }
 
-// A full stop after an abbreviation is not a sentence end (the bank's own splitter: "St. Augustine wants 3.5 to 4 inches.").
 function guideGroups(blocks, productNames) {
   const bank = require('./company-facts-bank');
   const sections = guideSections(blocks);
   // What the guide itself links is a product or brand it names (a pet medication, a collar): the catalog does not know those, so the link
-  // labels count as brand names too, in a sentence of the guide that names the product without the link.
+  // labels count as brand names too, in an item of the guide that names the product without the link.
   const linked = sections.flatMap((group) => group.parts).flatMap((part) => [...String(part).matchAll(/\[([^\]]{2,60})\]\(/g)].map((m) => m[1].trim()))
     .flatMap((label) => [label, /^[A-Z][A-Za-z]{5,}/.exec(label)?.[0]]).filter(Boolean);
   const ctx = { productNames: [...productNames, ...linked] };
   const out = [];
   for (const group of sections) {
-    const sentences = group.parts.flatMap((part) => bank.splitSentences(String(part).replace(/\s+/g, ' ').trim()))
-      .map((raw) => raw.trim())
-      .filter((sentence) => sentence.length >= 12 && sentence.length <= 260 && plainLine(sentence, bank, ctx));
+    const items = group.parts.map((part) => String(part).replace(/\s+/g, ' ').trim())
+      .filter((item) => item.length >= 12 && item.length <= MAX_ITEM_CHARS && plainLine(item, bank, ctx));
     // a group whose heading may not be repeated is dropped whole: its steps would sit under the wrong case
-    if (sentences.length && (!group.heading || (group.heading.length <= 120 && plainLine(group.heading, bank, ctx)))) out.push({ heading: group.heading || null, sentences });
+    if (items.length && (!group.heading || (group.heading.length <= 120 && plainLine(group.heading, bank, ctx)))) out.push({ heading: group.heading || null, sentences: items });
   }
   return out;
 }
 
 /**
- * The prep guide the customer may be asking about: { source, key, label, sections: [{ heading, sentences }] } with the published words of
+ * The prep guide the customer may be asking about: { source, key, label, sections: [{ heading, sentences }] } with the published words of (`sentences` are whole published items: a paragraph, list item, callout or FAQ row)
  * that guide. Which guide: the one prep-guide-sender gives the customer's BOOKED visit (bookedPrepGuide: the soonest upcoming visit, its
  * stop and its stored guide, else its service types' family), else, with no booked visit, the family the LAST completed service belongs to
  * (prepFamilyForServiceType: the sender's own match rule). Only that one service's guide, never another's. The words are the template's

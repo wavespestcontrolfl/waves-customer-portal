@@ -390,7 +390,10 @@ async function bookedPrepGuide(customerIds) {
   const members = visit.visit_id
     ? await db('scheduled_services').where({ visit_id: visit.visit_id }).whereNotIn('status', CLOSED_VISIT_STATUSES).select('id', 'service_type', 'prep_template_key')
     : [];
-  const stop = members.some((member) => member.id === visit.id) ? members : [visit, ...members];
+  // the stop is the member snapshot just read: a visit that is no longer among its live members (detached or cancelled since the page
+  // state was read) is not a booked visit any more, so the pick is refused rather than guided from the stale row
+  if (visit.visit_id && !members.some((member) => member.id === visit.id)) throw new Error(`visit ${visit.id} is no longer a live member of its stop`);
+  const stop = members.length ? members : [visit];
   const storedKeys = new Set(stop.filter((row) => row.prep_template_key).map((row) => (
     Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === row.prep_template_key)?.[0] || null)));
   const families = storedKeys.size ? storedKeys : new Set(stop.map((row) => prepFamilyForServiceType(row.service_type)?.[0] || undefined).filter(Boolean));

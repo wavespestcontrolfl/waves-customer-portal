@@ -1113,6 +1113,8 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
       // no key anywhere: the stop's service types (one family names it, two families name none, a service no guide covers is ignored)
       expect(await stop({ id: 'svc-1', service_type: 'Pest Control' }, [{ id: 'svc-1', service_type: 'Pest Control' }, { id: 'svc-2', service_type: 'Termite Inspection' }])).toMatchObject({ pestType: 'interior_pest' });
       expect(await stop({ id: 'svc-1', service_type: 'Pest Control' }, [{ id: 'svc-1', service_type: 'Pest Control' }, { id: 'svc-2', service_type: 'Lawn Care' }])).toMatchObject({ pestType: null, config: null });
+      // the booked visit left its stop between the page-state read and the member read (detached or cancelled): the pick is refused, not guided from the stale row
+      await expect(stop({ id: 'svc-1', service_type: 'Lawn Care', prep_template_key: 'prep.lawn' }, [keyed])).rejects.toThrow('no longer a live member of its stop');
       // a failed member read is a failed pick, never a smaller stop
       await expect(stop({ id: 'svc-1', service_type: 'Pest Control' }, new Error('members down'))).rejects.toThrow('members down');
     } finally { spy.mockRestore(); }

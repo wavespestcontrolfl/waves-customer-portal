@@ -66,12 +66,12 @@ describe('loadPrepGuideFacts', () => {
       source: 'booked',
       key: 'prep.interior_pest',
       label: 'Interior Pest Treatment',
-      // verbatim and in guide order, each under the heading it sits below; dropped: merge tags, a link, a short stub, an email pointer, a price,
-      // a product name, a safety claim, a stay-out claim ("Keep pets out of the treated rooms": only a LABEL FACTS sentence may make one), a non-string,
-      // the details rows, the button and the signature
+      // each published item WHOLE, verbatim and in guide order, under the heading it sits below. Dropped whole: an item with a merge tag (the
+      // greeting paragraph), a link, a stay-out claim ("Keep pets out of the treated rooms": only a LABEL FACTS sentence may make one), a
+      // price, a product name or a safety claim, a short stub, an email pointer, a non-string, and the details rows, button and signature
       sections: [
-        { heading: null, sentences: ['Welcome to your visit.', 'Please read the whole guide.'] },
-        { heading: 'Before your visit', sentences: ['Please clear the area under the sinks.', 'Pick up toys and pet bowls from the floor.', 'Vacuum the carpets the day before.'] },
+        { heading: null, sentences: ['Welcome to your visit. Please read the whole guide.'] },
+        { heading: 'Before your visit', sentences: ['Vacuum the carpets the day before.'] },
       ],
     });
     expect(sender.bookedPrepGuide).toHaveBeenCalledWith(['c1']);
@@ -118,13 +118,36 @@ describe('loadPrepGuideFacts', () => {
     expect((await load({ booked }, { withDb: false })).result).toBeNull();
   });
 
-  test('the company facts bank\'s own safety rule holds for a guide: "safe" anywhere, a safety or "chemical-free" claim, a phone number or an address is never repeated', async () => {
+  test('the company facts bank\'s own rules hold for a guide: "safe" anywhere, a safety or "chemical-free" claim, a phone number, an email or a street address is never repeated; a measurement is', async () => {
     const booked = { visit: { id: 'v1' }, pestType: 'interior_pest', config: PEST };
     const blocks = [{ type: 'list', items: [
       'We use safe pesticides at every visit.', 'Our products are non-toxic and pesticide-free.', 'Call 941 555 0101 if anything changes.',
-      'Email contact at office@example.com for questions.', 'Plan on about 20 minutes to clear the kitchen counters.', 'Move the furniture 12 to 18 inches from the walls.',
+      'Email contact at office@example.com for questions.', 'Meet us at 123 Example Lane to pick up the gate key.', 'Park at 4501 Bay Shore Road and walk in.',
+      'Plan on about 20 minutes to clear the kitchen counters.', 'Move the furniture 12 to 18 inches from the walls.', 'Clear 2 feet around every outlet.',
     ] }];
-    expect(flat((await load({ booked, blocks })).result)).toEqual(['Plan on about 20 minutes to clear the kitchen counters.', 'Move the furniture 12 to 18 inches from the walls.']);
+    expect(flat((await load({ booked, blocks })).result)).toEqual(['Plan on about 20 minutes to clear the kitchen counters.', 'Move the furniture 12 to 18 inches from the walls.', 'Clear 2 feet around every outlet.']);
+  });
+
+  test('an item is never cut: a sentence that depends on a screened-out one goes with it (the item that names a product, then says "It only lasts 24 hours")', async () => {
+    const booked = { visit: { id: 'v1' }, pestType: 'flea', config: FLEA };
+    const blocks = [{ type: 'list', items: [
+      'Need something today? [Capstar](https://example.com/c) kills adult fleas within 30 minutes. It only lasts 24 hours, so it is a bridge, not a plan.',
+      'Wash or replace pet bedding. Replace anything you cannot wash.',
+    ] }];
+    expect(flat((await load({ booked, blocks })).result)).toEqual(['Wash or replace pet bedding. Replace anything you cannot wash.']);
+    const seeded = flat((await load({ booked, blocks: SEEDED['prep.flea'] })).result);
+    expect(seeded.some((item) => /only lasts 24 hours/.test(item))).toBe(false);
+  });
+
+  test('the FAQ rows of a guide are read (question and answer, as published) under their own heading, after the steps', async () => {
+    const booked = { visit: { id: 'v1' }, pestType: 'lawn', config: { emailTemplateKey: 'prep.lawn', label: 'Lawn Treatment' } };
+    const { result } = await load({ booked, blocks: SEEDED['prep.lawn'] });
+    const faq = result.sections.find((section) => section.heading === 'Frequently asked questions');
+    expect(faq.sentences).toContain('Can I overseed or lay sod right after? Not right after a weed treatment. Pre-emergent and some post-emergent products stop new grass too. Ask your technician for the window; it is usually several weeks.');
+    expect(result.sections[result.sections.length - 1]).toBe(faq); // the background comes last
+    // the service details rows are not prose
+    const detailsOnly = [{ type: 'details', rows: [{ label: 'Date', value: 'Tuesday morning' }] }];
+    expect((await load({ booked, blocks: detailsOnly })).result).toEqual({ sections: [] });
   });
 
   test('a step stays under the heading of the case it is for (the cockroach guide splits kitchen prep from palmetto bug prep)', async () => {
@@ -137,7 +160,7 @@ describe('loadPrepGuideFacts', () => {
     expect(palmetto.sentences.some((sentence) => /Unlock gates and clear the lanai/.test(sentence))).toBe(true);
     expect(german.sentences.some((sentence) => /Unlock gates and clear the lanai/.test(sentence))).toBe(false);
     // a group with no heading is only the guide's opening
-    expect(result.sections.filter((section) => !section.heading)).toHaveLength(1);
+    expect(result.sections.filter((section) => !section.heading).length).toBeLessThanOrEqual(1);
   });
 
   test('a group whose heading may not be repeated is dropped whole: its steps never sit under another case', async () => {
@@ -151,12 +174,12 @@ describe('loadPrepGuideFacts', () => {
     expect((await load({ booked, blocks })).result.sections).toEqual([{ heading: 'Before we arrive', sentences: ['Move the plant pots inside.'] }]);
   });
 
-  test('a full stop after an abbreviation or inside a number is not a sentence end: the published lawn copy keeps "St. Augustine wants 3.5 to 4 inches."', async () => {
+  test('an item is read whole, so a full stop after an abbreviation or inside a number never cuts it: the published lawn copy keeps "St. Augustine wants 3.5 to 4 inches."', async () => {
     const { result } = await load({ booked: { visit: { id: 'v1' }, pestType: 'lawn', config: { emailTemplateKey: 'prep.lawn', label: 'Lawn Treatment' } }, blocks: SEEDED['prep.lawn'] });
-    expect(flat(result)).toContain('St. Augustine wants 3.5 to 4 inches.');
-    expect(flat(result).some((sentence) => /^Augustine/.test(sentence))).toBe(false);
-    const split = flat((await load({ booked: { visit: { id: 'v1' }, pestType: 'lawn', config: PEST }, blocks: [{ type: 'paragraph', content: 'Mow before the visit on Mt. Pleasant Road. Is it safe to mow? No. Keep the gate unlocked, e.g. with the code box.' }] })).result);
-    expect(split).toEqual(['Mow before the visit on Mt. Pleasant Road.', 'Keep the gate unlocked, e.g. with the code box.']); // ("Is it safe to mow?" holds the word safe)
+    expect(flat(result).some((item) => item.includes('St. Augustine wants 3.5 to 4 inches. Cutting it short in our heat stresses the turf'))).toBe(true);
+    expect(flat(result).some((item) => /^Augustine/.test(item))).toBe(false);
+    const whole = flat((await load({ booked: { visit: { id: 'v1' }, pestType: 'lawn', config: PEST }, blocks: [{ type: 'paragraph', content: 'Mow before the visit on Mt. Pleasant Road. Keep the gate unlocked, e.g. with the code box.' }, { type: 'paragraph', content: 'Is it safe to mow? No. Keep the gate unlocked.' }] })).result);
+    expect(whole).toEqual(['Mow before the visit on Mt. Pleasant Road. Keep the gate unlocked, e.g. with the code box.']); // (the second holds the word safe: left out whole)
   });
 
   test('a product the guide links is a brand name: a sentence naming it without the link is dropped too', async () => {
@@ -165,25 +188,23 @@ describe('loadPrepGuideFacts', () => {
     expect(flat((await load({ booked, blocks })).result)).toEqual(['Wash the pet bedding before the visit.']);
   });
 
-  test('the seeded flea guide: the steps come before the background, so the section answers how to vacuum and what bedding to wash', async () => {
+  test('the seeded flea guide: the steps come before the background, so the section answers how to vacuum and how to get the home ready', async () => {
     const { result } = await load({ booked: { visit: { id: 'v1' }, pestType: 'flea', config: FLEA }, blocks: SEEDED['prep.flea'] });
     const { buildFactsBlock } = require('../services/sms-shadow-drafter');
     const text = buildFactsBlock({ summary: 'X', billing, prepGuide: result });
     const rendered = (/PREP GUIDE \([^\n]*\n((?:[^\n]*\n)*?)ACCOUNT FLAGS:/.exec(text) || [])[1] || '';
     const lines = rendered.split('\n').filter((line) => line.startsWith('- ')).map((line) => line.slice(2));
     // how to vacuum, what bedding to wash, the canister, clearing the floor, the pet bowls: all there, word for word
-    for (const wanted of [
-      'Vacuum every carpet, rug and hard floor, slowly, including under beds, under couch cushions, behind and under furniture, along every baseboard, and inside closets.',
-      'Empty the canister or bag into a sealed trash bag and take it outside to the bin right away.',
-      'Wash or replace pet bedding.',
-      'Vacuum daily for the next 14 days, then every other day through week four.',
-    ]) expect(lines).toContain(wanted);
-    // the hot-wash line carries a drying time ("dry on high heat for at least 20 minutes"): only a LABEL FACTS sentence may give one, so it stays out
-    expect(lines.some((line) => /^Wash all bedding, throw blankets/.test(line))).toBe(false);
-    expect(lines.some((line) => /^Pick up toys/.test(line))).toBe(true);
-    // every line is a published sentence of the guide, none invented, and the background (why fleas are different) comes after the steps
-    const published = JSON.stringify(SEEDED['prep.flea']);
-    for (const line of lines) expect(published).toContain(line.replace(/"/g, '\\"'));
+    const has = (start) => lines.some((line) => line.startsWith(start));
+    expect(lines).toContain('Vacuum every carpet, rug and hard floor, slowly, including under beds, under couch cushions, behind and under furniture, along every baseboard, and inside closets.');
+    for (const start of ['Empty the canister or bag into a sealed trash bag', 'Vacuum daily for the next 14 days', 'Use the crevice tool', 'Strip beds and pet beds']) expect({ start, found: has(start) }).toEqual({ start, found: true });
+    // ("Wash or replace pet bedding. Anything you cannot hot-wash is better thrown out than kept." and the hot-wash item are left out whole: the shared banned-copy guard reads a claim in each)
+    // the hot-wash item carries a drying time ("dry on high heat for at least 20 minutes"): only a LABEL FACTS sentence may give one, so it stays out
+    expect(has('Wash all bedding, throw blankets')).toBe(false);
+    expect(has('Pick up toys, pet toys, shoes')).toBe(false); // (it ends "not back on the floor until it is dry": the same rule)
+    // every line is a published item of the guide, none invented, and the background (why fleas are different) comes after the steps
+    const published = new Set(SEEDED['prep.flea'].flatMap((block) => [block.content, ...(block.items || []), ...(block.rows || []).map((row) => `${row.label} ${row.value}`)]).filter((text) => typeof text === 'string').map((text) => text.replace(/\s+/g, ' ').trim()));
+    for (const line of lines) expect({ line, published: published.has(line) }).toEqual({ line, published: true });
     const why = lines.findIndex((line) => /^One adult female lays/.test(line));
     const step = lines.findIndex((line) => /^Vacuum every carpet/.test(line));
     expect(step).toBeGreaterThanOrEqual(0);
@@ -222,7 +243,7 @@ describe('the PREP GUIDE section of the facts block', () => {
 
   test('the guide\'s sentences, word for word, under a header that allows repeating them and nothing else; after LAWN HEALTH and before ACCOUNT FLAGS', () => {
     const text = block(guide());
-    expect(text).toMatch(/\nPREP GUIDE \(our written prep guide for their booked Interior Pest Treatment; for prep questions about that service, repeat these sentences word for word and add no other step, time or rule; a line ending in a colon names the case the sentences under it are for, so use those sentences only when the customer's case is known to match it, and otherwise give no step from them; for any other service or a prep question these do not answer, give no prep advice\):\n- Please clear the area under the sinks\.\n- Pick up toys and pet bowls from the floor\.\nACCOUNT FLAGS:/);
+    expect(text).toMatch(/\nPREP GUIDE \(our written prep guide for their booked Interior Pest Treatment; for prep questions about that service, repeat these lines word for word and add no other step, time or rule; a line ending in a colon names the case the lines under it are for, so use those lines only when the customer's case is known to match it, and otherwise give no step from them; for any other service or a prep question these do not answer, give no prep advice\):\n- Please clear the area under the sinks\.\n- Pick up toys and pet bowls from the floor\.\nACCOUNT FLAGS:/);
     expect(text.indexOf('LAWN HEALTH:')).toBeLessThan(text.indexOf('PREP GUIDE ('));
     expect(block(guide({ source: 'last' }))).toContain('for their last Interior Pest Treatment;');
   });
