@@ -91,9 +91,19 @@ function billingPartyNamed(extractions) {
     .some((c) => c && c.is_billing_party === true));
 }
 
-// The caller said this line cannot receive texts.
-function callerCannotText(extractions) {
-  return extractions.some((x) => x.caller?.ani_cannot_text === true);
+// The phone is not a delivery channel: the caller said the line cannot get
+// texts, or declined texts on the call (TCPA: no SMS without consent).
+function smsBlocked(extractions) {
+  return extractions.some((x) => x.caller?.ani_cannot_text === true
+    || x.consent?.sms_declined === true || x.sms_declined === true);
+}
+
+// Termite or WDO work the call asked for, even when the composed intent
+// carries no termite key (WDO has none) and no flag names it.
+function termiteRequested(extractions) {
+  return extractions.some((x) => /termite|wdo/i.test([
+    JSON.stringify(x.service_request || {}), x.service_interest, x.service_type, x.service_requested,
+  ].filter((v) => typeof v === 'string').join(' ')));
 }
 
 function homeSizeFound(propertyFacts) {
@@ -103,20 +113,25 @@ function homeSizeFound(propertyFacts) {
 
 // The contact the draft row actually stores: the resolved draft phone (a
 // blocked caller ID or a short callback number resolves to none) or a
-// post-quarantine email. A line the caller said cannot get texts does not
-// count as a phone.
+// post-quarantine email. A phone the caller cannot or will not get texts on
+// does not count.
 function hasContact(f) {
   const { context } = f;
   const hasEmail = !!((context?.leadIsForThisCall && context?.lead?.email)
     || (!context?.customerPhoneAmbiguous && context?.customer?.email));
-  return (!!f.draftPhone && !callerCannotText(f.extractions)) || hasEmail;
+  return (!!f.draftPhone && !smsBlocked(f.extractions)) || hasEmail;
 }
 
 // One row per owner hold rule: [reason, predicate over the gathered facts].
 const HOLD_RULES = [
+  // Keyed on the call's confirmed appointment, not the persisted booking:
+  // the draft composes while the processor is still routing, so no booking
+  // outcome exists yet. A confirmed time whose booking was then blocked
+  // also holds, which is the safe side (the office already owns that call).
   ['booked_on_call', (f) => bookedOnCall(f.context?.extraction)],
   ['quote_not_promised', (f) => !quotePromisedOnCall(f.extractions)],
-  ['termite_hold', (f) => f.serviceKeys.some((k) => /termite|wdo/i.test(k)) || /termite|wdo|swarmer/i.test(f.flags)],
+  ['termite_hold', (f) => f.serviceKeys.some((k) => /termite|wdo/i.test(k)) || /termite|wdo|swarmer/i.test(f.flags)
+    || termiteRequested(f.extractions)],
   ['commercial_hold', (f) => f.intent.is_commercial === true || f.intent.category === 'COMMERCIAL'],
   ['home_size_not_found', (f) => f.homeSizeDrivesPrice !== false && !homeSizeFound(f.propertyFacts)],
   ['priced_line_needs_review', (f) => f.pricedLineNeedsReview === true],

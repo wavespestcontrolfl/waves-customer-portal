@@ -51,6 +51,8 @@ describe('callAutoSendShadowVerdict', () => {
     ['third_party_payer', (i) => { i.intent.constraint_flags = [{ flag: 'landlord_pays', note: 'realty company covers it' }]; }],
     ['third_party_payer', (i) => { i.context.extraction.secondary_contacts = [{ role: 'landlord', is_billing_party: true }]; }],
     ['no_contact', (i) => { i.context.extraction.caller = { ani_cannot_text: true }; }],
+    ['no_contact', (i) => { i.context.extraction.consent = { sms_declined: true }; }],
+    ['termite_hold', (i) => { i.context.extraction.service_request = { quote_promised: true, secondary_categories: ['wdo_inspection'] }; }],
     // A caller ID exists, but the draft resolved no storable phone.
     ['no_contact', (i) => { i.draftPhone = null; }],
   ])('holds with %s', (reason, mutate) => {
