@@ -2889,7 +2889,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       channel: origin?.channel,
       unitBandPricing,
       currentCustomer: context.isExistingCustomer === true || priorQualifyingServices.length > 0,
-      propertyType: propertyFacts?.propertyType,
+      propertyType: propertyFacts?.propertyType || context.customer?.property_type,
     });
 
     let engineResult = null;

@@ -19,13 +19,15 @@
 //   - not a bedroom-band unit: the page's amount is not the band's own
 //     one-time rate.
 // Returns true when it swapped the ask for the plan.
+const { isCommercialProperty } = require('../pricing-engine/commercial-helpers');
+
 function offerPlanWithOneTimeChoice(intent, {
   channel = null, unitBandPricing = null, currentCustomer = false, propertyType = null,
 } = {}) {
   if (channel !== 'call' || unitBandPricing || currentCustomer) return false;
-  // A property the lookup resolved as commercial keeps the manual-quote path,
-  // whatever the call's own category says.
-  if (/commercial/i.test(String(propertyType || ''))) return false;
+  // A property the pricing engine would class as commercial (office, retail,
+  // ...) keeps the manual-quote path, whatever the call's own category says.
+  if (propertyType && isCommercialProperty({ propertyType })) return false;
   const keys = Object.keys(intent?.services || {});
   if (intent?.decision !== 'draft' || intent.is_commercial === true) return false;
   if (keys.length !== 1 || keys[0] !== 'oneTimePest') return false;
