@@ -15,7 +15,6 @@ import {
   Star,
   Trash2,
   Unlock,
-  Zap,
 } from "lucide-react";
 import {
   ActionFeedback,
@@ -129,12 +128,6 @@ function canDeleteEmailTemplate(template) {
   return status === "draft" || status === "archived";
 }
 
-function canDeleteEmailAutomation(automation) {
-  if (automation?.can_delete !== undefined) return automation.can_delete === true;
-  const status = String(automation?.status || "draft").toLowerCase();
-  return status === "draft" || status === "archived";
-}
-
 function TemplateStatusBadge({ status }) {
   const normalized = String(status || "draft").toLowerCase();
   return (
@@ -175,62 +168,6 @@ function statusTone(status) {
 function rateText(value) {
   const n = Number(value || 0);
   return `${Number.isFinite(n) ? n.toFixed(1).replace(".0", "") : "0"}%`;
-}
-
-function automationStatusTone(status) {
-  if (status === "active") return "strong";
-  return "neutral";
-}
-
-function runStatusTone(status) {
-  if (["sent", "blocked", "skipped"].includes(status)) return "strong";
-  if (["failed"].includes(status)) return "alert";
-  if (["retry_scheduled", "running"].includes(status)) return "alert";
-  return "neutral";
-}
-
-function minutesLabel(value) {
-  const minutes = Number(value || 0);
-  if (!minutes) return "Immediate";
-  if (minutes % 1440 === 0) return `${minutes / 1440}d delay`;
-  if (minutes % 60 === 0) return `${minutes / 60}h delay`;
-  return `${minutes}m delay`;
-}
-
-function automationDraftFrom(row = {}) {
-  return {
-    name: row.name || "",
-    description: row.description || "",
-    triggerEventKey: row.trigger_event_key || "",
-    triggerDescription: row.trigger_description || "",
-    templateKey: row.template_key || "",
-    delayMinutes: row.delay_minutes ?? 0,
-    audience: row.audience || "customer",
-    status: row.status || "draft",
-    suppressionGroupKey: row.suppression_group_key || "",
-    legalClassification: row.legal_classification || "transactional_relationship",
-    frequencyCap: row.frequency_cap || "once_per_entity",
-    idempotencyKeyTemplate: row.idempotency_key_template || "",
-    conditionsText: JSON.stringify(asObject(row.conditions), null, 2),
-    exitConditionsText: JSON.stringify(asObject(row.exit_conditions), null, 2),
-    retryPolicyText: JSON.stringify(asObject(row.retry_policy), null, 2),
-    quietHoursText: JSON.stringify(asObject(row.quiet_hours), null, 2),
-    timezone: row.timezone || "America/New_York",
-    owner: row.owner || "operations",
-    dryRunNotes: row.dry_run_notes || "",
-  };
-}
-
-function parseJsonText(value, label) {
-  try {
-    const parsed = JSON.parse(value || "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error(`${label} must be a JSON object`);
-    }
-    return parsed;
-  } catch (e) {
-    throw new Error(`${label} must be valid JSON: ${e.message}`);
-  }
 }
 
 function listText(value) {
@@ -1007,396 +944,6 @@ function TemplateSettingsPanel({ settings, groups, busy, onChange, onSave }) {
   );
 }
 
-function AutomationRunsPanel({
-  automationKey,
-  runs,
-  loading,
-  busy,
-  onProcessDue,
-}) {
-  if (!automationKey) return null;
-  return (
-    <Card>
-      <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2">
-          <History size={15} />
-          <CardTitle>Automation runs</CardTitle>
-          <Badge tone="neutral">{automationKey}</Badge>
-        </div>
-        <div className="flex gap-2 flex-wrap">
-          <Button variant="secondary" size="sm" className="gap-2" onClick={onProcessDue} disabled={busy}>
-            <RefreshCw size={14} /> Process due
-          </Button>
-        </div>
-      </CardHeader>
-      <CardBody>
-        {loading ? (
-          <div className="py-10 text-center text-13 text-ink-secondary">Loading automation runs...</div>
-        ) : runs.length ? (
-          <Table aria-label="Email automation runs" className="min-w-[1000px] text-left">
-              <thead>
-                <tr className="border-b border-zinc-200 text-ui-label text-ink-tertiary">
-                  <th className="py-2 pr-4 font-medium">Created</th>
-                  <th className="py-2 pr-4 font-medium">Run after</th>
-                  <th className="py-2 pr-4 font-medium">Recipient</th>
-                  <th className="py-2 pr-4 font-medium">Entity</th>
-                  <th className="py-2 pr-4 font-medium">Status</th>
-                  <th className="py-2 pr-4 font-medium">Attempts</th>
-                  <th className="py-2 font-medium">Result</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-100">
-                {runs.map((run) => (
-                  <tr key={run.id}>
-                    <td className="py-3 pr-4 whitespace-nowrap text-ink-secondary">
-                      {formatDateTime(run.created_at)}
-                    </td>
-                    <td className="py-3 pr-4 whitespace-nowrap text-ink-secondary">
-                      {formatDateTime(run.run_after)}
-                    </td>
-                    <td className="py-3 pr-4 whitespace-nowrap text-zinc-900">
-                      {run.recipient_email}
-                    </td>
-                    <td className="py-3 pr-4 whitespace-nowrap text-ink-secondary">
-                      {[run.entity_type, run.entity_id].filter(Boolean).join(" / ") || "-"}
-                    </td>
-                    <td className="py-3 pr-4 whitespace-nowrap">
-                      <Badge tone={runStatusTone(run.status)}>{run.status}</Badge>
-                    </td>
-                    <td className="py-3 pr-4 whitespace-nowrap text-ink-secondary">
-                      {run.attempts || 0}/{run.max_attempts || 0}
-                    </td>
-                    <td className="py-3 min-w-[280px] text-ink-secondary">
-                      <div className="line-clamp-2">
-                        {run.last_error || run.exit_reason || run.idempotency_key || "-"}
-                      </div>
-                      {run.completed_at ? (
-                        <div className="mt-1 text-ui-caption text-ink-tertiary">
-                          Completed {formatDateTime(run.completed_at)}
-                        </div>
-                      ) : null}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-        ) : (
-          <div className="py-10 text-center text-13 text-ink-secondary">No runs for this automation yet.</div>
-        )}
-      </CardBody>
-    </Card>
-  );
-}
-
-function AutomationsPanel({
-  automations,
-  templates,
-  groups,
-  loading,
-  drafts,
-  dryRuns,
-  selectedRunsKey,
-  runs,
-  runsLoading,
-  busy,
-  onDraft,
-  onRefresh,
-  onSave,
-  onDryRun,
-  onSelectRuns,
-  onProcessDue,
-  onDelete,
-}) {
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [search, setSearch] = useState("");
-  const filtered = automations.filter((row) => {
-    const matchesStatus = statusFilter === "all" || row.status === statusFilter;
-    const text = `${row.name} ${row.automation_key} ${row.trigger_event_key} ${row.template_key}`.toLowerCase();
-    return matchesStatus && text.includes(search.toLowerCase());
-  });
-
-  return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="flex items-center gap-2">
-            <Zap size={15} />
-            <CardTitle>Automations</CardTitle>
-          </div>
-          <div className="flex gap-2 flex-wrap">
-            <Input
-              size="sm"
-              className="w-56"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search automations"
-            />
-            <Select
-              size="sm"
-              className="w-36"
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-            >
-              <option value="all">All statuses</option>
-              <option value="active">Active</option>
-              <option value="draft">Draft</option>
-              <option value="paused">Paused</option>
-              <option value="archived">Archived</option>
-            </Select>
-            <Button variant="secondary" size="sm" className="gap-2" onClick={onRefresh} disabled={loading}>
-              <RefreshCw size={14} /> Refresh
-            </Button>
-          </div>
-        </CardHeader>
-        <CardBody>
-          {loading ? (
-            <div className="py-10 text-center text-13 text-ink-secondary">Loading automations...</div>
-          ) : filtered.length ? (
-            <div className="divide-y divide-zinc-100">
-              {filtered.map((row) => {
-                const draft = drafts[row.automation_key] || automationDraftFrom(row);
-                const dryRun = dryRuns[row.automation_key];
-                const activeVersionLabel = row.active_version_number
-                  ? `Template v${row.active_version_number}`
-                  : "No active version";
-                return (
-                  <div key={row.automation_key} className="py-4 first:pt-0 last:pb-0 space-y-3">
-                    <div className="flex items-start justify-between gap-3 flex-wrap">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <div className="text-14 font-medium text-zinc-900">{row.name}</div>
-                          <Badge tone={automationStatusTone(row.status)}>{row.status}</Badge>
-                          <Badge tone="neutral">{minutesLabel(row.delay_minutes)}</Badge>
-                        </div>
-                        <div className="mt-1 text-12 text-ink-tertiary">
-                          {row.automation_key} - trigger {row.trigger_event_key}
-                        </div>
-                      </div>
-                      <div className="flex gap-2 flex-wrap">
-                        <Badge tone="neutral">{activeVersionLabel}</Badge>
-                        <Badge tone="neutral">{row.send_count_30d || 0} sent / 30d</Badge>
-                        {(row.would_send_30d > 0 || row.would_block_30d > 0) && (
-                          <>
-                            <Badge tone="neutral">{row.would_send_30d || 0} would send / 30d</Badge>
-                            <Badge tone="neutral">{row.would_block_30d || 0} would block / 30d</Badge>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-4 gap-2">
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Status</label>
-                      <Select
-                        className="mt-1"
-                        value={draft.status}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, status: e.target.value })}
-                      >
-                        <option value="active">Active</option>
-                        <option value="draft">Draft</option>
-                        <option value="paused">Paused</option>
-                        <option value="archived">Archived</option>
-                      </Select>
-                    </div>
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Template</label>
-                      <Select
-                        className="mt-1"
-                        value={draft.templateKey}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, templateKey: e.target.value })}
-                      >
-                        {templates.map((t) => (
-                          <option key={t.template_key} value={t.template_key}>
-                            {t.template_key}
-                          </option>
-                        ))}
-                      </Select>
-                    </div>
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Delay minutes</label>
-                      <Input
-                        className="mt-1"
-                        type="number"
-                        min="0"
-                        value={draft.delayMinutes}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, delayMinutes: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Audience</label>
-                      <Select
-                        className="mt-1"
-                        value={draft.audience}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, audience: e.target.value })}
-                      >
-                        <option value="customer">Customer</option>
-                        <option value="lead">Lead</option>
-                        <option value="subscriber">Subscriber</option>
-                        <option value="internal_user">Internal user</option>
-                      </Select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-2">
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Trigger</label>
-                      <Input
-                        className="mt-1"
-                        value={draft.triggerEventKey}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, triggerEventKey: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Suppression group</label>
-                      <Select
-                        className="mt-1"
-                        value={draft.suppressionGroupKey}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, suppressionGroupKey: e.target.value })}
-                      >
-                        <option value="">No group</option>
-                        {groups.map((g) => (
-                          <option key={g.key} value={g.key}>
-                            {g.name}
-                          </option>
-                        ))}
-                      </Select>
-                    </div>
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Legal classification</label>
-                      <Select
-                        className="mt-1"
-                        value={draft.legalClassification}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, legalClassification: e.target.value })}
-                      >
-                        <option value="transactional_relationship">Transactional relationship</option>
-                        <option value="commercial_marketing">Commercial marketing</option>
-                        <option value="mixed">Mixed</option>
-                      </Select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Frequency cap</label>
-                      <Input
-                        className="mt-1"
-                        value={draft.frequencyCap}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, frequencyCap: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Idempotency key</label>
-                      <Input
-                        className="mt-1 font-mono text-12"
-                        value={draft.idempotencyKeyTemplate}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, idempotencyKeyTemplate: e.target.value })}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Conditions JSON</label>
-                      <Textarea
-                        className="mt-1 font-mono text-12"
-                        rows={5}
-                        value={draft.conditionsText}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, conditionsText: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Exit conditions JSON</label>
-                      <Textarea
-                        className="mt-1 font-mono text-12"
-                        rows={5}
-                        value={draft.exitConditionsText}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, exitConditionsText: e.target.value })}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Owner</label>
-                      <Input
-                        className="mt-1"
-                        value={draft.owner}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, owner: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-11 uppercase tracking-label text-ink-tertiary">Timezone</label>
-                      <Input
-                        className="mt-1"
-                        value={draft.timezone}
-                        onChange={(e) => onDraft(row.automation_key, { ...draft, timezone: e.target.value })}
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-11 uppercase tracking-label text-ink-tertiary">Dry-run notes</label>
-                    <Input
-                      className="mt-1"
-                      value={draft.dryRunNotes}
-                      onChange={(e) => onDraft(row.automation_key, { ...draft, dryRunNotes: e.target.value })}
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between gap-3 flex-wrap rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
-                    <div className="text-12 text-ink-secondary">
-                      {dryRun ? (
-                        <>
-                          Dry run: <span className="font-medium text-zinc-900">{dryRun.candidate_count || 0}</span> candidates from {dryRun.source || "history"} in {dryRun.window_days || 30} days.
-                          {dryRun.notes ? <span className="block text-ink-tertiary">{dryRun.notes}</span> : null}
-                        </>
-                      ) : (
-                        "Run a dry check before making an automation active."
-                      )}
-                    </div>
-                    <div className="flex gap-2 flex-wrap">
-                      <Button variant="secondary" size="sm" className="gap-2" onClick={() => onSelectRuns(row.automation_key)} disabled={busy}>
-                        <History size={14} /> Runs
-                      </Button>
-                      <Button variant="secondary" size="sm" className="gap-2" onClick={() => onDryRun(row.automation_key)} disabled={busy}>
-                        <Eye size={14} /> Dry run
-                      </Button>
-                      <Button variant="primary" size="sm" className="gap-2" onClick={() => onSave(row.automation_key, draft)} disabled={busy}>
-                        <Save size={14} /> Save
-                      </Button>
-                      {canDeleteEmailAutomation(row) ? (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="gap-2"
-                          onClick={() => onDelete(row.automation_key)}
-                          disabled={busy}
-                        >
-                          <Trash2 size={14} /> Delete
-                        </Button>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          ) : (
-            <div className="py-10 text-center text-13 text-ink-secondary">No automations match the current filters.</div>
-          )}
-        </CardBody>
-      </Card>
-      <AutomationRunsPanel
-        automationKey={selectedRunsKey}
-        runs={runs}
-        loading={runsLoading}
-        busy={busy}
-        onProcessDue={onProcessDue}
-      />
-    </div>
-  );
-}
-
 function TemplateList({ templates, selectedKey, onSelect, filter, onFilter, onToggleStatus, onDelete, busy }) {
   const modes = ["all", "service", "marketing"];
   const filtered = templates.filter((t) => filter === "all" || t.mode === filter);
@@ -1646,13 +1193,6 @@ export default function EmailTemplatesPanelV2() {
   });
   const [deliverability, setDeliverability] = useState(null);
   const [deliverabilityLoading, setDeliverabilityLoading] = useState(false);
-  const [automations, setAutomations] = useState([]);
-  const [automationLoading, setAutomationLoading] = useState(false);
-  const [automationDrafts, setAutomationDrafts] = useState({});
-  const [dryRuns, setDryRuns] = useState({});
-  const [selectedRunsKey, setSelectedRunsKey] = useState(null);
-  const [automationRuns, setAutomationRuns] = useState([]);
-  const [automationRunsLoading, setAutomationRunsLoading] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState(null);
   const [draft, setDraft] = useState(null);
   const [selectedFixtureId, setSelectedFixtureId] = useState(null);
@@ -1666,7 +1206,6 @@ export default function EmailTemplatesPanelV2() {
   const historySequence = useRef(0);
   const templateIssuesSequence = useRef(0);
   const deliverabilitySequence = useRef(0);
-  const runsSequence = useRef(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -1677,9 +1216,7 @@ export default function EmailTemplatesPanelV2() {
         const rows = d.templates || [];
         const params = hashParams();
         const hashKey = params.get("tab") === "email_templates" ? params.get("key") : null;
-        const hashView = params.get("tab") === "email_templates" ? params.get("view") : null;
         const hashTemplate = hashKey ? rows.find((t) => t.template_key === hashKey) : null;
-        if (hashView === "automations") setActiveView("automations");
         if (hashTemplate?.mode) setFilter(hashTemplate.mode);
         setTemplates(rows);
         setSelectedKey((prev) =>
@@ -1795,38 +1332,10 @@ export default function EmailTemplatesPanelV2() {
       });
   }, []);
 
-  const loadAutomations = useCallback(() => {
-    setAutomationLoading(true);
-    return adminFetch("/admin/email-templates/automations")
-      .then((d) => {
-        const rows = d.automations || [];
-        setAutomations(rows);
-        setAutomationDrafts(Object.fromEntries(rows.map((row) => [row.automation_key, automationDraftFrom(row)])));
-      })
-      .catch((e) => setToast(`Automations load failed: ${e.message}`))
-      .finally(() => setAutomationLoading(false));
-  }, []);
-
-  const loadAutomationRuns = useCallback((key = selectedRunsKey, { background = false } = {}) => {
-    if (!key) return Promise.resolve();
-    const seq = ++runsSequence.current;
-    if (!background) setAutomationRunsLoading(true);
-    return adminFetch(`/admin/email-templates/automations/${key}/runs?limit=100`)
-      .then((d) => {
-        if (seq !== runsSequence.current) return;
-        setSelectedRunsKey(key);
-        setAutomationRuns(d.runs || []);
-        setReadErrors((prev) => ({ ...prev, automations: null }));
-      })
-      .catch((e) => { if (seq === runsSequence.current) setReadErrors((prev) => ({ ...prev, automations: e.message })); })
-      .finally(() => { if (seq === runsSequence.current) setAutomationRunsLoading(false); });
-  }, [selectedRunsKey]);
-
   const refreshReadView = () => {
     if (activeView === "history" && !historyLoading) return loadHistory({ background: true });
     if (activeView === "issues" && !templateIssuesLoading) return loadTemplateIssues({ background: true });
     if (activeView === "deliverability" && !deliverabilityLoading) return loadDeliverability({ background: true });
-    if (activeView === "automations" && !automationRunsLoading) return loadAutomationRuns(selectedRunsKey, { background: true });
   };
   useVisiblePageRefresh(refreshReadView, { intervalMs: 60000, enabled: !loading && !busy });
 
@@ -1872,10 +1381,6 @@ export default function EmailTemplatesPanelV2() {
   useEffect(() => {
     if (activeView === "deliverability") loadDeliverability();
   }, [activeView, loadDeliverability]);
-
-  useEffect(() => {
-    if (activeView === "automations") loadAutomations();
-  }, [activeView, loadAutomations]);
 
   const selectedVersion = useMemo(
     () => detail?.versions?.find((v) => v.id === selectedVersionId) || null,
@@ -2265,136 +1770,6 @@ export default function EmailTemplatesPanelV2() {
     }
   };
 
-  const setAutomationDraft = (key, nextDraft) => {
-    setAutomationDrafts((prev) => ({ ...prev, [key]: nextDraft }));
-  };
-
-  const saveAutomation = async (key, automationDraft) => {
-    setBusy(true);
-    setToast("");
-    try {
-      await adminFetch(`/admin/email-templates/automations/${key}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          name: automationDraft.name,
-          description: automationDraft.description,
-          triggerEventKey: automationDraft.triggerEventKey,
-          triggerDescription: automationDraft.triggerDescription,
-          templateKey: automationDraft.templateKey,
-          delayMinutes: automationDraft.delayMinutes,
-          audience: automationDraft.audience,
-          status: automationDraft.status,
-          suppressionGroupKey: automationDraft.suppressionGroupKey || null,
-          legalClassification: automationDraft.legalClassification,
-          frequencyCap: automationDraft.frequencyCap,
-          idempotencyKeyTemplate: automationDraft.idempotencyKeyTemplate,
-          conditions: parseJsonText(automationDraft.conditionsText, "Conditions"),
-          exitConditions: parseJsonText(automationDraft.exitConditionsText, "Exit conditions"),
-          retryPolicy: parseJsonText(automationDraft.retryPolicyText, "Retry policy"),
-          quietHours: parseJsonText(automationDraft.quietHoursText, "Quiet hours"),
-          timezone: automationDraft.timezone,
-          owner: automationDraft.owner,
-          dryRunNotes: automationDraft.dryRunNotes,
-        }),
-      });
-      await loadAutomations();
-      setToast("Automation saved");
-    } catch (e) {
-      setToast(`Automation save failed: ${e.message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const deleteAutomation = async (key) => {
-    if (!key) return;
-    if (!window.confirm("Delete this email automation? This can't be undone.")) return;
-    setBusy(true);
-    setToast("");
-    try {
-      await adminFetch(`/admin/email-templates/automations/${key}`, { method: "DELETE" });
-      setAutomationDrafts((prev) => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
-      if (selectedRunsKey === key) {
-        runsSequence.current += 1;
-        setAutomationRunsLoading(false);
-        setSelectedRunsKey(null);
-        setAutomationRuns([]);
-      }
-      await loadAutomations();
-      setToast("Automation deleted");
-    } catch (e) {
-      setToast(`Automation delete failed: ${e.message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const dryRunAutomation = async (key) => {
-    setBusy(true);
-    setToast("");
-    try {
-      const d = await adminFetch(`/admin/email-templates/automations/${key}/dry-run`, { method: "POST" });
-      setDryRuns((prev) => ({ ...prev, [key]: d.dryRun }));
-      setToast("Dry run complete");
-    } catch (e) {
-      setToast(`Dry run failed: ${e.message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const selectAutomationRuns = async (key) => {
-    setSelectedRunsKey(key);
-    await loadAutomationRuns(key);
-  };
-
-  const processDueAutomationRuns = async () => {
-    setBusy(true);
-    setToast("");
-    try {
-      // Preview first: this button sends real customer emails, so confirm the
-      // recipient list before firing the batch.
-      const preview = await adminFetch("/admin/email-templates/automations/runs/process-due", {
-        method: "POST",
-        body: JSON.stringify({ limit: 50, preview: true }),
-      });
-      const dueCount = preview.dueCount || 0;
-      if (dueCount === 0) {
-        setToast("No automation runs are due");
-        return;
-      }
-      const runIds = (preview.runs || []).map((r) => r.id).filter(Boolean);
-      const recipients = (preview.runs || [])
-        .map((r) => r.recipient_email)
-        .filter(Boolean);
-      const shown = recipients.slice(0, 10).join("\n");
-      const more = recipients.length > 10 ? `\n…and ${recipients.length - 10} more` : "";
-      if (
-        !window.confirm(
-          `Send ${dueCount} due automation email${dueCount === 1 ? "" : "s"} now?\n\n${shown}${more}`,
-        )
-      ) {
-        setToast("Cancelled — nothing sent");
-        return;
-      }
-      // Send only the runs just previewed (server re-validates each is still due).
-      const d = await adminFetch("/admin/email-templates/automations/runs/process-due", {
-        method: "POST",
-        body: JSON.stringify({ limit: 50, runIds }),
-      });
-      if (selectedRunsKey) await loadAutomationRuns(selectedRunsKey);
-      setToast(`Processed ${d.processed || 0} automation run${d.processed === 1 ? "" : "s"}`);
-    } catch (e) {
-      setToast(`Process due failed: ${e.message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   if (loading) {
     return <div className="p-8 text-center text-13 text-ink-secondary">Loading email templates...</div>;
   }
@@ -2420,14 +1795,6 @@ export default function EmailTemplatesPanelV2() {
           }}
         >
           <Plus size={14} /> New Template
-        </Button>
-        <Button
-          variant={activeView === "automations" ? "primary" : "secondary"}
-          size="sm"
-          className="gap-2"
-          onClick={() => setActiveView("automations")}
-        >
-          <Zap size={14} /> Automations
         </Button>
         <Button
           variant={activeView === "history" ? "primary" : "secondary"}
@@ -2466,27 +1833,7 @@ export default function EmailTemplatesPanelV2() {
       {toast && <div className="text-12 text-ink-secondary">{toast}</div>}
       {readErrors[activeView] && <ActionFeedback error onRetry={busy ? undefined : refreshReadView}>{readErrors[activeView]}</ActionFeedback>}
 
-      {activeView === "automations" ? (
-        <AutomationsPanel
-          automations={automations}
-          templates={templates}
-          groups={groups}
-          loading={automationLoading}
-          drafts={automationDrafts}
-          dryRuns={dryRuns}
-          selectedRunsKey={selectedRunsKey}
-          runs={automationRuns}
-          runsLoading={automationRunsLoading}
-          busy={busy}
-          onDraft={setAutomationDraft}
-          onRefresh={loadAutomations}
-          onSave={saveAutomation}
-          onDryRun={dryRunAutomation}
-          onSelectRuns={selectAutomationRuns}
-          onProcessDue={processDueAutomationRuns}
-          onDelete={deleteAutomation}
-        />
-      ) : activeView === "history" ? (
+      {activeView === "history" ? (
         <SendHistoryPanel messages={history} loading={historyLoading} />
       ) : activeView === "issues" ? (
         <TemplateIssuesPanel

@@ -18,7 +18,6 @@ function createDbMock(initialRows = {}) {
     rows: {
       google_reviews: [],
       customers: [],
-      email_template_automation_intents: [],
       ...initialRows,
     },
     inserts: [],
@@ -205,13 +204,6 @@ function createDbMock(initialRows = {}) {
               if (existing && existing !== row) Object.assign(existing, mergeRecord);
               return [];
             },
-            // email_template_automation_intents' onConflict(...).ignore() —
-            // no real conflict simulation needed for these tests (nothing
-            // here seeds a colliding trigger_event_key+entity_id+occurred_at
-            // row), so this always keeps the fresh insert.
-            ignore: () => ({
-              returning: async (cols) => (Array.isArray(cols) ? [Object.fromEntries(cols.map(c => [c, row[c]]))] : [{ id: row.id }]),
-            }),
           }),
         };
       },
@@ -2206,7 +2198,7 @@ describe('Google Business review sync', () => {
     expect(urls.filter(u => u.includes('fields=reviews'))).toHaveLength(0);
   });
 
-  test('records a durable review.linked_5star intent marker when an existing unmatched review is linked to a customer during an ordinary GBP sync (codex round 3 on #5154 — supersedes round 2\'s updated_at stamp)', async () => {
+  test('an ordinary GBP sync links an existing unmatched review to the matching customer', async () => {
     seedSyncedReview({ id: 'attr-1', customer_id: null });
     db.__state.rows.customers.push({
       id: 'cust-attr', first_name: 'John', last_name: 'Doe', has_left_google_review: false, review_marked_at: null, deleted_at: null,
@@ -2223,31 +2215,9 @@ describe('Google Business review sync', () => {
 
     const after = db.__state.rows.google_reviews.find(r => r.id === 'attr-1');
     expect(after.customer_id).toBe('cust-attr');
-    const marker = db.__state.rows.email_template_automation_intents.find(
-      (m) => m.entity_id === 'attr-1' && m.trigger_event_key === 'review.linked_5star',
-    );
-    expect(marker).toBeTruthy();
-    expect(JSON.parse(marker.payload).customer_id).toBe('cust-attr');
   });
 
-  test('records NO intent marker when a synced review has no customer match (no transition)', async () => {
-    seedSyncedReview({ id: 'no-match-1', reviewer_name: 'Nobody Matches' });
-    gbpFeed([{
-      name: 'accounts/1/locations/2/reviews/rev-keep',
-      reviewer: { displayName: 'Nobody Matches' },
-      starRating: 5,
-      comment: 'Great work',
-      createTime: '2026-05-25T12:00:00Z',
-    }]);
-
-    await service.syncAllReviews();
-
-    const after = db.__state.rows.google_reviews.find(r => r.id === 'no-match-1');
-    expect(after.customer_id).toBeFalsy();
-    expect(db.__state.rows.email_template_automation_intents).toHaveLength(0);
-  });
-
-  test('records NO intent marker for a four-star attribution (review.linked_5star is 5-star only)', async () => {
+  test('a four-star review is still linked to the matching customer', async () => {
     seedSyncedReview({ id: 'attr-4star', customer_id: null, star_rating: 4 });
     db.__state.rows.customers.push({
       id: 'cust-attr-4', first_name: 'Jane', last_name: 'Roe', has_left_google_review: false, review_marked_at: null, deleted_at: null,
@@ -2264,10 +2234,9 @@ describe('Google Business review sync', () => {
 
     const after = db.__state.rows.google_reviews.find(r => r.id === 'attr-4star');
     expect(after.customer_id).toBe('cust-attr-4');
-    expect(db.__state.rows.email_template_automation_intents).toHaveLength(0);
   });
 
-  test('Places fallback also records a durable review.linked_5star intent marker when an existing unmatched row is linked to a customer (codex round 3 on #5154, second sync path)', async () => {
+  test('Places fallback also links an existing unmatched row to the matching customer', async () => {
     const existing = {
       id: 'places-attr-1',
       google_review_id: 'places_place-1_1779307999',
@@ -2302,11 +2271,6 @@ describe('Google Business review sync', () => {
 
     const after = db.__state.rows.google_reviews.find(r => r.id === 'places-attr-1');
     expect(after.customer_id).toBe('cust-places-attr');
-    const marker = db.__state.rows.email_template_automation_intents.find(
-      (m) => m.entity_id === 'places-attr-1' && m.trigger_event_key === 'review.linked_5star',
-    );
-    expect(marker).toBeTruthy();
-    expect(JSON.parse(marker.payload).customer_id).toBe('cust-places-attr');
   });
 
   test('an older overlapping runner YIELDS on an existing row: no content regression, no reviewer-edit park, no attribution side effects (codex r48)', async () => {

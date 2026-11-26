@@ -22,7 +22,6 @@ createRoot(document.getElementById('root')).render(React.createElement(UiSurface
 </script></body></html>`;
 
 const template = { template_key: "fixture-template", name: "Fixture service notice", mode: "service", purpose: "qa", status: "active", active_version_id: "version-1", allowed_variables: [] };
-const automation = { automation_key: "fixture-automation", name: "Fixture follow-up", template_key: template.template_key, trigger_event_key: "service.completed", delay_minutes: 15, audience: "customer", status: "active", suppression_group_key: "service", legal_classification: "transactional_relationship", conditions: {}, exit_conditions: {}, owner: "operations", timezone: "America/New_York", can_delete: false };
 
 function fixture(url) {
   const p = url.pathname;
@@ -51,8 +50,6 @@ function fixture(url) {
   if (p === "/api/admin/email-templates/send-history") return { messages: [{ id: "send-1", sent_at: "2026-10-25T14:00:00Z", recipient_email_snapshot: "readable-recipient@example.invalid", template_key: template.template_key, subject_snapshot: "Readable fixture subject remains intact", status: "sent", provider_message_id: "provider-fixture-1" }] };
   if (p === "/api/admin/email-templates/issues") return { issues: [{ id: "issue-1", created_at: "2026-10-25T14:05:00Z", template_key: template.template_key, event_type: "render_failed", workflow: "fixture workflow", entity_type: "customer", entity_id: "customer-a", reason: "Readable fixture issue details remain intact" }] };
   if (p === "/api/admin/email-templates/suppressions") return { suppressions: [{ id: "suppression-1", email: "suppressed-reader@example.invalid", group_key: "service", group_name: "Service", suppression_type: "manual", status: "active", blocked_count: 2, source: "fixture", suppressed_at: "2026-10-25T14:10:00Z", customer: { id: "customer-a", first_name: "Avery", last_name: "Sample", phone: "+19415550100" } }], stats: [] };
-  if (p === "/api/admin/email-templates/automations") return { automations: [automation] };
-  if (p === "/api/admin/email-templates/automations/fixture-automation/runs") return { runs: [{ id: "run-1", created_at: "2026-10-25T14:15:00Z", run_after: "2026-10-25T14:30:00Z", recipient_email: "automation-reader@example.invalid", entity_type: "customer", entity_id: "customer-a", status: "sent", attempts: 1, max_attempts: 3, result: "Readable automation result remains intact" }] };
 }
 
 async function main() {
@@ -121,11 +118,9 @@ async function main() {
         ["Send History", "Email send history", "readable-recipient@example.invalid"],
         ["Issues", "Email issues", "Readable fixture issue details remain intact"],
         ["Suppressions", "Email suppressions", "suppressed-reader@example.invalid"],
-        ["Automations", "Email automation runs", "automation-reader@example.invalid"],
       ];
       for (const [view, label, sentinel] of tables) {
         await page.getByRole("button", { name: view, exact: true }).click();
-        if (view === "Automations") { await page.getByRole("button", { name: "Runs", exact: true }).click(); }
         const table = page.getByRole("table", { name: label, exact: true }); await table.waitFor(); await page.getByText(sentinel, { exact: true }).waitFor(); await page.waitForTimeout(80);
         const cells = await table.locator("tbody td").evaluateAll((nodes) => nodes.map((node) => parseFloat(getComputedStyle(node).fontSize)));
         assert.ok(cells.length > 0 && cells.every((font) => font >= 14), `${tag} ${label} cell fonts ${JSON.stringify(cells)}`);

@@ -74,30 +74,13 @@ describe('admin notification event routes', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.schema = {
-      hasTable: jest.fn(async (table) => ['email_template_automations', 'sms_templates'].includes(table)),
+      hasTable: jest.fn(async (table) => ['sms_templates'].includes(table)),
       hasColumn: jest.fn(async (_table, column) => column === 'trigger_event_key'),
     };
   });
 
-  test('groups catalog events with email automations and SMS templates', async () => {
+  test('groups catalog events with SMS templates', async () => {
     setDbQueues({
-      'email_template_automations as a': [chain([
-        {
-          automation_key: 'estimate.delivery',
-          template_key: 'estimate.delivery',
-          trigger_event_key: 'estimate.sent',
-          template_name: 'Estimate delivery',
-          subject: 'Your estimate is ready',
-          preview_text: 'Open your Waves estimate.',
-          status: 'active',
-          active_version_id: 'version-1',
-          active_version_number: 1,
-          version_status: 'active',
-          audience: 'lead',
-          frequency_cap: 'once_per_estimate',
-          delay_minutes: 0,
-        },
-      ])],
       sms_templates: [
         chain([
           {
@@ -135,8 +118,7 @@ describe('admin notification event routes', () => {
       const smsOnly = body.events.find((event) => event.event_key === '__sms_only__');
 
       expect(res.status).toBe(200);
-      expect(estimateSent.status).toBe('paired');
-      expect(estimateSent.email_automations).toHaveLength(1);
+      expect(estimateSent.status).toBe('sms_only');
       expect(estimateSent.sms_templates).toHaveLength(1);
       expect(smsOnly.sms_templates).toHaveLength(1);
       expect(body.catalog.length).toBeGreaterThan(0);
