@@ -462,14 +462,21 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     // navigation free to overwrite the shell it just stored, so it fails
     // (quota retries below; the previous worker keeps serving otherwise).
     const previousShell = await cache.match(OFFLINE_URL);
+    // The customer copy is part of the same commit: a rollback puts the
+    // previous one back (or removes the key when there was none), so it
+    // never names a build whose new assets the rollback deletes.
+    const previousCustomerShell = customerShell ? await cache.match(CUSTOMER_SHELL_URL) : null;
     const restorePreviousShell = async () => {
       if (previousShell) await putShell(cache, previousShell.clone(), previousBuildId).catch(() => {});
+      if (!customerShell) return;
+      if (previousCustomerShell) await cache.put(CUSTOMER_SHELL_URL, previousCustomerShell.clone()).catch(() => {});
+      else await cache.delete(CUSTOMER_SHELL_URL).catch(() => {});
     };
     try {
       await putShell(cache, withoutUrl(shellResponse.clone()), buildId);
-      // After '/' committed the generation. A failed write leaves the older
-      // customer copy, whose build the prune still retains.
-      if (customerShell) await cache.put(CUSTOMER_SHELL_URL, withoutUrl(shellResponse.clone())).catch(() => {});
+      // Part of the commit: a failed write (quota) rolls the generation back
+      // and takes the quota retry, like the '/' write.
+      if (customerShell) await cache.put(CUSTOMER_SHELL_URL, withoutUrl(shellResponse.clone()));
       if (!supersedable) await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } }));
     } catch (err) {
       await restorePreviousShell();
@@ -841,8 +848,15 @@ async function answerNavigation(request, attempt, { customer, networkOnly }, dec
 // saved build, not this response's, so the live build stays where it was.
 // A shell without assets is not a build.
 function refreshShellAfterNavigation(attempt, choice, navSeq, startedAt, customerShell) {
-  return Promise.all([attempt, choice]).then(([{ copy }, chosen]) => {
+  return Promise.all([attempt, choice]).then(async ([{ copy }, chosen]) => {
     if (!copy) return undefined;
+    // The whole body first, outside the shell-refresh lock: a body that
+    // stalls must not hold the lock every later refresh and install waits on.
+    try {
+      await copy.clone().text();
+    } catch {
+      return undefined;
+    }
     const advance = chosen === 'saved' ? Promise.resolve() : copy.clone().text().then(html => {
       const assets = shellAssetUrls(html);
       if (assets.length) advanceLiveBuild(buildIdOf(assets), navSeq);

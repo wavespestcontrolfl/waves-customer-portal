@@ -1671,6 +1671,31 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']); // B's batch rolled back
   });
 
+  it('rolls the customer copy back too when the install marker cannot be stored', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchInstall, setFetch } = loadWorker(cache);
+    const shell000 = shellHtml(['/assets/index-000.js']);
+    await cacheCompleteShellResponse(fakeResponse(shell000), undefined, { customerShell: true });
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(shell000);
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    cache.failPut = (url) => url === 'https://portal.test/__waves/install-commit';
+
+    await expect(dispatchInstall()).rejects.toThrow(/Quota/);
+
+    // The customer copy never names B, whose assets the rollback deleted.
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(shell000);
+    expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']);
+  });
+
+  it('removes a first customer copy when its generation rolls back', async () => {
+    const cache = fakeCache();
+    const { dispatchInstall, setFetch } = loadWorker(cache);
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    cache.failPut = (url) => url === 'https://portal.test/__waves/install-commit';
+    await expect(dispatchInstall()).rejects.toThrow(/Quota/);
+    expect(await cache.match('/__waves/customer-shell')).toBeUndefined();
+  });
+
   it('skips a superseded refresh: an earlier navigation whose response lands after a newer one', async () => {
     // Codex #4335 P1: navigation A begins before a deploy but its response is
     // slow; navigation B begins later, is answered by the new build and its
@@ -1934,6 +1959,35 @@ describe('service-worker slow page loads', () => {
     expect(await (await cache.match('/')).text()).toBe(networkHtml);
     expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(savedHtml);
     expect(await cache.match('/assets/index-OLD.js')).toBeTruthy();
+  });
+
+  it('rolls the customer copy back with its generation when its write fails', async () => {
+    const { cache, network, load } = await start();
+    cache.failPut = (url) => url.endsWith(CUSTOMER_SHELL_URL);
+    network.release();
+    await (await load('/').promise).settled();
+    // Quota on both tries: the generation is not committed, '/' and the
+    // customer copy keep the old build, and the new entry file is gone.
+    expect(await (await cache.match('/')).text()).toBe(savedHtml);
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(savedHtml);
+    expect(await cache.match('/assets/index-NEW.js')).toBeUndefined();
+  });
+
+  it('takes no shell-refresh turn for a body that stalls after the saved copy answered', async () => {
+    const { cache, worker, load } = await start();
+    const stalled = new Promise(() => {});
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? gatedResponse(networkHtml, stalled)
+      : fakeResponse(`asset:${request.url}`)));
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(bodyOf(await nav.promise)).toBe(savedHtml);
+    // A healthy load right after still refreshes the shell: no lock is held.
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? fakeResponse(networkHtml)
+      : fakeResponse(`asset:${request.url}`)));
+    await (await load('/').promise).settled();
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
   });
 
   it('a customer screen load refreshes the customer copy', async () => {
