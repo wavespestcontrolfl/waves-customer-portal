@@ -18,8 +18,8 @@
  *   (splitWorkDate): each shift's STORED paid hundredths (duration_minutes, what the pay pays) are shared across the holidays it
  *   overlaps and the rest of it by the clock milliseconds in each; the recorded meal (breaks of 30 minutes or more of THAT work
  *   date, clipped to its shifts) is placed in the parts by clock time, each part capped at its own paid hundredths and the
- *   total at the deduction; the rest of the deduction (the day summary's unpaid_meal_minutes: what the pay deducts, 0 with
- *   GATE_AUTO_LUNCH off, never more than the paid total) is shared by the hundredths each part has left. Every share is a
+ *   total at the deduction; the rest of the deduction (the day summary's unpaid_meal_minutes: what the pay deducts, 0 since
+ *   Waves takes no unpaid lunch (owner 2026-11-22), never more than the paid total) is shared by the hundredths each part has left. Every share is a
  *   largest-remainder allocation (allocate), so the parts add up to exactly the stored total less the deduction.
  * - Fallback, per work date: when the time entries cannot give clock times for that date (a shift with no clock-out, or no
  *   shift entries while the day's summary holds shift minutes), the date's summary row is read as a whole (shift minutes
@@ -101,7 +101,7 @@ function allocate(total, weights) {
  *    allocate() the same way); a part's placed meal is capped at its own paid hundredths, and the placed total at the deduction.
  * 3. What is left of the deduction is shared by allocate(), weighted by each part's hundredths left after step 2 (never more).
  * 4. A part's premium minutes = paid - placed - shared (never below 0).
- * The deduction is capped at the date's paid total (the pay never deducts more than the shift: unpaid-meal.js), so the parts
+ * The deduction is capped at the date's paid total (the pay never deducts more than the shift), so the parts
  * add up to the stored total less the deduction exactly.
  * Returns { parts: [{ holiday, paid, placed, shared, premium }], deduction, meals } (parts with nothing paid are left out;
  * `meals` are the recorded meals read, clipped to the shifts: { id, from, to, minutes }).
@@ -223,7 +223,7 @@ async function holidayWorkByDay(conn, start, end) {
     .select('o.technician_id', conn.raw("to_char(o.work_date, 'YYYY-MM-DD') AS work_date"));
   if (!holidays.length) return out;
   const ids = [...new Set(holidays.map((row) => row.technician_id))];
-  // A break still running is not a meal (time-tracking.js dayUnpaidMealUnits).
+  // A break still running is not a meal (a completed break only).
   const breaks = await conn('time_entries')
     .whereIn('technician_id', ids)
     .where('entry_type', 'break')

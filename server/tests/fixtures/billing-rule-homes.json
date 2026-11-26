@@ -93,7 +93,6 @@
     "services/estimator-engine/booking-predraft.js": 1,
     "services/estimator-engine/scope-guards.js": 1,
     "services/eval/lawn-visit-assessment-eval.js": 1,
-    "services/field-team-rules.js": 1,
     "services/gps-arrival-detector.js": 1,
     "services/ib-cancel-effect-bundles.js": 1,
     "services/intelligence-bar/banking-tools.js": 1,

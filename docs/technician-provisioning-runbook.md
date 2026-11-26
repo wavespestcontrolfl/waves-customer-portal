@@ -48,34 +48,23 @@ brand-new row and returns 409 once the placeholder owns the email, and
    (visits already assigned are listed for manual reassignment, never
    moved). The editor records who verified each category and when.
 
-### Hired button (GATE_HIRED_PACKET)
+### Hired button (Google sign-in)
 
-When `GATE_HIRED_PACKET` is on (dark by default; see `docs/gates-and-env.md`),
-one step replaces steps 1 to 3 above. On the Team tab, press **Hired** on the
-prospective row, fill in the hire's email and first day (name, phone, pay rate,
-job title and employment type are prefilled from the row), and press **Hire
-and send link**. The row becomes an active staff account and the hire gets a
-welcome email with a link to set their password; it works for 7 days. The
-toast says whether the email went out. If it did not arrive, or the link
-expired, press **Resend link** on that row (once a minute at most). The hire is
-not field-dispatchable until you tick that box (step 4), and the Onboarding
-card lists their required documents once they sign in. The manual steps above
-still work with the gate off or on.
+One step replaces steps 1 to 3 above for a hire who signs in with Google
+(owner 2026-11-22). Make the hire's company Google account, link its address on
+the row (Team tab, Google sign-in), then press **Hired** on the prospective row.
+Fill in the hire's email and first day (name, phone, pay rate, job title and
+employment type are prefilled from the row). The form names the address, and
+the button reads **Hire with Google sign-in**. The row becomes an active account
+that signs in with that Google address and nothing else: no password, no link,
+no email. Hand the hire the Google account in person. The row then shows
+"Signs in with Google", and "Forgot password?" sends that hire nothing. This is
+the way to turn on the login of a job offer hire, because the email on a job
+application is one nobody proved. The hire is not field-dispatchable until you
+tick that box (step 4), and the Onboarding card lists their required documents
+once they sign in. The button shows while staff Google sign-in is on. The manual
+steps above still work.
 
-**A hire who signs in with Google (owner 2026-11-22).** Make the hire's company
-Google account, link its address on the row (Team tab, Google sign-in), then
-press **Hired**. The form names the address, and the button reads **Hire with
-Google sign-in**. The row becomes an active account that signs in with that
-Google address and nothing else: no password, no link, no email. Hand the hire
-the Google account in person. The row then shows "Signs in with Google", has no
-Resend link, and "Forgot password?" sends that hire nothing. This is the way to
-turn on the login of a job offer hire, because the email on a job application
-is one nobody proved. To give such a person a password later, set the row back
-to prospective, clear the Google sign-in and press Hired with the emailed link
-(that press needs `GATE_HIRED_PACKET`; the Google press does not: its Hired
-button shows while staff Google sign-in is on).
-First confirm the mailbox with the hire, and correct the Email field in the
-form: the link goes to that address, and whoever opens it sets the password.
 The Google press is for a technician row that never held a sign-in (no
 password, no earlier sign-in, no two-step enrollment), never an office (admin)
 row. For a person who had an account before, turn the account on again from

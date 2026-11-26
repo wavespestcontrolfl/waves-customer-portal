@@ -36,7 +36,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({
 const db = require('../models/db');
 const PushService = require('../services/push-notifications');
 const { disconnectStaffSockets } = require('../sockets');
-const featureGates = require('../config/feature-gates');
+const googleSignin = require('../services/staff-google-signin');
 const router = require('../routes/admin-timetracking');
 const {
   deactivateTechnician,
@@ -265,12 +265,12 @@ describe('owner (full-access) staff row lifecycle is owner-only', () => {
   });
 
   test('a non-owner admin cannot hire a prospective owner row', async () => {
-    const gateSpy = jest.spyOn(featureGates, 'hiredPacketLive').mockReturnValue(true);
+    const gateSpy = jest.spyOn(googleSignin, 'googleSigninReady').mockReturnValue(true);
     const prospective = { ...ownerRow, active: false, employment_status: 'prospective' };
     const chains = [makeChain({ first: prospective })];
     installTransaction(chains);
     const res = await invoke(hireTechnician, reqFor(prospective, {
-      body: { name: prospective.name, email: OWNER_EMAIL, hireDate: '2026-11-05' },
+      body: { name: prospective.name, email: OWNER_EMAIL, hireDate: '2026-11-05', googleEmail: OWNER_EMAIL },
     }));
     gateSpy.mockRestore();
     expect(res.statusCode).toBe(403);

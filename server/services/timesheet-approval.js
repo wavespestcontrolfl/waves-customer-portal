@@ -951,8 +951,8 @@ async function generateWeeklyPayrollExport(weekStart, now = new Date()) {
     const csvRows = rows.map(r => {
       // Paid hours: regular and OT are already split on paid minutes (shift
       // less the unpaid meal), so Total Hours is their sum. The unpaid lunch
-      // is shown beside it; with GATE_AUTO_LUNCH off it is 0.00 and Total
-      // Hours equals the shift hours, as before.
+      // is shown beside it; it is 0.00 (every clocked minute is paid) and Total
+      // Hours equals the shift hours.
       const regMin = parseFloat(r.regular_minutes || 0);
       const otMin = parseFloat(r.overtime_minutes || 0);
       const unpaidMin = parseFloat(r.unpaid_meal_minutes || 0);

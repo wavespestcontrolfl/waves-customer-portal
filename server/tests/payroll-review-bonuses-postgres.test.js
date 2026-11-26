@@ -37,7 +37,6 @@ const {
   markPaid, savePolicy, getDashboard, overCapPayoutIds, getPolicyStrict, lockPayoutRows,
 } = require('../services/review-incentives');
 const { markPayoutsPaid } = require('../services/payroll-review-bonuses');
-const { reviewPayouts } = require('../services/field-team-program');
 
 jest.setTimeout(60000);
 
@@ -721,20 +720,6 @@ postgres('payroll review bonus import', () => {
         await other('system_settings').where({ key }).del();
         await other.destroy();
       }
-    });
-
-    it('the technician Pay Overview flags the over-cap payout and fails when the policy cannot be read', async () => {
-      const id = await readyTech('Sample Alpha');
-      await savePolicy({ monthlyCapCount: 1, programStartsAt: '2026-01-01T00:00:00Z' }, trx);
-      const a = await payout(id, '2026-09-15T15:00:00Z');
-      const b = await payout(id, '2026-09-16T15:00:00Z');
-      const range = { start: '2026-09-01', end: '2026-10-01' };
-      const rows = await reviewPayouts(trx, id, range);
-      expect(Object.fromEntries(rows.map((r) => [r.id, r.over_monthly_cap]))).toEqual({ [a]: false, [b]: true });
-      expect(rows.every((r) => !('month_rank' in r))).toBe(true);
-      await trx.raw('alter table system_settings rename to system_settings_unreadable');
-      await expect(trx.transaction((inner) => reviewPayouts(inner, id, range))).rejects.toThrow(/system_settings/);
-      await trx.raw('alter table system_settings_unreadable rename to system_settings');
     });
 
     it('the dashboard marks over-cap rows, leaves them out of pending, and reports the cap', async () => {

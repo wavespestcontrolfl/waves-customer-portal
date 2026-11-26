@@ -9,7 +9,7 @@ import './tech-field.css';
 // consume the outlet context. The workspace sits inside Waves Admin: the admin
 // top bar and tab bar are the chrome, and a page-level tab row (Today, Tools,
 // More) switches between the workspace's own sections (owner 2026-10-05).
-export default function TechFieldShell({ staffProfile = null, techRole, documentsAvailable, payGrowthAvailable }) {
+export default function TechFieldShell({ staffProfile = null, techRole, documentsAvailable }) {
   const base = useTechBasePath();
   const { pathname, search } = useLocation();
   // The page scrolls in the admin main area (.admin-main), which stays mounted
@@ -21,13 +21,12 @@ export default function TechFieldShell({ staffProfile = null, techRole, document
   useEffect(() => { rootRef.current?.closest('.admin-main')?.scrollTo?.({ top: 0, behavior: 'instant' }); }, [pathname, visitKey]);
   const { navigationBusy, setNavigationBusy } = useTechNavigationLock();
   const documentsRoute = Boolean(matchPath(`${base}/documents`, pathname));
-  const payGrowthRoute = Boolean(matchPath(`${base}/pay-growth`, pathname));
   const todayRoute = Boolean(matchPath(base, pathname));
   const moreRoute = Boolean(matchPath(`${base}/more`, pathname));
   const visit = new URLSearchParams(search).get('visit');
   const visitSearch = visit ? `?visit=${encodeURIComponent(visit)}` : '';
   const legacyTool = ['protocols', 'lawn-diagnostic', 'social-post'].map(tool => `${base}/${tool}`).some(path => matchPath(path, pathname));
-  const section = moreRoute || documentsRoute || payGrowthRoute ? 'more'
+  const section = moreRoute || documentsRoute ? 'more'
     : todayRoute ? 'today' : 'tools';
   return (
     <div className="tech-field" ref={rootRef}>
@@ -48,7 +47,7 @@ export default function TechFieldShell({ staffProfile = null, techRole, document
         <div className={legacyTool ? 'tf-existing' : undefined}>
           {documentsRoute && !documentsAvailable
             ? <p>Staff documents are unavailable.</p>
-            : <Outlet context={{ techRole, staffProfile, documentsAvailable, payGrowthAvailable, setNavigationBusy }} />}
+            : <Outlet context={{ techRole, staffProfile, documentsAvailable, setNavigationBusy }} />}
         </div>
       </div>
     </div>

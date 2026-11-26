@@ -11,18 +11,15 @@ const {
 const {
   ACTIVE_WRITE_GENERATION,
   WEEKLY_OT_THRESHOLD_MINUTES,
-  UNPAID_MEAL_MIN_BREAK_MINUTES,
 } = require('../constants/staff-time');
 const { PAYROLL_SCALE, payrollUnits } = require('../utils/payroll-units');
 const { lockPayrollMutationsShared } = require('./payroll-lock');
 const { paidLineCoveringWeeks, finalRunClosesWeeks } = require('./payroll-paid-line-weeks');
-const { unpaidMealUnits } = require('../utils/unpaid-meal');
-const { autoLunchLive, shiftCloseReviewLive } = require('../config/feature-gates');
+const { shiftCloseReviewLive } = require('../config/feature-gates');
 const { recordAuditEvent } = require('./audit-log');
 const { formatETTime } = require('../utils/datetime-et');
 
 const UNDO_STOP_WINDOW_MINUTES = 30;
-const AUTO_LUNCH_OFF_MESSAGE = 'Auto lunch is not turned on, so there is no lunch to change.';
 
 function payrollNumber(units) {
   return Number(units) / Number(PAYROLL_SCALE);
@@ -533,22 +530,6 @@ async function getStatus(technicianId) {
     .where('status', '!=', 'voided')
     .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [today]);
 
-  const autoLunchOn = autoLunchLive();
-  const todayDay = autoLunchOn
-    ? await db('time_entry_daily_summary')
-      .where({ technician_id: technicianId, work_date: today })
-      .first('no_lunch')
-    : null;
-
-  const mealFloor = UNPAID_MEAL_MIN_BREAK_MINUTES * 100;
-  const todayRecordedMeal = autoLunchOn
-    ? Number(todayEntries
-      .filter(e => e.entry_type === 'break' && e.status !== 'active')
-      .map(e => payrollUnits(e.duration_minutes))
-      .filter(units => units >= BigInt(mealFloor))
-      .reduce((sum, units) => sum + units, 0n)) / 100
-    : 0;
-
   const todayShiftMin = todayEntries
     .filter(e => e.entry_type === 'shift')
     .reduce((sum, e) => sum + (parseFloat(e.duration_minutes) || 0), 0);
@@ -575,12 +556,6 @@ async function getStatus(technicianId) {
       jobMinutes: Math.round(todayJobMin * 100) / 100,
       jobCount: todayJobCount,
     },
-    // "No lunch today" control: the card shows it only while the gate is on.
-    // recordedMealMinutes: completed breaks of 30+ minutes today. They stay
-    // unpaid whatever "No lunch" says, so the card shows them.
-    autoLunch: autoLunchOn
-      ? { enabled: true, noLunch: Boolean(todayDay?.no_lunch), recordedMealMinutes: todayRecordedMeal }
-      : { enabled: false, noLunch: false, recordedMealMinutes: 0 },
   };
 }
 
@@ -1214,103 +1189,6 @@ async function computeDailySummary(technicianId, date) {
   return summary;
 }
 
-// The unpaid meal of one work day from its entries (GATE_AUTO_LUNCH), in
-// payroll units. Shared by the daily compute and the weekly refresh so the
-// two cannot drift. Only completed breaks count.
-function dayUnpaidMealUnits(dayEntries, totalShiftUnits, noLunch, enabled) {
-  return unpaidMealUnits({
-    totalShiftUnits,
-    breakDurationUnits: dayEntries
-      .filter(e => e.entry_type === 'break' && e.status !== 'active')
-      .map(e => payrollUnits(e.duration_minutes)),
-    noLunch,
-    enabled,
-  });
-}
-
-// A DATE cell as YYYY-MM-DD. node-postgres builds DATE values at local
-// midnight, so read the local parts (a UTC read could shift the day).
-function dateCellYmd(value) {
-  if (value instanceof Date) {
-    return [
-      value.getFullYear(),
-      String(value.getMonth() + 1).padStart(2, '0'),
-      String(value.getDate()).padStart(2, '0'),
-    ].join('-');
-  }
-  return String(value).slice(0, 10);
-}
-
-/**
- * Mark one ET work day "No lunch today" (or undo it). The flag lives on the
- * day's summary row; computeDailySummaryInTransaction reads it and never
- * overwrites it. The day and its week are recomputed under the same staff
- * week lock the entry writers take. An approved day or week is refused.
- *
- * `editedBy` + `editReason` (admin route only) append who changed what and
- * why to the day's notes, the day-level counterpart of an entry's
- * edited_by / edit_reason.
- */
-async function setDayNoLunch(technicianId, workDate, noLunch, { editedBy = null, editReason = null } = {}) {
-  const day = validateWorkDate(workDate);
-  const weekStart = staffWeekStartForWorkDate(day);
-  const flag = Boolean(noLunch);
-  // No lunch only means something while GATE_AUTO_LUNCH is on. Checked here
-  // and again once the week lock is held, so a flip to off while this call
-  // waited for the lock still writes nothing.
-  if (!autoLunchLive()) throw staffTimeHttpError(409, AUTO_LUNCH_OFF_MESSAGE);
-  const result = await db.transaction(async (trx) => {
-    await lockStaffWeek(trx, technicianId, weekStart);
-    if (!autoLunchLive()) throw staffTimeHttpError(409, AUTO_LUNCH_OFF_MESSAGE);
-
-    const weekly = await trx('time_weekly_summary')
-      .where({ technician_id: technicianId, week_start: weekStart })
-      .forUpdate()
-      .first('id', 'status');
-    if (weekly?.status === 'approved') {
-      throw staffTimeHttpError(409, 'Unlock the approved week before changing lunch.');
-    }
-
-    const readDay = () => trx('time_entry_daily_summary')
-      .where({ technician_id: technicianId, work_date: day })
-      .forUpdate()
-      .first('id', 'status', 'notes', 'no_lunch');
-    let daily = await readDay();
-    if (!daily) {
-      // The tech can tap before the first clock-out writes the day's row.
-      await computeDailySummaryInTransaction(trx, technicianId, day);
-      daily = await readDay();
-    }
-    if (daily?.status === 'approved') {
-      throw staffTimeHttpError(409, 'Reopen the approved day before changing lunch.');
-    }
-
-    const updates = { no_lunch: flag, updated_at: new Date() };
-    if (editedBy) {
-      updates.notes = appendEntryNote(
-        daily.notes,
-        `No lunch ${flag ? 'set' : 'cleared'} by ${editedBy}${editReason ? `: ${editReason}` : ''}`,
-      );
-    }
-    await trx('time_entry_daily_summary').where({ id: daily.id }).update(updates);
-
-    const summary = await computeDailySummaryInTransaction(trx, technicianId, day);
-    await computeWeeklySummaryInTransaction(trx, technicianId, weekStart, { lock: false });
-    // The tech attested the week on the old pay basis. Clear the sign-off when
-    // the flag changed, even if the totals did not (a short day, or a recorded
-    // meal that already covers the deduction), as an entry edit does.
-    if (Boolean(daily.no_lunch) !== flag) {
-      await resetWeekSignOff(trx, technicianId, weekStart);
-    }
-    return summary;
-  });
-  logger.info(`[time-tracking] No-lunch ${flag ? 'set' : 'cleared'} for tech ${technicianId} on ${day}`, {
-    editedBy,
-    editReason,
-  });
-  return result;
-}
-
 async function computeDailySummaryInTransaction(trx, technicianId, workDate) {
   const entries = await trx('time_entries')
     .where({ technician_id: technicianId })
@@ -1339,22 +1217,6 @@ async function computeDailySummaryInTransaction(trx, technicianId, workDate) {
   const totalBreak = payrollNumber(totalBreakUnits);
   const totalAdmin = payrollNumber(totalAdminUnits);
   const jobCount = jobEntries.length;
-
-  // Unpaid meal (GATE_AUTO_LUNCH). Only completed breaks count; the day's
-  // no_lunch flag is set by the tech or an admin and is never rewritten here.
-  // Gate off: no flag read and a zero unpaid meal, byte-identical to before.
-  const autoLunchOn = autoLunchLive();
-  const existingDay = autoLunchOn && totalShiftUnits > 0n
-    ? await trx('time_entry_daily_summary')
-      .where({ technician_id: technicianId, work_date: workDate })
-      .first('no_lunch')
-    : null;
-  const unpaidMeal = payrollNumber(dayUnpaidMealUnits(
-    breakEntries,
-    totalShiftUnits,
-    Boolean(existingDay?.no_lunch),
-    autoLunchOn,
-  ));
 
   const firstIn = shiftEntries.length > 0
     ? shiftEntries.reduce((min, e) => (e.clock_in < min ? e.clock_in : min), shiftEntries[0].clock_in)
@@ -1396,7 +1258,8 @@ async function computeDailySummaryInTransaction(trx, technicianId, workDate) {
     total_drive_minutes: totalDrive,
     total_break_minutes: totalBreak,
     total_admin_minutes: totalAdmin,
-    unpaid_meal_minutes: unpaidMeal,
+    // Every clocked minute is paid (owner 2026-11-22): no unpaid meal is taken off.
+    unpaid_meal_minutes: 0,
     job_count: jobCount,
     first_clock_in: firstIn,
     last_clock_out: lastOut,
@@ -1432,51 +1295,6 @@ async function computeWeeklySummary(technicianId, weekStart) {
   return summary;
 }
 
-/**
- * Re-derive the unpaid meal of every NON-approved day in a week from its
- * entries and the CURRENT gate, so a gate flip (or a rule change) never leaves
- * a stale deduction in the weekly totals. Writes the daily row when the value
- * differs and updates the in-memory row the caller sums. An approved day keeps
- * its stored snapshot. Runs under the caller's staff week lock.
- *
- * With the gate off and no stored deduction there is nothing to correct, so
- * no query runs (the gate-off path stays byte-identical).
- */
-async function refreshDailyUnpaidMeals(trx, technicianId, start, end, dailies) {
-  const open = dailies.filter(d => d.status !== 'approved');
-  const enabled = autoLunchLive();
-  if (!open.length) return;
-  if (!enabled && !open.some(d => payrollUnits(d.unpaid_meal_minutes) > 0n)) return;
-
-  const rows = await trx('time_entries')
-    .where({ technician_id: technicianId })
-    .where('status', '!=', 'voided')
-    .whereIn('entry_type', ['shift', 'break'])
-    .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
-    .select('entry_type', 'status', 'duration_minutes', trx.raw(`${STAFF_WORK_DATE_SQL}::text AS work_date`));
-  const byDate = new Map();
-  for (const row of rows) {
-    const key = String(row.work_date).slice(0, 10);
-    if (!byDate.has(key)) byDate.set(key, []);
-    byDate.get(key).push(row);
-  }
-
-  for (const daily of open) {
-    const dayEntries = byDate.get(dateCellYmd(daily.work_date)) || [];
-    const shiftUnits = dayEntries
-      .filter(e => e.entry_type === 'shift')
-      .reduce((sum, e) => sum + payrollUnits(e.duration_minutes), 0n);
-    const derived = dayUnpaidMealUnits(dayEntries, shiftUnits, Boolean(daily.no_lunch), enabled);
-    if (derived === payrollUnits(daily.unpaid_meal_minutes)) continue;
-    const value = payrollNumber(derived);
-    await trx('time_entry_daily_summary')
-      .where({ id: daily.id })
-      .whereRaw("status IS DISTINCT FROM 'approved'")
-      .update({ unpaid_meal_minutes: value, updated_at: new Date() });
-    daily.unpaid_meal_minutes = value;
-  }
-}
-
 async function computeWeeklySummaryInTransaction(
   trx,
   technicianId,
@@ -1492,8 +1310,6 @@ async function computeWeeklySummaryInTransaction(
     .where('work_date', '<=', weekEndStr)
     .orderBy('work_date', 'asc')
     .forUpdate();
-
-  await refreshDailyUnpaidMeals(trx, technicianId, start, weekEndStr, dailies);
 
   const sumDailyUnits = (field) => dailies.reduce(
     (sum, daily) => sum + payrollUnits(daily[field]),
@@ -1511,8 +1327,9 @@ async function computeWeeklySummaryInTransaction(
   const jobCount = dailies.reduce((s, d) => s + Number(d.job_count || 0), 0);
   const daysWorked = dailies.filter(d => payrollUnits(d.total_shift_minutes) > 0n).length;
 
-  // Regular and overtime split PAID minutes: shift minutes less the unpaid
-  // meal of each day (0 while GATE_AUTO_LUNCH is off). A day never pays below 0.
+  // Regular and overtime split PAID minutes: shift minutes less the stored
+  // unpaid meal of each day (0 since every clocked minute is paid, owner
+  // 2026-11-22; an approved day keeps its stored snapshot). A day never pays below 0.
   const dayPaidUnits = (daily) => {
     const shiftUnits = payrollUnits(daily.total_shift_minutes);
     const unpaidUnits = payrollUnits(daily.unpaid_meal_minutes);
@@ -1726,7 +1543,6 @@ module.exports = {
   voidEntry,
   computeDailySummary,
   computeDailySummaryInTransaction,
-  setDayNoLunch,
   computeWeeklySummary,
   computeWeeklySummaryInTransaction,
   lockStaffWeek,

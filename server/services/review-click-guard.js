@@ -56,7 +56,7 @@ function etMidnight(value) {
 // second. Fields are the ones the completion flow writes:
 //   service_records.ended_at (service report v1)
 //   scheduled_services.actual_end_time / check_out_time / completed_at (the same
-//   order lifecycle-email-sweeps and the field-team program read)
+//   order lifecycle-email-sweeps reads)
 function instantOrMidnight(instant, date) {
   if (instant) {
     const d = new Date(instant);
