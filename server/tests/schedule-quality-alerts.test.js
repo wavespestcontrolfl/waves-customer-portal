@@ -105,16 +105,9 @@ describe('queue capacity', () => {
   });
 });
 
-test.each(['GATE_SCHEDULE_QUALITY_MEASUREMENTS', 'GATE_SCHEDULE_QUALITY_ALERTS'])('no database work when %s is dark', async dark => {
+test('no database work when GATE_SCHEDULE_QUALITY_MEASUREMENTS is dark', async () => {
   const conn = { transaction: jest.fn() };
-  process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
-  process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
-  delete process.env[dark];
-  try {
-    expect(await refreshScheduleQualityAlerts({ dates: ['2040-09-10'] }, conn)).toEqual({ status: 'gate_off' });
-    expect(conn.transaction).not.toHaveBeenCalled();
-  } finally {
-    delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
-    delete process.env.GATE_SCHEDULE_QUALITY_ALERTS;
-  }
+  delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
+  expect(await refreshScheduleQualityAlerts({ dates: ['2040-09-10'] }, conn)).toEqual({ status: 'gate_off' });
+  expect(conn.transaction).not.toHaveBeenCalled();
 });

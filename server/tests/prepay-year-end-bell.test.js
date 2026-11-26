@@ -153,19 +153,8 @@ describe('prepay year end bell next year', () => {
   });
 });
 
-describe('prepay year end bell gate', () => {
-  const db = require('../models/db');
-  afterEach(() => { delete process.env.GATE_PREPAY_YEAR_END_BELL; });
-
-  test('gate off: no query runs and nothing is raised or closed', async () => {
-    delete process.env.GATE_PREPAY_YEAR_END_BELL;
-    await expect(runPrepayYearEndBell({ today: '2026-11-01' })).resolves.toEqual({ raised: 0, closed: 0 });
-    await expect(runPrepayYearEndBell({ conn: db, today: '2026-11-01' })).resolves.toEqual({ raised: 0, closed: 0 });
-    expect(db).not.toHaveBeenCalled();
-  });
-
-  test('gate on with no candidate terms and no open bell: one term query, nothing raised or closed', async () => {
-    process.env.GATE_PREPAY_YEAR_END_BELL = 'true';
+describe('prepay year end bell run', () => {
+  test('no candidate terms and no open bell: one term query, nothing raised or closed', async () => {
     const episodes = require('../services/admin-alert-episodes');
     const openKeys = jest.spyOn(episodes, 'openAdminAlertKeys').mockResolvedValue([]);
     const close = jest.spyOn(episodes, 'closeAdminAlertKeys').mockResolvedValue(0);

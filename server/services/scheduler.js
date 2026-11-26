@@ -11042,8 +11042,7 @@ function initScheduledJobs() {
   // post-merge P2): the Monday irrigation send fires at 7:00 ET, so a
   // lawn-email gap alert after that is unactionable for the very send it
   // warns about — this tick must precede it. Still before the day's route
-  // starts, so a price gap rings first. Dark behind
-  // GATE_SCHEDULE_INTEGRITY_WATCHDOG. See
+  // starts, so a price gap rings first. See
   // server/services/schedule-integrity-watchdog.js.
   // =========================================================================
   cron.schedule('40 6 * * *', async () => {
@@ -11062,11 +11061,9 @@ function initScheduledJobs() {
   // booking with a visit TODAY or TOMORROW that has no time or technician
   // rings now, not at the next 6:40 run (by then a today visit is history).
   // Catches bookings made, and technicians removed, after the daily tick, and
-  // retries a failed write. Same gate as the watchdog it belongs to.
+  // retries a failed write.
   cron.schedule('25 7-20 * * *', async () => {
     try {
-      const { isEnabled } = require('../config/feature-gates');
-      if (!isEnabled('scheduleIntegrityWatchdog')) return;
       const result = await runExclusive('combined-booking-check-urgent', () =>
         require('./combined-booking-check').runCombinedBookingCheck({ urgentOnly: true }));
       if (result?.failed) logger.warn(`[combined-booking-check] urgent pass: ${result.failed} failed`);

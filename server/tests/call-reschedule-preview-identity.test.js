@@ -4,8 +4,6 @@ jest.mock('../services/call-booking-catalog', () => ({ ...jest.requireActual('..
 const { previewProposal, applyProposal } = require('../services/call-reschedule-proposals');
 describe('proposal preview identity', () => {
   test.each(['service_id', 'service_type', 'service_address_state', 'deleted_at', 'address_missing'])('changing %s after preview cannot apply the old approval', async (field) => {
-    const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-    process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
     const now = new Date('2099-09-09T08:00:00-04:00');
     const target = '2099-09-10T14:00:00-04:00';
     const quote = 'Could you come Thursday at two instead?';
@@ -29,31 +27,26 @@ describe('proposal preview identity', () => {
     };
     conn.transaction = async (fn) => fn(conn);
     const rebooker = { collectiveMoveGateOn: () => false, reschedule: jest.fn(), previewMoveConflicts: jest.fn() };
-    try {
-      rebooker.previewMoveConflicts.mockResolvedValue(field === 'service_address_state' ? [{
-        target_id: 'visit', target_date: '2099-09-10', target_start: '14:00', target_end: '15:00',
-        conflict_id: 'conflict-1', conflict_date: '2099-09-10', conflict_start: '13:30', conflict_end: '15:30',
-        status: 'confirmed', service_type: 'Conflicting service',
-      }] : []);
-      const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
-      expect(preview.displayAddress.address_line1).toBe('100 Example Avenue');
-      if (field === 'service_address_state') {
-        expect(preview.overlap).toEqual({ count: 1, appointments: [{ id: 'conflict-1', scheduled_date: '2099-09-10',
-          current_window: { start_at: '2099-09-10T17:30:00.000Z', end_at: '2099-09-10T19:30:00.000Z' },
-          status: 'confirmed', service_name: 'Conflicting service' }] });
-        expect(rebooker.previewMoveConflicts).toHaveBeenCalledWith('visit', '2099-09-10', { start: '14:00', end: '15:00' },
-          { conn: expect.any(Function), adminWindowRules: true, overlapAdvisory: true, seriesPolicy: 'single' });
-      }
-      if (field === 'deleted_at') tables.customers[0].deleted_at = now;
-      else if (field === 'address_missing') tables.customers[0].address_line1 = null;
-      else selected[field] = field === 'service_id' ? 'service-b' : (field === 'service_address_state' ? 'GA' : 'Changed service');
-      await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', previewHash: preview.preview_hash, now, rebooker }))
-        .rejects.toMatchObject({ status: 409 });
-      expect(rebooker.reschedule).not.toHaveBeenCalled();
-    } finally {
-      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-      else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
+    rebooker.previewMoveConflicts.mockResolvedValue(field === 'service_address_state' ? [{
+      target_id: 'visit', target_date: '2099-09-10', target_start: '14:00', target_end: '15:00',
+      conflict_id: 'conflict-1', conflict_date: '2099-09-10', conflict_start: '13:30', conflict_end: '15:30',
+      status: 'confirmed', service_type: 'Conflicting service',
+    }] : []);
+    const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
+    expect(preview.displayAddress.address_line1).toBe('100 Example Avenue');
+    if (field === 'service_address_state') {
+      expect(preview.overlap).toEqual({ count: 1, appointments: [{ id: 'conflict-1', scheduled_date: '2099-09-10',
+        current_window: { start_at: '2099-09-10T17:30:00.000Z', end_at: '2099-09-10T19:30:00.000Z' },
+        status: 'confirmed', service_name: 'Conflicting service' }] });
+      expect(rebooker.previewMoveConflicts).toHaveBeenCalledWith('visit', '2099-09-10', { start: '14:00', end: '15:00' },
+        { conn: expect.any(Function), adminWindowRules: true, overlapAdvisory: true, seriesPolicy: 'single' });
     }
+    if (field === 'deleted_at') tables.customers[0].deleted_at = now;
+    else if (field === 'address_missing') tables.customers[0].address_line1 = null;
+    else selected[field] = field === 'service_id' ? 'service-b' : (field === 'service_address_state' ? 'GA' : 'Changed service');
+    await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', previewHash: preview.preview_hash, now, rebooker }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
   });
 
   // Size rule (owner 2026-10-31, lawn_rounds_9 only): the plan marks a short move inside the round as no series move,
@@ -64,8 +57,6 @@ describe('proposal preview identity', () => {
     ['2099-09-18', 'lawn_rounds_9', true],   // 8 days: the series preview
     ['2099-09-12', 'custom', true],          // another pattern: the series preview
   ])('a move to %s of a %s visit reads the series preview: %s', async (target, pattern, readsSeries) => {
-    const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-    process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
     const now = new Date('2099-09-09T08:00:00-04:00');
     const startAt = `${target}T14:00:00-04:00`;
     const quote = 'Could you come Thursday at two instead?';
@@ -92,15 +83,10 @@ describe('proposal preview identity', () => {
       previewSeriesMove: jest.fn().mockResolvedValue(readsSeries
         ? { collective: true, conflictSnapshot: [], occurrenceIds: ['visit'], occurrences: [] }
         : { collective: false, oneOff: true, conflictSnapshot: [] }) };
-    try {
-      const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
-      expect(rebooker.previewSeriesMove).toHaveBeenCalledTimes(1);
-      expect(rebooker.previewMoveConflicts).toHaveBeenCalledTimes(readsSeries ? 0 : 1);
-      expect(preview.plan.seriesMove).toBe(readsSeries);
-      expect(preview.series.collective).toBe(readsSeries);
-    } finally {
-      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-      else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
-    }
+    const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
+    expect(rebooker.previewSeriesMove).toHaveBeenCalledTimes(1);
+    expect(rebooker.previewMoveConflicts).toHaveBeenCalledTimes(readsSeries ? 0 : 1);
+    expect(preview.plan.seriesMove).toBe(readsSeries);
+    expect(preview.series.collective).toBe(readsSeries);
   });
 });

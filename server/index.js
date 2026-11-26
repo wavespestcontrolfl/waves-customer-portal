@@ -1757,7 +1757,7 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
 
     // WDO report attention sweep — exception-based bell for reports stalled
     // BEFORE send (inspection never closed out, signed-but-unsent drafts,
-    // holds failing release). Quiet when clean; gated + cross-replica
+    // holds failing release). Quiet when clean; cross-replica
     // serialized inside the sweep itself. Every 6h with an early first run
     // so a fresh deploy surfaces existing stalls the same morning.
     {

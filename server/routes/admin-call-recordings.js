@@ -376,7 +376,7 @@ router.get('/proposals', async (req, res, next) => {
     if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
     const proposals = require('../services/call-reschedule-proposals');
     const rows = await proposals.listProposals(db, { limit: 101, offset, customerScope: ownCustomerScope(req) });
-    res.json(forStaffRole(req, { proposals_enabled: proposals.enabled(), proposals: rows.slice(0, 100), has_more: rows.length > 100, next_offset: offset + 100 }));
+    res.json(forStaffRole(req, { proposals: rows.slice(0, 100), has_more: rows.length > 100, next_offset: offset + 100 }));
   } catch (err) { next(err); }
 });
 

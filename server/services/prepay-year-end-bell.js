@@ -1,5 +1,5 @@
 /**
- * Office bell before a prepaid year ends (GATE_PREPAY_YEAR_END_BELL, ships dark).
+ * Office bell before a prepaid year ends.
  *
  * An annual prepay customer paid for 12 months. When the year ends, nothing
  * charges them again: the nightly booking stops (or bills the visit price) and
@@ -235,7 +235,6 @@ async function raiseOne(conn, row) {
 }
 
 async function runPrepayYearEndBell({ conn = db, today = etDateString() } = {}) {
-  if (!require('../config/feature-gates').prepayYearEndBellLive()) return { raised: 0, closed: 0 };
   const openKeys = await AlertEpisodes.openAdminAlertKeys(conn, KEY_PREFIX);
   const rows = await candidateTerms(conn, today, [...new Set(openKeys.map(termIdOfKey).filter(Boolean))]);
   if (!rows.length && !openKeys.length) return { raised: 0, closed: 0 };
