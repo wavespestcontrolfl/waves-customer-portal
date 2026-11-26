@@ -234,9 +234,10 @@ function groundedPromises(promises, staffLines) {
   for (const p of promises) {
     const quote = normalized(p);
     const line = quote.length >= 8 && agentLines.find((l) => ` ${normalized(l)} `.includes(` ${quote} `));
-    // A staff line too long to show whole is left out: a cut could hide the promise or its condition.
+    // A staff line too long to show whole is left out (a cut could hide the promise or its condition), and so is one
+    // that also holds an access code (gate, door, alarm): the model may have quoted around it.
     const shown = line ? cleanText(line, 10000) : null;
-    if (shown && shown.length > MAX_PROMISE_CHARS) continue;
+    if (shown && (shown.length > MAX_PROMISE_CHARS || require('./context-aggregator').redactAccessCodes(shown) !== shown)) continue;
     if (shown && !kept.includes(shown)) kept.push(shown);
   }
   return kept;

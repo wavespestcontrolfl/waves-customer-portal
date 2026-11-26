@@ -4918,7 +4918,9 @@ holds its quote. When a known staff number other than `ADAM_PHONE` answered
 banner (category and banner kind `live_call_next_step`, dedupe
 `live-call-next-step:<CallSid>`, admin role only, no night banner) in fixed
 words: the staff name and whether a next step waits. No call text reaches
-the bell or the lock screen. A quarantined call saves none and raises none.
+the bell or the lock screen. A call quarantined before its summary saves none
+and raises none; a later quarantine leaves the fixed-word bell row, which then
+opens a call with no early summary.
 `GATE_CALL_EARLY_SUMMARY` off: no model call and no new summary.
 `GATE_LIVE_CALL_TRANSCRIPTION` off: no start, and the press-1 TwiML is
 byte-identical),

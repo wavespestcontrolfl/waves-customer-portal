@@ -433,6 +433,13 @@ describe('the promises saved', () => {
     expect(saved().promises).toEqual(["I'll waive the fee only if the manager approves."]);
   });
 
+  test('a staff line that also holds a gate code is left out, even when the quote skipped the code', async () => {
+    say([...CALL, ['staff', "I'll call you back tomorrow, and the gate code is 4821."]]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll call you back tomorrow"] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual([]);
+  });
+
   test('a staff line too long to show whole is left out, never cut', async () => {
     say([...CALL, ['staff', `${'Let me explain how this works. '.repeat(5)}I'll waive the fee only if the manager approves.`]]);
     reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll waive the fee"] }));
