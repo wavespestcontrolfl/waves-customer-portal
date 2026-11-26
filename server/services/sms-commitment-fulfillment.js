@@ -195,7 +195,10 @@ const customerAsk = (commitment) => commitment.kind === 'other' && commitment.sm
 const staffPromise = (commitment) => commitment.kind === 'other' && commitment.sms_context?.basis === 'promise';
 // A customer's TEXT asking for a call back (owner 2026-10-03, "we spoke to
 // her, why would we then text her"): answered once a person at Waves spoke
-// with them by phone after it, whoever dialed. Never an email ask (its own
+// with them by phone after it, whoever dialed. Like a general ask (owner
+// ruling 2026-09-28), the alert means nobody from Waves responded, so who
+// the text asked Waves to call (a manager, another number) is the person's
+// to handle on that call, not the alert's. Never an email ask (its own
 // lane) and never a promise Waves made: a promise made on a call is not kept
 // by the customer phoning in (owner audit 2026-10-05, call-commitments.js).
 const textCallbackAsk = (commitment) => commitment.kind === 'callback' && commitment.sms_context?.basis === 'request'
@@ -374,7 +377,8 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
       // (textCallbackAsk). Every other ask reads outbound calls only, with
       // exactly the fields it read before, so its evidence hash is unchanged.
       const callIn = textCallbackAsk(commitment);
-      const { callEndedAtSql, postCallRowSql } = require('./sms-pending-conversations');
+      const { callEndedAtSql } = require('./sms-pending-conversations');
+      const { POST_CALL_ROW_SOURCES } = require('../utils/call-timeline');
       const rows = await conn('call_log').where({ customer_id: customerId })
         .where((q) => (callIn
           ? q.where('direction', 'outbound')
@@ -383,12 +387,15 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
             // call after the text (a hold, voicemail, a dropped leg) is not
             // on the row, and the customer may have texted because of it, so
             // that call never answers the ask: the alert rings and a person
-            // can mark it done. A row inserted after the call was over
-            // (postCallRowSql) does not say when it began, so it never
-            // counts either; nor does a row whose end stamp is before the
-            // text (callEndedAtSql, the Messages reader's definition).
+            // can mark it done. A row a status callback or a recording
+            // recovery wrote (call-timeline.js POST_CALL_ROW_SOURCES, on any
+            // status) was inserted after the call began, so its insert time
+            // says nothing about the start and it never counts; nor does a
+            // row whose end stamp is before the text (callEndedAtSql, the
+            // Messages reader's definition).
             .orWhere((w) => w.where({ direction: 'inbound', status: 'completed', answered_by: 'human' })
-              .whereRaw(`${postCallRowSql('call_log')} IS NOT TRUE`).whereRaw(`${callEndedAtSql('call_log')} > ?`, [after]))
+              .whereRaw(`COALESCE(call_log.metadata->>'source', '') NOT IN (${[...POST_CALL_ROW_SOURCES].map((source) => `'${source}'`).join(', ')})`)
+              .whereRaw(`${callEndedAtSql('call_log')} > ?`, [after]))
           : q.where('direction', 'outbound')))
         // A call back reaches the customer on ANY of their phones (primary,
         // alternate, service contact), and a call in may come from any of

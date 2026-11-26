@@ -2972,8 +2972,10 @@ postgres('SMS commitments on PostgreSQL', () => {
       await callIn(before, { metadata: { ended_at: at(120000), conference_path: { hold: { phase: 'returned', open_at: at(-20000) } } } });
       await outboundCall(before, { source: 'admin-callback',
         metadata: { ended_at: at(160000), customer_leg: { status: 'completed', duration_seconds: 163 } } });
-      // A row inserted after the call was over does not say when the call began.
+      // A row inserted after the call was over, or first written by a
+      // status callback mid-call, does not say when the call began.
       await callIn(new Date(message.created_at.getTime() + 200000), { metadata: { source: 'twilio_recording_status_recovered', ended_at: at(150000) } });
+      await callIn(new Date(message.created_at.getTime() + 5000), { metadata: { source: 'status_callback', inserted_on_status: 'ringing', ended_at: at(150000) } });
       const now = new Date(after.getTime() + 600000);
       const evidence = await loadSmsFulfillmentEvidence(mockPg, await mockPg('call_commitments').first(), message, now);
       expect(evidence.records.filter((r) => r.type === 'call')).toHaveLength(0);
