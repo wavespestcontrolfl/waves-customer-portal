@@ -86,17 +86,20 @@ const SAFETY_CLAIM_RE = /\bsafe(?:r|st|ly)?\b|\bnon[\s-]?toxic\b|\bharmless\b|\b
 // policy, and every attempt to tell a price from a count by wording kept leaking). So the text may hold no digit of any script (any
 // Unicode decimal digit or other number character: fullwidth, Arabic-Indic, superscripts, vulgar fractions such as a half sign) and no
 // number word: zero to nineteen, the tens, hundred, thousand, million, billion, dozen, couple, and the multiplying or fraction words
-// half/halves, quarter(s), third(s) (but not "third-party"), twice, thrice, double, triple, quadruple. NO exception for clock times:
+// half/halves, quarter(s), every fraction denominator (third(s) but not "third-party", fourth ... twelfth, tenths, hundredth), twice, thrice,
+// double, triple, quadruple, and the named clock times noon, midday, midnight and o'clock. NO exception for clock times:
 // "Office opens at nine a.m." blocks (intended; the owner rewords). "Quarterly", "monthly", "weekly", "once", "first" and "second" are
 // not numbers. "Prices" and "rates" are not numbers either: the screens for those words are the soft warnings.
 const UNIT_WORD = 'one|two|three|four|five|six|seven|eight|nine';
 const TEEN_WORD = 'ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
-const NUMBER_WORD_RE = new RegExp(`\\b(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen|couple|half|halves|quarters?|thirds?(?![-\\s]party\\b)|twice|thrice|double|triple|quadruple)\\b`, 'gi');
-const NUMBER_CHAR_RE = /[\p{Nd}\p{No}]/u;
-// "one" as a pronoun or in a compound is not a number: "one of our techs", "one another", "no one", "this one", "which one", "one-time".
-// ("anyone", "someone" and "everyone" never match \b one \b.) A counting "one" ("one visit", "one acre") still blocks.
+// Fraction denominators and large ordinals ("a fifth", "one-eighth", "tenths", "hundredth"): "first" and "second" are not among them.
+const DENOMINATOR_WORD = "(?:fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|(?:thir|four|fif|six|seven|eigh|nine)teenth|(?:twen|thir|for|fif|six|seven|eigh|nine)tieth|hundredth|thousandth|millionth)s?";
+const NUMBER_WORD_RE = new RegExp(`\\b(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen|couple|half|halves|quarters?|thirds?(?![-\\s]party\\b)|${DENOMINATOR_WORD}|twice|thrice|double|triple|quadruple|noon|noontime|midday|midnight|o'?clock)\\b`, 'gi');
+const NUMBER_CHAR_RE = /\p{N}/u; // decimal digits (Nd), letter numbers such as Roman numeral characters (Nl), other numbers (No)
+// "one" passes only in these fixed phrases: "one of", "one another", "no one", "one-time", "one-off". ("anyone", "someone" and "everyone"
+// never match \b one \b.) Every other "one" counts, so "every one business day", "each one visit" and "this one" block (intended).
 const ONE_PRONOUN_AFTER_RE = /^(?:\s+(?:of|another)\b|-(?:time|off)\b)/i;
-const ONE_PRONOUN_BEFORE_RE = /\b(?:no|this|that|which|each|every)\s+$/i;
+const ONE_PRONOUN_BEFORE_RE = /\bno\s+$/i;
 
 /** True when the text states an amount: any digit or number character, or any number word. */
 function hasNumberInFact(text) {
