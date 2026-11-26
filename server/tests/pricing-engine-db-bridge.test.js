@@ -737,6 +737,36 @@ describe('pricing engine DB bridge', () => {
     expect(constants.SPECIALTY.trenching.products.taurus_sc.productOzPerFinishedGallonAtHighRate).toBe(1.8);
   });
 
+  test('a stored trenching row written before the retreatment-only ruling cannot bring repair wording back', async () => {
+    const tiers = constants.SPECIALTY.trenching.warrantyTiers;
+    const productWarnings = constants.SPECIALTY.trenching.products.talstar_p.warnings;
+    const savedTiers = { ...tiers };
+    const savedWarnings = [...productWarnings];
+    try {
+      const db = pricingConfigDb([{
+        config_key: 'onetime_trenching',
+        data: {
+          warrantyTiers: {
+            three_year_repair_retreat: { label: '3-Year Repair + Retreat Warranty', priceAdderPct: 0.15, allowedChemistryTypes: ['non_repellent'] },
+            five_year_repair_retreat: { label: '5-Year Repair + Retreat Warranty', priceAdderPct: 0.25, allowedChemistryTypes: ['non_repellent'] },
+          },
+          products: {
+            talstar_p: { warnings: ['Do not attach long repair-and-retreat warranty without admin approval.'] },
+          },
+        },
+      }]);
+      await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+      expect(tiers.three_year_repair_retreat.label).toBe('3-Year Retreat Warranty');
+      expect(tiers.five_year_repair_retreat.label).toBe('5-Year Retreat Warranty');
+      expect(tiers.three_year_repair_retreat.priceAdderPct).toBe(0.15);
+      expect(tiers.five_year_repair_retreat.priceAdderPct).toBe(0.25);
+      expect(constants.SPECIALTY.trenching.products.talstar_p.warnings.join(' ')).not.toMatch(/repair/i);
+    } finally {
+      Object.assign(tiers, savedTiers);
+      constants.SPECIALTY.trenching.products.talstar_p.warnings = savedWarnings;
+    }
+  });
+
   test('syncs flea package, exterior tiers, and one-time modifiers from pricing_config', async () => {
     const db = pricingConfigDb([
       {

@@ -92,6 +92,13 @@ function mergePlainObject(target, value) {
   Object.assign(target, value);
 }
 
+// Termite trenching copy is retreatment only (owner ruling 2026-11-25; see SPECIALTY.trenching.warrantyTiers). A
+// stored pricing_config row written before that ruling can still carry "Repair + Retreat" or "repair-and-retreat";
+// rewrite it on load so the old wording never reaches a new quote.
+function retreatOnlyTermiteCopy(text) {
+  return String(text).replace(/repair\s*\+\s*retreat/gi, 'Retreat').replace(/repair-and-retreat/gi, 'retreatment');
+}
+
 function deepMergePlainObject(target, value) {
   if (!target || typeof target !== 'object' || Array.isArray(target)) return;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return;
@@ -2188,6 +2195,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         setNumber(target, 'productOzPerFinishedGallonAtStandardRate', data.productOzPerFinishedGallonAtStandardRate ?? data.product_oz_per_finished_gallon_at_standard_rate, Number);
         setNumber(target, 'productOzPerFinishedGallonAtHighRate', data.productOzPerFinishedGallonAtHighRate ?? data.product_oz_per_finished_gallon_at_high_rate, Number);
         setStringArray(target, 'warnings', data.warnings);
+        if (Array.isArray(target.warnings)) target.warnings = target.warnings.map(retreatOnlyTermiteCopy);
       };
       ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p'].forEach((key) => {
         applyTrenchingProductOverlay(key, trenchingProducts[key] || ot[key]);
@@ -2196,7 +2204,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         mergePlainObject(constants.SPECIALTY.trenching.applicationRates, ot.applicationRates || ot.application_rates);
       }
       if (ot.warrantyTiers || ot.warranty_tiers) {
-        mergePlainObject(constants.SPECIALTY.trenching.warrantyTiers, ot.warrantyTiers || ot.warranty_tiers);
+        const trenchingTiers = constants.SPECIALTY.trenching.warrantyTiers;
+        mergePlainObject(trenchingTiers, ot.warrantyTiers || ot.warranty_tiers);
+        for (const tier of Object.values(trenchingTiers)) {
+          if (tier && typeof tier.label === 'string') tier.label = retreatOnlyTermiteCopy(tier.label);
+        }
       }
     }
     if (config.onetime_boracare) {

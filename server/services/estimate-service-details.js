@@ -294,7 +294,7 @@ const SERVICE_DETAILS_COPY = {
         ['Signal word', 'CAUTION'],
         ['Standard station checks', '4 per year (quarterly)'],
         ['Required for coverage', 'Annual inspection + current payments'],
-        ['Retreatment and repair', 'As your signed agreement or bond states'],
+        ['Retreatment', 'As your signed agreement or bond states (no damage repair)'],
         // Bond option (owner 2026-07-20): terms are program structure and
         // stable; the per-application price for each term lives on the
         // estimate's bond selector, never in this static guide (rates are
@@ -372,11 +372,11 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What exactly does the agreement cover?',
-        a: 'Your signed agreement covers subterranean termites, including Formosan. It does not cover drywood termites, powderpost beetles or old house borers; drywood treatment such as Bora-Care\u00ae is quoted separately. Retreatment and repair terms are the ones in your signed agreement or bond.',
+        a: 'Your signed agreement covers subterranean termites, including Formosan. It does not cover drywood termites, powderpost beetles or old house borers; drywood treatment such as Bora-Care\u00ae is quoted separately. Retreatment terms are the ones in your signed agreement or bond. Waves does not repair termite damage.',
       },
       {
         q: 'What does the agreement NOT cover?',
-        a: 'Drywood termites, powderpost beetles, old house borers and other wood-destroying organisms; damage that existed before coverage began; repair of any damage unless a signed repair bond covers it; detached structures (sheds, fences, decks) unless added in writing; and whole-structure fumigation. Keeping coverage active requires the annual inspection, current payments, and reasonable property conditions \u2014 no wood-to-soil contact, moisture problems addressed, and access for inspections. Your signed agreement is the authority; read it and ask us anything unclear.',
+        a: 'Drywood termites, powderpost beetles, old house borers and other wood-destroying organisms; damage that existed before coverage began; repair of any termite damage; detached structures (sheds, fences, decks) unless added in writing; and whole-structure fumigation. Keeping coverage active requires the annual inspection, current payments, and reasonable property conditions \u2014 no wood-to-soil contact, moisture problems addressed, and access for inspections. Your signed agreement is the authority; read it and ask us anything unclear.',
       },
     ],
     // Termite-specific customer responsibilities (external review): the

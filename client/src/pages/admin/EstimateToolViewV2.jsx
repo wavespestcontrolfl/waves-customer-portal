@@ -115,11 +115,11 @@ const TRENCHING_PRODUCT_META = {
     config: "78 oz @ $95 | 0.8 oz / finished gal standard",
   },
   bifen_it: {
-    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year retreatment warranty is quote-required by default.",
     config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
   talstar_p: {
-    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year retreatment warranty is quote-required by default.",
     config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
 };
@@ -7959,8 +7959,8 @@ export default function EstimateToolViewV2({
                             options={[
                               { value: "none", label: "None" },
                               { value: "one_year_retreat", label: "1-Year Retreat" },
-                              { value: "three_year_repair_retreat", label: "3-Year Repair + Retreat" },
-                              { value: "five_year_repair_retreat", label: "5-Year Repair + Retreat" },
+                              { value: "three_year_repair_retreat", label: "3-Year Retreat" },
+                              { value: "five_year_repair_retreat", label: "5-Year Retreat" },
                             ]}
                           />
                         </Field>
