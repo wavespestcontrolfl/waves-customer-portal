@@ -195,9 +195,9 @@
     {
       "router": "server/routes/review-geo-link.js",
       "mount": "/rv",
-      "reason": "Printed business-card review QR (owner 2026-11-21) — GET /rv is a 302 to a Google review form chosen from Cloudflare visitor-location headers; the target is only a googleReviewUrl from config/locations.js (nothing in the request names it, so not an open redirect), no token and no row lookup; location values are never logged or stored; per-route limiter; see docs/public-route-contracts.md",
+      "reason": "Printed business-card review QR (owner 2026-11-21) and per-tech badge QR /rv/<tech> (owner 2026-11-25, badge pick) — every GET under /rv is a 302 to a Google review form chosen from Cloudflare visitor-location headers; the target is only a googleReviewUrl from config/locations.js (nothing in the request names it, so not an open redirect), no token; the only lookups are fire-and-forget counter bumps on reserved review-<office> / review-tech-<slug> short codes that never change the redirect; location values are never logged or stored; per-route limiter; see docs/public-route-contracts.md",
       "routes": [
-        "GET /rv",
+        "GET /rv<re:.*>",
         "USE /rv (express-rate-limit({ handler#8859f1ea }))",
         "USE /rv (inline function#29df873e)"
       ]
