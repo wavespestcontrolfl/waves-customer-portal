@@ -451,7 +451,7 @@ describe('blogHeroSocialImageUrl', () => {
 
     // Graph mock for the hidden-post picture check. `sizes` are the pictures
     // Facebook reports for each hidden post, in order.
-    function mockPictureGraph({ sizes, publish = () => ({ ok: true, json: async () => ({ success: true }) }), published = false }) {
+    function mockPictureGraph({ sizes, publish = () => ({ ok: true, json: async () => ({ success: true }) }), published = false, del = null }) {
       const calls = [];
       let made = 0;
       global.fetch = jest.fn(async (url, opts = {}) => {
@@ -466,8 +466,11 @@ describe('blogHeroSocialImageUrl', () => {
           const size = sizes[n - 1];
           return ok(size ? { attachments: { data: [{ media: { image: size } }] } } : {});
         }
-        if (u.includes('fields=is_published')) return ok({ is_published: published });
-        if (method === 'DELETE') return ok({ success: true });
+        if (u.includes('fields=is_published')) {
+          if (published === 'unreadable') return { ok: false, status: 500, json: async () => ({}), text: async () => 'boom' };
+          return ok({ is_published: published });
+        }
+        if (method === 'DELETE') return del ? del() : ok({ success: true });
         if (method === 'POST') return publish();
         throw new Error(`unexpected fetch: ${u}`);
       });
@@ -539,6 +542,50 @@ describe('blogHeroSocialImageUrl', () => {
       });
       const res = await share();
       expect(res.platforms).toEqual([expect.objectContaining({ postId: 'fb-1', success: true })]);
+      expect(calls.filter((c) => c.url.includes('/page-1/feed'))).toHaveLength(1);
+      expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+    });
+
+    test('a delete whose answer is lost still makes and publishes a fresh post (the old one never goes public)', async () => {
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '0';
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      try {
+        const calls = mockPictureGraph({
+          sizes: [{ width: 200, height: 200 }, { width: 720, height: 720 }],
+          del: () => { throw new Error('socket hang up'); },
+        });
+        const pending = share();
+        await jest.advanceTimersByTimeAsync(5000);
+        const res = await pending;
+        expect(res.platforms).toEqual([expect.objectContaining({ postId: 'fb-2', success: true })]);
+        const publishes = calls.filter((c) => c.method === 'POST' && c.body && c.body.is_published);
+        expect(publishes.map((c) => c.url)).toEqual(['https://graph.facebook.com/v25.0/fb-2']);
+      } finally {
+        jest.useRealTimers();
+        delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+      }
+    });
+
+    test('a failed publish is asked once more on the same post before anything else', async () => {
+      let n = 0;
+      const calls = mockPictureGraph({
+        sizes: [{ width: 720, height: 720 }],
+        publish: () => { n += 1; return n === 1 ? { ok: false, status: 500, text: async () => 'temporary' } : { ok: true, json: async () => ({ success: true }) }; },
+      });
+      const res = await share();
+      expect(res.platforms).toEqual([expect.objectContaining({ postId: 'fb-1', success: true })]);
+      expect(calls.filter((c) => c.url.includes('/page-1/feed'))).toHaveLength(1);
+      expect(n).toBe(2);
+    });
+
+    test('publish state unknown: fails without a retry and without deleting (the post may be public)', async () => {
+      const calls = mockPictureGraph({
+        sizes: [{ width: 720, height: 720 }],
+        publish: () => { throw new Error('socket hang up'); },
+        published: 'unreadable',
+      });
+      const res = await share();
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: false, error: expect.stringMatching(/fb-1 may be public; not retried/) })]);
       expect(calls.filter((c) => c.url.includes('/page-1/feed'))).toHaveLength(1);
       expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
     });

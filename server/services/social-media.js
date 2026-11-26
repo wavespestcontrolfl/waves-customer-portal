@@ -828,7 +828,8 @@ async function withRetry(fn, { maxAttempts = 3, label = '' } = {}) {
       const isTransient = !status || status >= 500 || /ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|network/i.test(err.message);
       const isAuth = status === '401' || status === '403' || /expired|invalid.*token|not.*configured/i.test(err.message);
 
-      if (isAuth || !isTransient || attempt === maxAttempts) throw err;
+      // noRetry: the call may have taken effect and a second try could repeat it.
+      if (err.noRetry || isAuth || !isTransient || attempt === maxAttempts) throw err;
 
       const delay = Math.pow(4, attempt - 1) * 1000;  // 1s, 4s, 16s
       logger.warn(`[social] ${label} attempt ${attempt}/${maxAttempts} failed: ${err.message} — retrying in ${delay}ms`);
@@ -1551,14 +1552,15 @@ async function postToFacebook(message, link, imageUrl) {
   if (size && isSmallFacebookPicture(size)) {
     // Facebook gave the hidden post the small side thumbnail. Nobody has seen
     // it: delete it, ask Facebook to read the page again, wait, try once more.
+    // The first post is never published after this point, so even a delete
+    // whose answer is lost leaves at most one hidden copy nobody sees.
     logger.warn(`[social] Facebook link picture came back ${size.width}x${size.height}; trying once more`);
-    if (await deleteFacebookPost(id, token)) {
-      await readFacebookLinkPreview(link, token, { settleMs: FACEBOOK_PICTURE_RETRY_SETTLE_MS });
-      id = await createFacebookFeedPost(body);
-      size = await readFacebookLinkPictureSize(id, token);
-      if (size && isSmallFacebookPicture(size)) {
-        logger.warn(`[social] Facebook link picture still ${size.width}x${size.height}; publishing anyway`);
-      }
+    await deleteFacebookPost(id, token);
+    await readFacebookLinkPreview(link, token, { settleMs: FACEBOOK_PICTURE_RETRY_SETTLE_MS });
+    id = await createFacebookFeedPost(body);
+    size = await readFacebookLinkPictureSize(id, token);
+    if (size && isSmallFacebookPicture(size)) {
+      logger.warn(`[social] Facebook link picture still ${size.width}x${size.height}; publishing anyway`);
     }
   }
   await publishFacebookPost(id, token);
@@ -1608,7 +1610,7 @@ async function readFacebookLinkPictureSize(postId, token) {
   }
 }
 
-// True only when Facebook confirms the delete.
+// Best effort: only ever called on a post that is hidden and stays hidden.
 async function deleteFacebookPost(postId, token) {
   try {
     const res = await fetch(`https://graph.facebook.com/v25.0/${postId}?access_token=${encodeURIComponent(token)}`, {
@@ -1624,37 +1626,56 @@ async function deleteFacebookPost(postId, token) {
   }
 }
 
-async function readFacebookPostPublished(postId, token) {
+// 'public', 'hidden', or 'unknown' (the read failed: the post may be public).
+async function readFacebookPostState(postId, token) {
   try {
     const url = `https://graph.facebook.com/v25.0/${postId}?fields=is_published&access_token=${encodeURIComponent(token)}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS) });
-    if (!res.ok) return false;
-    return (await res.json())?.is_published === true;
+    if (!res.ok) return 'unknown';
+    const data = await res.json();
+    if (data?.is_published === true) return 'public';
+    if (data?.is_published === false) return 'hidden';
+    return 'unknown';
   } catch {
-    return false;
+    return 'unknown';
   }
 }
 
-// Make the hidden post public. If the answer is lost but the post went public,
-// that counts as done, so a retry never makes a second public post. If it did
-// not go public, the hidden post is deleted before the error goes up, so a
-// retry leaves no hidden copy behind.
-async function publishFacebookPost(postId, token) {
-  let failure = null;
+async function requestFacebookPublish(postId, token) {
   try {
     const res = await fetch(`https://graph.facebook.com/v25.0/${postId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ is_published: true, access_token: token }),
     });
-    if (res.ok) return;
-    failure = new Error(`Facebook publish API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (res.ok) return null;
+    return new Error(`Facebook publish API ${res.status}: ${(await res.text()).slice(0, 300)}`);
   } catch (err) {
-    failure = new Error(`Facebook publish failed: ${err.name}`);
+    return new Error(`Facebook publish failed: ${err.name}`); // never the message: it can quote the token
   }
-  if (await readFacebookPostPublished(postId, token)) return;
-  await deleteFacebookPost(postId, token);
-  throw failure;
+}
+
+// Make the hidden post public. Publishing the same post twice is harmless, so
+// a failed publish is asked once more on the SAME post before anything else.
+// Then the post's state decides:
+//   public  -> done (the first answer was lost), so no second public post.
+//   hidden  -> delete it and fail; a retry of the whole post is then safe.
+//   unknown -> fail with noRetry: the post may be public, so a retry that
+//              makes a new post could double it. The error names the post.
+async function publishFacebookPost(postId, token) {
+  let failure = await requestFacebookPublish(postId, token);
+  if (!failure) return;
+  failure = (await requestFacebookPublish(postId, token)) || null;
+  if (!failure) return;
+  const state = await readFacebookPostState(postId, token);
+  if (state === 'public') return;
+  if (state === 'hidden') {
+    await deleteFacebookPost(postId, token);
+    throw failure;
+  }
+  const unsure = new Error(`${failure.message} (post ${postId} may be public; not retried)`);
+  unsure.noRetry = true;
+  throw unsure;
 }
 
 function sleep(ms) {
