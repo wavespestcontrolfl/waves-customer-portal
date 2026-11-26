@@ -45,6 +45,7 @@ function dashboardFixture(api, method = 'GET') {
   if (api === '/admin/dashboard/kpi-history') return { series: {} };
   if (api === '/admin/kpi-targets') return { targets: [] };
   if (api === '/admin/dashboard/ebitda-bridge') return { rows: [], revenue: 0 };
+  if (api === '/admin/dashboard/office-cost-per-stop') return { months: [], trailing: {} };
   if (api === '/admin/dashboard/mrr-bridge') return { months: [] };
   if (api === '/admin/revenue/overview') return { byServiceLine: [] };
   if (api === '/admin/dashboard/churn-reasons') return { reasons: [], totals: { customers: 0, mrr: 0 } };
