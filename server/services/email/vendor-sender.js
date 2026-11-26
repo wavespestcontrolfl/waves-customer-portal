@@ -29,11 +29,6 @@ function senderMailbox(address) {
   return m ? m[1].replace(/\.$/, '') : '';
 }
 
-// LIKE metacharacters in a bound value match literally (knex/pg default
-// escape character is backslash).
-function escapeLike(value) {
-  return String(value).replace(/[\\%_]/g, (c) => `\\${c}`);
-}
 
 // Registrable domain of the sender ("Name <a@mail.x.com>" -> "x.com"), or null.
 function registrableSenderDomain(address) {
@@ -74,7 +69,9 @@ async function registryHasSender(mailbox, reg, shared) {
 async function historyHasSender(email, mailbox, reg, shared, strict) {
   const q = db('emails');
   if (shared || strict) {
-    q.whereRaw('(lower(from_address) = ? OR lower(from_address) LIKE ?)', [mailbox, `%<${escapeLike(mailbox)}>`]);
+    // Stored senders are bare addresses (display forms: 2 of ~89k rows), so
+    // one exact comparison — no LIKE, so no wildcard can widen the match.
+    q.whereRaw('lower(from_address) = ?', [mailbox]);
   } else {
     q.whereRaw(
       '(lower(from_address) LIKE ? OR lower(from_address) LIKE ? OR lower(from_address) LIKE ? OR lower(from_address) LIKE ?)',
@@ -82,7 +79,9 @@ async function historyHasSender(email, mailbox, reg, shared, strict) {
     );
   }
   if (strict) {
-    q.where('auto_action', 'like', 'expense\\_%');
+    // The expense must still exist: a deleted expense can leave the marker.
+    q.where('auto_action', 'like', 'expense\\_%')
+      .whereRaw('EXISTS (SELECT 1 FROM expenses WHERE expenses.id = emails.expense_id)');
   } else {
     q.where((qb) => qb
       .whereIn('classification', VENDOR_CLASSIFICATIONS)

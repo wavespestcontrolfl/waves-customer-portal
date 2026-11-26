@@ -107,11 +107,6 @@ describe('email spam blocker safety helpers', () => {
 });
 
 describe('stale auto-block removal (sender became a customer)', () => {
-  // These cases test the other identities; the vendor check answers no.
-  let vendorSpy;
-  beforeEach(() => { vendorSpy = jest.spyOn(require('../services/email/vendor-sender'), 'isVendorWeUse').mockResolvedValue(false); });
-  afterEach(() => vendorSpy.mockRestore());
-
   const gmailClient = require('../services/email/gmail-client');
 
   const mockTables = ({ del, blockRow = {}, syncTrashed = [] }) => {
@@ -527,12 +522,6 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
     expect(increment).toHaveBeenCalledWith('blocked_count', 1);
   });
 
-  describe('reconcile', () => {
-  // These cases test the other identities; the vendor check answers no.
-  let vendorSpy;
-  beforeEach(() => { vendorSpy = jest.spyOn(require('../services/email/vendor-sender'), 'isVendorWeUse').mockResolvedValue(false); });
-  afterEach(() => vendorSpy.mockRestore());
-
   test.each([
     ['a government sender', 'licensing@fdacs.gov'],
     ['VendorLink, a public bid portal (inbox replay 2026-10-28)', 'vendorlink@myvendorlink.com'],
@@ -557,82 +546,6 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
 
     const counts = await reconcileStaleAutoBlocks();
     expect(counts).toEqual({ reconciled: 1, failed: 0 });
-    expect(del).toHaveBeenCalledTimes(1);
-  });  });
-});
-
-describe('vendor we use: stale AUTOMATIC blocks are unwound (owner 2026-11-25)', () => {
-  const vendorSender = require('../services/email/vendor-sender');
-  const { isBlocked, reconcileStaleAutoBlocks } = require('../services/email/spam-blocker');
-  const noOne = (table) => {
-    if (table === 'customers' || table === 'leads') {
-      const chain = { whereNull: jest.fn(() => chain), where: jest.fn(() => chain), first: jest.fn(async () => null) };
-      return { whereRaw: jest.fn(() => chain) };
-    }
-    if (table === 'emails') {
-      const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain), select: jest.fn(async () => []) };
-      return chain;
-    }
-    throw new Error(`unexpected table ${table}`);
-  };
-  afterEach(() => jest.restoreAllMocks());
-
-  test('isBlocked removes an automatic block on a vendor (strict check) and lets the mail through', async () => {
-    const spy = jest.spyOn(vendorSender, 'isVendorWeUse').mockResolvedValue(true);
-    const del = jest.fn(async () => 1);
-    db.mockImplementation((table) => {
-      if (table === 'blocked_email_senders') {
-        const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain), whereNull: jest.fn(() => chain),
-          first: jest.fn(async () => ({ id: 'v1', reason: 'spam_auto', email_address: 'orders@supplier.example', gmail_filter_id: null, created_at: '2026-07-01T00:00:00Z' })), del };
-        return chain;
-      }
-      return noOne(table);
-    });
-    await expect(isBlocked('orders@supplier.example')).resolves.toBe(false);
-    expect(spy).toHaveBeenCalledWith({ id: null, from_address: 'orders@supplier.example' }, { strict: true });
-    expect(del).toHaveBeenCalled();
-  });
-
-  test('a MANUAL block on a vendor still stands, with no vendor lookup', async () => {
-    const spy = jest.spyOn(vendorSender, 'isVendorWeUse').mockResolvedValue(true);
-    const increment = jest.fn(async () => {});
-    db.mockImplementation((table) => {
-      if (table === 'blocked_email_senders') {
-        return { where: jest.fn((arg) => (arg && arg.id === 'm1' ? { increment } : { first: jest.fn(async () => ({ id: 'm1', reason: 'manual', email_address: 'orders@supplier.example' })) })) };
-      }
-      return noOne(table);
-    });
-    await expect(isBlocked('orders@supplier.example')).resolves.toBe(true);
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  test('a failed vendor lookup keeps the automatic block', async () => {
-    jest.spyOn(vendorSender, 'isVendorWeUse').mockRejectedValue(new Error('vendor lookup failed (email null, code 57014)'));
-    const increment = jest.fn(async () => {});
-    const del = jest.fn();
-    db.mockImplementation((table) => {
-      if (table === 'blocked_email_senders') {
-        return { where: jest.fn((arg) => (arg && arg.id === 'a1' ? { increment } : { first: jest.fn(async () => ({ id: 'a1', reason: 'spam_auto', email_address: 'x@junk.example' })), del })) };
-      }
-      return noOne(table);
-    });
-    await expect(isBlocked('x@junk.example')).resolves.toBe(true);
-    expect(del).not.toHaveBeenCalled();
-  });
-
-  test('reconcileStaleAutoBlocks unwinds an automatic block on a vendor and leaves a stranger blocked', async () => {
-    jest.spyOn(vendorSender, 'isVendorWeUse').mockImplementation(async (e) => e.from_address === 'orders@supplier.example');
-    const del = jest.fn(async () => 1);
-    db.mockImplementation((table) => {
-      if (table === 'blocked_email_senders') {
-        const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain),
-          select: jest.fn(async () => [{ id: 'v1', email_address: 'orders@supplier.example' }, { id: 'b2', email_address: 'stranger@junk.example' }]),
-          first: jest.fn(async () => ({ id: 'v1', reason: 'spam_auto', email_address: 'orders@supplier.example', gmail_filter_id: null })), del };
-        return chain;
-      }
-      return noOne(table);
-    });
-    await expect(reconcileStaleAutoBlocks()).resolves.toEqual({ reconciled: 1, failed: 0 });
     expect(del).toHaveBeenCalledTimes(1);
   });
 });

@@ -90,21 +90,17 @@ describe('isVendorWeUse', () => {
     expect(await isVendorWeUse({ id: 'e9', from_address: 'Seller <seller@gmail.com>' })).toBe(true);
     expect(calls.vendor_email_domains).toContainEqual(['whereIn', 'domain', ['seller@gmail.com']]);
     expect(calls.vendor_email_domains.some((c) => c[0] === 'orWhere')).toBe(false);
-    expect(calls.emails[0]).toEqual(['whereRaw', '(lower(from_address) = ? OR lower(from_address) LIKE ?)', ['seller@gmail.com', '%<seller@gmail.com>']]);
+    expect(calls.emails[0]).toEqual(['whereRaw', 'lower(from_address) = ?', ['seller@gmail.com']]);
   });
 
   test('strict mode (spam block) needs a booked expense from the same mailbox, never the whole domain', async () => {
     const calls = mockTables({ priorEmail: { id: 'e0' } });
     expect(await isVendorWeUse({ id: 'e9', from_address: 'merchant-a@billing.example' }, { strict: true })).toBe(true);
-    expect(calls.emails[0]).toEqual(['whereRaw', '(lower(from_address) = ? OR lower(from_address) LIKE ?)', ['merchant-a@billing.example', '%<merchant-a@billing.example>']]);
+    expect(calls.emails[0]).toEqual(['whereRaw', 'lower(from_address) = ?', ['merchant-a@billing.example']]);
     expect(calls.emails).toContainEqual(['where', 'auto_action', 'like', 'expense\\_%']);
+    // A deleted expense leaves the marker behind; only a live expense row counts.
+    expect(calls.emails).toContainEqual(['whereRaw', 'EXISTS (SELECT 1 FROM expenses WHERE expenses.id = emails.expense_id)']);
     expect(calls.emails.some((c) => c[0] === 'whereIn' || c[0] === 'orWhere')).toBe(false);
-  });
-
-  test('LIKE wildcards in a mailbox match literally', async () => {
-    const calls = mockTables({ priorEmail: null });
-    await isVendorWeUse({ id: 1, from_address: 'a_b%c@gmail.com' });
-    expect(calls.emails[0][2]).toEqual(['a_b%c@gmail.com', '%<a\\_b\\%c@gmail.com>']);
   });
 
   test('a display name holding an address never replaces the bracketed mailbox', async () => {
@@ -117,7 +113,7 @@ describe('isVendorWeUse', () => {
     const calls = mockTables({ priorEmail: null });
     expect(await isVendorWeUse({ id: 2, from_address: 'other-merchant@billtrust.com' })).toBe(false);
     expect(calls.vendor_email_domains).toContainEqual(['whereIn', 'domain', ['other-merchant@billtrust.com']]);
-    expect(calls.emails[0][2]).toEqual(['other-merchant@billtrust.com', '%<other-merchant@billtrust.com>']);
+    expect(calls.emails[0][2]).toEqual(['other-merchant@billtrust.com']);
   });
 
   test('strict mode rethrows a failed lookup so the deferred block retries', async () => {
