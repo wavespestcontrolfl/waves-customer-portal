@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useBiometricLock } from '../components/BiometricGate';
 import { isNativeApp } from '../native/platform';
-import { clearHomeReads, readHomeReads, storedHomeIdentity, writeHomeRead } from '../lib/homeSnapshot';
+import { clearSavedHome, readHomeReads, storedHomeIdentity, writeHomeRead } from '../lib/homeSnapshot';
 
 const PortalReadContext = createContext(null);
 export const READ_TIMEOUT_MS = 15000;
@@ -51,7 +51,9 @@ export function PortalReadProvider({ enabled, persistIdentity = null, persistPro
   }, [invalidated]);
   const invalidate = useCallback((message) => {
     cache.current.clear();
-    clearHomeReads();
+    // The saved account goes with the saved reads: an offline relaunch must
+    // not adopt a screen the server just denied.
+    clearSavedHome();
     [...invalidated].forEach((reset) => reset(message));
   }, [invalidated]);
   const readers = useRef(new Set()).current;

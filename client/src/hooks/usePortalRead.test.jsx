@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import usePortalRead, { PortalReadProvider, usePortalRefresh } from './usePortalRead';
 import { PortalRefreshArea } from '../components/portal/PortalRefresh';
-import { HOME_READS_KEY, homeIdentityKey, writeHomeRead } from '../lib/homeSnapshot';
+import { HOME_READS_KEY, HOME_SNAPSHOT_KEY, homeIdentityKey, readHomeSnapshot, writeHomeRead, writeHomeSnapshot } from '../lib/homeSnapshot';
 
 const native = vi.hoisted(() => ({ enabled: false, callback: null, remove: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../native/platform', () => ({ isNativeApp: () => native.enabled }));
@@ -519,5 +519,16 @@ describe('saved home reads', () => {
     await act(async () => { release({ next: { id: 'x', serviceType: 'Wrong Login Visit' } }); });
     expect(screen.getByTestId('next-visit').textContent).toContain('Wrong Login Visit');
     expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('a denied read also deletes the saved account, so an offline relaunch adopts nothing', async () => {
+    seed();
+    const me = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', actor: { kind: 'holder' }, cancelled: false };
+    expect(writeHomeSnapshot({ token: TOKEN, requestIdentity: identity, me, propertyPayload: { scope: 'saved', properties: [], selected: null } })).toBe(true);
+    expect(readHomeSnapshot(TOKEN)).not.toBeNull();
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 401 }); }} lastLoad={never} otherLoad={never} />);
+    await waitFor(() => expect(localStorage.getItem(HOME_READS_KEY)).toBeNull());
+    expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
+    expect(readHomeSnapshot(TOKEN)).toBeNull();
   });
 });

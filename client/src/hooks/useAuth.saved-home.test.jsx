@@ -24,7 +24,7 @@ vi.mock('../utils/api', () => ({
     getAuthProperties: vi.fn(),
     selectAuthProperty: vi.fn(),
     verifyCode: vi.fn(),
-    setTokens: vi.fn(function setTokens(token, refreshToken) { this.token = token; this.refreshToken = refreshToken; }),
+    setTokens: vi.fn(function setTokens(token, refreshToken) { this.token = token; this.refreshToken = refreshToken; localStorage.setItem('waves_token', token); }),
     adoptTokens: vi.fn(function adoptTokens(token, refreshToken) { this.token = token; this.refreshToken = refreshToken; }),
     clearTokens: vi.fn(function clearTokens() { this.token = null; this.refreshToken = null; localStorage.removeItem('waves_token'); }),
     request: vi.fn(async () => ({ success: true })),
@@ -444,5 +444,97 @@ describe('saved home screen at launch', () => {
     expect(text('loading')).toBe('true');
     expect(authApi.propertiesError).toBeNull();
     expect(api.getMe).toHaveBeenCalledTimes(2);
+  });
+
+  describe('holding the saved screen until the winning property read', () => {
+    it('an older list read that loses to a reconnect read does not release the hold; the winner does', async () => {
+      seedSnapshot();
+      let releaseOlder;
+      let releaseWinner;
+      api.getMe.mockResolvedValueOnce(FRESH_ME);
+      api.getAuthProperties
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseOlder = resolve; }))
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseWinner = resolve; }));
+      await mount();
+      expect(text('name')).toBe('Pat Fresh');
+      await act(async () => { void authApi.refreshProperties(); });
+      await act(async () => { releaseOlder(PROPS); });
+      expect(text('saved')).toBe('true');
+      await act(async () => { releaseWinner(PROPS); });
+      expect(text('saved')).toBe('false');
+    });
+
+    it('a reconnect read that wins before the fresh /auth/me lands does not unlock the saved account', async () => {
+      seedSnapshot();
+      let releaseMe;
+      api.getMe.mockImplementationOnce(() => new Promise((resolve) => { releaseMe = resolve; }));
+      await mount();
+      await act(async () => { await authApi.refreshProperties(); });
+      expect(text('saved')).toBe('true');
+      expect(text('name')).toBe('Pat Saved');
+      await act(async () => { releaseMe(FRESH_ME); });
+      expect(text('saved')).toBe('false');
+      expect(text('name')).toBe('Pat Fresh');
+    });
+
+    it('a winning reconnect read that FAILS over a fresh /auth/me still releases the hold, with the /auth/me fallback', async () => {
+      seedSnapshot();
+      let releaseOlder;
+      api.getMe.mockResolvedValueOnce({ ...FRESH_ME, propertyScope: { enabled: true, propertyId: 'p9' } });
+      api.getAuthProperties
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseOlder = resolve; }))
+        .mockRejectedValueOnce(new Error('offline'));
+      await mount();
+      await act(async () => { await authApi.refreshProperties(); });
+      expect(text('saved')).toBe('false');
+      expect(text('selected')).toBe('cust-1:p9');
+      await act(async () => { releaseOlder(PROPS); });
+      expect(text('selected')).toBe('cust-1:p9');
+    });
+  });
+
+  it('a stored token that was removed (a sign-out in another tab, event not yet run) discards the answer and signs out', async () => {
+    seedSnapshot();
+    let releaseMe;
+    api.getMe.mockImplementationOnce(() => new Promise((resolve) => { releaseMe = resolve; }));
+    await mount();
+    const { flushNativePushToken } = await import('../native/nativePush');
+    flushNativePushToken.mockClear();
+    localStorage.removeItem('waves_token');
+    await act(async () => { releaseMe({ ...FRESH_ME, lastName: 'GoneLogin' }); });
+    expect(text('name')).toBe('');
+    expect(text('saved')).toBe('false');
+    expect(text('loading')).toBe('false');
+    expect(authApi.isAuthenticated).toBe(false);
+    expect(api.clearTokens).toHaveBeenCalled();
+    expect(savedSnapshot()).toBeNull();
+    expect(flushNativePushToken).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403])('a %i from /auth/properties after /auth/me succeeded is a session denial: sign out and delete the saved screen', async (status) => {
+    seedSnapshot();
+    api.getMe.mockResolvedValueOnce(FRESH_ME);
+    api.getAuthProperties.mockRejectedValueOnce(Object.assign(new Error('denied'), { status }));
+    const { flushNativePushToken } = await import('../native/nativePush');
+    flushNativePushToken.mockClear();
+    await mount();
+    expect(api.clearTokens).toHaveBeenCalled();
+    expect(text('name')).toBe('');
+    expect(text('saved')).toBe('false');
+    expect(text('loading')).toBe('false');
+    expect(authApi.isAuthenticated).toBe(false);
+    expect(savedSnapshot()).toBeNull();
+    expect(authApi.propertiesError).toBeNull();
+    expect(flushNativePushToken).not.toHaveBeenCalled();
+  });
+
+  it('a transient /auth/properties failure still keeps the session (fallback, not sign-out)', async () => {
+    seedSnapshot();
+    api.getMe.mockResolvedValueOnce(FRESH_ME);
+    api.getAuthProperties.mockRejectedValueOnce(new Error('offline'));
+    await mount();
+    expect(api.clearTokens).not.toHaveBeenCalled();
+    expect(text('name')).toBe('Pat Fresh');
+    expect(authApi.propertiesError).toBeTruthy();
   });
 });

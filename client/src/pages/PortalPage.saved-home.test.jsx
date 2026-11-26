@@ -189,4 +189,16 @@ describe('saved home screen in the portal', () => {
     await waitFor(() => expect(api.getBalance).toHaveBeenCalled());
     for (const read of ['getBalance', 'getServiceStats', 'getAutopay', 'getReferrals']) expect(api[read]).toHaveBeenCalledTimes(1);
   });
+
+  it('holds the floating Waves Chat pill while saved and offers it once the account is fresh', async () => {
+    api.getPortalMessagesUnread.mockResolvedValue({ count: 0 });
+    const { rerender } = view();
+    await screen.findByText(/hello pat/i);
+    await waitFor(() => expect(api.getPortalMessagesUnread).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /Waves Chat/ })).not.toBeInTheDocument();
+    auth.saved = false;
+    auth.customer = FRESH_CUSTOMER;
+    rerender(<BrowserRouter><PortalPage /></BrowserRouter>);
+    expect(await screen.findByRole('button', { name: /Waves Chat/ })).toBeInTheDocument();
+  });
 });

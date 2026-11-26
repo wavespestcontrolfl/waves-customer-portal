@@ -18417,7 +18417,9 @@ export default function PortalPage() {
   const photoIdAvailable = photoIdGate.status === 'available' && !cancelledAccount && !contactSession;
   // Waves Chat pill: the Messages thread (never probed for a cancelled or
   // contact session, so `enabled` is already false there).
-  const chatAvailable = messagesGate.enabled;
+  // Held with the Messages tab while the saved home screen shows (customerSaved):
+  // the same thread must not open from the floating pill before fresh data lands.
+  const chatAvailable = messagesGate.enabled && !customerSaved;
   // reportIssuePrefill lives here, above the keyed PortalReadProvider, so a
   // property/account switch (sessionEpoch — another tab, or this one) does
   // NOT clear it on its own. Left alone, a still-open Photo ID handoff would
