@@ -416,7 +416,7 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       // A row this IS a follow-up child of (Codex r3 P1, PR #5049) — see
       // resolveCompletionDefaultProductNames' own isFollowup doc above.
       // A later visit of a package booked up front counts too (protocol-package-stage.js).
-      isFollowup: !!scheduled.followup_source_service_id || await isLaterPackageVisit(db, scheduled),
+      isFollowup: !!scheduled.followup_source_service_id || await isLaterPackageVisit(db, scheduled, { protocols: protocolSet }),
     });
 
     let holds = [];

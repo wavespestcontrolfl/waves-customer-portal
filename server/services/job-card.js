@@ -631,7 +631,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     serviceKey: svc.service_key || null,
     // Booked as a follow-up of a finished visit, or a later visit of a package booked up front: the card is the program's
     // follow-up card, not the first visit's.
-    isFollowup: svc.followup_source_service_id != null || await isLaterPackageVisit(dbh, svc),
+    isFollowup: svc.followup_source_service_id != null || await isLaterPackageVisit(dbh, svc, { protocols: deps.protocols }),
     // What the estimate sold for an area add-on that IS this visit (null for any other visit).
     areaAddOnScope: soldScopeOf(svc.area_addon_scope),
     serviceLine,
@@ -2395,7 +2395,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   const lawnAddon = addons.find((a) => a.programKey === 'lawn')?.addon || null;
   const found = (line, owners = []) => ({ line, treatment, primaryIsLawn, lawnAddon, owners });
   // The card's own follow-up rule (loadJobCardFacts): a booked follow-up, or a later visit of a package booked up front.
-  const isFollowup = svc.followup_source_service_id != null || await isLaterPackageVisit(dbh, { ...svc, id: serviceId });
+  const isFollowup = svc.followup_source_service_id != null || await isLaterPackageVisit(dbh, { ...svc, id: serviceId }, { protocols: deps.protocols });
   const candidates = [
     ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null, isFollowup }] : []),
     ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),

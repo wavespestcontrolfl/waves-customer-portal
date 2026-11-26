@@ -848,13 +848,13 @@ async function matchForBookedVisit(req, protocols, serviceType) {
     ? await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id }))
       .leftJoin('services', 'scheduled_services.service_id', 'services.id')
       .first(
-        'scheduled_services.id', 'scheduled_services.service_type', 'scheduled_services.scheduled_date',
+        'scheduled_services.id',
         'scheduled_services.followup_source_service_id', 'scheduled_services.recurring_parent_id', 'scheduled_services.recurring_ongoing',
         db.raw('COALESCE(scheduled_services.service_key_snapshot, services.service_key) as service_key'),
       )
     : null;
   const match = matchServiceProtocol(protocols, serviceType, { serviceKey: visit?.service_key || null, month: req.query.month || null });
-  return followupVisitMatch(match, visit?.followup_source_service_id != null || await isLaterPackageVisit(db, visit));
+  return followupVisitMatch(match, visit?.followup_source_service_id != null || await isLaterPackageVisit(db, visit, { protocols }));
 }
 
 // GET /api/admin/protocols/match — best service template plus full program fallback.
