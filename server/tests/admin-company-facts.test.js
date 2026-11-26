@@ -92,6 +92,12 @@ describe('approve is the owner account only', () => {
     expect(mockBank.approveFact).toHaveBeenCalledWith(ID, { ownerWords: 'ok 11-25', acknowledgeWarnings: true }, { id: 'bbbbbbbb-0000-4000-8000-000000000001', isOwner: true });
   });
 
+  test('the list tells the page whether to show Approve: true for the owner account only', async () => {
+    expect((await call(url())).body.viewer).toEqual({ ownerActions: true });
+    mockEmail = 'someone.else@example.test';
+    expect((await call(url())).body.viewer).toEqual({ ownerActions: false });
+  });
+
   test('a blocked approve answers 422 with the codes', async () => {
     mockBank.approveFact.mockRejectedValueOnce(new FactError('BLOCKED', 422, { blocks: ['banned_copy'], warnings: [] }));
     const res = await call(url(`/${ID}/approve`), 'POST', {});
@@ -113,7 +119,7 @@ describe('any admin may draft, edit, discard, retire and restore', () => {
     expect((await call(url('?status=draft'))).status).toBe(200);
     expect(mockBank.listFacts).toHaveBeenCalledWith({ status: 'draft' });
     const paged = await call(url('?status=all&limit=50&cursor=abc'));
-    expect(paged.body).toEqual({ facts: [], nextCursor: null });
+    expect(paged.body).toEqual({ facts: [], nextCursor: null, viewer: { ownerActions: false } });
     expect(mockBank.listFacts).toHaveBeenLastCalledWith({ status: 'all', limit: '50', cursor: 'abc' });
     expect((await call(url(`/${ID}`), 'PATCH', { factText: 'x' })).body.fact.id).toBe('f2');
     expect((await call(url(`/${ID}`), 'DELETE')).body).toEqual({ id: 'f1', discarded: true });

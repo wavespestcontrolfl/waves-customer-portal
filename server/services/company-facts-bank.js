@@ -601,7 +601,8 @@ async function getFact(id, { dbi = db } = {}) {
 
 /** Every event of one fact, oldest first. Also answers for a discarded draft (events outlive the row). */
 async function factHistory(id, { dbi = db } = {}) {
-  return dbi('company_fact_bank_events').where({ fact_id: id }).orderBy([{ column: 'at', order: 'asc' }, { column: 'id', order: 'asc' }]).select('*');
+  return dbi('company_fact_bank_events as e').leftJoin('technicians as t', 't.id', 'e.actor_id').where('e.fact_id', id)
+    .orderBy([{ column: 'e.at', order: 'asc' }, { column: 'e.id', order: 'asc' }]).select('e.*', 't.name as actor_name');
 }
 
 /* ── Snapshot ─────────────────────────────────────────────────────────── */

@@ -299,6 +299,43 @@ describe('approve is owner only in the service too', () => {
   });
 });
 
+// The admin page (client/src/pages/admin/knowledge-base/company-facts/factHash.js) sends SHA-256 hex of the UTF-8 bytes of the text it
+// shows, trimmed. These are the same vectors and digests as factHash.test.js there: both suites passing means the two agree.
+describe('the reviewed text hash the page sends', () => {
+  const VECTORS = [
+    ['We service Parrish.', 'c57a55f5bdf7d857dde8598b504227e47e0884a02575db5b0e3d4bd3e79e0844'],
+    ['  We service Parrish.  \n', 'c57a55f5bdf7d857dde8598b504227e47e0884a02575db5b0e3d4bd3e79e0844'],
+    ['Café opens early — niño, naïve, 日本語, 🦟 bugs.', 'c185faf759bc6a38d33c76975557af29856c3c47e8e4af1003ec6d846f09a311'],
+    ['', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'],
+    ['Tab\tinside', 'a8341bbb0dbef7ce24463a17edf0b5cb2b649f8baf6720de50ca6011d1337859'],
+    ['\u00a0nbsp edge\u00a0', 'cf76e3929646075b6442b7da2805bad8930fdae9a258df83eac09a64e3ff0b66'],
+    ['a\u200bb', '8df62aef5f92e4c30c0c938497f55f60078c361a476e7e0448485194ad79f884'],
+    ['e\u0301 vs \u00e9', '832caca12d18b70335221a2f851239bcaf2705d20438fbd146adffdf6099865d'],
+  ];
+  const ID = '00000000-0000-4000-8000-000000000001';
+  const owner = { id: 'o1', isOwner: true };
+
+  // A fake transaction that serves the locked row, then fails the first check read (CATALOG_UNAVAILABLE): getting that far means the hash gate passed.
+  const dbFor = (text) => {
+    const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(String(text).trim()) };
+    const trx = (table) => {
+      if (table !== 'company_fact_bank') throw new Error('past the hash gate');
+      return { where: () => ({ forUpdate: () => ({ first: async () => row }) }) };
+    };
+    trx.raw = async () => ({});
+    return { transaction: (work) => work(trx) };
+  };
+
+  test.each(VECTORS)('the page hash of %j is the hash the server computes', (text, digest) => {
+    expect(sha256(String(text).trim())).toBe(digest);
+  });
+
+  test.each(VECTORS.filter(([text]) => text.trim()))('approve accepts the page hash of %j and refuses another wording', async (text, digest) => {
+    await expect(Bank.approveFact(ID, { textSha256: digest }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+    await expect(Bank.approveFact(ID, { textSha256: VECTORS[3][1] }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_TEXT' });
+  });
+});
+
 describe('snapshot', () => {
   const approved = (n, text, over = {}) => ({
     id: `00000000-0000-4000-8000-00000000000${n}`, topic: `Topic ${n}`, fact_text: text, text_sha256: sha256(text), approved_at: new Date(2026, 10, 25, 10, n), approved_by: OWNER, ...over,

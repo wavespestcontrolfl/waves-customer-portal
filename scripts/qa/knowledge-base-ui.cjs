@@ -36,7 +36,15 @@ async function main() {
         if (!url.pathname.startsWith('/api/')) return route.continue();
         let body, status = 200;
         const payload = request.postData() ? request.postDataJSON() : null;
-        if (/^\/api\/admin\/(kb|wiki)(\/|$)/.test(url.pathname)) {
+        if (url.pathname.startsWith('/api/admin/company-facts')) {
+          // Synthetic company facts: one draft for Drafts, one approved line, and an empty history. The owner account sees Approve.
+          report.requests.push({ name, method, path: url.pathname, search: url.search, body: payload });
+          const state = url.searchParams.get('status');
+          const facts = { draft: [{ id: '11111111-1111-4111-8111-111111111111', topic: 'Fixture company fact', fact_text: 'We service the fixture area.', status: 'draft', check_result: { blocks: [], warnings: [] }, created_at: '2026-11-25T15:00:00Z' }], approved: [], retired: [] }[state] || [];
+          if (url.pathname.endsWith('/history')) body = { events: [] };
+          else if (method === 'GET') body = { facts, nextCursor: null, viewer: { ownerActions: fixtureRole === 'admin' } };
+          else { report.unmatched.push(`${method} ${url.pathname}`); status = 404; body = {}; }
+        } else if (/^\/api\/admin\/(kb|wiki)(\/|$)/.test(url.pathname)) {
           report.requests.push({ name, method, path: url.pathname, search: url.search, body: payload });
           assert.equal(request.headers().authorization, 'Bearer synthetic-local-token');
           if (method !== 'GET') await new Promise((resolve) => setTimeout(resolve, 200));
@@ -89,12 +97,13 @@ async function main() {
         await page.setViewportSize({ width: touch ? 390 : 1440, height: 900 });
         await page.waitForTimeout(300);
       }
-      for (const tab of ['browse', 'create', 'field', 'audit', 'tokens']) {
+      for (const tab of ['browse', 'create', 'field', 'audit', 'tokens', 'company-facts']) {
         await page.goto(`${server.baseUrl}/admin/knowledge?area=base&source=fixture&kbTab=${tab}`);
         await page.getByRole('heading', { name: 'Knowledge base', exact: true }).waitFor(); await waitForFonts(page);
         if (tab === 'browse') await page.getByText(entryFixture.title, { exact: true }).waitFor();
         if (tab === 'field') await page.getByText(wikiFixture.title, { exact: true }).first().waitFor();
         if (tab === 'tokens') await page.getByText('Fixture integration', { exact: true }).waitFor();
+        if (tab === 'company-facts') await page.getByText('Fixture company fact', { exact: true }).waitFor();
         await measure(tab); await screenshot(tab);
       }
       const requests = (method, requestPath) => report.requests.filter((entry) => entry.name === name && entry.method === method && entry.path === requestPath);

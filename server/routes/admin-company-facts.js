@@ -2,10 +2,11 @@
  * Admin API for the company facts bank (owner 2026-11-25; services/company-facts-bank.js holds every rule).
  *
  *   GET    /                list, ?status=draft|approved|retired|all, ?limit=1..500 (default 500), ?cursor=<nextCursor>; newest first,
- *                           answers { facts, nextCursor } (nextCursor null on the last page)
+ *                           answers { facts, nextCursor, viewer: { ownerActions } } (nextCursor null on the last page; ownerActions
+ *                           is true for the owner account only, so the page can hide Approve)
  *   POST   /                add a draft { topic, factText, question?, ownerWords?, source?, sourceRef? }
  *   GET    /:id             one fact
- *   GET    /:id/history     its events, oldest first
+ *   GET    /:id/history     its events, oldest first, each with actor_name (the staff member's name, null when gone)
  *   PATCH  /:id             edit a draft in place; an edit of an approved fact makes a NEW draft that supersedes it
  *   DELETE /:id             discard a draft
  *   POST   /:id/approve     OWNER ACCOUNT ONLY (requireFullAccess); { textSha256 (the hash the page showed; 409 STALE_TEXT
@@ -49,7 +50,11 @@ const handle = (where, { needsId = true, status = 200 } = {}, run) => async (req
 
 const withCheck = (fact) => ({ fact, check: fact.check_result || null });
 
-router.get('/', handle('list', { needsId: false }, (req) => Bank.listFacts({ status: req.query.status, limit: req.query.limit, cursor: req.query.cursor })));
+// `viewer.ownerActions` tells the page whether to show Approve (the same shape admin-careers gives its offer panel); the server still refuses everyone else.
+router.get('/', handle('list', { needsId: false }, async (req, actor) => ({
+  ...(await Bank.listFacts({ status: req.query.status, limit: req.query.limit, cursor: req.query.cursor })),
+  viewer: { ownerActions: actor.isOwner },
+})));
 
 router.post('/', handle('create', { needsId: false, status: 201 }, async (req, actor) => withCheck(await Bank.createDraft(req.body, actor))));
 

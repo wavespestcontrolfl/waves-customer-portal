@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
-import { BookOpen, Brain, Gauge, Plus, ShieldCheck, Sprout } from "lucide-react";
+import { BookOpen, Brain, Gauge, ListChecks, Plus, ShieldCheck, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { ActionFeedback, UiSurface } from "../../components/ui";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
@@ -8,16 +8,17 @@ import { getAdminUser } from "../../lib/adminAuth";
 import { adminFetch } from "../../utils/admin-fetch";
 import AuditTab from "./knowledge-base/AuditTab";
 import BrowseTab from "./knowledge-base/BrowseTab";
+import CompanyFactsTab from "./knowledge-base/company-facts/CompanyFactsTab";
 import CreateTab from "./knowledge-base/CreateTab";
 import FieldIntelligenceTab from "./knowledge-base/FieldIntelligenceTab";
 import KnowledgeBaseStats from "./knowledge-base/KnowledgeBaseStats";
 import TokensTab from "./knowledge-base/TokensTab";
 
-const KB_TAB_KEYS = new Set(["browse", "create", "field", "audit", "tokens"]);
+const KB_TAB_KEYS = new Set(["browse", "create", "field", "audit", "tokens", "company-facts"]);
 
 // The knowledge base is READ-ONLY for a technician (staff allow-list,
-// 2026-10-02): Create, Audit and Tokens need admin-only routes.
-const OWNER_ONLY_KB_TABS = ["create", "audit", "tokens"];
+// 2026-10-02): Create, Audit, Tokens and Company facts need admin-only routes.
+const OWNER_ONLY_KB_TABS = ["create", "audit", "tokens", "company-facts"];
 
 function knowledgeBaseTabs(isAdminRole) {
   const tabs = [
@@ -37,6 +38,7 @@ function knowledgeBaseTabs(isAdminRole) {
     tabs.push(
       { key: "audit", label: "Audit", Icon: ShieldCheck },
       { key: "tokens", label: "Tokens", Icon: Gauge },
+      { key: "company-facts", label: "Company facts", Icon: ListChecks },
     );
   }
   return isAdminRole
@@ -130,7 +132,7 @@ export default function KnowledgeBasePage({ embedded = false }) {
         headingLevel={embedded ? 2 : 1}
         sticky={!embedded}
         variant="workspace"
-        navGridClassName="grid-cols-2 md:grid-cols-5"
+        navGridClassName={tabs.length > 5 ? "grid-cols-2 md:grid-cols-6" : "grid-cols-2 md:grid-cols-5"}
       />
 
       {feedback && (
@@ -180,6 +182,9 @@ export default function KnowledgeBasePage({ embedded = false }) {
       )}
       {tab === "tokens" && (
         <TokensTab showFeedback={showFeedback} />
+      )}
+      {tab === "company-facts" && (
+        <CompanyFactsTab showFeedback={showFeedback} />
       )}
     </UiSurface>
   );
