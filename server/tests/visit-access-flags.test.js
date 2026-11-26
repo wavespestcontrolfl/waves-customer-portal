@@ -27,6 +27,7 @@ const { randomUUID } = require('crypto');
 const statesMigration = require('../models/migrations/20261003140000_visit_access_states');
 const verdictsMigration = require('../models/migrations/20261126170000_visit_access_verdicts');
 const flags = require('../services/visit-access-flags');
+const { lockVisitAccess } = jest.requireActual('../services/typed-decisions/visit-access-shadow');
 
 jest.setTimeout(60000);
 
@@ -90,11 +91,13 @@ describe('visit access flags: the quote a technician reads', () => {
   let lastHash;
 
   const visit = () => ({ id: visitId, customer_id: customerId });
-  // One stored state and its rows: answers = { provider: { question: boolean } }, unlisted = no.
-  async function seed({ state = { recent_texts: '- Our dog Biscuit will be in the yard' }, answers = { typesafe: { dog_on_property: true } }, at = new Date('2026-10-06T10:00:00Z') } = {}) {
+  // One stored state for a customer, with the providers' answers on it ({ provider: { question: boolean } },
+  // unlisted = no) and, beside it, the review rows the sweep would have recorded.
+  async function seed({ state = { recent_texts: '- Our dog Biscuit will be in the yard' }, answers = { typesafe: { dog_on_property: true } }, at = new Date('2026-10-06T10:00:00Z'), customer = customerId } = {}) {
     seq += 1;
     const hash = `${String(seq).padStart(2, '0')}`.padEnd(64, 'a');
-    await database('visit_access_states').insert({ scheduled_service_id: visitId, subject_hash: hash, state: JSON.stringify(state), created_at: at });
+    const onState = Object.fromEntries(Object.entries(answers).map(([provider, said]) => [provider, Object.fromEntries(QUESTIONS.map((q) => [q, Boolean(said[q])]))]));
+    await database('visit_access_states').insert({ scheduled_service_id: visitId, subject_hash: hash, state: JSON.stringify(state), customer_id: customer, answers: JSON.stringify(onState), created_at: at });
     for (const [provider, said] of Object.entries(answers)) {
       for (const q of QUESTIONS) {
         await database('decision_reviews').insert({
@@ -109,6 +112,7 @@ describe('visit access flags: the quote a technician reads', () => {
   const tap = (questionId, verdict, over = {}) => flags.tapAccessFlag(database, {
     visitId, scope: (q) => q, questionId, verdict, subjectHash: lastHash, ...over,
   }, who);
+  const lock = async () => { const holder = await database.transaction(); await lockVisitAccess(holder, visitId); return holder; };
   const verdicts = () => database('visit_access_verdicts').where({ scheduled_service_id: visitId }).orderBy('created_at');
   const pets = () => database('property_preferences').where({ customer_id: customerId }).first();
   const unlabeled = async () => Number((await database('decision_reviews').where({ subject_id: visitId, label_status: 'unreviewed' }).count('* as n').first()).n);
@@ -177,7 +181,7 @@ describe('visit access flags: the quote a technician reads', () => {
     await seed({ answers: { typesafe: { dog_on_property: true }, cloudflare: { dog_on_property: false } } });
     const before = await reviewCount();
     await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'right', saved: true });
-    expect(await verdicts()).toMatchObject([{ question_id: 'dog_on_property', subject_hash: lastHash, verdict: 'right', technician_id: techId }]);
+    expect(await verdicts()).toMatchObject([{ question_id: 'dog_on_property', subject_hash: lastHash, verdict: 'right', technician_id: techId, customer_id: customerId }]);
     // decision_reviews is exactly as the sweep left it
     expect(await reviewCount()).toBe(before);
     expect(await unlabeled()).toBe(before);
@@ -324,5 +328,61 @@ describe('visit access flags: the quote a technician reads', () => {
     expect(first).toBe('waiting');
     await holder.commit();
     await expect(move).resolves.toBe('moved');
+  });
+
+  test('evidence belongs to the customer it was built for: a visit whose customer changed, or a legacy state with no customer, shows nothing and takes no tap', async () => {
+    await seed({ answers: { typesafe: { dog_on_property: true } } });
+    expect(await flags.accessFlagsFor(database, visit())).toHaveLength(1);
+    // a customer merge or undo changes the visit's customer; the visit id stays
+    const other = { id: visitId, customer_id: randomUUID() };
+    await expect(flags.accessFlagsFor(database, other)).resolves.toEqual([]);
+    await expect(flags.tapAccessFlag(database, { visitId, scope: (q) => q, questionId: 'dog_on_property', verdict: 'right', subjectHash: lastHash }, who)).resolves.toMatchObject({ saved: true });
+    await database('visit_access_verdicts').del();
+    await database('property_preferences').del();
+    await database('scheduled_services').update({ customer_id: other.customer_id });
+    await expect(tap('dog_on_property', 'right')).resolves.toEqual({ conflict: true });
+    expect(await verdicts()).toEqual([]);
+    expect(await pets()).toBeUndefined();
+    // a row stored before the column existed names no one
+    await database('scheduled_services').update({ customer_id: customerId });
+    await database('visit_access_states').update({ customer_id: null });
+    await expect(flags.accessFlagsFor(database, visit())).resolves.toEqual([]);
+    await expect(tap('dog_on_property', 'right')).resolves.toEqual({ conflict: true });
+  });
+
+  test('a Right given for another customer never carries to this one', async () => {
+    await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T09:00:00Z') });
+    await database('visit_access_verdicts').insert({ scheduled_service_id: visitId, customer_id: randomUUID(), question_id: 'dog_on_property', subject_hash: lastHash, verdict: 'right' });
+    await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T10:00:00Z') });
+    expect((await flags.accessFlagsFor(database, visit()))[0]).toMatchObject({ questionId: 'dog_on_property', status: 'open' });
+  });
+
+  test('eligibility comes from the answers on the state, never the review rows a label preserves', async () => {
+    await seed({ answers: { typesafe: { dog_on_property: true } } });
+    // reviewers confirmed and then removed every review row: the card does not depend on them
+    await database('decision_reviews').update({ label_status: 'confirmed_correct' });
+    expect(await flags.accessFlagsFor(database, visit())).toHaveLength(1);
+    await database('decision_reviews').del();
+    expect(await flags.accessFlagsFor(database, visit())).toHaveLength(1);
+    // and a state with no answers yet (written, not yet answered) shows nothing
+    await database('visit_access_states').update({ answers: null });
+    expect(await flags.accessFlagsFor(database, visit())).toEqual([]);
+  });
+
+  test('a tap waits for the lock a sweep holds while it publishes a state, so the digest it checked is still current at commit', async () => {
+    await seed();
+    const holder = await lock();
+    let settled = false;
+    const racing = tap('dog_on_property', 'right').then((value) => { settled = true; return value; });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(settled).toBe(false);
+    // the sweep publishes a newer state while the tap waits, then lets go
+    const newer = `99`.padEnd(64, 'b');
+    await holder('visit_access_states').insert({ scheduled_service_id: visitId, subject_hash: newer, state: '{}', customer_id: customerId, answers: '{}' });
+    await holder.commit();
+    await expect(racing).resolves.toEqual({ conflict: true });
+    expect(await verdicts()).toEqual([]);
+    expect(await pets()).toBeUndefined();
+    expect(newer).toHaveLength(64);
   });
 });

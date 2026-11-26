@@ -303,28 +303,31 @@ function AccessFlagCard({ flag, serviceId, request, onChanged }) {
   );
 }
 
-// Flags are per visit; a grouped stop shows each question once, from the first member that has it. Each flag keeps the
-// visit it was read for, which is the visit its tap goes to.
+// Flags are per visit and each visit keeps its own evidence and verdict, so a grouped stop lists every service's flags
+// under its own label: a confirmed flag on one service never hides an open one on a sibling.
 function collectAccessFlags(services, byService) {
-  const out = [];
-  for (const s of services) {
-    const list = byService[s.id]?.brief?.accessFlags;
-    for (const flag of Array.isArray(list) ? list : []) {
-      if (flag?.questionId && !out.some((f) => f.questionId === flag.questionId)) out.push({ ...flag, serviceId: s.id });
-    }
-  }
-  return out;
+  return services
+    .map((service) => {
+      const list = byService[service.id]?.brief?.accessFlags;
+      return { service, flags: (Array.isArray(list) ? list : []).filter((flag) => flag?.questionId) };
+    })
+    .filter((member) => member.flags.length);
 }
 
-function AccessFlagsSection({ flags, request, onChanged }) {
-  if (!request || !flags.length) return null;
+function AccessFlagsSection({ members, grouped, request, onChanged }) {
+  if (!request || !members.length) return null;
   return (
     <div data-testid="visit-brief-access-flags">
       <div style={{ ...sectionLabelStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
         <span>Before you go in</span>
         <span style={{ fontWeight: 400, color: DARK.muted }}>Read by AI</span>
       </div>
-      {flags.map((f) => <AccessFlagCard key={`${f.serviceId}:${f.questionId}:${f.subjectHash}`} flag={f} serviceId={f.serviceId} request={request} onChanged={onChanged} />)}
+      {members.map(({ service, flags }) => (
+        <div key={service.id}>
+          <MemberLabel service={service} show={grouped} />
+          {flags.map((f) => <AccessFlagCard key={`${service.id}:${f.questionId}:${f.subjectHash}`} flag={f} serviceId={service.id} request={request} onChanged={onChanged} />)}
+        </div>
+      ))}
     </div>
   );
 }
@@ -1398,7 +1401,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         />
       )}
       {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
-      <AccessFlagsSection flags={accessFlags} request={request} onChanged={onRetry} />
+      <AccessFlagsSection members={accessFlags} grouped={stop.services.length > 1} request={request} onChanged={onRetry} />
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
       {request && fertilizerVisits.map(member => <div key={member.id}>
         {fertilizerVisits.length > 1 && <strong>{member.serviceType || member.service_type}</strong>}

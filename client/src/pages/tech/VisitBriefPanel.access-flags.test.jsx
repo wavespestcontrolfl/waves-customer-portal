@@ -150,4 +150,32 @@ describe('Visit Brief: Before you go in', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Network down'));
     expect(screen.getByRole('button', { name: 'Wrong' })).not.toBeDisabled();
   });
+
+  it('a grouped stop keeps each service\'s own flags: a confirmed flag on one never hides an open one on its sibling', async () => {
+    const lawn = { ...SERVICE, id: 'svc-2', serviceType: 'Lawn Care' };
+    const grouped = { key: 'row:svc-1', isVisit: true, services: [SERVICE, lawn], primary: SERVICE, liveCount: 2 };
+    const request = vi.fn(async () => ({ status: 'wrong' }));
+    render(
+      <VisitBriefPanel
+        stop={grouped}
+        detail={{
+          status: 'ready',
+          byService: {
+            'svc-1': { estimate: null, brief: { brief: null, accessFlags: [{ ...DOG, status: 'right' }] } },
+            'svc-2': { estimate: null, brief: { brief: null, accessFlags: [{ ...DOG, subjectHash: 'c'.repeat(64) }] } },
+          },
+        }}
+        request={request}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />,
+    );
+    const section = screen.getByTestId('visit-brief-access-flags');
+    expect(section).toHaveTextContent('Quarterly Pest Control');
+    expect(section).toHaveTextContent('Lawn Care');
+    expect(screen.getAllByTestId('access-flag-dog_on_property')).toHaveLength(2);
+    expect(screen.getByText('Marked right. Thanks.')).toBeInTheDocument();
+    // the sibling is still open, and its tap goes to its own visit with its own evidence
+    fireEvent.click(screen.getByRole('button', { name: 'Wrong' }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith('/admin/schedule/svc-2/access-flags/dog_on_property', { method: 'POST', body: JSON.stringify({ verdict: 'wrong', subjectHash: 'c'.repeat(64) }) }));
+  });
 });

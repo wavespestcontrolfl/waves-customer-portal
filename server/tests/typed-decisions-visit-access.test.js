@@ -140,7 +140,7 @@ describe('visit access shadow: rules that need no database', () => {
     .first('s.*', 'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2', 'c.zip as customer_zip', 'c.city as customer_city', 'c.has_multi_home'), database);
 
   beforeAll(async () => {
-    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
+    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 4 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
     await database.raw(`CREATE TABLE ??.customers (id uuid PRIMARY KEY, deleted_at timestamptz, address_line1 text, address_line2 text, zip text, city text, has_multi_home boolean)`, [schema]);
     await database.raw(`CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY, customer_id uuid, service_type varchar(200),
@@ -187,16 +187,20 @@ describe('visit access shadow: rules that need no database', () => {
 
   test('the verdicts table takes one verdict per visit, question and evidence, only right or wrong, and its down drops it', async () => {
     const visitId = await visit();
-    const row = { scheduled_service_id: visitId, question_id: 'dog_on_property', subject_hash: 'a'.repeat(64), verdict: 'right' };
+    const row = { scheduled_service_id: visitId, customer_id: customerId, question_id: 'dog_on_property', subject_hash: 'a'.repeat(64), verdict: 'right' };
     await database('visit_access_verdicts').insert(row);
     await expect(database('visit_access_verdicts').insert({ ...row, verdict: 'wrong' })).rejects.toThrow(/uniq/);
     await expect(database('visit_access_verdicts').insert({ ...row, subject_hash: 'b'.repeat(64), verdict: 'maybe' })).rejects.toThrow(/verdict_check/);
     await database('visit_access_verdicts').insert({ ...row, subject_hash: 'b'.repeat(64), verdict: 'wrong' });
+    await expect(database('visit_access_verdicts').insert({ ...row, customer_id: null, subject_hash: 'c'.repeat(64) })).rejects.toThrow(/customer_id/);
     await verdictsMigration.up(database); // a second run changes nothing
     expect(await database('visit_access_verdicts').where({ scheduled_service_id: visitId })).toHaveLength(2);
     await verdictsMigration.down(database);
     expect(await database.schema.hasTable('visit_access_verdicts')).toBe(false);
+    expect(await database.schema.hasColumn('visit_access_states', 'answers')).toBe(false);
+    expect(await database.schema.hasColumn('visit_access_states', 'customer_id')).toBe(false);
     await verdictsMigration.up(database);
+    expect(await database.schema.hasColumn('visit_access_states', 'answers')).toBe(true);
   });
 
   test('the migration keeps a value another migration added, and its down refuses while a visit row exists', async () => {
@@ -397,6 +401,55 @@ describe('visit access shadow: rules that need no database', () => {
     await database('customers').where({ id: customerId }).update({ has_multi_home: true });
     expect(await build(home)).toBeNull();
     await database('customers').where({ id: customerId }).update({ has_multi_home: false });
+  });
+
+  test('new evidence is answered even when every older review row is labeled: the state row carries the current answers and the card shows', async () => {
+    const home = await visit({ service_address_line1: '100 Example Street', service_address_zip: '34200', service_address_city: 'Bradenton' });
+    await sweep();
+    const before = await database('visit_access_states').where({ scheduled_service_id: home }).first();
+    expect(before).toMatchObject({ customer_id: customerId });
+    expect(before.answers.typesafe).toEqual(Object.fromEntries(Object.keys(pkg.questions).map((id) => [id, false])));
+    // every review row is now preserved (labeled) under the old state; a customer then reports a loose dog
+    await database('decision_reviews').where({ subject_id: home }).update({ label_status: 'confirmed_correct' });
+    await text('Our dog Biscuit is loose in the yard', '2026-10-05T13:00:00Z');
+    mockAsk.mockResolvedValue(reply({ dog_on_property: yes }));
+    expect(await sweep()).toMatchObject({ asked: 1 });
+    const states = await database('visit_access_states').where({ scheduled_service_id: home }).orderBy('created_at', 'desc');
+    expect(states).toHaveLength(2);
+    expect(states[0].answers.typesafe.dog_on_property).toBe(true);
+    expect(states[0].customer_id).toBe(customerId);
+    // the review rows keep the older state they were judged on
+    expect((await rows(home)).every((r) => r.label_status === 'confirmed_correct' && r.subject_hash === before.subject_hash)).toBe(true);
+    const found = await require('../services/visit-access-flags').accessFlagsFor(database, { id: home, customer_id: customerId });
+    expect(found.map((f) => f.questionId)).toEqual(['dog_on_property']);
+    // a second pass asks nobody: the answers are on the state
+    expect(await sweep()).toMatchObject({ asked: 0, unchanged: 1 });
+  });
+
+  test('a state stored with review rows but no answers column value is backfilled from those rows without asking again', async () => {
+    const home = await visit();
+    await sweep();
+    await database('visit_access_states').update({ answers: null, customer_id: null });
+    mockAsk.mockClear();
+    expect(await sweep()).toMatchObject({ asked: 0, unchanged: 1 });
+    expect(mockAsk).not.toHaveBeenCalled();
+    const row = await database('visit_access_states').where({ scheduled_service_id: home }).first();
+    expect(row.customer_id).toBe(customerId);
+    expect(row.answers.typesafe.dog_on_property).toBe(false);
+  });
+
+  test('publishing a state waits for the visit lock a technician\'s tap holds', async () => {
+    const home = await visit();
+    const holder = await database.transaction();
+    await access.lockVisitAccess(holder, home);
+    let done = false;
+    const running = sweep().then((result) => { done = true; return result; });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(done).toBe(false);
+    expect(await database('visit_access_states').where({ scheduled_service_id: home })).toHaveLength(0);
+    await holder.commit();
+    await running;
+    expect(await database('visit_access_states').where({ scheduled_service_id: home })).toHaveLength(1);
   });
 
   test('visitSinglePremises is the sweep\'s own proof, asked again for the technician: false once a second home appears, for an unknown visit, and on an error', async () => {
@@ -611,9 +664,13 @@ describe('visit access shadow: rules that need no database', () => {
     await sweep();
     await database('decision_reviews').where({ subject_id: visitId, provider: 'cloudflare' }).update({ label_status: 'confirmed_correct' });
     await text('We will be home all day', '2026-10-05T13:40:00Z');
-    // Both are asked on the new state only if due: the labeled provider is settled, so only Jev is.
+    // Both are asked on the new state: a label preserves the old review row, but the new state's current answers
+    // (what the technician's flags read) are needed from every provider, so the labeled provider is asked too.
+    // Its fresh answer is refused by the recorder (the row is labeled) and still lands on the state row.
     mockAsk.mockImplementation(async (_id, _state, opts) => reply(opts && opts.provider === 'cloudflare' ? { contact_before_arrival: yes } : {}));
-    expect(await sweep()).toMatchObject({ asked: 1 });
+    expect(await sweep()).toMatchObject({ asked: 2 });
+    const [newest] = await database('visit_access_states').where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc');
+    expect(newest.answers.cloudflare.contact_before_arrival).toBe(true);
     const { sampleFor, stableDraw } = require('../services/typed-decisions/shadow-recorder');
     for (const row of (await rows(visitId)).filter((r) => r.provider === 'typesafe')) {
       expect(row.sampled_for).toBe(sampleFor(row.jev_answer, row.baseline_answers, () => stableDraw(row), []));
@@ -660,8 +717,8 @@ describe('visit access shadow: rules that need no database', () => {
     // Retention is its own, ungated step, and covers the technicians' verdicts on those states too.
     await database('visit_access_states').update({ created_at: new Date('2026-01-01T00:00:00Z') });
     await database('visit_access_verdicts').insert([
-      { scheduled_service_id: visitId, question_id: 'dog_on_property', subject_hash: first.subject_hash, verdict: 'right', created_at: new Date('2026-01-01T00:00:00Z') },
-      { scheduled_service_id: visitId, question_id: 'past_access_problem', subject_hash: first.subject_hash, verdict: 'wrong', created_at: new Date('2026-10-04T00:00:00Z') },
+      { scheduled_service_id: visitId, customer_id: customerId, question_id: 'dog_on_property', subject_hash: first.subject_hash, verdict: 'right', created_at: new Date('2026-01-01T00:00:00Z') },
+      { scheduled_service_id: visitId, customer_id: customerId, question_id: 'past_access_problem', subject_hash: first.subject_hash, verdict: 'wrong', created_at: new Date('2026-10-04T00:00:00Z') },
     ]);
     gates(false);
     expect(await access.pruneVisitAccessStates({ dbh: database, now: NOW })).toBe(2);

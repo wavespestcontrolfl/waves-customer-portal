@@ -2,37 +2,40 @@
  * Visit access flags on the technician's Visit Brief (GATE_VISIT_ACCESS_FLAGS=on).
  *
  * The hourly sweep (typed-decisions/visit-access-shadow.js) stores, per visit,
- * the redacted state the providers read (visit_access_states) and one
- * decision_reviews row per provider and question. This module reads those back
- * as flags for the technician and takes their Right / Wrong tap:
+ * the redacted state the providers read (visit_access_states), the customer it
+ * was built for, and the providers' current yes / no answers for that exact
+ * digest. This module reads those back as flags for the technician and takes
+ * their Right / Wrong tap:
  *
  *   accessFlagsFor(dbh, visit)   flags for the visit's NEWEST stored state
  *   tapAccessFlag(dbh, tap, who) Right / Wrong, as one verdict row
  *
- * Nothing here calls a model. A card shows when ANY provider said yes on the
- * newest state (a missed dog is worse than an extra flag) and the technician
- * has not marked it Wrong on that state, or when a Right they gave on an
- * EARLIER state of the same visit carries forward (the pet save itself changes
- * the state, and a confirmed warning must survive it). A Wrong never carries:
- * new evidence shows the card again.
+ * Nothing here calls a model, and nothing here reads decision_reviews (its
+ * rows are review samples; a label preserves one under an older digest). A card
+ * shows when ANY provider said yes on the newest state (a missed dog is worse
+ * than an extra flag) and the technician has not marked it Wrong on that state,
+ * or when a Right they gave on an EARLIER state of the same visit carries
+ * forward (the pet save itself changes the state, and a confirmed warning must
+ * survive it). A Wrong never carries: new evidence shows the card again.
+ * Evidence and verdicts belong to the customer they were built for: a state or
+ * verdict that does not name the visit's CURRENT customer is no evidence.
  *
  * The tap writes ONE row to visit_access_verdicts, keyed by visit, question and
- * the evidence digest (`subjectHash`) the card was read from. It never touches
- * decision_reviews, so the providers' answers and the review lane's labels stay
- * as the sweep and the reviewers left them. The tap runs in one transaction
- * that holds a FOR SHARE lock on the visit row, so a reassignment cannot land
- * between the assignment check and the writes. Only the tap whose insert
- * created a Right on a dog flag saves the pet line, on the locked profile row
- * and only while it holds no pets; a replay writes nothing. Neither write
- * sends anything to a customer. Both paths re-prove the visit is still at its
- * customer's one premises, because the profile, texts and notes the state was
- * built from are keyed on the customer.
+ * the evidence digest (`subjectHash`) the card was read from. It runs in one
+ * transaction that takes the visit's advisory lock (the one the sweep takes to
+ * publish a state, so the digest checked is still current at commit) and a FOR
+ * SHARE lock on the visit row (so a reassignment cannot land between the
+ * assignment check and the writes). Only the tap whose insert created a Right
+ * on a dog flag saves the pet line, on the locked profile row and only while it
+ * holds no pets; a replay writes nothing. Neither write sends anything to a
+ * customer. Both paths re-prove the visit is still at its customer's one
+ * premises, because the profile, texts and notes the state was built from are
+ * keyed on the customer.
  */
 const logger = require('./logger');
 const { packageFor } = require('./typed-decisions/packages');
-const { PACKAGE_ID, SUBJECT_TYPE, visitSinglePremises } = require('./typed-decisions/visit-access-shadow');
+const { PACKAGE_ID, visitSinglePremises, lockVisitAccess } = require('./typed-decisions/visit-access-shadow');
 
-const REVIEWS = 'decision_reviews';
 const STATES = 'visit_access_states';
 const VERDICTS = 'visit_access_verdicts';
 const QUOTE_CHARS = 160;
@@ -99,18 +102,19 @@ function pickQuote(state, questionId) {
   return { quote: null, source: read.length ? `Read: ${read.join(', ')}` : 'Read: nothing written on file' };
 }
 
-const saidYes = (row) => parse(row.jev_answer)?.yes === true;
-
-// Everything one visit's flags are read from: the newest stored state, its
-// provider answers, and every verdict the technicians gave on the visit.
-async function loadEvidence(dbh, visitId) {
-  const stored = await dbh(STATES).where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc').first('subject_hash', 'state');
-  if (!stored) return null;
-  const answers = await dbh(REVIEWS)
-    .where({ package_id: PACKAGE_ID, subject_type: SUBJECT_TYPE, subject_id: visitId, subject_hash: stored.subject_hash })
-    .select('question_id', 'jev_answer');
-  const verdicts = await dbh(VERDICTS).where({ scheduled_service_id: visitId }).select('question_id', 'subject_hash', 'verdict');
-  return { hash: stored.subject_hash, state: parse(stored.state) || {}, answers, verdicts };
+// Everything one visit's flags are read from: the newest stored state, the
+// providers' current answers kept on it, and the verdicts the technicians gave
+// on the visit. Evidence belongs to the customer it was built for: the newest
+// state is used only when it names the visit's CURRENT customer (a customer
+// merge or undo can change that while the visit id stays; a row stored before
+// the column existed names no one), and so are the verdicts carried from it.
+// The eligibility answers are the state's own, never the review rows, which a
+// label preserves under an older digest.
+async function loadEvidence(dbh, visit) {
+  const stored = await dbh(STATES).where({ scheduled_service_id: visit.id }).orderBy('created_at', 'desc').first('subject_hash', 'state', 'answers', 'customer_id');
+  if (!stored || !stored.customer_id || String(stored.customer_id) !== String(visit.customer_id)) return null;
+  const verdicts = await dbh(VERDICTS).where({ scheduled_service_id: visit.id, customer_id: visit.customer_id }).select('question_id', 'subject_hash', 'verdict');
+  return { hash: stored.subject_hash, state: parse(stored.state) || {}, answers: parse(stored.answers) || {}, verdicts };
 }
 
 // One question as the technician sees it: a verdict on the newest evidence
@@ -123,7 +127,7 @@ function questionView(ev, questionId) {
   let status = 'open';
   if (newest) status = newest.verdict;
   else if (mine.some((v) => v.verdict === 'right')) status = 'right';
-  const yes = ev.answers.some((row) => row.question_id === questionId && saidYes(row));
+  const yes = Object.values(ev.answers).some((byQuestion) => byQuestion && byQuestion[questionId] === true);
   return { status, newestVerdict: newest ? newest.verdict : null, shown: status === 'right' || (status === 'open' && yes) };
 }
 
@@ -142,7 +146,7 @@ async function petsOnFile(dbh, customerId) {
 async function accessFlagsFor(dbh, visit) {
   try {
     if (!(await visitSinglePremises(visit.id, dbh))) return [];
-    const ev = await loadEvidence(dbh, visit.id);
+    const ev = await loadEvidence(dbh, visit);
     if (!ev) return [];
     const flags = [];
     for (const questionId of Object.keys(packageFor(PACKAGE_ID).questions)) {
@@ -208,16 +212,19 @@ async function savePet(trx, visit, who) {
 async function tapAccessFlag(dbh, tap, who) {
   const { visitId, scope, questionId, verdict, subjectHash } = tap;
   return dbh.transaction(async (trx) => {
+    // One writer at a time per visit with the sweep's state publish: the digest
+    // checked below is still the current one when the verdict commits.
+    await lockVisitAccess(trx, visitId);
     const visit = await scope(trx('scheduled_services').where({ 'scheduled_services.id': visitId }))
       .forShare().first('scheduled_services.id', 'scheduled_services.customer_id');
     if (!visit || !(await visitSinglePremises(visit.id, trx))) return { notFound: true };
-    const ev = await loadEvidence(trx, visit.id);
+    const ev = await loadEvidence(trx, visit);
     if (!ev || ev.hash !== subjectHash) return { conflict: true };
     const view = questionView(ev, questionId);
     if (view.newestVerdict) return { status: view.newestVerdict, saved: false };
     if (!view.shown) return { conflict: true };
     const [created] = await trx(VERDICTS)
-      .insert({ scheduled_service_id: visit.id, question_id: questionId, subject_hash: subjectHash, verdict, technician_id: UUID_RE.test(String(who.actorId)) ? who.actorId : null })
+      .insert({ scheduled_service_id: visit.id, customer_id: visit.customer_id, question_id: questionId, subject_hash: subjectHash, verdict, technician_id: UUID_RE.test(String(who.actorId)) ? who.actorId : null })
       .onConflict(['scheduled_service_id', 'question_id', 'subject_hash']).ignore().returning('id');
     // A concurrent tap on the same evidence won: its verdict stands.
     if (!created) {
