@@ -262,7 +262,7 @@ it('shows the lower price when the booking was made below the price on the page,
   renderPage(pageFetch({ book: response(200, { booked: true, date: '2026-11-30', window: { start: '09:00', end: '11:00' }, price: { annual: 400, monthly: 33.33, setupFee: 99 } }) }));
   await pickFirstTime();
   fillAndSubmit();
-  expect(await screen.findByTestId('booked-price')).toHaveTextContent('Your price is now $400 a year.');
+  expect(await screen.findByTestId('booked-price')).toHaveTextContent('Your price is now $100 per application.');
   // The price card above shows the booked price too.
   expect(screen.getByTestId('application-price')).toHaveTextContent('$100');
   expect(screen.getByTestId('monthly-price')).toHaveTextContent('About $33.33 a month');

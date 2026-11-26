@@ -575,9 +575,13 @@ async function recoverCommitted(home, contact, offer, shown, deps) {
   // A test double may answer with the customer id alone: then the draft is the shown-price one.
   const customerId = typeof found === 'object' ? found.customerId : found;
   const estimateId = (typeof found === 'object' && found.estimateId) || shownKey;
-  const draft = await (deps.db || db)('estimates').where({ id: estimateId }).first('id');
+  const draft = await (deps.db || db)('estimates').where({ id: estimateId }).first('id', 'annual_total', 'estimate_data');
   const estimateToken = draft && (deps.handoffToken || REAL.handoffToken())(estimateId);
-  return estimateToken ? { estimateId, estimateToken, customerId } : null;
+  if (!estimateToken) return null;
+  // The terms the committed booking was made on, read from its draft, so the retry's answer shows the same price.
+  const data = typeof draft.estimate_data === 'string' ? (() => { try { return JSON.parse(draft.estimate_data); } catch { return null; } })() : draft.estimate_data;
+  const committed = draftTermsOf(draft, data);
+  return { estimateId, estimateToken, customerId, committedTerms: committed || null };
 }
 
 // The check createSelfBooking runs inside its transaction, after its own replay and conflict checks, before the visit is
@@ -629,9 +633,19 @@ async function draftHoldingShownPrice(trx, estimateId, shown) {
   const draft = await trx('estimates').where({ id: estimateId }).forShare().first();
   if (!draft || draft.pricing_authority !== 'SERVER') return null;
   const data = typeof draft.estimate_data === 'string' ? (() => { try { return JSON.parse(draft.estimate_data); } catch { return null; } })() : draft.estimate_data;
-  const setupFee = data && data.setupFeeQuote && data.setupFeeQuote.amount != null ? Number(data.setupFeeQuote.amount) : 0;
-  const holds = !!data && toCents(draft.annual_total) === shown.annualCents && Number.isFinite(setupFee) && toCents(setupFee) === shown.setupCents;
-  return holds ? draft : null;
+  const terms = draftTermsOf(draft, data);
+  return terms && terms.annualCents === shown.annualCents && terms.setupCents === shown.setupCents ? draft : null;
+}
+
+// The annual total and the FROZEN setup fee a draft holds, in cents, or null. The fee must be there explicitly, a zero too
+// (markEstimate always writes it): a draft whose setupFeeQuote was dropped would convert with the live fee.
+function draftTermsOf(draft, data) {
+  const quote = data && data.setupFeeQuote;
+  if (!quote || quote.amount === null || quote.amount === undefined || quote.amount === '') return null;
+  const setupFee = Number(quote.amount);
+  const annual = Number(draft.annual_total);
+  if (!Number.isFinite(setupFee) || setupFee < 0 || !Number.isFinite(annual) || annual <= 0) return null;
+  return { annualCents: toCents(annual), setupCents: toCents(setupFee) };
 }
 
 // The strict member-at-address check the price pass ran (home-quote memberStatusOf), on the booking transaction. A member, a
@@ -739,7 +753,10 @@ async function bookHome(token, input, deps = {}) {
     // Re-read inside the booking transaction: the gate, the prospect row (locked) and the price it still holds.
     commitGuard: commitGuardFor(home, shown, prepared.estimateId, deps, prepared.terms || shown),
   });
-  return answerOf(result, offer, pin, booking, prepared.terms);
+  // A recovered retry answers with the committed draft's terms; a fresh booking with its own, unless createSelfBooking
+  // answered it as the replay of another submission (then this submission's terms are not the committed ones).
+  const replayed = !!(result.body && result.body.replayed);
+  return answerOf(result, offer, pin, booking, prepared.committedTerms || (replayed ? null : prepared.terms));
 }
 
 /** The typed body: { contact, offer, shown } or { refuse } (a 400 naming what is wrong). */
@@ -770,8 +787,9 @@ async function answerOf(result, offer, pin, booking, terms) {
   // The row the booking wrote has no column for the mail list (mail_prospects has none that fits): nothing is recorded there.
   const body = { booked: true, date: offer.date, window: { start: from, end: to || null } };
   // The price this booking was made on (the lower of the card's and today's while the card's price is held), so the page
-  // can show it. Absent on the replay of an earlier booking (also a concurrent one createSelfBooking answered as a replay).
-  if (terms && !(result.body && result.body.replayed)) body.price = { annual: terms.annualCents / 100, monthly: Math.round(terms.annualCents / 12) / 100, setupFee: terms.setupCents / 100 };
+  // can show it. A retry of a committed booking carries that booking's price (from its draft); a concurrent submission
+  // answered as a replay carries none.
+  if (terms) body.price = { annual: terms.annualCents / 100, monthly: Math.round(terms.annualCents / 12) / 100, setupFee: terms.setupCents / 100 };
   return { status: 200, body };
 }
 

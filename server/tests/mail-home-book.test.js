@@ -429,7 +429,7 @@ describe('bookHome', () => {
     // What createSelfBooking resolved for the visit just before it calls the guard.
     const STAMP = { custId: 'cust-1', visitPrice: 156.75, followUpVisitPrice: 156.75, paymentPref: 'pay_at_visit', sourceEstimateId: 'est-1' };
     const guard = (t, ctx = STAMP) => commitGuard(t, ctx);
-    const DRAFT = { annual_total: '627.00', pricing_authority: 'SERVER', estimate_data: { mailProspectId: 'prospect-1' } };
+    const DRAFT = { annual_total: '627.00', pricing_authority: 'SERVER', estimate_data: { mailProspectId: 'prospect-1', setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } } };
     const trxFor = (found, liveVisit = undefined, draft = DRAFT) => {
       const prospect = {};
       prospect.where = jest.fn(() => prospect);
@@ -912,6 +912,17 @@ describe('the printed price is held for a mailed home', () => {
     expect(await bookHome(TOKEN, INPUT(), deps)).toBeNull();
   });
 
+  test('the retry of a committed booking answers with the price its draft holds', async () => {
+    mockRow = held();
+    findCommittedBookingCustomer.mockResolvedValue({ customerId: 'cust-1', estimateId: 'est-held' });
+    mockEstimateRow = { id: 'est-held', annual_total: '600.00', estimate_data: { setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } } };
+    booking.createSelfBooking.mockResolvedValue({ ok: true, body: { replayed: true, booking: { id: 'b1' } } });
+    const res = await bookHome(TOKEN, INPUT(), deps);
+    expect(res).toMatchObject({ status: 200, body: { booked: true, price: { annual: 600, monthly: 50, setupFee: 0 } } });
+    expect(booking.createSelfBooking.mock.calls[0][0].pricing_estimate_id).toBe('est-held');
+    expect(saveEstimate).not.toHaveBeenCalled();
+  });
+
   test('a concurrent submission that createSelfBooking answers as a replay carries no price', async () => {
     booking.createSelfBooking.mockResolvedValue({ ok: true, body: { replayed: true, booking: { id: 'b1' } } });
     const res = await bookHome(TOKEN, INPUT(), deps);
@@ -951,7 +962,7 @@ describe('the printed price is held for a mailed home', () => {
       return trx;
     };
     gates.isEnabled.mockImplementation((name) => name !== 'bookingPayAtVisit');
-    const draftAt = (annual) => ({ annual_total: annual, pricing_authority: 'SERVER', estimate_data: {} });
+    const draftAt = (annual, data = { setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } }) => ({ annual_total: annual, pricing_authority: 'SERVER', estimate_data: data });
     const home = (mailedAt) => ({ row: { ...row(), mailed_at: mailedAt } });
     // Held: the draft must hold the terms (600), not the shown price (627).
     expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, terms)(trxFor(draftAt('600.00')))).toBe(true);
@@ -964,6 +975,8 @@ describe('the printed price is held for a mailed home', () => {
     expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, discounted)(trxFor(draftAt('627.00'), lockedRow(daysAgo(62))))).toBe(false);
     // The locked row's printed snapshot is the price compared, not its columns.
     expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, discounted)(trxFor(draftAt('627.00'), { ...lockedRow(daysAgo(3)), mailed_price: snap(650, 0) }))).toBe(false);
+    // A draft whose frozen setup fee was dropped before the commit is refused: it would convert with the live fee.
+    expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, discounted)(trxFor(draftAt('627.00', {})))).toBe(false);
     // Terms equal to the shown price need no hold.
     expect(await commitGuardFor(home(null), shown, 'est-1', deps)(trxFor(draftAt('627.00'), lockedRow(null)))).toBe(true);
   });
