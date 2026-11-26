@@ -1,7 +1,6 @@
 const { savepointRead } = require('../utils/savepoint-read');
 const { isPreEmergent } = require('./service-report/lawn-watering-rule');
 const { dateOnlyString } = require('../utils/date-only');
-const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 function normalizeText(value) {
   return String(value || '')
@@ -354,22 +353,28 @@ function repeatGroupFinding({ product, input, groupType, groupValue, last }) {
 // Velista (EPA 100-1534), Resistance Management: "Do not make more than two successive applications of Velista; these
 // two applications should be followed by applications of fungicides from a different FRAC mode of action group."
 //
-// How the lawn's history is read, one way for every product on this list:
-//   - the lawn's completed fungicide applications in the SUCCESSIVE_LOOKBACK_DAYS before the visit, by service date
-//     (property-scoped as the take-all pair is; an application with no property counts, the safe side);
-//   - a date that carries the product counts, alone or in a tank mix (the label limits the product's applications; a
-//     mix partner does not un-count one);
-//   - a date without the product ends the run only when it carries a fungicide of another group. A date whose
-//     fungicides are all of the product's own group, or of no group on file, neither counts nor ends the run;
-//   - `max` such dates in a row before this visit = this application would be one too many.
-// The finding names the label limit and the dates. On the job card's tank search it is a warning beside the amount, like
-// a group repeat (job-card.js ROTATION_CODES; owner 2026-10-09, "show the mix amount"); a hard stop there is the owner's
-// call. `approvable: false` rides to the close-out's record: a manager approval there does not make it a permitted
-// application.
+// How the lawn's history is read, one way for every product on this list (successiveRun):
+//   - the lawn's completed fungicide applications up to the visit's date, newest first, with no lower date bound (the
+//     label names no time after which a run ends). One service record is one application: its tank-mix rows are one,
+//     two visits on one date are two. The visit judged is left out by its own id;
+//   - property-scoped as the take-all pair is. An application that names no property may have been made here, so it
+//     is read;
+//   - an application that carries the product counts, alone or in a tank mix (the label limits the product's
+//     applications; a mix partner does not un-count one), wherever it is placed;
+//   - an application without the product ends the run only when it carries a fungicide of another group AND is placed
+//     at this property (a rotation that names no property may have been made elsewhere). One whose fungicides are all
+//     of the product's own group, or of no group on file, neither counts nor ends the run;
+//   - `max` such applications in a row before this visit = this application would be one too many.
+// Who reads it:
+//   - the approval engine raises successive_application_limit with the dates. On the job card's tank search it is a
+//     warning beside the amount, like a group repeat (job-card.js ROTATION_CODES; owner 2026-10-09, "show the mix
+//     amount"). `approvable: false` rides to the close-out's record: an approval there does not permit it;
+//   - Fast Complete and the treatment guide pass the product's row over (no card, no list, no search), as they do the
+//     Group 11 row on a take-all lawn (owner 2026-10-23), and give the next fungicide (lawn-fast-complete.js
+//     fungicideHolds).
 const SUCCESSIVE_USE_LIMITS = Object.freeze([
-  Object.freeze({ epa: '100-1534', name: /^velista\b/, group: '7', max: 2, source: 'Velista label, EPA 100-1534, Resistance Management' }),
+  Object.freeze({ epa: '100-1534', name: /^velista\b/, category: 'fungicide', group: '7', max: 2, source: 'Velista label, EPA 100-1534, Resistance Management' }),
 ]);
-const SUCCESSIVE_LOOKBACK_DAYS = 365;
 const SUCCESSIVE_USE_CODE = 'successive_application_limit';
 
 const epaOf = (value) => String(value ?? '').toLowerCase().replace(/\s+/g, '');
@@ -378,13 +383,14 @@ function isLimitedProduct(limit, { epa, name }) {
   const registration = epaOf(epa);
   return registration ? registration === limit.epa : limit.name.test(normalizeText(name));
 }
-const successiveLimitFor = (product) => SUCCESSIVE_USE_LIMITS.find((limit) => isLimitedProduct(limit, { epa: product?.epa_reg_number, name: product?.name })) || null;
+const successiveLimitFor = (product) => SUCCESSIVE_USE_LIMITS.find((limit) => isLimitedProduct(limit, { epa: product?.epa_reg_number ?? product?.epaRegNumber, name: product?.name })) || null;
 // Every group a history row carries, bare ("Group 11 + 3" and "3 + 11" both read 11 and 3). Not behind the v13 gate.
 const rowGroups = (row) => [row.catalog_group, row.catalog_moa_group, row.moa_group]
   .flatMap((value) => String(value ?? '').split(GROUP_SPLIT)).map(bareGroup).filter(Boolean);
 
-async function fungicideHistory(knex, { customerId, propertyId, category, serviceDate, strict }) {
-  const since = etDateString(addETDays(parseETDateTime(`${dateOnlyString(serviceDate)}T12:00`), -SUCCESSIVE_LOOKBACK_DAYS));
+// The lawn's completed applications of one product category up to the visit's date, as product rows (newest first).
+// A failed read throws when strict, else reads as no history.
+async function categoryHistory(knex, { customerId, propertyId, category, serviceDate, serviceId = null, strict = false }) {
   return savepointRead(knex, (k) => k('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('products_catalog as pc', function () {
@@ -393,42 +399,71 @@ async function fungicideHistory(knex, { customerId, propertyId, category, servic
     .modify((query) => scopeToTreatedProperty(query, propertyId, { joinVisit: true, includeUnplaced: true }))
     .where('sr.customer_id', customerId)
     .where('sr.status', 'completed')
-    .where('sr.service_date', '<', serviceDate)
-    .where('sr.service_date', '>=', since)
+    .where('sr.service_date', '<=', serviceDate)
+    // The visit being judged is not its own history (a close-out can be read again after its record exists).
+    .modify((query) => { if (serviceId) query.whereRaw('(sr.scheduled_service_id IS NULL OR sr.scheduled_service_id <> ?)', [serviceId]); })
     .where(function () { this.where('sp.product_category', category).orWhere('pc.category', category); })
-    .orderBy('sr.service_date', 'desc')
-    .select('sr.service_date', 'sp.product_name', 'sp.moa_group', 'pc.epa_reg_number as catalog_epa', 'pc.frac_group as catalog_group', 'pc.moa_group as catalog_moa_group'))
+    .orderBy([{ column: 'sr.service_date', order: 'desc' }, { column: 'sr.created_at', order: 'desc' }])
+    .select(
+      'sr.id as service_record_id', 'sr.service_date', 'sr.created_at as recorded_at', 'sp.product_name', 'sp.moa_group',
+      'pc.epa_reg_number as catalog_epa', 'pc.frac_group as catalog_group', 'pc.moa_group as catalog_moa_group',
+      k.raw('COALESCE(pah_scope.property_id, ss.property_id) as treated_property_id'),
+    ))
     .catch((err) => { if (strict) throw err; return []; });
 }
 
-// The dates, newest first, of the product's unbroken run of applications that ends at the lawn's latest fungicide date.
-function successiveRun(limit, rows) {
-  const days = new Map();
+// The product rows as applications, newest first: one per service record (rows with no record id: one per date).
+function applicationsOf(rows) {
+  const byRecord = new Map();
   for (const row of rows || []) {
     const day = dateOnlyString(row.service_date);
     if (!day) continue;
-    const entry = days.get(day) || { limited: false, otherGroup: false };
-    if (isLimitedProduct(limit, { epa: row.catalog_epa, name: row.product_name })) entry.limited = true;
-    else if (rowGroups(row).some((group) => group !== limit.group)) entry.otherGroup = true;
-    days.set(day, entry);
+    const key = row.service_record_id != null ? `record:${row.service_record_id}` : `day:${day}`;
+    if (!byRecord.has(key)) byRecord.set(key, { day, recordedAt: row.recorded_at instanceof Date ? row.recorded_at.toISOString() : String(row.recorded_at || ''), rows: [] });
+    byRecord.get(key).rows.push(row);
   }
+  return [...byRecord.values()].sort((a, b) => b.day.localeCompare(a.day) || b.recordedAt.localeCompare(a.recordedAt));
+}
+
+// The dates, newest first, of the product's unbroken run of applications that ends at the lawn's latest fungicide
+// application. `propertyId`: the visit's property (null = a visit that names none).
+function successiveRun(limit, rows, { propertyId = null } = {}) {
+  const here = (row) => String(row.treated_property_id ?? '') === String(propertyId ?? '');
   const run = [];
-  for (const day of [...days.keys()].sort().reverse()) {
-    const entry = days.get(day);
-    if (entry.limited) run.push(day);
-    else if (entry.otherGroup) break;
+  for (const application of applicationsOf(rows)) {
+    if (application.rows.some((row) => isLimitedProduct(limit, { epa: row.catalog_epa, name: row.product_name }))) run.push(application.day);
+    else if (application.rows.some((row) => here(row) && rowGroups(row).some((group) => group !== limit.group))) break;
   }
   return run;
 }
 
-async function successiveUseFindings(knex, { customerId, propertyId, product, serviceDate, strict }) {
+// Does the lawn's latest application of the category carry this group? (Fast Complete: whether the Group 11 run is
+// still open after a Velista run.) Null when there is no application.
+function latestApplicationCarries(rows, group) {
+  const [latest] = applicationsOf(rows);
+  return latest ? latest.rows.some((row) => rowGroups(row).includes(String(group))) : null;
+}
+
+// Every listed product whose run is full before this visit, as `[{ limit, dates }]`, with the history rows read
+// (`rowsByCategory`, for a caller that asks more of them). A visit with no readable date reads as none.
+async function successiveLimitsReached(knex, { customerId, propertyId = null, serviceDate, serviceId = null, strict = false, limits = SUCCESSIVE_USE_LIMITS }) {
+  const day = dateOnlyString(serviceDate);
+  const reached = [];
+  const rowsByCategory = new Map();
+  if (!day) return { reached, rowsByCategory };
+  for (const limit of limits) {
+    if (!rowsByCategory.has(limit.category)) rowsByCategory.set(limit.category, await categoryHistory(knex, { customerId, propertyId, category: limit.category, serviceDate: day, serviceId, strict }));
+    const run = successiveRun(limit, rowsByCategory.get(limit.category), { propertyId });
+    if (run.length >= limit.max) reached.push({ limit, dates: run.slice(0, limit.max) });
+  }
+  return { reached, rowsByCategory };
+}
+
+async function successiveUseFindings(knex, { customerId, propertyId, product, serviceDate, serviceId, strict }) {
   const limit = successiveLimitFor(product);
-  if (!limit || !dateOnlyString(serviceDate)) return [];
-  const rows = await fungicideHistory(knex, { customerId, propertyId, category: product.category, serviceDate, strict });
-  const run = successiveRun(limit, rows);
-  if (run.length < limit.max) return [];
-  const dates = run.slice(0, limit.max);
-  return [{
+  if (!limit) return [];
+  const { reached } = await successiveLimitsReached(knex, { customerId, propertyId, serviceDate, serviceId, strict, limits: [limit] });
+  return reached.map(({ dates }) => ({
     code: SUCCESSIVE_USE_CODE,
     severity: 'block',
     approvable: false,
@@ -436,7 +471,7 @@ async function successiveUseFindings(knex, { customerId, propertyId, product, se
     productName: product.name,
     message: `${product.name} was the lawn's last ${limit.max} fungicide applications (${[...dates].reverse().join(', ')}). Its label allows no more than ${limit.max} in a row: use a fungicide of another group.`,
     evidence: { limit: limit.max, dates, source: limit.source },
-  }];
+  }));
 }
 
 // The repeat-group (rotation) review of one applied product: for each of its groups, the latest
@@ -558,7 +593,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
     }
 
     blocks.push(...await repeatGroupFindings(knex, { customerId, propertyId: service?.property_id || null, product, input, plan, serviceDate, strict }));
-    blocks.push(...await successiveUseFindings(knex, { customerId, propertyId: service?.property_id || null, product, serviceDate, strict }));
+    blocks.push(...await successiveUseFindings(knex, { customerId, propertyId: service?.property_id || null, product, serviceDate, serviceId: service?.id || null, strict }));
   }
 
   const turfProfile = await savepointRead(knex, (k) => k('customer_turf_profiles')
@@ -619,6 +654,9 @@ module.exports = {
   priorProtocolRow,
   rowNamesTakeAll,
   successiveRun,
+  successiveLimitsReached,
+  latestApplicationCarries,
+  isLimitedProduct,
   SUCCESSIVE_USE_LIMITS,
   SUCCESSIVE_USE_CODE,
 };

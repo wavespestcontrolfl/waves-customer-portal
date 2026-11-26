@@ -606,17 +606,20 @@ async function loadChinch({ loaded, sheet, svc, knex, readFailures }) {
 // and the wetting-agent rows, by what their staged rows say), as `{ guidedProductIds }` or `{}`. The
 // sheet holds their taps until the fresh guide has answered, so a card never finds its product
 // already on the sheet. Pure; no limit read.
-function guidedProductIds(loaded, sheet, takeAllMapped = false) {
+function guidedProductIds(loaded, sheet, holds = {}) {
+  // `holds`: fungicideHolds for the visit, or the Group 11 pass-over alone as a boolean (the older call).
+  const { takeAllMapped = false, successiveHeld = [] } = typeof holds === 'boolean' ? { takeAllMapped: holds } : (holds || {});
   if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
   const guide = require('./lawn-treatment-guide');
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-  const picks = guide.pickAddOns(candidates, rows, { takeAllMapped });
+  const picks = guide.pickAddOns(candidates, rows, { takeAllMapped, successiveHeld });
   return {
     guidedProductIds: Object.values(picks).filter(Boolean).map((pick) => pick.item.productId),
     // Every take-all fungicide of the month (a pick or not): the sheet never lists it with the plain add-ons. The large patch Artavia row the
     // pick passed over (Group 11 stacking on a take-all lawn) is held the same way.
-    takeAllProductIds: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId),
+    // A row at its label limit on applications in a row (Velista, two) is held the same way.
+    takeAllProductIds: [...new Set([...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped }), ...guide.successiveHeldAddOns(candidates, rows, { successiveHeld })].map((candidate) => candidate.item.productId))],
   };
 }
 
@@ -625,13 +628,17 @@ function guidedProductIds(loaded, sheet, takeAllMapped = false) {
 // guide, or on the chinch context read, so a gate that is off or a read that failed never lets the sheet list or search the row. The sheet
 // treats these ids as blocked from the start (no list, no search), until a fresh guide answer replaces this with its own blocked list. If
 // the staged rows cannot be read the ids are unknown and the key is left out (the guide, when it answers, still blocks the row).
-async function group11HeldContext({ loaded, sheet, svc, knex }) {
+// The key also carries a row passed over for its label limit on applications in a row (a third Velista): the sheet treats every id here the
+// same way, so the row is off the list and the search from the start. `holds` = fungicideHolds for this visit.
+async function group11HeldContext({ loaded, sheet, svc, knex, holds = null }) {
   try {
-    if (featureGates.lawnV13Live?.() !== true || !(await group11PassOver({ svc, knex }))) return {};
+    if (featureGates.lawnV13Live?.() !== true) return {};
+    const { takeAllMapped, successiveHeld } = holds || await fungicideHolds({ svc, knex });
+    if (!takeAllMapped && !successiveHeld.length) return {};
     const guide = require('./lawn-treatment-guide');
     const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
     const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-    const held = guide.group11HeldAddOns(candidates, rows, { takeAllMapped: true }).map((candidate) => candidate.item.productId);
+    const held = [...new Set([...guide.group11HeldAddOns(candidates, rows, { takeAllMapped }), ...guide.successiveHeldAddOns(candidates, rows, { successiveHeld })].map((candidate) => candidate.item.productId))];
     return held.length ? { group11HeldProductIds: held } : {};
   } catch (err) {
     logger.warn(`[lawn-fast] Group 11 held rows unavailable for ${loaded?.plan ? 'a visit' : 'no plan'}: ${err?.code || err?.name || 'Error'}`);
@@ -882,6 +889,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoSc
     const sheet = await sheetPlanned(loaded, knex);
     const weed = await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures });
     const chinch = await loadChinch({ loaded, sheet, svc, knex, readFailures });
+    const holds = await fungicideHolds({ svc, knex });
     return {
       source: 'plan',
       unavailable: null,
@@ -895,8 +903,8 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoSc
       ...(loaded.tetrinoScout ? { tetrinoScout: loaded.tetrinoScout } : {}),
       ...weed,
       ...chinch,
-      ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, await group11PassOver({ svc, knex }))),
-      ...await group11HeldContext({ loaded, sheet, svc, knex }),
+      ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, holds)),
+      ...await group11HeldContext({ loaded, sheet, svc, knex, holds }),
       // GATE_LAWN_TROUBLE_AREAS: what the places' limit read needs (stripped from the payload by the context).
       ...(featureGates.lawnTroubleAreasLive() ? { troubleSeed: troubleSeedOf({ loaded, sheet, weed, chinch }) } : {}),
     };
@@ -1182,6 +1190,30 @@ async function group11PassOver({ svc, knex }) {
   return GROUP11_MONTHS.includes(visitMonthOf(svc)) && takeAllMappedOn({ svc, knex });
 }
 
+// The fungicide rows the guide and the sheet pass over on this visit, as `{ takeAllMapped, successiveHeld }`:
+//   - successiveHeld: the label limits on applications in a row that this lawn has reached (Velista: two; the approval
+//     engine's own history read, SUCCESSIVE_USE_LIMITS). The product's row is passed over and the next fungicide is offered;
+//   - takeAllMapped: the Group 11 pass-over above, EXCEPT when such a limit is reached and the lawn's latest fungicide
+//     application carried no Group 11 product. That is the December case of the card: Artavia in September, Headway in
+//     October, Velista in October and November. November's Velista ended the Group 11 run, so December's Artavia row is the
+//     one offered. When the latest application did carry Group 11, both rows stay passed over.
+// A history read that fails holds nothing for a run nobody read, and leaves the Group 11 pass-over as it was.
+async function fungicideHolds({ svc, knex }) {
+  const group11 = await group11PassOver({ svc, knex });
+  try {
+    const engine = require('./waveguard-approval-engine');
+    const { reached, rowsByCategory } = await engine.successiveLimitsReached(knex, {
+      customerId: svc.customer_id, propertyId: svc.property_id || null, serviceDate: svc.scheduled_date, serviceId: svc.id || null, strict: true,
+    });
+    const successiveHeld = reached.map((entry) => entry.limit);
+    const group11RunEnded = successiveHeld.length > 0 && engine.latestApplicationCarries(rowsByCategory.get('fungicide'), '11') === false;
+    return { takeAllMapped: group11 && !group11RunEnded, successiveHeld };
+  } catch (err) {
+    logger.warn(`[lawn-fast] fungicide history unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return { takeAllMapped: group11, successiveHeld: [] };
+  }
+}
+
 /**
  * GET /:serviceId/lawn-fast/treatment-guide?assessmentId=: the "Suggested from this lawn" cards for
  * the visit's CONFIRMED assessment (GATE_LAWN_TREATMENT_GUIDE, lawn-treatment-guide.js). The sheet
@@ -1228,9 +1260,9 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
   // loadWeedMix catches a defect into readFailures for the context's sake; here that would read as "no weed group".
   if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-  const takeAllMapped = await group11PassOver({ svc, knex });
+  const { takeAllMapped, successiveHeld } = await fungicideHolds({ svc, knex });
   const [offers, chinch] = await Promise.all([
-    guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex), takeAllMapped }),
+    guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex), takeAllMapped, successiveHeld }),
     loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex, places: await limitPlaces(svc, knex) }) : null,
   ]);
   // A read that throws fails the request (the sheet then follows the context's decisions); only a
@@ -1244,7 +1276,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
     weeds: guide.weedOffer(weedMix, sheet.addOns),
     // GATE_LAWN_TROUBLE_AREAS: the lawn's take-all areas on file (server-confirmed, active).
     troubleAreas: await takeAllAreasOn({ svc, knex }),
-  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), limitWarned: guide.limitWarnedProducts({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId), placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
+  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), limitWarned: guide.limitWarnedProducts({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: [...new Set([...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped }), ...guide.successiveHeldAddOns(candidates, rows, { successiveHeld })].map((candidate) => candidate.item.productId))], placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────
@@ -1545,6 +1577,7 @@ module.exports = {
   prepareLawnRecommendations,
   takeAllMappedOn,
   group11PassOver,
+  fungicideHolds,
   guidedProductIds,
   group11HeldContext,
   takeAllProductIdsFor,
