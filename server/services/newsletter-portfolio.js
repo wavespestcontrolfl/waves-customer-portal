@@ -52,7 +52,17 @@ const CLASS_CAP = 1;
 // still counts as away.
 const AWAY_ZONES = new Set(['tampa', 'pinellas']);
 const AWAY_CAP = 2;
-const awayZoneOf = (event) => norm(event?.region_zone) || cityToZone(event?.city) || '';
+// A city string can carry punctuation ("St. Petersburg") or name a beach town
+// the zone map does not list ("St. Pete Beach"), so the away check also reads
+// the punctuation-free city against the Tampa Bay place words.
+const AWAY_CITY_RX = /\b(?:st pete|st petersburg|saint petersburg|clearwater|largo|dunedin|gulfport|madeira beach|treasure island|indian rocks|seminole|pinellas|safety harbor|tarpon springs|tampa|ybor|brandon|riverview|hillsborough)\b/;
+function awayZoneOf(event) {
+  const zone = norm(event?.region_zone);
+  if (zone) return zone;
+  const city = norm(event?.city);
+  if (!city) return '';
+  return cityToZone(city) || (AWAY_CITY_RX.test(city) ? 'pinellas' : '');
+}
 const isAway = (event) => AWAY_ZONES.has(awayZoneOf(event));
 
 const MIN_WEEKEND = 4;

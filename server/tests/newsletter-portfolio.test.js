@@ -111,6 +111,20 @@ describe('local first (owner 2026-11-26)', () => {
     expect(result.selected.map((e) => e.id)).not.toContain(untagged.id);
   });
 
+  test.each(['St. Petersburg', 'St. Pete Beach', 'Clearwater Beach', 'Tampa'])('untagged %s counts as away', (city) => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'pinellas', editorial_score: 96 - i, source_id: `p-${i}` }));
+    const untagged = ev({ region_zone: null, city, editorial_score: 93, source_id: 'u-1' });
+    const result = selectPortfolio([...tagged, untagged]);
+    expect(result.selected.map((e) => e.id)).not.toContain(untagged.id);
+  });
+
+  test('an untagged local city is not counted as away', () => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'tampa', editorial_score: 96 - i, source_id: `t-${i}` }));
+    const local = ev({ region_zone: null, city: 'Lakewood Ranch', editorial_score: 93, source_id: 'u-2' });
+    const result = selectPortfolio([...tagged, local]);
+    expect(result.selected.map((e) => e.id)).toContain(local.id);
+  });
+
   test('a thin local week selects fewer events (below the minimum the issue skips) instead of a third Tampa Bay event', () => {
     const away = [1, 2, 3, 4].map((i) => ev({ region_zone: 'pinellas', editorial_score: 95 - i, source_id: `p-${i}`, venue_name: `PV ${i}` }));
     const local = [ev({ region_zone: 'sarasota', editorial_score: 82, source_id: 'l-1' })];
