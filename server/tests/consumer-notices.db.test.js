@@ -1,6 +1,6 @@
-// FDACS-13692 consumer notices (GATE_WARRANTY_13692_CHECK) through PostgreSQL: the migration (columns, FK cascade, index,
+// FDACS-13692 consumer notices through PostgreSQL: the migration (columns, FK cascade, index,
 // up/down/up), the real lookup over e-signed contracts and paper records (Eastern signed day, DATE columns read as the
-// exact day), and the three admin routes behind the gate. Every write runs in a transaction that is rolled back.
+// exact day), and the three admin routes. Every write runs in a transaction that is rolled back.
 // Synthetic data only. Skips without DATABASE_URL (CI runs it against the migrated database).
 const SKIP = !process.env.DATABASE_URL;
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -67,9 +67,8 @@ describeDb('FDACS-13692 consumer notices (PostgreSQL)', () => {
     mockSent.length = 0;
     mockAdminId = randomUUID();
     await mockPg('technicians').insert({ id: mockAdminId, name: 'Fixture admin' });
-    process.env.GATE_WARRANTY_13692_CHECK = 'true';
   });
-  afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); delete process.env.GATE_WARRANTY_13692_CHECK; });
+  afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
     if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     if (database) await database.destroy();
@@ -145,21 +144,10 @@ describeDb('FDACS-13692 consumer notices (PostgreSQL)', () => {
   });
 
   describe('the routes', () => {
-    test('the whole surface answers 404 while the gate is off', async () => {
-      const customerId = await customer();
-      const recordId = await paper(customerId, '2026-09-01');
-      delete process.env.GATE_WARRANTY_13692_CHECK;
-      expect((await fetch(base(customerId))).status).toBe(404);
-      expect((await upload(customerId)).status).toBe(404);
-      expect((await fetch(`${base(customerId)}/paper/${recordId}/file`)).status).toBe(404);
-      expect(await mockPg('consumer_notice_paper_records').where({ customer_id: customerId })).toHaveLength(1);
-      expect(mockSent).toEqual([]);
-    });
-
     test('lists, uploads a paper scan under the customer prefix, and opens it with a short signed link', async () => {
       const customerId = await customer();
       const empty = await (await fetch(base(customerId))).json();
-      expect(empty).toMatchObject({ enabled: true, graceEnd: '2026-11-24', notices: [] });
+      expect(empty).toEqual({ notices: [] });
 
       const saved = await upload(customerId, { signedOn: '09/01/2026' });
       expect(saved.status).toBe(201);

@@ -121,7 +121,8 @@ async function withProjectionChecked(ranked, ctx) {
   if (!ranked.normalBest) return ranked;
   try {
     const road = await roadSaving(ctx.current, ranked.normalBest, ctx.travel);
-    if (road && road.saving_minutes < ctx.config.minDayMoveDriveSavingMinutes) {
+    const floor = Math.max(ctx.config.minDayMoveDriveSavingMinutes || 0, ranked.normalBestMinutesFloor || 0);
+    if (road && road.saving_minutes < floor) {
       const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
       return rest;
     }
@@ -153,22 +154,52 @@ async function confirmOnRoads(ranked, ctx) {
   if (moveRules.mustMove(ctx.service, ctx.current)) return withProjectionChecked(ranked, ctx);
   if (!ranked.qualifies) return ranked;
   const floor = ctx.config.minDayMoveDriveSavingMinutes;
+  const failed = [];
   try {
-    const failed = [];
     for (const row of ranked.rankedRows.slice(0, ROAD_CHECK_SLOTS)) {
-      const road = await roadSaving(ctx.current, row.cand, ctx.travel);
+      const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
       // No road answer for the best slot: the model's result stands, and the
-      // audit row says the number is the estimate (r2).
-      if (!road && !failed.length) return { ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } };
-      const checked = withRoad(row, road);
-      if (!road || road.saving_minutes >= floor) return settled(ranked, checked, true);
+      // audit row says the number is the estimate (r2). The fallback list keeps
+      // no unchecked minutes-rule slot below it (apply.js retries take that list).
+      if (!road && !failed.length) return withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
+      const checked = { ...withRoad(row, road), floor: floorOfRow(row, floor, ctx) };
+      if (!road || road.saving_minutes >= checked.floor) return settled(ranked, checked, true);
       failed.push(checked);
     }
     return settled(ranked, failed[0], false);
   } catch (err) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
-    return ranked;
+    // A slot roads already refused stays refused: the error only stops the search.
+    // With nothing measured yet, it is the unanswered best slot: the model stands
+    // for it, and no unchecked minutes-rule slot stays in the fallback list.
+    return failed.length ? settled(ranked, failed[0], false)
+      : withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
   }
+}
+
+// A lookup that throws is no answer for THAT slot only (the model's number
+// stands for it, as when Google has none); slots already refused stay refused.
+async function roadSavingOrNull(current, cand, travel) {
+  try {
+    return await roadSaving(current, cand, travel);
+  } catch (err) {
+    logger.warn(`[auto-dispatch] road check failed for one slot (model kept): ${err.message}`);
+    return null;
+  }
+}
+
+// The fallback list after an unanswered best slot: the best slot, then only
+// score-bar slots (a minutes-rule slot needs its own road answer).
+function withoutUncheckedMinutes(ranked) {
+  const rows = (ranked.rankedRows || []).filter((row, i) => i === 0 || !row.byMinutes);
+  return { ...ranked, rankedRows: rows, ranked: rows.map((row) => row.cand) };
+}
+
+// The road floor of one slot: the ordinary drive floor, or for a minutes-rule
+// slot (move-rules.js minutesRuleOk) its own minutes, whichever is higher.
+function floorOfRow(row, floor, ctx) {
+  const moveRules = require('./move-rules');
+  return row.byMinutes ? Math.max(floor, moveRules.minutesRuleFloor(ctx.service, ctx.config)) : floor;
 }
 
 function settled(ranked, row, passed) {
@@ -178,9 +209,12 @@ function settled(ranked, row, passed) {
     bestScore: row.sc,
     gain: row.gain,
     qualifies: passed,
+    byMinutes: passed && !!row.byMinutes,
     roadFailed: !passed,
+    // The floor the road check held this slot to (index.js noMoveReason).
+    roadFloor: row.floor,
     ranked: passed ? [row.cand] : [],
-    rankedRows: passed ? [{ cand: row.cand, sc: row.sc, gain: row.gain }] : [],
+    rankedRows: passed ? [{ cand: row.cand, sc: row.sc, gain: row.gain, byMinutes: row.byMinutes }] : [],
   };
 }
 

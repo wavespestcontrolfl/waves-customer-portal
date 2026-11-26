@@ -20,6 +20,11 @@ const mockAdjustStock = jest.fn(async () => {
   if (mockState.adjustError) throw mockState.adjustError;
   return mockState.adjustResult;
 });
+// The SiteOne request close has its own suite (siteone-request-close.test.js).
+const mockCloseRequest = jest.fn(async () => null);
+jest.mock('../services/purchase-receipts/siteone-request-close', () => ({
+  closeRequestCoveredByLine: (...args) => mockCloseRequest(...args),
+}));
 jest.mock('../services/inventory-operations', () => ({
   adjustStock: (...args) => mockAdjustStock(...args),
 }));
@@ -106,6 +111,7 @@ beforeEach(() => {
   mockDbState.liveRequest = undefined;
   mockDbState.lockedProducts = [];
   mockAdjustStock.mockClear();
+  mockCloseRequest.mockClear();
   matchTitleToProduct.mockClear();
 });
 
@@ -472,6 +478,24 @@ describe('processReceiptLine', () => {
     expect(await processReceiptLine(siteOneLine)).toMatchObject({ status: 'logged', receivedQty: 78 });
     expect(mockAdjustStock).toHaveBeenCalledWith('p-taurus', expect.anything(), expect.objectContaining({ source: 'siteone_invoice' }));
     expect(mockDbState.lines['siteone|900000001-001|900000001-001|1']).toMatchObject({ status: 'logged' });
+  });
+
+  test('a logged line hands the request close its movement, and reports the request it closed (the live-request read then sees none)', async () => {
+    mockState.match = { matched: true, product: taurus };
+    mockCloseRequest.mockResolvedValueOnce('req-1');
+    const siteOneLine = { vendor: 'siteone', email, orderNumber: '900000001-001', shipmentKey: '900000001-001', lineNo: 4,
+      item: { title: 'CSI-Pest Taurus SC Broad Spectrum Liquid Concentrate Termiticide/Insecticide 78 fl oz. Bottle (QGCY) UOM:EA', quantity: 1 } };
+    expect(await processReceiptLine({ ...siteOneLine, purchaseOrder: 'WAVES-AB12CD34' })).toMatchObject({ status: 'logged', closedRestockRequestId: 'req-1', hasOpenRestockRequest: false });
+    expect(mockCloseRequest).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      vendor: 'siteone', productId: 'p-taurus', orderNumber: '900000001-001', lineNo: 4, movementId: 'mv-1', receivedQty: 78, receivedUnit: 'fl_oz', purchaseOrder: 'WAVES-AB12CD34',
+    }));
+  });
+
+  test('a held line (possible duplicate) never reaches the request close', async () => {
+    mockState.match = { matched: true, product: taurus };
+    mockDbState.duplicateMovement = { id: 'earlier' };
+    expect(await processReceiptLine(taurusLine())).toMatchObject({ status: 'possible_duplicate' });
+    expect(mockCloseRequest).not.toHaveBeenCalled();
   });
 
   test('idempotency: the same (order, shipment, line) twice logs once', async () => {

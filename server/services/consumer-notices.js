@@ -1,5 +1,5 @@
 // FDACS-13692 Consumer Notice Form on file (Rule 5E-14.105(1), F.A.C.; owner
-// 2026-10-24, GATE_WARRANTY_13692_CHECK): the owner or authorized agent signs
+// 2026-10-24): the owner or authorized agent signs
 // the state form BEFORE a wood-destroying-organism contract. A notice on file is
 // either an e-signed Document Request (customer_contracts, template
 // consumer_notice.fdacs_13692, signed_at read as an Eastern date) or a scan of
@@ -15,9 +15,6 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 
 const CONSUMER_NOTICE_TEMPLATE_KEY = 'consumer_notice.fdacs_13692';
-// Until this Eastern day a missing notice only warns the warranty office;
-// after it the warranty refuses (owner 2026-10-24).
-const CONSUMER_NOTICE_GRACE_END = '2026-11-24';
 // The form on file is Rev. 07/21: an earlier signed date is not this form.
 const FORM_FIRST_DAY = '2021-07-01';
 const KEY_PREFIX = 'consumer-notices/';
@@ -233,7 +230,6 @@ async function signedViewUrl(record, expiresIn = SIGNED_URL_SECONDS) {
 
 module.exports = {
   CONSUMER_NOTICE_TEMPLATE_KEY,
-  CONSUMER_NOTICE_GRACE_END,
   FORM_FIRST_DAY,
   MAX_FILE_BYTES,
   findConsumerNotice,

@@ -5,12 +5,25 @@
  * adjustStock path (inventory-operations.js), never raw SQL. Each vendor
  * writes under its own movement source (SOURCES).
  *
- * Stock only. This lane never closes, receives or otherwise writes a
- * product_restock_requests row: three audit rounds each found a new way an
- * automatic close could pick the wrong request (vendor guess, then order
- * number, then a lock race with a manual receipt), so it was removed. When
- * the product has a live (open|ordered) request, the logged bell says so
- * and a person decides.
+ * Stock only, with ONE narrow exception. This lane does not close, receive
+ * or otherwise write a product_restock_requests row: three audit rounds each
+ * found a new way an automatic close could pick the wrong request (vendor
+ * guess, then order number, then a lock race with a manual receipt), so it
+ * was removed. When the product has a live (open|ordered) request, the
+ * logged bell says so and a person decides.
+ * The exception (siteone-request-close.js): a logged SiteOne line closes the
+ * request the auto-order robot itself placed from SiteOne, and only when the
+ * invoice's printed PO equals the PO the robot typed into that order, the
+ * product has exactly one live request, that request is 'ordered' from the
+ * auto-reorder sweep with a placed SiteOne ledger row dated before the
+ * invoice email, and the line covers the quantity the ledger recorded as
+ * dispatched. It is safe because no guess is left: the PO names the order,
+ * so an unrelated invoice of the same product never closes it. The close
+ * adds no second stock movement (this line's movement already did). When a
+ * manual action holds that request, the line's transaction rolls back and
+ * the next sweep retries it, so the same delivery is never added twice.
+ * Without the exception the request would stay live forever and block every
+ * later automatic request for the product. Everything else stays with a person.
  *
  * Title sizing is exception-based. A line auto-logs only when its title
  * carries exactly one readable size that agrees with the catalog container,
@@ -71,6 +84,8 @@ const { parsePackSize } = require('../product-costing');
 const { convertInventoryQuantity } = require('../inventory-units');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { adjustStock } = require('../inventory-operations');
+const { closeRequestCoveredByLine } = require('./siteone-request-close');
+const { VENDOR: SITEONE_VENDOR, queuedLinePurchaseOrder } = require('./siteone-invoices');
 
 // GATE_INVENTORY_AGENT (inventory-agent.js): read at call time here too, so
 // a flip needs no redeploy. Off, these three statuses are held for a
@@ -332,7 +347,7 @@ function lineDisposition(found, { forcedStatus, holdAs } = {}, { agentOn = false
 }
 
 /**
- * @param {{vendor, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, ringBell}} params
+ * @param {{vendor, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, purchaseOrder, ringBell}} params
  *   vendor: a SOURCES key ('amazon' | 'siteone').
  *   orderNumber: may be null (no readable Order #) — keyed as 'unknown'.
  *   shipmentKey: Amazon's shipmentId (else the email's gmail_id / id), or
@@ -341,15 +356,16 @@ function lineDisposition(found, { forcedStatus, holdAs } = {}, { agentOn = false
  *   'no_items' (an itemless Delivered email), 'unreadable' (a SiteOne
  *   invoice never read into lines).
  *   holdAs: the status a line matched to a product is held under instead.
+ *   purchaseOrder: a SiteOne invoice's printed PO (siteone-request-close.js); absent for every other caller.
  *   ringBell(outcome, trx): writes the line's bell on its transaction.
  * @returns one of (every recorded outcome carries lineId):
  *   { skipped: true, reason }                                    — nothing written
  *     (reason 'asked_to_log_by_hand': the shipment was handed to a person)
  *   { status: 'unmatched'|'size_mismatch'|'needs_size'|forcedStatus|holdAs, inserted: true, product }
  *   { status: 'possible_duplicate', product, receivedQty, receivedUnit }  — held, no movement
- *   { status: 'logged', product, receivedQty, receivedUnit, movement, hasOpenRestockRequest }
+ *   { status: 'logged', product, receivedQty, receivedUnit, movement, hasOpenRestockRequest, closedRestockRequestId? }
  */
-async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, ringBell = async () => {} }, conn = db) {
+async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, purchaseOrder, ringBell = async () => {} }, conn = db) {
   if (!shipmentKey) {
     logger.warn(`[purchase-receipts] email ${email.id} line ${lineNo}: no shipment key, skipped`);
     return { skipped: true, reason: 'no_shipment_key' };
@@ -369,7 +385,7 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
     });
     if (!claim) return { ...ALREADY_PROCESSED };
     const outcome = classified.status === 'logged'
-      ? await performLoggedMovement(trx, { vendor, claim, classified, orderNumber, email, item })
+      ? await performLoggedMovement(trx, { vendor, claim, classified, orderNumber, email, item, purchaseOrder })
       : {
         status: classified.status, inserted: true, product: classified.product || null,
         ...(classified.unmatchedHold ? { unmatchedHold: classified.unmatchedHold } : {}),
@@ -408,7 +424,7 @@ function findPossibleDuplicateMovement(trx, productId, receivedAt) {
 // product row is already locked (classifyUnderLock), so no manual
 // adjustment commits between the duplicate check and the movement;
 // adjustStock locks the same row again, which Postgres treats as a no-op.
-async function performLoggedMovement(trx, { vendor, claim, classified, orderNumber, email, item }) {
+async function performLoggedMovement(trx, { vendor, claim, classified, orderNumber, email, item, purchaseOrder }) {
   const { product, receivedQty, receivedUnit } = classified;
   if (await findPossibleDuplicateMovement(trx, classified.productId, email.received_at)) {
     await trx('purchase_receipt_lines').where({ id: claim.id }).update({ status: 'possible_duplicate' });
@@ -418,10 +434,17 @@ async function performLoggedMovement(trx, { vendor, claim, classified, orderNumb
   const result = await adjustStock(classified.productId, { movementType: 'restock', quantity: receivedQty, unit: receivedUnit },
     { source: SOURCES[vendor], extraMetadata: { orderNumber, emailId: email.id, rawTitle: item.title }, trx });
   await trx('purchase_receipt_lines').where({ id: claim.id }).update({ movement_id: result.movement.id });
-  // Read-only: the bell mentions a live request; this lane never writes one.
+  // The only request write in this lane: the robot's own SiteOne request this line covers.
+  const closedRequestId = await closeRequestCoveredByLine(trx, {
+    vendor, productId: classified.productId, product, email, orderNumber, lineNo: claim.line_no, movementId: result.movement.id, receivedQty, receivedUnit, purchaseOrder,
+  });
+  // Otherwise read-only: the bell mentions a live request a person decides on.
   const liveRequest = await trx('product_restock_requests')
     .where({ product_id: classified.productId }).whereIn('status', LIVE_RESTOCK_STATUSES).first('id');
-  return { status: 'logged', product, receivedQty, receivedUnit, movement: result.movement, hasOpenRestockRequest: Boolean(liveRequest) };
+  return {
+    status: 'logged', product, receivedQty, receivedUnit, movement: result.movement, hasOpenRestockRequest: Boolean(liveRequest),
+    ...(closedRequestId ? { closedRestockRequestId: closedRequestId } : {}),
+  };
 }
 
 // A queued agent_pending line (inventory-agent.js) that THIS lane's own
@@ -441,7 +464,10 @@ async function logQueuedLine(trx, { line, email }) {
     status: 'logged', product_id: classified.productId, received_qty: classified.receivedQty, received_unit: classified.receivedUnit,
   });
   const orderNumber = line.order_number === UNKNOWN_ORDER ? null : line.order_number;
-  return performLoggedMovement(trx, { vendor: line.vendor, claim: line, classified, orderNumber, email, item });
+  // A SiteOne line keeps its invoice's printed PO (re-verified against the stored invoice and this
+  // exact line), so a queued line that posts later can still close the robot's own request.
+  const purchaseOrder = line.vendor === SITEONE_VENDOR ? await queuedLinePurchaseOrder(line, trx) : undefined;
+  return performLoggedMovement(trx, { vendor: line.vendor, claim: line, classified, orderNumber, email, item, purchaseOrder });
 }
 
 module.exports = {

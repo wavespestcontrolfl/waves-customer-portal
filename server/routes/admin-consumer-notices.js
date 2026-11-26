@@ -2,18 +2,15 @@ const express = require('express');
 const multer = require('multer');
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { warranty13692CheckLive } = require('../config/feature-gates');
 const notices = require('../services/consumer-notices');
 
-// FDACS-13692 consumer notices on file for a customer (GATE_WARRANTY_13692_CHECK,
-// dark). Staff-only. The list shows e-signed Document Requests and uploaded
+// FDACS-13692 consumer notices on file for a customer (owner 2026-10-24).
+// Staff-only. The list shows e-signed Document Requests and uploaded
 // paper scans; a scan is never returned as a key, only through a short signed
 // link. Mounted at /api/admin/customers/:customerId/consumer-notices.
 const router = express.Router({ mergeParams: true });
 router.use(adminAuthenticate, requireAdmin);
 router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-// Gate off = the whole surface answers 404, exactly as if it were not mounted.
-router.use((req, res, next) => (warranty13692CheckLive() ? next() : res.status(404).json({ error: 'Not found' })));
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A middleware, not router.param: the id is in the mount path, so param callbacks never fire here.
@@ -42,7 +39,7 @@ function receiveFile(req, res, next) {
 
 router.get('/', async (req, res, next) => {
   try {
-    res.json({ enabled: true, graceEnd: notices.CONSUMER_NOTICE_GRACE_END, notices: await notices.listConsumerNotices(req.params.customerId) });
+    res.json({ notices: await notices.listConsumerNotices(req.params.customerId) });
   } catch (err) {
     next(err);
   }
