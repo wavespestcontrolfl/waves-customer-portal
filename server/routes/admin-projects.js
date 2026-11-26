@@ -3380,7 +3380,11 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // strand an orphan invoice + burn an invoice number. Return a non-persisted
       // preview of the fee/total instead; `created: true` so the confirm dialog
       // still reads "Create and send", and the real send below does the create.
-      const fee = resolveWdoInspectionFee(parseFindings(project));
+      // A held send prices from the LOCKED row: a fee changed to $0 since the preflight bills nothing, so no draft.
+      const fee = resolveWdoInspectionFee(parseFindings(holdRequested && 'findings' in locked ? locked : project));
+      if (holdRequested && fee === 0) {
+        throw holdRefusal(422, 'wdo_no_charge', 'This WDO inspection is now recorded as no charge ($0 inspection fee). Nothing was sent. Use "Send report".');
+      }
       if (dryRun) {
         const totals = await previewWdoInvoiceTotals(project, customer, fee);
         return {
@@ -4404,6 +4408,12 @@ async function heldReleaseBlocker(project, customer, { readinessChecked = false,
   const sigState = wdoSignatureFreshness(project);
   if (!sigState.signed) return 'Licensee signature required, re-sign to release the paid report';
   if (!sigState.fresh) return 'Findings were edited after signing, the licensee must re-sign to release the paid report';
+  // ...and the photo addendum the licensee signed (the PDF builder's own check, run here so a hold is never promised on
+  // a report whose paid release would refuse). A photo read that fails throws (fail closed).
+  const signedPhotos = sigState.signature.photoSetHash;
+  if (signedPhotos && signedPhotos !== wdoPhotoSetHash(await loadWdoAddendumPhotoRows(project, database))) {
+    return 'Photos changed after signing, the licensee must re-sign to release the paid report';
+  }
   const gateProblem = wdoSectionTwoContradiction(project) || wdoCoreFindingsIncomplete(project);
   if (gateProblem) return gateProblem;
   const readiness = evaluateProjectSendReadiness({ project, customer });
@@ -4626,7 +4636,10 @@ function heldReportRecipientHandoff({ customerId, expectedEmail, state, ownClaim
     customerId, invoice, ownClaim, requireSettled, state,
     check: async (trx, fresh) => {
       const now = await ProjectEmail.resolveProjectEmailRecipientForSend(fresh.customer, { applyReportRule: true, database: trx });
-      return now?.email && normEmail(now.email) === normEmail(expectedEmail) ? null : 'REPORT_RECIPIENT_CHANGED';
+      if (!now?.email || normEmail(now.email) !== normEmail(expectedEmail)) return 'REPORT_RECIPIENT_CHANGED';
+      // ...and the address-wide rule under the same locks: another contact slot sharing the address that declined email
+      // since the queue check stops the PDF here.
+      return await ProjectEmail.dispatchBoundaryCheck({ recipient: now, customerId, database: trx }) ? null : 'REPORT_RECIPIENT_DECLINED';
     },
   });
 }
@@ -5306,6 +5319,9 @@ function selectSendStamp(hold, invoice, tokenUpdate) {
   return {
     invoice_id: invoice.id,
     updated_at: db.fn.now(),
+    // One held invoice send per confirmation: the count moves with every send that arms, and the operator's
+    // fingerprint names the count it saw, so a replayed request (a lost response) refuses instead of sending again.
+    delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || jsonb_build_object('held_invoice_sends', coalesce((delivery_channels->>'held_invoice_sends')::int, 0) + 1)"),
     ...(hold.wasHeld ? {} : {
       report_hold_status: 'held',
       report_hold_at: db.fn.now(),
@@ -5362,8 +5378,14 @@ function billingFingerprint(inv) {
 // The short form of the fingerprint the preview hands the drawer and the send hands back.
 // The confirmed bill, and whether the report was already held when the operator saw it: a first held send whose
 // response was lost, replayed after it succeeded, would otherwise pass as a resend of the invoice.
-const billingFingerprintHash = (inv, reportHeld = false) => crypto.createHash('sha1')
-  .update(billingFingerprint(inv) + (reportHeld ? '|held' : '')).digest('hex').slice(0, 16);
+// ...and how many held invoice sends the report had then (selectSendStamp counts them): one confirmation, one send.
+const billingFingerprintHash = (inv, reportHeld = false, project = null) => crypto.createHash('sha1')
+  .update(billingFingerprint(inv) + (reportHeld ? '|held' : '') + heldInvoiceSendsPart(project)).digest('hex').slice(0, 16);
+function heldInvoiceSendsPart(project) {
+  const channels = typeof project?.delivery_channels === 'string' ? safeJsonParse(project.delivery_channels) : project?.delivery_channels;
+  const sends = Number(channels?.held_invoice_sends) || 0;
+  return sends ? `|sends:${sends}` : '';
+}
 
 // Arming a hold is ONE transaction: the project row, then the invoice row (FOR UPDATE, always in that
 // order, with the customer's payment lock between them, as the pay paths take it), every precondition
@@ -5404,7 +5426,7 @@ async function armReportHold({ hold, project, invoice, expectedFingerprint, deli
     // ...and the locked invoice is the one the operator confirmed: a held send must carry the preview's fingerprint
     // (a send without one refuses, so an amount that changed before the request began cannot go out unconfirmed).
     if (billingFingerprint(lockedInvoice) !== billingFingerprint(invoice)
-      || String(expectedFingerprint || '') !== billingFingerprintHash(lockedInvoice, locked.report_hold_status === 'held')) {
+      || String(expectedFingerprint || '') !== billingFingerprintHash(lockedInvoice, locked.report_hold_status === 'held', locked)) {
       throw holdRefusal(409, 'hold_invoice_changed', 'The invoice changed while this was being sent. Nothing was sent. Refresh and send again.');
     }
     const notReleasable = await holdReleasabilityRefusal(locked, currentCustomer, { database: trx });
@@ -6010,7 +6032,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           status: invoice.status,
           created,
           payer_billed: !!invoice.payer_id,
-          billing_fingerprint: billingFingerprintHash(invoice, isReportHeld(project)),
+          billing_fingerprint: billingFingerprintHash(invoice, isReportHeld(project), project),
         },
       });
     }
@@ -6079,7 +6101,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           status: invoice.status,
           created,
           // What the operator is confirming: the send hands it back, and a held send refuses a changed invoice.
-          ...(holdRequested && invoice.id && !created ? { billing_fingerprint: billingFingerprintHash(invoice, isReportHeld(project)) } : {}),
+          ...(holdRequested && invoice.id && !created ? { billing_fingerprint: billingFingerprintHash(invoice, isReportHeld(project), project) } : {}),
         },
         email_routing: isPayerBilledPreview ? {
           // Homeowner gets the report ONLY; the invoice + pay link go to the payer

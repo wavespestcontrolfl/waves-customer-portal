@@ -1510,7 +1510,9 @@ describe('audit fixes', () => {
       const { updates } = mockTables({ project: wdoProject({ delivery_status: null }) });
       await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
       const projectUpdates = updates.projects || [];
-      expect(projectUpdates.some((u) => 'delivery_channels' in u || 'last_delivery_at' in u)).toBe(false);
+      // (the only channel write is the held invoice send count, not a delivery record)
+      const deliveryRecord = (u) => ('delivery_channels' in u && !String(u.delivery_channels?.sql || '').includes("'held_invoice_sends'")) || 'last_delivery_at' in u;
+      expect(projectUpdates.some(deliveryRecord)).toBe(false);
       expect(projectUpdates.some((u) => u.delivery_status === 'sent' || u.delivery_status === 'partial')).toBe(false);
       // the claim is given back with the status it had
       expect(projectUpdates.some((u) => u.delivery_claim_token === null && u.delivery_status === null)).toBe(true);
@@ -2458,6 +2460,62 @@ describe('audit fixes', () => {
       });
       expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
       expect(ProjectEmail.dispatchBoundaryCheck).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'customer-1' }));
+    });
+
+    test('the report email handoff applies the address-wide email rule under its locks', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const args = ProjectEmail.sendProjectReportReady.mock.calls[0][0];
+      ProjectEmail.dispatchBoundaryCheck.mockResolvedValueOnce(false);
+      const dispatch = jest.fn();
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(args.handoffState.boundaryBlock).toEqual({ code: 'REPORT_RECIPIENT_DECLINED' });
+    });
+
+    test('a held draft is priced from the locked project: a fee changed to $0 since the preflight creates no draft', async () => {
+      const zeroFee = wdoProject({ invoice_id: null, findings: { ...FINDINGS, inspection_fee: '0' } });
+      mockTables({ project: wdoProject({ invoice_id: null }), invoice: null });
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'projects') c.forUpdate = jest.fn(() => ({ ...c, first: jest.fn(async () => zeroFee) }));
+        return c;
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), { hold_report_until_paid: true, prepare_invoice: true });
+        expect((await res.json()).code).toBe('wdo_no_charge');
+      });
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+    });
+
+    test('a hold is refused when the photos changed after signing (the paid release would refuse)', async () => {
+      const project = wdoProject();
+      const sig = typeof project.wdo_signature === 'string' ? JSON.parse(project.wdo_signature) : project.wdo_signature;
+      const signed = wdoProject({ wdo_signature: { ...sig, photo_set_hash: 'signed-over-other-photos' } });
+      // the hold request is refused before any invoice goes out
+      mockTables({ project: signed });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        expect(res.status).toBeGreaterThanOrEqual(400);
+        expect(JSON.stringify(await res.json())).toMatch(/Photos changed after signing/);
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+    });
+
+    test('one confirmation sends a held invoice once: a replayed resend after it succeeded refuses', async () => {
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', invoice_id: 'inv-1' }) });
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), heldResendBodyFor())).status).toBe(200); });
+      expect((updates.projects || []).some((u) => String(u.delivery_channels?.sql || '').includes("'held_invoice_sends'"))).toBe(true);
+      // the replay finds the count moved since the confirmation
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockClear();
+      mockTables({ project: wdoProject({ report_hold_status: 'held', invoice_id: 'inv-1', delivery_channels: { held_invoice_sends: 1 } }) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), heldResendBodyFor());
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('hold_invoice_changed');
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
     });
 
     test('a held report sent another way takes back its link in the same write', () => {
