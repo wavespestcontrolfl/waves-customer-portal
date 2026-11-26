@@ -5,7 +5,7 @@
 // completed visit with no "N/A" tile, and Add to Calendar on every upcoming visit.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const native = vi.hoisted(() => ({ enabled: false }));
@@ -148,17 +148,34 @@ describe('fix 5: Billing says whether the account is paid up', () => {
   it('names the last payment when the balance is zero', async () => {
     api.getBalance.mockResolvedValue({ currentBalance: 0 });
     api.getPayments.mockResolvedValue({ payments: [
-      { id: 'p1', date: '2026-10-01', amount: 89, status: 'paid', type: 'recurring' },
-      { id: 'p2', date: '2026-11-01', amount: 120, status: 'paid', type: 'one_time' },
+      { id: 'p1', date: '2026-10-01', amount: 89, status: 'paid', type: 'recurring', receiptUrl: '/receipt/a' },
+      { id: 'p2', date: '2026-11-01', amount: 120, status: 'paid', type: 'one_time', receiptUrl: '/receipt/b' },
     ] });
     renderBilling();
     expect(await screen.findByText("You're paid up. Last payment $120.00 on Nov 1, 2026.")).toBeInTheDocument();
   });
 
+  it('shows what was charged when the payment was partly refunded', async () => {
+    api.getPayments.mockResolvedValue({ payments: [
+      { id: 'p1', date: '2026-11-01', amount: 100, refundAmount: 20, status: 'paid', type: 'one_time', stripeReceiptUrl: 'https://pay.stripe.test/r' },
+    ] });
+    renderBilling();
+    expect(await screen.findByText("You're paid up. Last payment $100.00 on Nov 1, 2026.")).toBeInTheDocument();
+  });
+
+  it('says nothing when no paid row carries a receipt (the server withholds them when it cannot rule out a third-party payer)', async () => {
+    api.getPayments.mockResolvedValue({ payments: [
+      { id: 'p1', date: '2026-11-01', amount: 100, status: 'paid', type: 'one_time', receiptUrl: null, stripeReceiptUrl: null },
+    ] });
+    renderBilling();
+    await screen.findByText('Account balance');
+    expect(screen.queryByText(/You're paid up/)).not.toBeInTheDocument();
+  });
+
   it('says so when a bank payment is still processing', async () => {
     api.getBalance.mockResolvedValue({ currentBalance: 0 });
     api.getPayments.mockResolvedValue({ payments: [
-      { id: 'p1', date: '2026-10-01', amount: 89, status: 'paid', type: 'recurring' },
+      { id: 'p1', date: '2026-10-01', amount: 89, status: 'paid', type: 'recurring', receiptUrl: '/receipt/a' },
       { id: 'p2', date: '2026-11-24', amount: 89, status: 'processing', type: 'recurring' },
     ] });
     renderBilling();
@@ -167,7 +184,7 @@ describe('fix 5: Billing says whether the account is paid up', () => {
 
   it('says nothing when money is owed or there is no payment on file', async () => {
     api.getBalance.mockResolvedValue({ currentBalance: 55 });
-    api.getPayments.mockResolvedValue({ payments: [{ id: 'p1', date: '2026-10-01', amount: 89, status: 'paid', type: 'recurring' }] });
+    api.getPayments.mockResolvedValue({ payments: [{ id: 'p1', date: '2026-10-01', amount: 89, status: 'paid', type: 'recurring', receiptUrl: '/receipt/a' }] });
     const owed = renderBilling();
     await screen.findByText('Balance due');
     expect(screen.queryByText(/You're paid up/)).not.toBeInTheDocument();
@@ -203,6 +220,15 @@ describe('fix 7: service-day tracker rows and missed visits', () => {
     // Rows that are already fine stay plain text, and the office hours stay as ruled.
     expect(screen.queryByRole('button', { name: /Ensure gates are unlocked/ })).not.toBeInTheDocument();
     expect(screen.getByText('Open 24 hrs')).toBeInTheDocument();
+  });
+
+  it('keeps "Secure pets" read-only on a secondary property, where My Property has no editor for this house', async () => {
+    api.getTodayTracker.mockResolvedValue({ tracker: tracker() });
+    const onOpenPets = vi.fn();
+    const secondary = { id: 'c1:pb', key: 'c1:pb', customerId: 'c1', propertyId: 'pb', isPrimaryProperty: false };
+    render(<ServiceTracker currentEntry={secondary} savedScope onOpenPets={onOpenPets} />);
+    await screen.findByText('Secure pets before tech arrives');
+    expect(screen.queryByRole('button', { name: /Secure pets before tech arrives/ })).not.toBeInTheDocument();
   });
 
   it.each([
@@ -313,6 +339,22 @@ describe('fix 9: visits', () => {
     fireEvent.click(buttons[1]);
     await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
     expect(String(fetchSpy.mock.calls[0][0])).toMatch(/calendar\.ics$/);
+  });
+
+  it('removes Add to Calendar at the server deadline while the Visits tab stays open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const soon = new Date(Date.now() + 5000).toISOString();
+      api.getSchedule.mockResolvedValue({ upcoming: [
+        { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: soon },
+      ] });
+      render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
+      await screen.findByRole('button', { name: 'Add to Calendar' });
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(screen.queryByRole('button', { name: 'Add to Calendar' })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('hides Add to Calendar once the server window has closed', async () => {

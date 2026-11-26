@@ -331,6 +331,16 @@ const calendarLinkStillLive = (svc) => {
 // ruling: visit promises are day-only). The server nulls calendarUrl for every
 // visit it would refuse a file for, so no button shows then.
 function AddToCalendarButton({ visit, style }) {
+  // Re-render when the server deadline passes, so a Visits tab left open stops offering a file the route now refuses
+  // (same timer as the Home card). `tick` re-arms it when the delay saturates the setTimeout ceiling.
+  const [tick, setTick] = useState(0);
+  const deadline = calendarLinkEndsAt(visit)?.getTime();
+  useEffect(() => {
+    const ms = deadline - Date.now();
+    if (!(ms > 0)) return undefined;
+    const timer = setTimeout(() => setTick((t) => t + 1), Math.min(ms, 2147483647));
+    return () => clearTimeout(timer);
+  }, [deadline, tick]);
   if (!visit?.calendarUrl || !calendarLinkStillLive(visit)) return null;
   return (
     <button type="button" onClick={() => {
@@ -3334,6 +3344,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
       : nextDate && !isNaN(nextDate)
         ? nextDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
         : 'No visit scheduled';
+  const onBalanceTap = balanceError ? loadBalance : () => onSwitchTab?.('billing');
   const balanceLabel = balancePending
     ? 'Checking balance'
     : balanceError
@@ -3358,7 +3369,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Text us', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
-    { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: balanceError ? loadBalance : () => onSwitchTab?.('billing') },
+    { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: onBalanceTap },
     { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${Number.isInteger(referralReward) ? referralReward : referralReward.toFixed(2)} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
   return (
@@ -3417,7 +3428,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
           {/* Same glass chip as the quick actions — the opaque #FFF7ED panel
               read as a peach block over the hero. The amber label carries
               the "due" signal. */}
-          <button type="button" data-glass="chip" onClick={balanceError ? loadBalance : () => onSwitchTab?.('billing')} style={{
+          <button type="button" data-glass="chip" onClick={onBalanceTap} style={{
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
@@ -3551,14 +3562,10 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
             </div>
           ) : (
             <div style={{ padding: 20, color: muted, fontSize: 14, lineHeight: 1.5 }}>
-              {nextServiceStatus === 'loading'
-                ? 'Checking your upcoming visits...'
-                : 'We could not load your schedule right now.'}
-              {nextServiceStatus === 'error' && (
-                <div style={{ marginTop: 12 }}>
-                  <button type="button" onClick={() => { void nextRead.refresh(); }} data-glass-accent="" style={dashboardSecondaryButton}>Try again</button>
-                </div>
-              )}
+              {{ loading: 'Checking your upcoming visits...', error: 'We could not load your schedule right now.' }[nextServiceStatus]}
+              <div hidden={nextServiceStatus !== 'error'} style={{ marginTop: 12 }}>
+                <button type="button" onClick={() => { void nextRead.refresh(); }} data-glass-accent="" style={dashboardSecondaryButton}>Try again</button>
+              </div>
             </div>
           )}
         </section>}
@@ -6085,12 +6092,14 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             {renderConfirmBtn(s, false)}
             {!readOnlyVisits && (
-              <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-                ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
-                fontSize: 14, position: 'relative',
-              }}>Reschedule</a>
+              <>
+                <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+                  ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
+                  fontSize: 14, position: 'relative',
+                }}>Reschedule</a>
+                <AddToCalendarButton visit={s} style={{ ...secondaryButton, padding: '10px 14px', flex: 1, fontSize: 14, position: 'relative' }} />
+              </>
             )}
-            {!readOnlyVisits && <AddToCalendarButton visit={s} style={{ ...secondaryButton, padding: '10px 14px', flex: 1, fontSize: 14, position: 'relative' }} />}
           </div>
         </div>
       </div>
@@ -6139,12 +6148,14 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           {renderConfirmBtn(s, true)}
           {/* C4: no Reschedule mutation control for a cancelled or contact session. */}
           {!readOnlyVisits && (
-            <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-              ...secondaryButton, padding: '9px 14px', textDecoration: 'none',
-              fontSize: 14, position: 'relative',
-            }}>Reschedule</a>
+            <>
+              <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+                ...secondaryButton, padding: '9px 14px', textDecoration: 'none',
+                fontSize: 14, position: 'relative',
+              }}>Reschedule</a>
+              <AddToCalendarButton visit={s} style={{ ...secondaryButton, padding: '9px 14px', fontSize: 14, position: 'relative' }} />
+            </>
           )}
-          {!readOnlyVisits && <AddToCalendarButton visit={s} style={{ ...secondaryButton, padding: '9px 14px', fontSize: 14, position: 'relative' }} />}
         </div>
       </div>
     </div>
@@ -6860,18 +6871,20 @@ const BILLING_COLUMN = { display: 'flex', flexDirection: 'column', gap: 16 };
 // "Are my payments current?" answered in one plain line: shown when the balance is zero and
 // the payment history already loaded on this tab has a paid row. A bank payment still in
 // flight is named too. Returns null when there is nothing true to say.
-function paidUpSummary(currentBalance, payments, formatMoney) {
-  if (!(Number(currentBalance) <= 0) || !Array.isArray(payments)) return null;
-  const kept = (p) => Math.max(0, (p.amount || 0) - (p.refundAmount || 0));
-  const dayOf = (p) => { const d = parseDate(p.date); return Number.isNaN(d.getTime()) ? null : d; };
+// Payer ownership: the history route withholds every receipt link when it could not rule out a
+// third-party (Bill-To) payer's payments, so the line needs the last paid row to carry one.
+// A paid row with no receipt at all (cash, check) shows no line: better silent than wrong.
+// The amount is what was charged; a partial refund stays in Payment History.
+function paidUpSummary({ loading, loadError, balance, payments, formatMoney }) {
+  const dayOf = (p) => parseDate(p.date);
   const last = payments
-    .filter((p) => p.status === 'paid' && kept(p) > 0 && dayOf(p))
+    .filter((p) => p.status === 'paid' && p.amount > 0 && (p.receiptUrl || p.stripeReceiptUrl) && !Number.isNaN(dayOf(p).getTime()))
     .sort((a, b) => dayOf(b) - dayOf(a))[0];
-  if (!last) return null;
-  const when = dayOf(last).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  const inFlight = payments.find((p) => p.status === 'processing' && (p.amount || 0) > 0);
-  const base = `You're paid up. Last payment ${formatMoney(kept(last))} on ${when}.`;
-  return inFlight ? `${base} A payment of ${formatMoney(inFlight.amount)} is still processing.` : base;
+  const inFlight = payments.find((p) => p.status === 'processing' && p.amount > 0);
+  const when = last && dayOf(last).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const paidUp = `You're paid up. Last payment ${formatMoney(last?.amount)} on ${when}.`;
+  const processing = inFlight ? ` A payment of ${formatMoney(inFlight.amount)} is still processing.` : '';
+  return !loading && !loadError && balance && last && Number(balance.currentBalance) <= 0 ? paidUp + processing : null;
 }
 
 function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, openAddCard = false, onSwitchTab = null }) {
@@ -7822,7 +7835,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
   const balanceTone = B.glassNavy;
-  const paidUpLine = loading || loadError || !balance ? null : paidUpSummary(currentBalance, payments, money);
+  const paidUpLine = paidUpSummary({ loading, loadError, balance, payments, formatMoney: money });
   // Open-invoice pay links (GATE_PORTAL_PAY_NOW; server includes them only
   // while the gate is on). Each entry carries the invoice's existing
   // tokenized /pay URL — the same checkout the SMS/email links open — so
@@ -8034,9 +8047,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
             <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
               {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
             </div>
-            {paidUpLine && (
-              <div style={{ marginTop: 8, fontSize: 14, color: B.glassNavy, fontWeight: 700, lineHeight: 1.4 }}>{paidUpLine}</div>
-            )}
+            <div hidden={!paidUpLine} style={{ marginTop: 8, fontSize: 14, color: B.glassNavy, fontWeight: 700, lineHeight: 1.4 }}>{paidUpLine}</div>
             {primaryOpenInvoice && (
               <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
                 <a href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, width: '100%', boxSizing: 'border-box' }} data-glass-accent="">
@@ -14057,7 +14068,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
 
 // One "Before your tech arrives" row. A warning row that has somewhere to go
 // (add the gate code, set the pet plan) is a button that opens My Property at that section.
-function TrackerChecklistRow({ item }) {
+function TrackerChecklistRow({ item, interactive }) {
   const rowStyle = {
     display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6,
     borderLeft: item.ok ? 'none' : `2px solid ${B.orange}`,
@@ -14069,7 +14080,9 @@ function TrackerChecklistRow({ item }) {
       <span style={{ fontSize: 14, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.textBody : B.navy, lineHeight: 1.4 }}>{item.text}</span>
     </>
   );
-  if (item.ok || typeof item.onTap !== 'function') return <div style={rowStyle}>{body}</div>;
+  // Not interactive when the row does not describe the shown house (a secondary property): My Property
+  // there is a notice about the primary address, with no editor for this visit's house.
+  if (item.ok || !interactive || typeof item.onTap !== 'function') return <div style={rowStyle}>{body}</div>;
   return (
     <button type="button" onClick={item.onTap} style={{
       ...rowStyle, width: '100%', minHeight: 44, boxSizing: 'border-box', background: 'none',
@@ -14093,7 +14106,7 @@ function TrackerRescheduleButton({ tracker, onReschedule }) {
   return <button type="button" onClick={onReschedule} data-glass-accent="" data-glass-size="primary" style={style}>Reschedule</button>;
 }
 
-function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null, onOpenAccess = null, onOpenPets = null, onReschedule = null }) {
+function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null, onOpenAccess, onOpenPets, onReschedule }) {
   const [tracker, setTracker] = useState(null);
   const trackerRef = useRef(null);
   trackerRef.current = tracker;
@@ -14663,7 +14676,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
               { icon: 'home', text: 'Clear access to garage/attic', ok: true },
             ] : []),
           ].map((item, i) => (
-            <TrackerChecklistRow key={i} item={item} />
+            <TrackerChecklistRow key={i} item={item} interactive={profileFactsApply} />
           ))}
         </div>
       )}
