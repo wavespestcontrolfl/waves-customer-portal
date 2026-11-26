@@ -136,6 +136,7 @@ const SERVICE_LABELS = {
 const HEARD_ABOUT_LABELS = {
   google_search: 'Google search', google_maps: 'Google Maps', chatgpt: 'ChatGPT',
   other_ai: 'Another AI assistant', facebook_instagram: 'Facebook / Instagram',
+  facebook_group: 'Facebook group',
   nextdoor: 'Nextdoor', yelp: 'Yelp', friend_neighbor: 'Friend or neighbor',
   truck_yard_sign: 'Truck or yard sign', other: 'Other',
 };

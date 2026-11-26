@@ -5101,7 +5101,7 @@ and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
 `sanitizeHeardAbout`, shared with the online quote wizard): `google_search`, `google_maps`, `chatgpt`,
-`other_ai`, `facebook_instagram`, `nextdoor`, `yelp`, `friend_neighbor`,
+`other_ai`, `facebook_instagram`, `facebook_group`, `nextdoor`, `yelp`, `friend_neighbor`,
 `truck_yard_sign`, `other`. Any other value — including free text — is
 SILENTLY DROPPED (never stored; the request still succeeds as if the field
 were absent). A valid value is stored verbatim in `leads.heard_about`
