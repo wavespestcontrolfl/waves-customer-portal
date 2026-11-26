@@ -54,7 +54,7 @@ const shareOn = () => typeof payrollProductionShareLive === 'function' && payrol
 const KIND = 'production_share';
 
 /** The frozen record of one technician's week: the figures and one row per stop. Plain JSON, ids and cents only. Pure. */
-function snapshotOf({ weekStart, settings, result, stops, degraded = false, takeBacks = [], takeBackToSet = [], takeBackAnswers = [] }) {
+function snapshotOf({ weekStart, settings, result, stops, degraded = false, takeBacks = [], takeBackToSet = [], takeBackAnswers = [], outstandingTakeBackCents = null }) {
   return {
     weekStart,
     // Set when the credits came from the per-technician retry of a failed shared read: such a draft is never accepted by finalize.
@@ -72,6 +72,8 @@ function snapshotOf({ weekStart, settings, result, stops, degraded = false, take
     // Refund take-backs moved this week (signed), and the paid stops with a new refund the owner has not answered (see the header).
     ...(takeBacks.length ? {
       refundTakeBackCents: takeBacks.reduce((sum, one) => sum + one.cents, 0),
+      // What is still owed after this week's take-backs, frozen so a reopened week shows it (an older snapshot has no such line).
+      ...(outstandingTakeBackCents == null ? {} : { outstandingTakeBackCents }),
       takeBacks: takeBacks.map((one) => ({
         sourceCheckId: one.sourceCheckId, visitId: one.visitId, workDate: one.workDate || null, paidWeekStart: one.paidWeekStart, cents: one.cents,
         dependsOnRuns: [...(one.dependsOnRuns || [])].sort(),
@@ -227,7 +229,7 @@ function sharesFor(inputs, technicianIds, weekStart) {
       const result = productionShare.shareForWeek({ credits: [applied.creditedCents], shifts: productionShare.shiftDays(stops).length, settings });
       shares.set(id, {
         shareCents: result.shareCents,
-        snapshot: snapshotOf({ weekStart, settings, result, stops, degraded: input.degraded === true, takeBacks: applied.takeBacks, takeBackToSet: input.takeBackToSet || [], takeBackAnswers: input.takeBackAnswers || [] }),
+        snapshot: snapshotOf({ weekStart, settings, result, stops, degraded: input.degraded === true, takeBacks: applied.takeBacks, takeBackToSet: input.takeBackToSet || [], takeBackAnswers: input.takeBackAnswers || [], outstandingTakeBackCents: applied.outstandingCents }),
       });
     } catch (err) {
       shares.set(id, { error: `The production share could not be worked out: ${(err && err.message) || 'unknown problem'}` });

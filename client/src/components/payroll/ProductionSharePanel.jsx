@@ -270,8 +270,8 @@ function RefundTakeBacks({ call, preview, generation, onChanged }) {
         ? `Refund taken back from a paid week: ${centsToDollars(one.cents)} (visit of ${dayLabel(one.workDate || one.paidWeekStart)})`
         : `Refund given back to a paid week: ${centsToDollars(-one.cents)} (visit of ${dayLabel(one.workDate || one.paidWeekStart)})`}
     </p>)}
-    {preview.owedTakeBackCents > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
-      Still owed and not yet taken: {centsToDollars(Math.max(0, preview.owedTakeBackCents - applied.filter(one => one.cents > 0).reduce((sum, one) => sum + one.cents, 0)))}. It comes off the next share week. A take-back is never taken from wages.
+    {preview.outstandingTakeBackCents > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
+      Still owed and not yet taken: {centsToDollars(preview.outstandingTakeBackCents)}. It comes off the next share week. A take-back is never taken from wages.
     </p>}
   </div>;
 }

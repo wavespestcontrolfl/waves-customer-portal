@@ -16,7 +16,7 @@ describe('applyTakeBacks', () => {
   it('takes the oldest paid week first and never takes the week below $0; the rest is not taken', () => {
     const result = applyTakeBacks(stops(30000, 20000), [owed('2026-09-21', 'b', 40000), owed('2026-09-14', 'a', 30000)]);
     expect(result.takeBacks.map((one) => [one.visitId, one.cents])).toEqual([['a', 30000], ['b', 20000]]);
-    expect(result).toMatchObject({ creditedCents: 0, refundTakeBackCents: 50000 });
+    expect(result).toMatchObject({ creditedCents: 0, refundTakeBackCents: 50000, outstandingCents: 20000 });
   });
 
   it('adds credit back first for a negative entry, so a give-back lets a take-back fit', () => {
@@ -35,7 +35,7 @@ describe('applyTakeBacks', () => {
   });
 
   it('does nothing with no entries', () => {
-    expect(applyTakeBacks(stops(100, 200), [])).toEqual({ takeBacks: [], refundTakeBackCents: 0, creditedCents: 300 });
+    expect(applyTakeBacks(stops(100, 200), [])).toEqual({ takeBacks: [], refundTakeBackCents: 0, creditedCents: 300, outstandingCents: 0 });
   });
 });
 

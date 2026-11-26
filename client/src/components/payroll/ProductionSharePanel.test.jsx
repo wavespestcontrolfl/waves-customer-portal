@@ -159,7 +159,7 @@ describe('Production share preview', () => {
     it('keeps an answered stop with the total he set, lets him clear it, and says what was taken or given back', async () => {
       const answered = { ...toSet, cents: 30000, note: null, signals: ['pay:x:3000'], newSignals: [], answerRevision: '7:2026-09-20T10:00:00.000001' };
       const call = await open({
-        takeBackToSet: [], takeBackAnswers: [answered], owedTakeBackCents: 30000,
+        takeBackToSet: [], takeBackAnswers: [answered], outstandingTakeBackCents: 10000,
         takeBacks: [
           { sourceCheckId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', cents: 20000 },
           { sourceCheckId: 'check-2', visitId: 'v-other', workDate: '2026-09-09', paidWeekStart: '2026-09-07', cents: -5000 },

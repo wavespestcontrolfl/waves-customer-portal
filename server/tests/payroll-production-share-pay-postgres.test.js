@@ -1249,7 +1249,7 @@ postgres('production share pay line', () => {
     expect(again.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 156000 });
   });
 
-  it('a visit that moves out of a finalized week that paid NO share is not "already paid": it earns in the week it moved to', async () => {
+  it('a finalized check owns its stops, a $0-share week included: a visit that moves out of it stays "already paid" in the week it moved to', async () => {
     const id = await tech('Sample Alpha');
     await settings(id);
     await worked(id, W1, 40);
@@ -1264,9 +1264,12 @@ postgres('production share pay line', () => {
     await trx('scheduled_services').where({ id: moving }).update({ completed_at: `${addDays(W2, 2)}T16:00:00Z`, scheduled_date: addDays(W2, 2) });
     await stop(id, addDays(W2, 1), '1800.00');
     const check = byName((await draft(W2)).body.run, 'Sample Alpha');
-    // 2 shifts: $2,300.00 - $1,800.00 bar = $500.00 above; 15% = $75.00 (the $500.00 visit counts: nothing paid it)
-    expect(check.productionShare).toMatchObject({ needsReviewCount: 0, creditedCents: 230000, aboveBarCents: 50000 });
-    expect(check.productionShareCents).toBe(7500);
+    // The check of week 1 owns that visit whatever its share was: week 2 credits only the $1,800.00 stop (the moved visit still makes its day a
+    // shift: 2 shifts, bar $1,800.00, nothing above it).
+    expect(check.productionShare).toMatchObject({ needsReviewCount: 1, creditedCents: 180000, aboveBarCents: 0 });
+    expect(check.productionShare.needsReview).toEqual([{ visitId: moving, workDate: addDays(W2, 2) }]);
+    const snapshot = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare;
+    expect(snapshot.stops.find((row) => row.visitId === moving)).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
   });
 
   describe('the credit ledger of earlier finalized weeks', () => {

@@ -57,14 +57,16 @@
  *   credit:<customer_credit_ledger id>       the credit row a full refund writes: source 'adjustment', delta above 0 and exactly the note of
  *                                            customer-credit.js refundCreditNote (a payer transfer or a void write other notes)
  *   inv-refunded:<invoice id>                the invoice status is 'refunded'
- * A take-back SOURCE is exactly what paidLedger (production-share.js) counts as paid: a stop row with creditCents > 0 on a finalized check
- * of a finalized run whose share is above $0. A refund on a stop of a $0-share check is no take-back source: that week paid no share.
+ * A take-back SOURCE is a stop row with creditCents > 0 on a finalized check of a finalized run whose share is above $0. A refund on a stop of a
+ * $0-share check is no take-back source: that week paid no share. (The credit ledger is wider on purpose: paidLedger, production-share.js, lets a
+ * finalized check OWN every positive-credit stop on it, so a stop moved out of a $0-share week is still already paid; only the source rule needs a share.)
  * A paid stop's refunds are found from the invoice ids FROZEN on its snapshot row (stops[].invoices and stops[].refundInvoices, the
  * latter also holding an annual term's prepay invoice) UNION the live visit links, so a deleted visit or a relinked invoice still asks.
  * pay and stmt signals carry the Stripe refund identity when the webhooks recorded it (payments.stripe_refund_id and
  * metadata.stamped_refund_ids): a failed refund followed by a new one of the same amount is a new signal. Legacy rows fall back to cents.
- * ONE RULE for an owner answer: it is IN FORCE only while the current signals of its source (the refund signals now, minus the ones the
- * check froze) EQUAL the signals it stored, which are exactly the ones the owner saw. Any difference, a new signal or a covered signal
+ ONE RULE for an owner answer: it is IN FORCE only while the FULL signal set of its source now (the signals its check froze and the new ones)
+ * EQUALS the set stored with it, which is the full set the owner saw. With no answer, the first prompt is any difference between the full set now
+ * and the frozen baseline. Any difference, a new signal or a covered signal
  * gone (a refund reversed), lists the source in takeBackToSet again (reason 'new' or 'changed', the answer shown as the previous total),
  * moves nothing from it (a 0 entry keeps its dependency) and rings the bell, until the owner saves a new answer against the signals now.
  * Every owner mutation names the answer it was shown (answerRevision, 'none' when there is no answer) and is refused (409) when the
@@ -344,12 +346,13 @@ const byWeekVisit = (a, b) => {
   return x < y ? -1 : (x > y ? 1 : 0);
 };
 
-// The take-back to set for a source whose answer is not in force: 'new' when a signal is new (or there is no answer), 'changed' when only a
-// covered one is gone. null when nothing needs an answer (no signals and no answer, or an answer in force).
-function reopenOf(current, answer) {
-  if (answer && sameList(current, answer.signals)) return null;
-  if (!answer) return current.length ? { reason: 'new', previousCents: null } : null;
-  return { reason: current.some((id) => !answer.signals.includes(id)) ? 'new' : 'changed', previousCents: answer.cents };
+// The take-back to set for a source: 'new' when a signal is new (or there is no answer), 'changed' when only a signal that was there is gone.
+// `current` is the FULL signal set now, `baseline` the set the check froze. With an answer: in force only while the full set now equals the
+// set stored with it. With none: the first prompt is any difference between the full set now and the frozen baseline. null = nothing to ask.
+function reopenOf(current, answer, baseline) {
+  const known = answer ? answer.signals : baseline;
+  if (sameList(current, known)) return null;
+  return { reason: current.some((id) => !known.includes(id)) ? 'new' : 'changed', previousCents: answer ? answer.cents : null };
 }
 
 // What a source moves this week: no answer (cleared) is a target of 0, so what was taken is given back; an answer that is not in force
@@ -360,15 +363,16 @@ const deltaOf = (answer, inForce, history) => (answer && !inForce ? 0 : (answer 
 // An answer is in force only while the signals now (minus the frozen ones) equal the ones it stored; otherwise the source is listed again
 // (reopenOf) and moves nothing until the owner answers again.
 function addSource(mine, row, { signals, answer, history, visit }) {
-  const frozen = new Set(row.frozen);
-  const current = signals.filter((id) => !frozen.has(id));
+  const baseline = [...row.frozen].sort();
+  const current = [...signals].sort(); // the FULL set now: the frozen baseline and the new ones
+  const fresh = current.filter((id) => !baseline.includes(id));
   const where = {
     checkId: canonicalId(row.check_id), visitId: canonicalId(row.visit_id), workDate: row.work_date || null, paidWeekStart: row.week_start,
     creditCents: Number(row.credit_cents), answerRevision: answer ? answer.revision : NO_ANSWER, signalRevision: signalRevisionOf(current), visit: visit || null,
   };
-  const reopen = reopenOf(current, answer);
-  if (reopen) mine.toSet.push({ ...where, newSignals: current, ...reopen });
-  if (answer) mine.answers.push({ ...where, id: answer.id, cents: answer.cents, note: answer.note, signals: answer.signals, newSignals: current, updatedAt: answer.updatedAt, revision: answer.revision, inForce: !reopen });
+  const reopen = reopenOf(current, answer, baseline);
+  if (reopen) mine.toSet.push({ ...where, newSignals: fresh, ...reopen });
+  if (answer) mine.answers.push({ ...where, id: answer.id, cents: answer.cents, note: answer.note, signals: answer.signals, newSignals: fresh, updatedAt: answer.updatedAt, revision: answer.revision, inForce: !reopen });
   if (!answer && !history) return;
   const delta = deltaOf(answer, !reopen, history);
   // ONE RULE for dependencies: a source with any finalized history is evaluated every week; its entry (0 cents when nothing moves)
@@ -427,7 +431,7 @@ async function refundLedgerOf(conn, technicianIds, weekStart) {
  * owed list for the technician (signed). Credit given back (a negative entry) is added first; take-backs then come off the credited
  * production, oldest paid week first, never below $0: what does not fit is a 0 entry, so it is still owed next week. Returns
  * { takeBacks: [{ visitId, sourceCheckId, paidWeekStart, workDate, cents, dependsOnRuns }] (cents signed), refundTakeBackCents (the net),
- * creditedCents } with creditedCents after them. Pure.
+ * creditedCents, outstandingCents (owed after this week's application) } with creditedCents after them. Pure.
  */
 function applyTakeBacks(stops, owed = []) {
   let room = stops.reduce((sum, stop) => sum + Number(stop.creditCents), 0);
@@ -438,13 +442,15 @@ function applyTakeBacks(stops, owed = []) {
   });
   const kept = [];
   for (const one of order.filter((each) => Number(each.cents) <= 0)) { room -= Number(one.cents); kept.push(entry(one, Number(one.cents))); }
+  let outstanding = 0;
   for (const one of order.filter((each) => Number(each.cents) > 0)) {
     const cents = Math.min(room, Number(one.cents));
     room -= cents;
+    outstanding += Number(one.cents) - cents; // what does not fit stays owed for the next week
     kept.push(entry(one, cents));
   }
   const takeBacks = kept.sort(byWeekVisit);
-  return { takeBacks, refundTakeBackCents: takeBacks.reduce((sum, one) => sum + one.cents, 0), creditedCents: room };
+  return { takeBacks, refundTakeBackCents: takeBacks.reduce((sum, one) => sum + one.cents, 0), creditedCents: room, outstandingCents: outstanding };
 }
 
 // ---------------------------------------------------------------- the owner's answer
@@ -488,12 +494,11 @@ async function paidStopOf(trx, checkId, visitId) {
   return stop;
 }
 
-// The refund signals of a paid stop now that its check did not freeze, sorted: the live links of the visit and the invoices the check froze
-// (a deleted visit or a relinked invoice still counts), read under the lock by PUT and DELETE.
+// The FULL refund signal set of a paid stop now, sorted (the signals its check froze and the new ones): the live links of the visit and the
+// invoices the check froze (a deleted visit or a relinked invoice still counts), read under the lock by PUT and DELETE.
 async function currentSignalsOf(trx, visitId, stop) {
-  const frozen = new Set(Array.isArray(stop.refundSignals) ? stop.refundSignals : []);
   const frozenInvoices = new Map([[visitId, asUuids([...(stop.invoices || []), ...(stop.refundInvoices || [])])]]);
-  return ((await refundSignalsOf(trx, [visitId], frozenInvoices)).get(visitId) || []).filter((id) => !frozen.has(id));
+  return [...((await refundSignalsOf(trx, [visitId], frozenInvoices)).get(visitId) || [])].sort();
 }
 
 // The page's view of the refunds must be the one the server reads under the lock.
@@ -528,9 +533,11 @@ async function setRefundTakeBack(input, actor, conn = db) {
     const before = await storedAnswer(trx, checkId, visitId);
     requireSameAnswer(before, v.answerRevision);
     const current = await currentSignalsOf(trx, visitId, stop);
-    if (!current.length && !before) throw new PayrollError(409, 'No new refund is recorded on this stop.');
+    const baseline = [...(Array.isArray(stop.refundSignals) ? stop.refundSignals : [])].sort();
+    // With no answer yet, a stop is asked about only when its full set differs from the one its check froze.
+    if (!before && sameList(current, baseline)) throw new PayrollError(409, 'No new refund is recorded on this stop.');
     requireSameSignals(current, v.signalRevision);
-    // The answer stores the FULL list the server read (the page sent only its revision): it is in force only while they stay the same.
+    // The answer stores the FULL set the server read (the page sent only its revision): it is in force only while the full set stays the same.
     const signals = current;
     await trx('production_share_refund_take_backs').insert({
       source_check_id: checkId, visit_id: visitId, signals: JSON.stringify(signals), cents: v.cents, note: v.note || null,

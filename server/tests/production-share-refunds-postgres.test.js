@@ -178,9 +178,9 @@ postgres('production share refunds', () => {
   const signalRevisionNow = async (checkId, visitId) => {
     const row = await trx('payroll_checks').where({ id: checkId }).first('calc_snapshot');
     const stop = (row.calc_snapshot.productionShare.stops || []).find((one) => one.visitId === visitId) || {};
-    const frozen = new Set(stop.refundSignals || []);
     const invoices = new Map([[visitId, [...(stop.invoices || []), ...(stop.refundInvoices || [])]]]);
-    const now = ((await productionShareRefunds.refundSignalsOf(trx, [visitId], invoices)).get(visitId) || []).filter((one) => !frozen.has(one));
+    // The FULL set now (frozen baseline and new), as the preview's signalRevision is.
+    const now = (await productionShareRefunds.refundSignalsOf(trx, [visitId], invoices)).get(visitId) || [];
     return productionShareRefunds.signalRevisionOf(now);
   };
   // A page sends what it saw: the answer revision and the signal revision are read from the database unless the test says what to send;
@@ -911,7 +911,8 @@ postgres('production share refunds', () => {
       const before = await bells();
       const shown = await preview(world.id, W1);
       const row = rowOf(shown, world.visit);
-      expect(row).toMatchObject({ kind: 'already_paid', creditCents: 100000, needsReview: false, reason: expect.stringMatching(/Refunds on paid stops/) });
+      // Built from the frozen stop: its paid credit and kind, never a refund flag.
+      expect(row).toMatchObject({ kind: 'priced', creditCents: 100000, needsReview: false, reason: expect.stringMatching(/Refunds on paid stops/) });
       expect(shown.needsReview).toEqual([]);
       expect(shown.creditedCents).toBe(100000);
       expect(await bells()).toBe(before);
@@ -974,6 +975,77 @@ postgres('production share refunds', () => {
       // The invoice's own PaymentIntent binding is cleared (or replaced): only the anchor key ties the marker to it.
       await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null, stripe_charge_id: null });
       expect((await signals([visit])).get(visit)).toEqual([`pay:${marker}:10000:refunded`]);
+    });
+  });
+
+  describe('round seven: full signal sets, frozen week figures', () => {
+    it('stores the FULL set (frozen baseline and new) with an answer, and reopens it when a frozen refund reverses', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      for (const weekStart of [W1, W2]) await worked(id, weekStart, 40);
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_full' });
+      const a = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_full', refund_amount: '10.00' });
+      expect((await override({ technicianId: id, visitId: visit, weekStart: W1, creditCents: 20000, reason: 'Refund was $10' })).status).toBe(200);
+      const { done } = await finalWeek(W1);
+      const checkId = byName(done, 'Sample Alpha').id;
+      await stop(id, W2, '500.00', customerId);
+      expect((await preview(id, W2)).takeBackToSet).toEqual([]);
+      // A new refund B beside the frozen A.
+      const b = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_full', refund_amount: '5.00' });
+      const open = (await preview(id, W2)).takeBackToSet[0];
+      expect(open).toMatchObject({ reason: 'new', newSignals: [`pay:${b}:500`] });
+      expect((await takeBack({ checkId, visitId: visit, cents: 3000, signalRevision: open.signalRevision })).status).toBe(200);
+      const stored = await trx('production_share_refund_take_backs').first('signals');
+      expect(stored.signals).toEqual([`pay:${a}:1000`, `pay:${b}:500`].sort());
+      expect((await preview(id, W2)).takeBackToSet).toEqual([]);
+      // The frozen refund A reverses: the full set no longer equals the one the owner answered, so the answer reopens and nothing more moves.
+      await trx('payments').where({ id: a }).update({ refund_amount: '0.00' });
+      const shown = await preview(id, W2);
+      expect(shown.takeBackToSet).toEqual([expect.objectContaining({ reason: 'changed', previousCents: 3000 })]);
+      expect(shown.takeBackAnswers).toEqual([expect.objectContaining({ cents: 3000, inForce: false })]);
+      expect(shown.refundTakeBackCents).toBe(0);
+    });
+
+    it('freezes the outstanding take-back at finalize and shows it when the week is reopened', async () => {
+      const world = await paidWorld('outst');
+      await refundOn(world, '30.00');
+      const open = await week(world, W2, '500.00');
+      await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 100000, signals: open.takeBackToSet[0].newSignals });
+      const live = await preview(world.id, W2);
+      expect(live).toMatchObject({ refundTakeBackCents: 50000, outstandingTakeBackCents: 50000 });
+      const { done } = await finalWeek(W2);
+      const stored = await trx('payroll_checks').where({ id: byName(done, 'Sample Alpha').id }).first('calc_snapshot');
+      expect(stored.calc_snapshot.productionShare.outstandingTakeBackCents).toBe(50000);
+      // The owner changes his answer afterwards; the reopened week still says what was outstanding when it was paid.
+      await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 60000, signals: open.takeBackToSet[0].newSignals });
+      expect(await preview(world.id, W2)).toMatchObject({ refundTakeBackCents: 50000, outstandingTakeBackCents: 50000 });
+      // An older snapshot has no such line: the preview omits it.
+      const row = stored.calc_snapshot;
+      delete row.productionShare.outstandingTakeBackCents;
+      // (a finalized check cannot be edited: the guard trigger is off for this rolled-back test transaction only)
+      await trx.raw('ALTER TABLE payroll_checks DISABLE TRIGGER USER');
+      await trx('payroll_checks').where({ id: byName(done, 'Sample Alpha').id }).update({ calc_snapshot: JSON.stringify(row) });
+      expect(await preview(world.id, W2)).not.toHaveProperty('outstandingTakeBackCents');
+    });
+
+    it('builds the stop table of a finalized week from its frozen stops: a repriced or cancelled visit keeps its paid credit', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      await worked(id, W1, 40);
+      const customerId = await customer();
+      const repriced = await stop(id, W1, '700.00', customerId);
+      const gone = await stop(id, addDays(W1, 1), '600.00', customerId);
+      const { done } = await finalWeek(W1);
+      expect(byName(done, 'Sample Alpha').productionShare.stopCount).toBe(2);
+      await trx('scheduled_services').where({ id: repriced }).update({ estimated_price: '50.00' });
+      await trx('scheduled_services').where({ id: gone }).update({ status: 'cancelled' });
+      const shown = await preview(id, W1);
+      expect(shown.stops.map((row) => [row.visitId, row.kind, row.creditCents]).sort()).toEqual([[gone, 'priced', 60000], [repriced, 'priced', 70000]].sort());
+      expect(shown.stops.find((row) => row.visitId === repriced).serviceType).toBe('General Pest Control');
+      expect(shown.stops.find((row) => row.visitId === gone)).toMatchObject({ creditCents: 60000, needsReview: false, serviceType: null });
+      expect(shown).toMatchObject({ creditedCents: 130000, shifts: 2 });
     });
   });
 
