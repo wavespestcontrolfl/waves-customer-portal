@@ -544,6 +544,41 @@ describe('a profile with no verdict flag and no evidence', () => {
   });
 });
 
+describe('a value a person types in is trusted; a machine reading is not', () => {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const translate = (p) => translateV2CallToV1Input({ homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St', ...p }, ['WDO'], { urgency: 'ROUTINE' });
+  const satellite = { dataSources: { propertyRecord: false, satellite: true }, constructionTrusted: false, foundationTrusted: false };
+
+  test('staff-typed wood frame on the WDO service prices $200 with no note', () => {
+    const line = wdoLine(estimate({ homeSqFt: 3000, constructionTrusted: undefined, foundationTrusted: undefined, services: { wdo: { constructionType: 'wood frame' } } }));
+    expect(line.price).toBe(200);
+    expect(staffNote(line)).toBeUndefined();
+  });
+
+  test('staff-typed concrete piers on the WDO service price the crawl column ($225) with no note', () => {
+    const line = wdoLine(estimate({ homeSqFt: 3000, constructionMaterial: 'CBS', constructionTrusted: false, foundationTrusted: false, services: { wdo: { foundationType: 'concrete piers' } } }));
+    expect(line.price).toBe(225);
+    expect(staffNote(line)).toBeUndefined();
+  });
+
+  test('values the estimator form marks manual (_manualFields) are trusted over a stale machine stamp', () => {
+    const wood = wdoLine(generateEstimate(translate({ ...satellite, constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', _manualFields: ['constructionMaterial'] })));
+    expect(wood.price).toBe(200);
+    expect(staffNote(wood)).toBeUndefined();
+    const piers = wdoLine(generateEstimate(translate({ ...satellite, constructionMaterial: 'CBS', foundationType: 'CRAWLSPACE', _manualFields: ['constructionMaterial', 'foundationType'] })));
+    expect(piers.price).toBe(225);
+    expect(staffNote(piers)).toBeUndefined();
+  });
+
+  test('a satellite wood frame stays untrusted: block price plus the note', () => {
+    const line = wdoLine(generateEstimate(translate({ ...satellite, constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB' })));
+    expect(line.price).toBe(175);
+    expect(staffNote(line)).toBeTruthy();
+    // An unrelated manual field does not trust the machine reading.
+    expect(wdoLine(generateEstimate(translate({ ...satellite, constructionMaterial: 'WOOD_FRAME', _manualFields: ['bedArea'] }))).price).toBe(175);
+  });
+});
+
 describe('one shared normalizer at every entry', () => {
   const { normalizeCountyConstruction } = require('../services/property-lookup/ai-property-lookup')._private;
   const { normalizeConstruction, normalizeFoundation } = require('../services/pricing-engine/structural-facts');

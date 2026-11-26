@@ -342,11 +342,15 @@ function structuralFactIsRecordBacked({ record, field }) {
 
 // The trust verdict the WDO price reads for one structural field of a PROFILE (the enriched lookup profile the estimator posts back,
 // or a saved older one). Conservative (owner 2026-11-26): a reading is trusted ONLY with an explicit stamp true, or with field-specific
-// evidence from a source that is not a photo / AI / generic guess (a county record, a tech-verified value). The profile's own false
+// evidence from a source that is not a photo / AI / generic guess (a county record, a tech-verified value), or a value a person typed
+// in (_manualFields). The profile's own false
 // stamp and any fieldVerify evidence always win. Everything else (an old profile, a record-only profile, missing sources) is untrusted:
 // the WDO price falls back to block / slab and adds the staff note. This can only lower a quote versus the frame and crawl cells.
 const UNTRUSTED_EVIDENCE_SOURCES = new Set(['', 'satellite', 'ai', 'vision', 'generic', 'unknown']);
 function profileStructuralFactIsTrusted(profile, { field, flag }) {
+  // A value a staff member or tech typed in (the estimator's manual-field list) is a person confirming it: trusted, even over a
+  // stale machine stamp from the lookup that was there before the edit.
+  if (Array.isArray(profile?._manualFields) && profile._manualFields.includes(field)) return true;
   if (profile?.[flag] === false) return false;
   const stored = profile?.fieldEvidence?.[field] ?? profile?._fieldEvidence?.[field];
   const evidence = Array.isArray(stored) ? stored[0] : stored;
