@@ -11,13 +11,20 @@
  *   not_booked_reason — why the lead did not book (NOT_BOOKED_RULES).
  *
  * Rules (owner ruling 2026-11-25, option A):
- *   - Only NULL fields are filled. A value an office user set is never
- *     overwritten (the UPDATE is also guarded per field with whereNull).
+ *   - Only NULL fields are filled; the job never overwrites a set value. There
+ *     is no office editor for these fields (option B, not picked); the
+ *     migration comment that mentions office edits predates that ruling.
+ *     Each UPDATE re-checks the field is NULL, the lead is live, and its
+ *     status and customer link are the ones the reason was computed from.
  *   - switch_reason / previous_company read caller speech only, on calls that
  *     carry competitor_mention / churn_signal / complaint chunks about a prior
  *     provider. Two different rivals named on one lead = ambiguous = left NULL.
- *   - no_response only when the lead status is 'unresponsive' and no other
- *     not-booked reason fits.
+ *   - not_booked_reason only for lost / unresponsive leads (never an open
+ *     lead, never a converted one); no_response only when the status is
+ *     'unresponsive' and no other not-booked reason fits.
+ *   - Each call feeds at most one lead: explicit owners (sid / metadata stamp)
+ *     win, conflicting owners are skipped, and the same-customer window is a
+ *     fallback only when exactly one live lead of that customer fits.
  *   - Leads of customers who already existed before the lead are skipped:
  *     they are not prospects switching providers.
  *   - why_filled_at is stamped only on a run that wrote at least one field.
@@ -36,7 +43,6 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
 
 const LOOKBACK_DAYS = 120;
 const PAGE_SIZE = 200;
@@ -45,13 +51,10 @@ const MAX_LEADS_PER_RUN = 2000;
 // from 2 days before the lead was created to 14 days after.
 const CALL_WINDOW_BEFORE_DAYS = 2;
 const CALL_WINDOW_AFTER_DAYS = 14;
-// A lead still open ('new', 'contacted', ...) is not "not booked" until it ages.
-const NOT_BOOKED_MIN_AGE_DAYS = 3;
 const EXISTING_CUSTOMER_MARGIN_DAYS = 1;
 const DAY_MS = 86400000;
 
 // Statuses that never get a not-booked reason (booked, junk, or not a lead).
-const NO_NOT_BOOKED_STATUSES = new Set(['won', 'disqualified', ...NON_ENGAGED_LEAD_STATUSES]);
 const LOST_STATUSES = new Set(['lost', 'unresponsive']);
 
 const SWITCH_TAGS = new Set(['competitor_mention', 'churn_signal', 'complaint']);
@@ -160,93 +163,86 @@ function planLeadWhy(lead, chunks, now = new Date()) {
     }
   }
 
-  // converted_at survives a reopen of a won lead: a converted lead never gets a not-booked reason.
-  if (isBlank(lead.not_booked_reason) && !lead.converted_at && !NO_NOT_BOOKED_STATUSES.has(lead.status)) {
-    const ageDays = (now - new Date(lead.created_at)) / DAY_MS;
-    if (LOST_STATUSES.has(lead.status) || ageDays >= NOT_BOOKED_MIN_AGE_DAYS) {
-      const reason = firstRule(NOT_BOOKED_RULES, joinText(callerChunks.filter((c) => NOT_BOOKED_TAGS.has(c.tag))))
-        || (lead.status === 'unresponsive' ? 'no_response' : null);
-      if (reason) patch.not_booked_reason = reason;
-    }
+  // Only a lead whose status says it did not book (lost / unresponsive) gets a
+  // not-booked reason. An open lead may have booked an assessment or a visit
+  // without a status change, so it is never guessed. converted_at survives a
+  // reopen of a won lead, so a converted lead never gets one either.
+  if (isBlank(lead.not_booked_reason) && !lead.converted_at && LOST_STATUSES.has(lead.status)) {
+    const reason = firstRule(NOT_BOOKED_RULES, joinText(callerChunks.filter((c) => NOT_BOOKED_TAGS.has(c.tag))))
+      || (lead.status === 'unresponsive' ? 'no_response' : null);
+    if (reason) patch.not_booked_reason = reason;
   }
   return patch;
 }
 
 const asUuidList = (rows, key) => [...new Set(rows.map((r) => r[key]).filter(Boolean))];
 
-// Link calls to a page of leads. Order of evidence: the sid on the lead, the
-// lead_id stamp on call_log.metadata, then the same customer inside a window.
-// Each linker adds call ids to byLead (lead id -> Set) and rows to calls.
-async function linkBySid(conn, leads, byLead, calls) {
-  const leadsBySid = new Map();
-  for (const l of leads) if (l.twilio_call_sid) leadsBySid.set(l.twilio_call_sid, [...(leadsBySid.get(l.twilio_call_sid) || []), l.id]);
-  if (!leadsBySid.size) return;
-  const sids = [...leadsBySid.keys()];
-  const rows = await conn('call_log')
-    .where((w) => w.whereIn('twilio_call_sid', sids).orWhereIn('call_sid', sids))
-    .select('id', 'twilio_call_sid', 'call_sid', 'customer_id', 'created_at');
-  for (const r of rows) {
-    calls.set(r.id, r);
-    for (const sid of [r.twilio_call_sid, r.call_sid]) for (const lid of leadsBySid.get(sid) || []) byLead.get(lid).add(r.id);
-  }
-}
+const CALL_COLS = (conn) => ['id', 'customer_id', 'created_at', 'twilio_call_sid', 'call_sid',
+  conn.raw("metadata->>'lead_id' AS stamp_lead_id"), conn.raw("metadata->>'relay_lead_id' AS stamp_relay_lead_id")];
 
-async function linkByStamp(conn, leads, byLead, calls) {
+// Candidate calls for a page of leads: by the lead's sid, by the lead_id stamp
+// on call_log.metadata, and by the same customer.
+async function candidateCalls(conn, leads) {
+  const sids = [...new Set(leads.map((l) => l.twilio_call_sid).filter(Boolean))];
   const ids = leads.map((l) => l.id);
-  const rows = await conn('call_log')
-    .where((w) => w.whereIn(conn.raw("metadata->>'lead_id'"), ids).orWhereIn(conn.raw("metadata->>'relay_lead_id'"), ids))
-    .select('id', 'customer_id', 'created_at', conn.raw("metadata->>'lead_id' AS stamp_lead_id"), conn.raw("metadata->>'relay_lead_id' AS stamp_relay_lead_id"));
-  for (const r of rows) {
-    calls.set(r.id, r);
-    for (const lid of [r.stamp_lead_id, r.stamp_relay_lead_id]) if (byLead.has(lid)) byLead.get(lid).add(r.id);
-  }
-}
-
-async function linkByCustomer(conn, leads, byLead, calls) {
   const customerIds = asUuidList(leads, 'customer_id');
-  if (!customerIds.length) return;
-  const rows = await conn('call_log').whereIn('customer_id', customerIds)
-    .select('id', 'customer_id', 'created_at', 'twilio_call_sid', 'call_sid',
-      conn.raw("metadata->>'lead_id' AS stamp_lead_id"), conn.raw("metadata->>'relay_lead_id' AS stamp_relay_lead_id"));
-  const owners = await explicitOwners(conn, rows);
-  // Every live lead of these customers, not just this page: a call whose window
-  // fits two leads is ambiguous and is left unassigned.
-  const allLeads = await conn('leads').whereIn('customer_id', customerIds).whereNull('deleted_at')
-    .select('id', 'customer_id', 'created_at');
-  const inWindow = (call, l) => {
-    const delta = (new Date(call.created_at) - new Date(l.created_at)) / DAY_MS;
-    return delta >= -CALL_WINDOW_BEFORE_DAYS && delta <= CALL_WINDOW_AFTER_DAYS;
-  };
-  for (const r of rows) {
-    if (owners.has(r.id)) continue; // explicitly owned calls were linked by sid / stamp
-    const fits = allLeads.filter((l) => l.customer_id === r.customer_id && inWindow(r, l));
-    if (fits.length !== 1 || !byLead.has(fits[0].id)) continue;
-    calls.set(r.id, r);
-    byLead.get(fits[0].id).add(r.id);
-  }
+  const rows = await conn('call_log').where((w) => {
+    w.whereIn(conn.raw("metadata->>'lead_id'"), ids).orWhereIn(conn.raw("metadata->>'relay_lead_id'"), ids);
+    if (sids.length) w.orWhereIn('twilio_call_sid', sids).orWhereIn('call_sid', sids);
+    if (customerIds.length) w.orWhereIn('customer_id', customerIds);
+  }).select(CALL_COLS(conn));
+  return [...new Map(rows.map((r) => [r.id, r])).values()];
 }
 
-// call id -> Set of lead ids that explicitly own it (metadata stamp or a lead's sid).
-async function explicitOwners(conn, rows) {
+// call id -> Set of live lead ids that explicitly own it: a metadata stamp, or
+// any live lead (across ALL leads, not just this page) whose sid is the call's.
+async function explicitOwners(conn, calls) {
   const owners = new Map();
   const add = (callId, leadId) => { if (leadId) owners.set(callId, (owners.get(callId) || new Set()).add(leadId)); };
-  for (const r of rows) { add(r.id, r.stamp_lead_id); add(r.id, r.stamp_relay_lead_id); }
-  const sids = [...new Set(rows.flatMap((r) => [r.twilio_call_sid, r.call_sid]).filter(Boolean))];
+  for (const c of calls) { add(c.id, c.stamp_lead_id); add(c.id, c.stamp_relay_lead_id); }
+  const sids = [...new Set(calls.flatMap((c) => [c.twilio_call_sid, c.call_sid]).filter(Boolean))];
   if (sids.length) {
-    const sidLeads = await conn('leads').whereIn('twilio_call_sid', sids).select('id', 'twilio_call_sid');
-    for (const r of rows) {
-      for (const l of sidLeads) if (l.twilio_call_sid === r.twilio_call_sid || l.twilio_call_sid === r.call_sid) add(r.id, l.id);
+    const sidLeads = await conn('leads').whereIn('twilio_call_sid', sids).whereNull('deleted_at').select('id', 'twilio_call_sid');
+    for (const c of calls) {
+      for (const l of sidLeads) if (l.twilio_call_sid === c.twilio_call_sid || l.twilio_call_sid === c.call_sid) add(c.id, l.id);
     }
   }
   return owners;
 }
 
+// Assign each call to at most ONE lead. Explicit owners win; two different
+// explicit owners = conflict = skipped. A call with no explicit owner falls back
+// to the customer window, only when exactly one live lead of that customer fits.
+async function assignCalls(conn, leads, calls) {
+  const owners = await explicitOwners(conn, calls);
+  const customerIds = asUuidList(leads, 'customer_id');
+  const custLeads = customerIds.length
+    ? await conn('leads').whereIn('customer_id', customerIds).whereNull('deleted_at').select('id', 'customer_id', 'created_at')
+    : [];
+  const inWindow = (call, l) => {
+    const delta = (new Date(call.created_at) - new Date(l.created_at)) / DAY_MS;
+    return delta >= -CALL_WINDOW_BEFORE_DAYS && delta <= CALL_WINDOW_AFTER_DAYS;
+  };
+  const owner = new Map(); // call id -> lead id
+  for (const c of calls) {
+    const explicit = owners.get(c.id);
+    if (explicit) { if (explicit.size === 1) owner.set(c.id, [...explicit][0]); continue; }
+    if (!c.customer_id) continue;
+    const fits = custLeads.filter((l) => l.customer_id === c.customer_id && inWindow(c, l));
+    if (fits.length === 1) owner.set(c.id, fits[0].id);
+  }
+  return owner;
+}
+
 async function loadChunksByLead(conn, leads) {
   const byLead = new Map(leads.map((l) => [l.id, new Set()]));
   const calls = new Map(); // call_log id -> row
-  await linkBySid(conn, leads, byLead, calls);
-  await linkByStamp(conn, leads, byLead, calls);
-  await linkByCustomer(conn, leads, byLead, calls);
+  const candidates = await candidateCalls(conn, leads);
+  const owner = await assignCalls(conn, leads, candidates);
+  for (const c of candidates) {
+    const leadId = owner.get(c.id);
+    if (byLead.has(leadId)) { calls.set(c.id, c); byLead.get(leadId).add(c.id); }
+  }
 
   const chunksByCall = new Map();
   if (calls.size) {
@@ -307,6 +303,8 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
         const q = conn('leads').where({ id: lead.id }).whereNull(key).whereNull('deleted_at');
         if (lead.status == null) q.whereNull('status'); else q.where('status', lead.status);
         if (key === 'not_booked_reason') q.whereNull('converted_at');
+        // The evidence came through this customer link; a relinked lead is skipped.
+        if (lead.customer_id == null) q.whereNull('customer_id'); else q.where('customer_id', lead.customer_id);
         wrote += await q.update({ [key]: patch[key], why_filled_at: now });
       }
       if (wrote) {

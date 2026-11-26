@@ -88,12 +88,12 @@ describe('prior-provider evidence (Codex #8521)', () => {
     expect(planLeadWhy(lead(), [c], NOW).switch_reason).toBe('price_creep');
   });
   test('a converted lead gets no not-booked reason after a reopen', () => {
-    const l = lead({ status: 'contacted', converted_at: daysAgo(5) });
+    const l = lead({ status: 'lost', converted_at: daysAgo(5) });
     expect(planLeadWhy(l, [chunk('objection', 'That is too much for us')], NOW).not_booked_reason).toBeUndefined();
   });
   test('agent words in context never decide a reason', () => {
     const c = chunk('objection', 'That is too much for us', { context: 'Agent: do you need to talk to your husband first?' });
-    expect(planLeadWhy(lead(), [c], NOW).not_booked_reason).toBe('price');
+    expect(planLeadWhy(lead({ status: 'lost' }), [c], NOW).not_booked_reason).toBe('price');
   });
   test('spam and cancelled leads get no not-booked reason', () => {
     for (const status of ['spam', 'cancelled']) {
@@ -122,7 +122,7 @@ describe('not_booked_reason rules', () => {
     ['price', 'That is too much for us right now'],
     ['timing', 'We are out of town, maybe next month'],
   ])('%s', (expected, quote) => {
-    expect(planLeadWhy(lead(), [chunk('objection', quote)], NOW).not_booked_reason).toBe(expected);
+    expect(planLeadWhy(lead({ status: 'lost' }), [chunk('objection', quote)], NOW).not_booked_reason).toBe(expected);
   });
 
   test('list matches the rules plus no_response', () => {
@@ -136,17 +136,16 @@ describe('not_booked_reason rules', () => {
     expect(planLeadWhy(lead({ status: 'unresponsive' }), [chunk('objection', 'too expensive')], NOW).not_booked_reason).toBe('price');
   });
 
-  test('won, duplicate, disqualified leads and young open leads get nothing', () => {
+  test('only lost / unresponsive leads get a reason; open leads never do (Codex #8521)', () => {
     const c = [chunk('objection', 'too expensive')];
-    for (const status of ['won', 'duplicate', 'disqualified']) {
+    for (const status of ['won', 'duplicate', 'disqualified', 'contacted', 'new', 'estimate_viewed']) {
       expect(planLeadWhy(lead({ status }), c, NOW).not_booked_reason).toBeUndefined();
     }
-    expect(planLeadWhy(lead({ status: 'new', created_at: daysAgo(1) }), c, NOW).not_booked_reason).toBeUndefined();
     expect(planLeadWhy(lead({ status: 'lost', created_at: daysAgo(1) }), c, NOW).not_booked_reason).toBe('price');
   });
 
   test('reads caller speech only', () => {
-    expect(planLeadWhy(lead(), [chunk('objection', 'too expensive', { speaker: 'agent' })], NOW).not_booked_reason).toBeUndefined();
+    expect(planLeadWhy(lead({ status: 'lost' }), [chunk('objection', 'too expensive', { speaker: 'agent' })], NOW).not_booked_reason).toBeUndefined();
   });
 });
 
@@ -155,7 +154,7 @@ describe('never overwrite an office-set value', () => {
   test('set fields are absent from the patch; empty ones are filled', () => {
     const l = lead({ switch_reason: 'contract', previous_company: 'Hughes', not_booked_reason: 'spouse' });
     expect(planLeadWhy(l, chunks, NOW)).toEqual({});
-    const partial = planLeadWhy(lead({ switch_reason: 'contract' }), chunks, NOW);
+    const partial = planLeadWhy(lead({ status: 'lost', switch_reason: 'contract' }), chunks, NOW);
     expect(partial).toEqual({ previous_company: 'Orkin', not_booked_reason: 'price' });
   });
   test('a blank string counts as empty, a real value never does', () => {
