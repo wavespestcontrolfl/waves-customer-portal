@@ -24,8 +24,8 @@ const heading = { fontSize: 26, lineHeight: 1.25, fontWeight: 600, color: W.navy
 const body = { fontSize: 16, lineHeight: 1.5, color: W.textBody, margin: 0 };
 
 /**
- * "Pick your first visit" after a commercial agreement is signed
- * (GATE_COMMERCIAL_FIRST_VISIT). Rendered only when /data's
+ * "Pick your first visit" after a commercial agreement is signed.
+ * Rendered only when /data's
  * cta.commercialFirstVisit.state is 'pick'. It loads the open times from
  * POST /estimates/:token/first-visit/availability, shows them in the shared
  * SchedulePicker (the same picker every booking surface uses), and books

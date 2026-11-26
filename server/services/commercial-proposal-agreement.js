@@ -580,8 +580,8 @@ async function handleAgreementSigned({ contractId, database = db }) {
       ? new Date(contract.signed_at).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' })
       : '';
     const payment = await paymentSentence(est, contract.customer_id, database);
-    // GATE_COMMERCIAL_FIRST_VISIT: when the signer can book the first visit online, the office waits for that booking
-    // (its own alert) instead of booking by phone beside it.
+    // When the signer can book the first visit online, the office waits for that booking (its own alert) instead of
+    // booking by phone beside it.
     const bookOnline = await require('./commercial-first-visit').firstVisitOnlineFor(est.id, database);
 
     await raiseAdminAlert('customer', {

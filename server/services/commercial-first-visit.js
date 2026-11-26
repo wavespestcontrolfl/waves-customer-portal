@@ -1,13 +1,12 @@
 // ============================================================
 // commercial-first-visit.js — "Pick your first visit" after a commercial
-// agreement is signed (GATE_COMMERCIAL_FIRST_VISIT; owner 2026-10-26, "OK GO"
+// agreement is signed (owner 2026-10-26, "OK GO"
 // on decision page choice 1B: "The customer picks the first visit from open
 // slots, the same way residential customers do. It books by itself, sized to
 // the real visit length.").
 //
-// Before: signing was never acceptance (owner ruling 2026-09-24); the office
-// marked the proposal won and booked the first visit by phone. With the gate
-// on, the signer picks the first visit on the estimate page:
+// Signing is never acceptance by itself (owner ruling 2026-09-24); the signer
+// picks the first visit on the estimate page:
 //   1. the open times come from the /book availability engine
 //      (routes/booking.js buildBookingAvailability) at the customer's own
 //      booking location, sized to the visit length and limited to pest techs;
@@ -54,8 +53,6 @@ const CADENCE_WORD = Object.freeze({ 12: 'monthly', 6: 'every-2-month', 4: 'quar
 const ALERT_LABEL = '🏢 Commercial first visit self-booked:';
 // Structured payment terms the win accepts outside invoice mode: none, or Auto Pay.
 const ONLINE_PAYMENT_TERMS = new Set([undefined, null, '', 'autopay']);
-
-const live = () => require('../config/feature-gates').commercialFirstVisitLive();
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -216,7 +213,7 @@ function atSignedPremises(plan, customer) {
 // preview); `picker` adds that the customer can tap it here (false for the document render).
 async function firstVisitCtaFor(estimate, { open = false, picker = false, conn = db } = {}) {
   try {
-    if (!live() || !estimate?.id) return null;
+    if (!estimate?.id) return null;
     const plan = firstVisitPlan(estimate);
     if (!plan) return null;
     const visit = await linkedFirstVisit(estimate.id, conn);
@@ -235,10 +232,10 @@ async function firstVisitCtaFor(estimate, { open = false, picker = false, conn =
 }
 
 // Whether the signer of this estimate's agreement can book the first visit online (the signed-agreement alert's copy):
-// gate on, an eligible plan and customer, and no visit yet. Never throws (false on any failure).
+// an eligible plan and customer, and no visit yet. Never throws (false on any failure).
 async function firstVisitOnlineFor(estimateId, conn = db) {
   try {
-    if (!live() || !estimateId) return false;
+    if (!estimateId) return false;
     const estimate = await conn('estimates').where({ id: estimateId }).first('id', 'customer_id', 'address', 'estimate_data', 'bill_by_invoice');
     const plan = estimate ? firstVisitPlan(estimate) : null;
     if (!plan || !(await eligibleCustomer(plan, estimate.customer_id, conn))) return false;
@@ -255,7 +252,7 @@ async function firstVisitOnlineFor(estimateId, conn = db) {
 // signed premises, the completion tax, and for a signed agreement the quote as signed), which the customer page and the
 // signed-agreement alert keep calling. `closed` is the route's verdict that a published estimate is closed (won,
 // declined, expired, archived; estimate-public.js estimateClosedOnline); it defaults to closed, so a caller that does not
-// say fails closed. The route asks only with GATE_COMMERCIAL_FIRST_VISIT on. Never throws: a failed read is
+// say fails closed. Never throws: a failed read is
 // { state: 'unknown' }.
 async function firstVisitReadiness(estimate, { conn = db, closed = true } = {}) {
   try {
@@ -290,7 +287,6 @@ const CALL_US = 'Please call us at (941) 297-5749 and we will book your first vi
 // The one eligibility read shared by the availability and the commit routes: the estimate as the route read it (open
 // and customer-viewable, judged by the caller), plus the plan, the signed agreement, no visit yet and the customer.
 async function bookingContext(estimate, { conn = db } = {}) {
-  if (!live()) return { refusal: refusal(404, 'not_found', 'Estimate not found') };
   const plan = firstVisitPlan(estimate);
   if (!plan || !estimate.customer_id) return { refusal: refusal(404, 'not_found', 'Estimate not found') };
   // The customer signed THIS quote: an agreement signed before a later edit does not cover it.
@@ -363,7 +359,7 @@ function findSlot(availability, date, time) {
 }
 
 // The booking transaction's re-check, on its own connection, under the per-estimate lock createSelfBooking takes:
-// 'ineligible' when the gate was turned off, 'booked' when a first visit landed since the caller's read,
+// 'booked' when a first visit landed since the caller's read,
 // 'ineligible' when the estimate is no longer open, its call-side verdict now blocks it, its plan changed, or its quote
 // is no longer the signed one, else 'ok'. `openFor(row)` is the route's open-estimate verdict.
 function estimateGuardFor(estimate, { openFor }) {
@@ -390,9 +386,6 @@ function estimateGuardFor(estimate, { openFor }) {
       if (!atSignedPremises(plan, customer)) return 'ineligible';
       // The quote on this read is still the one the customer signed (no edit landed since the caller's check).
       if (!(await require('./commercial-proposal-agreement').signedQuoteMatches(fresh, trx))) return 'ineligible';
-      // The kill switch, read last, after every lock wait above: a flip during the availability build or any of those
-      // waits books nothing (no row lock holds an environment flip).
-      if (!live()) return 'ineligible';
       guard.acceptPin = require('./estimate-manual-acceptance').estimateRowPin(fresh);
       return 'ok';
     },

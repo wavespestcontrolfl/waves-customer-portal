@@ -462,7 +462,7 @@ function CommercialProposalEditor() {
   const [prospectBrief, setProspectBrief] = useState(null);
   // GATE_COMMERCIAL_PROPOSAL_SIGN: { state: 'none' | 'awaiting' | 'signed', since?, signedAt?, signingBlocked? }; null with the gate off.
   const [commercialAgreement, setCommercialAgreement] = useState(null);
-  // GATE_COMMERCIAL_FIRST_VISIT: { state: 'online' | 'booked' | 'office' | 'unknown', reason?, visit? }; null with the gate off.
+  // { state: 'online' | 'booked' | 'office' | 'unknown', reason?, visit? }; null until the proposal loads.
   const [firstVisit, setFirstVisit] = useState(null);
   const [briefOpen, setBriefOpen] = useState(true);
 

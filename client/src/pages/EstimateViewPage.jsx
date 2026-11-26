@@ -7066,7 +7066,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
   // Back from the signing page (a bfcache restore or a tab switch), a customer waiting on the Florida consumer notice
   // sees it signed without a manual reload; so does the signer of a commercial agreement, whose page then shows the
-  // signed card (or the first-visit picker, GATE_COMMERCIAL_FIRST_VISIT) instead of a sign button the server now
+  // signed card (or the first-visit picker) instead of a sign button the server now
   // refuses as already signed. Listens only while one of them waits.
   const commercialAgreementUnsigned = data?.cta?.commercialAgreement?.canSign === true
     && data.cta.commercialAgreement.state !== 'signed';
@@ -10381,7 +10381,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             customerFirstName={estimate.customerFirstName}
             address={estimate.address}
             // Booked + upcoming visit → show the date, not "we'll follow up". A commercial proposal's
-            // self-booked first visit (GATE_COMMERCIAL_FIRST_VISIT) rides cta.commercialFirstVisit.
+            // self-booked first visit rides cta.commercialFirstVisit.
             appointmentLabel={existingAppointment
               ? formatAppointmentLabel(existingAppointment)
               : (cta?.commercialFirstVisit?.state === 'booked' ? firstVisitLabel(cta.commercialFirstVisit.visit) : null)}
