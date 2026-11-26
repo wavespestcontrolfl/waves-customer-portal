@@ -21,7 +21,11 @@
  *   - Leads of customers who already existed before the lead are skipped:
  *     they are not prospects switching providers.
  *   - why_filled_at is stamped only on a run that wrote at least one field.
- *   - Idempotent; bounded by LOOKBACK_DAYS and MAX_LEADS_PER_RUN.
+ *   - Idempotent; bounded by LOOKBACK_DAYS and MAX_LEADS_PER_RUN. Each run
+ *     scans least-recently-checked leads first (why_checked_at), so a capped
+ *     run never starves older leads in the window.
+ *   - A call explicitly owned by one lead (sid or metadata stamp) never feeds
+ *     another lead through the same-customer window fallback.
  *
  * Rule lists are ported from the research scripts of 2026-11-23 (switch
  * themes, objection themes, rival name patterns); the order of each list is
@@ -50,7 +54,10 @@ const NO_NOT_BOOKED_STATUSES = new Set(['won', 'duplicate', 'disqualified', 'han
 const LOST_STATUSES = new Set(['lost', 'unresponsive']);
 
 const SWITCH_TAGS = new Set(['competitor_mention', 'churn_signal', 'complaint']);
-const PRIOR_PROVIDER_RE = /(current|previous|prior|existing|former|old|other|last) (provider|company|pest)|switching (providers|companies)|provider switch|(provider|company)\b/i;
+// Evidence the caller actually USED another provider. A rival named only as a
+// quote ("Orkin quoted me $99") is not a prior relationship.
+const PRIOR_PROVIDER_RE = /(current|previous|prior|existing|former|old|last) (provider|company|pest|exterminator|guy|service)|switch(ing|ed)? (from|over from|providers|companies)|provider switch|(we|i) (had|used|were with|was with|'ve had|'ve been with|have been with|have been using|have had)\b|(we|i) (have|use) (them|[a-z]+ (pest|lawn|termite|exterminat))|currently (with|using|have)|cancel+(ed|ing)? (with|our|my|them)|(been|was|were) with (them|[a-z]+) for/i;
+const NO_PRIOR_PROVIDER_RE = /never (used|had|been with)|first time|no (current|previous|prior) (provider|company)|don'?t have (a|any) (provider|company|pest)/i;
 
 // First match wins. Specific complaint themes sit before the broad price theme.
 const SWITCH_RULES = [
@@ -58,12 +65,13 @@ const SWITCH_RULES = [
   ['pests_came_back', /still (seeing|have|got)|came back|coming back|not work|didn'?t work|ineffective|failed treatment|treatment effectiveness|recurring infestation|keep seeing|getting worse/],
   ['no_show', /no[- ]show|didn'?t show|never show|never came|miss(ed|ing) (an? |our |the )?(appointment|service|visit)|service gap|skipp|didn'?t come|haven'?t been out|haven'?t come/],
   ['no_callback', /call(ed)? back|callback|not getting back|can'?t reach|cannot reach|unresponsive|no one answer|nobody answer|never (answer|return)/],
-  ['contract', /contract|commitment|locked in|cancel(lation)? fee|renewal/],
+  ['contract', /contract|commitment|locked in|cancel(lation)? fee/],
   ['bundle', /bundle|consolidat|both lawn and pest|lawn and pest|one company/],
   ['price_creep', /price|pricing|cost|expensive|cheaper|afford|paying|raised|increase|went up|\$|dollar/],
 ];
 
-// First match wins. Run over caller speech in objection / complaint / need chunks.
+// First match wins. Run over caller speech in objection chunks only: a `need`
+// chunk is the caller's problem ("I want quarterly service"), not a rejection.
 const NOT_BOOKED_RULES = [
   ['spouse', /talk to (my|her|his)|husband|wife|spouse|partner|landlord|\bhoa\b|property manager|think about it|run it by/],
   ['one_visit', /one[- ]time|just once|single (visit|treatment|service)|one visit|just the one/],
@@ -72,7 +80,7 @@ const NOT_BOOKED_RULES = [
   ['price', /price|pricing|cost|expensive|afford|budget|cheaper|too much|\$|dollar/],
   ['timing', /not right now|next (month|week)|\blater\b|not ready|\bwait|after (the )?(holiday|summer|season)|timing|out of town|busy|schedul/],
 ];
-const NOT_BOOKED_TAGS = new Set(['objection', 'complaint', 'need']);
+const NOT_BOOKED_TAGS = new Set(['objection']);
 
 // Canonical name -> pattern. Own-firm name is deliberately absent. 'Arrow' is
 // tightened from a bare word (too many false hits) to the pest-company form.
@@ -111,12 +119,12 @@ const chunkText = (c) => [c.quote, c.context, topicsText(c)].filter(Boolean).joi
 const joinText = (chunks) => chunks.map(chunkText).join(' ');
 const firstRule = (rules, text) => (text ? (rules.find(([, re]) => re.test(text)) || [])[0] || null : null);
 
-// A chunk is about a prior provider when it is a competitor mention, or a
-// churn_signal / complaint that talks about a provider / company.
+// A chunk is about a prior provider when it is a competitor_mention /
+// churn_signal / complaint AND the words show the caller used that provider.
 function aboutPriorProvider(c) {
   if (!SWITCH_TAGS.has(c.tag)) return false;
-  if (c.tag === 'competitor_mention') return true;
-  return PRIOR_PROVIDER_RE.test(chunkText(c));
+  const text = chunkText(c);
+  return PRIOR_PROVIDER_RE.test(text) && !NO_PRIOR_PROVIDER_RE.test(text);
 }
 
 /**
@@ -185,10 +193,15 @@ async function linkByStamp(conn, leads, byLead, calls) {
 async function linkByCustomer(conn, leads, byLead, calls) {
   const customerIds = asUuidList(leads, 'customer_id');
   if (!customerIds.length) return;
-  const rows = await conn('call_log').whereIn('customer_id', customerIds).select('id', 'customer_id', 'created_at');
+  const rows = await conn('call_log').whereIn('customer_id', customerIds)
+    .select('id', 'customer_id', 'created_at', 'twilio_call_sid', 'call_sid',
+      conn.raw("metadata->>'lead_id' AS stamp_lead_id"), conn.raw("metadata->>'relay_lead_id' AS stamp_relay_lead_id"));
+  const owners = await explicitOwners(conn, rows);
   for (const r of rows) {
+    const owned = owners.get(r.id);
     for (const l of leads) {
       if (l.customer_id !== r.customer_id) continue;
+      if (owned && !owned.has(l.id)) continue; // the call belongs to another lead
       const delta = (new Date(r.created_at) - new Date(l.created_at)) / DAY_MS;
       if (delta >= -CALL_WINDOW_BEFORE_DAYS && delta <= CALL_WINDOW_AFTER_DAYS) {
         calls.set(r.id, r);
@@ -196,6 +209,21 @@ async function linkByCustomer(conn, leads, byLead, calls) {
       }
     }
   }
+}
+
+// call id -> Set of lead ids that explicitly own it (metadata stamp or a lead's sid).
+async function explicitOwners(conn, rows) {
+  const owners = new Map();
+  const add = (callId, leadId) => { if (leadId) owners.set(callId, (owners.get(callId) || new Set()).add(leadId)); };
+  for (const r of rows) { add(r.id, r.stamp_lead_id); add(r.id, r.stamp_relay_lead_id); }
+  const sids = [...new Set(rows.flatMap((r) => [r.twilio_call_sid, r.call_sid]).filter(Boolean))];
+  if (sids.length) {
+    const sidLeads = await conn('leads').whereIn('twilio_call_sid', sids).select('id', 'twilio_call_sid');
+    for (const r of rows) {
+      for (const l of sidLeads) if (l.twilio_call_sid === r.twilio_call_sid || l.twilio_call_sid === r.call_sid) add(r.id, l.id);
+    }
+  }
+  return owners;
 }
 
 async function loadChunksByLead(conn, leads) {
@@ -232,7 +260,6 @@ async function existingCustomerLeadIds(conn, leads) {
 async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_PER_RUN } = {}) {
   const cutoff = new Date(now - LOOKBACK_DAYS * DAY_MS);
   const stats = { scanned: 0, filled: 0, fields: 0 };
-  let cursor = null;
 
   while (stats.scanned < maxLeads) {
     const q = conn('leads')
@@ -240,17 +267,13 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
       .where('created_at', '>=', cutoff)
       .where((w) => w.whereNull('status').orWhere('status', '<>', 'duplicate'))
       .where((w) => w.whereNull('previous_company').orWhereNull('switch_reason').orWhereNull('not_booked_reason'))
-      .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .where((w) => w.whereNull('why_checked_at').orWhere('why_checked_at', '<', now))
+      .orderByRaw('why_checked_at ASC NULLS FIRST, created_at DESC, id DESC')
       .limit(Math.min(PAGE_SIZE, maxLeads - stats.scanned))
       .select('id', 'status', 'created_at', 'customer_id', 'twilio_call_sid', 'previous_company', 'switch_reason', 'not_booked_reason');
-    if (cursor) {
-      q.where((w) => w.where('created_at', '<', cursor.created_at)
-        .orWhere((x) => x.where('created_at', cursor.created_at).andWhere('id', '<', cursor.id)));
-    }
     const leads = await q;
     if (!leads.length) break;
     stats.scanned += leads.length;
-    cursor = leads[leads.length - 1];
 
     const existing = await existingCustomerLeadIds(conn, leads);
     const candidates = leads.filter((l) => !existing.has(l.id));
@@ -271,6 +294,9 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
         stats.fields += wrote;
       }
     }
+    // Stamp the page as examined so this run moves on and the next run starts
+    // with leads not looked at for the longest time.
+    await conn('leads').whereIn('id', leads.map((l) => l.id)).update({ why_checked_at: now });
     if (leads.length < PAGE_SIZE) break;
   }
   logger.info(`[lead-why-fill] scanned=${stats.scanned} leads_filled=${stats.filled} fields=${stats.fields}`);

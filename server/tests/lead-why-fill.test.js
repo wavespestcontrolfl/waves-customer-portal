@@ -12,7 +12,8 @@ const lead = (o = {}) => ({
   status: 'contacted', created_at: daysAgo(10), previous_company: null, switch_reason: null, not_booked_reason: null, ...o,
 });
 const chunk = (tag, quote, o = {}) => ({ speaker: 'caller', tag, quote, context: null, topics: [], ...o });
-const switchChunk = (quote, o = {}) => chunk('competitor_mention', quote, o);
+// Default topics carry the prior-provider evidence the switch fields require.
+const switchChunk = (quote, o = {}) => chunk('competitor_mention', quote, { topics: ['previous provider'], ...o });
 
 describe('switch_reason rules', () => {
   test.each([
@@ -61,6 +62,26 @@ describe('previous_company', () => {
   });
   test('a bare word is not a rival', () => {
     expect(planLeadWhy(lead(), [switchChunk('an arrow on the sign pointed to the house')], NOW).previous_company).toBeUndefined();
+  });
+});
+
+describe('prior-provider evidence (Codex #8521)', () => {
+  test('a rival named only as a quote is not a previous company or a switch', () => {
+    const c = chunk('competitor_mention', 'I have never used pest control before. Orkin quoted me $99, can you beat that?');
+    const patch = planLeadWhy(lead(), [c], NOW);
+    expect(patch.previous_company).toBeUndefined();
+    expect(patch.switch_reason).toBeUndefined();
+  });
+  test('the caller saying they used the rival counts', () => {
+    const c = chunk('competitor_mention', 'We had Turner for three years and they raised the price every renewal');
+    expect(planLeadWhy(lead(), [c], NOW)).toMatchObject({ previous_company: 'Turner', switch_reason: 'price_creep' });
+  });
+});
+
+describe('not_booked_reason reads objections only (Codex #8521)', () => {
+  test('a need is not a rejection', () => {
+    expect(planLeadWhy(lead(), [chunk('need', 'I want quarterly pest control')], NOW).not_booked_reason).toBeUndefined();
+    expect(planLeadWhy(lead(), [chunk('need', 'I need a termite inspection')], NOW).not_booked_reason).toBeUndefined();
   });
 });
 
