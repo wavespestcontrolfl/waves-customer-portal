@@ -88,7 +88,7 @@ function planningTableLive() {
 // (e.g. pest + termite bait at 120) and is never planned shorter.
 const LEGACY_DEFAULT_MINUTES = 60;
 
-const CADENCE = /quarterly|monthly|weekly|annual|every \d+ (weeks?|months?)/;
+const CADENCE = /quarterly|monthly|weekly|annual|every \d+ (weeks?|months?)|every other month/;
 const ONE_TIME = /one[- ]?time/;
 
 function isRecurring(stop, name) {
@@ -107,7 +107,7 @@ function pestMinutes(stop, name) {
   if (/german (cock)?roach/.test(name)) return PLANNING_MINUTES.germanRoach;
   if (/roach/.test(name)) return PLANNING_MINUTES.cockroach;
   if (!isRecurring(stop, name)) return PLANNING_MINUTES.oneTimePest;
-  if (/bi-?monthly/.test(name)) return PLANNING_MINUTES.biMonthlyPest;
+  if (/bi-?monthly|every other month|every 2 months/.test(name)) return PLANNING_MINUTES.biMonthlyPest;
   if (/monthly/.test(name)) return PLANNING_MINUTES.monthlyPest;
   return PLANNING_MINUTES.recurringPest;
 }
@@ -126,8 +126,8 @@ function rodentTermiteMinutes(name) {
 
 function specialtyMinutes(stop, name) {
   if (/mosquito/.test(name)) return PLANNING_MINUTES.mosquito;
-  if (/tree|shrub|palm/.test(name)) return PLANNING_MINUTES.treeShrub;
-  if (/bee|wasp|hornet|yellow ?jacket|mud dauber/.test(name)) return PLANNING_MINUTES.stingingInsect;
+  if (/tree|shrub|\bpalms?\b/.test(name)) return PLANNING_MINUTES.treeShrub;
+  if (/\bbees?\b|wasp|hornet|yellow ?jacket|mud dauber|stinging insect/.test(name)) return PLANNING_MINUTES.stingingInsect;
   if (/flea|tick/.test(name)) return PLANNING_MINUTES.fleaTick;
   if (/roach|web sweep/.test(name)) return pestMinutes(stop, name);
   if (/trap-only|trap check/.test(name)) return PLANNING_MINUTES.rodentCheck;
@@ -152,7 +152,7 @@ function tableMinutes(stop) {
   const lawn = /lawn|turf/.test(name);
   // A label that names two programs (pest + lawn, lawn + tree & shrub,
   // pest + mosquito) is a combined visit: no single row fits it.
-  const programs = [pest, lawn, /tree|shrub|palm/.test(name), /mosquito/.test(name)].filter(Boolean).length;
+  const programs = [pest, lawn, /tree|shrub|\bpalms?\b/.test(name), /mosquito/.test(name)].filter(Boolean).length;
   if (programs > 1) return null;
   if (LAWN_SPOT.test(name) && !/fertiliz/.test(name)) return PLANNING_MINUTES.lawnSpot;
   if (lawn) return isRecurring(stop, name) ? PLANNING_MINUTES.recurringLawn : PLANNING_MINUTES.lawnRound;
