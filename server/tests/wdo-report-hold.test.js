@@ -1766,25 +1766,28 @@ describe('audit fixes', () => {
       close.mockRestore();
     });
 
-    test('a held send whose customer row now has a different phone skips the pay-link text', async () => {
-      mockTables();
-      const base = db.getMockImplementation();
-      let customerReads = 0;
-      db.mockImplementation((table) => {
-        const c = base(table);
-        if (table === 'customers') {
-          const original = c.first;
-          c.first = jest.fn(async (...a) => {
-            customerReads += 1;
-            const row = await original(...a);
-            return a[0] === 'phone' && row ? { ...row, phone: '9415550177' } : row;
-          });
-        }
-        return c;
-      });
+    test('the pay-link text of a held send holds the phone, the customer and the claim through the provider request', async () => {
+      const { updates } = mockTables();
       await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
-      expect(sendCustomerMessage.mock.calls.some(([a]) => a.entryPoint === 'admin_project_report_with_invoice')).toBe(false);
-      expect(customerReads).toBeGreaterThan(0);
+      const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'admin_project_report_with_invoice')[0];
+      expect(sms.metadata.report_hold).toBe(true);
+      expect(typeof sms.withSmsHandoff).toBe('function');
+      const token = (updates.projects || []).find((u) => u.delivery_status === 'sending').delivery_claim_token;
+      const dispatch = jest.fn(async () => ({ ok: true, sid: 'SM1' }));
+      // nothing changed: dispatched once, under the lock
+      mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token }) });
+      expect(await sms.withSmsHandoff(dispatch)).toEqual({ ok: true, sid: 'SM1' });
+      dispatch.mockClear();
+      // the phone on the customer row now differs: refused, nothing dispatched
+      mockTables({ customer: { ...CUSTOMER, phone: '9415550177' }, project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token }) });
+      expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'RECIPIENT_CHANGED' }));
+      // the project moved to another customer (a merge): refused
+      mockTables({ project: wdoProject({ report_hold_status: 'held', customer_id: 'customer-2', delivery_claim_token: token }) });
+      expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'RECIPIENT_CHANGED' }));
+      // another request owns the claim: refused
+      mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: 'someone-else' }) });
+      expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'RECIPIENT_CHANGED' }));
+      expect(dispatch).not.toHaveBeenCalled();
     });
 
     test('arming judges release readiness on the customer read inside the arming transaction', async () => {
@@ -2078,6 +2081,32 @@ describe('audit fixes', () => {
       const dispatch = jest.fn();
       expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'RECIPIENT_CHANGED' }));
       expect(dispatch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('advisor redesign phase 5: the held invoice is the one staff confirmed', () => {
+    test('an invoice email that throws before the provider handoff takes the hold back; one that throws after keeps it', async () => {
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockImplementationOnce(async () => { throw new Error('pdf render failed'); });
+      let { updates } = mockTables();
+      await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor()); });
+      expect((updates.projects || []).some((u) => u.report_hold_status === null)).toBe(true);
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockImplementationOnce(async ({ handoffState }) => {
+        handoffState.handoffStarted = true;
+        throw new Error('socket hang up');
+      });
+      ({ updates } = mockTables());
+      await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor()); });
+      expect((updates.projects || []).some((u) => u.report_hold_status === null)).toBe(false);
+    });
+
+    test('a held send never reprices the confirmed draft, even when the fee changed since the preview', async () => {
+      // the untouched auto-created draft, at $175, while the project fee now reads $250
+      const draft = invoiceRow({ title: 'WDO Inspection', line_items: [{ description: 'WDO Inspection (FDACS-13645)', quantity: 1, unit_price: 175, amount: 175 }] });
+      mockTables({ project: wdoProject({ findings: { ...FINDINGS, inspection_fee: '250' } }), invoice: draft });
+      await withServer(async (baseUrl) => {
+        await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor({ expected_billing_fingerprint: projectsRouter._private.billingFingerprintHash(draft) }));
+      });
+      expect(InvoiceService.update).not.toHaveBeenCalled();
     });
   });
 
@@ -2388,15 +2417,16 @@ describe('audit fixes, round 2', () => {
 
 
   describe('P0: arming is ONE transaction that binds the hold to its invoice', () => {
-    test('locks the project row, then the customer payment lock, then the invoice row, and writes once naming the invoice', async () => {
+    test('locks as a merge does (payment lock, customer, invoice, project last), and writes once naming the invoice', async () => {
       mockTables();
       const { order, writes } = trackLocks();
       await withServer(async (baseUrl) => {
         const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
         expect((await res.json()).report_held).toBe(true);
       });
-      // project, the customer's payment lock, the customers row (the credit writer's lock, before the invoice row), the invoice
-      expect(order.slice(0, 4)).toEqual(['projects', 'customer', 'customers row', 'invoices']);
+      // the account merge's order: the customer's payment lock, the customers row (the credit writer's lock), the
+      // invoice, and the project last
+      expect(order.slice(0, 4)).toEqual(['customer', 'customers row', 'invoices', 'projects']);
       const stamp = writes.find((w) => w.payload.report_hold_status === 'held');
       expect(stamp.raws).toEqual(expect.arrayContaining([expect.objectContaining({
         sql: expect.stringContaining('invoice_id IS NOT DISTINCT FROM ?'),

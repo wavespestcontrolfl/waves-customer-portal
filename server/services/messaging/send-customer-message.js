@@ -705,7 +705,11 @@ async function sendCustomerMessageCore(input) {
     // row are held through the provider request while the number is re-read.
     || (input.audience === 'customer' && input.purpose === 'support_resolution'
       && input.entryPoint === 'project_report_hold_release'
-      && input.metadata?.original_message_type === 'project_report');
+      && input.metadata?.original_message_type === 'project_report')
+    // ...and the pay-link text sent with a held WDO report's invoice (operator-started; the report waits for payment).
+    || (input.audience === 'customer' && input.purpose === 'payment_link'
+      && input.entryPoint === 'admin_project_report_with_invoice'
+      && input.metadata?.original_message_type === 'invoice' && input.metadata?.report_hold === true);
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }

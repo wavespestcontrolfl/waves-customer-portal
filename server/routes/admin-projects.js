@@ -3254,7 +3254,8 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // This is the normal final-send path (UI posts the previewed draft's id), so
     // reprice it too if the WDO fee changed since the dry-run. Only the untouched
     // auto-created draft is affected; a hand-picked/edited invoice is left as-is.
-    return { invoice: await maybeRepriceWdoDraft(explicit, project), created: false };
+    // A held send bills exactly the invoice staff confirmed (its fingerprint): never repriced here.
+    return { invoice: holdRequested ? explicit : await maybeRepriceWdoDraft(explicit, project), created: false };
   }
 
   // Serialize the reuse-or-create decision on the project row. The endpoint is
@@ -5204,7 +5205,9 @@ const billingFingerprintHash = (inv) => crypto.createHash('sha1').update(billing
 // instead of retargeting, and a refusal rolls the whole arming back.
 async function armReportHold({ hold, project, invoice, expectedFingerprint, deliveryClaimToken }) {
   await db.transaction(async (trx) => {
-    const locked = await trx('projects').where({ id: project.id }).forUpdate().first();
+    // Lock order matches an account merge (the payment lock, then customers, then the invoice, then projects last),
+    // so a merge and an arming wait on each other instead of deadlocking. The project's owner is checked against the
+    // customers locked here once its row is locked (assertHoldArmable).
     const ownerId = (await require('../services/pay-combined').lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id)) || invoice.customer_id;
     // Credit issuance (postCreditMovement) locks the customers row, and the credit paths take that row before the
     // invoice row. Taking it here, in the same order, means a credit cannot be issued between this balance read and
@@ -5212,11 +5215,12 @@ async function armReportHold({ hold, project, invoice, expectedFingerprint, deli
     const lockedCustomer = await trx('customers').where({ id: ownerId }).forUpdate().first('id', 'account_credits');
     // The release's readiness (a recipient that accepts email, the account holder) is judged on the customer as it is
     // now, read in this transaction before the invoice lock (customers before invoices).
-    const currentCustomer = await loadProjectCustomer(locked.customer_id, { strict: true, database: trx, forShare: true }).catch(() => null);
+    const currentCustomer = await loadProjectCustomer(project.customer_id, { strict: true, database: trx, forShare: true }).catch(() => null);
     if (!currentCustomer || currentCustomer.deleted_at) {
       throw holdRefusal(409, 'hold_customer_changed', 'The customer record changed while this was being sent. Nothing was sent. Refresh and send again.');
     }
     const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+    const locked = await trx('projects').where({ id: project.id }).forUpdate().first();
     assertHoldArmable({ locked, lockedInvoice, intendedCustomerIds: [project.customer_id, invoice.customer_id] });
     // Known before any refusal below: a refused resend of an existing hold must leave that hold in place.
     hold.wasHeld = locked.report_hold_status === 'held';
@@ -5272,9 +5276,8 @@ function buildSendReportPdf(hold, refreshed, customer) {
 }
 
 // The customer email: invoice-first for a hold, report-only for a payer-billed invoice, else combined.
-function sendInvoiceEmail({ hold, deliveryClaimToken, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient }) {
+function sendInvoiceEmail({ handoffState, hold, deliveryClaimToken, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient }) {
   if (hold.active) {
-    const handoffState = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
     return ProjectEmail.sendProjectInvoiceBeforeReport({
       project: refreshed, customer, payUrl, invoice, attachments, recipient, handoffState,
       withProviderHandoff: heldInvoiceProviderHandoff({ invoice, project, deliveryClaimToken, recipientEmail: recipient?.email, state: handoffState }),
@@ -5401,6 +5404,33 @@ function heldInvoiceProviderHandoff({ invoice, project, deliveryClaimToken, reci
   });
 }
 
+// The held invoice text's locked handoff: the customer's phone, the project's owner and this send's claim, and the
+// invoice's owner, all re-read under the phone consent locks (customer FOR SHARE before the project, as a merge locks).
+function heldInvoiceSmsHandoff({ customerId, phone, projectId, invoiceId, deliveryClaimToken }) {
+  const { withSmsConsentLock } = require('../utils/customer-comms-lock');
+  const refused = { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false };
+  return async (dispatch) => {
+    let dispatched = false;
+    try {
+      return await withSmsConsentLock(db, { phone, customerId }, async (trx) => {
+        const liveCustomer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id', 'phone');
+        const liveInvoice = await trx('invoices').where({ id: invoiceId }).forShare().first('customer_id');
+        const liveProject = await trx('projects').where({ id: projectId }).forShare().first('customer_id', 'delivery_claim_token', 'report_hold_status');
+        if (!liveCustomer || normalizeUsPhone(liveCustomer.phone) !== phone
+          || String(liveInvoice?.customer_id) !== String(customerId)
+          || String(liveProject?.customer_id) !== String(customerId)
+          || String(liveProject?.delivery_claim_token || '') !== String(deliveryClaimToken)
+          || liveProject?.report_hold_status !== 'held') return refused;
+        dispatched = true;
+        return dispatch(trx);
+      });
+    } catch (err) {
+      if (dispatched) throw err;
+      return refused;
+    }
+  };
+}
+
 // Who a held invoice email goes to: the billing email authority's recipient (the customer's billing contact and email
 // choices, the address every invoice email uses), the same one its provider handoff re-resolves under the locks. A
 // refusal (no address, email off) is an empty recipient: nothing is sent and the send reports it.
@@ -5519,6 +5549,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   // The hold this request armed, until the first customer message goes out: any exception in between takes it back.
   let armedHold = null;
   let dispatchStarted = false;
+  // A held send's invoice email handoff state: the authority marks handoffStarted at the real provider handoff.
+  let heldHandoffState = null;
   // Tracks the SHARED project delivery claim (delivery_status='sending') this
   // route takes alongside /send — the invoice claim alone can't stop a
   // concurrent report-only /send from emailing + archiving the same FDACS
@@ -6004,19 +6036,21 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // customer with a bare pay-link text while the report is recorded not-sent
     // (and retries can't duplicate that text). For non-WDO the email is a bonus
     // (the report link rides in the SMS), so its failure doesn't block the text.
-    dispatchStarted = true;
+    if (hold.active) heldHandoffState = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    else dispatchStarted = true;
     if (emailRecipient.email) {
       try {
         const result = await sendInvoiceEmail({
-          hold, deliveryClaimToken, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient: emailRecipient,
+          handoffState: heldHandoffState, hold, deliveryClaimToken, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient: emailRecipient,
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
           : { ok: false, error: projectEmailFailureMessage(result), uncertain: invoiceEmailUncertain(result) };
       } catch (e) {
-        // Thrown before the library's provider phase (the library reports its own errors in the result): not sent.
+        // The library reports its own errors in the result, so a throw is usually before the provider phase (not sent).
+        // A held send knows: a throw after its handoff started may have reached the customer (outcome unknown).
         logger.error(`[projects] combined send email failed: ${e.message}`);
-        channels.email = { ok: false, error: e.message };
+        channels.email = { ok: false, error: e.message, uncertain: Boolean(heldHandoffState?.handoffStarted) };
       }
     } else {
       channels.email = { ok: false, error: 'No email on file' };
@@ -6128,15 +6162,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // itself lives in the email-only FDACS PDF and a bare pay-link text would be
     // wrong; for non-WDO the report link is in the text, so it sends regardless.
     const normalized = normalizeUsPhone(customer.phone);
-    // A held send's pay-link text goes only to the number on the customer row now (a phone corrected during the
-    // send skips the text; the invoice email already carries the pay link).
-    const phoneNow = hold.active && normalized
-      ? await db('customers').where({ id: customer.id }).first('phone').catch(() => null)
-      : null;
     if (!normalized) {
       channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
-    } else if (hold.active && normalizeUsPhone(phoneNow?.phone) !== normalized) {
-      channels.sms = { ok: false, error: 'Skipped: the phone number changed during the send' };
     } else if (isWdoProject && !channels.email?.ok) {
       channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
     } else {
@@ -6155,9 +6182,13 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           operatorInitiated: true,
           // original_message_type 'invoice' keeps the admin-sms-templates
           // invoice kill switch applicable to this billing text.
-          metadata: { original_message_type: 'invoice', project_id: project.id, invoice_id: invoice.id },
+          metadata: { original_message_type: 'invoice', project_id: project.id, invoice_id: invoice.id, ...(hold.active ? { report_hold: true } : {}) },
+          // A held send's pay-link text: the number, the customer and this send's claim re-read under the phone locks
+          // through the provider request (a phone corrected or a merge during the send skips the text).
+          ...(hold.active ? { withSmsHandoff: heldInvoiceSmsHandoff({ customerId: customer.id, phone: normalized, projectId: project.id, invoiceId: invoice.id, deliveryClaimToken }) } : {}),
         });
-        channels.sms = result.sent ? { ok: true } : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+        channels.sms = result.sent ? { ok: true }
+          : { ok: false, error: result.code === 'RECIPIENT_CHANGED' ? 'Skipped: the phone number or customer changed during the send' : (result.reason || result.code || 'SMS send blocked/failed') };
       } catch (e) {
         logger.error(`[projects] combined send sms failed: ${e.message}`);
         channels.sms = { ok: false, error: e.message };
@@ -6299,7 +6330,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
     // An exception before any customer message leaves no promise to keep: take the armed hold back, while this
     // request still owns the claim token it is fenced on (so before the claim is given back).
-    if (armedHold && !dispatchStarted) await takeBackHoldStamp(armedHold);
+    if (armedHold && !(heldHandoffState ? heldHandoffState.handoffStarted : dispatchStarted)) await takeBackHoldStamp(armedHold);
     // Return the shared project delivery claim too (guarded: only reverts a
     // row still parked at 'sending', so a post-delivery throw can't clobber
     // the final delivery_status).
