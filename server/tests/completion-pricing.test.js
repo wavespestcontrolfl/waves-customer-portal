@@ -189,6 +189,10 @@ describe('completion estimate evidence', () => {
     // conflicts with the annual: one line.
     expect(quote(fourVisits, silver([engineFour(150.07)]))).toEqual([150.07, 135.07, [['WaveGuard Silver', 15, 10, true]]]);
     expect(quote(fourVisits, silver([engineFour(150.2)]))).toEqual([135.07, 135.07, []]);
+    expect(quote(fourVisits, silver([{ ...engineFour(undefined), perVisit: 150.2 }]))).toEqual([135.07, 135.07, []]);
+    expect(quote(fourVisits, silver([{ ...engineFour(150.07), perVisit: 150.07 }]))).toEqual([150.07, 135.07, [['WaveGuard Silver', 15, 10, true]]]);
+    // The row saved another annual than its net: not the net-only shape.
+    expect(quote(lawnRow({ annual: 1068 }), silver())).toEqual(oneLine);
     // A list-price row that saved $150.07 for that same annual (a float divide) still proves the tier at $135.07.
     const floatSaved = { ...line, perApplicationPrice: 135.07, parentRecurringDiscounted: true, sourceLine: { service: 'pest_control',
       perTreatment: 150.07, annual: 600.3, annualAfterDiscount: 540.27, visitsPerYear: 4 } };

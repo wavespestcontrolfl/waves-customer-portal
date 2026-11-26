@@ -354,15 +354,18 @@ function engineListCents(raw, item, rate, amount) {
   const netAnnual = money(item.annualAfterDiscount);
   if (!visits || visitCount(item) !== visits || !(listAnnual > 0) || netAnnual === null) return null;
   const cents = (value) => Math.round(value * 100);
-  // The per-visit list price the engine saved (perApp), when it is the annual's share under either rounding at a half
-  // cent; with none saved, the share in whole cents. A saved figure that is neither conflicts: one line.
+  // The per-visit list price the engine saved (perApp, or perVisit on a mosquito line), when each saved one is the
+  // annual's share under either rounding at a half cent; with none saved, the share in whole cents. A saved figure
+  // that is neither conflicts: one line.
   const shares = [Math.round((listAnnual / visits) * 100), Math.round(cents(listAnnual) / visits)];
-  const savedPerApp = money(item.perApp);
-  const listCents = savedPerApp === null ? shares[1] : shares.includes(cents(savedPerApp)) ? cents(savedPerApp) : null;
-  if (listCents === null) return null;
+  const saved = [item.perApp, item.perVisit].map(money).filter((figure) => figure !== null).map(cents);
+  if (saved.some((figure) => !shares.includes(figure)) || new Set(saved).size > 1) return null;
+  const listCents = saved.length ? saved[0] : shares[1];
   // The visit's net is the net annual's share: tierPricedRow proves that, and the tier on the list annual, as for every
   // list-price row (the engine discounts the annual, so the share can sit a cent off the rate on the list share).
-  const agrees = money(raw.annualAfterDiscount) === netAnnual && tierNetCents(cents(listAnnual), rate).includes(cents(netAnnual));
+  // Every annual the row saved is that net (a row that saved another annual is not net-only).
+  const agrees = [raw.annualAfterDiscount, raw.annual ?? netAnnual].every((figure) => money(figure) === netAnnual)
+    && tierNetCents(cents(listAnnual), rate).includes(cents(netAnnual));
   return agrees && listCents >= cents(amount) ? listCents : null;
 }
 
