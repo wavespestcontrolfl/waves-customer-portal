@@ -3661,6 +3661,11 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     // A held WDO report sends through the release itself, the one sender of a held report (the automatic one runs it
     // too): one claim, one set of locked pre-send checks, the link published only once the email is accepted.
+    // Staff confirmed a plain send, and the report was held (by another admin) since the preview: ask again, so the
+    // early-release warning is seen before payment is bypassed.
+    if (req.body?.expected_hold === 'none' && isReportHeld(project)) {
+      return res.status(409).json({ code: 'hold_changed', error: 'This report was just held until its invoice is paid. Press Send report again to see the warning and send it early.' });
+    }
     if (project.project_type === 'wdo_inspection' && isReportHeld(project)) {
       return await sendHeldReportByStaff(req, res, { project, readiness, hasReadinessOverride, overrideReason });
     }
@@ -4201,6 +4206,9 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep', a
     const link = await stampHeldReportLink({ project, projectCols, ownClaim, customer: ctx.customer, invoice, requireSettled: !staffSend });
     if (!link) return { released: false, reason: 'claim_superseded' };
     if (link.unsettled) return await revertToHeld('invoice_not_settled', { countAttempt: false });
+    // The paid invoice is another customer's: this claim is still ours, so hand the report back now and let a person
+    // look (a counted attempt rings the bell).
+    if (link.ownerMismatch) return await revertToHeld('The paid invoice belongs to another customer, so the report was not sent. Check the invoice and the customer.');
     // Lease renewal and ownership recheck right before the provider calls.
     // The archived filing's reference is written BEFORE the email goes, in the same fenced update: a retry
     // after a crash then records the filing that was actually sent.
@@ -4388,13 +4396,14 @@ async function stampHeldReportLink({ project, projectCols, ownClaim, customer, i
     if (requireSettled) {
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('status', 'customer_id');
       if (!locked || !['paid', 'prepaid'].includes(String(locked.status || '').toLowerCase())) return 'unsettled';
-      if (String(locked.customer_id) !== String(customer.id)) return 'lost';
+      if (String(locked.customer_id) !== String(customer.id)) return 'owner_mismatch';
     }
     const lockedProject = await trx('projects').where({ ...ownClaim, invoice_id: invoice.id }).forUpdate().first('id', 'customer_id');
     if (!lockedProject || String(lockedProject.customer_id) !== String(customer.id)) return 'lost';
     return (await trx('projects').where({ ...ownClaim, invoice_id: invoice.id }).update(tokenUpdate)) ? 'ok' : 'lost';
   });
   if (published === 'unsettled') return { unsettled: true };
+  if (published === 'owner_mismatch') return { ownerMismatch: true };
   if (published !== 'ok') return null;
   const refreshed = await db('projects').where({ id: project.id }).first();
   const reportPath = await projectReportPathForProject(db, refreshed, customer);
@@ -5446,6 +5455,11 @@ function heldInvoiceSmsHandoff({ customerId, phone, projectId, invoiceId, delive
           || String(liveProject?.customer_id) !== String(customerId)
           || String(liveProject?.delivery_claim_token || '') !== String(deliveryClaimToken)
           || liveProject?.report_hold_status !== 'held') return refused;
+        // A collections hold (a wrong-number or wrong-party fallback) stops the pay link, as on the invoice email; an
+        // operator send skips only a plain dispute hold, and an unreadable hold refuses.
+        const collectionHold = require('../services/collections/collection-hold');
+        const held = await collectionHold.messagingHeldByCollectionHold(customerId, trx, { ignoreDisputeHold: collectionHold.holdExemptionApplies('operator') });
+        if (held.held) return { ok: false, code: 'COLLECTION_HOLD', reason: 'collection_hold', retryable: false };
         dispatched = true;
         return dispatch(trx);
       });
@@ -6276,8 +6290,15 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // A held send whose invoice email outcome is unknown: the invoice is parked for review the way a stale send is
     // (still payable from the link the customer may hold, so payment still releases the report), never marked sent
     // (no sent stamp, no reminders, no visit closeout). The office bell asks staff to check with the customer.
+    // Parked only when this was the invoice's first delivery: an invoice already sent (sent, viewed, overdue) keeps
+    // its status, since its earlier delivery still stands (the bell still asks staff to check this resend).
+    const firstDelivery = ['draft', 'scheduled'].includes(String(previousInvoiceStatus || '').toLowerCase());
     const parkUnverified = hold.active && !isPayerInvoice && Boolean(channels.email?.uncertain);
-    if (invoiceDelivered && parkUnverified) {
+    if (invoiceDelivered && parkUnverified && !firstDelivery) {
+      await db('invoices').where({ id: invoice.id, status: 'sending' })
+        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
+        .catch((err) => logger.error(`[projects] unverified held resend status not restored for ${invoice.id}: ${err.message}`));
+    } else if (invoiceDelivered && parkUnverified) {
       const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
       await db('invoices').where({ id: invoice.id, status: 'sending' })
         .update({ status: 'scheduled', scheduled_send_at: null, scheduled_send_error: STALE_SEND_PARK_ERROR, send_claim_token: null, updated_at: db.fn.now() })

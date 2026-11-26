@@ -2224,6 +2224,55 @@ describe('audit fixes', () => {
     });
   });
 
+  describe('audit round 25', () => {
+    test('P0: a collections hold that lands before the pay-link text stops it', async () => {
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'admin_project_report_with_invoice')[0];
+      const token = (updates.projects || []).find((u) => u.delivery_status === 'sending').delivery_claim_token;
+      mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token }) });
+      const collectionHold = require('../services/collections/collection-hold');
+      collectionHold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'wrong_number' });
+      const dispatch = jest.fn();
+      expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'COLLECTION_HOLD' }));
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(collectionHold.messagingHeldByCollectionHold).toHaveBeenLastCalledWith('customer-1', expect.anything(), { ignoreDisputeHold: true });
+    });
+
+    test('an unknown-outcome resend of an invoice already sent keeps its status (it stays an open bill)', async () => {
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'timeout', deliveryOutcome: 'uncertain' });
+      const sent = invoiceRow({ status: 'sent' });
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', invoice_id: 'inv-1' }), invoice: sent });
+      await withServer(async (baseUrl) => {
+        await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor({ expected_billing_fingerprint: projectsRouter._private.billingFingerprintHash(sent) }));
+      });
+      const writes = updates.invoices || [];
+      expect(writes.some((u) => u.status === 'scheduled')).toBe(false);
+      expect(writes.some((u) => u.status === 'sent')).toBe(true);
+      expect(InvoiceService.markDeliverySent).not.toHaveBeenCalled();
+    });
+
+    test('a plain Send report confirmed before another admin held the report asks again', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, '/admin/projects/project-1/send', { expected_hold: 'none' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('hold_changed');
+      });
+      expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+    });
+
+    test('a paid invoice owned by another customer hands the report back to held at once, with a counted attempt', async () => {
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid', customer_id: 'customer-2' }) });
+      const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(result.released).toBe(false);
+      expect(result.reason).not.toBe('claim_superseded');
+      const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(revert.report_hold_attempts).toBe(1);
+      expect(revert.report_hold_last_error).toMatch(/another customer/);
+    });
+  });
+
   describe('advisor redesign phase 4: a crashed release is handed back wherever its claim is cleared', () => {
     test('an edit that clears a crashed claim also gives a releasing report back to held', () => {
       const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');

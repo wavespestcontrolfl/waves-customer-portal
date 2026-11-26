@@ -2063,7 +2063,7 @@ export function ProjectDetail({
         body: {
           ...(overrideReason ? { override_reason: overrideReason } : {}),
           // A held report's early release: if payment released it meanwhile, the server sends no second copy.
-          ...(pv.releases_payment_hold ? { expected_hold: "held" } : {}),
+          expected_hold: pv.releases_payment_hold ? "held" : "none",
         },
       });
       const d = await readJsonResponse(r, "Could not send report");
