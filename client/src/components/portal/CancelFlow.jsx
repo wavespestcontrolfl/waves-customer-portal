@@ -382,7 +382,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
             <dt style={{ margin: 0, color: muted, fontWeight: 700 }}>{label}</dt>
             <dd style={{ margin: 0, color: B.grayDark }}>
               {value}
-              {link && <> · <a href={link.href} target="_blank" rel="noopener noreferrer" className="waves-focus-ring" style={{ color: B.glassNavy, fontWeight: 700 }}>{link.label}</a></>}
+              {link && <> · <a href={link.href} className="waves-focus-ring" style={{ color: B.glassNavy, fontWeight: 700 }}>{link.label}</a></>}
             </dd>
           </div>
         ))}

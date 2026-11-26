@@ -35,6 +35,13 @@ function readerFor(day, plan) {
   });
 }
 
+// Hourly gauge readings, ET hour -> inches. SRQ stands for the five areas around Sarasota, VNC for Venice/N. Port.
+// `wet` = work hours (8 AM on) with 0.05 in; the rest read dry; `gone` = work hours with no report.
+const hourRow = (wet, gone = []) => Object.fromEntries(Array.from({ length: 24 }, (_, h) => [h, h >= 8 && h < 17 && h - 8 < wet ? 0.05 : 0])
+  .filter(([h]) => !gone.includes(Number(h))));
+const obsOf = ({ SRQ, VNC }, gone = {}) => ({ SRQ: hourRow(SRQ, gone.SRQ), VNC: hourRow(VNC, gone.VNC), PGD: {}, SPG: {} });
+const obsFetch = (plan, gone) => jest.fn(async () => obsOf(plan, gone));
+
 function fakeConn({ campaigns = [], settings = {} } = {}) {
   const store = { ...settings };
   const conn = jest.fn((table) => ({
@@ -142,35 +149,46 @@ describe('recordRun', () => {
       .rejects.toThrow(/forecast unsettled for 2026-11-25/);
   });
 
-  test('scores a past day against measured rain once, and never rewrites a scored day', async () => {
+  test('scores a past day on measured work-hour rain once, never rewrites it, and regrades a day the daily grader scored', async () => {
     const settings = {
       [rainMode.DAYS_KEY]: JSON.stringify({
         '2026-11-23': { day: '2026-11-23', call: 'rain', areas: [] },
-        '2026-11-22': { day: '2026-11-22', call: 'dry', areas: [], score: { hit: true } },
+        '2026-11-22': { day: '2026-11-22', call: 'dry', areas: [], score: { basis: 'work_hours', hit: true } },
+        '2026-11-21': { day: '2026-11-21', call: 'rain', areas: [], score: { hit: false, wet_day: false } },
       }),
     };
     const conn = fakeConn({ campaigns, settings });
-    const inches = [0.6, 0.4, 0.3, 0.1, 0, null];
-    const fetchRain = jest.fn(async ({ latitude }) => {
-      const i = ZONES.findIndex((z) => ZONE_COORDS[z].lat === latitude);
-      return { days: [{ date: '2026-11-23', inches: inches[i] }] };
-    });
-    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain });
-    expect(run.scored).toEqual(['2026-11-23']);
+    // Five areas read wet at SRQ (6 work hours), Venice dry: a wet day.
+    const fetchObs = obsFetch({ SRQ: 6, VNC: 0 });
+    const fetchRain = jest.fn(async ({ start }) => ({ days: [{ date: start, inches: 0.1 }] }));
+    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain, fetchObs });
+    expect(run.scored.sort()).toEqual(['2026-11-21', '2026-11-23']);
     const days = JSON.parse(conn.store[rainMode.DAYS_KEY]);
-    expect(days['2026-11-23'].score).toMatchObject({ wet_areas: ZONES.slice(0, 3), wet_day: true, hit: true });
-    expect(days['2026-11-22'].score).toEqual({ hit: true });
-    expect(fetchRain).toHaveBeenCalledTimes(ZONES.length);
+    expect(days['2026-11-23'].score).toMatchObject({ basis: 'work_hours', wet_areas: ZONES.slice(0, 5), wet_day: true, hit: true });
+    expect(days['2026-11-23'].score.measured[ZONES[0]]).toMatchObject({ wet_hours: 6, missing: 0, wet: true });
+    // A day first graded here also gets the daily radar score, for comparison (0.1 in is a dry day by radar).
+    expect(days['2026-11-23'].score_daily).toMatchObject({ wet_day: false, hit: false });
+    // The old score moves to score_daily; the new one is primary.
+    expect(days['2026-11-21'].score_daily).toEqual({ hit: false, wet_day: false });
+    expect(days['2026-11-21'].score).toMatchObject({ basis: 'work_hours', hit: true });
+    expect(days['2026-11-22'].score).toEqual({ basis: 'work_hours', hit: true });
+    expect(fetchObs).toHaveBeenCalledTimes(2);
   });
 
-  test('a day with too little measured rain read stays unscored for the next run', async () => {
+  test('the 2026-11-25 shape: rain mostly before work and a wet Venice is not a wet day', async () => {
+    // Daily radar would read all six areas wet. Work hours: SRQ areas 2 wet hours (dry), Venice 7 (wet): 1 of 6.
+    const score = await rainMode.scoreDay({ day: '2026-11-25', call: 'rain', cutoff_call: 'rain' }, { fetchObs: obsFetch({ SRQ: 2, VNC: 7 }), now: new Date('2026-11-26T20:00:00Z') });
+    expect(score).toMatchObject({ wet_areas: ['venice_north_port'], wet_day: false, hit: false, cutoff_hit: false });
+  });
+  test('a day the gauges did not answer for stays unscored for the next run', async () => {
     const settings = { [rainMode.DAYS_KEY]: JSON.stringify({ '2026-11-23': { day: '2026-11-23', call: 'dry', areas: [] } }) };
     const conn = fakeConn({ campaigns, settings });
-    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn(async () => null) });
+    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn(async () => null), fetchObs: jest.fn(async () => null) });
     expect(run.scored).toEqual([]);
-    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-23'].score).toBeUndefined();
+    const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-23'];
+    expect(row.score).toBeUndefined();
+    expect(row.score_tried_at).toBe(AFTER_TWO.toISOString());
   });
-
   test('an open area (missing hours could still make it wet) is not counted, and unknown keeps the settled call', async () => {
     // Morning of the sold day: hours already over are gone from the feed.
     const partHours = (day) => hours(day, 2).slice(4); // 8-11 AM gone: 5 dry hours left, 4 missing = open
@@ -191,19 +209,23 @@ describe('recordRun', () => {
     expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'].call).toBe('rain');
   });
 
-  test('a radar gap that could flip the score waits; after the give-up days the areas read decide', async () => {
-    const inches = [0.6, 0.4, 0, 0, null, null]; // 2 wet, 2 dry, 2 missing: could be 4 of 6 wet or 2 of 6
-    const fetchRain = jest.fn(async ({ latitude }) => {
-      const i = ZONES.findIndex((z) => ZONE_COORDS[z].lat === latitude);
-      return { days: [{ date: '2026-11-23', inches: inches[i] }] };
-    });
+  test('a gauge gap that could flip the score waits; after the give-up days the areas read decide', async () => {
+    // SRQ: 2 wet work hours, 5 reports gone: Lakewood and Sarasota read the Venice gauge for those hours (dry), but
+    // Parrish, Palmetto and Bradenton N have no second gauge with reports: 3 open areas could still flip a dry day.
+    const gone = { SRQ: [10, 11, 12, 13, 14] };
+    const fetchObs = obsFetch({ SRQ: 2, VNC: 2 }, gone);
     const row = { day: '2026-11-23', call: 'rain', areas: [] };
-    expect(await rainMode.scoreDay(row, { fetchRain, now: new Date('2026-11-24T20:00:00Z') })).toBeNull();
-    const late = await rainMode.scoreDay(row, { fetchRain, now: new Date('2026-12-01T20:00:00Z') });
-    expect(late).toMatchObject({ partial: true, wet_day: true, hit: true });
+    expect(await rainMode.scoreDay(row, { fetchObs, now: new Date('2026-11-24T20:00:00Z') })).toBeNull();
+    const late = await rainMode.scoreDay(row, { fetchObs, now: new Date('2026-12-01T20:00:00Z') });
+    expect(late).toMatchObject({ partial: true, wet_day: false, hit: false });
   });
 
-  test('a day waiting on radar does not block the days after it', async () => {
+  test('a short gap that cannot flip the area does not hold the score', async () => {
+    // 7 wet hours and 2 gone at SRQ: wet either way.
+    const score = await rainMode.scoreDay({ day: '2026-11-23', call: 'rain' }, { fetchObs: obsFetch({ SRQ: 7, VNC: 0 }, { SRQ: [15, 16] }), now: new Date('2026-11-24T20:00:00Z') });
+    expect(score).toMatchObject({ partial: false, wet_day: true });
+  });
+  test('a day waiting on the gauges does not block the days after it', async () => {
     const settings = {
       [rainMode.DAYS_KEY]: JSON.stringify({
         '2026-11-18': { day: '2026-11-18', call: 'dry', areas: [], score_tried_at: '2026-11-24T18:00:00Z' },
@@ -213,23 +235,23 @@ describe('recordRun', () => {
       }),
     };
     const conn = fakeConn({ campaigns, settings });
-    const fetchRain = jest.fn(async ({ start }) => ({ days: [{ date: start, inches: start === '2026-11-21' ? 0 : null }] }));
-    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain });
+    const fetchObs = jest.fn(async (day) => (day === '2026-11-21' ? obsOf({ SRQ: 0, VNC: 0 }) : null));
+    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn(async () => null), fetchObs });
     expect(run.scored).toEqual(['2026-11-21']);
     const days = JSON.parse(conn.store[rainMode.DAYS_KEY]);
     expect(days['2026-11-18'].score_tried_at).toBe(AFTER_TWO.toISOString());
   });
 
-  test('a future day with only open areas fails the tick and keeps only the unknown cutoff', async () => {
+  test('a future day with only open areas fails the tick and freezes no cutoff', async () => {
     const conn = fakeConn({ campaigns });
     const oneHour = jest.fn(async () => hours('2026-11-25', 0).slice(0, 1)); // one dry hour per area: all open
     await expect(rainMode.recordRainMode({ now: AFTER_TWO, conn, read: oneHour, fetchRain: jest.fn() }))
       .rejects.toThrow(/forecast unsettled for 2026-11-25: 0 settled, 6 of 6 areas read/);
     const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'];
     expect(row.call).toBeUndefined();
-    expect(row.cutoff_call).toBe('unknown');
+    expect(row.cutoff_call).toBeUndefined();
+    expect(row.cutoff_at).toBeUndefined();
   });
-
   test('the 2 PM call is kept beside later calls, and the score grades both', async () => {
     const conn = fakeConn({ campaigns });
     await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn() });
@@ -237,8 +259,7 @@ describe('recordRun', () => {
     await rainMode.recordRun({ now: morning, conn, read: readerFor('2026-11-25', [9, 9, 9, 9, 9, 9]), fetchRain: jest.fn() });
     const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'];
     expect(row).toMatchObject({ call: 'rain', cutoff_call: 'dry', cutoff_at: AFTER_TWO.toISOString() });
-    const wet = jest.fn(async ({ start }) => ({ days: [{ date: start, inches: 1 }] }));
-    const score = await rainMode.scoreDay(row, { fetchRain: wet, now: new Date('2026-11-26T20:00:00Z') });
+    const score = await rainMode.scoreDay(row, { fetchObs: obsFetch({ SRQ: 6, VNC: 6 }), now: new Date('2026-11-26T20:00:00Z') });
     expect(score).toMatchObject({ wet_day: true, hit: true, cutoff_hit: false });
   });
 
@@ -263,18 +284,22 @@ describe('recordRun', () => {
     expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-30']).toMatchObject({ call: 'dry', cutoff_call: 'rain', cutoff_at: at(14).toISOString() });
   });
 
-  test('an unknown 2 PM call with nothing before it is kept as the cutoff, and graded as no call', async () => {
+  test('an unsettled 2 PM run freezes no cutoff; the next settled run before the day takes it (2026-11-26 bug)', async () => {
     const conn = fakeConn({ campaigns });
     const at = (h) => new Date(`2026-11-24T${String(h + 5).padStart(2, '0')}:00:00Z`); // Tuesday, sells Wed from 2 PM
     const open = jest.fn(async () => hours('2026-11-25', 0).slice(0, 1));
     await rainMode.recordRainMode({ now: at(14), conn, read: open, fetchRain: jest.fn() }).catch(() => {});
+    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'].cutoff_call).toBeUndefined();
     await rainMode.recordRun({ now: at(16), conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn() });
     const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'];
-    expect(row).toMatchObject({ call: 'dry', cutoff_call: 'unknown', cutoff_at: at(14).toISOString() });
-    const dry = jest.fn(async ({ start }) => ({ days: [{ date: start, inches: 0 }] }));
-    expect(await rainMode.scoreDay(row, { fetchRain: dry, now: new Date('2026-11-26T20:00:00Z') })).toMatchObject({ hit: true, cutoff_hit: null });
+    expect(row).toMatchObject({ call: 'dry', cutoff_call: 'dry', cutoff_at: at(16).toISOString() });
+    // Once the day has started a settled call is no cutoff: a day with none stays with no cutoff grade.
+    const conn2 = fakeConn({ campaigns });
+    await rainMode.recordRun({ now: new Date('2026-11-25T13:00:00Z'), conn: conn2, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn() });
+    const row2 = JSON.parse(conn2.store[rainMode.DAYS_KEY])['2026-11-25'];
+    expect(row2.cutoff_call).toBeUndefined();
+    expect(await rainMode.scoreDay(row2, { fetchObs: obsFetch({ SRQ: 0, VNC: 0 }), now: new Date('2026-11-26T20:00:00Z') })).toMatchObject({ hit: true, cutoff_hit: null });
   });
-
   test('a sold-day morning with no call in force fails; a second run of one tick replaces its history entry', async () => {
     const conn = fakeConn({ campaigns });
     const sixAm = new Date('2026-11-25T11:00:00Z');
@@ -297,32 +322,79 @@ describe('recordRun', () => {
     expect(run.problems).toEqual([expect.stringMatching(/forecast unsettled for 2026-11-25: 0 settled, 0 of 6 areas read/)]);
   });
 
-  test('radar readings from earlier tries are kept and merged, never re-read', async () => {
-    const settings = { [rainMode.DAYS_KEY]: JSON.stringify({ '2026-11-23': { day: '2026-11-23', call: 'rain', areas: [] } }) };
-    const conn = fakeConn({ campaigns, settings });
-    const first = [0.6, 0.4, 0.3, null, null, null]; // with the kept two: 3 wet of 6 = a wet day
-    const firstTry = [0.6, 0.4, null, null, null, null]; // 2 wet, 4 missing: must wait
-    const zoneIndex = (lat) => ZONES.findIndex((z) => ZONE_COORDS[z].lat === lat);
-    const try1 = jest.fn(async ({ latitude }) => ({ days: [{ date: '2026-11-23', inches: firstTry[zoneIndex(latitude)] }] }));
-    await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: try1 });
-    const kept = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-23'];
-    expect(kept.score).toBeUndefined();
-    expect(kept.measured_so_far).toMatchObject({ [ZONES[0]]: 0.6, [ZONES[1]]: 0.4 });
-    // Second try: the first two areas are not read again; a third wet area settles a wet day.
-    const try2 = jest.fn(async ({ latitude }) => ({ days: [{ date: '2026-11-23', inches: first[zoneIndex(latitude)] }] }));
-    await rainMode.recordRun({ now: new Date('2026-11-24T22:00:00Z'), conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: try2 });
-    expect(try2).toHaveBeenCalledTimes(4);
-    const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-23'];
-    expect(row.score).toMatchObject({ wet_day: true, hit: true, partial: false });
-    expect(row.measured_so_far).toBeUndefined();
+  test('the forecast numbers are kept per area for the work hours: at the cutoff, and latest (a dropped hour keeps its reading)', async () => {
+    const conn = fakeConn({ campaigns });
+    await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [6, 6, 6, 6, 0, 0]), fetchRain: jest.fn() });
+    let row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'];
+    expect(row.cutoff_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 80, 80, 10, 10, 10]);
+    expect(row.cutoff_chances[ZONES[5]]).toEqual([10, 10, 10, 10, 10, 10, 10, 10, 10]);
+    expect(Object.keys(row.latest_chances)).toEqual(ZONES);
+    // Noon on the day: hours 8-11 are gone from the feed; the latest keeps them, 12 on is new, the cutoff is untouched.
+    const noon = new Date('2026-11-25T17:00:00Z');
+    const later = (lat, lng) => hours('2026-11-25', 0).slice(4).map((h) => ({ ...h, rainChance: 55 }));
+    await rainMode.recordRun({ now: noon, conn, read: jest.fn(async (lat, lng) => later(lat, lng)), fetchRain: jest.fn() });
+    row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'];
+    expect(row.latest_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 55, 55, 55, 55, 55]);
+    expect(row.cutoff_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 80, 80, 10, 10, 10]);
   });
 
-  test('a day with no radar reading by the give-up day gets a final ungraded score', async () => {
-    const none = jest.fn(async () => null);
+  test('cutoff_chances are the unmerged readings of the run that supplied the call, also when the cutoff carries an earlier call forward', async () => {
+    const conn = fakeConn({ campaigns });
+    const at = (h) => new Date(`2026-11-29T${String(h + 5).padStart(2, '0')}:00:00Z`); // Sunday, ET hour h; sells Monday
+    // 10 AM: a settled rain call. 2 PM: the feed answers with fewer hours and no settled call (open areas): the call is
+    // carried forward and becomes the cutoff, with the 10 AM readings, not a merge with the 2 PM ones.
+    await rainMode.recordRun({ now: at(10), conn, read: readerFor('2026-11-30', [6, 6, 6, 6, 0, 0]), fetchRain: jest.fn() });
+    const partial = jest.fn(async () => hours('2026-11-30', 0).slice(6).map((h) => ({ ...h, rainChance: 33 })));
+    await rainMode.recordRainMode({ now: at(14), conn, read: partial, fetchRain: jest.fn() }).catch(() => {});
+    const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-30'];
+    expect(row).toMatchObject({ cutoff_call: 'rain', cutoff_at: at(14).toISOString() });
+    expect(row.cutoff_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 80, 80, 10, 10, 10]);
+    // latest_chances may merge: the 2 PM readings land on the hours they cover.
+    expect(row.latest_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 80, 80, 33, 33, 33]);
+    // A settled 2 PM run supplies its own readings (nothing merged in from before).
+    const conn2 = fakeConn({ campaigns });
+    await rainMode.recordRun({ now: at(10), conn: conn2, read: readerFor('2026-11-30', [6, 6, 6, 6, 0, 0]), fetchRain: jest.fn() });
+    await rainMode.recordRun({ now: at(14), conn: conn2, read: readerFor('2026-11-30', [2, 2, 2, 2, 0, 0]), fetchRain: jest.fn() });
+    const row2 = JSON.parse(conn2.store[rainMode.DAYS_KEY])['2026-11-30'];
+    expect(row2.cutoff_call).toBe('dry');
+    expect(row2.cutoff_chances[ZONES[0]]).toEqual([80, 80, 10, 10, 10, 10, 10, 10, 10]);
+  });
+
+  test('LSA and Facebook campaigns are classified and recorded too: rain_class by hand only, never a route line', async () => {
+    const more = [
+      { id: 10, platform: 'google_lsa', campaign_name: 'LSA', status: 'active', metadata: { rain_class: 'indoor' } },
+      { id: 11, platform: 'facebook', campaign_name: 'FB route', status: 'active', metadata: { route_line: 'pest' } },
+      { id: 12, platform: 'facebook', campaign_name: 'FB out', status: 'paused', metadata: { rain_class: 'outdoor' } },
+    ];
+    const conn = fakeConn({ campaigns: [...campaigns, ...more] });
+    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [6, 6, 6, 6, 0, 0]), fetchRain: jest.fn() });
+    expect(run.campaigns.filter((c) => c.campaign_id >= 10).map((c) => [c.campaign_id, c.platform, c.rain_class, c.would]))
+      .toEqual([[10, 'google_lsa', 'indoor', 'base'], [11, 'facebook', null, null], [12, 'facebook', 'outdoor', 'stop']]);
+    expect(rainMode.RAIN_PLATFORMS).toEqual(['google_ads', 'google_lsa', 'facebook']);
+  });
+  test('a read that failed is never a give-up: only a successful read with no reports gets the final ungraded score', async () => {
+    const failed = jest.fn(async () => null); // a 429, a timeout, a bad reply
+    const empty = jest.fn(async () => ({ SRQ: {}, VNC: {}, PGD: {}, SPG: {} })); // IEM answered; no gauge reported
     const row = { day: '2026-11-15', call: 'rain', cutoff_call: 'rain' };
-    expect(await rainMode.scoreDay(row, { fetchRain: none, now: new Date('2026-11-18T20:00:00Z') })).toBeNull();
-    expect(await rainMode.scoreDay(row, { fetchRain: none, now: new Date('2026-11-24T20:00:00Z') }))
+    const late = new Date('2026-11-24T20:00:00Z');
+    expect(await rainMode.scoreDay(row, { fetchObs: failed, now: late })).toBeNull();
+    expect(await rainMode.scoreDay(row, { fetchObs: empty, now: new Date('2026-11-18T20:00:00Z') })).toBeNull();
+    expect(await rainMode.scoreDay(row, { fetchObs: empty, now: late }))
       .toMatchObject({ partial: true, wet_day: null, hit: null, cutoff_hit: null });
+  });
+
+  test('a cutoff the earlier code wrote as unknown is replaced by a settled call before the day; a settled cutoff never is', () => {
+    const forecast = (call) => ({ call, areas: [], chances: { [ZONES[0]]: [80, 80, 80, 80, 10, 10, 10, 10, 10] } });
+    const old = { day: '2026-11-25', cutoff_call: 'unknown', cutoff_at: '2026-11-24T19:00:00.000Z' };
+    const at = '2026-11-24T21:00:00.000Z';
+    // An unsettled run leaves the old unknown alone; a run that is not a cutoff run does too.
+    expect(rainMode.nextDayRow(old, { day: '2026-11-25', forecast: forecast('unknown'), call: 'unknown', cutoffRun: true, at })).toMatchObject({ cutoff_call: 'unknown' });
+    expect(rainMode.nextDayRow(old, { day: '2026-11-25', forecast: forecast('rain'), call: 'rain', cutoffRun: false, at })).toMatchObject({ cutoff_call: 'unknown', cutoff_at: old.cutoff_at });
+    const fixed = rainMode.nextDayRow(old, { day: '2026-11-25', forecast: forecast('rain'), call: 'rain', cutoffRun: true, at });
+    expect(fixed).toMatchObject({ cutoff_call: 'rain', cutoff_at: at });
+    expect(fixed.cutoff_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 10, 10, 10, 10, 10]);
+    const later = rainMode.nextDayRow(fixed, { day: '2026-11-25', forecast: forecast('dry'), call: 'dry', cutoffRun: true, at: '2026-11-24T22:00:00.000Z' });
+    expect(later).toMatchObject({ cutoff_call: 'rain', cutoff_at: at, call: 'dry' });
   });
 });
 

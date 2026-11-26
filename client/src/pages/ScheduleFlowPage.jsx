@@ -35,7 +35,7 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { DOC_EYEBROW } from '../theme-doc';
 import { estimateCard } from '../components/estimate/cardStyles';
-import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
+import { WavesShell, CustomerColumn, PublicStateCard, BackToAccountButton } from '../components/brand';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
 import SchedulePicker, { sameSlot, rankBestTimes, SchedulePickerStyles } from '../components/booking/SchedulePicker';
@@ -2483,12 +2483,13 @@ function ScheduleFlowPage({ flow }) {
   if (loading) return <Page><SkeletonCard /></Page>;
   if (notFound) return <Page><NotFoundCard title={cfg.notFound.title} body={cfg.notFound.body} /></Page>;
   if (loadError) return <Page><LoadErrorCard title={cfg.loadErrorTitle} onRetry={load} /></Page>;
-  if (result) return <Page><cfg.Success result={result} data={data} /></Page>;
+  // BackToAccountButton: native app + signed in only (never when locked).
+  if (result) return <Page><cfg.Success result={result} data={data} /><BackToAccountButton /></Page>;
   // Inspection only: raised from the commit's out_of_area response — a STOP
   // like `blocked` below, just sourced from a POST instead of the GET state.
   if (outOfArea) return <Page><OutOfAreaCard token={token} county={outOfArea.county} ticket={outOfArea.ticket} /></Page>;
   const blocked = cfg.blocked(data, { token, mergeData, setResolvedAddress });
-  if (blocked) return <Page>{blocked}</Page>;
+  if (blocked) return <Page>{blocked}<BackToAccountButton /></Page>;
 
   const lanes = data?.lanes || [];
   const bookableLanes = lanes.filter((l) => !l.alreadyBooked);

@@ -112,19 +112,34 @@ function spanRain(hourly, date, startMin, endMin) {
   return { peak, complete };
 }
 
+// The starts a stop could move to on its own date, on the hour from the day's
+// start: [{ own, start, end }], where `own` is the stop's own (anchor) start and
+// `start`..`end` its whole span (members that work before the anchor included).
+// A start is a candidate when the whole span fits inside the day (duration
+// limit), the stop's own start is not before `earliestMin` (a notice's lead
+// time for today), and it is not the stop's current start. The one walk for
+// dryStart here and for the schedule rain record's later-only search.
+function candidateStarts({ reach, earliestMin, dayStartMin, dayEndMin }) {
+  const before = reach.ownStartMin - reach.startMin;
+  const length = reach.endMin - reach.startMin;
+  const out = [];
+  for (let own = dayStartMin; own + 60 <= dayEndMin; own += 60) {
+    const start = own - before;
+    if (own === reach.ownStartMin || start < dayStartMin || start + length > dayEndMin || own < earliestMin) continue;
+    out.push({ own, start, end: start + length });
+  }
+  return out;
+}
+
 // The dry, open start on the same date that is nearest the visit's own
 // start, or null. Dry: every hour of the moved stop and its drying time
 // reads below DRY_PCT. Open: no other stop of that technician overlaps it.
 // Today's targets start at least LEAD_MINUTES from now.
 function dryStart({ hourly, date, reach, isFree, earliestMin, dayStartMin, dayEndMin }) {
-  const before = reach.ownStartMin - reach.startMin;
-  const length = reach.endMin - reach.startMin;
   let best = null;
-  for (let own = dayStartMin; own + 60 <= dayEndMin; own += 60) {
-    const start = own - before;
-    if (own === reach.ownStartMin || start < dayStartMin || start + length > dayEndMin || own < earliestMin) continue;
-    const rain = spanRain(hourly, date, start, start + length);
-    if (!rain.complete || rain.peak >= DRY_PCT || !isFree(start, start + length)) continue;
+  for (const { own, start, end } of candidateStarts({ reach, earliestMin, dayStartMin, dayEndMin })) {
+    const rain = spanRain(hourly, date, start, end);
+    if (!rain.complete || rain.peak >= DRY_PCT || !isFree(start, end)) continue;
     if (best == null || Math.abs(own - reach.ownStartMin) < Math.abs(best - reach.ownStartMin)) best = own;
   }
   return best;
@@ -466,4 +481,4 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
 }
 
 // loadStops, loadPoints, spanRain, dryStart and serviceDay are read-only; the schedule rain record (scheduling/rain-schedule-record.js) reuses them.
-module.exports = { runRainPass, planRainPass, loadStops, loadPoints, spanRain, dryStart, serviceDay, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };
+module.exports = { runRainPass, planRainPass, loadStops, loadPoints, spanRain, dryStart, candidateStarts, serviceDay, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };
