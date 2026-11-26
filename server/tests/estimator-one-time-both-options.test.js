@@ -9,8 +9,8 @@
  * on a text thread, next to other services, for a current customer, or on
  * a bedroom-band unit.
  */
-const { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice } = require('../services/estimator-engine/one-time-pest-both-options');
-const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
+const { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice, callerIsPlanMember } = require('../services/estimator-engine/one-time-pest-both-options');
+const { buildEngineInput, _private: { buildDraftNotes } } = require('../services/estimator-engine/draft-builder');
 const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
 const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
 const { generateEstimate } = require('../services/pricing-engine');
@@ -81,5 +81,45 @@ describe('one-time pest ask: both options', () => {
     const engineResult = generateEstimate(engineInputs);
     expect(engineResult.lineItems.map((l) => l.service)).toEqual(['pest_control']);
     expect(validateEstimateDeliveryOptions({ showOneTimeOption: true, estimateData: { engineInputs, engineResult } })).toBeNull();
+  });
+
+  describe('plan member check', () => {
+    test('an ambiguous shared phone (no trusted customer) never reads another profile\'s plan', async () => {
+      const readActivePlan = jest.fn(async () => true);
+      await expect(callerIsPlanMember({ trustedCustomerId: null, readActivePlan })).resolves.toBe(false);
+      expect(readActivePlan).not.toHaveBeenCalled();
+    });
+    test('a trusted customer with an active plan on record is a member', async () => {
+      const readActivePlan = jest.fn(async () => true);
+      await expect(callerIsPlanMember({ trustedCustomerId: 'c1', readActivePlan })).resolves.toBe(true);
+      expect(readActivePlan).toHaveBeenCalledWith('c1');
+    });
+    test('an unreadable plan record counts as a member', async () => {
+      const onReadError = jest.fn();
+      await expect(callerIsPlanMember({ trustedCustomerId: 'c1', readActivePlan: async () => { throw new Error('db down'); }, onReadError })).resolves.toBe(true);
+      expect(onReadError).toHaveBeenCalled();
+    });
+    test('the pipeline stage or prior services decide without a read', async () => {
+      const readActivePlan = jest.fn();
+      await expect(callerIsPlanMember({ isExistingCustomer: true, trustedCustomerId: 'c1', readActivePlan })).resolves.toBe(true);
+      await expect(callerIsPlanMember({ priorQualifyingServices: ['pest'], trustedCustomerId: 'c1', readActivePlan })).resolves.toBe(true);
+      expect(readActivePlan).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('staff review notes', () => {
+    const notesArgs = (oneTimeChoiceShown) => ({
+      intent: intentWith({ pest: { frequency: 'quarterly' } }),
+      propertyFacts: facts,
+      totals: { monthly: 45, annual: 540, oneTime: 0 },
+      lane: 'yellow', laneReasons: [], comps: null, calibration: [], model: 'm', call: { id: 'call-1' },
+      oneTimeChoiceShown,
+    });
+    test('a both-options draft says the page prices the one-time choice', () => {
+      expect(buildDraftNotes(notesArgs(true))).toMatch(/One-time choice: offered beside the plan/);
+    });
+    test('a plain draft has no one-time choice line', () => {
+      expect(buildDraftNotes(notesArgs(false))).not.toMatch(/One-time choice/);
+    });
   });
 });

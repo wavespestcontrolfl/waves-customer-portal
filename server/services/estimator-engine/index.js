@@ -76,7 +76,7 @@ const {
   classifyLane,
   createDraftEstimate,
 } = require('./draft-builder');
-const { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice } = require('./one-time-pest-both-options');
+const { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice, callerIsPlanMember } = require('./one-time-pest-both-options');
 const { flagLookupPalmCountForReview } = require('./lookup-palm-review');
 
 
@@ -2925,19 +2925,20 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // A plan member keeps the plain one-time draft (the page's choice does not
     // carry the member one-time perk). Membership is read from the plan record
     // itself, not only the pipeline stage; an unreadable record counts as a member.
-    let callerIsPlanMember = context.isExistingCustomer === true || priorQualifyingServices.length > 0;
-    if (!callerIsPlanMember && context.customer?.id && origin?.channel === 'call' && intent.services?.oneTimePest) {
-      try {
-        callerIsPlanMember = await require('../waveguard-existing-services').isActivePlanCustomer(db, context.customer.id, { strict: true });
-      } catch (err) {
-        logger.warn(`[estimator-engine] both-options member check failed: ${err.message}`);
-        callerIsPlanMember = true;
-      }
-    }
+    // Only the trusted customer is read: an ambiguous shared phone links nobody.
+    const callerIsMember = origin?.channel === 'call' && intent.services?.oneTimePest
+      ? await callerIsPlanMember({
+        isExistingCustomer: context.isExistingCustomer,
+        priorQualifyingServices,
+        trustedCustomerId: trustedCustomer?.id,
+        readActivePlan: (id) => require('../waveguard-existing-services').isActivePlanCustomer(db, id, { strict: true }),
+        onReadError: (err) => logger.warn(`[estimator-engine] both-options member check failed: ${err.message}`),
+      })
+      : context.isExistingCustomer === true || priorQualifyingServices.length > 0;
     context.oneTimeAskBothOptions = offerPlanWithOneTimeChoice(intent, {
       channel: origin?.channel,
       unitBandPricing,
-      currentCustomer: callerIsPlanMember,
+      currentCustomer: callerIsMember,
       planShowsOneTimeChoice: () => {
         const trialInput = buildEngineInput(engineInputArgs());
         const trialResult = generateEstimateSafely(trialInput);

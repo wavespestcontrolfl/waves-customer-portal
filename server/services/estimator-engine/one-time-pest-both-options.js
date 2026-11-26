@@ -58,4 +58,21 @@ function planCanShowOneTimeChoice({ engineInputs, engineResult, totals }) {
   });
 }
 
-module.exports = { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice };
+// Whether the caller counts as a current plan member for the both-options
+// limit. The pipeline stage or prior services decide first; then the plan
+// record of the TRUSTED customer only (an ambiguous shared phone links
+// nobody, so another profile's plan never decides for this caller). An
+// unreadable record counts as a member: the caller keeps the plain
+// one-time draft, the safe side.
+async function callerIsPlanMember({ isExistingCustomer, priorQualifyingServices = [], trustedCustomerId, readActivePlan, onReadError }) {
+  if (isExistingCustomer === true || priorQualifyingServices.length > 0) return true;
+  if (!trustedCustomerId) return false;
+  try {
+    return (await readActivePlan(trustedCustomerId)) === true;
+  } catch (err) {
+    if (onReadError) onReadError(err);
+    return true;
+  }
+}
+
+module.exports = { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice, callerIsPlanMember };
