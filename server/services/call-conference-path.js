@@ -55,6 +55,13 @@ const STAFF_END_RETRY_MS = [2000, 5000, 15000, 30000, 60000];
 // The minute staff-end sweep reads answered calls started in this long, at most this many at a time.
 const STAFF_END_SWEEP_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const STAFF_END_SWEEP_LIMIT = 25;
+// The minute ring sweep sends a caller nobody answered to voicemail once the ring timeout, the in-memory backstop's
+// 20 s and this much more have passed: the backstop lives in memory, so a restart during the ring loses it.
+const RING_SWEEP_GRACE_SEC = 40;
+// A leg create that failed with no answer from Twilio (a 5xx, a timeout): a call to the same number from the same line
+// created this recently, still live, is that leg.
+const LEG_LOOKUP_WINDOW_MS = 2 * 60 * 1000;
+const LIVE_LEG_STATUSES = new Set(['queued', 'ringing', 'in-progress']);
 const OPEN_SQL = [
   "(metadata -> 'conference_path') IS NOT NULL",
   "(metadata #>> '{conference_path,voicemail_at}') IS NULL",
@@ -163,6 +170,32 @@ async function claimStart(callSid, { legCount, ringTimeoutSec }) {
   return { claim: row ? 'ended' : 'no_row', state: null };
 }
 
+const isRefusal = (err) => err?.status >= 400 && err?.status < 500;
+
+async function findPlacedLeg(api, to, from) {
+  const since = Date.now() - LEG_LOOKUP_WINDOW_MS;
+  const calls = await api.calls.list({ to, from, limit: 5 }).catch(() => null);
+  return (calls || []).find((c) => LIVE_LEG_STATUSES.has(c?.status) && new Date(c.dateCreated).getTime() >= since) || null;
+}
+
+// One staff leg. A refusal (4xx) placed nothing and is thrown at once. Any other failure (a 5xx, a timeout, a reset)
+// may have placed the call: look for it first, so the phone never rings twice, then try once more, so it is not left
+// silent.
+async function createLeg(api, params) {
+  try {
+    return await api.calls.create(params);
+  } catch (err) {
+    if (isRefusal(err)) throw err;
+    const found = await findPlacedLeg(api, params.to, params.from);
+    if (found) {
+      logger.warn(`[conference] leg create failed (${errorCode(err)}) but the call was placed: using ${masked(found.sid)}`);
+      return found;
+    }
+    logger.warn(`[conference] leg create failed (${errorCode(err)}) and no call was placed: trying once more`);
+    return api.calls.create(params);
+  }
+}
+
 async function placeStaffLegs({ callSid, numbers, ringTimeoutSec, callerFrom, wavesLine, callToken }) {
   const api = client();
   const placed = await Promise.all(numbers.map(async (to, index) => {
@@ -178,14 +211,12 @@ async function placeStaffLegs({ callSid, numbers, ringTimeoutSec, callerFrom, wa
     try {
       let call = null;
       if (callToken && callerFrom) {
-        call = await api.calls.create({ ...params, from: callerFrom, callToken }).catch((err) => {
-          // Only an API refusal falls back; a network error may have placed the call already.
-          if (!(err?.status >= 400 && err?.status < 500)) throw err;
-          logger.warn(`[conference] caller-ID passthrough refused for leg ${index} (${errorCode(err)}); ringing from the Waves line`);
+        call = await createLeg(api, { ...params, from: callerFrom, callToken }).catch((err) => {
+          logger.warn(`[conference] caller-ID passthrough not placed for leg ${index} (${errorCode(err)}); ringing from the Waves line`);
           return null;
         });
       }
-      if (!call) call = await api.calls.create({ ...params, from: wavesLine });
+      if (!call) call = await createLeg(api, { ...params, from: wavesLine });
       await stampLeg(callSid, index, { sid: call.sid })
         .catch((err) => logger.warn(`[conference] leg ${index} SID stamp failed for ${masked(callSid)} (${errorCode(err)})`));
       // The call may have settled while this leg was placed (the caller left, voicemail, another leg
@@ -434,6 +465,61 @@ async function recoverStaffEnds() {
   }
 }
 
+let sweepingRings = false;
+
+// Every minute (scheduler.js, next to recoverStaffEnds, whatever the gates say): a conference call nobody answered whose
+// ring is long over, with no voicemail and no close. Its no-answer backstop was an in-memory timer that a restart lost,
+// so without this the caller hears ringback until they hang up. The caller still on the line goes to voicemail, as the
+// backstop would have sent them; a caller Twilio reports gone is closed (its legs ended). One read of recent unanswered
+// calls (created_at is indexed) and one REST read per call past its deadline.
+async function recoverUnansweredRings() {
+  if (sweepingRings) return { action: 'busy' };
+  sweepingRings = true;
+  try {
+    const rows = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
+      .where('created_at', '>', new Date(Date.now() - STAFF_END_SWEEP_LOOKBACK_MS))
+      .whereRaw("(metadata -> 'conference_path') IS NOT NULL")
+      .whereRaw("(metadata #>> '{conference_path,accepted_leg_sid}') IS NULL")
+      .whereRaw("(metadata #>> '{conference_path,voicemail_at}') IS NULL")
+      .whereRaw("(metadata #>> '{conference_path,closed_at}') IS NULL")
+      .whereRaw("(metadata #>> '{ended_at}') IS NULL")
+      .whereRaw(CALLER_LIVE_SQL)
+      .orderBy('created_at', 'desc')
+      .limit(STAFF_END_SWEEP_LIMIT)
+      .select('twilio_call_sid', 'metadata', 'created_at');
+    let voicemail = 0;
+    let closed = 0;
+    for (const row of rows) {
+      const callSid = row.twilio_call_sid;
+      const state = readState(row);
+      if (!CALL_SID_RE.test(String(callSid || '')) || !state) continue;
+      const startedAt = new Date(state.started_at || row.created_at || NaN).getTime();
+      const ringSec = Number(state.ring_timeout_sec) || 0;
+      if (!Number.isFinite(startedAt) || !ringSec) continue;
+      if (Date.now() < startedAt + (ringSec + NO_ANSWER_BACKSTOP_EXTRA_SEC + RING_SWEEP_GRACE_SEC) * 1000) continue;
+      try {
+        const caller = await client().calls(callSid).fetch();
+        if (TERMINAL_LEG_STATUSES.has(String(caller?.status || ''))) {
+          await closeForCallerEnd(callSid);
+          closed += 1;
+          continue;
+        }
+        logger.warn(`[conference] ${masked(callSid)} rang out with no voicemail (a lost backstop): the sweep sends it to voicemail`);
+        if ((await sendCallerToVoicemail(callSid, noAnswerStatus(state))) === 'redirected') voicemail += 1;
+      } catch (err) {
+        logger.warn(`[conference] ring sweep failed for ${masked(callSid)} (${errorCode(err)})`);
+      }
+    }
+    return { action: 'swept', open: rows.length, voicemail, closed };
+  } catch (err) {
+    logger.warn(`[conference] ring sweep read failed (${errorCode(err)})`);
+    return { action: 'error' };
+  } finally {
+    sweepingRings = false;
+  }
+}
+
 // The caller's call ended (/call-status): close the claim and end every leg still ringing.
 async function closeForCallerEnd(callSid) {
   const closed = await updateState(callSid, [[['closed_at'], new Date().toISOString()]],
@@ -496,6 +582,7 @@ module.exports = {
   onStaffLegStatus,
   onTransferLegStatus,
   recoverStaffEnds,
+  recoverUnansweredRings,
   closeForCallerEnd,
   conferenceDialOutcome,
   _test: { callTokens, STAFF_END_RETRY_MS },

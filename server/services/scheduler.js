@@ -1010,6 +1010,13 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`[conference] staff-end recovery tick failed: ${err.message}`);
     }
+    // And a caller nobody answered whose no-answer backstop (an in-memory timer) a restart lost: to voicemail
+    // (call-conference-path.js recoverUnansweredRings).
+    try {
+      await require('./call-conference-path').recoverUnansweredRings();
+    } catch (err) {
+      logger.error(`[conference] ring recovery tick failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
