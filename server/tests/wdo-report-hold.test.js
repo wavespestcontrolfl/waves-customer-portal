@@ -900,7 +900,7 @@ describe('manual send releases a held report early, and never races the sweep', 
   test('a plain send (Send report, or report + invoice without the hold) claims no report that became held after its read', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
     expect(source).toContain("if ('report_hold_status' in project) sendClaimQuery.whereRaw(\"coalesce(report_hold_status, '') NOT IN ('held', 'releasing')\");");
-    expect(source).toMatch(/if \(!holdRequested && 'report_hold_status' in project\) \{\n\s+deliveryClaimQuery\.whereRaw\("coalesce\(report_hold_status, ''\) NOT IN \('held', 'releasing'\)"\);/);
+    expect(source).toContain(`: "coalesce(report_hold_status, '') NOT IN ('held', 'releasing')");`);
   });
 
   test('GET /:id offers the hold only while the gate is on, for an unsent WDO', async () => {
@@ -2144,6 +2144,83 @@ describe('audit fixes', () => {
         await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor({ expected_billing_fingerprint: projectsRouter._private.billingFingerprintHash(draft) }));
       });
       expect(InvoiceService.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('audit round 24', () => {
+    const releaseArgs = async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      return ProjectEmail.sendProjectReportReady.mock.calls[0][0];
+    };
+
+    test('P0: a paid invoice that belongs to another customer never releases the report', async () => {
+      // the invoice is another customer's from the start: every read of it agrees, and still nothing releases
+      const world = () => mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid', customer_id: 'customer-2' }) });
+      world();
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+      // ...and the handoff check refuses it too
+      const args = await releaseArgs();
+      const dispatch = jest.fn();
+      world();
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      expect(args.handoffState.boundaryBlock).toEqual({ code: 'HELD_INVOICE_UNSETTLED' });
+      // ...nor one the project is no longer held on
+      mockTables({ project: wdoProject({ report_hold_status: 'held', invoice_id: 'inv-9' }), invoice: invoiceRow({ status: 'paid' }) });
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('the first report email of unknown outcome keeps the link and records the unknown outcome', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'socket timeout', deliveryOutcome: 'uncertain' });
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const writes = updates.projects || [];
+      expect(writes.some((u) => String(u.delivery_channels?.sql || '').includes('release_email_unknown'))).toBe(true);
+      expect(writes.some((u) => 'report_token' in u && u.report_token === null)).toBe(false);
+      // the key stays: no block counted
+      expect(writes.some((u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks'))).toBe(false);
+    });
+
+    test('a refusal at the handoff because the invoice was refunded is "not due yet": no attempt, no block, no bell', async () => {
+      const holdService = require('../services/project-report-hold');
+      const raise = jest.spyOn(holdService, 'raiseReleaseFailedBell');
+      ProjectEmail.sendProjectReportReady.mockImplementationOnce(async ({ handoffState }) => {
+        handoffState.boundaryBlock = { code: 'HELD_INVOICE_UNSETTLED' };
+        return { ok: false, blocked: true, reason: 'handoff_refused' };
+      });
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_hold_attempts: 0 }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const writes = updates.projects || [];
+      const revert = writes.find((u) => u.report_hold_status === 'held');
+      expect(revert.report_hold_attempts).toBe(0);
+      expect(revert).not.toHaveProperty('report_hold_last_error');
+      expect(writes.some((u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks'))).toBe(false);
+      expect(raise).not.toHaveBeenCalled();
+      raise.mockRestore();
+    });
+
+    test('a confirmed early release finds the report already released by payment: nothing is sent again', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'released', status: 'sent', sent_at: '2026-11-26T10:00:00Z' }) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, '/admin/projects/project-1/send', { expected_hold: 'held' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('hold_already_released');
+      });
+      expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+    });
+
+    test('a held report whose invoice was deleted previews the release recipients', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held', invoice_id: null, findings: { ...FINDINGS, report_sent_to: 'agent@example.com' } }) });
+      const body = await withServer(async (baseUrl) => (await post(baseUrl, '/admin/projects/project-1/send', { dry_run: true })).json());
+      expect(body.releases_payment_hold).toBe(true);
+      expect(body.email_routing.recipient).toBeTruthy();
+    });
+
+    test('a held send-with-invoice never takes a release claim', () => {
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
+      expect(source).toContain(`? "coalesce(report_hold_status, '') <> 'releasing'"`);
     });
   });
 

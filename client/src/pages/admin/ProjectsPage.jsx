@@ -2060,7 +2060,11 @@ export function ProjectDetail({
       }
       const r = await adminFetch(`/admin/projects/${projectId}/send`, {
         method: "POST",
-        body: overrideReason ? { override_reason: overrideReason } : {},
+        body: {
+          ...(overrideReason ? { override_reason: overrideReason } : {}),
+          // A held report's early release: if payment released it meanwhile, the server sends no second copy.
+          ...(pv.releases_payment_hold ? { expected_hold: "held" } : {}),
+        },
       });
       const d = await readJsonResponse(r, "Could not send report");
       if (d.report_url) setSentLink(`${window.location.origin}${d.report_url}`);

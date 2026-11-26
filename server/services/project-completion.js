@@ -675,7 +675,7 @@ async function completeProjectBackedService({
       err.status = 404;
       throw err;
     }
-    // A held report being sent right now (GATE_WDO_REPORT_HOLD: the paid release, or a manual Send report): the send
+    // A held report being released right now (GATE_WDO_REPORT_HOLD, automatic or by staff): the release
     // is publishing its link and portal stamps, and a closeout in between would write the visit's link as unsent.
     // Closing waits a moment.
     // (A claim older than the 10-minute takeover window is a crashed send: it does not block.)

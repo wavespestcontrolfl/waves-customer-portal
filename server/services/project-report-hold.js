@@ -44,8 +44,7 @@ async function recoverStaleReleasingClaims() {
   return db('projects')
     .where({ report_hold_status: 'releasing' })
     .where('report_hold_locked_at', '<', db.raw(`now() - interval '${STALE_RELEASING_MINUTES} minutes'`))
-    // The shared delivery lease too: a manual send that took over this stale release refreshed updated_at (and
-    // owns delivery_claim_token), so recovery must leave it alone; its own delivery clears the hold.
+    // The shared delivery lease too: a release still renewing it (updated_at) is alive, so recovery leaves it alone.
     .where('updated_at', '<', db.raw(`now() - interval '${STALE_RELEASING_MINUTES} minutes'`))
     .update({
       report_hold_status: 'held',
