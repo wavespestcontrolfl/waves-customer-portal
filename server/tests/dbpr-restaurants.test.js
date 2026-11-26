@@ -870,7 +870,7 @@ describe('syncRestaurantProspects', () => {
     expect(store.saveReport.mock.calls[0][0]).toEqual(pendingRow('id0', '9000'));
     expect(store.saveReport.mock.calls[0][1]).toMatchObject({ inspectionType: 'Routine - Food', pestEvidence: true });
     expect(result).toMatchObject({ failures: 0, reportsRead: 3, reportsFailed: 0, reportsLeft: 0, pestFound: 2 });
-    expect(reportCalls()[0]).toEqual(['https://www.myfloridalicense.com/inspectionDetail.asp?InspVisitID=9000&id=5001', 15000]);
+    expect(reportCalls()[0]).toEqual(['https://www.myfloridalicense.com/inspectionDetail.asp?InspVisitID=9000&id=5001', 15000, 524288]);
     // The three files come first.
     expect(fetchText.mock.calls.findIndex(([url]) => url.includes('inspectionDetail.asp'))).toBe(3);
   });

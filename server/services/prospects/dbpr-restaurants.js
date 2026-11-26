@@ -77,6 +77,9 @@ const REPORT_MAX_ATTEMPTS = 3;
 // The report reads: each page's own timeout, a second between pages, inspections of the last 45 days, at most 100
 // pages a run.
 const REPORT_TIMEOUT_MS = 15 * 1000;
+// A report page is about 40 KB (three live pages, 2026-11-25): a larger one is refused before it is parsed, as the
+// parse runs on the portal's event loop.
+const REPORT_MAX_BYTES = 512 * 1024;
 const REPORT_GAP_MS = 1000;
 const REPORT_WINDOW_DAYS = 45;
 const REPORT_MAX_PER_RUN = 100;
@@ -949,7 +952,7 @@ async function readOneReport(row, deps) {
   const url = reportUrl(row.source_key, row.license_id);
   if (!url) return null;
   try {
-    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS), row);
+    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS, REPORT_MAX_BYTES), row);
   } catch {
     return null;
   }
