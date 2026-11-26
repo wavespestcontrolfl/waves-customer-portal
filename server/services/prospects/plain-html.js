@@ -368,7 +368,7 @@ const INVISIBLE_RE = /[\u00ad\u200b\u200e\u2060-\u2064\ufeff]/g;
 // INVISIBLE_RE characters and NUL characters taken out (so "Callba&shy;ck" reads "Callback"; a browser drops a NUL
 // in text), and runs of white space made one space.
 function htmlText(html) {
-  return decodeHTML(String(html || '').replace(/<\/?([a-z][a-z0-9]*)>/g, (tag, name) => (INLINE_TAGS.has(name) ? '' : ' ')))
+  return decodeHTML(String(html || '').replace(/<\/?([a-z][a-z0-9]*)(?: span)?>/g, (tag, name) => (INLINE_TAGS.has(name) ? '' : ' ')))
     .replace(INVISIBLE_RE, '')
     .replaceAll('\0', '')
     .replace(/\s+/g, ' ')

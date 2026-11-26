@@ -304,6 +304,11 @@ describe('parseInspectionReport', () => {
     expect(parse(spannedVisit, { violation35: 1 })).toBeNull();
     const spannedViolation = reportPage(rows.replace('<td>&nbsp;</td>', '<td colspan="2">&nbsp;</td>'));
     expect(parse(spannedViolation, { violation35: 1 })).toBeNull();
+    // A rowspan from a row above the head row reaches into it: a Result cell over two rows puts it under Inspection
+    // Type on a callback's page. Any merged cell in the table refuses it.
+    const above = reportPage(rows).replace('<table><tr><td>Inspection Type</td>', '<table><tr><td rowspan="2">Result</td></tr><tr><td>Inspection Type</td>');
+    expect(above).not.toBe(reportPage(rows));
+    expect(parse(above, { violation35: 1 })).toBeNull();
     // The state's pages merge cells in their layout, outside both tables: that still answers.
     const layout = `<table><tr><td colspan="3">License information</td></tr></table>${reportPage(rows)}`;
     expect(parse(layout, { violation35: 1 })).toEqual(answer);
