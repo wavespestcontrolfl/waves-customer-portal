@@ -33,7 +33,7 @@ const { ledgerCall } = require('./llm-dispatch-metrics');
 const { anthropicText } = require('./llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { scrubPans } = require('../utils/pan-scrub');
-const { raiseAdminAlert, firstSentence, cutAtWord, breaksAlertRules, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
+const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const { staffAnswered, staffNameOf } = require('./live-call-upset-alert');
 
 let Anthropic = null;
@@ -137,8 +137,9 @@ function parseReply(raw) {
     summary,
     next_step: nextStep,
     promises: (Array.isArray(obj.promises) ? obj.promises : []).map((p) => cleanText(p, MAX_PROMISE_CHARS)).filter(Boolean).slice(0, MAX_PROMISES),
-    alert_title: nextStep ? cleanText(obj.alert_title, MAX_ALERT_TITLE_CHARS, false) : null,
-    alert_line: cleanText(obj.alert_line, MAX_ALERT_LINE_CHARS, false),
+    // Screened whole, then cut (bannerWords): a title or line that fails is null, so the alert uses fixed copy.
+    alert_title: nextStep ? cleanText(bannerWords(cleanText(obj.alert_title, 1000, false)), MAX_ALERT_TITLE_CHARS, false) : null,
+    alert_line: cleanText(bannerWords(cleanText(obj.alert_line, 1000, false)), MAX_ALERT_LINE_CHARS, false),
   };
 }
 
@@ -187,31 +188,31 @@ async function saveSummary(callSid, { summary, ...extras }, now) {
 // The alert's why: the staff name, then the model's one-line account of the call (or the summary's first sentence),
 // cut to the 110-character budget. A line the notification rules refuse (a second sentence, a date, a code) is
 // skipped for the next one; the last resort is a fixed line.
-// Words that may go on a lock screen: names redacted as every alert does, and none at all when the line holds an
-// access code (gate, door, alarm), a card number, a security code or an SSN: those lines fall back to fixed copy.
+// Words that may go on a lock screen, judged on the WHOLE model text before any cut (a cut can drop the word "gate"
+// and leave the code): names redacted as every alert does, and none at all when the text holds an access code (gate,
+// door, alarm), a card number, a security code, an SSN, or any run of 3+ digits (a code with no keyword, a phone
+// number, an address number). Those fall back to fixed copy; the details stay on the Calls tab behind the login.
+const DIGIT_RUN_RE = /\d(?:[\s.-]?\d){2,}/;
 function bannerWords(words) {
   const { redactedWords } = require('./admin-alert-names');
   const plain = redactedWords(words);
-  if (!plain) return '';
+  if (!plain || DIGIT_RUN_RE.test(plain)) return '';
   const { redactAccessCodes } = require('./context-aggregator');
   return redactAccessCodes(plain) === plain && scrubPans(plain) === plain ? plain : '';
 }
 
+// The alert's why: the staff name, then the model's one-line account of the call when the whole line may go on a
+// lock screen, cut to the 110-character budget; else a fixed line.
 function whyFor(name, reply) {
   const lead = `${name || 'The office'}'s call: `;
-  for (const words of [reply.alert_line, firstSentence(reply.summary)]) {
-    const plain = bannerWords(words);
-    const why = plain ? `${lead}${cutAtWord(plain, MAX_WHY_CHARS - lead.length)}` : '';
-    if (why && !breaksAlertRules(why)) return why;
-  }
-  return `${lead.trim().replace(/:$/, '')} just ended.`;
+  const why = reply.alert_line ? `${lead}${cutAtWord(reply.alert_line, MAX_WHY_CHARS - lead.length)}` : '';
+  return why && !breaksAlertRules(why) ? why : `${lead.trim().replace(/:$/, '')} just ended.`;
 }
 
 // The alert's action (the bell title after "Comms — "): the model's title, or a fixed line when it breaks the rules.
 function actionFor(name, reply) {
   const room = MAX_HEADLINE_CHARS - 'Comms — '.length;
-  const plain = reply.alert_title ? bannerWords(reply.alert_title) : '';
-  const title = plain ? cutAtWord(plain, room) : '';
+  const title = reply.alert_title ? cutAtWord(reply.alert_title, room) : '';
   return title && !breaksAlertRules(title) ? title : `read ${name || 'the office'}'s call summary`;
 }
 
@@ -267,16 +268,21 @@ function raiseOfficeAlert(trx, callSid, call, name, reply) {
     ...(call.customer_id ? { metadata: { customerId: call.customer_id } } : {}) });
 }
 
-// The promises the staff side really said: a promise is kept only when it is a contiguous quote of one "Agent:" line
-// (case, curly quotes, punctuation and spacing aside), so a caller's words, a model's guess or a flipped refusal
-// ("I cannot waive the fee" read as "I can waive the fee") never shows under a staff member's name.
+// The promises the staff side really said: a model quote is kept only when it is a contiguous quote of one "Agent:"
+// line (case, curly quotes, punctuation and spacing aside), and what is saved is that staff line itself, cut to the
+// promise budget: so a caller's words, a model's guess, a flipped refusal ("cannot" read as "can") or a dropped
+// condition ("only if the manager approves") never shows under a staff member's name.
 const normalized = (t) => String(t || '').toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
 function groundedPromises(promises, transcript) {
-  const agentLines = String(transcript || '').split('\n').filter((l) => l.startsWith('Agent: ')).map((l) => ` ${normalized(l.slice(7))} `);
-  return promises.filter((p) => {
+  const agentLines = String(transcript || '').split('\n').filter((l) => l.startsWith('Agent: ')).map((l) => l.slice(7).trim());
+  const kept = [];
+  for (const p of promises) {
     const quote = normalized(p);
-    return quote.length >= 8 && agentLines.some((line) => line.includes(` ${quote} `));
-  });
+    const line = quote.length >= 8 && agentLines.find((l) => ` ${normalized(l)} `.includes(` ${quote} `));
+    const shown = line ? cleanText(line, MAX_PROMISE_CHARS) : null;
+    if (shown && !kept.includes(shown)) kept.push(shown);
+  }
+  return kept;
 }
 
 /**

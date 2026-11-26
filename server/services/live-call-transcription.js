@@ -316,6 +316,11 @@ async function storeUtterance(callSid, body) {
     const panMasked = scrubbed.some((s) => s.panMasked && (s.id === null || changed.includes(s)));
     if (panMasked) await stampLiveState(trx, callSid, { pan_detected: true });
     storedText = scrubbed.find((s) => s.id === null).text;
+    // A card line that lands after the office-call alert was written (live-call-early-summary.js, which reads every
+    // line under this same lock) takes that alert's bell row away.
+    if (require('./live-call-card-pause').isCardIntent(storedText, panMasked)) {
+      await trx('notifications').where('recipient_type', 'admin').whereRaw("metadata ->> 'dedupeKey' = ?", [`live-call-next-step:${callSid}`]).del();
+    }
     return { stored: true, panMasked };
   });
   // After the commit, fire and forget (GATE_CALL_RECORDING_CARD_PAUSE): the recording pause never

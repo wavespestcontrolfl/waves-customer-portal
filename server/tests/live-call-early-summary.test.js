@@ -359,7 +359,7 @@ describe('the alert after an office call', () => {
     await early.writeEarlySummary(SID, { now: NOW });
     const [, spec] = mockRaise.mock.calls[0];
     expect(spec).toMatchObject({ severity: 'fyi', action: "read Virginia's call summary" });
-    expect(spec.why).toBe("Virginia's call: The caller has ants again.");
+    expect(spec.why).toBe("Virginia's call just ended.");
   });
 
   test('model words that break the alert rules fall back to fixed lines that compose', async () => {
@@ -368,7 +368,7 @@ describe('the alert after an office call', () => {
     await early.writeEarlySummary(SID, { now: NOW });
     const [, spec] = mockRaise.mock.calls[0];
     expect(spec.action).toBe("read the office's call summary");
-    expect(spec.why).toBe("The office's call: Wants a quote.");
+    expect(spec.why).toBe("The office's call just ended.");
   });
 
   test('a why longer than 110 characters is cut at a word', async () => {
@@ -443,7 +443,24 @@ describe('the alert after an office call', () => {
     say([...CALL, ['staff', 'I cannot waive the fee, sorry.']]);
     reply(JSON.stringify({ ...JSON_REPLY, promises: ['I can waive the fee', 'I cannot waive the fee'] }));
     await early.writeEarlySummary(SID, { now: NOW });
-    expect(saved().promises).toEqual(['I cannot waive the fee']);
+    expect(saved().promises).toEqual(['I cannot waive the fee, sorry.']);
+  });
+
+  test('a quote that drops a condition is saved as the whole staff line, condition kept', async () => {
+    setCall({ acceptance: staffAnswer });
+    say([...CALL, ['staff', "I'll waive the fee only if the manager approves."]]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll waive the fee"] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual(["I'll waive the fee only if the manager approves."]);
+  });
+
+  test('a code the 45-character cut would hide is caught on the whole title; any 3+ digit run is kept off the banner', async () => {
+    setCall({ acceptance: staffAnswer });
+    reply(JSON.stringify({ ...JSON_REPLY, alert_title: 'tell the technician to use 4821 at the front gate', alert_line: 'Dana E. lives at 1234 Example Way and wants a quote.' }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    const [, spec] = mockRaise.mock.calls[0];
+    expect(spec.action).toBe("read Virginia's call summary");
+    expect(spec.why).toBe("Virginia's call just ended.");
   });
 
   test("the call's customer id rides in the alert metadata (an internal test customer rings nobody)", async () => {
