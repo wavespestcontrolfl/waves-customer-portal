@@ -21,9 +21,18 @@ function labelUseRate(meta, product) {
   return { amount, unit: String(declared.unit) };
 }
 
+// The top of a catalog default_rate band ("1" -> 1, "0.25-1.5" -> 1.5), or null.
+function catalogBandTop(product) {
+  const parts = String(product?.default_rate ?? product?.defaultRate ?? '').split('-').map((part) => parseFloat(part)).filter((n) => Number.isFinite(n) && n > 0);
+  return parts.length ? parts[parts.length - 1] : null;
+}
+
 // The completion form reads its per-gallon prefill and its review ceiling from the catalog's default_rate band
-// (client/src/lib/product-rate-prefill.js). For a line with a label rate, both become that rate, but only when the
-// catalog keeps the band in the same per-gallon unit ("fl_oz/gal"); any other unit is left unchanged.
+// (client/src/lib/product-rate-prefill.js: the band's low end prefills, its top is the ceiling). For a line with a label
+// rate, only when the catalog keeps the band in the same per-gallon unit ("fl_oz/gal"); any other unit is left unchanged:
+//   - a card rate above the catalog band (Tekko Pro at 2 on the cockroach card) becomes both the prefill and the ceiling;
+//   - a card rate below it (Tekko Pro at 0.66 in the flea card's shared tank, sprayed at more water per area) is the
+//     prefill only. The ceiling stays the catalog's label top, so the label's own dilution is not reviewed as above label.
 function completionRateFields(meta, product) {
   const rate = labelUseRate(meta, product);
   if (!rate) return null;
@@ -32,7 +41,9 @@ function completionRateFields(meta, product) {
   // labelUseRate tells the client the band is the card's own (client/src/lib/protocol-completion-defaults.js). A line another
   // booked card shares (sharedRate, completion-product-defaults.js labelRateFor) has no one rate: the rate starts blank, so the
   // tech enters what went out and no single ceiling applies.
-  return { defaultRate: meta.sharedRate ? '' : String(rate.amount), labelUseRate: true };
+  if (meta.sharedRate) return { defaultRate: '', labelUseRate: true };
+  const top = catalogBandTop(product);
+  return { defaultRate: top != null && rate.amount < top ? `${rate.amount}-${top}` : String(rate.amount), labelUseRate: true };
 }
 
 module.exports = { labelUseRate, completionRateFields, normalizeEpa };
