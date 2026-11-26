@@ -2843,3 +2843,87 @@ describe('advisory route check on the create and reschedule saves', () => {
     });
   });
 });
+
+// GATE_TECH_SHIFT_HOURS (D4): the bar's own book and move tools say the office's shift line.
+describe('the shift line on a visit the bar books or moves (GATE_TECH_SHIFT_HOURS)', () => {
+  const eligibility = require('../services/technician-eligibility');
+  const LINE = "Tech One's shift is 8:00 AM to 3:00 PM. This visit is outside those hours.";
+  const adaCustomer = () => chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) });
+  const techChain = () => chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true }) });
+  let lines;
+  afterEach(() => { if (lines) lines.mockRestore(); lines = null; });
+
+  const book = async (extra = {}) => {
+    const created = { id: 'appt-1', technician_id: 'tech-1', window_start: '16:00:00', window_end: '17:00:00', estimated_duration_minutes: 60, ...extra };
+    const insertChain = chain({ returning: jest.fn().mockResolvedValue([created]) });
+    wireDb({
+      customers: [adaCustomer(), adaCustomer()],
+      technicians: [1, 2, 3].map(techChain),
+      technician_absences: [chain(), chain()],
+      scheduled_services: [chain(), insertChain],
+    });
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '4:00 PM',
+      ...(created.technician_id ? { technician_id: 'tech-1' } : {}),
+    });
+    return { result, created };
+  };
+
+  test('book: the line joins the warning, asked on the booking transaction for the saved row, the shift line alone', async () => {
+    lines = jest.spyOn(eligibility, 'dayWarningsFor').mockResolvedValue([LINE]);
+    const { result, created } = await book();
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(result.warning).toContain(LINE);
+    expect(lines).toHaveBeenCalledTimes(1);
+    const [techId, dates, options] = lines.mock.calls[0];
+    expect(techId).toBe('tech-1');
+    expect(dates).toEqual(['2099-01-15']);
+    expect(options).toMatchObject({ block: created, shiftOnly: true });
+    expect(typeof options.conn).toBe('function');
+    expect(options.conn).not.toBe(require('../models/db'));
+  });
+
+  test('book: a visit with no technician asks nothing; a failed read books with no line', async () => {
+    lines = jest.spyOn(eligibility, 'dayWarningsFor').mockResolvedValue([LINE]);
+    const none = await book({ technician_id: null });
+    expect(none.result).toMatchObject({ success: true });
+    expect(none.result.warning).toBeUndefined();
+    expect(lines).not.toHaveBeenCalled();
+    lines.mockRejectedValue(new Error('synthetic read failure'));
+    const failed = await book();
+    expect(failed.result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(failed.result.warning).toBeUndefined();
+  });
+
+  test('move: the line is asked for the new day and hours on the technician the committed row carries, and joins the warning', async () => {
+    lines = jest.spyOn(eligibility, 'dayWarningsFor').mockResolvedValue([LINE]);
+    const appt = {
+      id: 'svc-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: '2026-07-01',
+      window_start: '09:00:00', window_end: '10:00:00', notes: null, service_type: 'Pest Control', technician_id: 'tech-7', estimated_duration_minutes: 45,
+    };
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(appt) }), chain(), chain()],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+      reschedule_log: [chain({ insert: jest.fn().mockResolvedValue() })],
+    });
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '16:00', reason: 'customer asked',
+    });
+    expect(result).toMatchObject({ success: true });
+    expect(result.warning).toContain(LINE);
+    expect(lines).toHaveBeenCalledTimes(1);
+    const [techId, dates, options] = lines.mock.calls[0];
+    // The harness's committed row is on tech-1 (the row the update returned), not the tech-7 the card read.
+    expect(techId).toBe('tech-1');
+    expect(dates).toEqual(['2099-01-15']);
+    expect(options).toMatchObject({ shiftOnly: true, block: { window_start: '16:00', estimated_duration_minutes: 45 } });
+    expect(String(options.block.window_end).slice(0, 5)).toBe('17:00');
+  });
+
+  test('gate off: the real helper reads nothing and no line shows', async () => {
+    delete process.env.GATE_TECH_SHIFT_HOURS;
+    const { result } = await book();
+    expect(result).toMatchObject({ success: true });
+    expect(result.warning).toBeUndefined();
+  });
+});
