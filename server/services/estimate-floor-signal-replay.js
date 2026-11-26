@@ -292,7 +292,8 @@ function savedLegacyTwoStoryRoofSignal(estData, { inputsOnlyIsLegacy = false } =
 function freezeSnapshotRuleStamps(estData) {
   if (!estData || typeof estData !== 'object' || !estData.sendSnapshot || typeof estData.sendSnapshot !== 'object') return;
   if (typeof estData.sendSnapshot.legacyTwoStoryRoof === 'boolean') return;
-  const { legacyTwoStoryRoof } = savedLegacyTwoStoryRoofSignal(estData);
+  // Issued unless the caller marked it never-issued (the signal's own gate): a priced bundle reads legacy either way.
+  const { legacyTwoStoryRoof } = savedLegacyTwoStoryRoofSignal(estData, { inputsOnlyIsLegacy: true });
   if (typeof legacyTwoStoryRoof === 'boolean') estData.sendSnapshot = { ...estData.sendSnapshot, legacyTwoStoryRoof };
 }
 

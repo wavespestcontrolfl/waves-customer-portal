@@ -7,6 +7,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The send-snapshot builder's pricing bundle build is captured (the test reads the estimate data it is handed).
+jest.mock('../routes/estimate-public', () => {
+  const actual = jest.requireActual('../routes/estimate-public');
+  actual.buildPricingBundle = jest.fn(async () => ({ captured: true }));
+  return actual;
+});
 
 const { generateEstimate, priceRodentExclusionV2 } = require('../services/pricing-engine');
 const { RODENT } = require('../services/pricing-engine/constants');
@@ -236,10 +242,38 @@ describe('replay: the estimate-level rule stamp decides the factor', () => {
     expect(savedLegacyTwoStoryRoofSignal(inputsOnly())).toEqual({ legacyTwoStoryRoof: undefined });
   });
 
+  test('a resend of an issued inputs-only quote rebuilds at $600; the first send of an inputs-only draft rebuilds at $780', async () => {
+    const { buildEstimateSendSnapshot, estimateIssuedBeforeSend } = require('../routes/admin-estimates');
+    const { buildPricingBundle } = require('../routes/estimate-public');
+    const data = { engineInputs: REQUEST() };
+    // The issued signal the builder is given: the row as it stood before this send.
+    expect(estimateIssuedBeforeSend({ status: 'draft', sent_at: null, viewed_at: null, estimate_data: JSON.stringify(data) })).toBe(false);
+    expect(estimateIssuedBeforeSend({ status: 'sent', sent_at: '2026-11-20T15:00:00Z', estimate_data: data })).toBe(true);
+    expect(estimateIssuedBeforeSend({ status: 'viewed', viewed_at: '2026-11-20T16:00:00Z', estimate_data: data })).toBe(true);
+    expect(estimateIssuedBeforeSend({ status: 'sending', estimate_data: { ...data, deliveryState: { firstDeliveredAt: '2026-11-20T15:00:00Z' } } })).toBe(true);
+    // The real builder, with the bundle build captured: the estimate data it hands the bundle build replays at the sold price.
+    const bundleInput = async (issuedBefore) => {
+      buildPricingBundle.mockClear();
+      const out = await buildEstimateSendSnapshot({ id: 'est-1', status: 'sending', estimate_data: data }, () => new Date('2026-11-26T12:00:00Z'), { delivered: false, issuedBefore });
+      const handed = buildPricingBundle.mock.calls[0][0].estimate_data;
+      return { handed, snapshot: out.sendSnapshot };
+    };
+    const resend = await bundleInput(true);
+    expect(resend.handed.sendSnapshot).toEqual({ legacyTwoStoryRoof: true });
+    expect(publicReplayTotal(resend.handed)).toBe(600);
+    expect(resend.snapshot.legacyTwoStoryRoof).toBe(true);
+    const first = await bundleInput(false);
+    expect(first.handed.sendSnapshot).toEqual({ legacyTwoStoryRoof: false });
+    expect(publicReplayTotal(first.handed)).toBe(780);
+    expect(first.snapshot.legacyTwoStoryRoof).toBe(false);
+    const route = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    expect(route.match(/issuedBefore: estimateIssuedBeforeSend\((estimate|sibling)\)/g)).toHaveLength(3);
+  });
+
   test('the send-snapshot builder freezes the stamp beside the bundle', () => {
     const fs = require('fs');
     const route = fs.readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
-    expect(route).toContain('savedLegacyTwoStoryRoofSignal(estimateData).legacyTwoStoryRoof');
+    expect(route).toContain('savedLegacyTwoStoryRoofSignal(estimateData, { inputsOnlyIsLegacy: issuedBefore })');
     expect(route).toContain('sendSnapshot.legacyTwoStoryRoof = priorTwoStory === true;');
   });
 
