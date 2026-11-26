@@ -21,12 +21,18 @@ function useReportEditing(id, mode, onEditing) {
   }, [id, editing, onEditing]);
 }
 
+// Said only where the reload really runs (useAction below). The editor path has its own wording in factCopy.js and reloads nothing.
+const GONE_NOTICES = {
+  NOT_A_DRAFT: "Someone else already approved or changed this draft. The list was reloaded. Nothing was deleted.",
+  NOT_FOUND: "That draft was already deleted. The list was reloaded.",
+};
+
 // One in-flight request at a time per card. run() reports success through onDone(message) and failure as one plain sentence.
 function useAction(onDone, onStale) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const busyRef = useRef(false);
-  const run = async (work, doneMessage, switchTo) => {
+  const run = async (work, doneMessage, switchTo, onRefused) => {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
@@ -35,8 +41,18 @@ function useAction(onDone, onStale) {
       await work();
       onDone(doneMessage, switchTo);
     } catch (requestError) {
-      setError(errorMessage(requestError));
-      if (["STALE_TEXT", "STALE_FACT", "STATUS_CHANGED"].includes(requestError.code)) onStale();
+      // A fact that left this list is said as it is: the reload below is what these two sentences report.
+      const message = GONE_NOTICES[requestError.code] || errorMessage(requestError);
+      setError(message);
+      if (["STALE_TEXT", "STALE_FACT", "STATUS_CHANGED"].includes(requestError.code)) {
+        // The fact changed under this action: refresh the card, and let the caller close what it had open.
+        onStale();
+        onRefused?.();
+      } else if (["NOT_A_DRAFT", "NOT_FOUND"].includes(requestError.code)) {
+        // The fact was approved or deleted meanwhile, so its card is about to leave this list: say so on the page, not on the card, and reload.
+        onRefused?.();
+        onDone(message);
+      }
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -95,7 +111,7 @@ export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing })
       {mode === "discard" && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-ui-body">Discard this draft for good?</span>
-          <Button variant="danger" loading={busy} onClick={() => run(() => send(`/${fact.id}`, "DELETE", discardBase), "Draft discarded.")}>Discard</Button>
+          <Button variant="danger" loading={busy} onClick={() => run(() => send(`/${fact.id}`, "DELETE", discardBase), "Draft discarded.", undefined, () => setMode("view"))}>Discard</Button>
           <Button variant="secondary" onClick={() => setMode("view")}>Keep</Button>
         </div>
       )}

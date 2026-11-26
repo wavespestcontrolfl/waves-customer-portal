@@ -93,6 +93,11 @@ describe('office cost math', () => {
     ['hours zero', { owner_office_hours_per_month: '0', owner_office_hourly_rate: '50' }, 0],
     ['rate zero', { owner_office_hours_per_month: '12', owner_office_hourly_rate: '0.00' }, 0],
     ['both set', { owner_office_hours_per_month: '12.50', owner_office_hourly_rate: '40.00' }, 500],
+    ['a half cent rounds up once, on integers (2.50 h x $21.29 = 53.225)', { owner_office_hours_per_month: '2.50', owner_office_hourly_rate: '21.29' }, 53.23],
+    ['numbers as well as strings', { owner_office_hours_per_month: 2.5, owner_office_hourly_rate: 21.29 }, 53.23],
+    ['under a half cent rounds down (1.15 h x $1.15 = 1.3225)', { owner_office_hours_per_month: '1.15', owner_office_hourly_rate: '1.15' }, 1.32],
+    ['a hundredth of an hour at a nickel an hour is a cent (0.005 rounds up)', { owner_office_hours_per_month: '0.10', owner_office_hourly_rate: '0.05' }, 0.01],
+    ['the largest values the columns hold', { owner_office_hours_per_month: '9999.99', owner_office_hourly_rate: '999999.99' }, 9999989900],
   ])('owner allowance, %s', (_name, row, expected) => {
     expect(svc.ownerAllowance(row)).toBe(expected);
   });
@@ -240,19 +245,22 @@ describe('runMonthlyFinancialSnapshots', () => {
   const NOW = new Date('2026-12-02T10:35:00Z'); // 05:35 ET on the 2nd
   const CATCH_UP_NOW = new Date('2026-12-04T10:35:00Z');
   const PNL = { revenue: { total: 900 }, netIncome: 100, netMargin: 0.11, coverage: { complete: true } };
+  const fresh = (month, over = {}) => ({ month, computed_at: new Date('2026-12-02T10:36:00Z'), pnl_complete: true, ...over });
+  const FRESH_PAIR = [fresh('2026-11-01'), fresh('2026-10-01')];
 
-  // The stored row the catch-up looks at, a recording insert, and a transaction that keeps its writes
-  // only when the callback resolves (like Postgres), so a failure in the second write drops the first.
-  function runDb({ existing = null, failOn = null } = {}) {
+  // `rows` are the stored rows the catch-up looks at, a recording insert, and a transaction that keeps its writes
+  // only when the callback resolves (like Postgres), so a failure in the second write drops the first. Each
+  // transaction's options are recorded.
+  function runDb({ rows = [], failOn = null } = {}) {
     const committed = [];
-    let transactions = 0;
+    const options = [];
     const build = (writes) => {
       const db = (table) => {
         if (table === 'monthly_financial_snapshots') {
           let pending = null;
           const q = {
-            where: () => q,
-            first: () => Promise.resolve(existing),
+            whereIn: () => q,
+            select: () => Promise.resolve(rows),
             insert: (row) => { pending = row; return q; },
             onConflict: () => q,
             merge: async () => {
@@ -268,57 +276,127 @@ describe('runMonthlyFinancialSnapshots', () => {
       return db;
     };
     const db = build(committed);
-    db.transaction = async (cb) => {
-      transactions += 1;
+    db.transaction = async (cb, opts) => {
+      options.push(opts);
       const writes = [];
       const result = await cb(build(writes));
       committed.push(...writes);
       return result;
     };
-    return { db, committed, transactions: () => transactions };
+    return { db, committed, options };
   }
 
-  test('writes last month and re-writes the month before it, in one transaction', async () => {
+  test('writes last month and re-writes the month before it, in one REPEATABLE READ transaction', async () => {
     mockBuildPnl.mockResolvedValue(PNL);
-    const { db, committed, transactions } = runDb();
+    const { db, committed, options } = runDb();
     const res = await svc.runMonthlyFinancialSnapshots({ now: NOW, db });
     expect(res).toEqual({ skipped: null, months: ['2026-11-01', '2026-10-01'] });
-    expect(transactions()).toBe(1);
+    expect(options).toEqual([{ isolationLevel: 'repeatable read' }]); // one transaction, for both months and every read in them
     expect(committed.map((r) => r.month)).toEqual(['2026-11-01', '2026-10-01']);
     expect(committed[0]).toMatchObject({ paid_stops: 10, office_cost: 100, office_cost_per_stop: 10, pnl_complete: true });
-    expect(committed[0].computed_at).toBeInstanceOf(Date);
+    expect(committed[0].computed_at).toEqual(NOW);
   });
 
-  test('if the month-before refresh fails, nothing is kept, so last month stays missing and the catch-up retries the pair', async () => {
+  test('a single upsert (the backfill path) is its own REPEATABLE READ transaction', async () => {
+    mockBuildPnl.mockResolvedValue(PNL);
+    const { db, committed, options } = runDb();
+    const row = await svc.upsertMonthSnapshot('2026-10', db);
+    expect(options).toEqual([{ isolationLevel: 'repeatable read' }]);
+    expect(row.month).toBe('2026-10-01');
+    expect(committed).toHaveLength(1);
+    // The reads of the snapshot ran on the transaction's connection, so mockBuildPnl got the transaction's db, not the pool.
+    expect(mockBuildPnl.mock.calls[0][0]).not.toBe(db);
+  });
+
+  // A transaction that fails with `failures` serialization errors (SQLSTATE 40001) before it lets one through.
+  const serializationFailures = (db, failures, code = '40001') => {
+    const real = db.transaction;
+    const state = { attempts: 0 };
+    db.transaction = async (cb, opts) => {
+      state.attempts += 1;
+      if (state.attempts <= failures) throw Object.assign(new Error('could not serialize access due to concurrent update'), { code });
+      return real(cb, opts);
+    };
+    return state;
+  };
+
+  test('a serialization failure repeats the whole pair on a fresh snapshot, then succeeds', async () => {
+    mockBuildPnl.mockResolvedValue(PNL);
+    const { db, committed } = runDb();
+    const state = serializationFailures(db, 2);
+    const res = await svc.runMonthlyFinancialSnapshots({ now: NOW, db });
+    expect(state.attempts).toBe(3);
+    expect(res.months).toEqual(['2026-11-01', '2026-10-01']);
+    expect(committed).toHaveLength(2); // the two failed attempts kept nothing
+  });
+
+  test('a single upsert (the backfill) retries a serialization failure the same way', async () => {
+    mockBuildPnl.mockResolvedValue(PNL);
+    const { db, committed } = runDb();
+    const state = serializationFailures(db, 1);
+    expect((await svc.upsertMonthSnapshot('2026-10', db)).month).toBe('2026-10-01');
+    expect(state.attempts).toBe(2);
+    expect(committed).toHaveLength(1);
+    expect(mockBuildPnl).toHaveBeenCalledTimes(1); // compute ran on the attempt that got a transaction
+  });
+
+  test('the retry is bounded: three attempts, then the serialization error reaches the caller', async () => {
+    mockBuildPnl.mockResolvedValue(PNL);
+    const { db, committed } = runDb();
+    const state = serializationFailures(db, 99);
+    await expect(svc.runMonthlyFinancialSnapshots({ now: NOW, db })).rejects.toMatchObject({ code: '40001' });
+    expect(state.attempts).toBe(3);
+    expect(committed).toEqual([]);
+    // The same bound on the single upsert (the backfill path).
+    const alwaysFails = { attempts: 0, transaction: async () => { alwaysFails.attempts += 1; throw Object.assign(new Error('x'), { code: '40001' }); } };
+    await expect(svc.upsertMonthSnapshot('2026-10', alwaysFails)).rejects.toMatchObject({ code: '40001' });
+    expect(alwaysFails.attempts).toBe(3);
+  });
+
+  test.each([['a deadlock (40P01)', '40P01'], ['no code', null], ['a unique violation (23505)', '23505']])('%s is not retried', async (_n, code) => {
+    const { db } = runDb();
+    const state = serializationFailures(db, 99, code);
+    await expect(svc.runMonthlyFinancialSnapshots({ now: NOW, db })).rejects.toThrow(/could not serialize/);
+    expect(state.attempts).toBe(1);
+  });
+
+  test('if the month-before refresh fails, nothing is kept, so the pair stays missing and the catch-up retries it', async () => {
     mockBuildPnl.mockResolvedValue(PNL);
     const first = runDb({ failOn: '2026-10-01' });
     await expect(svc.runMonthlyFinancialSnapshots({ now: NOW, db: first.db })).rejects.toThrow(/2026-10-01 failed/);
     expect(first.committed).toEqual([]); // the 11-01 write was rolled back with it
-    // The catch-up on day 4 sees no row for last month and does the whole pair.
-    const retry = runDb({ existing: null });
+    const retry = runDb({ rows: [] });
     const res = await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP_NOW, catchUp: true, db: retry.db });
     expect(res.months).toEqual(['2026-11-01', '2026-10-01']);
     expect(retry.committed).toHaveLength(2);
   });
 
-  test.each([
-    ['written by this month\'s run, ledger complete', { computed_at: new Date('2026-12-02T10:36:00Z'), pnl_complete: true }, true],
-    ['written by this month\'s run, flag not yet recorded (null)', { computed_at: new Date('2026-12-02T10:36:00Z'), pnl_complete: null }, true],
-  ])('the catch-up run writes nothing when last month is %s', async (_n, existing, skipped) => {
-    const { db, committed } = runDb({ existing });
+  test('the catch-up run writes nothing when BOTH months were written by this month\'s run with the ledger complete', async () => {
+    const { db, committed, options } = runDb({ rows: FRESH_PAIR });
     const res = await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP_NOW, catchUp: true, db });
-    expect(res.skipped === 'already_written').toBe(skipped);
+    expect(res).toEqual({ skipped: 'already_written', months: [] });
     expect(committed).toEqual([]);
+    expect(options).toEqual([]);
     expect(mockBuildPnl).not.toHaveBeenCalled();
   });
 
+  test('a row with no pnl_complete verdict (NULL, an older row) is not by itself a reason to rerun', async () => {
+    const { db } = runDb({ rows: [fresh('2026-11-01', { pnl_complete: null }), fresh('2026-10-01', { pnl_complete: null })] });
+    expect((await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP_NOW, catchUp: true, db })).skipped).toBe('already_written');
+  });
+
   test.each([
-    ['missing', null],
-    ['written before this month\'s run opened (a backfill on the 1st: the month before was not refreshed with it)', { computed_at: new Date('2026-12-01T20:00:00Z'), pnl_complete: true }],
-    ['stored while the balance ledger had not synced past month end', { computed_at: new Date('2026-12-02T10:36:00Z'), pnl_complete: false }],
-  ])('the catch-up run does the pair again when last month is %s', async (_n, existing) => {
+    ['both rows are missing', []],
+    ['last month is missing', [fresh('2026-10-01')]],
+    ['the month before is missing (a one-month backfill made last month look fresh)', [fresh('2026-11-01')]],
+    ['last month was written before this month\'s run window opened', [fresh('2026-11-01', { computed_at: new Date('2026-12-01T20:00:00Z') }), fresh('2026-10-01')]],
+    ['the month before was written before this month\'s run window opened', [fresh('2026-11-01'), fresh('2026-10-01', { computed_at: new Date('2026-11-02T10:36:00Z') })]],
+    ['last month was stored while the balance ledger had not synced past month end', [fresh('2026-11-01', { pnl_complete: false }), fresh('2026-10-01')]],
+    ['the month before was stored incomplete', [fresh('2026-11-01'), fresh('2026-10-01', { pnl_complete: false })]],
+    ['a row has no computed_at', [fresh('2026-11-01', { computed_at: null }), fresh('2026-10-01')]],
+  ])('the catch-up run does the whole pair again when %s', async (_n, rows) => {
     mockBuildPnl.mockResolvedValue(PNL);
-    const { db, committed } = runDb({ existing });
+    const { db, committed } = runDb({ rows });
     const res = await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP_NOW, catchUp: true, db });
     expect(res.months).toEqual(['2026-11-01', '2026-10-01']);
     expect(committed).toHaveLength(2);
@@ -328,10 +406,9 @@ describe('runMonthlyFinancialSnapshots', () => {
     mockBuildPnl.mockResolvedValue(PNL);
     // 2027-02-02 00:00 EST is 05:00Z. A row computed 04:59Z is before it, 05:01Z is after.
     const now = new Date('2027-02-04T15:00:00Z');
-    const before = runDb({ existing: { computed_at: new Date('2027-02-02T04:59:00Z'), pnl_complete: true } });
-    expect((await svc.runMonthlyFinancialSnapshots({ now, catchUp: true, db: before.db })).skipped).toBeNull();
-    const after = runDb({ existing: { computed_at: new Date('2027-02-02T05:01:00Z'), pnl_complete: true } });
-    expect((await svc.runMonthlyFinancialSnapshots({ now, catchUp: true, db: after.db })).skipped).toBe('already_written');
+    const pair = (at) => [fresh('2027-01-01', { computed_at: new Date(at) }), fresh('2026-12-01', { computed_at: new Date(at) })];
+    expect((await svc.runMonthlyFinancialSnapshots({ now, catchUp: true, db: runDb({ rows: pair('2027-02-02T04:59:00Z') }).db })).skipped).toBeNull();
+    expect((await svc.runMonthlyFinancialSnapshots({ now, catchUp: true, db: runDb({ rows: pair('2027-02-02T05:01:00Z') }).db })).skipped).toBe('already_written');
   });
 });
 

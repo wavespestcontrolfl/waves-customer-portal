@@ -455,11 +455,11 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
   });
 });
 
-// An internal call (the voice-agent sandbox, the tech voice line) never takes recording audio into the pipeline.
-// GATE_VOICE_SANDBOX_RECORDING leaves a staff test recording at Twilio under the sandbox call's own CallSid, so this
-// lookup would find it. The row's stored source must refuse it here, at the one place every recovery entry point
-// passes through: the status callback that schedules a recovery decides from its request's To, which a delayed
-// callback or a changed sandbox number can get wrong.
+// An internal call (the voice-agent sandbox, the tech voice line) never takes recording audio into the pipeline. If
+// Twilio holds a recording under such a call's own CallSid (a staff test recording, say), this lookup would find it.
+// The row's stored source must refuse it here, at the one place every recovery entry point passes through: the
+// status callback that schedules a recovery decides from its request's To, which a delayed callback or a changed
+// sandbox number can get wrong.
 describe('recoverRecordingForCall: an internal call takes no recording audio', () => {
   const recording = { sid: 'REstaff00000000000000000000000001', status: 'completed', dateCreated: '2026-11-25T12:00:00Z', duration: '60', uri: '/2010-04-01/Accounts/AC/Recordings/REstaff00000000000000000000000001.json' };
   const recordingsSpy = require('twilio').__recordingsSpy;

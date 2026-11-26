@@ -6092,6 +6092,26 @@ re-read first, with the same rule for an undecided answer; any other profile
 prices its own `poolCageSize`, exactly as before the gate. Either way a Large or
 Oversized cage is held as before. The response
 shape does not change; `quote_required` was already a possible answer.
+Returning customer setup fee (`GATE_RETURNING_SETUP_FEE_GAP`, owner
+2026-11-24, "make this a rule"; dark by default;
+`server/services/returning-setup-fee-waiver.js`): gate on, a contact the
+server matches to a customer whose plan lapsed, quoting a solo pest or a
+solo mosquito plan inside one plan cycle plus 30 days of that customer's
+last completed visit of the same plan (quarterly 121 days, bi-monthly 91,
+monthly 60), is quoted no WaveGuard setup fee. The response answers
+`has_setup_fee: false` and omits `setup_fee_amount`, the answer an active
+member already gets, and the draft freezes `setupFeeQuote: { amount: 0,
+waived: 'returning_customer', kind: 'waveguard_membership' }`, which the
+self-booking handoff reads (no fee is queued). The rule is asked last and
+only about a membership fee still owed: an active member's waiver and an
+already-queued fee's waiver are settled first, from the reads the route
+already makes, and the visit history is not read for them. A failed
+history read keeps the fee (`resolveSetupFeeQuoteWithReturningRule`). The
+response carries no visit date and no reason; like the member waiver, a
+`false` here tells the visitor only that no setup fee applies to this
+quote. Gate off, an unmatched contact, a bundle, a rodent setup or a visit
+outside the window: the response is exactly as before. No field is added
+or removed; `has_setup_fee: false` was already a possible answer.
 `services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
 present tier must be a currently-sold one (`standard`/`enhanced`) or the
 route answers 400 before pricing — `light` (4x/quarterly, retired for new
@@ -10375,6 +10395,31 @@ when lawn is added back, with the gate on or off — the one-time option never
 sits on an estimate that carries a companion program. The page's tiles drive
 the existing dry-run → `previewBasis` → commit steps; there is no tier
 parameter on accept, the slot routes or any intent route.
+Returning customer setup fee (`GATE_RETURNING_SETUP_FEE_GAP`, owner
+2026-11-24, "make this a rule"; dark by default;
+`server/services/returning-setup-fee-waiver.js`): every re-price on this
+rail (dry run and commit; a removal, a restore and an add; the customer,
+the staff send-time park and its revert) decides the returning-customer
+rule again for the plan AFTER the change. The answer the estimate stored
+for the plan before the change is dropped first (the operator waiver that
+names the rule, or a frozen zero `setupFeeQuote` named
+`returning_customer`), so a waiver decided for one plan never rides a
+change onto another. Gate on, the linked customer's visit history is then
+read and the recompute decides on the plan it priced: a solo pest or solo
+mosquito plan inside one plan cycle plus 30 days of that customer's last
+completed visit of the same plan carries no WaveGuard setup fee, and the
+answer is stored on the estimate; any other outcome prices the fee as the
+engine does. A removal that leaves a solo plan therefore shows and bills
+the setup fee unless the rule waives it for THAT plan. The dry run and the
+commit run the same decision, and the `previewBasis` digest binds the
+money it produces. A failed history read answers 409 `reprice_unavailable`
+before any price is made (dry run and commit), like this rail's other
+fail-closed lookups, and nothing is written. A staff or move waiver is not
+the rule's and is kept. Gate off, or an estimate with no linked customer:
+no history read and no new refusal; an estimate that never held the rule's
+answer answers exactly as before, and one that holds it (stored while the
+gate was on) loses it at its next change here and prices the fee. The
+response shape does not change.
 
 The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
 (STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is

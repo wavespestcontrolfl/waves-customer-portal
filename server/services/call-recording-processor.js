@@ -26472,10 +26472,11 @@ const CallRecordingProcessor = {
     // takes recording audio into the pipeline, whoever asked. The row's own
     // stored source decides, ahead of the lookup below: the request that
     // scheduled this can carry another To, the sandbox number can change, and
-    // GATE_VOICE_SANDBOX_RECORDING leaves a staff test recording at Twilio
-    // under this very CallSid. It sits AFTER the card-data cleanup above on
-    // purpose: an owed delete or alert is a duty whatever the row's source,
-    // and that cleanup deletes by the SIDs the row holds, never by a lookup.
+    // whatever audio Twilio holds under an internal call's CallSid (a staff
+    // test recording, say) is not pipeline audio. It sits AFTER the card-data
+    // cleanup above on purpose: an owed delete or alert is a duty whatever the
+    // row's source, and that cleanup deletes by the SIDs the row holds, never
+    // by a lookup.
     const { isInternalCallSource, whereNotSandboxCall } = require('./voice-agent/relay-protocol');
     if (isInternalCallSource(call.source)) return { success: true, skipped: true, reason: 'internal_call' };
     if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };

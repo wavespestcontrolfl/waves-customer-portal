@@ -6428,7 +6428,7 @@ async function resolveCalculateQualifyingEvidence(options = {}, resolver = null)
 
 router.post('/calculate-estimate', async (req, res) => {
   try {
-    const { profile, selectedServices, options } = req.body;
+    const { profile, selectedServices, options, lead } = req.body;
     if (!profile) return res.status(400).json({ error: 'Profile required' });
     const turfConfirmation = needsTurfManualConfirmation(profile, selectedServices || [], options || {});
     if (turfConfirmation) {
@@ -6494,6 +6494,26 @@ router.post('/calculate-estimate', async (req, res) => {
         retryable: true,
       });
     }
+    // Returning customer $99 rule (GATE_RETURNING_SETUP_FEE_GAP): the matched customer's visit history, read as
+    // the save reads it (null while the gate is off). A failed read refuses, like the lookup above, so the
+    // preview never shows a fee the save would waive, or the reverse. A builder that holds only a lead (picking
+    // one clears its customer) names the lead and the typed contact: the save prices for the lead's customer
+    // (leadCustomerIdForEstimate), so the rule reads that customer's visits here too.
+    const Returning = require('../services/returning-setup-fee-waiver');
+    let returningVisitHistory = null;
+    try {
+      const database = require('../models/db');
+      const returningCustomerId = options?.existingCustomerId
+        || (Returning.returningSetupFeeGapLive()
+          ? await require('../services/admin-estimate-persistence').leadCustomerIdForPreview(database, lead) : null);
+      returningVisitHistory = await Returning.loadReturningVisitHistory(database, { customerId: returningCustomerId });
+    } catch (historyErr) {
+      return res.status(503).json({
+        error: 'Visit history lookup is temporarily unavailable — please retry in a moment.',
+        code: 'PRIOR_SERVICES_UNAVAILABLE',
+        retryable: true,
+      });
+    }
     // The add-ons' yearly-limit history of the matched customer's property (read here; the engine never queries).
     v1Input = await require('../services/area-addon-limits').attachQuoteAreaAddOnHistory(require('../models/db'), v1Input, options, { requesterRole: req.techRole });
     v1Input = await require('../services/pricing-engine/trusted-catalog-pricing')
@@ -6506,8 +6526,13 @@ router.post('/calculate-estimate', async (req, res) => {
         if (li && Number(li.initialFee) > 0) li.initialFee = 0;
       }
     }
-    const mapped = mapV1ToLegacyShape(v1);
+    // The same decision the save-time recompute makes, on the same server-priced plan (a move's waiver already
+    // covers the fee). The tool shows the reason; the dates are for an admin only (this router admits technicians).
+    const { mapped, waiver: returningWaiver } = Returning.mapWithReturningWaiver(
+      v1, mapV1ToLegacyShape, { history: moveSetupFeeWaived ? null : returningVisitHistory },
+    );
     if (moveSetupFeeWaived) mapped.moveSetupFeeWaived = true;
+    if (returningWaiver) mapped.returningSetupFeeWaiver = req.techRole === 'admin' ? returningWaiver : { rule: returningWaiver.rule };
     // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): tell the estimate tool
     // when this result may be marked for the tier picker, so it can default
     // the option on. Same stored-facts predicate the save applies (plus the

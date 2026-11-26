@@ -83,6 +83,44 @@ describe('new-home estimate setup-fee waiver in the builder', () => {
     const options = await generate();
     expect(options).not.toHaveProperty('moveEstimateId');
     expect(options).not.toHaveProperty('moveId');
+    // A reopened estimate names its own customer and never a lead.
+    expect(calculateBodies.at(-1)).not.toHaveProperty('lead');
+  });
+
+  // A builder that holds only a lead is saved for the lead's customer (the save reads the lead and the typed
+  // contact). The preview gets the same three values, so the returning-customer rule reads that customer's visits
+  // before the save does. They ride outside `options`, which are stored and replayed.
+  it('a lead-only builder sends its lead and typed contact to the preview, outside the stored options', async () => {
+    renderEditor({ initialLeadId: 'lead-1', initialCustomerName: 'QA Contact', initialCustomerPhone: '(941) 555-0100', initialAddress: '123 Palm Ave, Venice, FL 34285' });
+    fireEvent.change(await screen.findByLabelText('Home Sq Ft'), { target: { value: '2000' } });
+    const options = await generate();
+    expect(calculateBodies.at(-1).lead).toEqual({ leadId: 'lead-1', customerPhone: '(941) 555-0100', customerEmail: '' });
+    expect(options.existingCustomerId).toBeNull();
+    expect(options).not.toHaveProperty('leadId');
+  });
+
+  // Returning-customer rule (GATE_RETURNING_SETUP_FEE_GAP): the preview says why the $99 is gone, so staff do not
+  // add it back by hand. An admin sees the visit date; a technician's preview carries only the rule's name.
+  it('a preview that waives the fee for a returning customer says so, with the visit date only when the server sent it', async () => {
+    const waiver = { rule: 'returning_customer_gap', family: 'pest_control', lastCompletedVisitDate: '2026-08-21', gapDays: 95, windowDays: 121 };
+    let previewWaiver = waiver;
+    fetch.mockImplementation((url) => {
+      const path = String(url);
+      if (path.endsWith('/edit-source')) return response(currentEdit);
+      if (path.endsWith('/calculate-estimate')) return response({ ...structuredClone(result), returningSetupFeeWaiver: previewWaiver });
+      if (path.includes('/discounts')) return response([]);
+      return response({});
+    });
+    renderEditor({ editEstimateId: 'est-move' });
+    await screen.findByDisplayValue('QA Contact');
+    expect(screen.queryByTestId('returning-setup-fee-banner')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    const banner = await screen.findByTestId('returning-setup-fee-banner');
+    expect(banner).toHaveTextContent('Returning customer. The $99 setup fee is waived. Last plan visit Aug 21, 2026, 95 days ago. The fee comes back after 121 days.');
+
+    previewWaiver = { rule: 'returning_customer_gap' };
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(screen.getByTestId('returning-setup-fee-banner').textContent).toBe('Returning customer. The $99 setup fee is waived.'));
   });
 
   it('a new new-home estimate sends moveId (never moveEstimateId) and the banner dates read as calendar dates', async () => {

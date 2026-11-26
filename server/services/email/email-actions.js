@@ -1195,9 +1195,11 @@ function stripPlaceholderSignOff(text) {
 
 // Owner-approved COMPANY FACTS (the one list the texting agent and the voice agent also read). They hold no customer
 // data, so they ride every draft, matched customer or not. A staff member still reviews the Gmail draft before it goes.
+// The owner-approved bank lines (company-facts-bank) follow the code lines, read per draft; an empty bank adds nothing.
 function companyFactsSystemEntry() {
   const { renderCompanyFactsSection } = require('../sms-company-facts');
-  return `${renderCompanyFactsSection().replace(/\n$/, '')}\nUse only the lines that answer what the customer asked. They promise no visit, date, price, or contact; the rules above still apply.`;
+  const bank = require('../company-facts-bank').renderBankFactsSection();
+  return `${renderCompanyFactsSection().replace(/\n$/, '')}${bank ? `\n${bank}` : ''}\nUse only the lines that answer what the customer asked. They promise no visit, date, price, or contact; the rules above still apply.`;
 }
 
 async function draftFactsSystemEntries(email, customer) {
@@ -1579,4 +1581,6 @@ module.exports = {
   handleSpam,
   emailAutoDraftsEnabled,
   draftReplyForEmail,
+  // Exported for the company facts bank reader test
+  __test: { companyFactsSystemEntry },
 };
