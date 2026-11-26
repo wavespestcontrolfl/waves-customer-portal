@@ -156,9 +156,12 @@ function sanitizeFactsForJudge(block) {
 // `start`, minus the bank section; `text`: the section, capped ('' when the block has none at the exact spot); `offset`: its character offset
 // in the text without it.
 function bankExemption(lines, start) {
-  const { bankFactsRangeInLines } = require('./sms-company-facts');
+  const { bankFactsRangeInLines, isOwnerBankLine } = require('./sms-company-facts');
   const range = bankFactsRangeInLines(lines, start);
-  if (!range) return { before: lines.slice(0, start), text: '', offset: 0 };
+  // Size exemption only for a verified section: every line is wording the owner approved (any time: the judge grades stored drafts nightly),
+  // as the snapshot knows it. Anything else (multi-line visit data, a stale snapshot) stays inside the ordinary context budget.
+  const verified = range && lines.slice(range.start + 1, range.end).every((l) => isOwnerBankLine(l.slice(2), { at: 'any' }));
+  if (!verified) return { before: lines.slice(0, start), text: '', offset: 0 };
   return {
     before: [...lines.slice(0, range.start), ...lines.slice(range.end, start)],
     text: lines.slice(range.start, range.end).join('\n').slice(0, BANK_FACTS_JUDGE_CAP),

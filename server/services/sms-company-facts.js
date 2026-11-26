@@ -334,24 +334,30 @@ function exactBankFactsSection(factsBlock) {
   return range ? lines.slice(range.start, range.end).join('\n') : '';
 }
 
+const bankLineHash = (text) => require('crypto').createHash('sha256').update(String(text).trim()).digest('hex');
+
+/**
+ * True when `text` is exact owner-approved wording the bank snapshot knows (company-facts-bank wasApprovedAt: sha256 of the trimmed text).
+ * `at`: when the draft that carries the line was built (a Date or epoch ms; omitted = now, so only a line live now counts), `'any'` = no
+ * time test. `approved` (tests): a Set of hashes used instead of the bank's, with no time test. Fails closed (false) on any read fault.
+ */
+function isOwnerBankLine(text, { approved, at } = {}) {
+  const sha = bankLineHash(text);
+  if (approved) return approved.has(sha);
+  try { return require('./company-facts-bank').wasApprovedAt(sha, at === undefined ? Date.now() : at); } catch { return false; }
+}
+
 /**
  * The fact lines (text only) of a stored block's bank section that GROUND anything: [] when it has none, and a line only when the owner
- * ever approved exactly that wording (company-facts-bank getEverApprovedHashes: sha256 of the trimmed text, retired-after-approval lines
- * included, so a draft keeps its own lines after a retire). The structure alone is not trust: the lines above the section (customer
- * summary, notes) are free text, so a section forged there passes the shape test but can only ever repeat owner-approved wording.
- * An empty or stale set (the bank snapshot is older than five minutes, or never loaded) recognizes nothing: fail closed.
- * `approved` (tests, replays): a Set of hashes to use instead of the bank's.
+ * approved exactly that wording at or before `at`, the time of the draft that carries the block (isOwnerBankLine; a line retired more than
+ * five minutes before the draft was built does not count, so a copy forged into profile or visit text of a NEWER draft cannot revive it).
+ * The structure alone is not trust: the lines above the section (customer summary, notes, windows) are free text, so a forged section
+ * passes the shape test but can only repeat wording the owner had approved by then. An empty or stale bank snapshot recognizes nothing.
  */
-function bankFactLinesFrom(factsBlock, { approved } = {}) {
+function bankFactLinesFrom(factsBlock, opts = {}) {
   const section = exactBankFactsSection(factsBlock);
   if (!section) return [];
-  let hashes = approved;
-  if (!hashes) {
-    try { hashes = require('./company-facts-bank').getEverApprovedHashes(); } catch { hashes = new Set(); }
-  }
-  if (!hashes.size) return [];
-  const sha = (text) => require('crypto').createHash('sha256').update(text.trim()).digest('hex');
-  return section.split('\n').slice(1).map((l) => l.slice(2)).filter((line) => hashes.has(sha(line)));
+  return section.split('\n').slice(1).map((l) => l.slice(2)).filter((line) => isOwnerBankLine(line, opts));
 }
 
 // ---- Rebasing a stored block onto today's static section (sealed-eval freezer) ----
@@ -453,7 +459,7 @@ function heldPlaceInConversationContext(factsBlock) {
   // the owner-approved bank section is company policy like the static lines (only the exact section drafted into this block)
   // (stripped only when every line of it is owner wording: a section forged from profile text must not hide a place name from this check)
   const bank = exactBankFactsSection(rest);
-  if (bank && bankFactLinesFrom(rest).length === bank.split('\n').length - 1) rest = rest.replace(bank, '');
+  if (bank && bankFactLinesFrom(rest, { at: 'any' }).length === bank.split('\n').length - 1) rest = rest.replace(bank, '');
   for (const render of knownCompanyFactsRenders()) rest = rest.split(render.replace(/\n$/, '')).join('');
   return HELD_PLACE_CONTEXT_RE.test(rest);
 }
@@ -496,6 +502,7 @@ module.exports = {
   bankFactsRangeInLines,
   exactBankFactsSection,
   bankFactLinesFrom,
+  isOwnerBankLine,
   COMPANY_FACTS,
   FACT_CLOSED_HOLIDAY_KEYS,
   closedHolidaysMatchFactsLine,

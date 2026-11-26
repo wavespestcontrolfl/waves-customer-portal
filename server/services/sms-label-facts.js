@@ -1438,11 +1438,18 @@ function companyFactSentences() {
 // after a colon. Anything that is not a plain bounded string without a digit is dropped too: the bank states no amount.
 const BANK_SENTENCE_MAX = 400;
 const BANK_SENTENCES_MAX = 80;
-function isNeutralBankSentence(sentence) {
-  const text = canonText(sentence).toLowerCase();
+// One sentence of a bank line, on its own. The language screens run HERE, before a copy is ever masked: a bank line may be written in
+// another language, and the unsupported-language timing words ("trocken") are seen only by hasUnsupportedLanguage, which reads a masked
+// copy as one inert marker.
+function isNeutralBankPiece(piece) {
+  const text = canonText(piece).toLowerCase();
   return !/\?/.test(text) && !hasAnswerForce(text) && !LABEL_CONTEXT_RE.test(text) && !hasDuration(text) && !hasClockTime(text)
-    && !CLEARANCE_ANY_RE.test(text) && !RAINFAST_RE.test(text) && !UNTIL_DRY_HOLD_RE.test(text);
+    && !CLEARANCE_ANY_RE.test(text) && !RAINFAST_RE.test(text) && !UNTIL_DRY_HOLD_RE.test(text)
+    && !looksNonEnglish(piece) && !hasUnsupportedLanguage(piece) && !nonEnglishTimingWords(text);
 }
+// A unit (a sentence, or a whole line) is neutral only when EVERY sentence in it passes on its own: "We service docks. Absolutely." is not,
+// because the answer word reads as an answer only at the start of its own sentence.
+const isNeutralBankSentence = (unit) => String(unit).split(/(?<=[.!?])\s+/).filter((piece) => piece.trim()).every(isNeutralBankPiece);
 function cleanBankSentences(list) {
   if (!Array.isArray(list)) return [];
   const out = new Set();
@@ -1457,12 +1464,12 @@ function cleanBankSentences(list) {
 const bankUnitsOf = (line) => [line, ...line.split(/(?<=[.!?])\s+/)];
 /**
  * The copyable bank sentences of a stored facts block: the 'MORE COMPANY FACTS' section found by exact structure, and only lines whose
- * text the owner ever approved (sms-company-facts bankFactLinesFrom: a section forged from customer profile text grounds nothing).
+ * text the owner approved by `opts.at`, the draft's build time (sms-company-facts bankFactLinesFrom: a section forged from customer profile text grounds nothing).
  * [] when the block has none. The words of a bank line are NOT added to the English lexicon: it is process-wide, and a stored draft's
  * vocabulary must not change other customers' language checks (a copy is marked out of the reply before the language check reads it).
  */
-function bankSentencesFromBlock(factsBlock) {
-  const lines = require('./sms-company-facts').bankFactLinesFrom(factsBlock);
+function bankSentencesFromBlock(factsBlock, opts) {
+  const lines = require('./sms-company-facts').bankFactLinesFrom(factsBlock, opts);
   return lines.length ? cleanBankSentences(lines.flatMap(bankUnitsOf)) : [];
 }
 // The bank sentences a reply copies whole (what a draft's snapshot carries to its send-time recheck).
