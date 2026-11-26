@@ -1274,6 +1274,124 @@ postgres('production share refunds', () => {
     });
   });
 
+  describe('round twelve: parked refund identities, closed disputes, bells after commit', () => {
+    it('the statement webhook keeps each pre-settlement partial refund on the one parked row, and the signal tells them apart', async () => {
+      const webhook = require('../routes/stripe-webhook');
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '100.00', { scheduled_service_id: visit });
+      const [payer] = await trx('payers').insert({ display_name: 'Sample Payer' }).returning('id');
+      const [stmt] = await trx('payer_statements').insert({
+        payer_id: payer.id, period_start: '2026-09-01', period_end: '2026-09-30', terms_snapshot: 'due_on_receipt', token: randomUUID(), stripe_payment_intent_id: 'pi_wh',
+      }).returning('id');
+      await trx('invoices').where({ id: invoiceId }).update({ payer_statement_id: stmt.id });
+      const charge = (refundId, cents, cumulative) => ({
+        id: 'ch_wh', payment_intent: 'pi_wh', amount: 10000, amount_refunded: cumulative, refunded: false,
+        refunds: { data: [{ id: refundId, amount: cents, created: 1790000000 }] },
+      });
+      await webhook._handleChargeRefunded(charge('re_a', 800, 800));
+      const rows = () => trx('stripe_orphan_charges').where({ stripe_payment_intent_id: 'pi_wh' });
+      const [first] = await rows();
+      expect(first.source).toBe('statement_pay_webhook');
+      expect(first.parked_refunds).toEqual([{ refundId: 're_a', cents: 800 }]);
+      const one = (await signals([visit])).get(visit);
+      expect(one).toEqual([expect.stringMatching(new RegExp(`^orphan:${first.id}:r[0-9a-f]{10}$`))]);
+      // A replay of the same event adds nothing; a second partial refund adds its identity to the same row.
+      await webhook._handleChargeRefunded(charge('re_a', 800, 800));
+      expect((await rows())[0].parked_refunds).toHaveLength(1);
+      await webhook._handleChargeRefunded(charge('re_b', 700, 1500));
+      const all = await rows();
+      expect(all).toHaveLength(1);
+      expect(all[0].id).toBe(first.id);
+      expect(all[0].parked_refunds).toEqual([{ refundId: 're_a', cents: 800 }, { refundId: 're_b', cents: 700 }]);
+      expect(all[0].amount).toBe(first.amount);
+      const two = (await signals([visit])).get(visit);
+      expect(two).toHaveLength(1);
+      expect(two[0]).not.toEqual(one[0]);
+      expect(two[0]).not.toMatch(/^orphan-stmt:/);
+    });
+
+    it('a legacy parked statement row with no refund list stays unclear', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '100.00', { scheduled_service_id: visit });
+      const [payer] = await trx('payers').insert({ display_name: 'Sample Payer' }).returning('id');
+      const [stmt] = await trx('payer_statements').insert({
+        payer_id: payer.id, period_start: '2026-09-01', period_end: '2026-09-30', terms_snapshot: 'due_on_receipt', token: randomUUID(), stripe_payment_intent_id: 'pi_leg',
+      }).returning('id');
+      await trx('invoices').where({ id: invoiceId }).update({ payer_statement_id: stmt.id });
+      await trx('stripe_orphan_charges').insert({ stripe_payment_intent_id: 'pi_leg', stripe_charge_id: 'ch_leg', amount: '8.00', source: 'statement_pay_webhook', original_db_error: 'legacy' });
+      expect((await signals([visit])).get(visit)).toEqual([expect.stringMatching(/^orphan-stmt:/)]);
+    });
+
+    it('a dispute that closed won or warning_closed leaves the status-only signal and the status suffix; a recorded refund amount stays', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      const customerId = await customer();
+      const statusOnly = await stop(id, W1, '100.00', customerId);
+      const withAmount = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: statusOnly, stripe_payment_intent_id: 'pi_dw1' });
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: withAmount, stripe_payment_intent_id: 'pi_dw2' });
+      const a = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_dw1', status: 'disputed', refund_amount: '0.00', metadata: JSON.stringify({ statement_dispute: true }) });
+      const b = await paymentOf(customerId, { stripe_payment_intent_id: 'pi_dw2', status: 'disputed', refund_amount: '10.00' });
+      expect((await signals([statusOnly, withAmount])).get(statusOnly)).toEqual([`pay:${a}:disputed`]);
+      expect((await signals([withAmount])).get(withAmount)).toEqual([`pay:${b}:1000:disputed`]);
+      // Own week: the stop is flagged while the dispute is open, and clears when it closes won.
+      expect(rowOf(await preview(id, W1), statusOnly)).toMatchObject({ kind: 'refund_flagged' });
+      for (const final of ['won', 'warning_closed']) {
+        await trx('payments').where({ id: a }).update({ metadata: JSON.stringify({ dispute_final: final }) });
+        await trx('payments').where({ id: b }).update({ metadata: JSON.stringify({ dispute_final: final }) });
+        const found = await signals([statusOnly, withAmount]);
+        expect(found.get(statusOnly)).toEqual([]);
+        expect(found.get(withAmount)).toEqual([`pay:${b}:1000`]);
+      }
+      expect(rowOf(await preview(id, W1), statusOnly)).toMatchObject({ kind: 'priced', creditCents: 10000 });
+      // A lost dispute keeps the payment disputed and open.
+      await trx('payments').where({ id: a }).update({ metadata: JSON.stringify({ dispute_final: 'lost' }) });
+      expect((await signals([statusOnly])).get(statusOnly)).toEqual([`pay:${a}:disputed`]);
+    });
+
+    it('reopens an answered take-back when its dispute closes won', async () => {
+      const world = await paidWorld('dwon');
+      const payment = await refundOn(world, '30.00', { status: 'disputed' });
+      const open = await week(world, W2, '500.00');
+      await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 30000, signalRevision: open.takeBackToSet[0].signalRevision });
+      expect((await preview(world.id, W2)).takeBackToSet).toEqual([]);
+      await trx('payments').where({ id: payment }).update({ metadata: JSON.stringify({ dispute_final: 'won' }) });
+      const shown = await preview(world.id, W2);
+      // The payment now reads without the dispute state: a different signal, so the answer is out of force and the stop is asked again.
+      expect(shown.takeBackToSet).toEqual([expect.objectContaining({ previousCents: 30000 })]);
+      expect(shown.takeBackAnswers).toEqual([expect.objectContaining({ inForce: false })]);
+    });
+
+    it('raises the refund bell only after the run was saved: a refused draft (week already paid) raises none', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      await worked(id, W1, 40);
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_ac' });
+      await paymentOf(customerId, { stripe_payment_intent_id: 'pi_ac', refund_amount: '10.00' });
+      expect(await bells()).toBe(0);
+      const created = await draft(W1);
+      expect(created.status).toBe(201);
+      const rung = await bells();
+      expect(rung).toBe(1);
+      expect((await api('POST', `/runs/${created.body.run.id}/recompute`)).status).toBe(200);
+      expect(await bells()).toBe(rung);
+      expect((await override({ technicianId: id, visitId: visit, weekStart: W1, creditCents: 10000, reason: 'Refund seen' })).status).toBe(200);
+      expect((await api('POST', `/runs/${created.body.run.id}/recompute`)).status).toBe(200);
+      expect((await finalize(created.body.run.id)).body.run.status).toBe('finalized');
+      // A new refund arrives; drafting the paid week again is refused (409) and rings nothing.
+      await paymentOf(customerId, { stripe_payment_intent_id: 'pi_ac', refund_amount: '5.00' });
+      const before = await bells();
+      expect((await draft(W1)).status).toBe(409);
+      expect(await bells()).toBe(before);
+    });
+  });
+
   describe('a parked refund the bank bounced is not a refund signal', () => {
     it('skips a parked refund whose id is fenced as failed, and keeps a reconciled one', async () => {
       const id = await tech('Sample Alpha');

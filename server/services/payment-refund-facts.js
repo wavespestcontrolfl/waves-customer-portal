@@ -52,8 +52,15 @@ function depositReversal(row) {
 // A 'refunded' row with no refund amount and a 'disputed' row show the whole payment refunded (refundedTotal = payrollUnits(refund_amount)).
 const showsFullRefund = (status, refundedTotal) => status === 'disputed' || (status === 'refunded' && refundedTotal <= 0n);
 
-// The SQL twin for a payments alias: a row that shows any refund (an amount, or the whole payment by status).
-const paymentRefundShownSql = (alias) => `(COALESCE(${alias}.refund_amount, 0) > 0 OR ${alias}.status IN ('refunded', 'disputed'))`;
+// A dispute the webhook closed in Waves's favour (stripe-webhook.js handleDisputeClosed writes metadata.dispute_final) restored the money.
+// A pre-settlement statement dispute leaves the payment status 'disputed' with that marker.
+const disputeClosedSql = (alias) => `COALESCE(${alias}.metadata ->> 'dispute_final', '') IN ('won', 'warning_closed')`;
+
+// The SQL twin for a payments alias: a row that shows any refund (an amount, or the whole payment by status). A 'disputed' row whose dispute
+// closed won or warning_closed no longer shows the whole payment as taken (any recorded refund amount still counts). The commission ledger keeps
+// its own JS rule (showsFullRefund) unchanged.
+const paymentRefundShownSql = (alias) => `(COALESCE(${alias}.refund_amount, 0) > 0 OR ${alias}.status = 'refunded'
+  OR (${alias}.status = 'disputed' AND NOT ${disputeClosedSql(alias)}))`;
 
 // The durable keys a payment row carries to name its invoice (metadata), in the order the Stripe webhook reads them (stripe-webhook.js
 // findInvoiceForPayment): a dispute reopen writes dispute_invoice_id and clears the Stripe ids on the invoice, so these keys, not the
@@ -74,6 +81,6 @@ const COMBINED_ANCHOR_INVOICE_KEY = 'combined_anchor_invoice_id';
 const paymentNamesInvoiceSql = (alias, invoiceRef) => `(${[...PAYMENT_INVOICE_METADATA_KEYS, COMBINED_ANCHOR_INVOICE_KEY].map((key) => `${alias}.metadata ->> '${key}' = ${invoiceRef}::text`).join(' OR ')})`;
 
 module.exports = {
-  PAYMENT_INVOICE_METADATA_KEYS, COMBINED_ANCHOR_INVOICE_KEY, metadataInvoiceId, paymentNamesInvoiceSql,
+  PAYMENT_INVOICE_METADATA_KEYS, COMBINED_ANCHOR_INVOICE_KEY, disputeClosedSql, metadataInvoiceId, paymentNamesInvoiceSql,
   AUTO_MINT_RE, namedIn, COLLECTED_DEPOSITS, UUID_RE, VOIDED_INVOICE, invoiceLines, depositApplications, depositReversal, showsFullRefund, paymentRefundShownSql,
 };

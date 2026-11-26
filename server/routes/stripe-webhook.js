@@ -3590,7 +3590,15 @@ async function handleChargeRefunded(charge) {
             customer_id: null, invoice_id: null, amount: refundAmountDollars,
             source: 'statement_pay_webhook',
             original_db_error: `statement S-${stmtByPi.id}: partial refund $${refundAmountDollars.toFixed(2)} before settlement — reconcile refund_amount after settle`,
-          }).onConflict('stripe_payment_intent_id').ignore();
+            // Each partial refund's identity is kept on the one row (production share: a second refund must change what the payroll sees).
+            parked_refunds: JSON.stringify([{ refundId: refundId || null, cents: refundAmountCents }]),
+          }).onConflict('stripe_payment_intent_id').merge({
+            // Same row, same key, same resolution: only the identity list grows, and a replayed event for a refund already listed adds nothing.
+            parked_refunds: trx.raw(`CASE WHEN ?::text IS NOT NULL AND COALESCE(stripe_orphan_charges.parked_refunds, '[]'::jsonb) @> ?::jsonb
+              THEN stripe_orphan_charges.parked_refunds
+              ELSE COALESCE(stripe_orphan_charges.parked_refunds, '[]'::jsonb) || ?::jsonb END`,
+            [refundId || null, JSON.stringify([{ refundId: refundId || null }]), JSON.stringify([{ refundId: refundId || null, cents: refundAmountCents }])]),
+          });
         }
       });
       logger.warn(`[stripe-webhook] statement S-${stmtByPi.id} ${isFullRefund ? 'full' : 'partial'} refund handled in-lock (pre-settlement)`);

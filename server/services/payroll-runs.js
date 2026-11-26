@@ -1306,6 +1306,13 @@ async function confirmShareInputs(trx, run, used, technicianIds) {
   }
 }
 
+// Refund bells for a draft or recompute: raised only after the run was saved, for the technicians whose checks the evaluation drafted. A refused
+// run (a 409, a week already paid) raises none; the bell never blocks the run.
+async function alertRefundFlagsAfterCommit(shareInputs, technicianIds, weekStart) {
+  if (!shareInputs || !technicianIds.length) return;
+  await productionSharePay.alertRefundFlags(productionSharePay.restrictInputs(shareInputs, technicianIds), weekStart);
+}
+
 async function draftRun(input, actor, conn = db) {
   const v = validate(createSchema, input);
   const { start, end } = validateWeek(v.weekStart);
@@ -1315,8 +1322,9 @@ async function draftRun(input, actor, conn = db) {
   const today = etDateString();
   const seasonScores = await readSeasonScores(conn, payDate);
   const shareInputs = await productionSharePay.readInputs(conn, start);
-  await productionSharePay.alertRefundFlags(shareInputs, start);
   let runId;
+  // The technicians the successful evaluation drafted a check for: refund bells are raised for them only, and only after the run is saved.
+  let checkedIds = [];
   try {
     runId = await conn.transaction(async (trx) => {
       await lockRunWrite(trx, today);
@@ -1340,12 +1348,14 @@ async function draftRun(input, actor, conn = db) {
       }
       await replaceDraftChecks(trx, id, evaluation.checks);
       await audit(trx, actorId, 'payroll.run_drafted', 'payroll_runs', id, { run_id: id });
+      checkedIds = evaluation.checks.map((check) => check.technician_id);
       return id;
     });
   } catch (err) {
     if (err && err.code === '23505') throw taken;
     throw err;
   }
+  await alertRefundFlagsAfterCommit(shareInputs, checkedIds, start);
   return runView(conn, runId);
 }
 
@@ -1355,10 +1365,8 @@ async function recomputeRun(runId, actor, conn = db) {
   const today = etDateString();
   const seasonScores = await readSeasonScoresOfRun(conn, runId);
   const shareInputs = await readShareInputsOfRun(conn, runId);
-  if (shareInputs) {
-    const week = await conn('payroll_runs').where({ id: runId }).first(conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"));
-    await productionSharePay.alertRefundFlags(shareInputs, week ? week.week_start : '');
-  }
+  let checkedIds = [];
+  let weekStart = '';
   await conn.transaction(async (trx) => {
     await lockRunWrite(trx, today);
     const run = await loadRun(trx, runId, { lock: true });
@@ -1370,7 +1378,10 @@ async function recomputeRun(runId, actor, conn = db) {
     const evaluation = await evaluate(trx, run, { lock: true, shareInputs });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
+    checkedIds = evaluation.checks.map((check) => check.technician_id);
+    weekStart = run.week_start;
   });
+  await alertRefundFlagsAfterCommit(shareInputs, checkedIds, weekStart);
   return runView(conn, runId);
 }
 

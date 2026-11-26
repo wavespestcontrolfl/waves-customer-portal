@@ -48,10 +48,11 @@
  *                                              lost dispute stays open and keeps flagging;
  *                                            statement_pay_webhook rows (a partial refund before settlement, or a stale or orphan success on
  *                                              a statement charge): MATCHED; the table cannot tell the two apart without reading free text,
- *                                              so both are kept (over-detecting on purpose). The case is keyed by the bare PaymentIntent and inserted with
- *                                              onConflict ignore: a SECOND partial refund before settlement changes nothing on the row, so its
- *                                              signal ('orphan-stmt:<id>:<cents>:<updated_at>') is UNCLEAR: a source holding one is listed every
- *                                              week (reason 'unclear'), while an answer already in force keeps applying;
+ *                                              so both are kept (over-detecting on purpose). The webhook keeps each partial refund's identity
+ *                                              on the one row (stripe_orphan_charges.parked_refunds, appended on conflict), so its signal is exact
+ *                                              ('orphan:<id>:r<hash of refund ids and cents>'). A legacy row with no list, and a stale or orphan
+ *                                              success, stay UNCLEAR ('orphan-stmt:<id>:<cents>:<updated_at>'): a source holding one is listed
+ *                                              every week (reason 'unclear'), while an answer already in force keeps applying;
  *                                            '<pi>:dispute-won:<dispute id>:<invoice id>' (reinstated funds after a won dispute): EXCLUDED,
  *                                              the money came back to Waves;
  *                                            '<pi>:<invoice id>' residual shares and provisional cash of a combined debit, the card-hold and
@@ -68,7 +69,7 @@
  *   stmt           the same two markers as pay
  *   orphan         a partial refund: stripe_failed_refunds by refund id, or payments.metadata.failed_refund_ids of the charge's rows (EXCLUDED);
  *                  a partial dispute: the case is resolved when it closes won (EXCLUDED); no refund id exists to fence
- *   orphan-stmt    stripe_failed_refunds by the row's charge or intent (':x<hash>' suffix); the row itself never changes (unclear, see above)
+ *   orphan (statement) and orphan-stmt (legacy)  the helper (':x<hash>' suffix)
  *   deposit        estimate_deposits.failed_refund_ids (':f<hash>' suffix)
  *   credit         none: a bounce of a full refund does not reverse the credit already returned (the bounce notice says it may need a claw-back), so the
  *                  row keeps standing and the stop stays under review; the bounce still shows in inv-refunded and pay
@@ -95,7 +96,7 @@ const db = require('../models/db');
 const { PayrollError } = require('./payroll-w4');
 const { ANNUAL_PREPAY_PREPAID_METHOD } = require('./billing-lane');
 const {
-  VOIDED_INVOICE, COLLECTED_DEPOSITS, depositApplications, depositReversal, paymentRefundShownSql, paymentNamesInvoiceSql,
+  VOIDED_INVOICE, COLLECTED_DEPOSITS, depositApplications, depositReversal, paymentRefundShownSql, paymentNamesInvoiceSql, disputeClosedSql,
 } = require('./payment-refund-facts');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -120,11 +121,12 @@ const REFUND_IDENTITY_SQL = `COALESCE((SELECT ':' || left(md5(string_agg(x.id, '
 // refunded, so the state stands in for the cents.
 // A refund amount beside a 'disputed' or 'refunded' status is a different state from the same amount on a 'paid' row (a chargeback after a
 // partial refund keeps the amount): the status is in the id then. A row with no amount already carries its status above.
-// A statement charge's parked case (source statement_pay_webhook, keyed by the bare PaymentIntent) is an UNCLEAR signal: the statement webhook
-// inserts it with onConflict ignore, so a SECOND partial refund before settlement changes nothing on the row (no amount, no updated_at, no refund
-// id), and the signal cannot tell the refunds apart. Its id still carries the row's amount and updated_at (anything that does change shows), and
-// a source holding such a signal is listed again EVERY week (reason 'unclear', the answer shown as the previous total) so the owner re-checks it; the
-// answer he saved keeps being applied meanwhile (see addSource).
+// A statement charge's parked case (source statement_pay_webhook, keyed by the bare PaymentIntent). The statement webhook now keeps each partial
+// refund's identity on the one row (stripe_orphan_charges.parked_refunds, appended on conflict), so the signal is EXACT like the others:
+// 'orphan:<id>:r<hash of the sorted refund ids and cents>' (+ the failure suffix). A LEGACY row (parked_refunds NULL, written before the column,
+// or a stale/orphan-success case, which has no refund list) cannot tell refunds apart: it stays an UNCLEAR signal, 'orphan-stmt:<id>:<cents>:<updated_at>',
+// and a source holding one is listed again EVERY week (reason 'unclear', the answer shown as the previous total) so the owner re-checks it; the answer
+// he saved keeps being applied meanwhile (see addSource).
 const UNCLEAR_SIGNAL_PREFIX = 'orphan-stmt:';
 // ONE helper for the refund ids the bank bounced, for a charge or PaymentIntent: the sorted union (comma list, NULL when none) of the ids fenced in
 // stripe_failed_refunds (a bounce before settlement, when no payments row existed) and the ids in payments.metadata.failed_refund_ids of EVERY
@@ -137,7 +139,9 @@ const failedRefundIdsSql = (intent, charge) => `(SELECT string_agg(u.id, ',' ORD
       FROM payments fp WHERE fp.stripe_payment_intent_id = ${intent} OR fp.stripe_charge_id = ${charge}) u)`;
 // The ':x<hash>' suffix of that list; '' when nothing bounced.
 const failedFenceSql = (intent, charge) => `COALESCE(':x' || left(md5(${failedRefundIdsSql(intent, charge)}), 10), '')`;
-const STATUS_SUFFIX_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 AND p.status IN ('refunded', 'disputed') THEN ':' || p.status ELSE '' END";
+// (A dispute closed won or warning_closed is no longer 'disputed' here: paymentRefundShownSql and this suffix both read disputeClosedSql, so closing it
+// changes the signal and puts an answer back under review.)
+const STATUS_SUFFIX_SQL = `CASE WHEN COALESCE(p.refund_amount, 0) > 0 AND (p.status = 'refunded' OR (p.status = 'disputed' AND NOT ${disputeClosedSql('p')})) THEN ':' || p.status ELSE '' END`;
 const AMOUNT_OR_STATE_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 THEN round(p.refund_amount * 100)::bigint::text ELSE p.status END";
 
 const asUuids = (list) => [...new Set((list || []).map(String).filter((id) => UUID_RE.test(id)).map(canonicalId))];
@@ -232,7 +236,10 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
       -- key '<pi>:partial-refund:<refund id>'), and a statement charge's parked case (source statement_pay_webhook). A won dispute parks under
       -- its own key (':dispute-won:') and is no refund. A refund the bank bounced is fenced in stripe_failed_refunds and is no refund either.
       SELECT v.origin, CASE WHEN o.source = 'statement_pay_webhook'
-          THEN '${UNCLEAR_SIGNAL_PREFIX}' || o.id::text || ':' || round(o.amount * 100)::bigint::text || ':' || (extract(epoch FROM o.updated_at) * 1000000)::bigint::text || ${failedFenceSql('o.stripe_payment_intent_id', 'o.stripe_charge_id')}
+          THEN CASE WHEN jsonb_typeof(o.parked_refunds) = 'array'
+            THEN 'orphan:' || o.id::text || ':r' || left(md5((SELECT string_agg(COALESCE(e ->> 'refundId', '') || '=' || COALESCE(e ->> 'cents', ''), ',' ORDER BY e ->> 'refundId', e ->> 'cents')
+              FROM jsonb_array_elements(o.parked_refunds) e)), 10) || ${failedFenceSql('o.stripe_payment_intent_id', 'o.stripe_charge_id')}
+            ELSE '${UNCLEAR_SIGNAL_PREFIX}' || o.id::text || ':' || round(o.amount * 100)::bigint::text || ':' || (extract(epoch FROM o.updated_at) * 1000000)::bigint::text || ${failedFenceSql('o.stripe_payment_intent_id', 'o.stripe_charge_id')} END
           ELSE 'orphan:' || o.id::text END
       FROM invs v
       JOIN stripe_orphan_charges o ON (o.invoice_id = v.invoice_id
