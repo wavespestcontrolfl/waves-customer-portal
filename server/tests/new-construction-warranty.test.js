@@ -1,5 +1,10 @@
 // One live New Construction Termite Warranty per pre-treat job: a reissue
 // supersedes the open one; a signed one refuses a second (Codex #6515 r1).
+// The warranty prints the signed FDACS-13692 notice on file (a notice lookup is its own suite).
+jest.mock('../services/consumer-notices', () => ({
+  ...jest.requireActual('../services/consumer-notices'),
+  findConsumerNotice: async () => ({ source: 'esign', id: 'e1', signedOn: '08/20/2026' }),
+}));
 const { supersedeOpenNewConstructionWarranty, snapshotWarrantyNumber } = require('../services/new-construction-warranty');
 
 function fakeTrx(rows) {
@@ -98,7 +103,7 @@ describe('templateIssueWithWarnings (server-built warranty)', () => {
   const office = {
     warranty: {
       structures: 'The new home', notice_location: 'beside the electric panel', payer: 'Owner Test', treatment_price: '$1,250.00',
-      plan_price: 'Included in the treatment price', renewal_fee: '99', consumer_notice_date: '09/01/2026',
+      plan_price: 'Included in the treatment price', renewal_fee: '99',
       term_end: '01/01/2099', product: 'FORGED', issue_date: '01/01/2000',
     },
     // An owner contract runs from the initial treatment date; the builder
@@ -267,7 +272,7 @@ describe('templateIssueWithWarnings (server-built warranty)', () => {
       .resolves.toMatchObject({ treatment: { product: 'Termidor SC', active_ingredient: '9.1% Fipronil' } });
   });
 
-  test('round 16: legacy plan label passes the send gate as its current label; built-in products; address clauses; notice before contract', async () => {
+  test('round 16: legacy plan label passes the send gate as its current label; built-in products; address clauses', async () => {
     const legacy = { ...project, findings: { ...findings, warranty_type: 'Builder 1-year' } };
     await expect(issue({ projectId: project.id, values: office }, customer, legacy)).resolves.toBeTruthy();
     expect(mockReadiness.mock.calls.at(-1)[0].project.findings.warranty_type).toBe('Builder 1-year, renewable yearly to year 5');
@@ -282,8 +287,6 @@ describe('templateIssueWithWarnings (server-built warranty)', () => {
       const row = { ...project, findings: { ...findings, ...ok } };
       await expect(issue({ projectId: project.id, values: office }, customer, row)).resolves.toBeTruthy();
     }
-    const lateNotice = { ...office, warranty: { ...office.warranty, consumer_notice_date: '09/15/2026' }, basis: { kind: 'signed', date: '09/01/2026' } };
-    await expect(issue({ projectId: project.id, values: lateNotice }, customer, project)).rejects.toMatchObject({ status: 400 });
   });
 
   test('round 17: comma target list, mailing state, soil products only, one number per amount, positive amounts, service name', async () => {
@@ -402,8 +405,6 @@ describe('templateIssueWithWarnings (server-built warranty)', () => {
     await expect(issue({ projectId: project.id, values: office }, customer, bait)).rejects.toMatchObject({ status: 409 });
     const lateBasis = { ...office, basis: { kind: 'signed', date: '10/05/2026' } };
     await expect(issue({ projectId: project.id, values: lateBasis }, customer, project)).rejects.toMatchObject({ status: 400 });
-    const badNotice = { ...office, warranty: { ...office.warranty, consumer_notice_date: '2026-09-01' } };
-    await expect(issue({ projectId: project.id, values: badNotice }, customer, project)).rejects.toMatchObject({ status: 400 });
   });
 });
 
@@ -432,7 +433,7 @@ describe('method wording (soil, Bora-Care only, soil + Bora-Care)', () => {
   const secondary = { treatment_method: 'Wood treatment (borate)', product_name: 'Bora-Care', epa_registration: '64405-1', active_ingredient: 'Disodium octaborate tetrahydrate 40.0%', concentration_pct: '', gallons_applied: '', square_footage: '1,800' };
   const combined = { ...soil, additional_applications: [secondary], borate_treatment_date: '2026-10-15' };
   const office = {
-    warranty: { structures: 'The new home', notice_location: 'beside the electric panel', payer: 'Owner Test', treatment_price: '$1,250.00', plan_price: 'Included in the treatment price', renewal_fee: '99', consumer_notice_date: '09/01/2026' },
+    warranty: { structures: 'The new home', notice_location: 'beside the electric panel', payer: 'Owner Test', treatment_price: '$1,250.00', plan_price: 'Included in the treatment price', renewal_fee: '99' },
     basis: { kind: 'signed', date: '09/01/2026' },
     issuer: { name: 'Pat Office', title: 'Office Manager' },
   };

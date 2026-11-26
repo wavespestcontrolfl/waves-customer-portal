@@ -365,7 +365,6 @@
  *   GATE_LAWN_WATERING_FORECAST=true (lawn watering banner forecast + rain close-out, needs GATE_LAWN_WATERING_RULE: at completion a water-in instruction whose property forecast says at least the water-in amount of rain falls inside its window freezes ONE conditional sentence (instruction.forecast, in INCHES, never a probability) that the LIVE web banner shows beside the unchanged lines; on the live view only, radar-measured (MRMS) rain on whole days inside the window that reaches the water-in amount closes the banner with a measured-inches line. Holds never get either. The PDF, email, watering text, hero and assistant never change; ships DARK, read at call time via lawnWateringForecastLive(); off = byte-identical payload)
  *   GATE_LAWN_WATERING_TEXT_FORECAST=true (lawn watering forecast from two sources, needs GATE_LAWN_WATERING_FORECAST: the water-in rain sentence is frozen only when Open-Meteo's amount AND an NWS hourly "rain likely" hour agree in the window; a timed hold then a water-in gets the sentence for rain after the hold ends; the watering text carries the frozen sentence. Off = today: Open-Meteo alone, plain water-in only, live banner only)
  *   GATE_LAWN_WATERING_TEXT_HOURS=true (owner 2026-11-15, decision 5b A, "hours": the short lawn watering text after a visit names the watering order's evening window instead of the clock deadline: "Water about 1/4 inch tonight between 8 PM and midnight, even on an off day." (a weekday instead of "tonight" when the window falls on a later day, e.g. after a hold). The window is the first ET evening 8 PM to 11:59 PM that starts after the hold ends (else after the visit) and ends by the water-in deadline, and only when the county's restriction policy allows that whole window; a visit stamped at another address, a text that carries the rain sentence, a text that would pass 2 segments, or any failed lookup keeps today's wording, and the text still sends. Changes only the run clause; the hold, long-window and no-change sentences are unchanged. Customer text, so strict `=== 'true'`, read at call time via lawnWateringTextHoursLive(); ships DARK; needs GATE_LAWN_WATERING_SMS and GATE_LAWN_WATERING_RULE. Off = no extra reads and byte-identical texts. Kill = unset.)
- *   GATE_WARRANTY_13692_CHECK=true (owner 2026-10-24, Rule 5E-14.105(1): the New Construction Termite Warranty and the Builder Master Agreement read the signed FDACS-13692 consumer notice on file (an e-signed Document Request or an office-uploaded scan of the paper form) instead of a typed date. On or before the notice grace end (2026-11-24) a missing notice only warns and the typed date still works; after it the issue refuses until a notice dated on or before the contract basis date and the treatment date is on file. Adds the admin consumer-notices routes. Read at call time via warranty13692CheckLive(), strict 1/true/on, dark by default; off = typed date only, routes answer 404. Sends nothing to a customer.)
  *   GATE_ESTIMATE_CONSUMER_NOTICE=true (owner 2026-10-25, Rule 5E-14.105(1), F.A.C.: an estimate with a termite line asks the customer to read and sign the FDACS-13692 consumer notice on the estimate page BEFORE they can accept. Adds POST /api/estimates/:token/consumer-notice (issues the consumer_notice.fdacs_13692 Document Request and returns its signing URL), cta.consumerNotice on GET /:token/data, and refuses PUT /:token/accept with 409 consumer_notice_required until the customer has a notice on file. Read at call time via estimateConsumerNoticeLive(), strict 1/true/on, dark by default; off = byte-identical estimate page and accept. Sends nothing to a customer.)
  *   GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND=true (owner 2026-10-26, Rule 5E-14.105(1), F.A.C.: after the office's Mark accepted (or the Intelligence Bar accept) commits on an estimate with a termite line, and the customer has no signed FDACS-13692 on file, the consumer_notice.fdacs_13692 Document Request is issued (or the open one reused) and its signing link is sent by email and text through the Document Requests delivery; a failure rings the office bell. Read at call time via manualAcceptConsumerNoticeSendLive(), strict 1/true/on, dark by default; off = Mark accepted sends nothing new.)
  *   GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE=true (daily catch-up for the Mark accepted consumer notice send, needs GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND: the send runs detached after the accept commits, so a restart in between loses it with no bell. The 6:10 AM ET document run re-runs the same send for an office accept from the last 21 days (none before the send went live on 2026-10-26) when no email or text of a 13692 Document Request went out since the accept and the office got no bell for it. Read at call time via manualAcceptConsumerNoticeReconcileLive(), strict 1/true/on, dark by default; off = no catch-up.)
@@ -5074,12 +5073,6 @@ const gates = {
   // time via lawnWateringTextForecastLive().
   lawnWateringTextForecast: gateEnvValue('GATE_LAWN_WATERING_TEXT_FORECAST'),
 
-  // Warranty FDACS-13692 consumer notice check (owner 2026-10-24). Ships DARK.
-  // This entry is for logGateStatus only: new-construction-warranty.js and
-  // admin-consumer-notices.js read GATE_WARRANTY_13692_CHECK at call time via
-  // warranty13692CheckLive().
-  warranty13692Check: gateEnvValue('GATE_WARRANTY_13692_CHECK'),
-
   // Mark accepted sends the FDACS-13692 consumer notice (owner 2026-10-26). Ships DARK.
   // This entry is for logGateStatus only: estimate-consumer-notice.js reads
   // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND at call time via manualAcceptConsumerNoticeSendLive().
@@ -7021,13 +7014,6 @@ function manualAcceptConsumerNoticeReconcileLive() {
   return gateEnvValue('GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE');
 }
 
-// GATE_WARRANTY_13692_CHECK read at CALL time (same 1/true/on convention as
-// gateEnvValue). Owner 2026-10-24: the warranty needs the signed FDACS-13692
-// notice on file (Rule 5E-14.105(1)). Off = the typed date only, as before.
-function warranty13692CheckLive() {
-  return gateEnvValue('GATE_WARRANTY_13692_CHECK');
-}
-
 // GATE_ESTIMATE_CONSUMER_NOTICE read at CALL time (same 1/true/on convention as
 // gateEnvValue). Owner 2026-10-25, Rule 5E-14.105(1): the customer signs the
 // FDACS-13692 consumer notice on the estimate page before accepting a termite
@@ -8561,7 +8547,6 @@ module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
 module.exports.lawnWateringForecastLive = lawnWateringForecastLive;
 module.exports.lawnWateringTextForecastLive = lawnWateringTextForecastLive;
 module.exports.lawnWateringTextHoursLive = lawnWateringTextHoursLive;
-module.exports.warranty13692CheckLive = warranty13692CheckLive;
 module.exports.lawnExpectationsLive = lawnExpectationsLive;
 module.exports.lawnCoverageHideDefaultZonesLive = lawnCoverageHideDefaultZonesLive;
 module.exports.lawnProgramDetailLive = lawnProgramDetailLive;

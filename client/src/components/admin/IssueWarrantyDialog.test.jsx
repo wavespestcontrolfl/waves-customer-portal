@@ -29,7 +29,6 @@ const findings = {
 function fillOfficeFields() {
   const set = (id, value) => fireEvent.change(document.getElementById(id), { target: { value } });
   set('warranty-basis-date', '09/01/2026');
-  set('warranty-notice-date', '09/01/2026');
   set('warranty-treatment-price', '$1,250.00');
   set('warranty-renewal-fee', '$99.00');
   set('warranty-issuer-name', 'Pat Office');
@@ -40,14 +39,13 @@ function fillOfficeFields() {
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-// The consumer-notices list loads when the dialog opens: it answers 404 while
-// GATE_WARRANTY_13692_CHECK is off. `replies` answer the other calls in order.
-function mockApi({ notices = null, replies = [] } = {}) {
+// The consumer-notices list loads when the dialog opens; the default is one usable paper notice.
+// `replies` answer the other calls in order.
+const PAPER_NOTICE = { source: 'paper', id: 'p1', usable: true, signedOn: '08/20/2026' };
+function mockApi({ notices = [PAPER_NOTICE], replies = [] } = {}) {
   const queue = [...replies];
   adminFetch.mockImplementation(async (path) => {
-    if (isNoticeList(path)) {
-      return notices ? { ok: true, json: async () => ({ enabled: true, graceEnd: '2026-11-24', notices }) } : { ok: false, json: async () => ({}) };
-    }
+    if (isNoticeList(path)) return { ok: true, json: async () => ({ notices }) };
     return queue.shift();
   });
 }
@@ -66,6 +64,7 @@ describe('IssueWarrantyDialog', () => {
     const previewButton = screen.getByRole('button', { name: 'Preview warranty' });
     expect(previewButton).toBeDisabled();
     fillOfficeFields();
+    await screen.findByText(/FDACS-13692 on file: paper, signed 08\/20\/2026/);
     expect(previewButton).toBeEnabled();
     fireEvent.click(previewButton);
     await screen.findByText('WARRANTY TEXT FOR REVIEW');
@@ -92,13 +91,12 @@ describe('IssueWarrantyDialog', () => {
       treatment_price: '$1,250.00',
       plan_price: 'Included in the treatment price',
       renewal_fee: '$99.00',
-      consumer_notice_date: '09/01/2026',
     });
     expect(init.body.values.basis).toEqual({ kind: 'master', date: '09/01/2026' });
     expect(init.body.values.issuer).toEqual({ name: 'Pat Office', title: 'Office Manager' });
   });
 
-  it('gate on, notice on file: shows it, hides the typed date and sends none', async () => {
+  it('notice on file: shows it, has no typed date and sends none', async () => {
     mockApi({
       notices: [{ source: 'paper', id: 'p1', usable: true, signedOn: '08/20/2026' }, { source: 'esign', id: 'e1', usable: true, signedOn: '09/20/2026' }],
       replies: [{ ok: true, json: async () => ({ body: 'WARRANTY TEXT', renderHash: 'h2', warnings: [] }) }],
@@ -114,18 +112,24 @@ describe('IssueWarrantyDialog', () => {
     expect(apiCalls()[0][1].body.values.warranty).not.toHaveProperty('consumer_notice_date');
   });
 
-  it('gate on, none on file: warns with the grace end, keeps the typed date, shows server warnings, uploads a scan and reloads', async () => {
-    mockApi({
-      notices: [],
-      replies: [
-        { ok: true, json: async () => ({}) },
-        { ok: true, json: async () => ({ body: 'WARRANTY TEXT', renderHash: 'h3', warnings: ['No signed FDACS-13692 consumer notice is on file for this customer.'] }) },
-      ],
+  it('none on file: says the warranty needs one, keeps Preview off, uploads a scan and reloads the list', async () => {
+    let notices = [];
+    adminFetch.mockImplementation(async (path, init) => {
+      if (isNoticeList(path)) return { ok: true, json: async () => ({ notices }) };
+      if (init?.method === 'POST' && path.endsWith('/consumer-notices/paper')) {
+        notices = [PAPER_NOTICE];
+        return { ok: true, json: async () => ({}) };
+      }
+      return { ok: true, json: async () => ({ body: 'WARRANTY TEXT', renderHash: 'h3' }) };
     });
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
-    await screen.findByText(/Until 11\/24\/2026 you can type the date it was signed/);
-    expect(document.getElementById('warranty-notice-date')).not.toBeNull();
+    await screen.findByText(/The warranty cannot be issued without one/);
+    expect(document.getElementById('warranty-notice-date')).toBeNull();
     fillOfficeFields();
+    // Treatment is past: a new signature is too late, so the dialog names the cutoff and asks for the paper form.
+    expect(screen.getByText(/signed on or before 09\/01\/2026, so a new signature cannot qualify/)).toBeInTheDocument();
+    expect(screen.queryByText(/send it from Document Requests/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
     const file = new File(['%PDF-1.4 test'], 'notice.pdf', { type: 'application/pdf' });
     fireEvent.change(document.getElementById('warranty-notice-file'), { target: { files: [file] } });
     fireEvent.change(document.getElementById('warranty-notice-file-date'), { target: { value: '08/20/2026' } });
@@ -136,19 +140,41 @@ describe('IssueWarrantyDialog', () => {
     expect(init.body).toBeInstanceOf(FormData);
     expect(init.body.get('signedOn')).toBe('08/20/2026');
     expect(init.body.get('file')).toBe(file);
-    fireEvent.click(screen.getByRole('button', { name: 'Preview warranty' }));
-    await screen.findByText('No signed FDACS-13692 consumer notice is on file for this customer.');
-    expect(apiCalls()[1][1].body.values.warranty.consumer_notice_date).toBe('09/01/2026');
+    await screen.findByText(/FDACS-13692 on file: paper, signed 08\/20\/2026/);
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeEnabled();
   });
 
-  it('gate off: no notice panel, the typed date as before', () => {
-    mockApi();
+  it('a notice signed after the cutoff: shows its date and the cutoff, not "none on file", and keeps Preview off', async () => {
+    mockApi({ notices: [{ ...PAPER_NOTICE, signedOn: '09/15/2026' }] });
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
-    expect(document.getElementById('warranty-notice-date')).not.toBeNull();
-    expect(document.getElementById('warranty-notice-file')).toBeNull();
+    fillOfficeFields();
+    await screen.findByText(/was signed 09\/15\/2026\. It must be signed on or before 09\/01\/2026/);
+    expect(screen.queryByText(/No signed FDACS-13692 is on file/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
+  });
+
+  it('the notice list fails to load: says why Preview is off, and Try again loads it', async () => {
+    let fail = true;
+    adminFetch.mockImplementation(async (path) => {
+      if (isNoticeList(path)) {
+        if (fail) return { ok: false, json: async () => ({ error: 'boom' }) };
+        return { ok: true, json: async () => ({ notices: [PAPER_NOTICE] }) };
+      }
+      return undefined;
+    });
+    render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
+    fillOfficeFields();
+    await screen.findByText(/Could not load the FDACS-13692 notices/);
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByText(/FDACS-13692 on file: paper, signed 08\/20\/2026/);
+    expect(screen.queryByText(/Could not load the FDACS-13692 notices/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeEnabled();
   });
 
   it('keeps Preview disabled while the contract basis date is after treatment', () => {
+    mockApi();
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
     fillOfficeFields();
     fireEvent.change(document.getElementById('warranty-basis-date'), { target: { value: '10/05/2026' } });
@@ -157,13 +183,15 @@ describe('IssueWarrantyDialog', () => {
   });
 
   it('names the certificate fields the issue route found empty', async () => {
-    adminFetch.mockResolvedValue({ ok: false, json: async () => ({ error: 'Document has unresolved merge fields.', unresolvedVariables: ['treatment.product'] }) });
+    mockApi({ replies: [{ ok: false, json: async () => ({ error: 'Document has unresolved merge fields.', unresolvedVariables: ['treatment.product'] }) }] });
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
     fillOfficeFields();
+    await screen.findByText(/FDACS-13692 on file/);
     fireEvent.click(screen.getByRole('button', { name: 'Preview warranty' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('The certificate is missing: treatment.product'));
   });
   it('blocks a builder lot until the final treatment date is recorded, and names the $149.00 cap', () => {
+    mockApi();
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={{ ...findings, final_exterior_date: '' }} />);
     fillOfficeFields();
     expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
