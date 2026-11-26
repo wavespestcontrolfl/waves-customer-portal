@@ -104,11 +104,21 @@ const WORD_RATE_RE = new RegExp(`\\b(?:${WORD_AMOUNT_SRC}|(?:${UNIT_WORD}|half|d
 const PRICE_CUE_RE = /\b(?:costs?|costing|prices?|priced|pricing|fees?|charges?|charged|charging|rates?|quotes?|quoted|pays?|paying|paid|billed|bills?|starts?\s+at|starting\s+(?:at|from)|as\s+low\s+as|dollars?|bucks|cents?|discounts?|deposits?)\b/i;
 const AMOUNT_WORD_SRC = `(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen|half)`;
 const ANY_AMOUNT_RE = new RegExp(`\\d|\\b${AMOUNT_WORD_SRC}\\b`, 'i');
-const TIME_OF_DAY_RE = new RegExp(`\\b(?:\\d{1,2}(?:[:.]\\d{2})?|${AMOUNT_WORD_SRC})\\s*(?:a\\.?m\\b\\.?|p\\.?m\\b\\.?|o'clock\\b)|\\b(?:\\d{1,2}|${AMOUNT_WORD_SRC})\\s+in\\s+the\\s+(?:morning|afternoon|evening)\\b`, 'gi');
+// A valid clock time only: hour 1-12 (digit or word), optional minutes :00-:59, then a.m. / p.m. / o'clock, or the hour then "in the
+// morning/afternoon/evening". "99 pm", "ninety a.m.", "12:75 pm" and "49 in the morning" are not times, so they do not hide a price.
+const CLOCK_HOUR_SRC = `(?:(?<![\\d.,:])(?:1[0-2]|0?[1-9])(?!\\d)(?:[:.][0-5]\\d(?!\\d))?|\\b(?:${UNIT_WORD}|ten|eleven|twelve)\\b(?:\\s+(?:fifteen|thirty|forty[-\\s]?five))?)`;
+const TIME_OF_DAY_RE = new RegExp(`${CLOCK_HOUR_SRC}\\s*(?:a\\.?m\\b\\.?|p\\.?m\\b\\.?|o'clock\\b)|${CLOCK_HOUR_SRC}\\s+in\\s+the\\s+(?:morning|afternoon|evening)\\b`, 'gi');
+// A promotional price with no cue word: "only 49", "just 99", "only 129.99", "only forty-nine", or a bare two-decimal figure. A count or a
+// measure after the amount ("only 3 visits", "just 2 hours", "1.25 acres") is not a price; neither is "just one tech".
+const COUNT_UNIT_SRC = '(?:square|sq|visits?|days?|hours?|hrs?|minutes?|mins?|weeks?|months?|years?|acres?|feet|foot|ft|inch(?:es)?|miles?|times|treatments?|applications?|services?|stops?|trucks?|techs?|technicians?|people|customers?|properties|homes?|houses?|units?|zones?|rooms?|pests?|ants?|%|percent|more|other|extra)\\b';
+const PROMO_RE = new RegExp(`\\b(?:only|just)\\s+(?:(?<![\\d.,])(?:${AMOUNT_SRC})(?!\\d|[.,]\\d)|${WORD_AMOUNT_SRC}|(?:${UNIT_WORD})\\b(?=\\s*(?:[.!?,;]|$|/|\\bper\\b|\\ba\\b)))(?!\\s*${COUNT_UNIT_SRC})`, 'i');
+const DECIMAL_FIGURE_RE = new RegExp(`(?<![\\d.])\\d{1,4}\\.\\d{2}(?!\\d)(?!\\s*${COUNT_UNIT_SRC})`, 'i');
 
 function hasUnmarkedPrice(text) {
   if (RATE_RE.test(text) || WORD_RATE_RE.test(text)) return true;
-  return splitSentences(text).some((sentence) => PRICE_CUE_RE.test(sentence) && ANY_AMOUNT_RE.test(sentence.replace(TIME_OF_DAY_RE, ' ')));
+  const plain = text.replace(TIME_OF_DAY_RE, ' ');
+  if (PROMO_RE.test(plain) || DECIMAL_FIGURE_RE.test(plain)) return true;
+  return splitSentences(plain).some((sentence) => PRICE_CUE_RE.test(sentence) && ANY_AMOUNT_RE.test(sentence));
 }
 
 // [code, regex]: each is a hard block on its own.
