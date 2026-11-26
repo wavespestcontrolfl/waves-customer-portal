@@ -5549,7 +5549,7 @@ async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOver
   return true;
 }
 
-// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: this pipeline registers the reminder row with the confirmation already marked
+// This pipeline registers the reminder row with the confirmation already marked
 // (sendConfirmation:false) and sends its own text afterwards, so a delivered text for a visit booked for today or tomorrow
 // left the 24-hour "is tomorrow" reminder armed (it went out 3 to 12 minutes later). Called only after the primary text was
 // delivered, with the number it went to (smsRecipient: the caller's number when implied consent redirected it); the shared
