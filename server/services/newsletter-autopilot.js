@@ -593,14 +593,17 @@ async function autoDraftFlagship() {
   if (staleCount > 0) {
     logger.info(`[newsletter-autopilot] Dropped ${staleCount} stale locked event id(s)`);
   }
-  if (safeEventIds.length < 5 && lineupAlternates.length > 0) {
-    // Refill from the WHOLE floor-passing pool, best first, checked against
-    // the survivors: the stored alternates are only the top replacements for
-    // the original lineup, and under the local-first away cap they can all be
-    // away events while a lower-ranked local event would restore the minimum.
-    const refillPool = [...lineupAlternates, ...scored.filter(floorPassed)]
+  // Operator-full slates (5+ calendar picks) are the operator's intent: no
+  // automatic refill. Automatic slates refill from the WHOLE floor-passing
+  // pool, best first by effective score, checked against the survivors: the
+  // stored alternates are only top one-for-one replacements and under the
+  // local-first away cap they can all be away events.
+  let refillPool = [];
+  if (safeEventIds.length < 5 && eligiblePreferred.length < 5) {
+    refillPool = [...lineupAlternates, ...scored.filter(floorPassed)]
       .filter((ev) => ev && uuidRe.test(String(ev.id)) && !safeEventIds.includes(String(ev.id)))
-      .filter((ev, i, arr) => arr.findIndex((o) => String(o.id) === String(ev.id)) === i);
+      .filter((ev, i, arr) => arr.findIndex((o) => String(o.id) === String(ev.id)) === i)
+      .sort((x, y) => effectiveScore(y) - effectiveScore(x));
     if (refillPool.length) {
       const refillExisting = new Set(
         (await db('events_raw').whereIn('id', refillPool.map((ev) => String(ev.id))).pluck('id')).map(String),
@@ -610,8 +613,10 @@ async function autoDraftFlagship() {
       });
       logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from the ranked pool`);
     }
-    // Recheck BEFORE the paid draft call: a refill the caps held short must
-    // skip the week here, not after generation.
+  }
+  // Recheck BEFORE the paid draft call whenever stale rows were dropped: a
+  // thinned lineup the refill could not restore skips the week here.
+  if (staleCount > 0 || refillPool.length) {
     const poolById = new Map([...lineupEvents, ...refillPool].map((ev) => [String(ev.id), ev]));
     const refilledPreflight = preflightDigest(safeEventIds.map((id) => poolById.get(String(id))).filter(Boolean), reqs);
     if (!refilledPreflight.pass) return skipWeek(refilledPreflight);
