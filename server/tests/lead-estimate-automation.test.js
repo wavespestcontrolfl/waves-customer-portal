@@ -484,6 +484,104 @@ describe('service-interest mapper hardening', () => {
     expect(mapped.review).toContain('bed_bug_defaults_used');
   });
 
+  test('tree & shrub interest maps to the Standard treeShrub service with a defaults marker', () => {
+    for (const interest of [
+      'Tree and shrub care quote for declining shrubs, ground cover, and areca palms',
+      'Tree & Shrub Care',
+      'Ornamental care',
+    ]) {
+      const mapped = mapServiceInterestToEstimateServices(interest);
+      expect(mapped).toMatchObject({
+        supported: true,
+        unsupportedReason: null,
+        services: { treeShrub: { tier: 'standard', palmCountUnverified: true } },
+      });
+      expect(mapped.review).toContain('tree_shrub_defaults_used');
+    }
+  });
+
+  test('palms alone, palm injection, trimming and removal do not map to tree & shrub', () => {
+    expect(mapServiceInterestToEstimateServices('Palm injection')).toMatchObject({
+      supported: false,
+      unsupportedReason: 'service_not_mapped_for_automation',
+    });
+    expect(mapServiceInterestToEstimateServices('Palm trees look sick')).toMatchObject({ supported: false });
+    expect(mapServiceInterestToEstimateServices('Tree and shrub care plus palm injection')).toMatchObject({
+      supported: false,
+      unsupportedReason: 'palm_injection_requires_manual_scope',
+    });
+    expect(mapServiceInterestToEstimateServices('Shrub trimming')).toMatchObject({
+      supported: false,
+      unsupportedReason: 'tree_shrub_trimming_or_removal_requires_manual_scope',
+    });
+    expect(mapServiceInterestToEstimateServices('Pest control, no shrubs').services).not.toHaveProperty('treeShrub');
+  });
+
+  test('mixed pest and tree & shrub maps both services', () => {
+    const mapped = mapServiceInterestToEstimateServices('Recurring pest control and tree & shrub care');
+    expect(mapped).toMatchObject({
+      supported: true,
+      services: {
+        pest: { frequency: 'quarterly' },
+        treeShrub: { tier: 'standard' },
+      },
+    });
+  });
+
+  test('termite and commercial requests still hold when tree & shrub is also named', () => {
+    expect(mapServiceInterestToEstimateServices('Termite treatment and shrub care')).toMatchObject({
+      supported: false,
+      unsupportedReason: 'termite_treatment_requires_manual_scope',
+    });
+    const prev = process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+    process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'on';
+    try {
+      const readiness = evaluateLeadEstimateAutomationReadiness({
+        phone: '+19415550199',
+        intake: {
+          email: 'lead@example.com',
+          serviceInterest: 'Commercial tree and shrub care',
+          normalizedAddress: { line1: '123 Main St', city: 'Venice', state: 'FL', zip: '34285' },
+        },
+      });
+      expect(readiness.ready).toBe(false);
+      expect(readiness.missing).toContain('commercial_category_conflict');
+    } finally {
+      if (prev === undefined) delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+      else process.env.GATE_UNIT_SCOPE_GUARDRAILS = prev;
+    }
+  });
+
+  test('tree & shrub email lead drafts a priced estimate that parks for review, never auto-sends', async () => {
+    const interest = 'Tree and shrub care quote for declining shrubs, ground cover, and areca palms';
+    const readiness = evaluateLeadEstimateAutomationReadiness({
+      phone: '+19415550199',
+      serviceInterest: interest,
+      intake: {
+        email: 'lead@example.com',
+        serviceInterest: interest,
+        normalizedAddress: { line1: '123 Main St', city: 'Lakewood Ranch', state: 'FL', zip: '34202' },
+      },
+    });
+    // No sizes: the engine input defaults them and carries the existing review marker.
+    const draft = await buildAutomatedLeadDraftEstimate({
+      intake: { serviceInterest: interest, fullAddress: '123 Main St, Lakewood Ranch, FL 34202' },
+      body: {},
+      readiness,
+    });
+    expect(draft.automation.error).toBeUndefined();
+    expect(draft.estimateData.services).toMatchObject({ treeShrub: { tier: 'standard' } });
+    expect(draft.automation.review).toEqual(expect.arrayContaining(['tree_shrub_defaults_used', 'property_measurements_defaulted']));
+    const tsLine = draft.estimateData.engineResult.lineItems.find((l) => l.service === 'tree_shrub');
+    expect(tsLine).toBeDefined();
+    expect(tsLine.quoteRequired).toBe(true);
+    // Parked: the draft row exists with provisional totals, but it is not
+    // 'generated', so the auto-send lane cannot pick it up.
+    expect(draft.automation.status).toBe('manual_review_required');
+    expect(draft.automation.generated).toBe(false);
+    expect(draft.automation.provisionalTotals.monthly).toBeGreaterThan(0);
+  });
+
   test('automated bed-bug lead now survives engine generation end to end', async () => {
     const readiness = evaluateLeadEstimateAutomationReadiness({
       phone: '+19415550199',

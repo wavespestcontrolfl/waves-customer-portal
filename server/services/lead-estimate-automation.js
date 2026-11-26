@@ -124,6 +124,38 @@ function pestFrequencyFromText(text) {
   return 'quarterly';
 }
 
+const TREE_SHRUB_INTEREST = /\btree and shrub\b|\bshrubs?\b|\bornamentals?\b/;
+
+// Interest text that names work automation never prices, so the lead parks
+// for manual scoping instead of drafting a partial or wrong quote.
+function interestManualScopeReason(wants) {
+  if (wants(/\baeration\b|\bplugging\b|\blawn plug\b|\bcore plug\b/)) {
+    return 'lawn_aeration_plugging_requires_manual_scope';
+  }
+  if (!wants(TREE_SHRUB_INTEREST)) return null;
+  // Trimming, pruning and removal are arborist work the T&S program does not price.
+  if (wants(/\b(trim\w*|prun\w*|removal|remove|cut|cutting)\b/)) {
+    return 'tree_shrub_trimming_or_removal_requires_manual_scope';
+  }
+  // Palm injection / nutrition is a separate catalog program; drafting T&S
+  // alone would quietly drop it.
+  if (wants(/\bpalm (tree )?(injections?|nutrition)\b|\binject\w*/)) {
+    return 'palm_injection_requires_manual_scope';
+  }
+  return null;
+}
+
+// Tree & Shrub: the same `treeShrub` service the keyed path
+// (public-services-menu tree_shrub_program) and the engine's default tier use.
+// Narrow on purpose: palms alone are NOT a trigger. A lead never states a
+// palm count, so the line asks the pricer to route a zero-palm result to
+// review (palm_count_unverified); the marker below records the defaults.
+function addTreeShrubService(wants, services, review) {
+  if (!wants(TREE_SHRUB_INTEREST)) return;
+  services.treeShrub = { tier: 'standard', palmCountUnverified: true };
+  review.push('tree_shrub_defaults_used');
+}
+
 function mapServiceInterestToEstimateServices(serviceInterest) {
   const text = normalizedServiceClauses(serviceInterest);
   const services = {};
@@ -140,13 +172,9 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
   // plain matches — they qualify a selected service, they don't select one.
   const wants = (pattern) => hasUnnegatedMention(text, pattern);
 
-  if (wants(/\baeration\b|\bplugging\b|\blawn plug\b|\bcore plug\b/)) {
-    return {
-      services,
-      supported: false,
-      unsupportedReason: 'lawn_aeration_plugging_requires_manual_scope',
-      review,
-    };
+  const manualScopeReason = interestManualScopeReason(wants);
+  if (manualScopeReason) {
+    return { services, supported: false, unsupportedReason: manualScopeReason, review };
   }
 
   const pestWanted = wants(/\bpest\b|\bant\b|\bcockroach\b|\broach\b/);
@@ -193,6 +221,8 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
       };
     }
   }
+
+  addTreeShrubService(wants, services, review);
 
   if (wants(/\bflea\b|\btick\b/)) {
     services.flea = {};
