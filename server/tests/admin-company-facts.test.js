@@ -21,7 +21,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const mockBank = {
-  listFacts: jest.fn(async () => []),
+  listFacts: jest.fn(async () => ({ facts: [], nextCursor: null })),
   createDraft: jest.fn(async () => ({ id: 'f1', status: 'draft', check_result: { blocks: ['banned_copy'], warnings: [] } })),
   getFact: jest.fn(async () => ({ id: 'f1', status: 'draft', check_result: null })),
   factHistory: jest.fn(async () => [{ action: 'drafted' }]),
@@ -112,6 +112,9 @@ describe('any admin may draft, edit, discard, retire and restore', () => {
   test('list passes the status filter, edit and discard and retire and restore reach the service', async () => {
     expect((await call(url('?status=draft'))).status).toBe(200);
     expect(mockBank.listFacts).toHaveBeenCalledWith({ status: 'draft' });
+    const paged = await call(url('?status=all&limit=50&cursor=abc'));
+    expect(paged.body).toEqual({ facts: [], nextCursor: null });
+    expect(mockBank.listFacts).toHaveBeenLastCalledWith({ status: 'all', limit: '50', cursor: 'abc' });
     expect((await call(url(`/${ID}`), 'PATCH', { factText: 'x' })).body.fact.id).toBe('f2');
     expect((await call(url(`/${ID}`), 'DELETE')).body).toEqual({ id: 'f1', discarded: true });
     expect((await call(url(`/${ID}/retire`), 'POST', { reason: 'wrong' })).status).toBe(200);

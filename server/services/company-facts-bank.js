@@ -307,6 +307,7 @@ async function editDraftRow(trx, row, f, actor) {
   if ('question' in f) patch.question = f.question;
   if ('ownerWords' in f) patch.owner_words = f.ownerWords;
   if ('sourceRef' in f) patch.source_ref = f.sourceRef;
+  if ('source' in f) patch.source = f.source; // validated against SOURCES in cleanFields
   let updated;
   try {
     [updated] = await trx('company_fact_bank').where({ id: row.id }).update(patch).returning('*');
@@ -327,7 +328,7 @@ async function editApprovedRow(trx, row, f, actor) {
     question: 'question' in f ? f.question : row.question,
     fact_text: f.factText,
     text_sha256: sha256(f.factText),
-    source: row.source,
+    source: 'source' in f ? f.source : row.source,
     source_ref: 'sourceRef' in f ? f.sourceRef : row.source_ref,
     owner_words: 'ownerWords' in f ? f.ownerWords : null,
     check_result: checkResult(check),
@@ -473,11 +474,33 @@ async function retireFact(id, input, actor, { dbi = db } = {}) {
 
 /* ── Reads ────────────────────────────────────────────────────────────── */
 
-async function listFacts({ status } = {}, { dbi = db } = {}) {
+const MAX_PAGE = 500;
+const encodeCursor = (createdAtText, id) => Buffer.from(`${createdAtText}|${id}`).toString('base64url');
+function decodeCursor(cursor) {
+  const [ts, id] = Buffer.from(String(cursor), 'base64url').toString('utf8').split('|');
+  if (!ts || !id || Number.isNaN(Date.parse(ts)) || !/^[0-9a-f-]{36}$/i.test(id)) throw new FactError('INVALID_CURSOR', 400);
+  return { ts, id };
+}
+
+/**
+ * One page of facts, newest first, in a stable (created_at, id) order. `limit` is 1 to 500 (default 500); `cursor` is the
+ * `nextCursor` of the previous page. Returns { facts, nextCursor } where nextCursor is null on the last page. The cursor carries
+ * the timestamp as the database prints it (microseconds), so no row is skipped or repeated at a page edge.
+ */
+async function listFacts({ status, limit, cursor } = {}, { dbi = db } = {}) {
   if (status && status !== 'all' && !STATUSES.includes(status)) throw new FactError('INVALID_STATUS', 400);
-  const q = dbi('company_fact_bank').orderBy('created_at', 'desc').limit(500).select('*');
+  const size = Math.min(Math.max(Number.parseInt(limit, 10) || MAX_PAGE, 1), MAX_PAGE);
+  const q = dbi('company_fact_bank').select('*', dbi.raw('created_at::text AS cursor_ts')).orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(size + 1);
   if (status && status !== 'all') q.where({ status });
-  return q;
+  if (cursor) {
+    const at = decodeCursor(cursor);
+    q.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [at.ts, at.id]);
+  }
+  const rows = await q;
+  const page = rows.slice(0, size);
+  const last = rows.length > size ? page[page.length - 1] : null;
+  const facts = page.map(({ cursor_ts: _cursorTs, ...fact }) => fact);
+  return { facts, nextCursor: last ? encodeCursor(last.cursor_ts, last.id) : null };
 }
 
 async function getFact(id, { dbi = db } = {}) {
@@ -539,6 +562,11 @@ async function loadVerifiedFacts(dbi) {
     }
     seen.add(normalise(row.fact_text));
     kept.push(Object.freeze({ id: row.id, topic: row.topic, text: row.fact_text.trim(), sha: row.text_sha256, approvedAt: row.approved_at }));
+  }
+  // The whole ordered list, as a reader renders it: lines that pass alone can fail together once a retire changes which lines sit side by side.
+  if (kept.length && hasBannedCopy(renderBankFactsLines(kept), { timing: false })) {
+    dropped.push('section:section_banned_copy');
+    kept.length = 0;
   }
   const dropKey = dropped.join(',');
   if (dropKey && dropKey !== lastDropKey) logger.error(`[company-facts-bank] approved rows dropped at load (codes only): ${dropKey}`);

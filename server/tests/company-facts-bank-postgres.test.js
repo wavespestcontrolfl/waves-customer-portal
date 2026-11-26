@@ -285,6 +285,49 @@ jest.setTimeout(120000);
     });
   });
 
+  describe('source edits and paging', () => {
+    test('a source change on a draft is saved and validated; on an approved line it rides on the new draft', async () => {
+      const d = await draft();
+      expect(d.source).toBe('admin_page');
+      const edited = await Bank.editFact(d.id, { source: 'owner_paste', sourceRef: 'call 1234' }, admin, opts());
+      expect(edited).toMatchObject({ source: 'owner_paste', source_ref: 'call 1234' });
+      await expect(Bank.editFact(d.id, { source: 'made_up' }, admin, opts())).rejects.toMatchObject({ code: 'INVALID_SOURCE' });
+      expect((await row(d.id)).source).toBe('owner_paste');
+      const a = await live();
+      const next = await Bank.editFact(a.id, { factText: line(' sourced'), source: 'mac_sms_job' }, admin, opts());
+      expect(next.source).toBe('mac_sms_job');
+    });
+
+    test('list pages in a stable (created_at, id) order with no row skipped or repeated, even when every row shares one timestamp', async () => {
+      const made = [];
+      for (let i = 0; i < 5; i += 1) made.push((await draft()).id); // one transaction: all five share created_at
+      const seen = [];
+      let cursor;
+      let pages = 0;
+      do {
+        const page = await Bank.listFacts({ status: 'draft', limit: 2, cursor }, opts());
+        expect(page.facts.length).toBeLessThanOrEqual(2);
+        expect(page.facts[0]).not.toHaveProperty('cursor_ts');
+        seen.push(...page.facts.map((f) => f.id));
+        cursor = page.nextCursor;
+        pages += 1;
+      } while (cursor);
+      expect(pages).toBe(3);
+      expect(seen).toHaveLength(5);
+      expect(new Set(seen)).toEqual(new Set(made));
+      expect(seen).toEqual([...made].sort().reverse());
+      expect((await Bank.listFacts({ status: 'draft' }, opts())).nextCursor).toBeNull();
+    });
+
+    test('list refuses a bad cursor and a bad status, and clamps the page size to 1..500', async () => {
+      await expect(Bank.listFacts({ cursor: 'not-a-cursor' }, opts())).rejects.toMatchObject({ code: 'INVALID_CURSOR' });
+      await expect(Bank.listFacts({ status: 'nope' }, opts())).rejects.toMatchObject({ code: 'INVALID_STATUS' });
+      await draft();
+      expect((await Bank.listFacts({ status: 'draft', limit: 0 }, opts())).facts.length).toBeGreaterThan(0);
+      expect((await Bank.listFacts({ status: 'draft', limit: 99999 }, opts())).facts.length).toBeGreaterThan(0);
+    });
+  });
+
   describe('indexes and history', () => {
     test('one live copy of a line: a second draft is DUPLICATE, a discarded one can be added again', async () => {
       const text = line();

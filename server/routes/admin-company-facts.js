@@ -1,7 +1,8 @@
 /**
  * Admin API for the company facts bank (owner 2026-11-25; services/company-facts-bank.js holds every rule).
  *
- *   GET    /                list, ?status=draft|approved|retired|all (newest first)
+ *   GET    /                list, ?status=draft|approved|retired|all, ?limit=1..500 (default 500), ?cursor=<nextCursor>; newest first,
+ *                           answers { facts, nextCursor } (nextCursor null on the last page)
  *   POST   /                add a draft { topic, factText, question?, ownerWords?, source?, sourceRef? }
  *   GET    /:id             one fact
  *   GET    /:id/history     its events, oldest first
@@ -48,7 +49,7 @@ const handle = (where, { needsId = true, status = 200 } = {}, run) => async (req
 
 const withCheck = (fact) => ({ fact, check: fact.check_result || null });
 
-router.get('/', handle('list', { needsId: false }, async (req) => ({ facts: await Bank.listFacts({ status: req.query.status }) })));
+router.get('/', handle('list', { needsId: false }, (req) => Bank.listFacts({ status: req.query.status, limit: req.query.limit, cursor: req.query.cursor })));
 
 router.post('/', handle('create', { needsId: false, status: 201 }, async (req, actor) => withCheck(await Bank.createDraft(req.body, actor))));
 

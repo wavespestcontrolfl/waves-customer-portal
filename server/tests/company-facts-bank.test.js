@@ -267,6 +267,21 @@ describe('snapshot', () => {
     expect(JSON.stringify(logger.error.mock.calls)).toContain('no_approval_record');
   });
 
+  test('the whole rendered section is checked before it is published: lines that pass alone but fail together publish nothing', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const spy = jest.spyOn(drafter, 'hasBannedCustomerCopy').mockImplementation((text) => /alpha/.test(text) && /bravo/.test(text));
+    try {
+      const alpha = approved(1, 'We service the alpha zone.');
+      const bravo = approved(2, 'We service the bravo zone.');
+      expect((await Bank._test.loadVerifiedFacts(fakeDb([alpha]))).map((f) => f.id)).toEqual([alpha.id]);
+      expect(await Bank._test.loadVerifiedFacts(fakeDb([alpha, bravo]))).toEqual([]);
+      expect(JSON.stringify(logger.error.mock.calls)).toContain('section_banned_copy');
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain('alpha');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('"We use safe pesticides" written around the service is dropped at load', async () => {
     const rows = [approved(1, CLEAN), approved(2, 'We use safe pesticides at every visit.')];
     expect((await Bank._test.loadVerifiedFacts(fakeDb(rows))).map((f) => f.id)).toEqual([rows[0].id]);
