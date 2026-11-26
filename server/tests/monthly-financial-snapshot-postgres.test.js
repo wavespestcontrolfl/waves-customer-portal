@@ -17,6 +17,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { randomUUID } = require('node:crypto');
 const svc = require('../services/monthly-financial-snapshot');
+const { dateOnlyString: dateOnly } = require('../utils/date-only');
 
 jest.setTimeout(60000);
 const GATE = 'GATE_PNL_PAY_RUN_WAGES';
@@ -322,15 +323,71 @@ postgres('monthly financial snapshot (live Postgres)', () => {
         expect(await trx('monthly_financial_snapshots').count({ n: '*' }).first()).toMatchObject({ n: '2' });
       });
 
-      it('the catch-up skips a pair this month\'s run finished with the ledger synced, and redoes one stored while it was not', async () => {
+      it('the catch-up skips a pair this month\'s run finished with the ledger synced, and redoes one that is stale in EITHER month', async () => {
         await trx('stripe_sync_state').insert({ sync_type: 'balance_transactions', last_sync_at: '2026-12-02T09:00:00Z' });
-        await svc.runMonthlyFinancialSnapshots({ now: NOW, db: trx }); // pnl_complete true
-        expect((await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP, catchUp: true, db: trx })).skipped).toBe('already_written');
-        await trx('monthly_financial_snapshots').where({ month: '2026-11-01' }).update({ pnl_complete: false });
-        expect((await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP, catchUp: true, db: trx })).months).toEqual(['2026-11-01', '2026-10-01']);
-        // A row written before this month's run window opened (a backfill on the 1st) is redone too.
-        await trx('monthly_financial_snapshots').where({ month: '2026-11-01' }).update({ computed_at: '2026-12-01T20:00:00Z', pnl_complete: true });
-        expect((await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP, catchUp: true, db: trx })).skipped).toBeNull();
+        await svc.runMonthlyFinancialSnapshots({ now: NOW, db: trx }); // both rows complete
+        const catchUp = () => svc.runMonthlyFinancialSnapshots({ now: CATCH_UP, catchUp: true, db: trx });
+        expect((await catchUp()).skipped).toBe('already_written');
+        const row = (month) => trx('monthly_financial_snapshots').where({ month });
+        await row('2026-11-01').update({ pnl_complete: false });
+        expect((await catchUp()).months).toEqual(['2026-11-01', '2026-10-01']);
+        // A one-month backfill on the 1st: last month's row predates the run window.
+        await row('2026-11-01').update({ computed_at: '2026-12-01T20:00:00Z' });
+        expect((await catchUp()).skipped).toBeNull();
+        // The month before is stale while last month looks fresh.
+        await row('2026-10-01').update({ computed_at: '2026-11-02T10:36:00Z' });
+        expect((await catchUp()).skipped).toBeNull();
+        expect((await catchUp()).skipped).toBe('already_written'); // the run just made both fresh
+        // The month before is missing while last month looks fresh.
+        await row('2026-10-01').del();
+        expect((await catchUp()).months).toEqual(['2026-11-01', '2026-10-01']);
+        expect((await row('2026-10-01').first()).computed_at.toISOString()).toBe(CATCH_UP.toISOString());
+      });
+    });
+
+    describe('isolation', () => {
+      // A wrapper that hands the service the real pool and, inside every top-level transaction the service opens,
+      // records the isolation level Postgres is actually running it at and the snapshot rows it has written; then it
+      // ROLLS BACK on purpose once the service's callback has succeeded. Nothing is ever committed, so a persistent
+      // QA database keeps whatever it holds for these months.
+      const ROLLBACK = new Error('rolled back on purpose');
+      const spied = (months) => {
+        const seen = [];
+        const written = [];
+        const db = (...args) => database(...args);
+        db.raw = (...args) => database.raw(...args);
+        db.transaction = async (cb, options) => {
+          let result;
+          try {
+            await database.transaction(async (inner) => {
+              seen.push((await inner.raw('SHOW transaction_isolation')).rows[0].transaction_isolation);
+              result = await cb(inner);
+              written.push(...await inner('monthly_financial_snapshots').whereIn('month', months).orderBy('month'));
+              throw ROLLBACK;
+            }, options);
+          } catch (err) {
+            if (err !== ROLLBACK) throw err;
+          }
+          return result;
+        };
+        return { db, seen, written };
+      };
+      const MONTHS = ['2001-01-01', '2001-02-01'];
+
+      it('upsertMonthSnapshot and the monthly pair both run REPEATABLE READ, and nothing stays committed', async () => {
+        const before = await database('monthly_financial_snapshots').whereIn('month', MONTHS).orderBy('month');
+        const one = spied(MONTHS);
+        await svc.upsertMonthSnapshot('2001-01', one.db);
+        expect(one.seen).toEqual(['repeatable read']);
+        expect(one.written.map((r) => dateOnly(r.month))).toEqual(['2001-01-01']);
+        const pair = spied(MONTHS);
+        // now = 2001-03-02 05:35 ET: the pair is February and January 2001.
+        const res = await svc.runMonthlyFinancialSnapshots({ now: new Date('2001-03-02T10:35:00Z'), db: pair.db });
+        expect(res.months).toEqual(['2001-02-01', '2001-01-01']);
+        expect(pair.seen).toEqual(['repeatable read']); // one transaction for both months
+        expect(pair.written.map((r) => dateOnly(r.month))).toEqual(['2001-01-01', '2001-02-01']);
+        // Both transactions rolled back: the rows (or their absence) are exactly what they were.
+        expect(await database('monthly_financial_snapshots').whereIn('month', MONTHS).orderBy('month')).toEqual(before);
       });
     });
   });

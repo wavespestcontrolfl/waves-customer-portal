@@ -889,9 +889,11 @@ const OVH_FIELDS_UI = [
 // hourly rate = the allowance the dashboard's "Office cost per stop" card adds to the
 // ledger's office costs. Blank or 0 = not counted. Saved with the same PUT as the costs above.
 const OWNER_OFFICE_FIELDS_UI = [
-  { key: "ownerOfficeHoursPerMonth", col: "owner_office_hours_per_month", label: "Your office hours", hint: "hours a month you spend on office work instead of in the field", unit: "hours / month" },
-  { key: "ownerOfficeHourlyRate", col: "owner_office_hourly_rate", label: "Your office hourly rate", hint: "what an hour of your office time is worth", unit: "$ / hour" },
+  { key: "ownerOfficeHoursPerMonth", col: "owner_office_hours_per_month", label: "Your office hours", hint: "hours a month you spend on office work instead of in the field", unit: "hours / month", max: 9999.99 },
+  { key: "ownerOfficeHourlyRate", col: "owner_office_hourly_rate", label: "Your office hourly rate", hint: "what an hour of your office time is worth", unit: "$ / hour", max: 999999.99 },
 ];
+// The server (admin-revenue.js OWNER_OFFICE_FIELDS) refuses anything else: plain digits, at most two decimals, up to max.
+const OWNER_OFFICE_NUMBER = /^\d+(\.\d{1,2})?$/;
 const ALL_COST_FIELDS_UI = [...OVH_FIELDS_UI, ...OWNER_OFFICE_FIELDS_UI];
 
 function OperatingCostsSettingsTab() {
@@ -933,6 +935,10 @@ function OperatingCostsSettingsTab() {
       const v = Number(raw);
       if (!Number.isFinite(v) || v < 0) {
         setMessage({ text: `"${f.label}" must be a number ≥ 0 (or blank to clear).`, error: true });
+        return;
+      }
+      if (f.max !== undefined && (!OWNER_OFFICE_NUMBER.test(raw) || v > f.max)) {
+        setMessage({ text: `"${f.label}" must be from 0 to ${f.max} with at most two decimals (or blank to clear).`, error: true });
         return;
       }
       body[f.key] = v;
@@ -1047,8 +1053,9 @@ function OperatingCostsSettingsTab() {
               <Field label={f.label} help={f.hint} className="min-w-0 flex-1 sm:max-w-md">
                 <Input
                   type="number"
-                  step="any"
+                  step="0.01"
                   min="0"
+                  max={f.max}
                   value={valueOf(f)}
                   placeholder="0"
                   onChange={(ev) => setDirty((d) => ({ ...d, [f.key]: ev.target.value }))}
