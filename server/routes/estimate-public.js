@@ -98,6 +98,9 @@ const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, areaAddOnConfig } = require('../services/pricing-engine/constants');
+const {
+  oneTimePestNoHomeAgeLive, quarterlyPerAppWithoutHomeAge, storedPestAgeAdj, oneTimePestNoHomeAgeReplaySignal,
+} = require('../services/pricing-engine/one-time-pest-home-age');
 const { isRetiredTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
@@ -20869,6 +20872,8 @@ function savedFloorReplayOverrides(estData) {
   overrides.wholeHomeSealReplay = require('../services/estimate-whole-home-replay').wholeHomeSealReplaySignal(estData) || undefined;
   // Roof style quote-time multiplier and per-foot terms (GATE_EXCLUSION_ROOF_STYLE_PRICING): same contract, set even when empty.
   overrides.roofStyleReplay = require('../services/estimate-roof-style-replay').roofStyleReplaySignal(estData) || undefined;
+  // One-time pest home-age rule (GATE_ONE_TIME_PEST_NO_HOME_AGE): same contract, set even when empty.
+  overrides.oneTimePestNoHomeAgeReplay = oneTimePestNoHomeAgeReplaySignal(estData) || undefined;
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.
@@ -21258,8 +21263,11 @@ function oneTimePestChoiceAmountFromBreakdown(breakdown = {}) {
   return oneTimeChoiceAmountFromBreakdown(breakdown, 'pest_control');
 }
 
-function oneTimePestChoiceAmountFromPerApp(perApp) {
-  const amount = Number(perApp);
+// homeAgeAdj: the plan's home-age adjustment to take back out of the quarterly rate
+// (GATE_ONE_TIME_PEST_NO_HOME_AGE, owner 2026-11-26: a one-time price is the same
+// for an older and a newer home). 0 = price from the rate as it is.
+function oneTimePestChoiceAmountFromPerApp(perApp, homeAgeAdj = 0) {
+  const amount = Number(quarterlyPerAppWithoutHomeAge(perApp, homeAgeAdj));
   if (!Number.isFinite(amount) || amount <= 0) return null;
   const multiplier = Number(ONE_TIME.pest?.multiplier);
   const floor = Number(ONE_TIME.pest?.floor);
@@ -21296,7 +21304,7 @@ function pestTierPerApp(row = {}) {
   return null;
 }
 
-function oneTimePestChoiceAmountFromResultStats(estData = {}) {
+function oneTimePestChoiceAmountFromResultStats(estData = {}, homeAgeAdj = 0) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData && typeof estData === 'object' ? estData : {});
@@ -21309,7 +21317,7 @@ function oneTimePestChoiceAmountFromResultStats(estData = {}) {
   ];
   if (!tiers.length) return null;
   const tier = tiers.find(rowLooksQuarterly) || tiers[0];
-  return oneTimePestChoiceAmountFromPerApp(pestTierPerApp(tier));
+  return oneTimePestChoiceAmountFromPerApp(pestTierPerApp(tier), homeAgeAdj);
 }
 
 function pestPerAppFromFrequency(frequency = {}) {
@@ -21318,34 +21326,36 @@ function pestPerAppFromFrequency(frequency = {}) {
   return pestTierPerApp(pestRow);
 }
 
-function oneTimePestChoiceAmountFromFrequencies(frequencies = []) {
+function oneTimePestChoiceAmountFromFrequencies(frequencies = [], homeAgeAdj = 0) {
   if (!Array.isArray(frequencies) || !frequencies.length) return null;
   const ordered = [
     ...frequencies.filter(rowLooksQuarterly),
     ...frequencies.filter((row) => !rowLooksQuarterly(row)),
   ];
   for (const frequency of ordered) {
-    const amount = oneTimePestChoiceAmountFromPerApp(pestPerAppFromFrequency(frequency));
+    const amount = oneTimePestChoiceAmountFromPerApp(pestPerAppFromFrequency(frequency), homeAgeAdj);
     if (amount) return amount;
   }
   return null;
 }
 
-function oneTimePestChoiceAmountFromRecurringServices(recurringServices = []) {
+function oneTimePestChoiceAmountFromRecurringServices(recurringServices = [], homeAgeAdj = 0) {
   const services = Array.isArray(recurringServices) ? recurringServices : [];
   for (const service of services) {
     if (!isPestServiceName(service?.name || service?.label || service?.service)) continue;
-    const amount = oneTimePestChoiceAmountFromPerApp(pestTierPerApp(service));
+    const amount = oneTimePestChoiceAmountFromPerApp(pestTierPerApp(service), homeAgeAdj);
     if (amount) return amount;
   }
   return null;
 }
 
 function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
-  return oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies)
-    || oneTimePestChoiceAmountFromResultStats(estData)
+  const homeAgeAdj = oneTimePestNoHomeAgeLive() ? storedPestAgeAdj(estData) : 0;
+  return oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies, homeAgeAdj)
+    || oneTimePestChoiceAmountFromResultStats(estData, homeAgeAdj)
     || oneTimePestChoiceAmountFromRecurringServices(
       recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
+      homeAgeAdj,
     )
     || oneTimePestChoiceAmountFromBreakdown(
       pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData),
