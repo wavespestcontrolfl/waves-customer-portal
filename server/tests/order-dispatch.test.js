@@ -951,7 +951,7 @@ test('an adapter without a vendor-confirmed pre-submit total never auto-places: 
 // GATE_AUTO_ORDER_HISTORY_TOTAL (owner 2026-11-26): a history-total adapter places on the last identical order's total.
 describe('history-total placement', () => {
   const historyAdapter = (amountCents = 31400) => mockAdapter({ preSubmitTotal: 'history', place: jest.fn(async () => ({ externalOrderNumber: 'SM-1', amountCents, response: {}, evidence: {} })) });
-  const driftAlerts = () => notify.mock.calls.filter((c) => String(c[3]?.dedupeKey).startsWith('auto-order-price:'));
+  const driftAlerts = () => notify.mock.calls.filter((c) => String(c[3]?.detail).startsWith('Auto-order price check'));
   beforeEach(() => { process.env.GATE_AUTO_ORDER_HISTORY_TOTAL = 'true'; });
 
   test('gate on: places on the history quote and rings nothing when the total matches', async () => {
@@ -976,6 +976,23 @@ describe('history-total placement', () => {
     notify.mockClear();
     await run(historyAdapter(28000));
     expect(driftAlerts()).toHaveLength(1);
+  });
+
+  test('gate values other than exactly "true" (1, on, TRUE) still park and place nothing', async () => {
+    for (const v of ['1', 'on', 'TRUE']) {
+      process.env.GATE_AUTO_ORDER_HISTORY_TOTAL = v;
+      mockState.ledgerRows = [];
+      const a = historyAdapter();
+      expect(await run(a)).toMatchObject({ status: 'needs_review', reason: 'no_vendor_confirmed_total' });
+      expect(a.place).not.toHaveBeenCalled();
+    }
+  });
+
+  test('the price bell is persisted with the placement, so a failed delivery is re-rung', async () => {
+    notify.mockResolvedValueOnce(null); // notifyAdmin returned no row: not landed
+    await run(historyAdapter(34000));
+    const placedRow = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status === 'placed').pop().row;
+    expect(JSON.parse(placedRow.evidence).bell.title).toMatch(/^Auto-order price check/);
   });
 
   test('final total within tolerance (5%) rings nothing', async () => {

@@ -79,7 +79,8 @@
  * that figure in the bell, unless GATE_AUTO_ORDER_HISTORY_TOTAL is on (owner
  * ruling 2026-11-26): then it places on the last identical order's total, the
  * caps bind on that figure and again on the vendor's read-back total, and a
- * final total more than max(5%, $2) off the history total rings one alert.
+ * final total more than max(5%, $2) off the history total rings one durable bell (so does a total
+ * that could not be read back).
  *
  * The sweep consults canAutoOrder() and skips its "order manually" bell for
  * a vendor this module will order from, so every request ends either
@@ -101,7 +102,8 @@ const { fitAction } = require('../admin-alert-names');
 const { raiserFor, ringOnRefreshAfterConversion } = require('../admin-alert-injected');
 
 const GATE = 'GATE_AUTO_ORDER';
-const HISTORY_TOTAL_GATE = 'GATE_AUTO_ORDER_HISTORY_TOTAL';
+// Strict `=== 'true'` (not gateEnvValue's 1/on): this gate spends money without a vendor-confirmed total.
+const historyTotalLive = () => process.env.GATE_AUTO_ORDER_HISTORY_TOTAL === 'true';
 const RESTOCK_TAB = '/admin/inventory?tab=restock';
 // Advisory-lock key for the cap reservation (hashtext of this string).
 const CAPS_LOCK_KEY = 'vendor-order-caps';
@@ -517,6 +519,13 @@ function bellAlertParts({ title, body, productName }) {
     return {
       action: named([(n) => `check the ${n} auto-order dry run`, (n) => `check the ${n} dry run`]),
       why: 'A dry run filled the cart and submitted nothing; turn the dry run off to order for real.',
+      doneWhen: 'auto_order_reviewed',
+    };
+  }
+  if (/^Auto-order price check/.test(text)) {
+    return {
+      action: named([(n) => `check the ${n} order price`, () => 'check the order price']),
+      why: 'The order went out on the last identical order\'s total; check the charge on the vendor account.',
       doneWhen: 'auto_order_reviewed',
     };
   }
@@ -1005,7 +1014,7 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
   const quoteCents = bq.cents;
   const cap = await reserveUnderCaps(conn, ctx.ledger.id, quoteCents, { env });
   if (!cap.ok) return { parked: await park(conn, { ...ctx, reason: cap.reason, message: `${cap.message} (${vendor.name} total for the last identical order${bq.source ? `, ${bq.source}` : ''})`, amountCents: quoteCents }) };
-  if (adapter.preSubmitTotal !== 'vendor' && !(adapter.preSubmitTotal === 'history' && gateEnvValue(HISTORY_TOTAL_GATE))) {
+  if (adapter.preSubmitTotal !== 'vendor' && !(adapter.preSubmitTotal === 'history' && historyTotalLive())) {
     // A historical charge is not a vendor-confirmed current total: price,
     // tax or shipping may have moved since, and a cap can only be
     // enforced BEFORE money moves. Park with everything the office needs
@@ -1040,36 +1049,19 @@ async function reservePostSubmitAmount(conn, ledger, cents, env) {
 }
 
 // A history-total order (Sticker Mule) was admitted on the last identical order's total; the
-// vendor's read-back total can differ. More than max(5%, $2) apart rings ONE alert (deduped per ledger row).
-// A read-back that failed (evidence.totalSource 'quote') rings too: the real charge is unknown.
-async function alertHistoryTotalDrift({ ctx, adapter, vendor, placed, finalCents, quoteCents }) {
-  if (adapter.preSubmitTotal !== 'history' || !(quoteCents > 0)) return;
+// vendor's read-back total can differ. More than max(5%, $2) apart, or no read-back at all
+// (evidence.totalSource 'quote'), gets ONE durable bell: recordPlaced persists it with the
+// placement and deliverBell / reringPendingBells deliver it (no lost alert after a crash).
+function historyTotalBell({ adapter, vendor, product, placed, finalCents, quoteCents }) {
+  if (adapter.preSubmitTotal !== 'history' || !(quoteCents > 0)) return null;
   const unconfirmed = placed?.evidence?.totalSource === 'quote';
-  if (!unconfirmed && Math.abs(finalCents - quoteCents) <= Math.max(Math.round(quoteCents * 0.05), 200)) return;
-  const { ledger, request, product, notify } = ctx;
-  const why = unconfirmed
-    ? `Placed, but ${vendor.name} did not confirm the total; the last identical order was ${dollars(quoteCents)}.`
-    : `Placed at ${dollars(finalCents)}; the last identical order was ${dollars(quoteCents)}.`;
-  const detail = unconfirmed
-    ? `${vendor.name} order for ${product.name} was placed, but the order total could not be read back. It is recorded at the last identical order's total, ${dollars(quoteCents)}. Check the charge on the ${vendor.name} account.`
-    : `${vendor.name} order for ${product.name} was placed at ${dollars(finalCents)}. The last identical order was ${dollars(quoteCents)}, so the order went out on that history total.`;
-  try {
-    await raiserFor(notify)('system', {
-      area: 'Inventory',
-      action: fitAction('Inventory', product.name, [(n) => `check the ${n} order price`, () => 'check the order price']),
-      why,
-      severity: 'needs-you',
-      link: RESTOCK_TAB,
-      subject: { type: 'check', id: `auto-order-price:${ledger.id}` },
-      doneWhen: 'auto_order_reviewed',
-      who: 'person',
-    }, {
-      bell: true,
-      dedupeKey: `auto-order-price:${ledger.id}`,
-      detail,
-      metadata: { vendorOrderId: ledger.id, restockRequestId: request.id, productName: product.name, vendorName: vendor.name },
-    });
-  } catch (err) { logger.warn(`[order-dispatch] price-drift alert failed for ledger ${ledger.id}: ${err.message}`); }
+  if (!unconfirmed && Math.abs(finalCents - quoteCents) <= Math.max(Math.round(quoteCents * 0.05), 200)) return null;
+  return versioned({
+    title: `Auto-order price check: ${product.name}`,
+    body: unconfirmed
+      ? `${vendor.name} order ${placed.externalOrderNumber || ''} was placed, but its total could not be read back. It is recorded at the last identical order's total, ${dollars(quoteCents)}. Check the charge on the ${vendor.name} account.`
+      : `${vendor.name} order ${placed.externalOrderNumber || ''} was placed at ${dollars(finalCents)}. The last identical order was ${dollars(quoteCents)}, and the order went out on that total.`,
+  });
 }
 
 async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
@@ -1173,7 +1165,7 @@ async function parkOnReceivedLocked(trx, { ctx, placed, finalCents }) {
  * one reconcile bell) or stale recovery already parked the row
  * (attachLatePlacement).
  */
-async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
+async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents, priceBell = null }) {
   const { ledger, request, product, vendor, adapterKey, notify } = ctx;
   const orderFacts = {
     external_order_number: placed.externalOrderNumber || null,
@@ -1212,7 +1204,7 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
       return parkOnReceivedLocked(trx, { ctx, placed, finalCents });
     }
     const stillOpen = fresh?.status === 'open';
-    const bell = stillOpen ? null : closedMidFlightBell(fresh?.status);
+    const bell = stillOpen ? priceBell : closedMidFlightBell(fresh?.status);
     // Green transition only from a row still 'placing' (pre-push P1).
     const n = await trx('vendor_orders').where({ id: ledger.id, status: 'placing' }).update({
       ...orderFacts,
@@ -1414,9 +1406,7 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     }
     const overCap = await parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env });
     if (overCap) return overCap;
-    const recorded = await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
-    await alertHistoryTotalDrift({ ctx, adapter, vendor, placed, finalCents, quoteCents });
-    return recorded;
+    return await recordPlaced(conn, { ctx, placed, finalCents, quoteCents, priceBell: historyTotalBell({ adapter, vendor, product, placed, finalCents, quoteCents }) });
   } catch (err) {
     // Run-level failures are scoped to THIS adapter for the batch loop: the
     // other vendors' requests still dispatch (Codex r8 P1).
