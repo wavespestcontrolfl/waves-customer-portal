@@ -507,7 +507,10 @@ async function assertCartEmpty(run) {
     return false;
   }, EMPTY_CART_WAIT);
   run.evidence.cartRowsBefore = rowCount;
-  if (state === 'rows') throw new RefusedError('cart_not_empty', `SiteOne cart already holds ${rowCount} line(s) — never touched: empty it by hand`, run.evidence);
+  // Run-level, not a per-request refusal: an occupied cart blocks EVERY request on this Chrome, so the
+  // claim is released (the request stays open, retried tomorrow) and the job's failure bell asks the
+  // owner to empty it — never one parked request after another that stays parked once it is emptied.
+  if (state === 'rows') throw Object.assign(runLevel(`siteone cdp: the SiteOne cart already holds ${rowCount} line(s) — never touched: empty it by hand, the next run retries`), { cartNotEmpty: true });
   if (state !== 'empty') throw new RefusedError('cart_state_unreadable', 'SiteOne cart shows no lines and no empty-cart state — not proven empty, nothing added', run.evidence);
   run.cartEmptyBefore = true;
 }
