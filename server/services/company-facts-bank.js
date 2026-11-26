@@ -92,12 +92,16 @@ const BILLING_UNIT_SRC = '(?:mo(?:nth)?|months?|visits?|applications?|treatments
 const RATE_RE = new RegExp(`(?<![\\d.,])(?:${AMOUNT_SRC})(?!\\d|[.,]\\d)\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
 const PRICE_WORD_NUMBER_RE = new RegExp(`\\b(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as|only|just)\\b([^.\\d]{0,20})(?<![\\d.,])(${AMOUNT_SRC})(?!\\d|[.,]\\d)(?!\\s*${UNIT_SRC})`, 'gi');
 // Prices in words: teens, tens ("forty-nine", "forty nine"), and hundreds or thousands ("a hundred", "two hundred fifty"). A bare unit word
-// ("three", "one") is not an amount here: "three visits", "one acre" and "just one tech" are ordinary counts.
+// ("three", "one") is an amount only as a rate ("five per application", "five a month", "nine/mo"); "three visits", "one acre" and
+// "just one tech" are ordinary counts. A number is matched whole: it may not be followed by another number word ("twenty" of
+// "twenty-five acres", "one hundred" of "one hundred twenty square feet"), so the unit check always sees the complete number.
 const UNIT_WORD = 'one|two|three|four|five|six|seven|eight|nine';
 const TENS_WORD = `(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\\s](?:${UNIT_WORD}))?`;
 const TEEN_WORD = 'ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
-const WORD_AMOUNT_SRC = `(?:(?:a|an|${UNIT_WORD})\\s+(?:hundred|thousand)(?:\\s+(?:and\\s+)?(?:${TENS_WORD}|${TEEN_WORD}|${UNIT_WORD}))?|${TENS_WORD}|${TEEN_WORD})`;
-const WORD_RATE_RE = new RegExp(`\\b${WORD_AMOUNT_SRC}\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
+const ANY_NUMBER_WORD = `(?:${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)`;
+const WHOLE_NUMBER = `(?![-\\s]+(?:and\\s+)?${ANY_NUMBER_WORD}\\b)`;
+const WORD_AMOUNT_SRC = `(?:(?:a|an|${UNIT_WORD})\\s+(?:hundred|thousand)(?:\\s+(?:and\\s+)?(?:${TENS_WORD}|${TEEN_WORD}|${UNIT_WORD}))?|${TENS_WORD}|${TEEN_WORD})${WHOLE_NUMBER}`;
+const WORD_RATE_RE = new RegExp(`\\b(?:${WORD_AMOUNT_SRC}|(?:${UNIT_WORD})\\b${WHOLE_NUMBER})\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
 const WORD_PRICE_RE = new RegExp(`\\b(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as)\\b[^.\\d]{0,20}\\b${WORD_AMOUNT_SRC}\\b(?!\\s*${UNIT_SRC})`, 'i');
 const DECIMAL_FIGURE_RE = new RegExp(`(?<![\\d.])\\d{1,4}\\.\\d{2}(?!\\d)(?!\\s*${UNIT_SRC})`, 'i');
 const YEAR_CONTEXT_RE = /\b(?:in|since|by|until|during|before|after|year|years)\b/i;
@@ -175,16 +179,32 @@ function mentionsProduct(text, tokens) {
 
 /**
  * The whole-bank check, as a reader renders the lines one after another. The plain banned-copy screen runs on the full section. The
- * timing guard (rainfast, re-entry, drying) runs on the joined section when it fits the SMS reply limit, and on every adjacent pair of
- * lines otherwise, so a timing claim split across two lines is caught while no text over 2,000 characters ever reaches the guard.
+ * timing guard (rainfast, re-entry, drying) judges a line by the rain, pet and stay-off wording ANYWHERE in the same reply, so it runs on
+ * sliding windows of consecutive lines: each window starts at a line and takes the following lines while the joined text stays within
+ * the SMS reply limit (2,000 characters; no text over it ever reaches the guard). A short bank is one window. In a long bank every line
+ * sits in a window with each neighbour and with as many further lines as the limit allows; two lines more than a reply apart are not
+ * judged together, since no reply holds both.
  */
 const SMS_REPLY_LIMIT = 2000;
+function* timingWindows(texts) {
+  let coveredTo = -1;
+  for (let i = 0; i < texts.length - 1; i += 1) {
+    let end = i;
+    let length = texts[i].length;
+    while (end + 1 < texts.length && length + 1 + texts[end + 1].length <= SMS_REPLY_LIMIT) {
+      end += 1;
+      length += 1 + texts[end].length;
+    }
+    if (end > coveredTo && end > i) {
+      coveredTo = end;
+      yield texts.slice(i, end + 1).join(' ');
+    }
+  }
+}
 function sectionHasBannedCopy(texts) {
   if (!texts.length) return false;
   if (hasBannedCopy(texts.map((t) => `- ${t}`).join('\n'), { timing: false })) return true;
-  const joined = texts.join(' ');
-  if (joined.length <= SMS_REPLY_LIMIT && texts.length > 1 && hasBannedCopy(joined)) return true;
-  for (let i = 0; i + 1 < texts.length; i += 1) if (hasBannedCopy(`${texts[i]} ${texts[i + 1]}`)) return true;
+  for (const window of timingWindows(texts)) if (hasBannedCopy(window)) return true;
   return false;
 }
 

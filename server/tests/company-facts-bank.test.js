@@ -50,6 +50,9 @@ describe('hard blocks', () => {
     ['a hundred after a price word', 'Plans start at a hundred.', 'price_amount'],
     ['hundreds in words', 'The fee is two hundred fifty.', 'price_amount'],
     ['a thousand after a price word', 'Starting from a thousand.', 'price_amount'],
+    ['a one-digit word price per application', 'The add-on costs five per application.', 'price_amount'],
+    ['a one-digit word price a month', 'Plans are five a month.', 'price_amount'],
+    ['a one-digit word price with a slash', 'Plans are nine/mo.', 'price_amount'],
     ['a rate word and a number', 'Our rate is 75 for a quarterly visit.', 'price_amount'],
     ['four lowercase sentences', 'we serve parrish. we serve ruskin. we serve wimauma. we serve palmetto.', 'too_many_sentences'],
     ['another currency symbol', 'The initial application is \u20AC50.', 'dollar_amount'],
@@ -135,6 +138,12 @@ describe('hard blocks', () => {
     'Our crew has fifteen techs.',
     'The visit takes twenty minutes.',
     'We cover a hundred acres.',
+    'We do five applications.',
+    'Lots start at twenty-five acres.',
+    'Lots start at twenty five acres.',
+    'Lots start at one hundred twenty square feet.',
+    'It costs one hundred twenty square feet of coverage.',
+    'Lots start at fifty-five hundred square feet.',
     'We come back every 90 days for a quarterly visit.',
   ])('not a price: %s', (text) => {
     expect(blocksOf(text)).not.toContain('price_amount');
@@ -386,6 +395,36 @@ describe('snapshot', () => {
       expect(Bank._test.sectionHasBannedCopy(long)).toBe(false);
       expect(timingCalls.length).toBeGreaterThan(0);
       expect(Math.max(...timingCalls)).toBeLessThanOrEqual(2000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('REAL guard: a timing context line and a claim line with a neutral line between them are judged together, also in a bank over 2,000 characters', () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const real = drafter.hasBannedCustomerCopy;
+    const lengths = [];
+    const spy = jest.spyOn(drafter, 'hasBannedCustomerCopy').mockImplementation((text, opts) => {
+      if (opts && opts.rainTimeGuard) lengths.push(text.length);
+      return real(text, opts);
+    });
+    try {
+      const context = 'Rain can change our plans.';
+      const neutral = 'We service Palmetto on Tuesdays.';
+      const claim = 'Tomorrow is fine.';
+      const filler = Array.from({ length: 35 }, (_, i) => `We service the zone beside the park number ${i} on request every week.`);
+      // Each line, and each adjacent pair, passes the real guard alone.
+      expect(Bank._test.sectionHasBannedCopy([context, neutral])).toBe(false);
+      expect(Bank._test.sectionHasBannedCopy([neutral, claim])).toBe(false);
+      expect(Bank._test.sectionHasBannedCopy([context, neutral, claim])).toBe(true);
+      lengths.length = 0;
+      const long = [context, neutral, claim, ...filler];
+      expect(long.join(' ').length).toBeGreaterThan(2000);
+      expect(Bank._test.sectionHasBannedCopy(long)).toBe(true);
+      expect(Math.max(...lengths)).toBeLessThanOrEqual(2000);
+      // The same lines with the context line more than a reply away from the claim: no reply holds both, so they are not judged together.
+      expect(Bank._test.sectionHasBannedCopy([context, ...filler, claim])).toBe(false);
+      expect(Math.max(...lengths)).toBeLessThanOrEqual(2000);
     } finally {
       spy.mockRestore();
     }
