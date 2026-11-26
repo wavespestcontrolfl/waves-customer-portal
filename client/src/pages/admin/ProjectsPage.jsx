@@ -3384,7 +3384,9 @@ export function ProjectDetail({
           (project.project_type === WDO_TYPE ||
             project.project_type === CERTIFICATE_TYPE ||
             project.service_record_id) &&
-          project.status !== "closed" && (
+          project.status !== "closed" &&
+          // A held report goes out through Send report only (the server refuses a plain report + invoice send).
+          !["held", "releasing"].includes(project.report_hold_status) && (
             <button
               type="button"
               onClick={() => handleSendWithInvoice()}

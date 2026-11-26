@@ -115,6 +115,12 @@ describe("WDO report hold on the project page", () => {
     expect(screen.queryByRole("button", { name: "Send report" })).not.toBeInTheDocument();
   });
 
+  it("an open project with a held report offers Send report, and no plain Send report + invoice", async () => {
+    stubProject({ ...baseProject, report_hold_status: "held" });
+    expect(await screen.findByRole("button", { name: "Send report" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send report + invoice" })).not.toBeInTheDocument();
+  });
+
   it("a closed project that is not held offers no send button", async () => {
     stubProject({ ...baseProject, status: "closed", report_hold_status: null });
     await screen.findByRole("button", { name: "Save changes" });

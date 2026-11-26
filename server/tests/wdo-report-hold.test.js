@@ -885,19 +885,21 @@ describe('manual send releases a held report early, and never races the sweep', 
     });
   });
 
-  test('send-with-invoice without the hold flag on a held project delivers and releases atomically', async () => {
+  test('send-with-invoice without the hold flag on a held project refuses: a held report goes out only through the release', async () => {
     const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }) });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, SEND_WITH_INVOICE(), { invoice_id: 'inv-1' });
-      const body = await res.json();
-      expect(res.status).toBe(200);
-      expect(body.sent).toBe(true);
-      const released = (updates.projects || []).find((u) => u.report_hold_status === 'released');
-      expect(released).toBeTruthy();
-      expect(released.status.sql).toBe("CASE WHEN status = 'closed' THEN status ELSE 'sent' END");
-      expect(released.report_hold_release_source).toBe('manual_send');
-      expect(ProjectEmail.sendProjectReportWithInvoice).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('hold_use_send_report');
     });
+    expect(ProjectEmail.sendProjectReportWithInvoice).not.toHaveBeenCalled();
+    expect((updates.projects || []).some((u) => u.report_hold_status === 'released')).toBe(false);
+  });
+
+  test('a plain send (Send report, or report + invoice without the hold) claims no report that became held after its read', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
+    expect(source).toContain("if ('report_hold_status' in project) sendClaimQuery.whereRaw(\"coalesce(report_hold_status, '') NOT IN ('held', 'releasing')\");");
+    expect(source).toMatch(/if \(!holdRequested && 'report_hold_status' in project\) \{\n\s+deliveryClaimQuery\.whereRaw\("coalesce\(report_hold_status, ''\) NOT IN \('held', 'releasing'\)"\);/);
   });
 
   test('GET /:id offers the hold only while the gate is on, for an unsent WDO', async () => {
@@ -988,14 +990,8 @@ describe('audit fixes', () => {
         const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true, invoice_id: 'inv-2' });
         expect(res.status).toBe(409);
       });
-      const retarget = writes.find((w) => w.payload.invoice_id === 'inv-2');
-      expect(retarget).toBeTruthy();
-      expect(retarget.raws).toEqual([expect.objectContaining({
-        sql: expect.stringContaining("report_hold_status, '') NOT IN ('held', 'releasing')"),
-        bindings: ['inv-2'],
-      })]);
-      // a hold whose invoice is gone (NULL) is not adopted by another bill either
-      expect(retarget.raws[0].sql).not.toContain('IS NULL');
+      // a plain request on a held report is refused before any invoice is resolved: nothing is retargeted
+      expect(writes.find((w) => w.payload.invoice_id === 'inv-2')).toBeUndefined();
     });
 
     test('a hold request on a held project with another invoice is refused', async () => {
@@ -2152,12 +2148,23 @@ describe('audit fixes', () => {
       await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
       const counted = (u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks');
       expect((sweep.updates.projects || []).some(counted)).toBe(false);
-      // a staff Send report: the counter moves (the next attempt mints a new key) and staff are told
+      // ...and the outcome is recorded, so a later staff press knows a new copy is wanted
+      const flagged = (u) => String(u.delivery_channels?.sql || '').includes('release_email_unknown');
+      expect((sweep.updates.projects || []).some(flagged)).toBe(true);
+      // a staff Send report with that record: the counter moves first, so this send mints a new key
       ProjectEmail.sendProjectReportReady.mockClear();
-      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: held });
+      const manual = mockTables({ project: { ...wdoProject({ report_hold_status: 'held', delivery_channels: { release_email_unknown: true } }), invoice_id: 'inv-1' }, invoice: invoiceRow() });
+      await withServer(async (baseUrl) => (await post(baseUrl, '/admin/projects/project-1/send')).json());
+      expect((manual.updates.projects || []).some(counted)).toBe(true);
+      expect(ProjectEmail.sendProjectReportReady.mock.calls[0][0].idempotencyKey).toMatch(/:b1$/);
+    });
+
+    test('a staff Send report whose email outcome is unknown does not move the key: the automatic retry cannot send a second copy', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'email send held by provider_retry_ambiguous' });
       const manual = mockTables({ project: { ...wdoProject({ report_hold_status: 'held' }), invoice_id: 'inv-1' }, invoice: invoiceRow() });
       const body = await withServer(async (baseUrl) => (await post(baseUrl, '/admin/projects/project-1/send')).json());
-      expect((manual.updates.projects || []).some(counted)).toBe(true);
+      expect((manual.updates.projects || []).some((u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks'))).toBe(false);
+      expect(body.sent).toBe(false);
       expect(body.channels.email.error).toMatch(/press Send report again/);
     });
 
@@ -2464,14 +2471,20 @@ describe('audit fixes, round 2', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('a failed manual Send report of a held report merges its results into the stored release state (filing and key kept)', async () => {
+    test('a failed manual Send report of a held report hands it back to held, keeps its stored release state, and rings no bell', async () => {
+      const holdService = require('../services/project-report-hold');
+      const raise = jest.spyOn(holdService, 'raiseReleaseFailedBell');
       ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, blocked: true, reason: 'suppressed' });
       const { updates } = mockTables({ project: { ...wdoProject({ report_hold_status: 'held' }), invoice_id: 'inv-1' }, invoice: invoiceRow() });
-      await withServer(async (baseUrl) => { await post(baseUrl, '/admin/projects/project-1/send'); });
-      const finalWrite = (updates.projects || []).find((u) => u.delivery_status && u.delivery_claim_token === null && u.last_delivery_at);
-      expect(finalWrite).toBeTruthy();
-      expect(finalWrite.delivery_channels.sql).toBe("coalesce(delivery_channels, '{}'::jsonb) || ?::jsonb");
-      expect(JSON.parse(finalWrite.delivery_channels.bindings[0]).email.ok).toBe(false);
+      const body = await withServer(async (baseUrl) => (await post(baseUrl, '/admin/projects/project-1/send')).json());
+      expect(body.sent).toBe(false);
+      const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(revert).toBeTruthy();
+      // the stored release state (filing, keys, text mark) is never overwritten by a failed attempt
+      expect(revert).not.toHaveProperty('delivery_channels');
+      expect(revert.report_hold_attempts).toBe(0);
+      expect(raise).not.toHaveBeenCalled();
+      raise.mockRestore();
     });
 
     test('a manual Send report of a held report sends the named billing contact its copy (only the recipient is left out)', async () => {
@@ -2589,11 +2602,6 @@ describe('audit fixes, round 2', () => {
       expect(closed()).toHaveLength(1);
     });
 
-    test('a combined send on a held project', async () => {
-      mockTables({ project: wdoProject({ report_hold_status: 'held' }) });
-      await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), { invoice_id: 'inv-1' }); });
-      expect(closed()).toHaveLength(1);
-    });
 
     test('Sent another way on a held project', async () => {
       await markWith(wdoProject({ report_hold_status: 'held' }));
