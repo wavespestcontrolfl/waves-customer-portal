@@ -65,4 +65,18 @@ describe("mosquito +5% reprice — client mirror pins", () => {
     expect(ONE_TIME_MOSQUITO_FLOOR).toBe(199);
     expect(line(7000).price).toBe(199);
   });
+
+  it("a lot above 2 acres keeps its price and is marked for a hand price (server mirror, owner 2026-11-26)", () => {
+    const review = (lotSqFt) => calculateEstimate(mosquitoInput({ lotSqFt })).pricingMetadata;
+    for (const lotSqFt of [43560, 87120]) {
+      expect(review(lotSqFt).manualReviewReasons).not.toContain("mosquito_lot_above_2_acres");
+    }
+    for (const lotSqFt of [87121, 108900, 217800]) {
+      expect(review(lotSqFt).manualReviewReasons).toContain("mosquito_lot_above_2_acres");
+      expect(review(lotSqFt).warnings).toContain("Lot above 2 acres: set the mosquito price by hand");
+    }
+    // The price curve is flat past 64,500 sq ft, so 3 and 5 acres show the 2-acre price.
+    const perVisit = (lotSqFt) => mosquitoTiers(calculateEstimate(mosquitoInput({ lotSqFt })))[9].pv;
+    expect(perVisit(217800)).toBe(perVisit(87120));
+  });
 });

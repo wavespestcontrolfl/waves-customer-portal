@@ -3670,6 +3670,8 @@ const FRIENDLY_QUOTE_REASONS = {
     'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.',
   retired_tree_shrub_cadence_requote:
     'Our tree & shrub programs have been updated since this quote was sent — call Waves and we’ll refresh your tree & shrub plan with current pricing.',
+  mosquito_lot_above_2_acres:
+    'Mosquito service for a lot this size is priced by Waves — we’ll confirm your price before it’s finalized.',
   retired_tree_shrub_cadence_selection:
     'This estimate’s tree & shrub plan uses a retired schedule — call Waves and we’ll refresh your quote with the current tree & shrub options.',
 };

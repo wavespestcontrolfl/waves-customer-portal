@@ -905,6 +905,14 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
     const pricedManual = manualLines.filter((l) => Number(l.monthlyAfterDiscount ?? l.monthly) || Number(l.priceAfterDiscount ?? l.price));
     reasons.push(`partial draft: ${manualLines.map((l) => l.service).join(', ')} still need${manualLines.length === 1 ? 's' : ''} manual scoping${pricedManual.length ? ' — their PROVISIONAL amounts are included in the totals; verify before send' : ''}`);
   }
+  // Owner 2026-11-26: a recurring mosquito lot above 2 acres waits for the
+  // owner's hand price. The line's own review mark already parks the draft
+  // (partial draft above); this names the cause in the operator's words, and
+  // the call-quote auto-send verdict holds on it (lane_review_reason).
+  if (lines.some((l) => l?.service === 'mosquito'
+    && (l.manualReviewReasons || []).includes('mosquito_lot_above_2_acres'))) {
+    reasons.push('Lot above 2 acres: set the mosquito price by hand');
+  }
   const lookupPalmLine = lines.find((l) => l?.service === 'tree_shrub' && l.palmCountFromLookup === true
     && Number(l.palmCount) > 0 && (l.manualReviewReasons || []).includes(LOOKUP_PALM_REVIEW_REASON));
   if (lookupPalmLine) {

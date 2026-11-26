@@ -3760,6 +3760,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
             : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
               ? `${serviceInterest} · needs the area to plug (sq ft) · ${quoteFullAddress}`
+            : quoteRequiredReason === 'mosquito_lot_above_2_acres'
+              ? `${serviceInterest} · Lot above 2 acres: set the mosquito price by hand · ${quoteFullAddress}`
             : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
@@ -4400,6 +4402,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
+          : quoteRequiredReason === 'mosquito_lot_above_2_acres'
+          ? 'Mosquito control for a property this size is priced by our team — we\'ll review your lot and send your exact price shortly.'
           : (!RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason) && isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine))
           ? 'Tree & shrub pricing depends on your planting-bed area, and we could not confirm your home\'s footprint from records alone — the Waves team will confirm it and send your exact price shortly.'
           // A stale single-visit flea request (retired offer key) prices the

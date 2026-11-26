@@ -12,4 +12,8 @@ describe("area add-on custom-quote reasons read in plain words", () => {
     expect(humanizeQuoteReason("some_new_reason")).toBe("Some new reason");
     expect(humanizeQuoteReason("Already plain.")).toBe("Already plain.");
   });
+
+  it("a mosquito lot above 2 acres reads as customer wording, never the staff instruction", () => {
+    expect(humanizeQuoteReason("mosquito_lot_above_2_acres")).toBe("Mosquito service for a lot this size is priced by Waves — we’ll confirm your price before it’s finalized.");
+  });
 });

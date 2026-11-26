@@ -38,6 +38,8 @@ const FRIENDLY_QUOTE_REASONS = {
     "The refill solution was not recognized, so the default solution was priced. Correct it before this goes out.",
   mosquito_misting_oversize:
     "This misting layout has more nozzles than our standard system — Waves will confirm the price with you before it’s finalized.",
+  mosquito_lot_above_2_acres:
+    "Mosquito service for a lot this size is priced by Waves — we’ll confirm your price before it’s finalized.",
   mosquito_misting_oversize_risers:
     "This misting layout has more risers than our standard system — Waves will confirm the price with you before it’s finalized.",
 };

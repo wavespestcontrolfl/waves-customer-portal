@@ -4746,6 +4746,19 @@ function mosquitoLotSizePressure(sqft) {
   return 0;
 }
 
+// Owner 2026-11-26 ("fix this"): the recurring mosquito curve holds flat once
+// the ACRE anchor is reached (about 64,500 sq ft), so a 2-acre, 3-acre and
+// 5-acre lot all price the same. Above 2 acres (87,120 sq ft) the owner sets
+// the price by hand: the line carries this review reason, which every system
+// send path already reads as "manual quote line" (requiresManualReview /
+// manualReviewReasons: public quote, lead automation, call-quote draft lane,
+// voice agent, add-service offers). The price below 2 acres is unchanged and
+// an admin can still set a price and send the estimate.
+const MOSQUITO_LOT_ABOVE_2_ACRES_SQFT = 87120;
+const MOSQUITO_LOT_ABOVE_2_ACRES_REASON = 'mosquito_lot_above_2_acres';
+// Staff wording (draft lane reason, office bell, estimate tool). Never shown to a customer.
+const MOSQUITO_LOT_ABOVE_2_ACRES_TEXT = 'Lot above 2 acres: set the mosquito price by hand';
+
 function priceMosquito(property, options = {}) {
   const {
     tier = null,
@@ -4851,7 +4864,15 @@ function priceMosquito(property, options = {}) {
     };
   });
 
+  // The lot the pricer used: the gross parcel or the treatable area, whichever
+  // is larger (an explicit treatable area can stand without a parcel).
+  // An unmeasured lot (lotSizeMeasured:false) is not a size: the unverified-area hold below speaks for it.
+  const lotAbove2Acres = options.lotSizeMeasured !== false
+    && Math.max(Number(property.lotSqFt) || 0, areaResolution.mosquitoTreatableSqFt || 0) > MOSQUITO_LOT_ABOVE_2_ACRES_SQFT;
   const manualReviewReasons = uniqueList([
+    // First, so the reason a customer-facing hold and the office read
+    // (manualReviewReasons[0]) names the real cause.
+    lotAbove2Acres ? MOSQUITO_LOT_ABOVE_2_ACRES_REASON : null,
     ...areaResolution.manualReviewReasons,
     ...categoryResolution.manualReviewReasons,
     // A synthetic/default lot (caller passed lotSizeMeasured:false) is not a
@@ -10556,7 +10577,7 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
+  priceMosquito, MOSQUITO_LOT_ABOVE_2_ACRES_REASON, MOSQUITO_LOT_ABOVE_2_ACRES_TEXT, MOSQUITO_LOT_ABOVE_2_ACRES_SQFT, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
