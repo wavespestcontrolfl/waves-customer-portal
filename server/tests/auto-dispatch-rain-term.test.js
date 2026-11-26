@@ -592,6 +592,47 @@ describe('unread inputs never read as verified', () => {
     expect(rainTerm._test.dayReading(hoursFor({ '2026-12-02': 10 }).slice(0, 12), '2026-12-02').complete).toBe(false);
   });
 
+  test('a date the finder could not verify the route of is never a verified none; the 73-hour gap check honours the start time', async () => {
+    const state = await allWet();
+    // Nothing free, but the finder says it could not verify the route on a date the 5-day band admits.
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({
+      candidates: [], search: { rejections_by_date: { '2026-12-02': { route_unverified: 2 } } },
+    });
+    expect(await noteVisit(state)).toMatchObject({ status_5day: 'unverified', status_73h: 'unverified', would_move: false, reason: 'route_unverified' });
+    // A date the band does not admit, or the visit's own date, does not count.
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({
+      candidates: [], search: { rejections_by_date: { '2026-11-30': { route_unverified: 1 }, '2026-11-29': { route_unverified: 1 } } },
+    });
+    expect(await noteVisit(state)).toMatchObject({ status_5day: 'none', status_73h: 'unverified' });
+    // A plain drops count (if the finder ever reports one) makes both floors unverified.
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [], drops: { route_unverified: 1 } });
+    expect(await noteVisit(state)).toMatchObject({ status_5day: 'unverified', status_73h: 'unverified' });
+    // A found slot still answers; the route gap only blocks a "none".
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')], drops: { route_unverified: 1 } });
+    expect(await noteVisit(state)).toMatchObject({ status_5day: 'found', would_move: true });
+    // 73-hour forecast gap: an early slot on the boundary date (before now + 73 h) is not a slot of that floor.
+    const later = { ...run, nowDate: new Date('2026-11-26T15:00:00Z') };
+    const thin = await stateWith(async () => hoursFor({ '2026-11-30': 90, '2026-12-01': 90, '2026-12-02': 90 }));
+    const service = visit({ scheduled_date: '2026-11-30' });
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-11-29', 't1', '08:00')] });
+    const evalResult = freshEval();
+    await rainTerm.note(thin, {
+      service, prefs: {}, ctx: {}, guard: flexGuard(service), evalResult, run: later,
+    });
+    // 11-29 has no forecast; its 8:00 slot starts before 11:00 (now + 73 h), so the 73-hour floor has no gap to doubt.
+    expect(evalResult.audit.constraints.rain_term).toMatchObject({ status_73h: 'none' });
+  });
+
+  test('a visit in range is counted before any read that can fail', async () => {
+    const state = await allWet();
+    rainFit.bookingRainPlan.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'SERVICES_UNREAD' }));
+    const row = await noteVisit(state);
+    expect(row).toMatchObject({ reason: 'error', lead_days: 3 });
+    expect(state.counts).toMatchObject({ in_range: 1, errors: 1 });
+    await noteVisit(state, visit({ scheduled_date: '2026-12-20' }));
+    expect(state.counts.out_of_range).toBe(1);
+  });
+
   test('every searched row carries both floors\' statuses, whatever path built it', async () => {
     const state = await allWet();
     const probe = candidateSlots._internals.filterAndScoreSharedModelCandidates;

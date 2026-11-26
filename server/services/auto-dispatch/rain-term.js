@@ -95,6 +95,7 @@ const REASONS = {
   GROUPED: 'grouped_unverified',
   OCCUPANCY: 'occupancy_unverified',
   FORECAST: 'uncertain_forecast',
+  ROUTE: 'route_unverified',
   FOUND: 'drier_date_found',
   FOUND_73H: 'drier_date_only_with_73h_floor',
   FOUND_73H_UNSURE: 'drier_date_with_73h_floor_5day_uncertain',
@@ -298,7 +299,12 @@ async function freeSlots(service, prefs, ctx, bands) {
   const found = await findValidCandidateSlots(service, prefs, searchCtx(ctx, bands.pending73h, bands.meta, service));
   const tech = service.technician_id ? String(service.technician_id) : null;
   const all = (found && found.candidates) || [];
-  return { slots: all.filter((c) => !tech || String(c.technician_id) === tech), capped: all.length >= SEARCH_SCORE_CAP };
+  return {
+    slots: all.filter((c) => !tech || String(c.technician_id) === tech),
+    capped: all.length >= SEARCH_SCORE_CAP,
+    drops: (found && found.drops) || null,
+    search: (found && found.search) || null,
+  };
 }
 
 function rowFor(service, area, lead, wet, extra) {
@@ -355,22 +361,39 @@ async function firstFree(options, check) {
 // One floor's answer: found, unverified (the probe could not vet the slots it was given),
 // uncertain_capped (the search list may have been cut), uncertain_forecast (a free slot sits
 // on a day the forecast did not cover in full) or none (a verified "no slot").
-function floorStatus(result, { capped, unread }) {
+function floorStatus(result, { capped, unread, route }) {
   if (result.opt) return 'found';
   if (result.unverified) return 'unverified';
   if (capped) return 'uncertain_capped';
+  if (route) return 'unverified';
   return unread ? 'uncertain_forecast' : 'none';
+}
+
+// Whether the finder reported a date this floor admits as one whose route it could not verify
+// (find-time's route_unverified rejection): that date is not a verified "no slot". The finder
+// result carries per-date rejections only if a caller passes them on; today findValidCandidateSlots
+// exposes none, so this reads whatever it does carry (a drops count, a per-date map) and a count of
+// any size makes the floor unverified.
+function routeGap({ drops, search }, { service, band }) {
+  if (Number(drops && drops.route_unverified) > 0) return true;
+  const orig = toDateStr(service.scheduled_date);
+  const byDate = (search && search.rejections_by_date) || {};
+  return Object.entries(byDate).some(([date, reasons]) => Number(reasons && reasons.route_unverified) > 0
+    && date !== orig && flexTier.flexWindowAdmits(band, orig, date));
 }
 
 // Whether a free slot the band admits sits on a day within the forecast window that is
 // unread or only partly read: the floor cannot be called empty. Days past the window are
 // outside what this shadow judges by design, so they do not count.
-function forecastGap(slots, { service, band, run, wetByDate, zone, state }) {
+function forecastGap(slots, {
+  service, band, run, wetByDate, zone, state, afterFloor,
+}) {
   const orig = toDateStr(service.scheduled_date);
   return slots.some((slot) => {
     const date = toDateStr(slot.date);
     const lead = daysBetween(run.today, date);
     if (date === orig || !trustFor(lead) || !flexTier.flexWindowAdmits(band, orig, date)) return false;
+    if (afterFloor && !startsAfterFloor(slot, run)) return false;
     return wetByDate.get(date) == null || state.partial.has(`${zone}|${date}`);
   });
 }
@@ -397,6 +420,7 @@ function verdictReason({
   if (candidate) return grouped ? REASONS.GROUPED : REASONS.OCCUPANCY;
   const both = [status5, status73];
   if (both.includes('uncertain_capped')) return REASONS.CAPPED;
+  if (both.includes('unverified')) return REASONS.ROUTE;
   return both.includes('uncertain_forecast') ? REASONS.FORECAST : REASONS.NONE;
 }
 
@@ -443,9 +467,11 @@ async function searchVerdict({
     service, run, currentWet: wetByDate.get(base.current.date), wetByDate,
   };
   const gap = { ...common, zone: area, state };
-  const cov = (band) => ({ capped: found.capped, unread: forecastGap(slots, { ...gap, band }) });
-  const cov5 = cov(bands.current);
-  const cov73 = cov(bands.pending73h);
+  const cov = (band, afterFloor) => ({
+    capped: found.capped, unread: forecastGap(slots, { ...gap, band, afterFloor }), route: routeGap(found, { service, band }),
+  });
+  const cov5 = cov(bands.current, false);
+  const cov73 = cov(bands.pending73h, true);
   const opts5 = drierOptions(slots, { ...common, band: bands.current });
   const opts73 = drierOptions(slots, { ...common, band: bands.pending73h, afterFloor: true });
   if (grouped) {
@@ -466,11 +492,9 @@ async function searchVerdict({
   });
 }
 
-async function judge(args, state) {
-  const { service, run } = args;
+async function judge(args, state, lead) {
+  const { service } = args;
   const date = toDateStr(service.scheduled_date);
-  const lead = daysBetween(run.today, date);
-  if (lead == null || lead < FIRST_LEAD_DAYS || lead > LAST_LEAD_DAYS) return { counted: 'out_of_range', row: null };
   const area = areaOf(service);
   const wet = area && state.forecast.has(area) ? state.forecast.get(area).get(date) : null;
   const base = rowFor(service, area || null, lead, wet, {});
@@ -489,16 +513,17 @@ async function judge(args, state) {
  */
 async function note(state, args) {
   if (!state || !args.evalResult || !args.evalResult.audit) return;
+  // Counted before any read that can fail: a visit in range is in range whatever follows.
+  const lead = daysBetween(args.run.today, toDateStr(args.service.scheduled_date));
+  if (lead == null || lead < FIRST_LEAD_DAYS || lead > LAST_LEAD_DAYS) { state.counts.out_of_range += 1; return; }
+  state.counts.in_range += 1;
   let row;
   try {
-    const verdict = await judge(args, state);
-    if (verdict.counted) { state.counts.out_of_range += 1; return; }
-    row = verdict.row;
-    state.counts.in_range += 1;
+    row = (await judge(args, state, lead)).row;
   } catch (err) {
     state.counts.errors += 1;
     row = {
-      mode: MODE_SHADOW, would_move: false, status_5day: 'unverified', status_73h: 'unverified', reason: REASONS.ERROR, error: err.code || err.name || 'error',
+      mode: MODE_SHADOW, lead_days: lead, would_move: false, status_5day: 'unverified', status_73h: 'unverified', reason: REASONS.ERROR, error: err.code || err.name || 'error',
     };
   }
   state.counts[row.reason] = (state.counts[row.reason] || 0) + 1;
