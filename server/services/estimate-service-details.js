@@ -96,7 +96,7 @@ const COMPLIANCE_SECTION = {
 const SERVICE_DETAILS_COPY = {
   pest_control: {
     title: 'Pest Protection — Service Details',
-    // Stylized in-house renders (gemini-3-pro-image, 2026-07-11 — no
+    // Stylized in-house renders (gpt-image-2.6-sunburst, remade 2026-11-25 without the Gemini SynthID watermark — no
     // manufacturer photography/trade dress). Owner-picked set, cut to Taurus
     // 2026-10-26: the Talstar P render shows a brand Waves does not buy (owner
     // 2026-09-11: the bifenthrin bottle was Atticus Talak 7.9 F; owner 2026-11-18: now LESCO Crosscheck Plus), and the
@@ -740,8 +740,8 @@ const SERVICE_DETAILS_COPY = {
         'Waves Pest Control, LLC operates under Florida license JB351547 and is insured. Florida law requires a posted treatment notice at every qualifying lawn visit; your report carries the details behind the sign.',
       ],
     },
-    // Stylized in-house product renders (client/public/product-images) — the
-    // program's flagship products, generated 2026-07-11 (gemini-3-pro-image;
+    // Stylized in-house product renders (server/assets/product-images) — the
+    // program's flagship products, remade 2026-11-25 (gpt-image-2.6-sunburst, no SynthID;
     // no manufacturer photography, no copied trade dress). Products chosen
     // from the lawn protocols: Arena 50 WDG (insecticide rotation), LESCO
     // granular fert, Celsius WG
