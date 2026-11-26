@@ -163,13 +163,13 @@ postgres('mailed record on PostgreSQL', () => {
     expect(await conn('mail_prospects').where({ mail_batch: 'recheck-2' }).first('id')).toBeUndefined();
   });
 
-  test('a reprint of a marked batch prints the name, office line and page address it was marked with', async () => {
+  test('a reprint of a marked batch prints the name and office line it was marked with', async () => {
     const id = await row();
     await markBatch({ batch: 'print-1', now: NOW });
-    expect((await stored(id)).mailed_price.label).toEqual({ name: 'Alex & Jamie Tester', nameCheck: false, textNumber: expect.any(String), officeByDefault: false, slug: expect.stringMatching(/-example$/) });
+    expect((await stored(id)).mailed_price.label).toEqual({ name: 'Alex & Jamie Tester', nameCheck: false, textNumber: expect.any(String), officeByDefault: false });
     const first = (await labelsFor({ batch: 'print-1' })).labels;
-    // The Clerk's names, the town and the page address change after the cards are in the mail.
-    await conn('mail_prospects').where({ id }).update({ recipient_names: JSON.stringify(['OTHER PAT']), city: 'VENICE', zip: '34285', page_slug: '999-changed' });
+    // The Clerk's names and the town change after the cards are in the mail.
+    await conn('mail_prospects').where({ id }).update({ recipient_names: JSON.stringify(['OTHER PAT']), city: 'VENICE', zip: '34285' });
     expect((await labelsFor({ batch: 'print-1' })).labels).toEqual(first);
   });
 

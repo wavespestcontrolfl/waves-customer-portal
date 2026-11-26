@@ -8,7 +8,7 @@
  *
  * The label of a home shows its MONTHLY price (annual / 12 from whole cents, the same toPrice as the admin list and the
  * home's page), the office line to text and the date the price is held until (PRICE_HOLD_DAYS from the day it was marked).
- * The name, the office line and the page address are frozen in the snapshot too (mailed_price.label), for a reprint.
+ * The name and the office line are frozen in the snapshot too (mailed_price.label), for a reprint.
  * Nothing here sends anything and no paid service is called.
  */
 
@@ -49,17 +49,21 @@ function printedPriceOf(row) {
   return { monthly: snap.monthly, annual: snap.annual, setupFee: snap.setupFee, pricedAt };
 }
 
-/** What the label prints besides the price, frozen with it at marking: { name, nameCheck, textNumber, officeByDefault, slug }. */
+/**
+ * What the label prints besides the price, frozen with it at marking: { name, nameCheck, textNumber, officeByDefault }.
+ * The page address (page_slug) is not frozen here: the public lookup resolves the row's own slug, which is written once
+ * and never changed (prospect-store assignPageSlug), so the label always prints the address that reaches the home.
+ */
 function labelFieldsOf(row) {
   const { name, check } = labelName(row.recipient_names);
   const office = officeLineOf(row);
-  return { name, nameCheck: check, textNumber: office.number, officeByDefault: office.byDefault, slug: row.page_slug || null };
+  return { name, nameCheck: check, textNumber: office.number, officeByDefault: office.byDefault };
 }
 
 /**
  * The label fields a mailed row was printed with (mailed_price.label), or null for a row marked before they were kept or
- * a snapshot that does not hold them. A reprint of a batch uses these, so a later change of the Clerk's names, of an
- * office line or of the page address never makes the second print differ from the cards in the mail.
+ * a snapshot that does not hold them. A reprint of a batch uses these, so a later change of the Clerk's names or of an
+ * office line never makes the second print differ from the cards in the mail.
  */
 function printedLabelOf(row) {
   if (!row || !row.mailed_at) return null;
@@ -74,7 +78,6 @@ function printedLabelOf(row) {
     nameCheck: label.nameCheck === true,
     textNumber: label.textNumber,
     officeByDefault: label.officeByDefault === true,
-    slug: typeof label.slug === 'string' && label.slug ? label.slug : null,
   };
 }
 
@@ -244,6 +247,22 @@ async function markBatch({ batch, ids, now = new Date() }, conn = db, deps = {})
   });
 }
 
+// One label row from a home, the price it prints and its label fields.
+function labelRowOf(row, priceNow, fields) {
+  return {
+    name: fields.name,
+    price: labelPrice(priceNow.monthly),
+    perApplication: perApplicationLabel(priceNow.annual),
+    slug: row.page_slug || null,
+    token: row.page_token,
+    textNumber: fields.textNumber,
+    // The last day the printed price is held, as the label words it ("Jan 23"); booking honors it (home-book.js).
+    heldUntil: heldUntilLabel(heldUntilOf(row.mailed_at)),
+    // The one-time setup fee the page shows and booking applies (null when there is none), so the label can say it.
+    setupFee: Number(priceNow.setupFee) > 0 ? labelPrice(priceNow.setupFee) : null,
+  };
+}
+
 /**
  * Read only: the label rows [{ name, price, perApplication, slug, token, textNumber, heldUntil, setupFee }] for the homes of `batch`, or (no batch)
  * for the homes markBatch would mark at `now`. price is the monthly price the label shows; for a marked home it is the frozen
@@ -270,25 +289,13 @@ async function labelsFor({ batch, ids } = {}, conn = db, deps = {}) {
     const printed = row.mailed_at ? printedPriceOf(row) : null;
     const priceNow = printed || snapshotOf(row);
     if (!priceNow || priceNow.monthly == null) continue;
-    const { monthly, annual } = priceNow;
     // A home not yet marked is listed only if markBatch would mark it now.
     if (!row.mailed_at && await known(row, conn)) continue;
     // A marked home prints what it was marked with; one marked before the fields were kept is worked out again.
     const fields = printedLabelOf(row) || labelFieldsOf(row);
     if (fields.nameCheck) nameCheck.push(row.id);
     if (fields.officeByDefault) officeByDefault.push(row.id);
-    labels.push({
-      name: fields.name,
-      price: labelPrice(monthly),
-      perApplication: perApplicationLabel(annual),
-      slug: fields.slug,
-      token: row.page_token,
-      textNumber: fields.textNumber,
-      // The last day the printed price is held, as the label words it ("Jan 23"); booking honors it (home-book.js).
-      heldUntil: heldUntilLabel(heldUntilOf(row.mailed_at)),
-      // The one-time setup fee the page shows and booking applies (null when there is none), so the label can say it.
-      setupFee: Number(priceNow.setupFee) > 0 ? labelPrice(priceNow.setupFee) : null,
-    });
+    labels.push(labelRowOf(row, priceNow, fields));
   }
   return { labels, nameCheck, officeByDefault };
 }

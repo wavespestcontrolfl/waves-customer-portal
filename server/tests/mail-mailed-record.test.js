@@ -104,9 +104,9 @@ describe('markBatch input', () => {
 
 describe('the label fields kept with the price', () => {
   const { printedLabelOf, labelFieldsOf } = require('../services/mail/mailed-record');
-  const row = { recipient_names: ['TESTER ALEX J', 'TESTER JAMIE'], city: 'LAKEWOOD RANCH', zip: '34202', page_slug: '101-example' };
-  test('labelFieldsOf: the name, the office line and the page address', () => {
-    expect(labelFieldsOf(row)).toEqual({ name: 'Alex & Jamie Tester', nameCheck: false, textNumber: expect.any(String), officeByDefault: false, slug: '101-example' });
+  const row = { recipient_names: ['TESTER ALEX J', 'TESTER JAMIE'], city: 'LAKEWOOD RANCH', zip: '34202' };
+  test('labelFieldsOf: the name and the office line', () => {
+    expect(labelFieldsOf(row)).toEqual({ name: 'Alex & Jamie Tester', nameCheck: false, textNumber: expect.any(String), officeByDefault: false });
   });
   test('printedLabelOf: only a mailed row with whole fields; an older snapshot has none', () => {
     const label = labelFieldsOf(row);
