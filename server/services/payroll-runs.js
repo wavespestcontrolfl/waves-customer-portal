@@ -1315,7 +1315,7 @@ async function draftRun(input, actor, conn = db) {
   const today = etDateString();
   const seasonScores = await readSeasonScores(conn, payDate);
   const shareInputs = await productionSharePay.readInputs(conn, start);
-  await productionSharePay.alertRefundFlags(shareInputs);
+  await productionSharePay.alertRefundFlags(shareInputs, start);
   let runId;
   try {
     runId = await conn.transaction(async (trx) => {
@@ -1355,7 +1355,10 @@ async function recomputeRun(runId, actor, conn = db) {
   const today = etDateString();
   const seasonScores = await readSeasonScoresOfRun(conn, runId);
   const shareInputs = await readShareInputsOfRun(conn, runId);
-  await productionSharePay.alertRefundFlags(shareInputs);
+  if (shareInputs) {
+    const week = await conn('payroll_runs').where({ id: runId }).first(conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"));
+    await productionSharePay.alertRefundFlags(shareInputs, week ? week.week_start : '');
+  }
   await conn.transaction(async (trx) => {
     await lockRunWrite(trx, today);
     const run = await loadRun(trx, runId, { lock: true });

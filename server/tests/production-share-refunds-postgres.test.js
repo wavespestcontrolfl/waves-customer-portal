@@ -868,7 +868,11 @@ postgres('production share refunds', () => {
       expect((await signals([visit])).get(visit)).toEqual([`orphan:${live.id}`]);
       // A failed id still named in the row's stamped list or stripe_refund_id does not make a new signal identity.
       await trx('payments').where({ id: payment }).update({ refund_amount: '10.00', stripe_refund_id: 're_bounced', metadata: JSON.stringify({ invoice_id: invoiceId, failed_refund_ids: ['re_bounced'], stamped_refund_ids: ['re_bounced'] }) });
-      expect((await signals([visit])).get(visit)).toEqual([`orphan:${live.id}`, `pay:${payment}:1000`].sort());
+      // The failed id is out of the identity hash, and the row's bounce shows as the failure suffix instead (the one helper, failedRefundIdsSql).
+      const stillThere = (await signals([visit])).get(visit);
+      expect(stillThere).toHaveLength(2);
+      expect(stillThere).toContain(`orphan:${live.id}`);
+      expect(stillThere.find((one) => one.startsWith('pay:'))).toMatch(new RegExp(`^pay:${payment}:1000:x[0-9a-f]{10}$`));
     });
 
     it('round-trips a stop with hundreds of signals by their revision, and stores the full list', async () => {
@@ -1157,9 +1161,15 @@ postgres('production share refunds', () => {
       // A second pre-settlement refund leaves the parked row unchanged: the source is asked about (unclear) with nothing new.
       const shown = await preview(id, W2);
       expect(shown.takeBackToSet).toEqual([expect.objectContaining({ reason: 'unclear', newSignals: [], previousCents: null })]);
+      const rung = await bells();
+      expect(rung).toBeGreaterThan(0);
       const saved = await takeBack({ checkId, visitId: visit, cents: 30000, signalRevision: shown.takeBackToSet[0].signalRevision });
       expect(saved.status).toBe(200);
       expect((await preview(id, W2)).takeBacks).toEqual([expect.objectContaining({ cents: 30000 })]);
+      // Re-saving the same total moves the answer revision only: the reminder for this source and week rings nothing again.
+      expect((await takeBack({ checkId, visitId: visit, cents: 30000, signalRevision: shown.takeBackToSet[0].signalRevision })).status).toBe(200);
+      await preview(id, W2);
+      expect(await bells()).toBe(rung);
     });
 
     it('shows a final check with no production share snapshot as having recorded none: nothing is worked out live for the week', async () => {
@@ -1207,6 +1217,60 @@ postgres('production share refunds', () => {
       expect(after).toHaveLength(4);
       for (const one of after) expect(one).toMatch(/:x[0-9a-f]{10}$/);
       expect(after.filter((one) => /^(pay|stmt|orphan-stmt):/.test(one)).every((one) => !before.includes(one))).toBe(true);
+    });
+  });
+
+  describe('round eleven: one failed-id helper, frozen weeks read first', () => {
+    it('park, settle, bounce on a statement charge: the failed id recorded only in the settled payment row changes the parked signal', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '100.00', { scheduled_service_id: visit });
+      const [payer] = await trx('payers').insert({ display_name: 'Sample Payer' }).returning('id');
+      const [stmt] = await trx('payer_statements').insert({
+        payer_id: payer.id, period_start: '2026-09-01', period_end: '2026-09-30', terms_snapshot: 'due_on_receipt', token: randomUUID(), stripe_payment_intent_id: 'pi_psb',
+      }).returning('id');
+      await trx('invoices').where({ id: invoiceId }).update({ payer_statement_id: stmt.id });
+      // Parked before settlement.
+      await trx('stripe_orphan_charges').insert({
+        stripe_payment_intent_id: 'pi_psb', stripe_charge_id: 'ch_psb', amount: '8.00', source: 'statement_pay_webhook', original_db_error: 'statement partial refund before settlement',
+      });
+      const parked = (await signals([visit])).get(visit);
+      expect(parked).toEqual([expect.stringMatching(/^orphan-stmt:[0-9a-f-]+:800:\d+$/)]);
+      // Settled: the statement payment row exists with no refund stamped; the bounce is recorded only in its metadata.failed_refund_ids.
+      const settled = await paymentOf(customerId, {
+        statement_id: stmt.id, customer_id: null, stripe_payment_intent_id: 'pi_psb', stripe_charge_id: 'ch_psb', refund_amount: '0.00',
+        metadata: JSON.stringify({ failed_refund_ids: ['re_psb'] }),
+      });
+      expect(settled).toBeTruthy();
+      const bounced = (await signals([visit])).get(visit);
+      expect(bounced).toEqual([expect.stringMatching(/^orphan-stmt:[0-9a-f-]+:800:\d+:x[0-9a-f]{10}$/)]);
+      expect(bounced[0]).not.toEqual(parked[0]);
+    });
+
+    it('opens a finalized week from its frozen figures first: a failing live read only drops the display details, and a no-share check reads nothing live', async () => {
+      const world = await paidWorld('first');
+      const ledger = jest.spyOn(productionShareRefunds, 'refundLedgerOf').mockRejectedValue(new Error('live read failed'));
+      const frozen = await api('GET', `/production-share/preview?technicianId=${world.id}&weekStart=${W1}`);
+      expect(frozen.status).toBe(200);
+      expect(frozen.body).toMatchObject({ creditedCents: 100000, takeBackToSet: [], takeBackAnswers: [] });
+      expect(frozen.body.stops).toEqual([expect.objectContaining({ visitId: world.visit, kind: 'priced', creditCents: 100000, readOnly: true, serviceType: null })]);
+      // A week no final check covers still reports the failure.
+      const open = await api('GET', `/production-share/preview?technicianId=${world.id}&weekStart=${W3}`);
+      expect(open.status).toBe(500);
+      ledger.mockClear();
+      // A final check that recorded no share: nothing is read live at all.
+      const id = await tech('Sample Bravo');
+      await settings(id, { bar_cents: 10000 });
+      await worked(id, W2, 40);
+      await stop(id, W2, '1000.00');
+      process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'false';
+      await finalWeek(W2);
+      process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
+      const none = await api('GET', `/production-share/preview?technicianId=${id}&weekStart=${W2}`);
+      expect(none.status).toBe(200);
+      expect(none.body).toMatchObject({ recordedNoProductionShare: true, stops: [] });
+      expect(ledger).not.toHaveBeenCalled();
     });
   });
 

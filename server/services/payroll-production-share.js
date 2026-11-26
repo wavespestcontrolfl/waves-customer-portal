@@ -340,10 +340,10 @@ function takeBackNote(name, count) {
 }
 
 /** Raises the refund bells for the flags a draft or a preview read (production-share-refund-alerts.js). Never throws. */
-async function alertRefundFlags(inputs) {
+async function alertRefundFlags(inputs, weekStart = '') {
   const { raiseRefundFlagAlerts } = require('./production-share-refund-alerts');
   for (const [technicianId, input] of inputs || []) {
-    if (input && input.stops) await raiseRefundFlagAlerts({ technicianId, stops: input.stops, takeBackToSet: input.takeBackToSet || [] });
+    if (input && input.stops) await raiseRefundFlagAlerts({ technicianId, weekStart, stops: input.stops, takeBackToSet: input.takeBackToSet || [] });
   }
 }
 

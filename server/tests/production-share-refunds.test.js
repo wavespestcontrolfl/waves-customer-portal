@@ -49,11 +49,11 @@ describe('the refund bell', () => {
   it('lists the flagged stop of the own week and the paid stop to set, nothing else', () => {
     expect(flagsOf(week)).toEqual([
       { kind: 'own', visitId: 'v1', signals: ['pay:x:100', 'kind:refund_flagged'] },
-      { kind: 'paid', visitId: 'v3', signals: ['orphan:y', 'pay:x:100', 'answer:none', 'signals:none'] },
+      { kind: 'paid', visitId: 'v3', signals: ['source:', 'signals:none', 'week:'] },
     ]);
     // A refund the owner answered that changed rings as its own kind.
     expect(flagsOf({ takeBackToSet: [{ visitId: 'v4', newSignals: [], reason: 'changed', answerRevision: '7:t' }] }))
-      .toEqual([{ kind: 'changed', visitId: 'v4', signals: ['answer:7:t', 'signals:none'] }]);
+      .toEqual([{ kind: 'changed', visitId: 'v4', signals: ['source:', 'signals:none', 'week:'] }]);
   });
 
   it('keys a flag by visit and sorted signals, so the same refund is one bell and a new signal is another', () => {
@@ -179,8 +179,11 @@ describe('a paid-stop prompt is keyed by its signal revision', () => {
   });
 
   it('keys the paid-stop bell by it, so each new state rings once', () => {
-    const key = (rev) => flagsOf({ takeBackToSet: [{ ...toSet(rev), answerRevision: '7:t' }] })[0].signals;
+    const key = (rev, answerRevision = '7:t', weekStart = '2026-09-21') => flagsOf({ weekStart, takeBackToSet: [{ ...toSet(rev), answerRevision }] })[0].signals;
     expect(key('r1')).not.toEqual(key('r2'));
+    // Re-saving the same total moves the answer revision, never the key; a new review week does.
+    expect(key('r1', '7:t')).toEqual(key('r1', '8:u'));
+    expect(key('r1', '7:t', '2026-09-21')).not.toEqual(key('r1', '7:t', '2026-09-28'));
     expect(flagKeyOf('v9', key('r1'))).toBe(flagKeyOf('v9', key('r1')));
   });
 });

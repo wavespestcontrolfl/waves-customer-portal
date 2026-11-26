@@ -1421,10 +1421,20 @@ async function finalizedWeekOf(conn, technicianId, weekStart) {
 
 // Which rows a week is shown with: the frozen ones when a final check froze a production share; none when a final check recorded no production
 // share (the gate was off, or it covered only time off: nothing is worked out live); the live ones otherwise.
+// The week as the pay run works it out: every W-2 technician with numbers in force is read together (an invoice or a package shared by two
+// technicians is split once), and this technician's rows are returned. For a week a final check covers it is optional (display details): null when it
+// is not read (the check recorded no share) or when the read fails.
+async function liveWeekFor(conn, technicianId, weekStart, settings, paidWeek) {
+  if (!paidWeek) return weekOfTechnician(conn, technicianId, weekStart, settings);
+  const frozen = paidWeek.figures && Number.isFinite(Number(paidWeek.figures.shareCents));
+  if (!frozen) return null;
+  try { return await weekOfTechnician(conn, technicianId, weekStart, settings); } catch { return null; }
+}
+
 function weekRowsOf(paidWeek, week) {
   const frozen = paidWeek && paidWeek.figures && Number.isFinite(Number(paidWeek.figures.shareCents)) ? paidWeek.figures : null;
   const recordedNone = Boolean(paidWeek) && !frozen;
-  const stops = frozen ? frozenStopRows(frozen, week.rows) : (recordedNone ? [] : week.rows);
+  const stops = frozen ? frozenStopRows(frozen, week ? week.rows : []) : (recordedNone ? [] : week.rows);
   return { frozen, recordedNone, stops, days: shiftDays(stops) };
 }
 
@@ -1478,17 +1488,17 @@ async function previewWeek(technicianId, weekStart, conn = db) {
   // From here on the id is the one the database holds (lowercase), whatever the caller typed.
   const id = canonicalId(technician.id);
   const settings = await settingsFor(conn, id, weekStart);
-  // The week as the pay run works it out: every W-2 technician with numbers in force is read together (an invoice or a package shared
-  // by two technicians is split once), and this technician's rows are returned.
-  const week = await weekOfTechnician(conn, id, weekStart, settings);
   // A week a final check covers shows what that check froze and nothing read now for a number: its stop rows (credit, kind, review mark), take-backs,
   // credited production, share and outstanding take-back. Live visit data only fills display details (type, time, address). A refund on one of its
   // stops is answered as a take-back in a later week, never as an own-week credit the guard would refuse (and no own-week bell rings for it).
+  // The final check is read FIRST. The live week (below) is needed only for a week no final check covers; for a covered week it only fills display
+  // details and the prompts about earlier weeks, so a failure there drops those and never the frozen figures (a no-share check reads none).
   const paidWeek = await finalizedWeekOf(conn, id, weekStart);
+  const week = await liveWeekFor(conn, id, weekStart, settings, paidWeek);
   const { frozen, recordedNone, stops, days } = weekRowsOf(paidWeek, week);
-  const prompts = recordedNone ? { toSet: [], answers: [] } : { toSet: week.takeBackToSet, answers: week.takeBackAnswers };
+  const prompts = week && !recordedNone ? { toSet: week.takeBackToSet, answers: week.takeBackAnswers } : { toSet: [], answers: [] };
   const { applied, result, outstanding } = weekFigures({ frozen, recordedNone, stops, week, settings, days });
-  await require('./production-share-refund-alerts').raiseRefundFlagAlerts({ technicianId: id, stops: paidWeek ? [] : stops, takeBackToSet: prompts.toSet });
+  await require('./production-share-refund-alerts').raiseRefundFlagAlerts({ technicianId: id, weekStart, stops: paidWeek ? [] : stops, takeBackToSet: prompts.toSet });
   // The conflict tuples stay on the server: the page gets the stop's revision.
   const shown = stops.map((stop) => { const copy = { ...stop }; delete copy.conflictTuples; delete copy.refundInvoices; return copy; });
   return {

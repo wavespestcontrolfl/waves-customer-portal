@@ -61,8 +61,10 @@
  *                                            customer-credit.js refundCreditNote (a payer transfer or a void write other notes)
  *   inv-refunded:<invoice id>                the invoice status is 'refunded'
  * Failure marker each family carries (a refund the bank bounced must change or remove its signal, so an answer reopens and movement stops):
- *   pay            payments.metadata.failed_refund_ids (the id is dropped from the identity hash; the webhook also rewinds refund_amount) AND
- *                  stripe_failed_refunds by the row's charge or intent (':x<hash>' suffix: a bounce fenced before a row existed)
+ * ONE helper reads them all (failedRefundIdsSql): the sorted union of stripe_failed_refunds and payments.metadata.failed_refund_ids over every
+ * payment row of the same charge or intent. pay, stmt and orphan-stmt put its hash in their id (':x<hash>'); a parked partial refund is excluded when
+ * its refund id is in it.
+ *   pay            the helper (':x<hash>' suffix), and the row's own failed ids are dropped from its identity hash (the webhook also rewinds refund_amount)
  *   stmt           the same two markers as pay
  *   orphan         a partial refund: stripe_failed_refunds by refund id, or payments.metadata.failed_refund_ids of the charge's rows (EXCLUDED);
  *                  a partial dispute: the case is resolved when it closes won (EXCLUDED); no refund id exists to fence
@@ -124,11 +126,17 @@ const REFUND_IDENTITY_SQL = `COALESCE((SELECT ':' || left(md5(string_agg(x.id, '
 // a source holding such a signal is listed again EVERY week (reason 'unclear', the answer shown as the previous total) so the owner re-checks it; the
 // answer he saved keeps being applied meanwhile (see addSource).
 const UNCLEAR_SIGNAL_PREFIX = 'orphan-stmt:';
-// The refund ids the bank bounced BEFORE settlement are fenced in stripe_failed_refunds, keyed by charge and PaymentIntent (no payments row exists
-// to hold them). A hash of the sorted ids that match a charge or intent is in the pay, stmt and orphan-stmt signals, so a bounce changes them,
-// reopens an answer and suspends movement. '' when nothing is fenced.
-const failedFenceSql = (intent, charge) => `COALESCE((SELECT ':x' || left(md5(string_agg(ff.stripe_refund_id, ',' ORDER BY ff.stripe_refund_id)), 10)
-      FROM stripe_failed_refunds ff WHERE ff.stripe_payment_intent_id = ${intent} OR ff.stripe_charge_id = ${charge}), '')`;
+// ONE helper for the refund ids the bank bounced, for a charge or PaymentIntent: the sorted union (comma list, NULL when none) of the ids fenced in
+// stripe_failed_refunds (a bounce before settlement, when no payments row existed) and the ids in payments.metadata.failed_refund_ids of EVERY
+// payment row with that intent or charge (a bounce after settlement, which is the only place a settled payment records it). Every signal family
+// with an intent and a charge reads it: pay, stmt and orphan-stmt put its hash in their id; a parked partial refund is excluded when its refund id is in it.
+const failedRefundIdsSql = (intent, charge) => `(SELECT string_agg(u.id, ',' ORDER BY u.id) FROM (
+      SELECT ff.stripe_refund_id AS id FROM stripe_failed_refunds ff WHERE ff.stripe_payment_intent_id = ${intent} OR ff.stripe_charge_id = ${charge}
+      UNION
+      SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(fp.metadata -> 'failed_refund_ids') = 'array' THEN fp.metadata -> 'failed_refund_ids' ELSE '[]'::jsonb END)
+      FROM payments fp WHERE fp.stripe_payment_intent_id = ${intent} OR fp.stripe_charge_id = ${charge}) u)`;
+// The ':x<hash>' suffix of that list; '' when nothing bounced.
+const failedFenceSql = (intent, charge) => `COALESCE(':x' || left(md5(${failedRefundIdsSql(intent, charge)}), 10), '')`;
 const STATUS_SUFFIX_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 AND p.status IN ('refunded', 'disputed') THEN ':' || p.status ELSE '' END";
 const AMOUNT_OR_STATE_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 THEN round(p.refund_amount * 100)::bigint::text ELSE p.status END";
 
@@ -232,12 +240,9 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
         OR split_part(o.stripe_payment_intent_id, ':', 1) IN (SELECT k.pi FROM keys k WHERE k.invoice_id = v.invoice_id))
       WHERE ((o.source = 'combined_pay_webhook' AND (
           (o.stripe_payment_intent_id LIKE '%:partial-refund:%'
-            AND NOT EXISTS (SELECT 1 FROM stripe_failed_refunds ff WHERE ff.stripe_refund_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 2))
-            -- after settlement the bounce is recorded on the charge's payment rows instead (metadata.failed_refund_ids)
-            AND NOT EXISTS (SELECT 1 FROM payments fp
-              WHERE (fp.stripe_charge_id = o.stripe_charge_id OR fp.stripe_payment_intent_id = split_part(o.stripe_payment_intent_id, ':partial-refund:', 1))
-                AND jsonb_typeof(fp.metadata -> 'failed_refund_ids') = 'array'
-                AND jsonb_exists(fp.metadata -> 'failed_refund_ids', split_part(o.stripe_payment_intent_id, ':partial-refund:', 2))))
+            -- a bounce before settlement is fenced in stripe_failed_refunds, one after settlement in the payment rows' metadata.failed_refund_ids
+            AND split_part(o.stripe_payment_intent_id, ':partial-refund:', 2)
+              <> ALL (COALESCE(string_to_array(${failedRefundIdsSql("split_part(o.stripe_payment_intent_id, ':partial-refund:', 1)", 'o.stripe_charge_id')}, ','), ARRAY[]::text[])))
           OR (o.stripe_payment_intent_id LIKE '%:partial-dispute:%' AND NOT o.resolved)))
         OR o.source = 'statement_pay_webhook')
       UNION

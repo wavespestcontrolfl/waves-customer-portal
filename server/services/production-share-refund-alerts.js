@@ -33,12 +33,15 @@ const KINDS = {
 };
 
 // The refund flags in a technician's week: [{ kind: 'own' | 'paid', visitId, signals }]. Pure.
-function flagsOf({ stops = [], takeBackToSet = [] }) {
+function flagsOf({ stops = [], takeBackToSet = [], weekStart: week = '' }) {
   return [
     // The stop's kind and the answer revision are in the key, so the same refund rings once and a changed state rings again.
     ...stops.filter((stop) => OWN_KINDS.has(stop.kind)).map((stop) => ({ kind: 'own', visitId: stop.visitId, signals: [...(stop.refundSignals || []), `kind:${stop.kind}`] })),
+    // A paid-stop reminder is keyed by its source (check, visit), the signal revision and the review week: re-saving the same total on an
+    // unchanged source (the answer revision moves, the facts do not) rings nothing again that week.
     ...takeBackToSet.map((one) => ({
-      kind: one.reason === 'changed' ? 'changed' : 'paid', visitId: one.visitId, signals: [...(one.newSignals || []), `answer:${one.answerRevision || 'none'}`, `signals:${one.signalRevision || 'none'}`],
+      kind: one.reason === 'changed' ? 'changed' : 'paid', visitId: one.visitId,
+      signals: [`source:${one.checkId || ''}`, `signals:${one.signalRevision || 'none'}`, `week:${week || ''}`],
     })),
   ];
 }
