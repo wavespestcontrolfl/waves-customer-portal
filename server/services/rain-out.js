@@ -1614,6 +1614,82 @@ async function checkTarget({ serviceId, target, caller = null, reasonCode = null
   return { ok: true, conflicts, routeConflicts, ...(await routeShiftRows(service, route, { office: true }))(target) };
 }
 
+// GATE_TECH_SHIFT_HOURS (D4): the shift line an office save states, asked before the save for each hour
+// the office picked or its sheet offers: "<Name>'s shift is 8:00 AM to 6:00 PM. This visit is outside those
+// hours." `asks` is [{ technicianId, date, block }], `block` the visit as the save would leave it (pickedBlock);
+// the answer has one entry for each ask, in order: the line, or null. It is the office reader's own answer
+// (technician-eligibility.js shiftLinesFor): the shift line alone, none on a day the technician does not
+// work (the shift is not that day's), none for a time it cannot read, no read with the gate off, and one
+// pair of reads for each technician asked about. No technician: no line. Advisory: a failure is logged
+// and gives no line. `caller` is who asks: an ask the caller may not make (mayAskShiftOf) reads nothing
+// and has no line.
+async function pickedShiftLines(asks, caller) {
+  const lines = asks.map(() => null);
+  const idOf = (ask) => (ask.technicianId && mayAskShiftOf(caller, ask.technicianId) ? String(ask.technicianId) : null);
+  for (const technicianId of new Set(asks.map(idOf).filter(Boolean))) {
+    const own = asks.map((_ask, i) => i).filter((i) => idOf(asks[i]) === technicianId);
+    try {
+      const told = await require('./technician-eligibility').shiftLinesFor(technicianId, own.map((i) => asks[i]));
+      own.forEach((i, n) => { lines[i] = told[n] || null; });
+    } catch (err) {
+      logger.info(`[rain-out] picked-hour shift line failed for technician ${technicianId}: ${err.message}`);
+    }
+  }
+  return lines;
+}
+
+// Whose shift a caller may ask about before a save: an admin any technician's, a technician its own.
+// The line names the technician and the shift's hours (today's follow the clock-in), and these reads
+// change nothing, so a technician-role login never learns another technician's hours from them,
+// whatever GATE_TECH_LOGIN_PRIVACY says. No caller: no one's. The two ids are compared as uuids, not as
+// text: slot-check takes an id in capitals, in braces or with no hyphens (Joi.guid), and so does PostgreSQL.
+const uuidDigits = (id) => String(id).toLowerCase().replace(/[{}-]/g, '');
+const mayAskShiftOf = (caller, technicianId) => caller?.isAdmin === true
+  || (caller?.technicianId != null && uuidDigits(caller.technicianId) === uuidDigits(technicianId));
+
+// A visit as a save of the picked window would leave it: that window, and the visit's length.
+const pickedBlock = (window, minutes) => ({ window_start: window.start, window_end: window.end, estimated_duration_minutes: minutes });
+
+// The asks of the pickers' check: each picked slot with the length a save of it leaves the visit. A new
+// appointment, and an edit of the length (`durationEdit`, the edit form: update-details writes the form's
+// length; the same flag as on the best-times read), are judged on the length sent. A move of a visit that
+// exists (`serviceId`) keeps the visit's stored length, and the calendars send the booked window's span as
+// the length: a 90-minute visit in a one-hour window works past that window. So a move is judged on the
+// stored length, and on its window alone when the visit has none, as the save judges it.
+async function pickedSlotAsks(slots, caller) {
+  const stored = await storedLengths(slots, caller);
+  // The read of the lengths failed: a move's length is not known, so that slot is not asked about (no
+  // technician, no line). A line on the length sent could disagree with the save.
+  const unread = (p) => stored === null && !!p.serviceId && !p.durationEdit;
+  const moved = (p) => !p.durationEdit && !!stored && stored.has(uuidDigits(p.serviceId));
+  const lengthOf = (p) => (moved(p) ? stored.get(uuidDigits(p.serviceId)) : p.durationMinutes);
+  return slots.map((p) => ({ technicianId: unread(p) ? null : p.technicianId, date: p.date, block: pickedBlock(p.window, lengthOf(p)) }));
+}
+
+// GATE_TECH_SHIFT_HOURS: the stored length of each visit a picked slot moves, keyed as uuidDigits reads its
+// id. One read, and only for a slot that can get a line and is a move: it names a visit, it is no edit of
+// the length, and it names a technician the caller may ask about. The gate off, or no such slot: no read.
+// A failed read is logged and gives null: no move of the check gets a line (pickedSlotAsks). A technician
+// caller gets the length of its own visits only (mayAskShiftOf on the visit's technician): a line that
+// appears or not at a picked hour would tell the stored length of any visit whose id it sends. Another
+// technician's visit is judged on the length sent, as a visit that is not found.
+async function storedLengths(slots, caller) {
+  const lengths = new Map();
+  const ids = [...new Set(slots
+    .filter((p) => p.serviceId && !p.durationEdit && p.technicianId && mayAskShiftOf(caller, p.technicianId))
+    .map((p) => String(p.serviceId)))];
+  if (!ids.length || !require('../config/feature-gates').techShiftHoursLive()) return lengths;
+  try {
+    const rows = await db('scheduled_services').whereIn('id', ids).select('id', 'technician_id', 'estimated_duration_minutes');
+    rows.filter((row) => mayAskShiftOf(caller, row.technician_id))
+      .forEach((row) => lengths.set(uuidDigits(row.id), row.estimated_duration_minutes));
+  } catch (err) {
+    logger.info(`[slot-check] stored visit lengths not read: ${err.message}`);
+    return null;
+  }
+  return lengths;
+}
+
 // Batch advisory probe for the generic date/time pickers (edit, reschedule,
 // create, bulk move) — the picker-agnostic sibling of checkTarget. No route
 // simulation: each target is just a date + window checked against the same
@@ -1651,6 +1727,7 @@ async function checkSlots({ targets, caller = null } = {}) {
       serviceId: t.serviceId,
       technicianId: t.technicianId,
       durationMinutes: t.durationMinutes,
+      durationEdit: t.durationEdit === true,
     });
   }
   // No service in hand, so nameScopeFor degrades to admin-or-nobody: admins
@@ -1710,7 +1787,10 @@ async function checkSlots({ targets, caller = null } = {}) {
       }),
     };
   }));
-  return { ok: true, results };
+  // The office's shift line for each picked slot that names a technician (pickedShiftLines), beside its
+  // overlap answer and never in it: `conflicts` is what the pickers count and word as a double booking.
+  const lines = await pickedShiftLines(await pickedSlotAsks(parsed, caller), caller);
+  return { ok: true, results: results.map((result, i) => (lines[i] ? { ...result, shiftWarning: lines[i] } : result)) };
 }
 
 /**
