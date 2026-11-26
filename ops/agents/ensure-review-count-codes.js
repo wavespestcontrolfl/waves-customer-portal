@@ -44,10 +44,11 @@ function planRows({ offices, techs, techSlugRe, fallbackOfficeId }) {
   return wanted;
 }
 
-// Why an existing row cannot count a scan, or null when it can.
-function unusableReason(row, now = Date.now()) {
+// Why an existing row is not ready, or null when it is. resolveShortCode skips an expired row, and the public
+// /l/<code> alias redirects to target_url, so the stored target must be exactly the review form this run plans.
+function unusableReason(row, expectedTarget, now = Date.now()) {
   if (row.expires_at && new Date(row.expires_at).getTime() < now) return 'expired';
-  if (/\/rv(\/|$|\?)/i.test(String(row.target_url || ''))) return 'target loops into /rv';
+  if (String(row.target_url || '') !== expectedTarget) return 'target is not the planned review form';
   return null;
 }
 
@@ -97,13 +98,14 @@ async function main() {
       .select('code', 'click_count', 'expires_at', 'target_url');
     const have = new Map(existing.map((r) => [r.code, r]));
     const missing = wanted.filter((w) => !have.has(w.code));
-    // An existing row is only "ready" when it can count: resolveShortCode skips an expired row, and a row aimed at
-    // /rv would loop the /l alias back into /rv. Such rows are reported, never changed (this script never updates).
-    const unusable = existing.filter((r) => unusableReason(r));
+    // Rows that are not ready are reported, never changed (this script never updates).
+    const plannedTarget = new Map(wanted.map((w) => [w.code, w.target_url]));
+    const why = (r) => unusableReason(r, plannedTarget.get(r.code));
+    const unusable = existing.filter((r) => why(r));
     for (const w of wanted) {
       const row = have.get(w.code);
       if (!row) console.log(`  missing ${w.code}`);
-      else if (unusableReason(row)) console.log(`  UNUSABLE ${w.code}: ${unusableReason(row)}`);
+      else if (why(row)) console.log(`  UNUSABLE ${w.code}: ${why(row)}`);
       else console.log(`  ready   ${w.code} (${row.click_count} clicks)`);
     }
     console.log(`Wanted ${wanted.length}: ${existing.length - unusable.length} ready, ${unusable.length} unusable, ${missing.length} missing.`);

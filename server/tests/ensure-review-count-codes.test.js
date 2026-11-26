@@ -60,15 +60,17 @@ describe('parseTechArgs', () => {
 
 describe('unusableReason', () => {
   const now = Date.parse('2026-11-25T12:00:00Z');
-  test('a live row aimed at a review form is ready', () => {
-    expect(unusableReason({ expires_at: null, target_url: 'https://g.page/r/x/review' }, now)).toBeNull();
-    expect(unusableReason({ expires_at: '2027-01-01T00:00:00Z', target_url: 'https://g.page/r/x/review' }, now)).toBeNull();
+  const form = 'https://g.page/r/x/review';
+  test('a live row aimed at the planned review form is ready', () => {
+    expect(unusableReason({ expires_at: null, target_url: form }, form, now)).toBeNull();
+    expect(unusableReason({ expires_at: '2027-01-01T00:00:00Z', target_url: form }, form, now)).toBeNull();
   });
   test('an expired row cannot count', () => {
-    expect(unusableReason({ expires_at: '2026-11-01T00:00:00Z', target_url: 'https://g.page/r/x/review' }, now)).toBe('expired');
+    expect(unusableReason({ expires_at: '2026-11-01T00:00:00Z', target_url: form }, form, now)).toBe('expired');
   });
-  test('a row aimed at /rv would double count through /l', () => {
-    expect(unusableReason({ target_url: 'https://portal.wavespestcontrol.com/rv/adam' }, now)).toBe('target loops into /rv');
-    expect(unusableReason({ target_url: 'https://portal.wavespestcontrol.com/rv' }, now)).toBe('target loops into /rv');
+  test.each([
+    ['loops into /rv', 'https://portal.wavespestcontrol.com/rv/adam'], ['another page', 'https://example.com/'], ['empty', null],
+  ])('a row whose target %s is not ready', (_label, target) => {
+    expect(unusableReason({ target_url: target }, form, now)).toBe('target is not the planned review form');
   });
 });
