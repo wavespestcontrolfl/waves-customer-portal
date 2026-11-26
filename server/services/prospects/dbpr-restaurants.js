@@ -414,9 +414,11 @@ function readReportTables(page) {
   let violationsHeads = 0; // the violations head rows read so far: a second one makes the page unreadable
   let row = []; // the cell texts of the row being read, blank cells kept so each keeps its position
   let spanned = false; // whether a cell of the table being read covers more than one column or row ("<td span>")
+  const outerSpanned = []; // the flag of each table a nested table opened inside, restored when it closes
   const endRow = () => {
     // A merged cell anywhere in either table (a row above its head row too, as a rowspan reaches down) puts cells at
-    // the wrong positions: the page cannot answer. The flag holds from a table tag to the next one.
+    // the wrong positions: the page cannot answer. Each table keeps its own flag: a table nested in a cell starts
+    // clear, and its end gives back the flag of the table around it.
     if (spanned && (codeColumn >= 0 || dateColumn >= 0 || row.includes('Inspection Date') || violationsColumn(row) >= 0)) {
       unreadable = true;
     }
@@ -457,7 +459,14 @@ function readReportTables(page) {
       codeColumn = -1;
       dateColumn = -1;
     }
-    if (/^table$/i.test(match[2])) spanned = false;
+    if (/^table$/i.test(match[2])) {
+      if (match[0].startsWith('</')) {
+        spanned = outerSpanned.length ? outerSpanned.pop() : false;
+      } else {
+        outerSpanned.push(spanned);
+        spanned = false;
+      }
+    }
     row = [];
   }
   endRow();

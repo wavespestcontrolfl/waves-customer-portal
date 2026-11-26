@@ -309,6 +309,10 @@ describe('parseInspectionReport', () => {
     const above = reportPage(rows).replace('<table><tr><td>Inspection Type</td>', '<table><tr><td rowspan="2">Result</td></tr><tr><td>Inspection Type</td>');
     expect(above).not.toBe(reportPage(rows));
     expect(parse(above, { violation35: 1 })).toBeNull();
+    // A table nested in the merged cell does not clear the flag of the table around it.
+    const nested = reportPage(rows).replace('<table><tr><td>Inspection Type</td>',
+      '<table><tr><td rowspan="2"><table><tr><td>Result</td></tr></table></td></tr><tr><td>Inspection Type</td>');
+    expect(parse(nested, { violation35: 1 })).toBeNull();
     // The state's pages merge cells in their layout, outside both tables: that still answers.
     const layout = `<table><tr><td colspan="3">License information</td></tr></table>${reportPage(rows)}`;
     expect(parse(layout, { violation35: 1 })).toEqual(answer);
