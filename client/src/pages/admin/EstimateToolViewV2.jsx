@@ -5141,10 +5141,16 @@ export default function EstimateToolViewV2({
         return null;
       }
 
+      // The save prices a lead-only builder for the lead's own customer (its leadId and typed contact). The
+      // preview gets the same three values, outside `options` (those are stored and replayed), so the
+      // returning-customer setup fee rule reads the same customer's visits in both. A reopened estimate sends none.
+      const lead = !editMode?.id && form.leadId
+        ? { leadId: form.leadId, customerPhone: form.customerPhone || "", customerEmail: form.customerEmail || "" }
+        : undefined;
       const r = await fetch("/api/admin/estimator/calculate-estimate", {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ profile, selectedServices, options }),
+        body: JSON.stringify({ profile, selectedServices, options, lead }),
       });
       if (!r.ok) {
         const openQuestion = await scopeUnresolvedQuestion(r);
@@ -5934,6 +5940,14 @@ export default function EstimateToolViewV2({
           <div className="mb-4 border-hairline border-zinc-900 rounded-xs bg-zinc-50 px-4 py-3 text-14 text-zinc-700" data-testid="move-estimate-edit-banner">
             New-home estimate for a move. The $99 setup fee is waived.
             {formatCalendarDate(editMoveEstimate.moveInDate) && <> Move-in {formatCalendarDate(editMoveEstimate.moveInDate)}.</>}
+          </div>
+        )}
+        {E?.returningSetupFeeWaiver && (
+          <div className="mb-4 border-hairline border-zinc-900 rounded-xs bg-zinc-50 px-4 py-3 text-14 text-zinc-700" data-testid="returning-setup-fee-banner">
+            Returning customer. The $99 setup fee is waived.
+            {formatCalendarDate(E.returningSetupFeeWaiver.lastCompletedVisitDate) && (
+              <> Last plan visit {formatCalendarDate(E.returningSetupFeeWaiver.lastCompletedVisitDate)}, {E.returningSetupFeeWaiver.gapDays} days ago. The fee comes back after {E.returningSetupFeeWaiver.windowDays} days.</>
+            )}
           </div>
         )}
         {editMode && (

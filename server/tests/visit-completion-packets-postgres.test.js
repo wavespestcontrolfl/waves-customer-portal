@@ -5091,17 +5091,39 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
   });
 
+  // The closeout freezes the visit's place in its plan series (returning-setup-fee-waiver.js reads it). A failed
+  // read (a real SQL error inside the completion's transaction) omits that one field: the packet still saves, with
+  // its add-on lines frozen.
+  test('a failed plan-series read omits the frozen series and preserves the packet', async () => {
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ is_recurring: true, recurring_pattern: 'quarterly' });
+    await mockPg('scheduled_service_addons').insert({ scheduled_service_id: fixture.serviceIds[0], service_name: 'Fixture Monthly Add-on', recurring_pattern: 'monthly' });
+    const seriesRead = (query) => query.sql.includes('from "scheduled_services" as "s" left join "scheduled_services" as "p"');
+    await withReadFailure(seriesRead, async (database) => {
+      expect(await saveVisitCompletionPacket(submission(), database)).toMatchObject({ status: 202 });
+      const records = await database('service_records').where({ customer_id: fixture.customerId }).orderBy('scheduled_service_id');
+      expect(records).toHaveLength(2);
+      expect(records[0].service_data).not.toHaveProperty('completedSeries');
+      // The line keeps the cadence its own freezer read, with no cycle.
+      expect(records[0].service_data.completedAddonLines.map((line) => line.recurrence))
+        .toEqual([{ pattern: 'monthly', intervalDays: null, nth: null, weekday: null }]);
+      // The second member's own read succeeded: a visit with no series is frozen as no plan visit.
+      expect(records[1].service_data.completedSeries).toEqual({ planVisit: false, pattern: null, cycleDays: null });
+    });
+  });
+
   test.each(['rows', 'catalog', 'profiles'])('add-on %s read failures preserve the packet and per-line snapshot fallback', async (read) => {
     const key = `fixture_${fixture.catalogId}`;
+    // The first visit is a quarterly plan visit: its closeout freezes that (returning-setup-fee-waiver.js reads it).
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ is_recurring: true, recurring_pattern: 'quarterly' });
     await mockPg('service_completion_profiles').insert({ service_key: key, completion_mode: 'service_report', active: true });
     await mockPg('scheduled_service_addons').insert([
       { scheduled_service_id: fixture.serviceIds[0], service_id: fixture.catalogId,
         service_name: 'Fixture Frozen Add-on', service_key_snapshot: key },
       { scheduled_service_id: fixture.serviceIds[0], service_id: fixture.catalogId,
-        service_name: 'Fixture Live Add-on', service_key_snapshot: null },
+        service_name: 'Fixture Live Add-on', service_key_snapshot: null, recurring_pattern: 'monthly' },
     ]);
     const matches = {
-      rows: (query) => query.sql.startsWith('select "service_id", "service_name", "service_key_snapshot" from "scheduled_service_addons"'),
+      rows: (query) => query.sql.startsWith('select "service_id", "service_name", "service_key_snapshot", "recurring_pattern", "recurring_interval_days", "recurring_nth", "recurring_weekday" from "scheduled_service_addons"'),
       catalog: (query) => query.sql.startsWith('select "id", "service_key" from "services"'),
       profiles: (query) => query.sql.startsWith('select "service_key", "project_type" from "service_completion_profiles"'),
     };
@@ -5109,10 +5131,17 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(await saveVisitCompletionPacket(submission(), database)).toMatchObject({ status: 202 });
       const records = await database('service_records').where({ customer_id: fixture.customerId }).orderBy('scheduled_service_id');
       expect(records).toHaveLength(2);
+      // The visit's plan series freezes with the closeout, whatever happens to the add-on reads.
+      expect(records[0].service_data.completedSeries).toEqual({ planVisit: true, pattern: 'quarterly', cycleDays: 91 });
       const lines = records[0].service_data.completedAddonLines;
       if (read === 'rows') expect(lines).toBeUndefined();
       else {
         expect(lines).toHaveLength(2);
+        // Each line freezes its cadence from the schedule line: none (the line rides the visit's), or its own
+        // with that cadence's cycle from the visit's series slot.
+        const cadenceOf = (name) => lines.find((line) => line.serviceName === name).recurrence;
+        expect(cadenceOf('Fixture Frozen Add-on')).toEqual({ pattern: null, intervalDays: null, nth: null, weekday: null });
+        expect(cadenceOf('Fixture Live Add-on')).toEqual({ pattern: 'monthly', intervalDays: null, nth: null, weekday: null, cycleDays: 30 });
         expect(lines.find((line) => line.serviceName === 'Fixture Live Add-on')).not.toHaveProperty('serviceKey');
         const frozen = lines.find((line) => line.serviceName === 'Fixture Frozen Add-on');
         if (read === 'catalog') expect(frozen).toMatchObject({ serviceKey: key, findingsType: null });

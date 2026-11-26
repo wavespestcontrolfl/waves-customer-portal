@@ -470,8 +470,10 @@ describe('classification behavior', () => {
         select: () => {
           if (table === 'scheduled_service_addons') {
             return Promise.resolve([
-              { service_id: 'a1', service_name: 'Flea & Tick', service_key_snapshot: 'flea_tick' },
-              { service_id: 'a2', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly' },
+              { service_id: 'a1', service_name: 'Flea & Tick', service_key_snapshot: 'flea_tick',
+                recurring_pattern: 'one_time', recurring_interval_days: null, recurring_nth: null, recurring_weekday: null },
+              { service_id: 'a2', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly',
+                recurring_pattern: null, recurring_interval_days: null, recurring_nth: null, recurring_weekday: null },
             ]);
           }
           if (table === 'service_completion_profiles') return Promise.resolve(profiles);
@@ -491,6 +493,14 @@ describe('classification behavior', () => {
     const withoutPointer = await frozenAddonLinesForCompletion('ss-r22', trxFor([]));
     expect(withoutPointer[0]).not.toHaveProperty('serviceKey');
     expect(withoutPointer[0]).toMatchObject({ serviceId: 'a1', serviceName: 'Flea & Tick' });
+    // Every line freezes its cadence, key frozen or not: a one_time line is one application, and a line with no
+    // pattern rode the visit's cadence. The schedule line can be edited or removed after the visit.
+    for (const lines of [withPointer, withoutPointer]) {
+      expect(lines.map((line) => line.recurrence)).toEqual([
+        { pattern: 'one_time', intervalDays: null, nth: null, weekday: null },
+        { pattern: null, intervalDays: null, nth: null, weekday: null },
+      ]);
+    }
     // r26: a rules-covered key does NOT freeze without its profile row
     // either — a null-pointer freeze would pin a typed lane (termite)
     // to its unconditional key rule forever

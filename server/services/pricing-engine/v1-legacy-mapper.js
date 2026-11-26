@@ -1360,8 +1360,12 @@ function mapV1ToLegacyShape(v1Result) {
   // the engine puts on the pest line (PEST.initialFee, live pricing_config).
   // The page shows that fee and the accept bills it, so the stored one-time
   // and year-1 totals carry it too (they were $99 low before).
+  // A result the returning-customer rule marked (returning-setup-fee-waiver waiveSetupFeeOnEngineResult,
+  // GATE_RETURNING_SETUP_FEE_GAP) carries no fee: the pest line's is already zero, and the mosquito constant
+  // below has no line to zero.
   const feeMixServices = palmMonthlyAfterCredits > 0 ? [...services, { service: 'palm_injection' }] : services;
-  const membershipFee = require('../estimate-converter').recurringMixHasMembershipFeeService(feeMixServices)
+  const membershipFee = v1Result.membershipSetupFeeWaived !== true
+    && require('../estimate-converter').recurringMixHasMembershipFeeService(feeMixServices)
     ? (pestLI ? (pestLI.initialFee || 0) : (Number(require('./constants').PEST.initialFee) || 0))
     : 0;
 

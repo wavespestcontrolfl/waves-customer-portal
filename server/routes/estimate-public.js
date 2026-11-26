@@ -18605,6 +18605,18 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         return { status: 409, body: ({ error: 'reprice_unavailable' }) };
       }
     }
+    // Returning customer $99 rule (GATE_RETURNING_SETUP_FEE_GAP): a service change re-prices the quote, so it
+    // decides again, as a staff save does. The stored answer was for the plan before the change (one plan
+    // family) and is dropped; the customer's visit history decides for the plan after it. A failed read fails
+    // closed, like every other lookup here. Null while the gate is off or the estimate has no customer.
+    const Returning = require('../services/returning-setup-fee-waiver');
+    Returning.dropReturningSetupWaiver(parsedData);
+    let returningVisitHistory = null;
+    try {
+      returningVisitHistory = await Returning.loadReturningVisitHistory(db, { customerId: estimate.customer_id });
+    } catch (_) {
+      return { status: 409, body: ({ error: 'reprice_unavailable' }) };
+    }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     // A line this mutation ADDS was never sold: the add rail, or the customer taking a staff-parked
     // offer. The STAFF restore is the compensation of a send that delivered on no channel
@@ -18612,6 +18624,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const lineIsAdded = mode === 'add' || (mode === 'restore' && staffOffered && actor !== 'staff');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
+      returningVisitHistory,
       // A line this mutation adds (the add rail, or the customer taking a staff-parked offer) was
       // never sold, so the lawn pricer's v13 bahia review still applies to it. The STAFF restore is
       // the compensation of a send that delivered on no channel (revertLeadServiceForSend): it puts
@@ -18634,6 +18647,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     if (!reprice.recomputed) {
       return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
+    // The rule's answer for the plan after the change, stored where the page and the accept read a waiver.
+    Returning.storeReturningSetupWaiver(parsedData, reprice.returningSetupFeeWaiver);
 
     const afterResult = reprice.serverResult;
     // An add the engine declined to price (e.g. no turf basis after all) must
@@ -30634,6 +30649,10 @@ async function buildPricingBundleInner(estimate) {
         // (same rule as the fee card above).
         const anchorFrozenFee = Number(estData?.setupFeeQuote?.amount);
         if (estData?.setupFeeQuote && !(anchorFrozenFee > 0)) return rawV1OneTimeTotal;
+        // Returning customer inside one cycle + 30 days (GATE_RETURNING_SETUP_FEE_GAP): the save left the fee out
+        // of the stored totals and finalize strips the fee card, so the anchor must not add it back. A staff
+        // waiver keeps today's anchor.
+        if (require('../services/returning-setup-fee-waiver').returningSetupFeeWaiverOf(estData)) return rawV1OneTimeTotal;
         const fee = anchorFrozenFee > 0 ? anchorFrozenFee : (Number(PEST.initialFee || 99) || 99);
         return Math.round(((Number(rawV1OneTimeTotal) || 0) + fee) * 100) / 100;
       }
