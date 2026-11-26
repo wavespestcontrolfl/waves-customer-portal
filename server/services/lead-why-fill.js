@@ -63,14 +63,15 @@ const PRIOR_PROVIDER_RE = /(current|previous|prior|existing|former|old|last) (pe
 // At most one word between the phrase and the name ("had the Turner guy" is
 // two, so "we had ants and Orkin quoted us" never links Orkin).
 const RIVAL_USE_LEAD = String.raw`\b(?:had|have had|used|been using|been with|was with|were with|leaving|left|cancel+(?:ed|ing)?|switch(?:ing|ed)? from|currently (?:have|use|with))\s+(?:the\s+)?(?:\w+\s+)?`;
-const NO_PRIOR_PROVIDER_RE = /never (used|had|been with)|first time|no (current|previous|prior) (provider|company)|don'?t have (a|any) (provider|company|pest)/i;
+// A chunk about a quote or estimate is shopping, not a prior relationship.
+const NO_PRIOR_PROVIDER_RE = /never (used|had|been with)|first time|no (current|previous|prior) (provider|company)|don'?t have (a|any) (provider|company|pest)|\bquot(e|es|ed|ing)\b|estimate|\bbids?\b/i;
 
 // First match wins. Specific complaint themes sit before the broad price theme.
 const SWITCH_RULES = [
   ['moved', /\bmoved\b|new (home|house)|just (bought|purchased)|bought (a|the|our) (new )?(home|house)|closing on|offer on the home/],
   ['pests_came_back', /still (seeing|have|got)|came back|coming back|not work|didn'?t work|ineffective|failed treatment|treatment effectiveness|recurring infestation|keep seeing|getting worse/],
   ['no_show', /no[- ]show|didn'?t show|never show|never came|miss(ed|ing) (an? |our |the )?(appointment|service|visit)|service gap|skipp|didn'?t come|haven'?t been out|haven'?t come/],
-  ['no_callback', /call(ed)? back|callback|not getting back|can'?t reach|cannot reach|unresponsive|no one answer|nobody answer|never (answer|return)/],
+  ['no_callback', /(never|didn'?t|don'?t|did not|do not|won'?t|wouldn'?t|would not|no one|nobody) (ever )?(call(ed)? (me |us )?back|return(ed)? (my|our) calls?|answer(s|ed)?)|no callback|not getting back|can'?t reach|cannot reach|unresponsive/],
   ['contract', /contract|commitment|locked in|cancel(lation)? fee/],
   ['bundle', /bundle|consolidat|both lawn and pest|lawn and pest|one company/],
   ['price_creep', /price|pricing|cost|expensive|cheaper|afford|paying|raised|increase|went up|\$|dollar/],
@@ -159,7 +160,8 @@ function planLeadWhy(lead, chunks, now = new Date()) {
     }
   }
 
-  if (isBlank(lead.not_booked_reason) && !NO_NOT_BOOKED_STATUSES.has(lead.status)) {
+  // converted_at survives a reopen of a won lead: a converted lead never gets a not-booked reason.
+  if (isBlank(lead.not_booked_reason) && !lead.converted_at && !NO_NOT_BOOKED_STATUSES.has(lead.status)) {
     const ageDays = (now - new Date(lead.created_at)) / DAY_MS;
     if (LOST_STATUSES.has(lead.status) || ageDays >= NOT_BOOKED_MIN_AGE_DAYS) {
       const reason = firstRule(NOT_BOOKED_RULES, joinText(callerChunks.filter((c) => NOT_BOOKED_TAGS.has(c.tag))))
@@ -207,17 +209,20 @@ async function linkByCustomer(conn, leads, byLead, calls) {
     .select('id', 'customer_id', 'created_at', 'twilio_call_sid', 'call_sid',
       conn.raw("metadata->>'lead_id' AS stamp_lead_id"), conn.raw("metadata->>'relay_lead_id' AS stamp_relay_lead_id"));
   const owners = await explicitOwners(conn, rows);
+  // Every live lead of these customers, not just this page: a call whose window
+  // fits two leads is ambiguous and is left unassigned.
+  const allLeads = await conn('leads').whereIn('customer_id', customerIds).whereNull('deleted_at')
+    .select('id', 'customer_id', 'created_at');
+  const inWindow = (call, l) => {
+    const delta = (new Date(call.created_at) - new Date(l.created_at)) / DAY_MS;
+    return delta >= -CALL_WINDOW_BEFORE_DAYS && delta <= CALL_WINDOW_AFTER_DAYS;
+  };
   for (const r of rows) {
-    const owned = owners.get(r.id);
-    for (const l of leads) {
-      if (l.customer_id !== r.customer_id) continue;
-      if (owned && !owned.has(l.id)) continue; // the call belongs to another lead
-      const delta = (new Date(r.created_at) - new Date(l.created_at)) / DAY_MS;
-      if (delta >= -CALL_WINDOW_BEFORE_DAYS && delta <= CALL_WINDOW_AFTER_DAYS) {
-        calls.set(r.id, r);
-        byLead.get(l.id).add(r.id);
-      }
-    }
+    if (owners.has(r.id)) continue; // explicitly owned calls were linked by sid / stamp
+    const fits = allLeads.filter((l) => l.customer_id === r.customer_id && inWindow(r, l));
+    if (fits.length !== 1 || !byLead.has(fits[0].id)) continue;
+    calls.set(r.id, r);
+    byLead.get(fits[0].id).add(r.id);
   }
 }
 
@@ -280,7 +285,7 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
       .where((w) => w.whereNull('why_checked_at').orWhere('why_checked_at', '<', now))
       .orderByRaw('why_checked_at ASC NULLS FIRST, created_at DESC, id DESC')
       .limit(Math.min(PAGE_SIZE, maxLeads - stats.scanned))
-      .select('id', 'status', 'created_at', 'customer_id', 'twilio_call_sid', 'previous_company', 'switch_reason', 'not_booked_reason');
+      .select('id', 'status', 'converted_at', 'created_at', 'customer_id', 'twilio_call_sid', 'previous_company', 'switch_reason', 'not_booked_reason');
     const leads = await q;
     if (!leads.length) break;
     stats.scanned += leads.length;
@@ -301,6 +306,7 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
         // why_filled_at rides in the same update, so it never lags its field.
         const q = conn('leads').where({ id: lead.id }).whereNull(key).whereNull('deleted_at');
         if (lead.status == null) q.whereNull('status'); else q.where('status', lead.status);
+        if (key === 'not_booked_reason') q.whereNull('converted_at');
         wrote += await q.update({ [key]: patch[key], why_filled_at: now });
       }
       if (wrote) {

@@ -78,6 +78,19 @@ describe('prior-provider evidence (Codex #8521)', () => {
     expect(patch.previous_company).toBeUndefined();
     expect(patch.switch_reason).toBeUndefined();
   });
+  test('a rival who only quoted is not a previous company', () => {
+    const patch = planLeadWhy(lead(), [chunk('competitor_mention', 'I had Orkin quote me $99')], NOW);
+    expect(patch.previous_company).toBeUndefined();
+    expect(patch.switch_reason).toBeUndefined();
+  });
+  test('a callback that happened is not no_callback', () => {
+    const c = chunk('competitor_mention', 'We had Orkin. They called back and raised the price');
+    expect(planLeadWhy(lead(), [c], NOW).switch_reason).toBe('price_creep');
+  });
+  test('a converted lead gets no not-booked reason after a reopen', () => {
+    const l = lead({ status: 'contacted', converted_at: daysAgo(5) });
+    expect(planLeadWhy(l, [chunk('objection', 'That is too much for us')], NOW).not_booked_reason).toBeUndefined();
+  });
   test('agent words in context never decide a reason', () => {
     const c = chunk('objection', 'That is too much for us', { context: 'Agent: do you need to talk to your husband first?' });
     expect(planLeadWhy(lead(), [c], NOW).not_booked_reason).toBe('price');
