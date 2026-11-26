@@ -705,11 +705,12 @@ test('caps parse: unset / blank / non-integer are absent, never a passing compar
 // ---- nothing after the vendor call may read as "failed — order manually".
 
 test('no identical prior vendor order → needs_review no_binding_total, nothing sent', async () => {
-  const a = mockAdapter({ bindingQuote: jest.fn(async () => null) });
+  const a = mockAdapter({ preSubmitTotal: 'history', bindingQuote: jest.fn(async () => null) });
   const r = await run(a);
   expect(r).toMatchObject({ status: 'needs_review', reason: 'no_binding_total' });
   expect(a.place).not.toHaveBeenCalled();
-  expect(notify.mock.calls[0][3].detail).toMatch(/identical order by hand/);
+  // "None" is more than "never ordered": the latest identical order may be unpaid, canceled or unreadable.
+  expect(notify.mock.calls[0][3].detail).toMatch(/Sticker Mule has no usable prior order of item 4242 at 500: there is none among its newest orders, or the latest one is not paid yet, was canceled, or cannot be read\. So there is no binding total to cap\. The restock request stays open — check the Sticker Mule account first/);
 });
 
 test('a binding-total lookup error is a definite pre-submit failure', async () => {
@@ -946,6 +947,87 @@ test('an adapter without a vendor-confirmed pre-submit total never auto-places: 
   expect(notify.mock.calls[0][3].detail).toMatch(/item 4242 × 500/);
   const ledger = lastLedgerPatch();
   expect(ledger.placed_at).toBeUndefined();
+});
+
+// A vendor that confirms no total before an order (Sticker Mule) is never auto-ordered: every order
+// of its items is placed by hand on the vendor's site, and the portal does not see those orders. One
+// may already be in when the alert rings (in production, or not paid yet). So the check leads the
+// alert the reader sees (headline and why), not only its detail, whatever the park's reason.
+describe('a pre-submit park for a vendor that is never auto-ordered sends staff to the vendor account first', () => {
+  const HEADLINE = 'Inventory — order Yard sign sticker if not yet on order';
+  const WHY = 'No order was sent; check the vendor account first, then order by hand only what is not already on order.';
+  // The request's own quantity is named: an order already in for fewer stickers does not cover it.
+  const NEXT = / The restock request stays open — check the Sticker Mule account first: if an order already in covers this request in full \(500 each\), mark the request ordered; if not, order what is missing by hand, then mark it ordered\.$/;
+  const history = (overrides = {}) => mockAdapter({ preSubmitTotal: 'history', ...overrides });
+  const alert = () => { const [, headline, why, opts] = notify.mock.calls[0]; return { headline, why, detail: opts.detail }; };
+  const expectAccountCheck = () => {
+    expect(alert()).toMatchObject({ headline: HEADLINE, why: WHY, detail: expect.stringMatching(NEXT) });
+    expect(alert().detail).not.toMatch(/stays open — order manually/);
+  };
+
+  test('the last identical order is known: it may be the one still in production', async () => {
+    const a = history();
+    expect(await run(a)).toMatchObject({ status: 'needs_review', reason: 'no_vendor_confirmed_total' });
+    expect(a.place).not.toHaveBeenCalled();
+    expectAccountCheck();
+    // The message names the order to place; it does not tell the reader to place it before the check.
+    expect(alert().detail).toMatch(/the last identical order \(order SM-0\) was \$314\.00, which fits the caps\. A reorder by hand is item 4242 × 500\. The restock request stays open/);
+    expect(alert().detail).not.toMatch(/Reorder item/);
+  });
+
+  test('no usable prior order: the latest one may be in and not paid yet', async () => {
+    expect(await run(history({ bindingQuote: jest.fn(async () => null) }))).toMatchObject({ status: 'needs_review', reason: 'no_binding_total' });
+    expectAccountCheck();
+  });
+
+  test('the lookup failed: what is in at the vendor is not known', async () => {
+    const a = history({ bindingQuote: jest.fn(async () => { throw new Error('Sticker Mule order history lookup did not finish in 90 s'); }) });
+    expect(await run(a)).toMatchObject({ status: 'failed', reason: 'adapter_error' });
+    expect(a.place).not.toHaveBeenCalled();
+    expectAccountCheck();
+    expect(alert().detail).toMatch(/^Auto-order failed: Yard sign sticker \(Sticker Mule\)\nbinding total lookup failed: Sticker Mule order history lookup did not finish in 90 s The restock request stays open/);
+  });
+
+  test('the last total is over a cap', async () => {
+    process.env.AUTO_ORDER_MAX_PER_ORDER_CENTS = '10000';
+    expect(await run(history())).toMatchObject({ status: 'needs_review', reason: 'over_per_order_cap' });
+    expectAccountCheck();
+  });
+
+  test('a park before the lookup (no price row for the item)', async () => {
+    mockState.pricing = null;
+    expect(await run(history())).toMatchObject({ status: 'needs_review', reason: 'no_price' });
+    expectAccountCheck();
+  });
+
+  test('a long product name is cut; the condition stays in the headline', async () => {
+    mockState.product = { ...sticker, name: 'Termite notice sticker pack of ten' };
+    await run(history());
+    expect(alert().headline).toBe('Inventory — order Termite notice… if not yet on order');
+    expect(alert().headline.length).toBeLessThanOrEqual(60);
+  });
+
+  test('the alert rung again later from its stored text leads with the check too', async () => {
+    notify.mockRejectedValueOnce(new Error('bell down'));
+    expect(await run(history())).toMatchObject({ reason: 'no_vendor_confirmed_total', bellPending: true });
+    const evidence = JSON.parse(lastLedgerPatch().evidence);
+    mockState.updates = [];
+    mockState.pendingBells = [{ id: 'ledger-1', evidence, request_id: 'req-1', product_name: 'Yard sign sticker', vendor_name: 'Sticker Mule' }];
+    const again = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } });
+    expect(again.bells).toMatchObject({ rung: ['ledger-1'], pending: [] });
+    expect(notify).toHaveBeenLastCalledWith('system', HEADLINE, WHY, expect.objectContaining({ detail: `${evidence.bell.title}\n${evidence.bell.body}` }));
+  });
+
+  test('a vendor the dispatcher does place for keeps the plain hand-off', async () => {
+    const refused = Object.assign(new Error('account has 0 payment methods; exactly one is required'), { refuse: 'no_payment' });
+    expect(await run(mockAdapter({ place: jest.fn(async () => { throw refused; }) }))).toMatchObject({ status: 'needs_review', reason: 'no_payment' });
+    expect(alert()).toMatchObject({
+      headline: 'Inventory — order Yard sign sticker by hand',
+      why: 'The auto-order did not go through; order it manually, then mark the restock request ordered.',
+      detail: expect.stringMatching(/ The restock request stays open — order manually, then mark it ordered\.$/),
+    });
+    expect(alert().detail).not.toMatch(/account first/);
+  });
 });
 
 test('the real Sticker Mule adapter is history-total + count quantity; the real SiteOne adapter is vendor-total + package quantity + login', () => {
