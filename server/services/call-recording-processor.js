@@ -9211,6 +9211,32 @@ function verifyRecordingBuffer(buffer, expectedSeconds, contentLength) {
   return { ok: true, bytes };
 }
 
+// A download stopped at opts.maxBytes: the file is larger than the caller can take.
+const RECORDING_TOO_LARGE = 'RECORDING_TOO_LARGE';
+
+// The body, read no further than maxBytes: an oversized file never sits whole in memory.
+async function readBodyCapped(res, maxBytes) {
+  const tooLarge = () => Object.assign(new Error(`Recording over ${maxBytes} bytes`), { code: RECORDING_TOO_LARGE });
+  if (Number(res.headers?.get?.('content-length')) > maxBytes) {
+    await res.body?.cancel?.().catch(() => {});
+    throw tooLarge();
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw tooLarge();
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total);
+}
+
 async function downloadRecording(mp3Url, opts = {}) {
   const twilioAuth = Buffer.from(
     `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
@@ -9229,7 +9255,7 @@ async function downloadRecording(mp3Url, opts = {}) {
     if (res.status === 404 && opts.expectedSeconds) err.code = RECORDING_NOT_READY;
     throw err;
   }
-  const buffer = Buffer.from(await res.arrayBuffer());
+  const buffer = opts.maxBytes ? await readBodyCapped(res, opts.maxBytes) : Buffer.from(await res.arrayBuffer());
   if (opts.expectedSeconds) {
     const verdict = verifyRecordingBuffer(buffer, opts.expectedSeconds, res.headers.get('content-length'));
     if (!verdict.ok) {

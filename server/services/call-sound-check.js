@@ -34,6 +34,7 @@ const { dispatch, rejectCall } = require('./llm/call');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { scrubPansDetailed } = require('../utils/pan-scrub');
 const { etDateString } = require('../utils/datetime-et');
+const crypto = require('crypto');
 
 const METADATA_KEY = 'sound_check';
 // One row per claim: what it reserved and what it cost. The cap sums this table, which outlives a deleted call row.
@@ -211,9 +212,13 @@ async function daySpendUsd(conn, day) {
 // call's metadata, and the old audio's note does not describe the new audio). Only an object can take a record: the
 // merge in recordPatch would turn any other jsonb value into an array, and a call whose record cannot be read back
 // would be claimed, and paid for, on every tick.
+// A record names its recording by `recording_key`, a digest of the URL, never the URL: a recording quarantined
+// for card data later has its URL cleared from the row, and no copy of it may stay behind here.
+const recordingKey = (url) => crypto.createHash('sha256').update(String(url), 'utf8').digest('hex');
+const RECORDING_KEY_SQL = "encode(sha256(convert_to(recording_url, 'UTF8')), 'hex')";
 const whereNoRecord = (qb) => qb.whereRaw(
   "jsonb_typeof(COALESCE(metadata, '{}'::jsonb)) = 'object'"
-  + " AND (metadata->:key IS NULL OR (metadata->:key->>'recording_url') <> recording_url)",
+  + ` AND (metadata->:key IS NULL OR (metadata->:key->>'recording_key') <> ${RECORDING_KEY_SQL})`,
   { key: METADATA_KEY },
 );
 const recordPatch = (conn, record) => conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [METADATA_KEY]: record })]);
@@ -244,16 +249,28 @@ async function writeFirstRecord(conn, call, record) {
       .whereNull('processing_token')
       .whereRaw(NOT_CARD_FLAGGED_SQL);
   }
-  return (await query.update({ metadata: recordPatch(conn, { ...record, recording_url: call.recording_url }) })) > 0;
+  return (await query.update({ metadata: recordPatch(conn, { ...record, recording_key: recordingKey(call.recording_url) }) })) > 0;
+}
+
+// Was this recording of this call already sent once? A recording adopted away and back again is not paid twice.
+async function alreadyHeard(conn, call) {
+  return Boolean(await conn(SPEND).where({ call_id: call.id, recording_key: recordingKey(call.recording_url) }).first('id'));
 }
 
 // Claim the call and reserve its worst cost in one transaction. Returns the spend row's id, or null when the claim
-// was lost (another writer, or the call changed).
+// was lost (another writer, the call changed, or this recording already has a spend row: unique key).
 async function claimCall(conn, call, claim) {
   return conn.transaction(async (trx) => {
     if (!(await writeFirstRecord(trx, call, claim))) return null;
-    const [row] = await trx(SPEND).insert({ call_id: call.id, day: claim.day, reserved_usd: claim.reserved_usd }).returning('id');
-    return row?.id ?? row;
+    const rows = await trx(SPEND)
+      .insert({ call_id: call.id, recording_key: recordingKey(call.recording_url), day: claim.day, reserved_usd: claim.reserved_usd })
+      .onConflict(['call_id', 'recording_key']).ignore()
+      .returning('id');
+    if (!rows.length) throw Object.assign(new Error('already heard'), { alreadyHeard: true });
+    return rows[0]?.id ?? rows[0];
+  }).catch((err) => {
+    if (err.alreadyHeard) return null;
+    throw err;
   });
 }
 
@@ -275,7 +292,7 @@ async function listen(conn, call, audio, claim, price) {
   const spent = round6(attemptCostUsd(price, heard.usage, claim.reserved_usd));
   // The spend is settled whatever happens to the call row: Google billed the attempt either way.
   await conn(SPEND).where({ id: claim.spendId }).update({ spent_usd: spent, settled_at: conn.fn.now() });
-  const record = { ...outcome, spent_usd: spent, day: claim.day, at: claim.at, recording_url: call.recording_url };
+  const record = { ...outcome, spent_usd: spent, day: claim.day, at: claim.at, recording_key: recordingKey(call.recording_url) };
   const saved = await claimed().update({ metadata: recordPatch(conn, record) });
   if (!saved) logger.warn(`[call-sound-check] outcome not saved for call ${call.id}: its claim was gone after the model call`);
   return outcome.status;
@@ -303,6 +320,7 @@ async function checkOne(conn, call, ctx) {
   // The download sends the Twilio account's credentials, so only the one exact Twilio URL is fetched, over https.
   const url = canonicalTwilioRecordingUrl(call.recording_url);
   if (!url) return end('skipped', 'not_twilio_url');
+  if (await alreadyHeard(conn, call)) return end('skipped', 'already_heard');
   if (rowSeconds > MAX_SECONDS) return end('skipped', 'too_long');
   // Nothing is downloaded for a call the day has no room for.
   if (worstCaseUsd(ctx.price, rowSeconds) > first.room) return 'capped';
@@ -311,6 +329,7 @@ async function checkOne(conn, call, ctx) {
   try {
     audio = await ctx.download(url, rowSeconds);
   } catch (err) {
+    if (err.code === 'RECORDING_TOO_LARGE') return end('skipped', 'too_long');
     logger.warn(`[call-sound-check] download failed for call ${call.id}: ${String(err.message).slice(0, 120)}`);
     return end('failed', 'download_failed');
   }
@@ -344,7 +363,8 @@ async function runCallSoundCheck({ conn = db, now, clock, download, audioSeconds
     price,
     clock: readClock,
     // With the call's length the pipeline's download refuses a cut-off file, so the model never judges half a call.
-    download: download || ((url, expectedSeconds) => pipeline().downloadRecording(url, { expectedSeconds })),
+    // The download stops at MAX_AUDIO_BYTES, so an oversized file is never read whole.
+    download: download || ((url, expectedSeconds) => pipeline().downloadRecording(url, { expectedSeconds, maxBytes: MAX_AUDIO_BYTES })),
     audioSeconds: audioSeconds || ((buffer) => pipeline().estimateMp3DurationSeconds(buffer)),
   };
   const tally = { done: 0, failed: 0, skipped: 0, capped: 0 };
@@ -359,6 +379,7 @@ async function runCallSoundCheck({ conn = db, now, clock, download, audioSeconds
 }
 
 module.exports = {
+  recordingKey,
   runCallSoundCheck,
   hear,
   METADATA_KEY,

@@ -39,7 +39,7 @@ const USAGE_COST = 0.0198; // (4,500 x $3 + 120 x $15 + 300 x $15) per 1M tokens
 // What the model adapter hands back for a good listen.
 const answer = (extra = {}) => ({ ok: true, json: ANSWER, model: 'listening-model', usage: USAGE, ...extra });
 const TALLY = { done: 0, failed: 0, skipped: 0, capped: 0 };
-const record = (fields) => ({ day: DAY, at: NOW.toISOString(), recording_url: expect.stringMatching(/^https:\/\/api\.twilio\.com\//), ...fields });
+const record = (fields) => ({ day: DAY, at: NOW.toISOString(), recording_key: expect.stringMatching(/^[0-9a-f]{64}$/), ...fields });
 // The model's answer for the test (llm.dispatch), and the download and the MP3 length read the job is run with.
 const fakes = ({ dispatch = async () => answer(), ...over } = {}) => {
   llm.dispatch.mockReset().mockImplementation(dispatch);
@@ -139,7 +139,7 @@ postgres('call sound check (live Postgres)', () => {
   const recordOf = async (id) => (await metadataOf(id))?.[KEY];
   const SPEND = 'call_sound_check_spend';
   // An earlier attempt of the day, settled, on a call row that no longer exists.
-  const spentToday = (usd, day = DAY) => trx(SPEND).insert({ call_id: randomUUID(), day, reserved_usd: usd, spent_usd: usd });
+  const spentToday = (usd, day = DAY) => trx(SPEND).insert({ call_id: randomUUID(), recording_key: 'f'.repeat(64), day, reserved_usd: usd, spent_usd: usd });
   const spendRows = () => trx(SPEND).orderBy('id').select('call_id', trx.raw('day::text AS day'), trx.raw('reserved_usd::float AS reserved_usd'), trx.raw('spent_usd::float AS spent_usd'));
   const run = (f, now = NOW) => soundCheck.runCallSoundCheck({ conn: trx, now, ...f });
 
@@ -293,7 +293,7 @@ postgres('call sound check (live Postgres)', () => {
   test('the day stops at the cap: a call that does not fit is left alone, and the next ET day has room', async () => {
     // $0.76 so far today, $0.26 of it an unfinished claim. The call's worst cost is about $0.077; the cap is $0.83.
     await spentToday(0.5);
-    await trx(SPEND).insert({ call_id: await insertCall({ metadata: { [KEY]: { status: 'started', reserved_usd: 0.26, day: DAY } } }), day: DAY, reserved_usd: 0.26 });
+    await trx(SPEND).insert({ call_id: await insertCall({ metadata: { [KEY]: { status: 'started', reserved_usd: 0.26, day: DAY } } }), recording_key: '0'.repeat(64), day: DAY, reserved_usd: 0.26 });
     const id = await insertCall();
     const f = fakes();
     expect(await run(f)).toEqual({ ...TALLY, capped: 1 });
@@ -338,7 +338,7 @@ postgres('call sound check (live Postgres)', () => {
     const id = await insertCall(call);
     const f = fakes(Object.fromEntries(Object.entries(fake).map(([name, fn]) => [name, jest.fn(fn)])));
     expect(await run(f)).toEqual({ ...TALLY, skipped: 1 });
-    expect(await recordOf(id)).toEqual(record({ status: 'skipped', reason, recording_url: (await trx('call_log').where({ id }).first('recording_url')).recording_url }));
+    expect(await recordOf(id)).toEqual(record({ status: 'skipped', reason }));
     expect(f.download).toHaveBeenCalledTimes(downloads);
     expect(await run(f)).toEqual(TALLY);
     expect(llm.dispatch).not.toHaveBeenCalled();
@@ -401,14 +401,46 @@ postgres('call sound check (live Postgres)', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('outcome not saved'));
     // the old audio's attempt is still owed; the new recording is a new candidate
     expect(await run(f)).toEqual({ ...TALLY, done: 1 });
-    expect(await recordOf(id)).toEqual(expect.objectContaining({ status: 'done', recording_url: swapped }));
+    expect(await recordOf(id)).toEqual(expect.objectContaining({ status: 'done', recording_key: soundCheck.recordingKey(swapped) }));
     expect((await spendRows()).map((r) => r.spent_usd)).toEqual([USAGE_COST, USAGE_COST]);
   });
 
   test('a note of a recording the call no longer has makes the call a candidate again', async () => {
-    const id = await insertCall({ metadata: { [KEY]: { status: 'done', recording_url: 'https://api.twilio.com/2010-04-01/Recordings/REold.mp3' } } });
+    const id = await insertCall({ metadata: { [KEY]: { status: 'done', recording_key: soundCheck.recordingKey('https://api.twilio.com/2010-04-01/Recordings/REold.mp3') } } });
     expect(await run(fakes())).toEqual({ ...TALLY, done: 1 });
     expect(await recordOf(id)).toEqual(expect.objectContaining({ status: 'done', note: expect.any(Object) }));
+  });
+
+  test('no record keeps the recording URL: a later card quarantine clears the only copy', async () => {
+    const id = await insertCall();
+    await run(fakes());
+    const url = (await trx('call_log').where({ id }).first('recording_url')).recording_url;
+    expect(JSON.stringify(await recordOf(id))).not.toContain(url);
+    expect(JSON.stringify(await recordOf(id))).not.toContain('RE');
+  });
+
+  test('a recording adopted away and back again is not paid for twice', async () => {
+    const id = await insertCall();
+    const first = (await trx('call_log').where({ id }).first('recording_url')).recording_url;
+    const other = 'https://api.twilio.com/2010-04-01/Accounts/ACfixture/Recordings/REother.mp3';
+    const f = fakes();
+    expect(await run(f)).toEqual({ ...TALLY, done: 1 });
+    await trx('call_log').where({ id }).update({ recording_url: other });
+    expect(await run(f)).toEqual({ ...TALLY, done: 1 });
+    await trx('call_log').where({ id }).update({ recording_url: first });
+    expect(await run(f)).toEqual({ ...TALLY, skipped: 1 });
+    expect(await recordOf(id)).toEqual(record({ status: 'skipped', reason: 'already_heard' }));
+    expect(llm.dispatch).toHaveBeenCalledTimes(2);
+    expect(f.download).toHaveBeenCalledTimes(2);
+    expect(await run(f)).toEqual(TALLY);
+  });
+
+  test('a download the downloader stopped for size is a skipped record, never sent', async () => {
+    const id = await insertCall();
+    const f = fakes({ download: jest.fn(async () => { throw Object.assign(new Error('Recording over 12582912 bytes'), { code: 'RECORDING_TOO_LARGE' }); }) });
+    expect(await run(f)).toEqual({ ...TALLY, skipped: 1 });
+    expect(await recordOf(id)).toEqual(record({ status: 'skipped', reason: 'too_long' }));
+    expect(llm.dispatch).not.toHaveBeenCalled();
   });
 
   test('a long-prompt tier with no audio rate makes no call', async () => {
