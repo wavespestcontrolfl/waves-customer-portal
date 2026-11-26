@@ -103,11 +103,15 @@ const WHOLE_NUMBER = `(?![-\\s]+(?:and\\s+)?${ANY_NUMBER_WORD}\\b)`;
 const WORD_AMOUNT_SRC = `(?:(?:a|an|${UNIT_WORD})\\s+(?:hundred|thousand)(?:\\s+(?:and\\s+)?(?:${TENS_WORD}|${TEEN_WORD}|${UNIT_WORD}))?|${TENS_WORD}|${TEEN_WORD})${WHOLE_NUMBER}`;
 const WORD_RATE_RE = new RegExp(`\\b(?:${WORD_AMOUNT_SRC}|(?:${UNIT_WORD})\\b${WHOLE_NUMBER})\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
 const WORD_PRICE_RE = new RegExp(`\\b(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as)\\b[^.\\d]{0,20}\\b${WORD_AMOUNT_SRC}\\b(?!\\s*${UNIT_SRC})`, 'i');
+// One through nine DIRECTLY after an explicit price cue is a price whatever follows ("costs five", "fee is nine", "starts at nine"), except
+// a time of day ("starts at nine a.m.", "...in the morning"). "only"/"just" are not cues: "only three visits" and "just one tech" pass.
+const PRICE_CUE_SRC = '(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as)';
+const WORD_CUE_UNIT_RE = new RegExp(`\\b${PRICE_CUE_SRC}(?:\\s+(?:is|are|of|at|about|around))?\\s+(?:${UNIT_WORD})\\b${WHOLE_NUMBER}(?!\\s*(?:a\\.?m\\b|p\\.?m\\b|o'clock|in\\s+the\\s+(?:morning|afternoon|evening)))`, 'i');
 const DECIMAL_FIGURE_RE = new RegExp(`(?<![\\d.])\\d{1,4}\\.\\d{2}(?!\\d)(?!\\s*${UNIT_SRC})`, 'i');
 const YEAR_CONTEXT_RE = /\b(?:in|since|by|until|during|before|after|year|years)\b/i;
 
 function hasUnmarkedPrice(text) {
-  if (RATE_RE.test(text) || DECIMAL_FIGURE_RE.test(text) || WORD_RATE_RE.test(text) || WORD_PRICE_RE.test(text)) return true;
+  if (RATE_RE.test(text) || DECIMAL_FIGURE_RE.test(text) || WORD_RATE_RE.test(text) || WORD_PRICE_RE.test(text) || WORD_CUE_UNIT_RE.test(text)) return true;
   for (const m of text.matchAll(PRICE_WORD_NUMBER_RE)) {
     const isYear = /^(?:19|20)\d{2}$/.test(m[2]) && YEAR_CONTEXT_RE.test(m[1]);
     if (!isYear) return true;
@@ -180,24 +184,18 @@ function mentionsProduct(text, tokens) {
 /**
  * The whole-bank check, as a reader renders the lines one after another. The plain banned-copy screen runs on the full section. The
  * timing guard (rainfast, re-entry, drying) judges a line by the rain, pet and stay-off wording ANYWHERE in the same reply, so it runs on
- * sliding windows of consecutive lines: each window starts at a line and takes the following lines while the joined text stays within
- * the SMS reply limit (2,000 characters; no text over it ever reaches the guard). A short bank is one window. In a long bank every line
- * sits in a window with each neighbour and with as many further lines as the limit allows; two lines more than a reply apart are not
- * judged together, since no reply holds both.
+ * EVERY contiguous run of two or more lines whose joined text stays within the SMS reply limit (2,000 characters; no text over it ever
+ * reaches the guard), so a verdict that depends on how much text surrounds a claim cannot be dodged by the choice of window. With the
+ * 20-line cap that is at most 190 guard calls. Two lines more than a reply apart are not judged together, since no reply holds both.
  */
 const SMS_REPLY_LIMIT = 2000;
 function* timingWindows(texts) {
-  let coveredTo = -1;
   for (let i = 0; i < texts.length - 1; i += 1) {
-    let end = i;
-    let length = texts[i].length;
-    while (end + 1 < texts.length && length + 1 + texts[end + 1].length <= SMS_REPLY_LIMIT) {
-      end += 1;
-      length += 1 + texts[end].length;
-    }
-    if (end > coveredTo && end > i) {
-      coveredTo = end;
-      yield texts.slice(i, end + 1).join(' ');
+    let joined = texts[i];
+    for (let j = i + 1; j < texts.length; j += 1) {
+      joined += ` ${texts[j]}`;
+      if (joined.length > SMS_REPLY_LIMIT) break;
+      yield joined;
     }
   }
 }

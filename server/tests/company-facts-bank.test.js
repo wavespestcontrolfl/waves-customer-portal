@@ -53,6 +53,12 @@ describe('hard blocks', () => {
     ['a one-digit word price per application', 'The add-on costs five per application.', 'price_amount'],
     ['a one-digit word price a month', 'Plans are five a month.', 'price_amount'],
     ['a one-digit word price with a slash', 'Plans are nine/mo.', 'price_amount'],
+    ['a one-digit word price right after costs', 'The add-on costs five.', 'price_amount'],
+    ['a one-digit word price after starts at', 'Lots start at nine.', 'price_amount'],
+    ['a one-digit word price after fee is', 'The fee is nine.', 'price_amount'],
+    ['a one-digit word price after priced at', 'Plans are priced at seven.', 'price_amount'],
+    ['a one-digit word price after billed', 'The service is billed three.', 'price_amount'],
+    ['a one-digit word price after as low as', 'Plans run as low as six.', 'price_amount'],
     ['a rate word and a number', 'Our rate is 75 for a quarterly visit.', 'price_amount'],
     ['four lowercase sentences', 'we serve parrish. we serve ruskin. we serve wimauma. we serve palmetto.', 'too_many_sentences'],
     ['another currency symbol', 'The initial application is \u20AC50.', 'dollar_amount'],
@@ -139,6 +145,8 @@ describe('hard blocks', () => {
     'The visit takes twenty minutes.',
     'We cover a hundred acres.',
     'We do five applications.',
+    'Our crews start at nine a.m.',
+    'We open at nine in the morning.',
     'Lots start at twenty-five acres.',
     'Lots start at twenty five acres.',
     'Lots start at one hundred twenty square feet.',
@@ -395,6 +403,29 @@ describe('snapshot', () => {
       expect(Bank._test.sectionHasBannedCopy(long)).toBe(false);
       expect(timingCalls.length).toBeGreaterThan(0);
       expect(Math.max(...timingCalls)).toBeLessThanOrEqual(2000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('EVERY contiguous run is judged: a claim the guard rejects in a short run is blocked even when a longer run passes', () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const calls = [];
+    // Rejects "alpha" + "bravo" together unless the run also holds "gamma" (a longer run passes).
+    const spy = jest.spyOn(drafter, 'hasBannedCustomerCopy').mockImplementation((text, opts) => {
+      if (!(opts && opts.rainTimeGuard)) return false;
+      calls.push(text.length);
+      return /alpha/.test(text) && /bravo/.test(text) && !/gamma/.test(text);
+    });
+    try {
+      expect(Bank._test.sectionHasBannedCopy(['We service alpha.', 'We service bravo.', 'We service gamma.'])).toBe(true);
+      expect(Bank._test.sectionHasBannedCopy(['We service alpha.', 'We service gamma.', 'We service bravo.'])).toBe(false); // every run holds gamma or one marker
+      calls.length = 0;
+      const twenty = Array.from({ length: 20 }, (_, i) => `We service the zone beside the park number ${i}.`);
+      Bank._test.sectionHasBannedCopy(twenty);
+      expect(calls.length).toBeLessThanOrEqual(190);
+      expect(calls.length).toBe(190); // all 190 runs of two or more lines fit 2,000 characters here
+      expect(Math.max(...calls)).toBeLessThanOrEqual(2000);
     } finally {
       spy.mockRestore();
     }
