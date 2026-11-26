@@ -73,33 +73,9 @@ function upcomingEstimateVisits(conn, { today, days }) {
     .select('s.*');
 }
 
-// The saved result the estimate's lines come from (estimate-public.js acceptanceServiceLists: result, else engineResult)
-// with its recurring block, and the engine's line items for that result: its own when the engine result was saved whole,
-// else the engine result saved beside the mapped one.
-function pricingRecords(data) {
-  const source = object(data.result || data.engineResult || data);
-  const lineItems = Array.isArray(source.lineItems) ? source.lineItems : list(object(data.engineResult).lineItems);
-  return { block: object(source.recurring), lineItems: lineItems.filter((item) => item && typeof item === 'object') };
-}
-
-// The engine's recurring lines of one service: each becomes a recurring row on its own (estimate-public.js
-// recurringServicesWithSupplements; a one-time line such as a plan's first-visit fee does not).
-function serviceEngineLines(lineItems, serviceKey) {
-  const { recurringServiceKey, recurringServicesWithSupplements } = require('../routes/estimate-public');
-  return lineItems.filter((item) => recurringServiceKey(item) === serviceKey && recurringServicesWithSupplements({ lineItems: [item] }).length > 0);
-}
-
-// The tier and rate the engine applied to one service of the estimate: exactly one recurring engine line of that
-// service, whose only discount is the WaveGuard tier, at one rate. Else null.
-function engineTierRecord(lineItems, serviceKey) {
-  const items = serviceEngineLines(lineItems, serviceKey);
-  if (items.length !== 1) return null;
-  const priced = list(items[0].discount?.appliedDiscounts).filter((d) => Number(d?.amount) > 0);
-  const [rate, ...otherRates] = [...new Set(priced.map((d) => Number(d.amount)))];
-  if (otherRates.length || !(rate > 0 && rate <= 1) || priced.some((d) => d.type !== 'waveguard')) return null;
-  // The engine names the tier on the applied discount (discount-engine.js getEffectiveDiscount).
-  return { rate, tier: word(priced[0].tier) };
-}
+// The estimate's saved records, the engine's recurring lines of one service and the engine's tier record of it are
+// read by the invoice's own pricing helpers (completion-pricing.js), so this check and the invoice read one record.
+const { pricingRecords, serviceEngineLines, engineTierRecord } = require('./completion-pricing');
 
 // An estimate saved from its mapped result only (the admin estimate tool saves recurring.services with no line items)
 // has no engine record: its witness is the tier and rate the estimate saved, read here on their own (recordsTier).

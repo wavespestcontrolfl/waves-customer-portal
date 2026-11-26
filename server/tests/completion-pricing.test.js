@@ -149,6 +149,53 @@ describe('completion estimate evidence', () => {
       .toEqual([{ name: 'Accepted estimate discount', dollars: 24, named: false }]);
   });
 
+  test('a row that saved only its net takes the list price and tier of the engine line beside it, when every figure agrees', () => {
+    // The mapped lawn shape: per visit, per year and per month are all the accepted net, with only a rate on the row.
+    // The engine's own line of the service keeps the list annual and the tier record.
+    const waveguard = (tier, amount) => ({ appliedDiscounts: [{ tier, type: 'waveguard', amount }] });
+    const engineLawn = (extra = {}) => ({ service: 'lawn_care', name: 'Lawn Care', annual: 1068, perApp: 118.67, frequency: 9,
+      annualBeforeDiscount: 1068, annualAfterDiscount: 961.2, discount: waveguard('silver', 0.1), ...extra });
+    const lawnRow = (sourceLine = {}, perApplicationPrice = 106.8) => ({ ...line, perApplicationPrice, parentRecurringDiscounted: true,
+      serviceKey: 'lawn_care_6week', sourceLine: { service: 'lawn_care', perTreatment: perApplicationPrice, annual: 961.2,
+        annualAfterDiscount: 961.2, visitsPerYear: 9, discount: { effectiveDiscount: 0.1, appliedDiscountPercent: 0.1 }, ...sourceLine } });
+    const silver = (engineLineItems = [engineLawn()], estimateTier = { tier: 'silver', amount: 0.1 }) => ({ tierDiscounted: true, estimateTier, engineLineItems });
+    const quote = (row, context) => {
+      const { base, amount, discounts } = acceptedPricing(row, context);
+      return [base, amount, discounts.map(({ name, dollars, percent, named }) => [name, dollars, percent, named])];
+    };
+    // $1,068 a year over 9 visits is $118.67 a visit; 10% off is $106.80, the visit's price. The total does not change.
+    expect(quote(lawnRow(), silver())).toEqual([118.67, 106.8, [['WaveGuard Silver', 11.87, 10, true]]]);
+    const oneLine = [106.8, 106.8, []];
+    // Any figure that disagrees keeps the row's own net as its base: one line.
+    expect(quote(lawnRow({ annualAfterDiscount: 961.11 }), silver())).toEqual([106.8, 106.8, []]);
+    expect(quote(lawnRow(), silver([engineLawn({ frequency: 8 })]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn({ annualBeforeDiscount: undefined })]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn({ annualAfterDiscount: 961.11 })]))).toEqual(oneLine);
+    // The engine applied another tier or rate than the estimate's, or another discount beside the tier.
+    expect(quote(lawnRow(), silver([engineLawn({ discount: waveguard('gold', 0.1) })]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn()], { tier: 'silver', amount: 0.15 }))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn({ discount: { appliedDiscounts: [...waveguard('silver', 0.1).appliedDiscounts,
+      { type: 'military', amount: 0.05 }] } })]))).toEqual(oneLine);
+    // Two engine lines of the service, none, or no tier the estimate itself names (a staff discount on recurring work,
+    // a Bronze estimate).
+    expect(quote(lawnRow(), silver([engineLawn(), engineLawn({ annual: 1200, annualBeforeDiscount: 1200 })]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn()], null))).toEqual(oneLine);
+    // A row with its own list or net figures is priced by them, never by the engine line.
+    expect(quote(lawnRow({ priceAfterDiscount: 106.8 }), silver())).toEqual(oneLine);
+    // A row whose recorded rate is not the tier's keeps one line through the list-price rules.
+    expect(quote(lawnRow({ discount: { effectiveDiscount: 0, appliedDiscountPercent: 0 } }), silver())[2])
+      .toEqual([['Accepted estimate discount', 11.87, undefined, false]]);
+    // The tree-and-shrub shape that rounds another way: $565 a year over 6 visits at 20% is $75.34 a visit, but the row
+    // saved $451.92 a year and bills $75.32. The figures disagree by 2 cents, so the row keeps one line.
+    const shrub = engineLawn({ service: 'tree_shrub', name: 'Tree & Shrub', annual: 565, perApp: 94.17, frequency: 6,
+      annualBeforeDiscount: 565, annualAfterDiscount: 452, discount: waveguard('platinum', 0.2) });
+    const shrubRow = lawnRow({ service: 'tree_shrub', annual: 451.92, annualAfterDiscount: 451.92, visitsPerYear: 6,
+      discount: { effectiveDiscount: 0.2, appliedDiscountPercent: 0.2 } }, 75.32);
+    expect(quote({ ...shrubRow, serviceKey: 'tree_shrub_program' }, silver([shrub], { tier: 'platinum', amount: 0.2 })))
+      .toEqual([75.32, 75.32, []]);
+  });
+
   describe('acceptedVisitBreakdown', () => {
     const estimate = { id: 'e1', customer_id: 'c1', property_id: 'p1', status: 'accepted', waveguard_tier: 'Silver',
       estimate_data: { summary: { manualDiscount: { amount: 19.8, recurringAmount: 19.8, label: 'Military Discount' } } } };

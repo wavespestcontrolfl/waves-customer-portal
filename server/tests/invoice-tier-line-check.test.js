@@ -89,10 +89,13 @@ describe('tierSavingsLeftOffInvoices', () => {
     });
     expect(acceptedVisitBreakdown.mock.calls).toEqual([[visit(), { database: conn }]]);
     // The invoice's own discount context (estimateDiscountContext), with only its tier reading replaced.
-    expect(acceptedPricing.mock.calls).toEqual([[scheduleLine(), { manualName: null, tierDiscounted: true, estimateTier: { tier: 'gold', amount: 0.15 } }]]);
+    // The context carries the engine's lines too, which the invoice reads for a row that saved only its net.
+    expect(acceptedPricing.mock.calls).toEqual([[scheduleLine(), { manualName: null, tierDiscounted: true, estimateTier: { tier: 'gold', amount: 0.15 },
+      engineLineItems: [pestItem()] }]]);
     jest.clearAllMocks();
     expect(await findingsOn({ tier: null, recurring: {} })).toHaveLength(1);
-    expect(acceptedPricing.mock.calls[0][1]).toEqual({ manualName: null, tierDiscounted: false, estimateTier: { tier: 'gold', amount: 0.15 } });
+    expect(acceptedPricing.mock.calls[0][1]).toEqual({ manualName: null, tierDiscounted: false, estimateTier: { tier: 'gold', amount: 0.15 },
+      engineLineItems: [pestItem()] });
   });
 
   // The invoice's own row rules keep one line on purpose; given the engine's tier and rate, its pricing still does.
