@@ -704,6 +704,11 @@ postgres('production share refunds', () => {
       // Refunded in full: no payments row exists, only the deposit ledger says so.
       await trx('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunded', refunded_amount: '20.00' });
       expect((await signals([visit])).get(visit)).toEqual([`deposit:${deposit.id}:2000`]);
+      // A refund that bounces after the deposit was marked refunded is appended to failed_refund_ids and nothing else changes: the signal moves.
+      await trx('estimate_deposits').where({ id: deposit.id }).update({ failed_refund_ids: JSON.stringify(['re_failed']) });
+      const afterBounce = (await signals([visit])).get(visit);
+      expect(afterBounce).toEqual([expect.stringMatching(new RegExp(`^deposit:${deposit.id}:2000:f[0-9a-f]{10}$`))]);
+      await trx('estimate_deposits').where({ id: deposit.id }).update({ failed_refund_ids: JSON.stringify([]) });
       // A refund of a deposit that was never applied does not reach this invoice (the commission rule).
       await trx('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunded', refunded_amount: '5.00', credited_amount: '5.00', amount: '25.00' });
       expect((await signals([visit])).get(visit)).toEqual([]);
@@ -1044,6 +1049,8 @@ postgres('production share refunds', () => {
       const shown = await preview(id, W1);
       expect(shown.stops.map((row) => [row.visitId, row.kind, row.creditCents]).sort()).toEqual([[gone, 'priced', 60000], [repriced, 'priced', 70000]].sort());
       expect(shown.stops.find((row) => row.visitId === repriced).serviceType).toBe('General Pest Control');
+      // History is read-only: no credit can be set or cleared on a frozen row.
+      expect(shown.stops.every((row) => row.readOnly === true && row.stopRevision === undefined)).toBe(true);
       expect(shown.stops.find((row) => row.visitId === gone)).toMatchObject({ creditCents: 60000, needsReview: false, serviceType: null });
       expect(shown).toMatchObject({ creditedCents: 130000, shifts: 2 });
     });
@@ -1123,6 +1130,52 @@ postgres('production share refunds', () => {
       expect((await finalize(draftRun.id, draftRun.token)).status).toBe(409);
       await preview(id, W2);
       expect(await bells()).toBe(before + 1);
+    });
+  });
+
+  describe('round nine: one eligibility rule, no-snapshot weeks', () => {
+    it('lets the owner save the first take-back for a source whose frozen signal is unclear, with a positive total', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      for (const weekStart of [W1, W2]) await worked(id, weekStart, 40);
+      const customerId = await customer();
+      const visit = await stop(id, W1, '1000.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '1000.00', { scheduled_service_id: visit });
+      const [payer] = await trx('payers').insert({ display_name: 'Sample Payer' }).returning('id');
+      const [stmt] = await trx('payer_statements').insert({
+        payer_id: payer.id, period_start: '2026-09-01', period_end: '2026-09-30', terms_snapshot: 'due_on_receipt', token: randomUUID(), stripe_payment_intent_id: 'pi_unc',
+      }).returning('id');
+      await trx('invoices').where({ id: invoiceId }).update({ payer_statement_id: stmt.id });
+      await trx('stripe_orphan_charges').insert({
+        stripe_payment_intent_id: 'pi_unc', stripe_charge_id: 'ch_unc', amount: '30.00', source: 'statement_pay_webhook', original_db_error: `statement S-${stmt.id}: partial refund`,
+      });
+      // The owner credits the stop knowing the first refund; the check freezes the unclear signal.
+      expect((await override({ technicianId: id, visitId: visit, weekStart: W1, creditCents: 100000, reason: 'Refund seen' })).status).toBe(200);
+      const { done } = await finalWeek(W1);
+      const checkId = byName(done, 'Sample Alpha').id;
+      await stop(id, W2, '500.00', customerId);
+      // A second pre-settlement refund leaves the parked row unchanged: the source is asked about (unclear) with nothing new.
+      const shown = await preview(id, W2);
+      expect(shown.takeBackToSet).toEqual([expect.objectContaining({ reason: 'unclear', newSignals: [], previousCents: null })]);
+      const saved = await takeBack({ checkId, visitId: visit, cents: 30000, signalRevision: shown.takeBackToSet[0].signalRevision });
+      expect(saved.status).toBe(200);
+      expect((await preview(id, W2)).takeBacks).toEqual([expect.objectContaining({ cents: 30000 })]);
+    });
+
+    it('shows a final check with no production share snapshot as having recorded none: nothing is worked out live for the week', async () => {
+      const id = await tech('Sample Alpha');
+      await settings(id, { bar_cents: 10000 });
+      await worked(id, W1, 40);
+      await stop(id, W1, '1000.00');
+      // The share gate is off while the week is paid: the check has hours and no production share snapshot.
+      process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'false';
+      const { done } = await finalWeek(W1);
+      const stored = await trx('payroll_checks').where({ id: byName(done, 'Sample Alpha').id }).first('calc_snapshot');
+      expect(stored.calc_snapshot.productionShare).toBeUndefined();
+      process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
+      const shown = await preview(id, W1);
+      expect(shown).toMatchObject({ recordedNoProductionShare: true, stops: [], needsReview: [], creditedCents: 0, shareCents: 0, takeBacks: [], takeBackToSet: [], takeBackAnswers: [], refundTakeBackCents: 0 });
+      expect(shown).not.toHaveProperty('outstandingTakeBackCents');
     });
   });
 

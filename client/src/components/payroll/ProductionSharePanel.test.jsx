@@ -113,6 +113,31 @@ describe('Production share preview', () => {
     expect(call.mock.calls.find(([path]) => path === '/production-share/stop-override')[1].body).toMatchObject({ visitId: 'v8', revision: 'ov8' });
   });
 
+  it('shows a frozen stop of a final week as history: no credit box, no clear button, its review mark kept', async () => {
+    const owner = { visitId: 'v7', workDate: '2026-09-15', serviceType: 'Pest Control', kind: 'owner_set', creditCents: 50000, needsReview: false, readOnly: true, reason: 'Paid by a final pay run: this is what it was paid with.' };
+    const flagged = { visitId: 'v6', workDate: '2026-09-16', serviceType: 'Pest Control', kind: 'refund_flagged', creditCents: 0, needsReview: true, readOnly: true, reason: 'Paid by a final pay run: this is what it was paid with.' };
+    const call = vi.fn(async (path) => answerFor(path, { stops: [owner, flagged], needsReview: [flagged] }));
+    render(<ProductionSharePanel call={call} technicians={TECHS} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open the production share preview' }));
+    fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-a' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+    await screen.findByText('Set by the owner');
+    expect(screen.queryByRole('button', { name: /Clear the credit I set|Set credit|Clear the old credit/ })).toBeNull();
+    expect(screen.queryByLabelText('Set the credit of this stop')).toBeNull();
+    expect(screen.getAllByText(/Needs review:/)).toHaveLength(1);
+    expect(screen.queryByText(/need review\. Each shows \$0 until you set its credit below/)).toBeNull();
+  });
+
+  it('says a final check recorded no production share', async () => {
+    const call = vi.fn(async (path) => answerFor(path, { recordedNoProductionShare: true, configured: false, stops: [], needsReview: [], takeBackToSet: [], takeBackAnswers: [], takeBacks: [] }));
+    render(<ProductionSharePanel call={call} technicians={TECHS} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open the production share preview' }));
+    fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-a' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+    expect(await screen.findByText(/recorded no production share/)).toBeInTheDocument();
+    expect(screen.queryByText(/No numbers are set for this week/)).toBeNull();
+  });
+
   describe('refunds on paid stops', () => {
     const toSet = { checkId: 'check-1', visitId: 'v-paid', workDate: '2026-09-08', paidWeekStart: '2026-09-07', creditCents: 100000, newSignals: ['pay:x:3000'], answerRevision: 'none', signalRevision: 'sig-1', reason: 'new', previousCents: null,
       visit: { serviceType: 'Pest Control', scheduledDate: '2026-09-08', windowDisplay: '9-11 AM', completedAt: '2026-09-08T15:10:00.000Z' } };

@@ -378,7 +378,7 @@ postgres('production share pay line', () => {
       expect(snapshot.stops.find((row) => row.visitId === unpriced)).toMatchObject({ kind: 'owner_set', creditCents: 126000, needsReview: false });
       expect((await finalize(created.id)).body.run.status).toBe('finalized');
       // the week is paid: neither a change nor a clear is accepted
-      expect((await override({ ...key, creditCents: 1, reason: 'late', revision: await revisionOf(key.visitId) })).status).toBe(409);
+      expect((await override({ ...key, creditCents: 1, reason: 'late', revision: await revisionOf(key.visitId), stopRevision: 'shown-before-finalize' })).status).toBe(409);
       expect((await clear(key)).status).toBe(409);
       expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced }).first('credit_cents')).toMatchObject({ credit_cents: '126000' });
     });

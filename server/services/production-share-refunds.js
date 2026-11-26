@@ -265,13 +265,17 @@ async function depositSignalsOf(conn, invoices) {
   const estimateIds = [...new Set([...estimatesOf.values()].flat())];
   if (!estimateIds.length) return out;
   const deposits = await conn('estimate_deposits').whereRaw('estimate_id = ANY(?::uuid[])', [estimateIds]).whereIn('status', COLLECTED_DEPOSITS)
-    .select('id', 'estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount');
+    .select('id', 'estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount', 'failed_refund_ids');
   const signalsOfEstimate = new Map();
   for (const row of deposits) {
     const { reversed, refunded } = depositReversal(row);
     if (!(reversed > 0n)) continue;
     const key = canonicalId(row.estimate_id);
-    signalsOfEstimate.set(key, [...(signalsOfEstimate.get(key) || []), `deposit:${row.id}:${refunded}`]);
+    // A refund that bounces after the deposit was marked refunded is appended to failed_refund_ids and leaves refunded_amount alone (manual
+    // reconciliation): the failed ids are in the signal, so the bounce changes it, reopens an answer and suspends movement.
+    const failed = (Array.isArray(row.failed_refund_ids) ? row.failed_refund_ids : []).map(String).sort();
+    const failedPart = failed.length ? `:f${crypto.createHash('md5').update(failed.join(',')).digest('hex').slice(0, 10)}` : '';
+    signalsOfEstimate.set(key, [...(signalsOfEstimate.get(key) || []), `deposit:${row.id}:${refunded}${failedPart}`]);
   }
   for (const [visit, set] of invoices) {
     const found = [...set].flatMap((invoiceId) => (estimatesOf.get(invoiceId) || []).flatMap((estimateId) => signalsOfEstimate.get(estimateId) || []));
@@ -366,6 +370,16 @@ function reopenOf(current, answer, baseline) {
   return { reason: current.some((id) => !known.includes(id)) ? 'new' : 'changed', previousCents: answer ? answer.cents : null };
 }
 
+// ONE eligibility rule for a paid source, read by the prompt (addSource) and by the write guard (setRefundTakeBack): the take-back the owner is
+// asked to set, or null. A reopened source (reopenOf) is asked; so is a source holding a signal that cannot tell refunds apart (unclear: asked
+// every week, never stopping an answer already in force). An owner can save when the source is asked, or when an answer already exists to change.
+function promptOf(current, answer, baseline) {
+  const reopen = reopenOf(current, answer, baseline);
+  if (reopen) return { ...reopen, inForce: false };
+  const unclear = current.some((id) => id.startsWith(UNCLEAR_SIGNAL_PREFIX));
+  return unclear ? { reason: 'unclear', previousCents: answer ? answer.cents : null, inForce: true } : null;
+}
+
 // What a source moves this week: no answer (cleared) is a target of 0, so what was taken is given back; an answer that is not in force
 // moves nothing.
 const deltaOf = (answer, inForce, history) => (answer && !inForce ? 0 : (answer ? answer.cents : 0) - (history ? history.cents : 0));
@@ -381,13 +395,11 @@ function addSource(mine, row, { signals, answer, history, visit }) {
     checkId: canonicalId(row.check_id), visitId: canonicalId(row.visit_id), workDate: row.work_date || null, paidWeekStart: row.week_start,
     creditCents: Number(row.credit_cents), answerRevision: answer ? answer.revision : NO_ANSWER, signalRevision: signalRevisionOf(current), visit: visit || null,
   };
-  const reopen = reopenOf(current, answer, baseline);
-  // A signal that cannot tell refunds apart asks again every week, but never stops an answer already in force (reopen stays what equality says).
-  const unclear = !reopen && current.some((id) => id.startsWith(UNCLEAR_SIGNAL_PREFIX)) ? { reason: 'unclear', previousCents: answer ? answer.cents : null } : null;
-  if (reopen || unclear) mine.toSet.push({ ...where, newSignals: fresh, ...(reopen || unclear) });
-  if (answer) mine.answers.push({ ...where, id: answer.id, cents: answer.cents, note: answer.note, signals: answer.signals, newSignals: fresh, updatedAt: answer.updatedAt, revision: answer.revision, inForce: !reopen });
+  const { inForce, ...asked } = promptOf(current, answer, baseline) || { inForce: true };
+  if (asked.reason) mine.toSet.push({ ...where, newSignals: fresh, ...asked });
+  if (answer) mine.answers.push({ ...where, id: answer.id, cents: answer.cents, note: answer.note, signals: answer.signals, newSignals: fresh, updatedAt: answer.updatedAt, revision: answer.revision, inForce });
   if (!answer && !history) return;
-  const delta = deltaOf(answer, !reopen, history);
+  const delta = deltaOf(answer, inForce, history);
   // ONE RULE for dependencies: a source with any finalized history is evaluated every week; its entry (0 cents when nothing moves)
   // carries the run of the source check and every run that holds an entry for it.
   if (delta === 0 && !(history && history.runs.size)) return;
@@ -547,8 +559,8 @@ async function setRefundTakeBack(input, actor, conn = db) {
     requireSameAnswer(before, v.answerRevision);
     const current = await currentSignalsOf(trx, visitId, stop);
     const baseline = [...(Array.isArray(stop.refundSignals) ? stop.refundSignals : [])].sort();
-    // With no answer yet, a stop is asked about only when its full set differs from the one its check froze.
-    if (!before && sameList(current, baseline)) throw new PayrollError(409, 'No new refund is recorded on this stop.');
+    // The same rule as the prompt (promptOf): a stop is saved when it is asked about, or when an answer already exists to change.
+    if (!before && !promptOf(current, null, baseline)) throw new PayrollError(409, 'No new refund is recorded on this stop.');
     requireSameSignals(current, v.signalRevision);
     // The answer stores the FULL set the server read (the page sent only its revision): it is in force only while the full set stays the same.
     const signals = current;

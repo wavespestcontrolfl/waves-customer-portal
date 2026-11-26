@@ -282,15 +282,18 @@ function RefundTakeBacks({ call, preview, generation, onChanged }) {
 
 function PreviewNotes({ preview }) {
   return <>
-        {!preview.configured && <p className="m-0 text-ui-caption text-ink-secondary">No numbers are set for this week, so the share shows $0.</p>}
+        {preview.recordedNoProductionShare && <p role="status" className="m-0 text-ui-caption text-ink-secondary">
+          A final pay check covers this week, and it recorded no production share. Nothing is worked out here for the week.
+        </p>}
+        {!preview.configured && !preview.recordedNoProductionShare && <p className="m-0 text-ui-caption text-ink-secondary">No numbers are set for this week, so the share shows $0.</p>}
         {preview.refundCents > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
           Refunds recorded on these stops total {centsToDollars(preview.refundCents)}. A stop with a refund shows $0 until you set its credit.
         </p>}
         {preview.unallocatedRefundCents > 0 && <p role="status" className="m-0 text-ui-caption text-warn-fg">
           Refunds of {centsToDollars(preview.unallocatedRefundCents)} are on shared invoices that cannot be split across their visits. They are not in any stop above.
         </p>}
-        {preview.needsReview.length > 0 && <p role="status" className="m-0 text-ui-caption text-warn-fg">
-          {preview.needsReview.length} stop{preview.needsReview.length === 1 ? '' : 's'} need review. Each shows $0 until you set its credit below, so pay is never guessed.
+        {preview.needsReview.filter(stop => !stop.readOnly).length > 0 && <p role="status" className="m-0 text-ui-caption text-warn-fg">
+          {preview.needsReview.filter(stop => !stop.readOnly).length} stop{preview.needsReview.filter(stop => !stop.readOnly).length === 1 ? '' : 's'} need review. Each shows $0 until you set its credit below, so pay is never guessed.
         </p>}
   </>;
 }
@@ -384,9 +387,11 @@ export default function ProductionSharePanel({ call, technicians }) {
                 <TD nums align="right">{centsToDollars(stop.creditCents)}</TD>
                 <TD>
                   {stop.needsReview && <span className="text-warn-fg">Needs review: </span>}{stop.reason}
-                  <StopCreditForm key={`${stop.visitId}:${stop.kind}:${stop.creditCents}:${stop.stopRevision || ''}`} call={call} technicianId={preview.technician.id}
-                    weekStart={preview.weekStart} stop={stop} generation={() => selection.current}
-                    onChanged={(startedUnder) => { if (startedUnder === selection.current) load(preview.technician.id, preview.weekStart); }} />
+                  {stop.readOnly
+                    ? <VisitReference stop={stop} />
+                    : <StopCreditForm key={`${stop.visitId}:${stop.kind}:${stop.creditCents}:${stop.stopRevision || ''}`} call={call} technicianId={preview.technician.id}
+                      weekStart={preview.weekStart} stop={stop} generation={() => selection.current}
+                      onChanged={(startedUnder) => { if (startedUnder === selection.current) load(preview.technician.id, preview.weekStart); }} />}
                 </TD>
                 <TD nums align="right">{stop.refundCents > 0 ? centsToDollars(stop.refundCents) : ''}</TD>
               </TR>)}
