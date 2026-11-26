@@ -40,7 +40,8 @@
  *                  (lawn-rounds.js datesMoveSeries). Recorded only.
  *        call_list a wet visit with no later dry slot that day and none on the next work day: it would go to the office call
  *                  list, not a text. Unread forecast hours on that day keep it unread_forecast, never call_list.
- *        none      a visit whose forecast or point could not be read, or one with an hour (a later start that day or the next
+ *        none      a visit whose forecast or point could not be read, a next-work-day scan with no work day in it
+ *                  (reason no_work_day_in_scan: unresolved, and the day is not frozen), or one with an hour (a later start that day or the next
  *                  work day) that has no reading and none read wet. The reason is kept. Unread is never dry.
  *      At most MAX_PROPOSALS (10) reorders and day moves per target day, one per physical stop. A visit past the cap
  *      is recorded as `cap` with what it would have been.
@@ -171,7 +172,8 @@ async function dryDayFor(row, hourly, ctx) {
   const { day, taken, occupied } = ctx;
   const length = row.visit.reach.endMin - row.visit.reach.startMin;
   const date = await nextWorkDay(day, ctx);
-  if (!date) return { target: null, unread: false };
+  // No work day inside the scan: nothing was judged, so the caller must not read this as "no dry slot".
+  if (!date) return { target: null, unread: false, exhausted: true };
   let unread = false;
   for (let start = DAY_OPEN; start + length <= DAY_CLOSE; start += 60) {
     if (occupied(row.visit, date, start, start + length) || clashes(taken, techOf(row), date, start, start + length)) continue;
@@ -204,24 +206,14 @@ async function reorderStart(row, ctx, hourly) {
 }
 
 /**
- * The same-day starts a reorder may take, from ONE list that the dry-hour search and the unread check both walk, so they
- * cannot drift: on the hour from the day's start, the visit's own hours and drying hours inside the day (the walk of
- * rain-pass dryStart), later than the visit's own start (owner 2026-11-26), and not before `earliestMin` (a day's own
- * start for a stop judged today). `own` is the stop's own start; `start` and `end` its whole span (before-work members
- * included).
+ * The same-day starts a reorder may take, from ONE list that the dry-hour search and the unread check both walk: rain-pass's
+ * own candidate walk (candidateStarts: grouped offsets, duration limits, earliest start), kept to those LATER than the
+ * visit's own start (owner 2026-11-26). `own` is the stop's own start; `start` and `end` its whole span.
  */
 function laterStarts(row, ctx) {
   const { reach } = row.visit;
-  const length = reach.endMin - reach.startMin;
-  const before = reach.ownStartMin - reach.startMin;
-  const { startMin, endMin } = ctx.dayHours;
-  const out = [];
-  for (let own = startMin; own + 60 <= endMin; own += 60) {
-    const start = own - before;
-    if (own <= reach.ownStartMin || start < startMin || start + length > endMin || own < ctx.earliestMin) continue;
-    out.push({ own, start, end: start + length });
-  }
-  return out;
+  return rainPass.candidateStarts({ reach, earliestMin: ctx.earliestMin, dayStartMin: ctx.dayHours.startMin, dayEndMin: ctx.dayHours.endMin })
+    .filter((c) => c.own > reach.ownStartMin);
 }
 
 /**
@@ -280,7 +272,9 @@ async function proposeFor(row, ctx) {
   if (!Array.isArray(hourly)) return { ...base, decision: 'none', reason: 'unread_forecast' };
   // A later hour with no reading could still have been dry: unread, never a move or a call.
   if (laterHourUnread(row, hourly, ctx)) return { ...base, decision: 'none', reason: 'unread_forecast' };
-  const { target, unread } = await dryDayFor(row, hourly, ctx);
+  const { target, unread, exhausted } = await dryDayFor(row, hourly, ctx);
+  // A scan with no work day in it is unresolved, never a call list: the day is not frozen on it (see planDay).
+  if (exhausted) return { ...base, decision: 'none', reason: 'no_work_day_in_scan' };
   // No dry slot today and none on the next work day: the visit goes to the office call list (no text).
   if (!target) return unread ? { ...base, decision: 'none', reason: 'unread_forecast' } : { ...base, decision: 'call_list', reason: 'no_dry_slot' };
   const plans = planMovesOf(row.visit, await ctx.seriesRows(), target.date);
@@ -390,7 +384,10 @@ async function planDay({ now, conn, day, today, read, deps }) {
   // that could be read.
   const eligible = decided.proposals.filter((p) => p.reason !== 'no_point').length;
   const unread = decided.proposals.filter((p) => ['unread_forecast', 'error'].includes(p.reason)).length;
-  const problem = eligible > 0 && unread === eligible ? `forecast unread for all ${unread} outdoor visit(s) on ${day}` : null;
+  const unresolved = decided.proposals.filter((p) => p.reason === 'no_work_day_in_scan').length;
+  let problem = null;
+  if (unresolved > 0) problem = `no work day within ${NEXT_WORK_SCAN} days of ${day} for ${unresolved} visit(s): nothing is frozen`;
+  else if (eligible > 0 && unread === eligible) problem = `forecast unread for all ${unread} outdoor visit(s) on ${day}`;
   // The forecast numbers per area for the work hours (the ads record's reader, NWS only), kept so the day can be replayed.
   const forecast = await rainMode.forecastDay(day, { read }).catch(() => null);
   return { ...decided, problem, chances: forecast?.chances || null };

@@ -725,6 +725,62 @@ describe('proposals that failed to plan', () => {
   });
 });
 
+describe('a scan with no work day in it', () => {
+  const allClosed = () => jest.fn(async (from, to) => {
+    // Every date of the range is a closure day.
+    const out = new Set();
+    for (let d = new Date(`${from}T12:00:00Z`); d <= new Date(`${to}T12:00:00Z`); d = new Date(d.getTime() + 24 * 3600 * 1000)) out.add(d.toISOString().slice(0, 10));
+    return out;
+  });
+
+  test('is unresolved: none/no_work_day_in_scan, never call_list, and the day is not frozen', async () => {
+    const conn = fakeConn();
+    const d = deps([stop()], { blackoutDates: allClosed() });
+    const out = await run({ now: TUE_CUTOFF, conn, deps: d, read: jest.fn(async () => hoursFor(ALL_DAY)) });
+    expect(out.proposals[0]).toMatchObject({ decision: 'none', reason: 'no_work_day_in_scan' });
+    expect(out.proposals.some((p) => p.decision === 'call_list')).toBe(false);
+    expect(out.problems[0]).toMatch(/no work day within 8 days of 2026-11-25 for 1 visit/);
+    expect(daysOf(conn)[WED]).toBeUndefined(); // nothing frozen: the retry decides again
+    // The retry, once a day is open, takes the cutoff.
+    n = 0;
+    const retry = await run({ now: TUE_RETRY, conn, deps: deps([stop()]), read: jest.fn(async () => hoursFor(ALL_DAY)) });
+    expect(retry.problems).toEqual([]);
+    expect(daysOf(conn)[WED].cutoff.proposals[0].decision).toBe('day_move');
+  });
+
+  test('a visit that reorders the same day is not touched by a closed next week', async () => {
+    const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()], { blackoutDates: allClosed() }), read: jest.fn(async () => hoursFor(MORNING)) });
+    expect(out.proposals[0].decision).toBe('reorder');
+    expect(out.problems).toEqual([]);
+  });
+});
+
+describe('rain-pass candidateStarts is the one walk', () => {
+  const dayStartMin = 480;
+  const dayEndMin = 1020;
+
+  test('grouped offsets, duration limits and the earliest start; the current start is never a candidate', () => {
+    // A grouped stop whose first member works 30 minutes before the anchor and which lasts 150 minutes in all.
+    const reach = { startMin: 570, endMin: 720, ownStartMin: 600 };
+    const c = rainPass.candidateStarts({ reach, earliestMin: 0, dayStartMin, dayEndMin });
+    expect(c.every((x) => x.start === x.own - 30 && x.end - x.start === 150)).toBe(true);
+    expect(c.some((x) => x.own === 600)).toBe(false);
+    expect(c[0].own).toBe(480 + 60); // own 480 would start the whole span at 450, before the day
+    expect(Math.max(...c.map((x) => x.end))).toBeLessThanOrEqual(dayEndMin);
+    const lead = rainPass.candidateStarts({ reach, earliestMin: 780, dayStartMin, dayEndMin });
+    expect(Math.min(...lead.map((x) => x.own))).toBe(780);
+  });
+
+  test('dryStart takes its starts from it: the nearest dry open one', () => {
+    const reach = { startMin: 540, endMin: 600, ownStartMin: 540 };
+    const dry = Array.from({ length: 24 }, (_, h) => ({ startTime: `${WED}T${String(h).padStart(2, '0')}:00:00-05:00`, rainChance: 0 }));
+    const asked = [];
+    const own = rainPass.dryStart({ hourly: dry, date: WED, reach, earliestMin: 0, dayStartMin, dayEndMin, isFree: (st, en) => { asked.push([st, en]); return st >= 660; } });
+    expect(own).toBe(660);
+    expect(asked).toEqual(rainPass.candidateStarts({ reach, earliestMin: 0, dayStartMin, dayEndMin }).map((x) => [x.start, x.end]));
+  });
+});
+
 describe('one candidate list for the later-hour search and the unread check', () => {
   test('laterStarts is exactly what rain-pass dryStart walks, filtered to starts after the visit\'s own start', () => {
     const dayHours = { startMin: 480, endMin: 1020 };
