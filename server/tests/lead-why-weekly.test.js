@@ -76,6 +76,10 @@ describe('counts', () => {
     const s = summarizeWeek([lead('W', { status: 'won', not_booked_reason: 'price' })], []);
     expect(s).toMatchObject({ won: 1, notBooked: 0, notBookedKnown: 0, notBookedReasons: [] });
   });
+  test('a lost lead that converted is not counted as not booked', () => {
+    const s = summarizeWeek([lead('C', { status: 'lost', converted_at: '2026-11-19T15:00:00Z', not_booked_reason: 'price' })], []);
+    expect(s).toMatchObject({ notBooked: 0, notBookedKnown: 0 });
+  });
 });
 
 describe('the card', () => {
@@ -152,6 +156,7 @@ function connWith(rows, pages = [rows]) {
   let i = 0;
   q.select = jest.fn(async () => pages[i++] || []);
   const conn = jest.fn(() => q);
+  conn.raw = jest.fn((sql) => sql);
   conn.q = q;
   return conn;
 }

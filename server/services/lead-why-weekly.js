@@ -105,9 +105,9 @@ function topCounts(rows, field, n = TOP_N) {
 
 const known = (rows, field) => rows.filter((r) => clean(r[field])).length;
 
-// Not booked = status lost / unresponsive. The loss reasons are counted over these same leads, so a
+// Not booked = status lost / unresponsive and never converted. The loss reasons are counted over these same leads, so a
 // lead won after the nightly fill never adds a stale reason. The rest are open or closed another way.
-const notBookedRows = (rows) => rows.filter((r) => NOT_BOOKED_STATUSES.includes(r.status));
+const notBookedRows = (rows) => rows.filter((r) => NOT_BOOKED_STATUSES.includes(r.status) && !r.converted_at);
 function weekTotals(rows) {
   const won = rows.filter((r) => r.status === 'won').length;
   const notBooked = notBookedRows(rows).length;
@@ -199,11 +199,13 @@ async function loadWeekLeads(conn, week) {
       .where('leads.created_at', '<', week.to)
       .modify((q) => scopeToProspects(q, 'leads'))
       .modify((q) => {
-        if (after) q.whereRaw('(leads.created_at, leads.id) > (?, ?)', [after.created_at, after.id]);
+        if (after) q.whereRaw('(leads.created_at, leads.id) > (?::timestamptz, ?)', [after.cursor_at, after.id]);
       })
       .orderBy([{ column: 'leads.created_at', order: 'asc' }, { column: 'leads.id', order: 'asc' }])
       .limit(PAGE)
-      .select('leads.id', 'leads.status', 'leads.created_at', 'leads.switch_reason', 'leads.previous_company', 'leads.not_booked_reason');
+      // cursor_at keeps Postgres microseconds: a JS Date would drop them and repeat a row.
+      .select('leads.id', 'leads.status', 'leads.created_at', 'leads.converted_at', 'leads.switch_reason', 'leads.previous_company', 'leads.not_booked_reason',
+        conn.raw('leads.created_at::text as cursor_at'));
     all.push(...page);
     if (page.length < PAGE) return all;
     after = page[page.length - 1];
