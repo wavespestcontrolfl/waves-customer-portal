@@ -222,6 +222,10 @@ async function sendTemplate({
   // handed in from an earlier read: an address that changed in between is no
   // email, so the plan and rate never go to a former address.
   expectedRecipientKey = null,
+  // A PII-sensitive caller (the app's profile edit): the provider's error body is not logged, and a failure is logged
+  // and stored by its code only. An error message can carry the recipient address (a provider body, or a failed
+  // insert's bound values). Default false = unchanged for every other caller.
+  suppressProviderErrorLog = false,
 }) {
   const recipientCustomer = await loadCustomer(recipientCustomerId);
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
@@ -250,13 +254,14 @@ async function sendTemplate({
         ...categories,
       ],
       suppressionGroupKey: TRANSACTIONAL_GROUP,
+      suppressProviderErrorLog,
       ...billingHandoffOption({ billingAuthorityInput, recipientEmail: contact.email, templateKey, state }),
     });
     if (state.boundaryBlock) return await billingEmailSendOutcome(result, state, billingLog);
     if (result.deduped) return dedupedTemplateResult(result);
     return settleTemplateResult(result, log);
   } catch (err) {
-    return templateSendFailure(err, { billingAuthorityInput, state, billingLog, log });
+    return templateSendFailure(err, { billingAuthorityInput, state, billingLog, log, suppressProviderErrorLog });
   }
 }
 
@@ -331,15 +336,17 @@ function dedupedTemplateResult(result) {
   };
 }
 
-async function templateSendFailure(err, { billingAuthorityInput, state, billingLog, log }) {
+async function templateSendFailure(err, { billingAuthorityInput, state, billingLog, log, suppressProviderErrorLog = false }) {
   if (billingAuthorityInput) {
     return billingEmailSendFailure(err, state.handoffStarted, billingLog, {
       logTag: 'account-membership-email', label: `${log.eventType} for ${log.customerId}`,
     });
   }
-  await logLifecycleEmailAttempt({ ...log, status: 'failed', failureReason: err.message });
-  logger.error(`[account-membership-email] ${log.eventType} failed for ${log.customerId}: ${err.message}`);
-  return { ok: false, error: err.message };
+  // A PII-sensitive caller gets the error's code, never its message (see sendTemplate's suppressProviderErrorLog).
+  const reason = suppressProviderErrorLog ? String(err.status || err.code || err.name || 'send_failed') : err.message;
+  await logLifecycleEmailAttempt({ ...log, status: 'failed', failureReason: reason });
+  logger.error(`[account-membership-email] ${log.eventType} failed for ${log.customerId}: ${reason}`);
+  return { ok: false, error: reason };
 }
 
 function itemSummary(items = []) {
@@ -366,6 +373,17 @@ async function sendAccountUpdated({
   propertyLabel: explicitPropertyLabel = '',
   changedAt = new Date(),
   idempotencyKey,
+  // Send to this contact ({ email, name }) instead of the customer's current
+  // primary one: the profile edit notifies the address a customer just left.
+  contactOverride = null,
+  // Send even when the actor is the recipient. Set only for an identity change
+  // (name or email edited in the portal), where the notice is the takeover alarm.
+  alwaysNotify = false,
+  // A neutral greeting name for a notice that goes to an address the customer just left: the template would
+  // otherwise greet it with the customer's CURRENT first name (the new one, after a rename).
+  greetingName = null,
+  // Passed to sendTemplate: a failure is logged and stored by its code only (the app's profile edit).
+  suppressProviderErrorLog = false,
 } = {}) {
   // The account.updated template is a security-style "was this you?" notice.
   // Skip it when the recipient is the same person who made the change — a
@@ -374,6 +392,7 @@ async function sendAccountUpdated({
   // notice is still sent when a different actor (e.g. staff) changed the
   // recipient's settings, or when the actor is unknown (fail toward notifying).
   if (
+    !alwaysNotify &&
     actorCustomerId != null &&
     recipientCustomerId != null &&
     String(actorCustomerId) === String(recipientCustomerId)
@@ -395,7 +414,10 @@ async function sendAccountUpdated({
     recipientCustomerId,
     templateKey: 'account.updated',
     eventType: 'account.updated',
+    contactOverride,
+    suppressProviderErrorLog,
     payload: {
+      ...(greetingName ? { first_name: greetingName } : {}),
       account_section: accountSection,
       change_summary: summary,
       changed_items_summary: itemSummary(changedItems) || summary,

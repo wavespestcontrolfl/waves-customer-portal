@@ -6,6 +6,7 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_CUSTOMER_PROFILE_EDIT=true (owner 2026-11-26 "yes do all these fixes": a signed-in account holder edits their own first name, last name and email in the Waves app and the portal, from the Account menu (PUT /api/customer/profile). A phone number can never be changed there (it is the login). It has a gate because a change emails the customer: an email change sends an "account updated" notice to the OLD address and to the NEW address, so a takeover shows; a name-only change sends one notice to the current address. A contact login and a cancelled account are refused. Off, the route answers 404 {enabled:false} and /api/auth/me reports profileEdit:false, so the app hides the Edit control. Strict `=== 'true'`, read at call time via customerProfileEditLive(); dark by default. Kill: unset.)
  *   GATE_ONE_TIME_PEST_NO_HOME_AGE=true (owner 2026-11-26 "both older homes and newer home should have the same one time price": a one-time pest price no longer carries the home-age adjustment of the pest plan. On, a new pest plan quote saves the quarterly rate without the age adjustment; a one-time pest line on the same estimate and the one-time choice the estimate page shows beside the plan are priced from it. A one-time job priced alone never carried the adjustment. The plan price keeps it. A quote already priced keeps its one-time amount when the gate changes. It changes a price, so the owner flips it. Off or unset = new quotes price as before. Kill = unset.)
  *   GATE_RETURNING_SETUP_FEE_GAP=true (owner 2026-11-24 "make this a rule", 2026-11-25 "I'd like to automate this": a customer who cancelled and comes back pays the $99 WaveGuard setup fee again only when the gap from the last completed visit of the same plan (pest or mosquito) to the day of the quote is longer than one plan cycle plus 30 days: quarterly over 121 days, bi-monthly over 91, monthly over 60. Inside that window the quote carries no fee, with no staff step: the estimate tool shows why, the page leaves the fee out and the accept bill never charges it. Covers quotes the staff or a technician save, a customer's own service change on the estimate page, the customer's own plan-restart quote, the website quote with its self-booking, and the quotes drafted from a call or a text thread. It decides each time a quote is priced, so a quote already saved keeps its fee until it is priced again. It lowers a price, so the owner flips it. Read at call time via returningSetupFeeGapLive(), strict 'true', dark by default. Off = the fee is charged exactly as before. Kill: unset.)
  *   GATE_CALL_GIVEN_VISIT_TEXTS=true (owner 2026-11-24 "yes, visit only", narrowing the 2026-10-29 caller-given-contact ruling: when a caller books a visit on a call and gives another person's number to be texted ("my husband Bob will be home, text him too"), that person gets three texts for that ONE visit only: its booking confirmation, its reminders and its en-route text, as plain informational copy with no management link; the en-route text carries a map-only tracker link of the person's own, never the account holder's tracker link (owner 2026-11-24 "yes he gets it") (the caller must have agreed to appointment texts for that person; their own text choices, STOP and any decline are honored and the send window applies). Nothing else: no portal login, no review ask, no email, no text about another visit, no account-level consent. The number is kept on its own row tied to the visit (visit_text_recipients), never on the customer. Anything beyond those three texts still goes through the Reply-YES flow, unchanged. Named risk: a text to a person who is not the account holder. Kill = unset, instant off: the three senders read callGivenVisitTextsLive() at call time. Off = today's behavior, no extra read.)
@@ -2491,6 +2492,8 @@ const gates = {
   routeEngineSummary: process.env.GATE_ROUTE_ENGINE_SUMMARY === 'true',
   // GATE_ALERT_CLEAR_AGENT (alert clear-up agent, shadow only; exactly 'shadow'). Boot-log entry; the call-time reader is alertClearAgentMode().
   alertClearAgent: process.env.GATE_ALERT_CLEAR_AGENT === 'shadow',
+  // GATE_CUSTOMER_PROFILE_EDIT (customer edits own name and email, dark). Boot-log entry only; the call-time reader is customerProfileEditLive().
+  customerProfileEdit: process.env.GATE_CUSTOMER_PROFILE_EDIT === 'true',
   // Shared-writer cancellation notice (job-status.js): when a visit whose
   // reminders already went out is cancelled through ANY path (cascade,
   // track, IB, raw transition), text the customer the existing
@@ -9449,3 +9452,12 @@ function wdoReportHoldLive() {
 }
 // GATE_WDO_REPORT_HOLD reader, on its own line so gate PRs never conflict.
 module.exports.wdoReportHoldLive = wdoReportHoldLive;
+
+// GATE_CUSTOMER_PROFILE_EDIT read at CALL time (owner 2026-11-26, "yes do all these fixes"): strict 'true'. It has a gate because a
+// profile change emails the customer (an email change emails the old and the new address). Off = PUT /api/customer/profile answers
+// 404 {enabled:false} before any read, and /api/auth/me reports profileEdit:false so the app hides the Edit control. Kill = unset.
+function customerProfileEditLive() {
+  return process.env.GATE_CUSTOMER_PROFILE_EDIT === 'true';
+}
+// GATE_CUSTOMER_PROFILE_EDIT reader, on its own line so gate PRs never conflict.
+module.exports.customerProfileEditLive = customerProfileEditLive;

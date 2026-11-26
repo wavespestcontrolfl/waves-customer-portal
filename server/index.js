@@ -672,6 +672,8 @@ app.use('/api/integrations/commitments-worker', require('./routes/integrations-c
 app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watchdog-worker').watchdogGate);
 // Staff roof read (GATE_ROOF_ENTRY_READ): the router's own first middleware, answered here before the global limiter.
 app.use('/api/admin/roof-entry-read', require('./routes/admin-roof-entry-read').gateOn);
+// Customer profile edit (GATE_CUSTOMER_PROFILE_EDIT): both routes answer the dark 404 here, before the global limiter.
+app.use('/api/customer/profile', require('./routes/customer-profile').gateOn);
 // Public experiment exposure intake (GATE_GROWTHBOOK): POST /exposure only (any case, repeated or trailing slashes); GET /status stays open.
 app.use('/api/public/experiments', require('./routes/experiments-public').exposureDarkGuard);
 // Customer Photo ID (GATE_CUSTOMER_PHOTO_ID): the gate answers before the global limiter and the parsers (requireCustomerPhotoIdGateOpen, defined below).
@@ -933,6 +935,8 @@ app.use('/api/push', require('./routes/push'));
 app.use('/api/customer/activity', require('./routes/customer-activity'));
 // Store rating pop-up claim for the customer app (GATE_APP_RATING_PROMPT, dark) — authenticated.
 app.use('/api/customer/app-rating', require('./routes/customer-app-rating'));
+// Customer edits own name and email (GATE_CUSTOMER_PROFILE_EDIT, dark) — authenticated holder only.
+app.use('/api/customer/profile', require('./routes/customer-profile'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
