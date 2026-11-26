@@ -452,6 +452,10 @@ describe('a later stage named anywhere in a flea, cockroach or bed bug name', ()
     // An explicit stage stands when the name also lists an extra.
     ['Flea Control Service Visit 2 with Recheck', ['flea', 2, 'flea_followup']],
     ['German Roach Treatment 2 + Follow-up', ['cockroach', 3, 'cockroach_followup']],
+    ['Flea Treatment 2', ['flea', 2, 'flea_followup']],
+    ['Bed Bug Treatment 3', ['bed_bug', 3, 'bed_bug_followup']],
+    ['Cockroach Treatment Service Visit 2 of 3', ['cockroach', 3, 'cockroach_followup']],
+    ['Flea Control Service (Visit 2)', ['flea', 2, 'flea_followup']],
   ])('%s is the later card', (name, expected) => {
     expect(stage(name)).toEqual(expected);
   });
@@ -472,12 +476,26 @@ describe('a later stage named anywhere in a flea, cockroach or bed bug name', ()
     ['Flea Control Service, recheck is included', ['flea', 1, 'flea_service']],
     ['German Roach Treatment 2-Visit Package', ['cockroach', 1, 'german_roach_cleanout']],
     ['Bed Bug Treatment Service 2 Treatments', ['bed_bug', 2, 'bed_bug_treatment']],
+    // The older side-by-side terms read the name without its package phrases too.
+    ['Flea Treatment (2 Visits)', ['flea', 1, 'flea_service']],
+    ['Bed Bug Treatment 2-Visit Package', ['bed_bug', 2, 'bed_bug_treatment']],
+    ['Bed Bug Treatment 2 treatments', ['bed_bug', 2, 'bed_bug_treatment']],
+    // A number that counts rooms is not a visit number.
+    ['German Roach Treatment 2 bedrooms', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Flea Treatment 2 rooms', ['flea', 1, 'flea_service']],
+    ['Bed Bug Treatment 3 Bedrooms', ['bed_bug', 2, 'bed_bug_treatment']],
     ['Vehicle German Roach Treatment (2 Visits)', ['cockroach', 1, 'german_roach_cleanout']],
     ['German Roach Initial Service (3-Visit)', ['cockroach', 1, 'german_roach_cleanout']],
     ['Bed Bug Treatment Service', ['bed_bug', 2, 'bed_bug_treatment']],
     ['Cockroach Treatment Service', ['cockroach', 1, 'cockroach_control']],
   ])('%s stays the first card', (name, expected) => {
     expect(stage(name)).toEqual(expected);
+  });
+
+  test('a long free-text name is read in bounded time', () => {
+    const started = Date.now();
+    expect(stage(`Flea Control Service with ${'a'.repeat(5000)} ${'b '.repeat(3000)}`)).toEqual(['flea', 1, 'flea_service']);
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   test('a heat name keeps its scope review, and other programs are not read for stage words', () => {
