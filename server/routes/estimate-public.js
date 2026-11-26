@@ -99,7 +99,7 @@ const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, areaAddOnConfig } = require('../services/pricing-engine/constants');
 const {
-  oneTimePestNoHomeAgeLive, quarterlyPerAppWithoutHomeAge, storedPestAgeAdj, oneTimePestNoHomeAgeReplaySignal,
+  oneTimePestHomeAgeExcludedForEstimate, quarterlyPerAppWithoutHomeAge, storedPestAgeAdj, oneTimePestNoHomeAgeReplaySignal,
 } = require('../services/pricing-engine/one-time-pest-home-age');
 const { isRetiredTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
@@ -21350,7 +21350,7 @@ function oneTimePestChoiceAmountFromRecurringServices(recurringServices = [], ho
 }
 
 function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
-  const homeAgeAdj = oneTimePestNoHomeAgeLive() ? storedPestAgeAdj(estData) : 0;
+  const homeAgeAdj = oneTimePestHomeAgeExcludedForEstimate(estData) ? storedPestAgeAdj(estData) : 0;
   return oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies, homeAgeAdj)
     || oneTimePestChoiceAmountFromResultStats(estData, homeAgeAdj)
     || oneTimePestChoiceAmountFromRecurringServices(

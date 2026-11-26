@@ -14,6 +14,7 @@ const { generateEstimate } = require('../services/pricing-engine');
 const { PEST } = require('../services/pricing-engine/constants');
 const {
   quarterlyPerAppWithoutHomeAge, oneTimePestNoHomeAgeReplaySignal, storedPestAgeAdj,
+  oneTimePestHomeAgeExcludedForEstimate,
 } = require('../services/pricing-engine/one-time-pest-home-age');
 const { CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity-fields');
 const { oneTimeChoiceAmountForEstimate } = require('../routes/estimate-public');
@@ -92,6 +93,17 @@ describe('one-time pest price and home age', () => {
     const replayNew = generateEstimate(inputFor(BOTH, OLDER, { savedEstimateReplay: true, oneTimePestNoHomeAgeReplay: true }));
     expect(line(replayNew, 'one_time_pest').price).toBe(line(soldWithoutAge, 'one_time_pest').price);
     expect(line(replayNew, 'one_time_pest').homeAgeExcluded).toBe(true);
+
+    // The estimate page follows the saved line too (gate is off here).
+    const shown = { show_one_time_option: true };
+    expect(oneTimePestHomeAgeExcludedForEstimate({ engineResult: soldWithoutAge })).toBe(true);
+    expect(oneTimeChoiceAmountForEstimate(shown, { engineResult: soldWithoutAge }))
+      .toBe(line(soldWithoutAge, 'one_time_pest').price);
+    process.env[GATE] = 'true';
+    expect(oneTimePestHomeAgeExcludedForEstimate({ engineResult: soldWithAge })).toBe(false);
+    expect(oneTimeChoiceAmountForEstimate(shown, { engineResult: soldWithAge }))
+      .toBe(line(soldWithAge, 'one_time_pest').price);
+    expect(oneTimePestHomeAgeExcludedForEstimate({ engineResult: generateEstimate(inputFor(PLAN, OLDER)) })).toBe(true);
   });
 
   test('the replay stamp is server-owned and the helper respects the plan floor', () => {

@@ -47,7 +47,16 @@ function oneTimePestNoHomeAgeReplaySignal(estData) {
   return savedLineItems(estData).some((l) => l?.service === 'one_time_pest' && l.homeAgeExcluded === true);
 }
 
+// Whether the estimate page takes the age adjustment out of the one-time choice.
+// An estimate that saved a one-time pest line follows that line's own rule, as
+// the engine replay does; a plan-only estimate (no saved line) follows the gate.
+function oneTimePestHomeAgeExcludedForEstimate(estData) {
+  const saved = savedLineItems(estData).filter((l) => l?.service === 'one_time_pest');
+  return saved.length ? saved.some((l) => l.homeAgeExcluded === true) : oneTimePestNoHomeAgeLive();
+}
+
 module.exports = {
+  oneTimePestHomeAgeExcludedForEstimate,
   oneTimePestNoHomeAgeLive,
   quarterlyPerAppWithoutHomeAge,
   storedPestAgeAdj,
