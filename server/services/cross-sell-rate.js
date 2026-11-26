@@ -246,6 +246,9 @@ async function pestOnlySummary(db, asOfDate) {
       FROM v
       JOIN pest_only p ON p.customer_id = v.customer_id
       WHERE v.fam = 'pest' AND v.held_on_day
+        -- The same visits that made the family held: booked by the day, inside the window.
+        AND v.created_at < (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York'
+        AND v.scheduled_date BETWEEN CAST(? AS date) - ${WINDOW_DAYS} AND CAST(? AS date) + ${WINDOW_DAYS}
       ORDER BY v.customer_id, v.scheduled_date DESC, v.id
     )
     SELECT c.id, c.first_name, c.last_name, c.city, l.pest_service_key, COUNT(*) OVER () AS total_count
@@ -253,7 +256,7 @@ async function pestOnlySummary(db, asOfDate) {
     JOIN customers c ON c.id = l.customer_id
     ORDER BY LOWER(c.last_name), LOWER(c.first_name), c.id
     LIMIT ${PEST_ONLY_LIMIT}
-  `, asOfBindings(asOf));
+  `, [...asOfBindings(asOf), asOf, asOf, asOf]);
   return {
     total: rows.length ? Number(rows[0].total_count) : 0,
     rows: rows.map((r) => ({

@@ -161,7 +161,7 @@ describe('pestOnlyCustomers', () => {
     expect(await svc.pestOnlyCustomers(db, '2026-11-26')).toEqual([
       { id: 'c1', firstName: 'Sample', lastName: 'Alpha', city: 'Parrish', pestServiceKey: 'pest_general_quarterly' },
     ]);
-    expect(db.calls.raw[0].bindings).toEqual(['2026-11-26', '2026-11-26', '2026-11-26', '2026-11-26', '2026-11-26']);
+    expect(db.calls.raw[0].bindings).toEqual(Array(8).fill('2026-11-26'));
     expect(db.calls.raw[0].sql).toContain('LIMIT 500');
     expect(db.calls.raw[0].sql).toContain('ORDER BY LOWER(c.last_name)');
   });
