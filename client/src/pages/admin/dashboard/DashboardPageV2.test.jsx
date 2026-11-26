@@ -214,6 +214,13 @@ const FIXTURES = {
     pnlIncompleteMonths: [],
     officeCategories: ["Office Expenses"],
   },
+  "/admin/dashboard/ops-buyer-metrics": {
+    errors: {},
+    ownerReliance: null,
+    revenuePerRouteDay: null,
+    routeFill: { scheduledStops: 24, routeDaysAvailable: 4, stopsPerFullDay: 12, fillRatio: 0.5, label: "planning only, not a pay target" },
+    returnVisitRate: null,
+  },
   "/admin/dashboard/service-mix": { mix: [], total_services: 3 },
   "/admin/dashboard/revenue-by-city": { cities: [], total: 331 },
   "/admin/dashboard/review-trend": { trend: [], total: 180, avgRating: 5 },

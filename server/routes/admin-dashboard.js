@@ -1234,6 +1234,17 @@ router.get('/office-cost-per-stop', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/ops-buyer-metrics
+// Work and routes: the owner's field hours and the share of stops others do, revenue per route day, route fill
+// for the next 28 days (planning only), and the 12-month return-visit rate. Read live, read-only; each metric
+// fails on its own (null + an error note). See services/ops-buyer-metrics.js.
+router.get('/ops-buyer-metrics', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildOpsBuyerMetrics } = require('../services/ops-buyer-metrics');
+    res.json(await buildOpsBuyerMetrics({ db }));
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dashboard/ebitda-bridge
 // Month-to-date adjusted-EBITDA waterfall: revenue → gross profit → contribution
 // (after marketing actuals) → adjusted EBITDA (after owner-entered overhead
