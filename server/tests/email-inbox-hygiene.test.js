@@ -464,6 +464,22 @@ describe('reconcilePendingDrafts', () => {
     const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.draft_gmail_id);
     expect(patches).toEqual(['reconciled_existing_draft', null]);
   });
+
+  test('a released lead claim is re-drafted with the lead rules and no customer facts', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb({ customers: [{ id: 'c-1', first_name: 'Should', email: 'lead@prospect.example' }] }, {
+      emails: [[{
+        ...EMAIL, id: 'e-lead', gmail_thread_id: 't-lead', classification: 'lead_inquiry',
+        from_address: 'lead@prospect.example', label_ids: '[]',
+      }]],
+    });
+    gmailClient.getThread.mockResolvedValue({ messages: [{ labelIds: ['INBOX'] }] });
+    const counts = await reconcilePendingDrafts(new Date('2026-07-28T12:00:00Z'));
+    expect(counts.redrafted).toBe(1);
+    const { system } = dispatchWithFallback.mock.calls.at(-1)[1];
+    expect(system).toContain('NEW CUSTOMER INQUIRY');
+    expect(system).toContain('Greeting name: there.');
+  });
 });
 
 describe('draftReplyForEmail (GATE_EMAIL_AUTO_DRAFTS)', () => {

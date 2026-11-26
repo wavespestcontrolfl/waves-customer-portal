@@ -831,14 +831,16 @@ async function reconcilePendingDrafts(now = new Date()) {
       // (draftReplyForEmail re-claims atomically and no-ops when the gate is
       // off or the row is non-inbound). Lazy require: email-actions requires
       // this module.
-      if (n && !hasDraft && !hasNewerSent && ['customer_request', 'scheduling', 'complaint'].includes(row.classification)) {
+      // lead_inquiry: only a new lead's draft claim reaches here (handleLeadInquiry is its one claimer).
+      if (n && !hasDraft && !hasNewerSent && ['customer_request', 'scheduling', 'complaint', 'lead_inquiry'].includes(row.classification)) {
         try {
           const { draftReplyForEmail } = require('./email-actions');
           const customer = await db('customers').where('email', normalizeAddress(row.from_address)).first();
           // Returns a real draft id only when a Gmail draft was created —
           // null covers gate-off and internally handled failures; counting
           // those would report recoveries that never happened.
-          const draftId = await draftReplyForEmail(row, { customer, tone: row.classification === 'complaint' ? 'complaint' : 'service' });
+          const tone = { complaint: 'complaint', lead_inquiry: 'lead' }[row.classification] || 'service';
+          const draftId = await draftReplyForEmail(row, { customer: tone === 'lead' ? null : customer, tone });
           if (draftId) counts.redrafted += 1;
         } catch (e) {
           logger.warn(`[inbox-hygiene] released-claim redraft failed (email ${row.id}): ${e.message}`);

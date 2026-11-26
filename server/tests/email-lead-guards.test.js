@@ -23,6 +23,12 @@ jest.mock('../services/email/gmail-client', () => ({
   trashMessage: jest.fn(),
   archiveMessage: jest.fn(),
   modifyLabels: jest.fn(),
+  getThread: jest.fn(async () => ({ messages: [{ labelIds: ['INBOX'] }] })),
+  createDraft: jest.fn(async () => ({ id: 'draft-1' })),
+  getSendAsSignature: jest.fn(async () => ''),
+}));
+jest.mock('../services/llm/call', () => ({
+  dispatchWithFallback: jest.fn(async () => ({ ok: true, text: 'Hi there,\n\nThanks for reaching out. What is the service address?' })),
 }));
 
 const db = require('../models/db');
@@ -37,7 +43,7 @@ const {
 const CHAIN_METHODS = [
   'where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNot', 'whereNotIn',
   'whereIn', 'whereNull', 'whereNotNull', 'whereILike', 'andWhereILike', 'orderBy',
-  'forUpdate',
+  'forUpdate', 'whereNotExists',
 ];
 
 /**
@@ -65,6 +71,8 @@ function setupDb(firstResults = {}, updateResults = {}) {
         return builder;
       });
     }
+    // The draft claim's subquery chains after select(); nothing in these tests awaits a select.
+    builder.select = jest.fn(() => builder);
     builder.first = jest.fn(async () => {
       state.firstTables.push(table);
       const queue = queues[table];
@@ -145,6 +153,65 @@ describe('handleLeadInquiry — lead-creation guards', () => {
 
   afterEach(() => {
     delete process.env.EMAIL_LEAD_MIN_CONFIDENCE;
+    delete process.env.GATE_EMAIL_AUTO_DRAFTS;
+  });
+
+  // Owner 2026-11-25 (*drafts*): a new lead's email gets a Gmail draft reply for the office to review and send.
+  test('a new lead from a real sender gets a draft reply in its thread (lead rules, no customer facts); never sent', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    const gmailClient = require('../services/email/gmail-client');
+    const { dispatchWithFallback } = require('../services/llm/call');
+    setupDb();
+
+    const result = await handleLeadInquiry(makeEmail(), makeClassification());
+
+    expect(result.action).toBe('lead_created');
+    expect(gmailClient.createDraft).toHaveBeenCalledTimes(1);
+    expect(gmailClient.createDraft.mock.calls[0][0]).toBe('jane.prospect@example.com');
+    expect(gmailClient.createDraft.mock.calls[0][3]).toBe('thread-1');
+    const { system } = dispatchWithFallback.mock.calls[0][1];
+    expect(system).toContain('NEW CUSTOMER INQUIRY');
+    expect(system).toContain('Never quote a price, a visit date or a time.');
+    expect(system).toContain('Greeting name: there.');
+    expect(system).not.toContain('FACTS FROM WAVES RECORDS');
+  });
+
+  test('a relay sender (lead from a no-reply form) gets no draft: the reply would go to the relay', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    const gmailClient = require('../services/email/gmail-client');
+    setupDb();
+
+    const result = await handleLeadInquiry(
+      makeEmail({ from_address: 'notifications@leadrelay.example.com', from_name: 'Lead Relay' }),
+      makeClassification({ extracted: { person_name: 'Sam Homeowner', email: 'sam.homeowner@gmail.com', phone: '941-555-9876' } }),
+    );
+
+    expect(result.action).toBe('lead_created');
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
+
+  test('a failed draft never undoes the lead', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    const gmailClient = require('../services/email/gmail-client');
+    gmailClient.getThread.mockRejectedValueOnce(new Error('gmail down'));
+    const state = setupDb();
+
+    const result = await handleLeadInquiry(makeEmail(), makeClassification());
+
+    expect(result.action).toBe('lead_created');
+    expect(insertsFor(state, 'leads')).toHaveLength(1);
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
+
+  test('gate off: a new lead gets no draft and no AI call', async () => {
+    const gmailClient = require('../services/email/gmail-client');
+    const { dispatchWithFallback } = require('../services/llm/call');
+    setupDb();
+
+    await handleLeadInquiry(makeEmail(), makeClassification());
+
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
   });
 
   test('happy path: new prospect still creates a lead + new_lead notification', async () => {
