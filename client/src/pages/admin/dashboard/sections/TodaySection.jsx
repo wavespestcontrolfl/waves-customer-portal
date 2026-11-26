@@ -7,6 +7,7 @@ import {
 import DashboardSection from "../DashboardSection";
 import ActionInbox from "../ActionInbox";
 import StaleVisitsCard from "../StaleVisitsCard";
+import BuyerViewRow from "../BuyerViewRow";
 import { KpiStrip, KpiTile } from "../KpiTile";
 import Verdict from "../Verdict";
 import { completionVerdict } from "../scorecard-metrics";
@@ -23,6 +24,7 @@ export default function TodaySection({
   onRetry,
   today,
   staleVisits,
+  buyerView,
   kpis,
   kpisLoading,
   kpisError,
@@ -42,6 +44,8 @@ export default function TodaySection({
         {pending.alerts ? "Retrying action inbox…" : "Action inbox is out of date."}
       </ActionFeedback>}
       <StaleVisitsCard data={staleVisits} error={errors.staleVisits} pending={pending.staleVisits} onRetry={onRetry} />
+      {/* Buyer view: the six numbers a buyer asks about, under the alerts. AR days is the core-KPI feed's own figure. */}
+      <BuyerViewRow data={buyerView} pending={pending.buyerView} onRetry={onRetry} arDays={kpis?.ar?.days ?? null} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <ChartCard
           title="Today's Completion"

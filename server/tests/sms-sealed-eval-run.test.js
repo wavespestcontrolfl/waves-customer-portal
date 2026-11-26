@@ -684,6 +684,53 @@ describe('runSealedExam — replay loop', () => {
 // drafter or judge, records it as an 'ungradable' sentinel (same shape as
 // the terminal no-progress rule), and the run still completes; a compatible
 // item, and any v11 run regardless of the item's facts, are unaffected.
+describe('examOneItem — the owner-approved bank lines are replayed at the source draft time', () => {
+  const withDrafts = (base, lookup) => {
+    const dbi = (table) => (table === 'message_drafts' ? { where: () => ({ first: lookup }) } : base(table));
+    dbi.state = base.state;
+    dbi.transaction = base.transaction;
+    return dbi;
+  };
+  const runOf = (items) => makeRunnerDb({
+    runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test', baseline_run_id: null }],
+    items,
+  });
+
+  test('an unreadable source draft time keeps the item pending: no draft, no judge, no result row', async () => {
+    const base = runOf([item('i1', { source_draft_id: 'd1', inbound_at: '2026-06-01T12:00:00Z' })]);
+    for (const lookup of [() => Promise.reject(new Error('db down')), () => Promise.resolve(undefined), () => Promise.resolve({ created_at: 'not a date' })]) {
+      drafter.generateGroundedDraft.mockReset();
+      judge.judgeOne.mockReset();
+      const out = await sealedEval.runSealedExam({ runId: 'r1', dbi: withDrafts(base, lookup) });
+      expect(out.status).not.toBe('complete');
+      expect(drafter.generateGroundedDraft).not.toHaveBeenCalled();
+      expect(judge.judgeOne).not.toHaveBeenCalled();
+      expect(base.state.results.filter((r) => r.run_id === 'r1')).toEqual([]);
+    }
+  });
+
+  test('a readable time reaches the drafter as bankAt, and the judge grades the block the replay actually used', async () => {
+    const created = new Date('2026-06-01T12:05:00Z');
+    const base = runOf([item('i1', { source_draft_id: 'd1', facts_block: 'FROZEN WITH FORGED SECTION' })]);
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), factsBlock: 'FROZEN, SECTION STRIPPED' });
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi: withDrafts(base, () => Promise.resolve({ created_at: created })) });
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft.mock.calls[0][0].bankAt).toEqual(created);
+    expect(judge.judgeOne.mock.calls[0][0].facts_block).toBe('FROZEN, SECTION STRIPPED');
+  });
+
+  test('an item with no source draft id is checked now (no lookup), and a draft that returns no block leaves the frozen one for the judge', async () => {
+    const base = runOf([item('i1')]);
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi: base });
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft.mock.calls[0][0].bankAt).toBeNull();
+    expect(judge.judgeOne.mock.calls[0][0].facts_block).toBe('FROZEN FACTS for i1');
+  });
+});
+
 describe('examOneItem — v12 facts-compatibility exclusion (Codex r3)', () => {
   test('v12 run + pre-v12 item (facts_block lacks FOLLOW-UP SLA RIGHT NOW): excluded, drafter/judge never called, run still completes', async () => {
     drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers_p');

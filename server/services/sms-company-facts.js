@@ -341,18 +341,26 @@ function locateBankSection(factsBlock) {
 }
 
 /**
- * The block as the models may read it: a bank section that does not verify (every line exact owner wording the bank knew at `opts.at`,
- * the time of the draft; omitted = now) is removed before the drafter and the verifier see it, because under the owner-approved heading
- * it would read as company policy. Multi-line free text (a visit window, a note) can reproduce the section shape. Only the section's
- * own lines go: the rest of the block stays byte-identical, and a block with no section, or a verified one, is returned unchanged.
+ * The block as the models may read it: the owner-approved bank heading appears only on a bank section that verifies (every line exact owner
+ * wording the bank knew at `opts.at`, the time of the draft; omitted = now). Free text (a visit window, a note, a typed text) can reproduce
+ * the heading with any shape of lines under it, so:
+ *   - a structural section that does not verify is removed whole (its heading and its lines);
+ *   - every OTHER line that is exactly the heading, before or after the first BILLING:, parsed as a section or not (a lone or malformed
+ *     heading, an earlier forged one beside a genuine section), is removed alone: the lines under it stay as plain text of the field that
+ *     carried them, no longer under the owner-approved heading.
+ * Nothing else changes: a block with no heading, or only a verified section, is returned unchanged.
  */
 function withoutUnverifiedBankSection(factsBlock, opts = {}) {
-  if (typeof factsBlock !== 'string') return factsBlock;
+  if (typeof factsBlock !== 'string' || !factsBlock.includes(SMS_BANK_FACTS_HEADER)) return factsBlock;
   const found = locateBankSection(factsBlock);
-  if (!found) return factsBlock;
-  const { before, lines, range } = found;
-  if (lines.slice(range.start + 1, range.end).every((l) => isOwnerBankLine(l.slice(2), opts))) return factsBlock;
-  return `${[...lines.slice(0, range.start), ...lines.slice(range.end)].join('\n')}${factsBlock.slice(before.length)}`;
+  const verified = found && found.lines.slice(found.range.start + 1, found.range.end).every((l) => isOwnerBankLine(l.slice(2), opts));
+  const lines = factsBlock.split('\n');
+  const drop = (line, i) => {
+    if (found && i >= found.range.start && i < found.range.end) return !verified;
+    return line === SMS_BANK_FACTS_HEADER;
+  };
+  const kept = lines.filter((line, i) => !drop(line, i));
+  return kept.length === lines.length ? factsBlock : kept.join('\n');
 }
 
 const bankLineHash = (text) => require('crypto').createHash('sha256').update(String(text).trim()).digest('hex');

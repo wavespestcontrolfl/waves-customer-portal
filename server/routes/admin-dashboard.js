@@ -1245,6 +1245,17 @@ router.get('/ops-buyer-metrics', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/buyer-view
+// The six numbers a buyer asks about (services/buyer-view.js): 12-month revenue and growth, recurring share, plan revenue
+// kept, gross margin from the books, owner-paid profit and SDE, office cost per stop. Stored monthly snapshots plus one
+// live plan-revenue query; every metric carries its basis. Read-only.
+router.get('/buyer-view', dashboardCache, async (req, res, next) => {
+  try {
+    const { getBuyerView } = require('../services/buyer-view');
+    res.json(await getBuyerView({ db }));
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dashboard/ebitda-bridge
 // Month-to-date adjusted-EBITDA waterfall: revenue → gross profit → contribution
 // (after marketing actuals) → adjusted EBITDA (after owner-entered overhead

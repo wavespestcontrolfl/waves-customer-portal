@@ -219,6 +219,106 @@ describe('plan-taken-hour', () => {
 // CALL FOLLOW-UP FREE HOUR (owner 2026-10-22,
 // "fix", after a call follow-up landed on another customer's 10 AM): visit 2
 // of a call keeps a copied hour only while that hour is free on its date.
+// GATE_TECH_SHIFT_HOURS (D4): a new plan visit outside its technician's shift is handed to the night tool.
+describe('a plan visit outside its technician\'s shift is handed off (GATE_TECH_SHIFT_HOURS)', () => {
+  const row = { customer_id: 'c1', technician_id: 't1', window_start: '15:00', window_end: '16:00' };
+  const savedGate = process.env.GATE_TECH_SHIFT_HOURS;
+  const logger = require('../services/logger');
+  // 8 AM to 3 PM for t1 on every day.
+  const shifts = (startMin = 480, endMin = 900) => loadTechShifts.mockImplementation(async () => (id) => (id === 't1' ? { startMin, endMin, source: 'roster' } : null));
+  beforeEach(() => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    loadTechShifts.mockClear();
+    findConflictingVisits.mockReset().mockImplementation(async () => []);
+  });
+  afterEach(() => {
+    if (savedGate === undefined) delete process.env.GATE_TECH_SHIFT_HOURS; else process.env.GATE_TECH_SHIFT_HOURS = savedGate;
+    loadTechShifts.mockReset().mockImplementation(async () => () => null);
+    findConflictingVisits.mockReset().mockImplementation(async () => []);
+  });
+
+  test('a free hour the shift does not hold is handed off, with no clash read; an hour it holds is not', async () => {
+    shifts();
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(10) })).toBe(true);
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+    expect(loadTechShifts).toHaveBeenCalledWith('conn', expect.objectContaining({ technicianIds: ['t1'] }));
+    // 2 PM to 3 PM ends on the shift end: held. 7 AM starts before the shift.
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, window_start: '14:00', window_end: '15:00', scheduled_date: day(10) })).toBe(false);
+    expect(findConflictingVisits).toHaveBeenCalledTimes(1);
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, window_start: '08:00', window_end: '09:00', scheduled_date: day(10) })).toBe(false);
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, window_start: '07:00', window_end: '08:00', scheduled_date: day(10) })).toBe(true);
+  });
+
+  test('the shift asked is the one of the visit\'s own day', async () => {
+    // Set hours only on day(10): the same hour on day(11) has no shift to be outside of.
+    loadTechShifts.mockImplementation(async () => (id, date) => (id === 't1' && date === day(10) ? { startMin: 480, endMin: 900, source: 'roster' } : null));
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(10) })).toBe(true);
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(11) })).toBe(false);
+    // The caller's own date wins over the row's (the series extension passes it).
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(11) }, { date: day(10) })).toBe(true);
+  });
+
+  test('the block is the longer of the window and the length; an end with seconds is outside', async () => {
+    shifts();
+    const at14 = { ...row, window_start: '14:00', window_end: '15:00', scheduled_date: day(10) };
+    expect(await planTakenHour.takenHourHandoff('conn', { ...at14, estimated_duration_minutes: 60 })).toBe(false);
+    expect(await planTakenHour.takenHourHandoff('conn', { ...at14, estimated_duration_minutes: 90 })).toBe(true);
+    expect(await planTakenHour.takenHourHandoff('conn', { ...at14, window_end: '15:00:30' })).toBe(true);
+  });
+
+  test('inside four days the visit keeps its hour, unread; a taken hour inside the shift is still handed off', async () => {
+    shifts();
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(3) })).toBe(false);
+    expect(loadTechShifts).not.toHaveBeenCalled();
+    findConflictingVisits.mockResolvedValue([{ id: 'x', customer_id: 'c2' }]);
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, window_start: '10:00', window_end: '11:00', scheduled_date: day(10) })).toBe(true);
+  });
+
+  test('no technician, no set hours, or a failed read: only the taken rule decides', async () => {
+    shifts();
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, technician_id: null, scheduled_date: day(10) })).toBe(false);
+    expect(loadTechShifts).not.toHaveBeenCalled();
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, technician_id: 't2', scheduled_date: day(10) })).toBe(false);
+    loadTechShifts.mockRejectedValue(new Error('synthetic read failure'));
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(10) })).toBe(false);
+    expect(findConflictingVisits).toHaveBeenCalled();
+  });
+
+  test('gate off: the hours are not read and a free hour outside the shift stays', async () => {
+    delete process.env.GATE_TECH_SHIFT_HOURS;
+    shifts();
+    expect(await planTakenHour.takenHourHandoff('conn', { ...row, scheduled_date: day(10) })).toBe(false);
+    expect(await planTakenHour.handOffTakenHours('conn', [{ ...row, scheduled_date: day(10) }])).toEqual([{ ...row, scheduled_date: day(10) }]);
+    expect(loadTechShifts).not.toHaveBeenCalled();
+  });
+
+  test('the seeder\'s batch reads the hours once, for its technicians, and hands off only the rows outside', async () => {
+    shifts();
+    const rows = [
+      { ...row, scheduled_date: day(20) },
+      { ...row, window_start: '10:00', window_end: '11:00', scheduled_date: day(50) },
+      { ...row, technician_id: 't2', scheduled_date: day(80) },
+      { ...row, technician_id: null, scheduled_date: day(110) },
+    ];
+    const out = await planTakenHour.handOffTakenHours('conn', rows);
+    expect(loadTechShifts).toHaveBeenCalledTimes(1);
+    expect(loadTechShifts.mock.calls[0][1].technicianIds.sort()).toEqual(['t1', 't2']);
+    expect(out[0]).toMatchObject({ window_start: null, window_end: null, recurring_dispatch_due_date: day(20) });
+    expect(out.slice(1)).toEqual(rows.slice(1));
+    expect(rows[0].window_start).toBe('15:00');
+  });
+
+  test('a batch whose read fails: no row is handed off for the shift, and the read is not tried again per row', async () => {
+    loadTechShifts.mockRejectedValue(new Error('synthetic read failure'));
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const rows = [{ ...row, scheduled_date: day(20) }, { ...row, scheduled_date: day(50) }];
+    expect(await planTakenHour.handOffTakenHours('conn', rows)).toEqual(rows);
+    expect(loadTechShifts).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('shift hours unread (synthetic read failure)'));
+    warn.mockRestore();
+  });
+});
+
 describe('callFollowUpWindow', () => {
   const conn = { transaction: async (fn) => fn('sp') };
   const args = { visit1: { property_id: 'prop-a' }, customerId: 'c1', technicianId: 't1', date: day(7) };

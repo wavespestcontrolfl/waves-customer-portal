@@ -221,6 +221,17 @@ const FIXTURES = {
     routeFill: { scheduledStops: 24, routeDaysAvailable: 4, stopsPerFullDay: 12, fillRatio: 0.5, label: "planning only, not a pay target" },
     returnVisitRate: null,
   },
+  "/admin/dashboard/buyer-view": {
+    months: { count: 12, from: "2025-06-01", to: "2026-05-01" },
+    revenue: { value: 120000, growthPct: 12.5, monthsCounted: 12, basis: "Revenue basis." },
+    recurring: { share: 61.2, matureShareOfRecurring: 70, monthsCounted: 12, basis: "Recurring basis." },
+    planRevenueKept: { pct: 94.1, customers: 40, basis: "Kept basis." },
+    grossMargin: { bookPct: 48.3, bookMonthsCounted: 12, perJobAtStandardPct: 55.1, basis: "Margin basis." },
+    ownerProfit: { marginPct: 14.2, sde: 31000, sdeMonthsCounted: 12, monthsCounted: 12, ownerPay: { officeMonths: 12, fieldMonths: 12, months: 12 }, basis: "Profit basis." },
+    officeCost: { perStop: 11.5, pctOfRevenue: 8.1, monthsCounted: 12, basis: "Office basis." },
+    ownerFieldHoursPerWeek: { value: 21.5, available: true },
+    pnlIncompleteMonths: [],
+  },
   "/admin/dashboard/service-mix": { mix: [], total_services: 3 },
   "/admin/dashboard/revenue-by-city": { cities: [], total: 331 },
   "/admin/dashboard/review-trend": { trend: [], total: 180, avgRating: 5 },
@@ -386,6 +397,15 @@ describe("DashboardPageV2 sections", () => {
     expect(document.getElementById("profit")).toContainElement(
       screen.getByText("Adjusted EBITDA"),
     );
+    // Buyer view: six tiles under the alerts, the books margin beside the per-job one, AR days from the core-KPI feed.
+    expect(document.getElementById("today")).toBeInTheDocument();
+    expect(screen.getByLabelText("Buyer view")).toBeInTheDocument();
+    expect(screen.getByText("Revenue, 12 months")).toBeInTheDocument();
+    expect(screen.getByText("$120.0k")).toBeInTheDocument();
+    expect(screen.getByText("61.2%")).toBeInTheDocument();
+    expect(screen.getByText("94.1%")).toBeInTheDocument();
+    expect(screen.getByText(/per job at standard minutes 55.1%/)).toBeInTheDocument();
+    expect(screen.getByText("$11.50")).toBeInTheDocument();
     // Office cost per stop: the stored-snapshot card, with the owner-time note while it is not counted.
     expect(document.getElementById("profit")).toContainElement(
       screen.getByText("per stop, last 2 months"),

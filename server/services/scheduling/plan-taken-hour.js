@@ -56,10 +56,20 @@
  * A time set on the call, and a two-treatment package's visit 2 (visit 1's
  * time, owner 2026-10-04 "same time"), keep theirs; a day with no free hour
  * keeps the copied one, as before.
+ *
+ * OUTSIDE THE SHIFT (GATE_TECH_SHIFT_HOURS, owner 2026-11-19, D4): a new plan
+ * visit whose block (the longer of its window and its length, as the movers
+ * read it: window-rules.js shiftBlockMinutes) is not inside its technician's
+ * shift that day is handed off the same way, taken or not. The night tool's
+ * finder obeys the shift (find-time.js), so it places the visit at an hour
+ * the shift holds. No technician, no set hours, the gate off or a failed
+ * read: only the taken rule above decides.
  */
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { toDateStr } = require('../auto-dispatch/dates');
-const { seriesCandidateDateClashRows, parseHHMM, minutesToHHMM } = require('./window-rules');
+const { seriesCandidateDateClashRows, parseHHMM, minutesToHHMM, shiftBlockMinutes } = require('./window-rules');
+const { techShiftHoursLive } = require('../../config/feature-gates');
+const { savepointScope } = require('../../utils/savepoint-read');
 const { formatSmsTime } = require('../../utils/sms-time-format');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 
@@ -94,11 +104,36 @@ function handoffFields(date, cols = null) {
 // its own place fields) would land on an hour another stop holds, and is far
 // enough out for the night tool to place it. False without a window, or
 // inside HANDOFF_MIN_DAYS_OUT — nothing is read then.
-async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = new Date() } = {}) {
+async function takenHourHandoff(conn, row, { date = row?.scheduled_date, now = new Date(), shiftOf = null } = {}) {
   if (!row || !row.window_start) return false;
   const day = toDateStr(date);
   if (!day || day < firstHandoffDate(now)) return false;
+  if (await outsideShift(conn, row, day, { now, shiftOf })) return true;
   return hourTaken(conn, row, day);
+}
+
+// The shifts of `technicianIds`, read in a savepoint scope of its own (utils/savepoint-read.js), so a failed read
+// never aborts the writer's transaction. Gate off: no read. A failed read: no shift for anyone, logged.
+async function shiftsFor(conn, technicianIds, now) {
+  const none = () => null;
+  if (!techShiftHoursLive() || !technicianIds.length) return none;
+  try {
+    const { loadTechShifts } = require('../technician-eligibility');
+    return await savepointScope(conn, (c) => loadTechShifts(c, { technicianIds, now }));
+  } catch (err) {
+    require('../logger').warn(`[plan-taken-hour] shift hours unread (${err.message}); only the taken rule decides`);
+    return none;
+  }
+}
+
+// Whether `row`'s block is outside its technician's shift on `day` (the header's last section). `shiftOf`: a
+// batch's one read (handOffTakenHours); without it the row's own technician is read here.
+async function outsideShift(conn, row, day, { now = new Date(), shiftOf = null } = {}) {
+  if (!row.technician_id) return false;
+  const shift = (shiftOf || await shiftsFor(conn, [row.technician_id], now))(row.technician_id, day);
+  if (!shift) return false;
+  const { startMin, endMin } = shiftBlockMinutes(row);
+  return startMin < shift.startMin || endMin > shift.endMin;
 }
 
 // Whether another stop holds `row`'s hour on `day`: the rule in the header.
@@ -194,9 +229,11 @@ async function callFollowUpWindow(conn, { visit1 = {}, customerId, technicianId 
 // (the fields `cols` has). Returns the rows; the input array is not changed.
 async function handOffTakenHours(conn, rows, { now = new Date(), cols = null } = {}) {
   if (!Array.isArray(rows) || !rows.length) return rows;
+  // One read of the hours for the batch's technicians (gate off: none).
+  const shiftOf = await shiftsFor(conn, [...new Set(rows.map((row) => row?.technician_id).filter(Boolean))], now);
   const out = [];
   for (const row of rows) {
-    out.push(await takenHourHandoff(conn, row, { now }) ? { ...row, ...handoffFields(row.scheduled_date, cols) } : row);
+    out.push(await takenHourHandoff(conn, row, { now, shiftOf }) ? { ...row, ...handoffFields(row.scheduled_date, cols) } : row);
   }
   const handedOff = out.filter((row, i) => row !== rows[i]).length;
   if (handedOff) {
