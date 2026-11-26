@@ -2,8 +2,8 @@
  * Lead "why" filler — nightly, deterministic, NO LLM calls.
  *
  * Fills three fields on `leads` from the voice-of-customer corpus
- * (call_research_chunks, mined by call-research-miner.js) using fixed keyword
- * rules over each chunk's quote + context + topics:
+ * (call_research_chunks, mined by call-research-miner.js) using fixed rules
+ * over each chunk's normalized topic labels (never raw quote words):
  *
  *   previous_company  — the rival the caller is LEAVING (RIVALS list). Not
  *                       leads.lost_to_competitor, which is the rival that WON.
@@ -19,9 +19,11 @@
  *     mentions office edits predates that ruling. Each UPDATE re-checks that
  *     the lead is live and that its status, converted_at and customer link
  *     are the ones the values were computed from.
- *   - switch_reason / previous_company read caller speech only, on calls that
- *     carry competitor_mention / churn_signal / complaint chunks about a prior
- *     provider. Two different rivals named on one lead = ambiguous = left NULL.
+ *   - switch_reason / previous_company read the caller's chunks on calls
+ *     where a caller chunk carries a provider-relationship label ("current
+ *     provider", "switching providers"); shopping labels alone never count.
+ *     Two different rivals on one lead = ambiguous = previous_company NULL.
+ *   - Each reason is the one with the most matching labels (ties: list order).
  *   - not_booked_reason only for lost / unresponsive leads that are not
  *     converted and whose customer has no active visit booked since the lead
  *     (an assessment booking keeps the status and leaves converted_at NULL).
@@ -38,9 +40,8 @@
  *     scans least-recently-checked leads first (why_checked_at), so a capped
  *     run never starves older leads in the window.
  *
- * Rule lists are ported from the research scripts of 2026-11-23 (switch
- * themes, objection themes, rival name patterns); the order of each list is
- * the priority — the first rule that matches wins.
+ * The label lists come from the topic labels the miner actually writes
+ * (prod sample 2026-11-25) and the research themes of 2026-11-23.
  *
  * Kill switch: LEAD_WHY_FILL=off (read per run in scheduler.js). Not a GATE_*.
  */
@@ -69,94 +70,100 @@ const DAY_MS = 86400000;
 const LOST_STATUSES = new Set(['lost', 'unresponsive']);
 
 const SWITCH_TAGS = new Set(['competitor_mention', 'churn_signal', 'complaint']);
-// Evidence the caller actually USED another provider. A rival named only as a
-// quote ("Orkin quoted me $99") is not a prior relationship.
-const PRIOR_PROVIDER_RE = /(current|previous|prior|existing|former|old|last) (pest |lawn )?(provider|company|exterminator|guy|service)|switch(ing|ed)? (from|over from|providers|companies)|provider switch|currently (with|using) (a|an|another|them)|cancel+(ed|ing)? (with|our|my) (provider|company|service)/i;
-// A rival counts as the previous company only when a use phrase names it:
-// "we had Turner", "switching from Orkin", "been with Hughes".
-// Only "the" may sit between the phrase and the name ("had the Turner guy"),
-// so "we had ants and Orkin quoted us" and "had called Orkin" never link.
-// A negated use ("have not used Orkin", "never had Turner") is not use.
-const RIVAL_USE_LEAD = String.raw`(?<!(?:\bnot|\bnever|n't|\bno)\s+)(?<!(?:\bnot|\bnever|n't)\s+(?:been|ever)\s+)\b(?:had|have had|used|been using|been with|was with|were with|leaving|left|cancel+(?:ed|ing)?|switch(?:ing|ed)? from|currently (?:have|use|with))\s+(?:the\s+)?`;
-// The caller says they never had a provider: no switch evidence at all.
-const NO_PRIOR_PROVIDER_RE = /never (used|had|been with)|first time|no (current|previous|prior) (provider|company)|don'?t have (a|any) (provider|company|pest)/i;
-// A rival named for a quote ("had Orkin quote me") is shopping, not use. This
-// only blocks that rival link; "we left Orkin ... now we want a quote" stays.
-// The look-ahead skips the rest of the company name ("Orkin Pest Control quote me").
-const RIVAL_SHOPPING_TAIL = String.raw`(?!(?:\s+(?:pest|lawn|termite|control|services?|company|exterminat\w*|inc\.?))*\s+(?:to\s+)?(?:quot|give|gave|come|came|bid|estimat|send|sent|look))`;
-
-// First match wins. Specific complaint themes sit before the broad price theme.
-const SWITCH_RULES = [
-  ['moved', /\bmoved\b|new (home|house)|just (bought|purchased)|bought (a|the|our) (new )?(home|house)|closing on|offer on the home/],
-  ['pests_came_back', /still (seeing|have|got)|came back|coming back|not work|didn'?t work|ineffective|failed treatment|treatment effectiveness|recurring infestation|keep seeing|getting worse/],
-  ['no_show', /no[- ]show|didn'?t show|never show|never came|miss(ed|ing) (an? |our |the )?(appointment|service|visit)|service gap|skipp|didn'?t come|haven'?t been out|haven'?t come/],
-  ['no_callback', /(never|didn'?t|don'?t|did not|do not|won'?t|wouldn'?t|would not|no one|nobody) (ever )?(call(ed)? (me |us )?back|return(ed)? (my|our) calls?|answer(s|ed)?)|no callback|not getting back|can'?t reach|cannot reach|unresponsive/],
-  ['contract', /contract|commitment|locked in|cancel(lation)? fee/],
-  ['bundle', /bundle|consolidat|both lawn and pest|lawn and pest|one company/],
-  ['price_creep', /price|pricing|cost|expensive|cheaper|afford|paying|raised|increase|went up|\$|dollar/],
-];
-
-// First match wins. Run over caller speech in objection chunks only: a `need`
-// chunk is the caller's problem ("I want quarterly service"), not a rejection.
-const NOT_BOOKED_RULES = [
-  // A spouse or partner must be named; "I'll think about it" alone is no reason.
-  ['spouse', /\b(husband|wife|spouse|partner|boyfriend|girlfriend|fianc[eé]e?)\b/],
-  ['one_visit', /one[- ]time|just once|single (visit|treatment|service)|one visit|just the one/],
-  // Needs words that turn the plan down: "the quarterly plan is too expensive" is a price objection.
-  ['no_plan', /(don'?t|do not|not|no|never) (want|interested in|looking for|need|sign(ing)? up for|do) (a |any |the |to )?(plan|contract|commitment|commit|recurring|quarterly|annual|subscription|membership|ongoing)|(don'?t|do not|won'?t|not going to|can'?t) (want to )?(commit|sign (a |any )?contract|prepay|pay (up ?front|in advance))|no (contracts?|commitments?|plans?)\b/],
-  ['wants_a_look', /in[- ]person|come out (and|to) (look|see|take)|look at (it|the)|take a look|see it first|inspect|walk ?through|before (i|we) (commit|decide|agree)/],
-  ['price', /price|pricing|cost|expensive|afford|budget|cheaper|too much|\$|dollar/],
-  ['timing', /not right now|next (month|week)|\blater\b|not ready|\bwait|after (the )?(holiday|summer|season)|timing|out of town|busy|schedul/],
-];
 const NOT_BOOKED_TAGS = new Set(['objection']);
 
-// Canonical name -> pattern. Own-firm name is deliberately absent. 'Arrow' is
-// tightened from a bare word (too many false hits) to the pest-company form.
-const RIVALS = [
-  ['Turner', /turner/i],
-  ['HomeTeam', /home ?team/i],
-  ['Massey', /massey/i],
-  ['Orkin', /\borkin/i],
-  ['Terminix', /terminix/i],
-  ['TruGreen', /tru ?green|true green/i],
-  ['Hughes', /hughes/i],
-  ['Green Edge', /green ?edge/i],
-  ['Arrow', /\barrow (pest|exterminat|termite)/i],
-  ['Keller', /keller/i],
-  ['Good News', /good news pest/i],
-  ['Hobsons', /hobson/i],
-  ['Southern Pride', /southern pride/i],
-  ['PHS', /\bphs\b/i],
-  ['Pest Bear', /pest ?bear/i],
-  ['Apex', /apex pest/i],
-  ['Venice Pest', /venice pest control/i],
-  ['Hawx', /\bhawx/i],
-  ['Aptive', /aptive/i],
-  ['Truly Nolen', /nolen/i],
-  ['Bug Off', /bug off/i],
-  ['Rentokil', /rentokil/i],
+// The rules read the miner's TOPIC LABELS (short normalized phrases such as
+// "current provider", "switching providers", "pricing", "one-time treatment",
+// "turner"), not raw quote words: the miner already resolved negation, quote
+// requests and who did what, so a label is far steadier than a keyword hit.
+//
+// A chunk is switch evidence only when one of its labels states a relationship
+// with a provider the caller had. Shopping labels alone ("comparison
+// shopping", "quote comparison") are not.
+const RELATIONSHIP_TOPIC = /^(current|previous|prior|existing|former|old|other pest|lawn) (pest )?provider$|^provider (dissatisfaction|switch(ing)?|cancellation)$|^switching providers?$|^replacement provider$|^service cancellation$/;
+
+// Each reason = labels that state it. The reason a lead gets is the one with
+// the most matching labels across its chunks; a tie goes to the earlier entry.
+const SWITCH_RULES = [
+  ['moved', /\bmov(e|ed|ing)\b|new (home|house)|home (purchase|sale)/],
+  ['pests_came_back', /treatment (effectiveness|failure)|failed treatment|ineffective treatment|service (effectiveness|failure|quality)|recurring (infestation|pests?)|re-?infestation/],
+  ['no_show', /service gap|missed (service|appointment|visit)|no[- ]show|service delays?|skipped service/],
+  ['no_callback', /call ?back|responsiveness|unresponsive|communication|no response/],
+  ['contract', /contract|commitment|cancellation fee|lock-?in/],
+  ['bundle', /bundl|consolidat/],
+  ['price_creep', /price|pricing|cost|rate increase|monthly price|fee/],
 ];
 
-const RIVAL_USE = RIVALS.map(([name, re]) => [name, new RegExp(RIVAL_USE_LEAD + '(?:' + re.source + ')\\w*\\b' + RIVAL_SHOPPING_TAIL, 'i')]);
+const NOT_BOOKED_RULES = [
+  ['spouse', /spouse|partner|husband|wife|decision maker|family decision/],
+  ['one_visit', /one-?time (treatment|service|visit)|single (treatment|service|visit)/],
+  ['no_plan', /commitment|recurring service|contract|annual prepay(ment)?|prepay|service frequency|quarterly service|membership|subscription/],
+  ['wants_a_look', /inspection request|in-?person (visit|inspection|assessment)|site visit|see (it )?first/],
+  ['price', /price|pricing|afford|budget|cost|fee|expensive/],
+  ['timing', /timing|appointment time|schedul|availability|later|seasonal/],
+];
+
+// Canonical name -> label pattern. Own-firm name is deliberately absent. The
+// miner writes rival names as labels ("turner", "turner pest control",
+// "truly nolan", "home team").
+const RIVALS = [
+  ['Turner', /^turner\b/],
+  ['HomeTeam', /^home ?team\b/],
+  ['Massey', /^massey\b/],
+  ['Orkin', /^orkin\b/],
+  ['Terminix', /^terminix\b/],
+  ['TruGreen', /^(tru ?green|true green)\b/],
+  ['Hughes', /^hughes\b/],
+  ['Green Edge', /^green ?edge\b/],
+  ['Arrow', /^arrow (pest|exterminat|termite)/],
+  ['Keller', /^keller\b/],
+  ['Good News', /^good news pest/],
+  ['Hobsons', /^hobsons?\b/],
+  ['Southern Pride', /^southern pride\b/],
+  ['PHS', /^phs\b/],
+  ['Pest Bear', /^pest ?bear\b/],
+  ['Apex', /^apex pest/],
+  ['Venice Pest', /^venice pest control/],
+  ['Hawx', /^hawx\b/],
+  ['Aptive', /^aptive\b/],
+  ['Truly Nolen', /^(truly )?nol[ae]n\b/],
+  ['Bug Off', /^bug off\b/],
+  ['Rentokil', /^rentokil\b/],
+];
 
 const SWITCH_REASONS = SWITCH_RULES.map(([reason]) => reason);
 const NOT_BOOKED_REASONS = [...NOT_BOOKED_RULES.map(([reason]) => reason), 'no_response'];
 const PREVIOUS_COMPANIES = RIVALS.map(([name]) => name);
 
 const isBlank = (v) => v === null || v === undefined || String(v).trim() === '';
-const topicsText = (c) => (Array.isArray(c.topics) ? c.topics.join(' ') : '');
-// Quote + topics only: `context` can hold the agent's surrounding sentences.
-const chunkText = (c) => [c.quote, topicsText(c)].filter(Boolean).join(' ').toLowerCase();
-const joinText = (chunks) => chunks.map(chunkText).join(' ');
-const firstRule = (rules, text) => (text ? (rules.find(([, re]) => re.test(text)) || [])[0] || null : null);
+const labels = (c) => (Array.isArray(c.topics) ? c.topics : []).map((t) => String(t).trim().toLowerCase()).filter(Boolean);
 
-// A chunk is about a prior provider when it is a competitor_mention /
-// churn_signal / complaint AND the words show the caller used that provider.
-function aboutPriorProvider(c) {
-  if (!SWITCH_TAGS.has(c.tag)) return false;
-  const text = chunkText(c);
-  if (NO_PRIOR_PROVIDER_RE.test(text)) return false;
-  return PRIOR_PROVIDER_RE.test(text) || RIVAL_USE.some(([, re]) => re.test(text));
+// The rule with the most matching labels; ties go to the earlier rule.
+function topReason(rules, chunkList) {
+  const all = chunkList.flatMap(labels);
+  let best = null;
+  let bestCount = 0;
+  for (const [reason, re] of rules) {
+    const n = all.filter((t) => re.test(t)).length;
+    if (n > bestCount) { best = reason; bestCount = n; }
+  }
+  return best;
+}
+
+const rivalsIn = (chunkList) => [...new Set(chunkList.flatMap(labels)
+  .flatMap((t) => RIVALS.filter(([, re]) => re.test(t)).map(([name]) => name)))];
+
+// Switch evidence for one call: the caller's switch-tag chunks on a call where
+// at least one caller chunk carries a relationship label. Whole-call scope lets
+// "We had Orkin" and a later "they never came" chunk work together.
+function switchChunksByCall(callerChunks) {
+  const byCall = new Map();
+  for (const c of callerChunks) byCall.set(c.call_log_id, [...(byCall.get(c.call_log_id) || []), c]);
+  const out = [];
+  for (const list of byCall.values()) {
+    if (list.some((c) => labels(c).some((t) => RELATIONSHIP_TOPIC.test(t)))) out.push(...list.filter((c) => SWITCH_TAGS.has(c.tag)));
+  }
+  return out;
 }
 
 const clearPatch = (lead) => Object.fromEntries(['previous_company', 'switch_reason', 'not_booked_reason']
@@ -172,21 +179,17 @@ function planLeadWhy(lead, chunks, facts = {}) {
   const callerChunks = (chunks || []).filter((c) => c.speaker === 'caller');
   const next = { previous_company: null, switch_reason: null, not_booked_reason: null };
 
-  const switchChunks = callerChunks.filter(aboutPriorProvider);
+  const switchChunks = switchChunksByCall(callerChunks);
   if (switchChunks.length) {
-    const text = joinText(switchChunks);
-    next.switch_reason = firstRule(SWITCH_RULES, text);
-    // Exactly one rival named anywhere in the switch talk, and named in a use
-    // phrase. "We had Turner and Orkin" names two: left unset.
-    const mentioned = RIVALS.filter(([, re]) => re.test(text)).map(([name]) => name);
-    const used = RIVAL_USE.filter(([, re]) => re.test(text)).map(([name]) => name);
-    if (mentioned.length === 1 && used.length === 1) next.previous_company = used[0];
+    next.switch_reason = topReason(SWITCH_RULES, switchChunks);
+    const rivals = rivalsIn(switchChunks);
+    if (rivals.length === 1) next.previous_company = rivals[0];
   }
 
   // Only a lead whose status says it did not book (lost / unresponsive), that
   // never converted and has no visit booked since, gets a not-booked reason.
   if (!lead.converted_at && !facts.booked && LOST_STATUSES.has(lead.status)) {
-    next.not_booked_reason = firstRule(NOT_BOOKED_RULES, joinText(callerChunks.filter((c) => NOT_BOOKED_TAGS.has(c.tag))))
+    next.not_booked_reason = topReason(NOT_BOOKED_RULES, callerChunks.filter((c) => NOT_BOOKED_TAGS.has(c.tag)))
       || (lead.status === 'unresponsive' && !facts.miningPending ? 'no_response' : null);
   }
 
@@ -417,5 +420,5 @@ module.exports = {
   SWITCH_REASONS,
   NOT_BOOKED_REASONS,
   PREVIOUS_COMPANIES,
-  _test: { SWITCH_RULES, NOT_BOOKED_RULES, RIVALS, aboutPriorProvider },
+  _test: { SWITCH_RULES, NOT_BOOKED_RULES, RIVALS, RELATIONSHIP_TOPIC },
 };
