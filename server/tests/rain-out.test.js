@@ -458,6 +458,15 @@ describe('rain-out service', () => {
         };
         const block = (start, end) => ({ window_start: start, window_end: end, estimated_duration_minutes: 45 });
 
+        test('an offered hour that is the visit\'s own day and hours is not asked about', async () => {
+          offeredLines.mockImplementation(async (_id, asks) => asks.map(() => LINE));
+          const options = await offered({ service: { scheduled_date: '2026-06-12', window_start: '08:00', window_end: '09:00' } });
+          expect(offeredLines.mock.calls[0][1].map((ask) => [ask.date, ask.block.window_start])).toEqual([['2026-06-11', '11:00'], ['2026-06-11', '14:00']]);
+          expect(options.map((o) => [o.date, o.window.start, o.shiftWarning])).toEqual([
+            ['2026-06-11', '11:00', LINE], ['2026-06-11', '14:00', LINE], ['2026-06-12', '08:00', undefined],
+          ]);
+        });
+
         test('the reader is asked once, about every hour and day offered as the move would leave the visit, and each line rides its own option', async () => {
           offeredLines.mockImplementation(async (_id, asks) => asks.map((ask) => (ask.block.window_start === '14:00' ? LINE : null)));
           const options = await offered();
@@ -3598,6 +3607,17 @@ describe('rain-out service', () => {
       test('no line: no key', async () => {
         expect(await check(target)).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
         expect(reader).toHaveBeenCalledTimes(1);
+      });
+
+      test('a stop that keeps its day and its hours is not asked about, as the mover states no line for it', async () => {
+        reader.mockResolvedValue([LINE]);
+        const own = { start: '09:00', end: '10:00' };
+        expect(await check({ date: '2031-03-06', window: own })).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect(reader).not.toHaveBeenCalled();
+        // Another day at the same hours, and the same day at other hours, are moves.
+        expect((await check({ date: '2031-03-07', window: own })).shiftWarning).toBe(LINE);
+        expect((await check({ date: '2031-03-06', window: { start: '09:00', end: '10:30' } })).shiftWarning).toBe(LINE);
+        expect((await check({ date: '2031-03-06', window: { start: '08:00', end: '10:00' } })).shiftWarning).toBe(LINE);
       });
 
       test('a visit with no technician is not asked', async () => {

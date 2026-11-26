@@ -181,6 +181,11 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
       expect((await check(anchor, laterDay, '07:30', '08:30')).shiftWarning).toBe(line);
       // A later hour today is the same question.
       expect((await check(anchor, today, '16:30', '17:30')).shiftWarning).toBe(line);
+      // A stop already outside the shift that keeps its day and its hours: no line, as the mover states none.
+      const late = await makeStop(technicianId, '17:00', '18:00');
+      expect(await check(late, today, '17:00', '18:00')).not.toHaveProperty('shiftWarning');
+      expect((await check(late, today, '17:30', '18:30')).shiftWarning).toBe(line);
+      expect((await check(late, laterDay, '17:00', '18:00')).shiftWarning).toBe(line);
       // The picked window ends in the hours; the visit's stored ninety minutes do not.
       await db('scheduled_services').where({ id: anchor }).update({ estimated_duration_minutes: 90 });
       expect((await check(anchor, laterDay, '16:00', '16:30')).shiftWarning).toBe(line);

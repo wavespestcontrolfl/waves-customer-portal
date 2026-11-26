@@ -1631,7 +1631,7 @@ async function checkTarget({ serviceId, target, caller = null, reasonCode = null
   // the tapped stop's own shift line, and the rows of the rest of the route. The line is about the window
   // the commit books (bookedTarget: a recurring visit's day move lands on the hour), as commit() reads it.
   const booked = bookedTarget(service, { date: targetDate, window: target.window }, dateOnlyString(service.scheduled_date) || etDateString());
-  const [shiftWarning] = await pickedShiftLines([{ technicianId: service.technician_id, date: targetDate, block: pickedBlock(booked.window, service.estimated_duration_minutes) }], caller);
+  const [shiftWarning] = await pickedShiftLines([movedShiftAsk(service, targetDate, booked.window)], caller);
   return {
     ok: true, conflicts, routeConflicts, ...(shiftWarning ? { shiftWarning } : {}),
     ...(await routeShiftRows(service, route, { office: true }))(target),
@@ -1674,12 +1674,20 @@ const mayAskShiftOf = (caller, technicianId) => caller?.isAdmin === true
 // A visit as a save of the picked window would leave it: that window, and the visit's length.
 const pickedBlock = (window, minutes) => ({ window_start: window.start, window_end: window.end, estimated_duration_minutes: minutes });
 
+// The ask about a visit a Quick Move would land on `date` at `window`: the visit's technician, and the
+// window with the visit's stored length. A stop that keeps its day and its hours is not asked about (no
+// technician, no line): the mover states no shift line for it either (rebooker: hoursChangedBy).
+function movedShiftAsk(service, date, window) {
+  const keeps = String(date) === dateOnlyString(service.scheduled_date)
+    && !require('./scheduling/window-rules').hoursChangedBy({ window_start: window.start, window_end: window.end }, service);
+  return { technicianId: keeps ? null : service.technician_id, date, block: pickedBlock(window, service.estimated_duration_minutes) };
+}
+
 // The office's sheet states the shift line of each hour it offers (pickedShiftLines), as `shiftWarning` on
 // the option. A technician's own options are held to the shift already (sameDayChoices, findRescheduleOptions).
 async function tellOfferedShiftLines(service, options, { initiatedBy, caller }) {
   if (initiatedBy !== 'admin') return;
-  const lines = await pickedShiftLines(options.map((opt) => ({
-    technicianId: service.technician_id, date: opt.date, block: pickedBlock(opt.window, service.estimated_duration_minutes) })), caller);
+  const lines = await pickedShiftLines(options.map((opt) => movedShiftAsk(service, opt.date, opt.window)), caller);
   options.forEach((opt, i) => { if (lines[i]) opt.shiftWarning = lines[i]; });
 }
 
