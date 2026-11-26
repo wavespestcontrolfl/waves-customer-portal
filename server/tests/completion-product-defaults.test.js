@@ -397,8 +397,8 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
     expect([second.matchedVisit.visit, second.matchedVisit.reason, second.source]).toEqual([3, 'bed_bug_followup', 'none']);
   });
 
-  test('every curated default and every lineMeta hint on the flea, bed bug and cockroach cards names a card line', () => {
-    for (const key of ['flea', 'bed_bug', 'cockroach']) {
+  test('every curated default and every lineMeta hint on the flea, bed bug, cockroach and mosquito cards names a card line', () => {
+    for (const key of ['flea', 'bed_bug', 'cockroach', 'mosquito']) {
       for (const visit of realProtocols[key].visits) {
         const lines = `${visit.primary}\n${visit.secondary}`.split('\n');
         for (const line of Object.keys(visit.lineMeta || {})) expect(lines).toContain(line);
@@ -431,15 +431,18 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
     expect(result.names).toEqual(['Atticus Antapex WSG', 'Tekko Pro IGR', 'Advion Evolution Cockroach Gel Bait']);
   });
 
-  test('other curated-less programs (pest visit 1, mosquito, termite) carry no field yet', () => {
-    for (const visitList of Object.values({
-      mosquito: realProtocols.mosquito.visits,
-      termite: realProtocols.termite.visits,
-    })) {
-      for (const visit of visitList) {
-        expect(visit.completionDefaultProducts).toBeUndefined();
-      }
+  test('mosquito: the barrier visits prefill PolyZone + Tekko Pro; the source-reduction visit prefills the Bti dunk (owner 2026-11-25, D7)', () => {
+    for (const [serviceType, serviceKey] of [['Monthly Mosquito Control Service', 'mosquito_monthly'], ['Seasonal Mosquito Control Service', 'mosquito_seasonal'], ['One-Time Mosquito Control Service', 'mosquito_one_time']]) {
+      const result = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType, serviceKey });
+      expect([serviceType, result.programKey, result.source, result.names]).toEqual([serviceType, 'mosquito', 'protocol_visit', ['Suspend Polyzone', 'Tekko Pro IGR']]);
     }
+    expect(realProtocols.mosquito.visits.find((v) => v.visit === 2).completionDefaultProducts).toEqual(['Summit Mosquito Dunk Tablets']);
+    const names = realProtocols.mosquito.visits.flatMap((v) => v.completionDefaultProducts);
+    for (const retired of ['Scion Insecticide', 'In2Care Mosquito Station', 'Tekko Trio']) expect(names).not.toContain(retired);
+  });
+
+  test('other curated-less programs (pest visit 1, termite) carry no field yet', () => {
+    for (const visit of realProtocols.termite.visits) expect(visit.completionDefaultProducts).toBeUndefined();
     expect(realProtocols.pest.visits.find((v) => v.visit === 1).completionDefaultProducts).toBeUndefined();
   });
 });

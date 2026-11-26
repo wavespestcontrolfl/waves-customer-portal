@@ -30,6 +30,7 @@ const RULE = {
 // Catalog rows as production stores them (product facts only), with the duplicate inactive Tekko Pro IGR row (the Tekko
 // Trio formula) that production holds.
 const CATALOG = [
+  { name: 'Suspend Polyzone', display_name: null, active_ingredient: 'Deltamethrin 4.75%', category: 'insecticide', product_type: 'pesticide', active: true },
   { name: 'LESCO Crosscheck Plus', display_name: null, active_ingredient: 'Bifenthrin 7.9%', category: 'insecticide', product_type: 'pesticide', active: true },
   { name: 'Scion Insecticide', display_name: null, active_ingredient: 'Gamma-cyhalothrin 5.9%', category: 'insecticide', product_type: 'pesticide', active: true },
   { name: 'Tekko Pro IGR', display_name: null, active_ingredient: '(S)-Hydroprene 9.0% + Novaluron 2.6% + Pyriproxyfen 2.6%', category: 'insecticide', product_type: 'pesticide', active: false },
@@ -203,7 +204,7 @@ describe('the product list', () => {
   test('active catalog rows with the active ingredient, no rate; the inactive duplicate never prints', async () => {
     const products = section(await build(), 'products');
     expect(products.bullets).toEqual([
-      'Barrier spray: LESCO Crosscheck Plus (bifenthrin); Scion Insecticide (gamma-cyhalothrin)',
+      'Barrier spray: Suspend Polyzone (deltamethrin)',
       'Larval control: Tekko Pro IGR (pyriproxyfen + novaluron)',
     ]);
     expect(products.bullets.join(' ')).not.toMatch(/hydroprene|Tekko Trio|%/);
@@ -225,16 +226,14 @@ describe('the product list', () => {
     }
   });
 
-  test('Atticus Talak 7.9 F stays a catalog row but is no longer the house bifenthrin: it never prints (owner 2026-11-18)', async () => {
-    const talak = { ...CATALOG[0], name: 'Atticus Talak 7.9 F' };
-    expect(section(await build({ catalog: [...CATALOG, talak] }), 'products').bullets[0]).toBe('Barrier spray: LESCO Crosscheck Plus (bifenthrin); Scion Insecticide (gamma-cyhalothrin)');
-    const talakOnly = CATALOG.map((row) => (row.name === 'LESCO Crosscheck Plus' ? talak : row));
-    expect(section(await build({ catalog: talakOnly }), 'products').bullets[0]).toBe('Barrier spray: Scion Insecticide (gamma-cyhalothrin)');
+  test('the barrier is the mosquito card\'s PolyZone; CrossCheck Plus, Scion and Atticus Talak never print (owner 2026-11-25, D7)', async () => {
+    const talak = { ...CATALOG[1], name: 'Atticus Talak 7.9 F' };
+    expect(section(await build({ catalog: [...CATALOG, talak] }), 'products').bullets[0]).toBe('Barrier spray: Suspend Polyzone (deltamethrin)');
   });
 
   test('a retired (inactive) product drops; with every row gone the section leaves out', async () => {
-    const noScion = CATALOG.map((row) => (row.name === 'Scion Insecticide' ? { ...row, active: false } : row));
-    expect(section(await build({ catalog: noScion }), 'products').bullets[0]).toBe('Barrier spray: LESCO Crosscheck Plus (bifenthrin)');
+    const noPolyzone = CATALOG.map((row) => (row.name === 'Suspend Polyzone' ? { ...row, active: false } : row));
+    expect(section(await build({ catalog: noPolyzone }), 'products').bullets[0]).toBe('Larval control: Tekko Pro IGR (pyriproxyfen + novaluron)');
     const result = await build({ catalog: CATALOG.map((row) => ({ ...row, active: false })) });
     expect(section(result, 'products')).toBeUndefined();
     expect(result.validation.status).toBe('passed');
