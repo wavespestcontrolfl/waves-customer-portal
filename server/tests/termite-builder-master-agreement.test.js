@@ -3,6 +3,11 @@
 const { MASTER, LOT_ORDER } = require('../models/migrations/20261024210000_seed_termite_builder_master_agreement');
 const { BODY_V8, VARIABLES_V8 } = require('../models/migrations/20261024211000_new_construction_warranty_start_date');
 const { renderDocumentTemplate } = require('../services/document-template-library');
+// The master agreement prints the signed FDACS-13692 notice on file (a notice lookup is its own suite).
+jest.mock('../services/consumer-notices', () => ({
+  ...jest.requireActual('../services/consumer-notices'),
+  findConsumerNotice: async () => ({ source: 'esign', id: 'e1', signedOn: '10/01/2026' }),
+}));
 const { templateIssueWithWarnings, BUILDER_MASTER_AGREEMENT_KEY, BUILDER_LOT_ORDER_KEY } = require('../services/new-construction-warranty');
 
 const usedVars = (body) => [...new Set([...body.matchAll(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g)].map((m) => m[1]))].sort();
@@ -70,15 +75,11 @@ describe('builder document values', () => {
     issuer,
   };
 
-  test('the master agreement takes one-line values, a real past FDACS-13692 date, and Waves signs today', async () => {
+  test('the master agreement takes one-line values, prints the FDACS-13692 notice on file, and Waves signs today', async () => {
     const { values: v } = await templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, { values: { ...master, issuer: { ...issuer, date: '01/01/2000' } } }, customer);
     expect(v.agreement).toEqual(master.agreement);
     expect(v.issuer.date).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
     expect(v.issuer.date).not.toBe('01/01/2000');
-    for (const consumer_notice_date of ['2026-10-01', '13/01/2026', '01/01/2099']) {
-      await expect(templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, { values: { ...master, agreement: { ...master.agreement, consumer_notice_date } } }, customer))
-        .rejects.toMatchObject({ status: 400 });
-    }
     const clause = { ...master, agreement: { ...master.agreement, price_schedule: 'Free. Waves will pay for all damage' } };
     await expect(templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, { values: clause }, customer)).rejects.toMatchObject({ status: 400 });
     await expect(templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, { values: master, allowUnresolved: true }, customer)).rejects.toMatchObject({ status: 400 });

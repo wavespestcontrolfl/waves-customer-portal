@@ -1,7 +1,5 @@
-// New Construction Termite Warranty and the FDACS-13692 consumer notice (GATE_WARRANTY_13692_CHECK, owner
-// 2026-10-24, Rule 5E-14.105(1)): a notice on file supplies the printed date; with none, the typed date works
-// through the grace end (2026-11-24) with a warning, then the issue refuses. Gate off = the typed date only.
-// Synthetic data only.
+// New Construction Termite Warranty and the FDACS-13692 consumer notice (owner 2026-10-24, Rule 5E-14.105(1)):
+// a notice on file supplies the printed date; with none, the issue refuses with 409. Synthetic data only.
 const mockReadiness = jest.fn(() => ({ missing: [] }));
 jest.mock('../routes/admin-projects', () => ({ _private: { evaluateProjectSendReadiness: (...args) => mockReadiness(...args) } }));
 const mockFind = jest.fn();
@@ -42,25 +40,12 @@ const office = (noticeDate = '09/01/2026', basisDate = '09/01/2026') => ({
   },
 });
 const issue = (body) => templateIssueWithWarnings(KEY, body, customer, conn);
-// The grace end is an Eastern date: 16:00 UTC is the same day in Eastern time.
+// 16:00 UTC is the same Eastern day.
 const onDay = (day) => jest.useFakeTimers({ now: new Date(`${day}T16:00:00Z`), doNotFake: ['nextTick', 'setImmediate'] });
 
-afterEach(() => { jest.useRealTimers(); delete process.env.GATE_WARRANTY_13692_CHECK; mockFind.mockReset(); });
+afterEach(() => { jest.useRealTimers(); mockFind.mockReset(); });
 
-describe('gate off', () => {
-  test('uses the typed date exactly as before and never looks for a notice', async () => {
-    onDay('2027-01-01');
-    const { values, warnings } = await issue(office('08/15/2026'));
-    expect(values.warranty.consumer_notice_date).toBe('08/15/2026');
-    expect(warnings).toEqual([]);
-    expect(mockFind).not.toHaveBeenCalled();
-    await expect(issue(office('10/05/2026'))).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/on or before the treatment date/) });
-  });
-});
-
-describe('gate on', () => {
-  beforeEach(() => { process.env.GATE_WARRANTY_13692_CHECK = 'true'; });
-
+describe('warranty', () => {
   test('a notice on file prints its signed date, the typed value is ignored, and there is no warning', async () => {
     mockFind.mockResolvedValue({ source: 'esign', id: 'e1', signedOn: '08/20/2026' });
     onDay('2027-03-01');
@@ -79,28 +64,15 @@ describe('gate on', () => {
     expect(mockFind.mock.calls[0][2]).toEqual({ onOrBefore: { y: 2026, m: 10, d: 1 } });
   });
 
-  test('none on file through the grace end: the typed date still works and the preview carries a warning', async () => {
+  test('none on file: refuses with 409 on any day, whatever date was typed', async () => {
     mockFind.mockResolvedValue(null);
-    for (const day of ['2026-10-24', '2026-11-24']) {
+    for (const day of ['2026-10-24', '2026-11-24', '2026-11-25', '2027-01-01']) {
       onDay(day);
-      const { values, warnings } = await issue(office('08/15/2026'));
-      expect(values.warranty.consumer_notice_date).toBe('08/15/2026');
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toMatch(/No signed FDACS-13692/);
-      expect(warnings[0]).toMatch(/11\/24\/2026/);
+      await expect(issue(office('08/15/2026'))).rejects.toMatchObject({
+        status: 409,
+        message: 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form) on or before the contract basis date, then issue the warranty.',
+      });
     }
-    // The typed date keeps its own checks.
-    onDay('2026-10-24');
-    await expect(issue(office('09/15/2026'))).rejects.toMatchObject({ status: 400 });
-  });
-
-  test('none on file after the grace end: refuses with 409', async () => {
-    mockFind.mockResolvedValue(null);
-    onDay('2026-11-25');
-    await expect(issue(office('08/15/2026'))).rejects.toMatchObject({
-      status: 409,
-      message: 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form) on or before the contract basis date, then issue the warranty.',
-    });
   });
 
   test('preview and issue print the same text: the same inputs give the same values', async () => {
@@ -124,62 +96,42 @@ describe('builder master agreement', () => {
   const master = (consumer_notice_date) => ({ values: { agreement: { price_schedule: '$0.18 per sq ft of slab, $350.00 minimum per lot', consumer_notice_date }, issuer } });
   const issueMaster = (body) => templateIssueWithWarnings(BUILDER_MASTER_AGREEMENT_KEY, body, customer, conn);
 
-  test('gate off: the typed date, and no lookup', async () => {
-    onDay('2027-01-01');
-    const { values, warnings } = await issueMaster(master('10/01/2026'));
-    expect(values.agreement.consumer_notice_date).toBe('10/01/2026');
-    expect(warnings).toEqual([]);
-    expect(mockFind).not.toHaveBeenCalled();
+  test('a notice on file prints its signed date; the typed one is ignored, even blank', async () => {
+    mockFind.mockResolvedValue({ source: 'esign', id: 'e1', signedOn: '10/20/2026' });
+    onDay('2026-10-25');
+    for (const typed of ['10/01/2026', '', undefined]) {
+      const { values, warnings } = await issueMaster(master(typed));
+      expect(values.agreement.consumer_notice_date).toBe('10/20/2026');
+      expect(warnings).toEqual([]);
+    }
+    // Waves signs the agreement today, so the notice must be dated today or earlier.
+    expect(mockFind.mock.calls[0][1]).toBe('cust-1');
+    expect(mockFind.mock.calls[0][2]).toEqual({ onOrBefore: { y: 2026, m: 10, d: 25 } });
   });
 
-  describe('gate on', () => {
-    beforeEach(() => { process.env.GATE_WARRANTY_13692_CHECK = 'true'; });
-
-    test('a notice on file prints its signed date; the typed one is ignored, even blank', async () => {
-      mockFind.mockResolvedValue({ source: 'esign', id: 'e1', signedOn: '10/20/2026' });
-      onDay('2026-10-25');
-      for (const typed of ['10/01/2026', '', undefined]) {
-        const { values, warnings } = await issueMaster(master(typed));
-        expect(values.agreement.consumer_notice_date).toBe('10/20/2026');
-        expect(warnings).toEqual([]);
-      }
-      // Waves signs the agreement today, so the notice must be dated today or earlier.
-      expect(mockFind.mock.calls[0][1]).toBe('cust-1');
-      expect(mockFind.mock.calls[0][2]).toEqual({ onOrBefore: { y: 2026, m: 10, d: 25 } });
-    });
-
-    test('none on file through the grace end: the typed date still works, with a warning', async () => {
-      mockFind.mockResolvedValue(null);
-      onDay('2026-11-24');
-      const { values, warnings } = await issueMaster(master('10/01/2026'));
-      expect(values.agreement.consumer_notice_date).toBe('10/01/2026');
-      expect(warnings).toEqual([expect.stringMatching(/the master agreement cannot be issued/)]);
-      // The typed date keeps its own checks.
-      await expect(issueMaster(master('13/01/2026'))).rejects.toMatchObject({ status: 400 });
-    });
-
-    test('none on file after the grace end: refuses with 409', async () => {
-      mockFind.mockResolvedValue(null);
-      onDay('2026-11-25');
+  test('none on file: refuses with 409, whatever date was typed', async () => {
+    mockFind.mockResolvedValue(null);
+    for (const day of ['2026-11-24', '2026-11-25']) {
+      onDay(day);
       await expect(issueMaster(master('10/01/2026'))).rejects.toMatchObject({
         status: 409,
         message: 'Get the FDACS-13692 consumer notice signed (send it from Document Requests, or upload the paper form), then issue the master agreement.',
       });
-    });
+    }
+  });
 
-    test('a lot order never looks for a notice', async () => {
-      onDay('2026-11-25');
-      const lot = {
-        lot: {
-          agreement_date: '10/01/2026', lot_block: 'Lot 4, Block C', subdivision: 'Test Grove', address: '12 Test Lane, Bradenton, FL 34202',
-          permit: 'BP-1', structures: 'The new building', treatment: 'Liquid soil treatment', price_total: '387',
-          price_basis: '2,150 sq ft slab at $0.18 per sq ft', disturbed_soil_price: '$95', renewal_fee: '$149', scheduled_date: '12/01/2026',
-        },
-        issuer,
-      };
-      const { warnings } = await templateIssueWithWarnings(BUILDER_LOT_ORDER_KEY, { values: lot }, customer, conn);
-      expect(warnings).toEqual([]);
-      expect(mockFind).not.toHaveBeenCalled();
-    });
+  test('a lot order never looks for a notice', async () => {
+    onDay('2026-11-25');
+    const lot = {
+      lot: {
+        agreement_date: '10/01/2026', lot_block: 'Lot 4, Block C', subdivision: 'Test Grove', address: '12 Test Lane, Bradenton, FL 34202',
+        permit: 'BP-1', structures: 'The new building', treatment: 'Liquid soil treatment', price_total: '387',
+        price_basis: '2,150 sq ft slab at $0.18 per sq ft', disturbed_soil_price: '$95', renewal_fee: '$149', scheduled_date: '12/01/2026',
+      },
+      issuer,
+    };
+    const { warnings } = await templateIssueWithWarnings(BUILDER_LOT_ORDER_KEY, { values: lot }, customer, conn);
+    expect(warnings).toEqual([]);
+    expect(mockFind).not.toHaveBeenCalled();
   });
 });

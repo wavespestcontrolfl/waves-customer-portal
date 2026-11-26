@@ -1,4 +1,4 @@
-// FDACS-13692 consumer notices on file (GATE_WARRANTY_13692_CHECK): which notice counts for a date (Eastern
+// FDACS-13692 consumer notices on file: which notice counts for a date (Eastern
 // signed day, on-or-before rule, e-sign vs paper) and the paper-scan upload checks. Synthetic data only.
 jest.mock('../models/db', () => {
   const db = () => { throw new Error('unexpected db call'); };

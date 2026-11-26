@@ -106,9 +106,9 @@ describe('readsOn follows each gate\'s own parser (codex #7732)', () => {
     }
     // A gate whose readers all live outside feature-gates.js: the catalogue
     // sees no reader evidence there, but every real reader is gateEnvValue.
-    expect(catalog.get('GATE_LAWN_MIN_AFTER_DISCOUNT').reader).toBe('strict');
+    expect(catalog.get('GATE_CUSTOMER_APP_NOTIFICATIONS').reader).toBe('strict');
     for (const [value, on] of [['on', true], ['1', true], ['TRUE', true], ['false', false]]) {
-      withEnv({ GATE_LAWN_MIN_AFTER_DISCOUNT: value }, () => expect(row('GATE_LAWN_MIN_AFTER_DISCOUNT').readsOn).toBe(on));
+      withEnv({ GATE_CUSTOMER_APP_NOTIFICATIONS: value }, () => expect(row('GATE_CUSTOMER_APP_NOTIFICATIONS').readsOn).toBe(on));
     }
   });
 });
@@ -117,7 +117,7 @@ describe('flipStatus', () => {
   test('flippable = a described on/off gate; everything else says why it is Railway-only', () => {
     const { flipStatus } = require('../services/gate-list');
     const catalog = featureGates.knownGateCatalog();
-    expect(flipStatus('GATE_LAWN_MIN_AFTER_DISCOUNT', catalog.get('GATE_LAWN_MIN_AFTER_DISCOUNT')).flippable).toBe(true);
+    expect(flipStatus('GATE_LAWN_COST_PLUS_LIST', catalog.get('GATE_LAWN_COST_PLUS_LIST')).flippable).toBe(true);
     expect(flipStatus('GATE_SETTINGS_GATE_FLIP', catalog.get('GATE_SETTINGS_GATE_FLIP'))).toMatchObject({ flippable: false });
     expect(flipStatus('GATE_REVIEW_AUTO_REPLY', catalog.get('GATE_REVIEW_AUTO_REPLY')).notFlippableReason).toMatch(/mode/);
     expect(flipStatus('GATE_NOT_IN_CATALOGUE', undefined).notFlippableReason).toMatch(/catalogue/);

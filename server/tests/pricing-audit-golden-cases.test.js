@@ -451,7 +451,8 @@ describe('pricing audit — FROZEN WaveGuard tier discounts (in-code constants, 
     ['platinum: pest + lawn + mosquito + tree & shrub', ['pest', 'lawn', 'mosquito', 'treeShrub'], 'platinum', 0.2, { pest_control: [358.4, 29.87], lawn_care: [460.8, 38.4], mosquito: [554.4, 46.2], tree_shrub: [467.2, 38.93] }],
   ];
   test.each(FROZEN_TIERS)('%s prices exactly as frozen', (_name, keys, tier, pct, perLine) => {
-    const res = generateEstimate({ ...BASE, bedArea: 2000, services: Object.fromEntries(keys.map((k) => [k, S[k]])) });
+    // 0 pins the tier percentages on the market list, not the $55 minimum after discounts.
+    const res = generateEstimate({ ...BASE, bedArea: 2000, lawnMinimumPerVisitAfterDiscount: 0, services: Object.fromEntries(keys.map((k) => [k, S[k]])) });
     expect(res.waveGuard.tier).toBe(tier);
     for (const [service, [annualAfterDiscount, monthlyAfterDiscount]] of Object.entries(perLine)) {
       const li = line(res, service);

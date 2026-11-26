@@ -536,6 +536,47 @@ function createPlainAdmin(service, { category, title, body, createOpts, ringGate
   return callerTrx ? gated(callerTrx) : db.transaction(gated);
 }
 
+// refreshOnlyOpen: the standing row as it stands now, locked, with the metadata to merge onto it. The rewrite
+// replaces the metadata, so it must be built from this read, not the probe's: a "Send to Claude" stamp or note
+// written after the probe survives, and an Undo of one is not reversed: keepSentToClaude runs exactly once, on the
+// ORIGINAL emission metadata against this locked row. null when a person closed the row since the probe.
+async function lockOpenStandingRow(trx, existing, emissionMeta) {
+  const current = await trx('notifications').where({ id: existing.id }).forUpdate().first();
+  if (!current || current.done_at != null) return null;
+  const existingMeta = typeof current.metadata === 'string' ? JSON.parse(current.metadata) : (current.metadata || {});
+  return { existing: current, existingMeta, useMeta: keepSentToClaude(current, existingMeta, emissionMeta) };
+}
+
+// notifyAdmin's refresh of a standing keyed row (the refreshOnDedupe branch): decides the ring, merges the
+// metadata and rewrites the row, returning the write's result. refreshOnlyOpen (opt-in, with dedupeOpenOnly): the
+// rewrite lands only while the row is still open (done_at IS NULL). A person's Done between the probe and this
+// write would otherwise take the new content onto a closed row and leave no open bell; with no row written it
+// returns null and the caller inserts a fresh one, as it does when no standing row exists.
+async function refreshStandingRow(trx, ctx) {
+  const { adjusted, ringOnRefresh, bumpOnRefresh, refreshOnlyOpen } = ctx;
+  const row = refreshOnlyOpen ? await lockOpenStandingRow(trx, ctx.existing, ctx.emissionMeta) : ctx;
+  if (!row) return null;
+  const { existing, existingMeta, useMeta } = row;
+  const { nextTitle, nextBody, nextDetail, nextLink, detailChanged, sameText } = ctx;
+  // A row that newly enters the owner audience (engineering/fyi ->
+  // owner) is news to the owner even at an equal count: it may
+  // have been read in Activity, so it must ring into the bell.
+  const enteredOwner = useMeta.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
+  // Likewise a row that leaves Claude's queue for the bell is news to the owner: it rings back in,
+  // unless the emission itself asked for a quiet refresh.
+  const leftClaudeQueue = Boolean(existingMeta.claudeQueue) && !useMeta.claudeQueue;
+  const shouldRing = adjusted?.quiet ? false : (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
+  const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
+  const bump = shouldRing && bumpOnRefresh;
+  const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
+    metadata: trx.raw(KEEP_DB_HOLD_SQL, [JSON.stringify(mergedMetadata), shouldRing]), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
+  const target = trx('notifications').where({ id: existing.id });
+  const written = await (refreshOnlyOpen ? target.whereNull('done_at') : target)
+    .update(bump ? { ...refreshed, created_at: trx.fn.now() } : refreshed);
+  if (refreshOnlyOpen && !written) return null;
+  return { notification: { ...existing, ...refreshed, ...(bump ? { created_at: new Date() } : {}), metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
+}
+
 const NotificationService = {
   scopeAdminFeedToRole,
   // The admin row text exactly as create() would persist it (emoji-stripped,
@@ -718,7 +759,7 @@ const NotificationService = {
     // moves the row's created_at to now, so a standing row that keeps getting
     // newer news (one row per customer thread: "3 texts") rises to the top of
     // the newest-first bell instead of staying where its first text put it.
-    const { dedupeKey, dedupeWindowMs, dedupeOpenOnly = false, dedupeVersion, refreshOnDedupe = false, refreshQuietClosed, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, dedupeOpenOnly = false, dedupeVersion, refreshOnDedupe = false, refreshQuietClosed, refreshOnlyOpen, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
@@ -756,7 +797,8 @@ const NotificationService = {
             ? await standingRefresh(existing, existingMeta) : null;
           // A row the owner sent to Claude stays in Claude's queue while it is open: this
           // emission still updates its text, never its routing (admin-alert-routing.js keepSentToClaude).
-          const useMeta = keepSentToClaude(existing, existingMeta, adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata);
+          const emissionMeta = adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata;
+          const useMeta = keepSentToClaude(existing, existingMeta, emissionMeta);
           const useDetail = adjusted && 'detail' in adjusted ? adjusted.detail : createOpts.detail;
           // Compared and stored in create()'s admin form (emoji-stripped +
           // brevity-cut), or a difference the guard itself introduces (an
@@ -802,22 +844,15 @@ const NotificationService = {
           const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(useMeta[k] ?? null));
           if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, refreshQuietClosed })) {
-            // A row that newly enters the owner audience (engineering/fyi ->
-            // owner) is news to the owner even at an equal count: it may
-            // have been read in Activity, so it must ring into the bell.
-            const enteredOwner = useMeta.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
-            // Likewise a row that leaves Claude's queue for the bell is news to the owner: it rings back in,
-            // unless the emission itself asked for a quiet refresh.
-            const leftClaudeQueue = Boolean(existingMeta.claudeQueue) && !useMeta.claudeQueue;
-            const shouldRing = adjusted?.quiet ? false : (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
-            const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
-            const bump = shouldRing && bumpOnRefresh;
-            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
-              metadata: trx.raw(KEEP_DB_HOLD_SQL, [JSON.stringify(mergedMetadata), shouldRing]), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
-            await trx('notifications').where({ id: existing.id }).update(bump ? { ...refreshed, created_at: trx.fn.now() } : refreshed);
-            return { notification: { ...existing, ...refreshed, ...(bump ? { created_at: new Date() } : {}), metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
+            const refreshedStanding = await refreshStandingRow(trx, {
+              existing, existingMeta, useMeta, emissionMeta, adjusted, ringOnRefresh, bumpOnRefresh, refreshOnlyOpen,
+              nextTitle, nextBody, nextDetail, nextLink, detailChanged, sameText,
+            });
+            if (refreshedStanding) return refreshedStanding;
+            // refreshOnlyOpen: a person closed the row since the probe. Fall through to a fresh row below.
+          } else {
+            return { notification: existing, deduped: true };
           }
-          return { notification: existing, deduped: true };
         }
         // A fresh keyed insert takes the same ring gate as a plain one.
         const created = await createPlainAdmin(this, {

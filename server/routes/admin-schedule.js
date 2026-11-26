@@ -21882,7 +21882,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       const priceAlertContext = { parent, parentId, childDate: nextStr, serviceLabel: childIdentity.service_type };
       if (priceVerdict?.skip) {
         logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — ${nextStr} price ${priceVerdict.price} is templated from a cancelled series root and not backed by the last paid visit (${priceVerdict.lastPaid ?? 'none'})`);
-        SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, priceAlertContext);
+        await SeriesPriceGuards.raiseExtensionPriceAlertInTransaction(conn, priceVerdict, priceAlertContext);
         onSkip?.('cancelled_root_price');
         return spawnedVisit;
       }
@@ -21936,6 +21936,12 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
         await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars);
         if (priceVerdict && !(await SeriesPriceGuards.insertedRowIsPrepaid(conn, autoExtRow.id))) {
           SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, { ...priceAlertContext, childId: autoExtRow.id });
+        }
+        // The cancelled-root alert for this very date closes once the guard has
+        // added that occurrence at a price a paid visit backs (rationale on
+        // closeRefusedPriceAlertAfterInsert). Gate off or a verdict: no read.
+        if (!priceVerdict && SeriesPriceGuards.seriesPriceGuardsLive()) {
+          await SeriesPriceGuards.closeRefusedPriceAlertAfterInsert(conn, { parent, parentId, child: nextData, childDate: nextStr, childId: autoExtRow.id });
         }
         spawnedVisit = {
           scheduledServiceId: autoExtRow.id,

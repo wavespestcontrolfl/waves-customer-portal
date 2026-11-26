@@ -1068,13 +1068,11 @@ function generateEstimate(input) {
     : PEST.enforceFloorPostDiscount === true;
   // Lawn minimum per visit after discounts (owner 2026-11-06). Replays thread
   // the value the saved quote was priced with (0 for quotes priced before
-  // the rule or while the gate was off), so only new quotes take it;
-  // otherwise the live DB-synced value while GATE_LAWN_MIN_AFTER_DISCOUNT is
-  // on (read at call time; off = 0, prices exactly as before).
+  // the rule), so only new quotes take it; otherwise the live DB-synced
+  // value (0 turns the rule off with no deploy).
   const lawnMinimumPerVisitAfterDiscountResolved = (() => {
     const override = Number(input.lawnMinimumPerVisitAfterDiscount);
     if (input.lawnMinimumPerVisitAfterDiscount != null && Number.isFinite(override) && override >= 0) return override;
-    if (!gateEnvValue('GATE_LAWN_MIN_AFTER_DISCOUNT')) return 0;
     const n = Number(LAWN_PRICING_V2.minimumPerVisitAfterDiscount);
     return Number.isFinite(n) && n > 0 ? n : 0;
   })();
