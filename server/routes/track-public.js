@@ -850,16 +850,18 @@ async function recipientTrackGet(req, res) {
     // The visit must still belong to the customer the row was bound to, as of THIS read too.
     if (!row || String(row.customer_id) !== String(hit.customerId) || !recipientLinkEligible(row)) return notFound();
     const state = publicTrackState(row);
-    const visitChange = await buildVisitChange(row, state, new Date(), { dayOnlyAutoPlaced: false });
+    // An eligible row is en route, on site or just completed, so it has no visit change (that is only for a scheduled, cancelled,
+    // missed, skipped or rebooking visit): the holder's visit-change reads, which answer a fallback on a failed read, never run here.
     // A FAILED tech_status read (strict) throws into the catch below; a read with no usable fix is vehicle null.
     const vehicle = state === 'en_route' ? await buildVehicle(row, { readOnly: true }) : null;
     const photoUrl = row.technician_id
-      ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url, SERVICE_PHOTO_TTL_SECONDS)
+      // strict: a signing failure throws into the catch below (the unknown-token 404), never a fallback photo.
+      ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url, SERVICE_PHOTO_TTL_SECONDS, { strict: true })
       : null;
     return res.json(recipientTrackPayload({
       state,
       tech: row.technician_id ? { firstName: firstNameOf(row.tech_name), photoUrl } : null,
-      window: trackWindow(row, visitChange, false, false),
+      window: trackWindow(row, null, false, false),
       property: { lat: parseCoord(row.latitude), lng: parseCoord(row.longitude), city: row.city },
       service: { type: row.service_type },
       vehicle,

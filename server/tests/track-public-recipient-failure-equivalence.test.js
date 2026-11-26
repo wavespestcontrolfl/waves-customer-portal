@@ -7,11 +7,15 @@ jest.mock('../models/db', () => {
   const mockDb = jest.fn((table) => {
     const state = mockTables[table] || {};
     let byToken = false;
+    // The route's FINAL recipient read joins the recipient row (track-public.js withRecipientRow): `state.joined` answers it.
+    let joined = false;
     const q = {};
     q.where = jest.fn((arg, val) => { if ((arg && arg['s.track_view_token']) || (arg === 's.track_view_token' && val)) byToken = true; return q; });
-    for (const m of ['leftJoin', 'join', 'whereNotNull', 'orderBy', 'whereRaw', 'select', 'limit', 'whereNull']) q[m] = jest.fn(() => q);
+    for (const m of ['leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'select', 'limit', 'whereNull']) q[m] = jest.fn(() => q);
+    q.join = jest.fn((other) => { if (other === 'visit_text_recipients as r') joined = true; return q; });
     q.first = jest.fn(async () => {
-      const v = byToken && 'byToken' in state ? state.byToken : state.first;
+      let v = byToken && 'byToken' in state ? state.byToken : state.first;
+      if (joined && 'joined' in state) v = state.joined;
       if (typeof v === 'function') return v();
       return v ?? null;
     });
@@ -106,39 +110,24 @@ describe.each(ROUTES)('%s (%s)', (path, method) => {
     expect(await run(path, method)).toEqual(expected);
   });
 
-  test('the ROUTE-SIDE visit read failing (every module read succeeds) answers as unknown too, and that read really ran', async () => {
+  test('the route\'s FINAL joined read failing (every module read and the holder lookup succeed) answers as unknown too, and that read really ran', async () => {
     const expected = await unknownAnswer();
-    // pass 1, all healthy: count the scheduled_services reads the module itself makes, and the route's own reads
+    // control: the joined read (scheduled_services as s + the recipient join) answers the visit, once
     world();
+    let joinedRan = 0;
+    mockTables['scheduled_services as s'].joined = () => { joinedRan += 1; return EN_ROUTE; };
+    expect((await run(path, method)).statusCode).not.toBe(404);
+    expect(joinedRan).toBe(1);
+    // the module's reads and the holder lookup succeed; ONLY the final joined read fails
+    world();
+    joinedRan = 0;
     let moduleReads = 0;
-    let routeReads = 0;
     mockTables.scheduled_services.first = () => { moduleReads += 1; return EN_ROUTE; };
-    mockTables['scheduled_services as s'].first = () => { routeReads += 1; return EN_ROUTE; };
-    await run(path, method);
-    // GET: the module reads the visit 3 times and the route reads it by id once (table "s"); the two POSTs read it by id through
-    // recipientVisitLive (a 4th scheduled_services read) and never the joined table
-    const routeUsesJoin = method === 'get';
-    expect(moduleReads).toBeGreaterThanOrEqual(3);
-    const MODULE_READS = routeUsesJoin ? moduleReads : moduleReads - 1;
-    expect(routeUsesJoin ? routeReads : 1).toBeGreaterThanOrEqual(1);
-
-    // pass 2: the module's reads all succeed, ONLY the route-side read fails
-    world();
-    let seen = 0;
-    let routeQueryRan = 0;
-    mockTables.scheduled_services.first = () => {
-      seen += 1;
-      if (!routeUsesJoin && seen > MODULE_READS) { routeQueryRan += 1; throw Object.assign(new Error('x'), { code: '57P01' }); }
-      return EN_ROUTE;
-    };
-    mockTables['scheduled_services as s'].first = () => {
-      if (!routeUsesJoin) return EN_ROUTE;
-      routeQueryRan += 1;
-      throw Object.assign(new Error('x'), { code: '57P01' });
-    };
+    mockTables['scheduled_services as s'].joined = () => { joinedRan += 1; throw Object.assign(new Error(`select where token '${TOKEN}'`), { code: '57P01' }); };
     expect(await run(path, method)).toEqual(expected);
-    expect(routeQueryRan).toBeGreaterThanOrEqual(1);
-    expect(seen).toBeGreaterThanOrEqual(MODULE_READS);
+    expect(joinedRan).toBe(1);
+    expect(moduleReads).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(TOKEN);
   });
 
   test('a visit REASSIGNED to another customer (or a row bound to none) answers as unknown, through the real module', async () => {
