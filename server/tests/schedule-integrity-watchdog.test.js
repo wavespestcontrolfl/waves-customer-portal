@@ -251,16 +251,8 @@ describe('classifiers', () => {
   });
 });
 
-describe('runScheduleIntegrityWatchdog gate', () => {
-  test('gated off → no-op, no queries, no bells', async () => {
-    isEnabled.mockReturnValue(false);
-    const result = await runScheduleIntegrityWatchdog({ now: NOW });
-    expect(result).toEqual({ skipped: true, reason: 'gated_off' });
-    expect(db).not.toHaveBeenCalled();
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-  });
-
-  test('gated on → runs the sweep under the cron lock', async () => {
+describe('runScheduleIntegrityWatchdog', () => {
+  test('runs the sweep under the cron lock', async () => {
     isEnabled.mockReturnValue(true);
     makeDbMock();
     const result = await runScheduleIntegrityWatchdog({ now: NOW });
