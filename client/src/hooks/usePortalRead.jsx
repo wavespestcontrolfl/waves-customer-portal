@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useBiometricLock } from '../components/BiometricGate';
 import { isNativeApp } from '../native/platform';
-import { SAVED_READ_KEYS, clearHomeReads, clearSavedHome, readHomeReads, storedHomeIdentity, writeHomeRead } from '../lib/homeSnapshot';
+import { SAVED_READ_KEYS, clearHomeReadsFor, clearSavedHomeFor, readHomeReads, storedHomeIdentity, writeHomeRead } from '../lib/homeSnapshot';
 
 const PortalReadContext = createContext(null);
 export const READ_TIMEOUT_MS = 15000;
@@ -83,12 +83,15 @@ export function PortalReadProvider({ enabled, persistIdentity = null, persistPro
     };
   }, [invalidationEpochIsCurrent, invalidationReaders]);
 
-  const evict = useCallback(({ key, clearAll = false, message, denied = false } = {}) => {
+  const evict = useCallback(({ key, clearAll = false, message, denied = false, identity } = {}) => {
     // The disk copy goes with the memory copy, also when the reader unmounted;
     // an access denial deletes the saved account as well, so an offline
-    // relaunch adopts nothing the server just refused.
-    if (denied) clearSavedHome();
-    else if (clearAll || SAVED_READ_KEYS.includes(key)) clearHomeReads();
+    // relaunch adopts nothing the server just refused. Only the entries of the
+    // login the request belonged to: a denial that lands after another login
+    // has saved its own must not erase those.
+    const diskIdentity = identity === undefined ? persistRef.current.identity : identity;
+    if (denied) clearSavedHomeFor(diskIdentity);
+    else if (clearAll || SAVED_READ_KEYS.includes(key)) clearHomeReadsFor(diskIdentity);
     let targets;
     if (clearAll) {
       cache.clear();
@@ -266,7 +269,7 @@ export default function usePortalRead(key, load) {
     const clearDeniedRead = (error) => {
       const denied = portalReadAuthorizationDenied(error);
       if (denied) {
-        if (providerEvict) providerEvict({ clearAll: true, message: error?.message, denied: true });
+        if (providerEvict) providerEvict({ clearAll: true, message: error?.message, denied: true, identity: stamp });
         else cache?.clear();
       }
       return denied;

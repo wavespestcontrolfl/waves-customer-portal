@@ -7,7 +7,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from './useAuth';
-import { HOME_READS_KEY, HOME_SNAPSHOT_KEY, HOME_STORE_MAX_AGE_MS, homeIdentityKey, writeHomeRead, writeHomeSnapshot } from '../lib/homeSnapshot';
+import { HOME_READS_KEY, HOME_SNAPSHOT_KEY, HOME_STORE_MAX_AGE_MS, homeIdentityKey, readHomeSnapshot, writeHomeRead, writeHomeSnapshot } from '../lib/homeSnapshot';
 
 vi.mock('../native/nativeBadge', () => ({ clearNativeBadge: vi.fn() }));
 vi.mock('../native/visitCard', () => ({ endVisitCards: vi.fn() }));
@@ -631,5 +631,45 @@ describe('saved home screen at launch', () => {
       expect(text('name')).toBe('');
       expect(api.getMe).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it('after the saved screen is reconciled, a transient refresh failure keeps the last successful selection', async () => {
+    seedSnapshot();
+    // /auth/me names house p9, but the list (the winner) selects p1.
+    api.getMe.mockResolvedValueOnce({ ...FRESH_ME, propertyScope: { enabled: true, propertyId: 'p9' } });
+    api.getAuthProperties.mockResolvedValueOnce(PROPS);
+    await mount();
+    expect(text('saved')).toBe('false');
+    expect(text('selected')).toBe('cust-1:p1');
+    api.getAuthProperties.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => { await authApi.refreshProperties(); });
+    expect(text('selected')).toBe('cust-1:p1');
+    expect(authApi.propertiesError).toBeTruthy();
+  });
+
+  it('a reconnect read that wins the reconciliation saves ITS list to the snapshot', async () => {
+    seedSnapshot();
+    let releaseOlder;
+    api.getMe.mockResolvedValueOnce(FRESH_ME);
+    const TWO = {
+      scope: 'saved',
+      properties: [
+        ...PROPS.properties,
+        { key: 'cust-1:p2', customerId: 'cust-1', propertyId: 'p2', isPrimaryProperty: false, isPrimaryProfile: false, profileLabel: 'Rental', address: { line1: '2 Test Way' } },
+      ],
+      selected: { key: 'cust-1:p2', customerId: 'cust-1', propertyId: 'p2' },
+    };
+    api.getAuthProperties
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseOlder = resolve; }))
+      .mockResolvedValueOnce(TWO);
+    await mount();
+    await act(async () => { await authApi.refreshProperties(); });
+    expect(text('saved')).toBe('false');
+    const saved = readHomeSnapshot(TOKEN);
+    expect(saved.properties.properties.map((p) => p.key)).toEqual(['cust-1:p1', 'cust-1:p2']);
+    expect(saved.properties.selected.key).toBe('cust-1:p2');
+    // The older read that lost must not rewrite it.
+    await act(async () => { releaseOlder(PROPS); });
+    expect(readHomeSnapshot(TOKEN).properties.properties).toHaveLength(2);
   });
 });

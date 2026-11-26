@@ -773,4 +773,24 @@ describe('saved home reads', () => {
     act(() => { evictFor({ message: 'scope changed' }); });
     expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
   });
+
+  it('a denial that lands after its provider unmounted deletes only ITS login\'s saved entries, never another login\'s', async () => {
+    seed();
+    const me = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', actor: { kind: 'holder' }, cancelled: false };
+    const props = { scope: 'saved', properties: [], selected: null };
+    writeHomeSnapshot({ token: TOKEN, requestIdentity: identity, me, propertyPayload: props });
+    let reject;
+    const late = () => new Promise((_, no) => { reject = no; });
+    const view = render(<PortalReadProvider enabled persistIdentity={identity} persistProperty="cust-1:p1"><Probe name="next-visit" load={late} /></PortalReadProvider>);
+    view.unmount();
+    // Meanwhile another login on this browser saves its own screen.
+    const otherToken = tokenFor({ customerId: 'cust-2', sessionId: 'fam-5' });
+    const otherIdentity = homeIdentityKey(otherToken);
+    localStorage.setItem('waves_token', otherToken);
+    writeHomeSnapshot({ token: otherToken, requestIdentity: otherIdentity, me: { ...me, id: 'cust-2', firstName: 'Sam' }, propertyPayload: props });
+    writeHomeRead(otherIdentity, 'cust-2:p1', 'next-visit', { next: { id: 'o1', serviceType: 'Other Login Visit' } }, Date.now());
+    await act(async () => { reject(Object.assign(new Error('revoked'), { status: 401 })); });
+    expect(readHomeSnapshot(otherToken)).not.toBeNull();
+    expect(localStorage.getItem(HOME_READS_KEY)).toContain('Other Login Visit');
+  });
 });

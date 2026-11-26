@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 // Saved home screen (owner 2026-11-25): while the app shows the last saved
-// account (customerSaved) the header says "Updating…", no money figure or pay
-// action shows, and the tabs that hold money, plan or settings wait for fresh
-// data. Home's next/last visit reads hydrate from storage as saved cards.
+// account (customerSaved) the portal does NOT mount: one small saved view shows
+// the profile line, the saved next / last visit cards from storage and
+// "Updating…", and makes no request at all. When the account turns fresh the
+// normal portal mounts once and every live read starts exactly once.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { BrowserRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => {
@@ -40,7 +41,7 @@ vi.mock('../hooks/useAuth', () => ({
 
 import api from '../utils/api';
 import PortalPage from './PortalPage';
-import { HOME_READS_KEY, homeIdentityKey, writeHomeRead } from '../lib/homeSnapshot';
+import { homeIdentityKey, writeHomeRead } from '../lib/homeSnapshot';
 
 const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const TOKEN = `${b64u({ alg: 'none' })}.${b64u({ customerId: 'cust-1', sessionId: 'fam-1' })}.sig`;
@@ -77,6 +78,10 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
 
 describe('saved home screen in the portal', () => {
+  const apiCalls = () => Object.entries(api)
+    .filter(([, fn]) => typeof fn === 'function' && fn.mock && fn.mock.calls.length > 0)
+    .map(([name]) => name);
+
   it('shows "Updating…" in the header only while the account is saved', async () => {
     const { unmount } = view();
     expect(await screen.findByTestId('portal-updating')).toHaveTextContent('Updating…');
@@ -88,100 +93,44 @@ describe('saved home screen in the portal', () => {
     expect(screen.queryByTestId('portal-updating')).not.toBeInTheDocument();
   });
 
-  it('withholds the balance and the pay action on Home even when the live balance already answered', async () => {
+  it('mounts no portal while saved: no request, no tab, no pay or request action, no chat pill, no recommendations', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: false, json: async () => ({}) });
+    api.getPropertyRecommendations.mockResolvedValue({ available: true, oneTap: true, cards: [{ id: 'lawn_offer', kind: 'offer', title: 'Lawn Care', serviceKey: 'lawn_care', mode: 'one_tap', ctaLabel: 'Buy now' }] });
+    api.getPortalMessagesUnread.mockResolvedValue({ count: 0 });
+    window.history.replaceState({}, '', '/?tab=billing&stripe_setup_flow=one_tap_card&one_tap_resume=r1&setup_intent=seti_1&redirect_status=succeeded');
     view();
     await screen.findByText(/hello pat/i);
-    expect(screen.queryByText('Pay now')).not.toBeInTheDocument();
-    expect(screen.queryByText(/\$120/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/NaN|\$0\.00/)).not.toBeInTheDocument();
-    const billing = screen.getAllByRole('button').filter((b) => /^billing/i.test(b.textContent.trim()) && !b.closest('nav'));
-    expect(billing.length).toBeGreaterThan(0);
-    for (const button of billing) expect(button).toBeDisabled();
-    expect(screen.getByText('Checking balance').closest('button')).toBeDisabled();
-  });
-
-  it('shows the balance and Pay now once fresh data lands', async () => {
-    auth.saved = false;
-    auth.customer = FRESH_CUSTOMER;
-    view();
-    expect(await screen.findByText('Pay now')).toBeInTheDocument();
-    expect(screen.getByText('Balance due').closest('button')).not.toBeDisabled();
-  });
-
-  it('holds the Billing, Plan and Refer tabs behind an updating note and never mounts their money screens', async () => {
-    view();
-    await screen.findByText(/hello pat/i);
-    for (const tab of ['Billing', 'Plan', 'Refer']) {
-      fireEvent.click(screen.getAllByRole('button', { name: tab })[0]);
-      expect(await screen.findByRole('heading', { name: 'Updating…' })).toBeInTheDocument();
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    // The saved view makes no request at all, and nothing completes a SetupIntent return.
+    expect(apiCalls()).toEqual([]);
+    expect(api.saveStripeCard).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // And it offers no way to act.
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+    for (const name of [/Pay now/, /Billing/, /Refer/, /Request/, /Waves Chat/, /Buy now/, /More/]) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
     }
-    expect(api.getCards).not.toHaveBeenCalled();
-    expect(api.getPayments).not.toHaveBeenCalled();
-    expect(screen.queryByText('Payment Methods')).not.toBeInTheDocument();
-    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Lawn Care')).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument();
+    // Whatever tab the link named, it shows the updating note.
+    expect(screen.getByRole('heading', { name: 'Updating…' })).toBeInTheDocument();
   });
 
-  it('keeps Visits and Documents open while saved', async () => {
-    view();
-    await screen.findByText(/hello pat/i);
-    fireEvent.click(screen.getAllByRole('button', { name: 'Visits' })[0]);
-    await screen.findByText(/no upcoming services scheduled/i);
-    expect(screen.queryByRole('heading', { name: 'Updating…' })).not.toBeInTheDocument();
-  });
-
-  it('opens the Billing tab normally on a fresh account', async () => {
-    auth.saved = false;
-    auth.customer = FRESH_CUSTOMER;
-    view();
-    await screen.findByText(/hello pat/i);
-    fireEvent.click(screen.getAllByRole('button', { name: 'Billing' })[0]);
-    await waitFor(() => expect(api.getCards).toHaveBeenCalled());
-    expect(screen.queryByRole('heading', { name: 'Updating…' })).not.toBeInTheDocument();
-  });
-
-  it('paints the saved next and last visit cards from storage while the loads are still pending', async () => {
-    const identity = homeIdentityKey(TOKEN);
-    writeHomeRead(identity, 'cust-1', 'next-visit', { next: { id: 'n1', serviceType: 'Saved Next Pest Visit', date: '2026-12-10' }, propertyScope: null }, Date.now() - 1000);
-    writeHomeRead(identity, 'cust-1', 'latest-service', { services: [{ id: 'l1', type: 'Saved Last Lawn Visit', date: '2026-11-10' }] }, Date.now() - 1000);
-    api.getNextService.mockImplementation(() => new Promise(() => {}));
-    api.getServices.mockImplementation(() => new Promise(() => {}));
-    view();
-    expect(await screen.findByText('Saved Next Pest Visit')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Saved next visit' })).toBeInTheDocument();
-    expect(screen.getByText('Saved Last Lawn Visit')).toBeInTheDocument();
-  });
-
-  it('does not paint another property\'s saved reads', async () => {
-    const identity = homeIdentityKey(TOKEN);
-    writeHomeRead(identity, 'cust-1:other-house', 'next-visit', { next: { id: 'n1', serviceType: 'Other House Visit', date: '2026-12-10' } }, Date.now() - 1000);
-    api.getNextService.mockImplementation(() => new Promise(() => {}));
-    view();
-    await screen.findByText(/hello pat/i);
-    expect(screen.queryByText('Other House Visit')).not.toBeInTheDocument();
-    expect(localStorage.getItem(HOME_READS_KEY) || '').not.toContain('Other House Visit');
-  });
-
-  it('starts no money or account read while saved, and each one exactly once when the account turns fresh', async () => {
+  it('starts every live read exactly once when the account turns fresh, and shows Pay now and the Refer amount only then', async () => {
     api.getReferrals.mockResolvedValue({ stats: { total: 1 }, totalEarned: 5000, rewardPerReferral: 25 });
     const { rerender } = view();
     await screen.findByText(/hello pat/i);
-    // Home's other reads have started; the money and account reads have not.
-    await waitFor(() => expect(api.getGoogleReviewCard).toHaveBeenCalled());
-    for (const read of ['getBalance', 'getServiceStats', 'getAutopay', 'getReferrals']) expect(api[read]).not.toHaveBeenCalled();
-    // Desktop layout (the quick-action sub line shows): no dollar amount on the Refer button while saved.
-    const referSaved = screen.getAllByRole('button').find((b) => /^refer/i.test(b.textContent.trim()) && !b.closest('nav'));
-    expect(referSaved).toHaveTextContent('View details');
-    expect(referSaved.textContent).not.toContain('$');
     auth.saved = false;
     auth.customer = FRESH_CUSTOMER;
     rerender(<BrowserRouter><PortalPage /></BrowserRouter>);
     expect(await screen.findByText('Pay now')).toBeInTheDocument();
-    for (const read of ['getBalance', 'getServiceStats', 'getAutopay', 'getReferrals']) expect(api[read]).toHaveBeenCalledTimes(1);
-    const referFresh = screen.getAllByRole('button').find((b) => /^refer/i.test(b.textContent.trim()) && !b.closest('nav'));
-    await waitFor(() => expect(referFresh).toHaveTextContent('$25 credit'));
+    for (const read of ['getBalance', 'getServiceStats', 'getAutopay', 'getReferrals', 'getGoogleReviewCard']) expect(api[read]).toHaveBeenCalledTimes(1);
+    const refer = screen.getAllByRole('button').find((b) => /^refer/i.test(b.textContent.trim()) && !b.closest('nav'));
+    await waitFor(() => expect(refer).toHaveTextContent('$25 credit'));
+    expect(screen.queryByTestId('portal-updating')).not.toBeInTheDocument();
   });
 
-  it('does not reload anything extra on a normal fresh launch', async () => {
+  it('does not start a read twice on a normal fresh launch', async () => {
     auth.saved = false;
     auth.customer = FRESH_CUSTOMER;
     view();
@@ -190,15 +139,34 @@ describe('saved home screen in the portal', () => {
     for (const read of ['getBalance', 'getServiceStats', 'getAutopay', 'getReferrals']) expect(api[read]).toHaveBeenCalledTimes(1);
   });
 
-  it('holds the floating Waves Chat pill while saved and offers it once the account is fresh', async () => {
+  it('offers the Waves Chat pill only once the account is fresh', async () => {
     api.getPortalMessagesUnread.mockResolvedValue({ count: 0 });
     const { rerender } = view();
     await screen.findByText(/hello pat/i);
-    await waitFor(() => expect(api.getPortalMessagesUnread).toHaveBeenCalled());
     expect(screen.queryByRole('button', { name: /Waves Chat/ })).not.toBeInTheDocument();
     auth.saved = false;
     auth.customer = FRESH_CUSTOMER;
     rerender(<BrowserRouter><PortalPage /></BrowserRouter>);
     expect(await screen.findByRole('button', { name: /Waves Chat/ })).toBeInTheDocument();
+  });
+
+  it('paints the saved next and last visit cards from storage with no request', async () => {
+    const identity = homeIdentityKey(TOKEN);
+    writeHomeRead(identity, 'cust-1', 'next-visit', { next: { id: 'n1', serviceType: 'Saved Next Pest Visit', date: '2026-12-10' }, propertyScope: null }, Date.now() - 1000);
+    writeHomeRead(identity, 'cust-1', 'latest-service', { services: [{ id: 'l1', type: 'Saved Last Lawn Visit', date: '2026-11-10' }] }, Date.now() - 1000);
+    view();
+    expect(await screen.findByText('Saved Next Pest Visit')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Saved next visit' })).toBeInTheDocument();
+    expect(screen.getByText('Saved Last Lawn Visit')).toBeInTheDocument();
+    expect(apiCalls()).toEqual([]);
+  });
+
+  it('does not paint another property\'s saved reads', async () => {
+    const identity = homeIdentityKey(TOKEN);
+    writeHomeRead(identity, 'cust-1:other-house', 'next-visit', { next: { id: 'n1', serviceType: 'Other House Visit', date: '2026-12-10' } }, Date.now() - 1000);
+    view();
+    await screen.findByText(/hello pat/i);
+    expect(screen.queryByText('Other House Visit')).not.toBeInTheDocument();
+    expect(screen.getAllByText('No saved visits are available.')).toHaveLength(2);
   });
 });

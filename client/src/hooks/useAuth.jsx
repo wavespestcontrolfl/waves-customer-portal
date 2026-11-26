@@ -675,6 +675,7 @@ export function AuthProvider({ children }) {
     // started under a superseded session must not overwrite the new
     // session's property list or surface its error.
     const superseded = startRequestGuard();
+    const requestIdentity = homeIdentityKey(api.token);
     const seq = ++propertyReadSeqRef.current;
     try {
       const data = await api.getAuthProperties({ scope: 'saved' });
@@ -684,7 +685,12 @@ export function AuthProvider({ children }) {
       if (propertyReadSeqRef.current !== seq) return false;
       adoptPropertyPayload(data);
       setPropertiesError(null);
-      // This read won: it reconciles the saved selection too.
+      // This read won: it reconciles the saved selection too, and the saved
+      // account follows it (the same identity-checked writer as the load), so
+      // an offline relaunch never adopts a list this read just replaced.
+      if (freshMeRef.current && customerRef.current) {
+        writeHomeSnapshot({ token: api.token, requestIdentity, me: customerRef.current, propertyPayload: data });
+      }
       releaseSavedHold();
       return true;
     } catch (err) {
@@ -699,10 +705,11 @@ export function AuthProvider({ children }) {
       if (propertyReadSeqRef.current !== seq) return false;
       console.error('Failed to reload service properties:', err);
       setPropertiesError('Other service properties are temporarily unavailable.');
-      // A winning failure over a fresh /auth/me runs the same fallback the
-      // load would have, so the held tabs are not stuck behind a read the
-      // newer one replaced.
-      if (freshMeRef.current && customerRef.current) {
+      // While the saved screen is still waiting to be reconciled, a winning
+      // failure over a fresh /auth/me runs the same fallback the load would
+      // have, so the hold is not stuck behind a read the newer one replaced.
+      // An ordinary later failure keeps the last successful selection.
+      if (customerSavedRef.current && freshMeRef.current && customerRef.current) {
         adoptScopeFromMe(customerRef.current);
         releaseSavedHold();
       }

@@ -75,6 +75,25 @@ export function clearHomeReads() {
   removeEntry(HOME_READS_KEY);
 }
 
+// Delete the entries that belong to ONE login and leave any other login's
+// alone: a denial that lands late (after its reader unmounted) must not erase
+// what another login has saved since.
+function clearEntriesFor(keys, identity) {
+  if (!identity) return;
+  for (const key of keys) {
+    const entry = readEntry(key);
+    if (entry && entry.identity === identity) removeEntry(key);
+  }
+}
+
+export function clearHomeReadsFor(identity) {
+  clearEntriesFor([HOME_READS_KEY], identity);
+}
+
+export function clearSavedHomeFor(identity) {
+  clearEntriesFor([HOME_SNAPSHOT_KEY, HOME_READS_KEY], identity);
+}
+
 export function clearSavedHome() {
   clearHomeSnapshot();
   clearHomeReads();
