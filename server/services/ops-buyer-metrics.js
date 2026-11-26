@@ -31,6 +31,7 @@
 const logger = require('./logger');
 const { applyAssignable, absentTechDays } = require('./technician-eligibility');
 const { isReService } = require('./re-service');
+const { NOT_A_ROUTE_STOP_STATUSES, placedOrLegacySql } = require('./stops-ahead');
 const { getBlackoutDates } = require('./scheduling/blackout-dates');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const { STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
@@ -41,8 +42,6 @@ const YEAR_DAYS = 365;
 const QUARTER_DAYS = 90;
 const WEEKS_SHORT = 4;
 const WEEKS_LONG = 12;
-// Visit statuses that are not a stop on a route (same list as job-costing's PREPAY_UNCOUNTED_VISIT_STATUSES).
-const NOT_A_STOP_STATUSES = ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled'];
 
 const STOP_KEY_SQL = 'COALESCE(ss.visit_id::text, sr.id::text)';
 const TECH_SQL = 'COALESCE(sr.technician_id, ss.technician_id)';
@@ -84,13 +83,13 @@ function returnVisitRatio(returnStops, completedStops) {
 
 /**
  * Minutes the owner's stops cost by the job-costing standard: the standard on-site time of EVERY service done at the stop
- * (a grouped visit sums its members) + one standard drive for the stop. `stops` = [{ members: [{ serviceType, laborHours }] }].
+ * (a grouped visit sums its members) + one drive (`driveMinutes`) for the stop. `stops` = [{ members: [{ serviceType, laborHours }] }].
  */
-function standardStopMinutes(stops, standard) {
-  const { standardLaborMinutesFor, JOB_COST_STANDARD } = standard;
+function standardStopMinutes(stops, standard, driveMinutes) {
+  const { standardLaborMinutesFor } = standard;
   return stops.reduce((sum, stop) => {
     const onSite = stop.members.reduce((acc, m) => acc + (standardLaborMinutesFor(m.serviceType) ?? (num(m.laborHours) * 60)), 0);
-    return sum + onSite + JOB_COST_STANDARD.defaultDriveMinutes;
+    return sum + onSite + driveMinutes;
   }, 0);
 }
 
@@ -177,6 +176,10 @@ async function ownerStopRows(db, ownerId, from, to) {
 /** The owner's weekly hours for the last 4 and 12 weeks, from the time clock when it has shifts, else from stops. */
 async function ownerFieldHours(db, now, ownerId) {
   const standard = require('./job-costing');
+  // The configured Average Drive Time (pricing_config global_drive_time), refreshed and read through job-costing, once per
+  // calculation: the same minutes job-costing charges each stop.
+  await standard.refreshDriveTimeSetting(db);
+  const driveMinutes = standard.standardDriveMinutes();
   const short = trailingWindow(now, WEEKS_SHORT * 7);
   const long = trailingWindow(now, WEEKS_LONG * 7);
   const clockShort = await ownerClockMinutes(db, ownerId, short.from, short.to);
@@ -184,8 +187,8 @@ async function ownerFieldHours(db, now, ownerId) {
   const stops = await ownerStopRows(db, ownerId, long.from, long.to);
   const stopsShort = stops.filter((stop) => stop.date >= short.from);
   const estimate = {
-    last4Weeks: hoursPerWeek(standardStopMinutes(stopsShort, standard), WEEKS_SHORT),
-    last12Weeks: hoursPerWeek(standardStopMinutes(stops, standard), WEEKS_LONG),
+    last4Weeks: hoursPerWeek(standardStopMinutes(stopsShort, standard, driveMinutes), WEEKS_SHORT),
+    last12Weeks: hoursPerWeek(standardStopMinutes(stops, standard, driveMinutes), WEEKS_LONG),
   };
   const clock = {
     last4Weeks: hoursPerWeek(clockShort.minutes, WEEKS_SHORT),
@@ -200,6 +203,7 @@ async function ownerFieldHours(db, now, ownerId) {
   const pick = (window) => (sources[window] === 'time_clock' ? clock[window] : estimate[window]);
   return {
     sources,
+    driveMinutesPerStop: driveMinutes,
     last4Weeks: pick('last4Weeks'),
     last12Weeks: pick('last12Weeks'),
     timeClock: clock,
@@ -207,7 +211,7 @@ async function ownerFieldHours(db, now, ownerId) {
     basis: 'Each window uses the owner\'s time-clock shifts (completed and edited entries, summed by work date, breaks not taken '
       + 'out) when it has any, divided by its weeks. A window with no owner shift instead uses the owner\'s completed stops x '
       + 'standard on-site minutes (pest 25, lawn 20; other types use their costed labor hours), every service of a grouped visit '
-      + 'counted, + 20 minutes of drive once per stop. The card names the source of each window.',
+      + `counted, + the configured Average Drive Time (${driveMinutes} minutes now) once per stop. The card names the source of each window.`,
     windows: { last4Weeks: short, last12Weeks: long },
   };
 }
@@ -309,14 +313,25 @@ async function revenuePerRouteDayMetric(db, now) {
   };
 }
 
+// One physical stop: a grouped visit (visit_id), else the same technician + customer + date + arrival window (stops-ahead.js
+// counts such ungrouped siblings once), else the row itself (a row with no customer).
+const SCHEDULED_STOP_KEY_SQL = `COALESCE(ss.visit_id::text, CASE WHEN ss.customer_id IS NULL THEN ss.id::text
+  ELSE concat_ws('|', ss.technician_id::text, ss.customer_id::text, ss.scheduled_date::text, ss.window_start::text) END)`;
+
+/**
+ * Scheduled stops in [from, to]. Placement and status come from stops-ahead.js (a route stop is not cancelled, skipped, no-show
+ * or rescheduled; a windowless row waiting on customer_pick_by or recurring_dispatch_due_date is not placed yet; a legacy
+ * date-only stop stays), and an unclaimed estimate slot hold (no customer, a reservation expiry set; live or expired, the
+ * predicate territory.js and tech-out.js use) is not a stop. Ungrouped siblings of one slot count once.
+ */
 async function scheduledStopCount(db, from, to) {
   const row = await db('scheduled_services as ss')
     .whereBetween('ss.scheduled_date', [from, to])
-    .whereNotIn('ss.status', NOT_A_STOP_STATUSES)
-    // An unclaimed estimate slot hold (no customer yet, a reservation expiry set; expired or live) is not a stop: the same
-    // predicate as territory.js and tech-out.js. A claimed hold has a customer and counts.
+    .whereNotIn('ss.status', NOT_A_ROUTE_STOP_STATUSES)
+    .whereRaw("(ss.track_state IS NULL OR ss.track_state <> 'cancelled')")
+    .whereRaw(placedOrLegacySql('ss'))
     .whereRaw('NOT (ss.customer_id IS NULL AND ss.reservation_expires_at IS NOT NULL)')
-    .select(db.raw('COUNT(DISTINCT COALESCE(ss.visit_id::text, ss.id::text))::text AS stops'))
+    .select(db.raw(`COUNT(DISTINCT ${SCHEDULED_STOP_KEY_SQL})::text AS stops`))
     .first();
   return num(row && row.stops);
 }
@@ -342,7 +357,8 @@ async function routeFill(db, now) {
     activeTechnicians: techs.length,
     closedDays: [...closedDates].filter((d) => d >= from && d <= to).sort(),
     label: 'planning only, not a pay target',
-    basis: 'Scheduled stops (not cancelled, skipped, no-show or rescheduled, and not an unclaimed estimate slot hold) in the next 28 days / (route days available x 12). '
+    basis: 'Scheduled stops in the next 28 days (route stops by the stops-ahead rules: not cancelled, skipped, no-show or rescheduled; a windowless '
+      + 'row still waiting to be placed is left out; same-slot siblings count once; an unclaimed estimate slot hold is left out) / (route days available x 12). '
       + 'Route days: each active field technician on each open day (no work-days list means every open day; a list counts only '
       + 'while the work-days setting is on), minus company closed days (weekly days off, one-off dates and the closed '
       + 'holidays) and technician absences.',

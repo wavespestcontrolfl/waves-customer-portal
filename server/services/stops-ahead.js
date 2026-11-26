@@ -507,4 +507,5 @@ module.exports = {
   NOT_A_STOP_STATUSES,
   NOT_A_ROUTE_STOP_STATUSES,
   isPlacedOrLegacyDateOnly,
+  placedOrLegacySql,
 };
