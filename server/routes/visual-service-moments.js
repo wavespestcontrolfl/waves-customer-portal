@@ -19,7 +19,10 @@ const {
   truncateText,
   invalidateVisualMomentReportPdfCache,
   youtubeOkColumns,
+  youtubeOkFields,
   countOkClipsThisWeek,
+  CLIP_GOAL_MIN,
+  CLIP_GOAL_MAX,
 } = require('../services/visual-service-notes');
 
 const router = express.Router();
@@ -91,7 +94,9 @@ function canMutateMoment(req, moment) {
 async function formatRows(rows, includeInternal) {
   return Promise.all((rows || []).map(async (row) => {
     const mediaUrl = await signedVisualMomentMediaUrl(row).catch(() => null);
-    return formatVisualMoment(row, { mediaUrl, includeInternal });
+    // Staff routes only: the YouTube mark is added here, never in the shared
+    // formatter that the public report uses.
+    return { ...formatVisualMoment(row, { mediaUrl, includeInternal }), ...youtubeOkFields(row) };
   }));
 }
 
@@ -99,7 +104,11 @@ async function formatRows(rows, includeInternal) {
 // The requesting tech's "OK to post" clip count for the current ET week.
 router.get('/tech/visual-moments/clip-week', authStack, async (req, res, next) => {
   try {
-    return res.json(await countOkClipsThisWeek(req.technicianId));
+    const enabled = await isVisualServiceNotesEnabled(req.technicianId);
+    if (!enabled && req.techRole !== 'admin') {
+      return res.json({ enabled: false, okClips: 0, goalMin: CLIP_GOAL_MIN, goalMax: CLIP_GOAL_MAX });
+    }
+    return res.json({ enabled: true, ...(await countOkClipsThisWeek(req.technicianId)) });
   } catch (err) {
     next(err);
   }

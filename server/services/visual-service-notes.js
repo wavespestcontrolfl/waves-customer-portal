@@ -212,6 +212,12 @@ function youtubeOkColumns({ mediaType, youtubeOk, technicianId }) {
 // Count of this tech's live video clips marked "OK to post" and captured in the
 // current Monday-to-Monday week in America/New_York. The boundaries are ET
 // calendar days converted to instants in SQL, so DST weeks stay correct.
+// Staff-only fields for the "OK to post" mark. Kept out of formatVisualMoment so
+// they never reach the public report payload (/api/reports/:token/data).
+function youtubeOkFields(row = {}) {
+  return { youtubeOk: !!row.youtube_ok_at, youtubeOkAt: row.youtube_ok_at || null };
+}
+
 async function countOkClipsThisWeek(technicianId, { knex = db, now = new Date() } = {}) {
   const weekStart = etWeekStart(now);
   if (!technicianId) return { weekStart, okClips: 0, goalMin: CLIP_GOAL_MIN, goalMax: CLIP_GOAL_MAX };
@@ -343,8 +349,6 @@ function formatVisualMoment(row = {}, { mediaUrl = null, includeInternal = false
     uploadStatus: row.upload_status || null,
     processingStatus: row.processing_status || 'none',
     visibilityStatus: row.visibility_status || 'internal_only',
-    youtubeOk: !!row.youtube_ok_at,
-    youtubeOkAt: row.youtube_ok_at,
     customerCaption: customerCaptionForMoment(row),
     capturedAt: row.captured_at || row.created_at,
     createdAt: row.created_at,
@@ -491,6 +495,7 @@ module.exports = {
   CLIP_GOAL_MIN,
   CLIP_GOAL_MAX,
   youtubeOkColumns,
+  youtubeOkFields,
   countOkClipsThisWeek,
   getVisualServiceNotesSettings,
   setVisualServiceNotesSettings,

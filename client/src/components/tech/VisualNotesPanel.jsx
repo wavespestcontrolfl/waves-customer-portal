@@ -207,7 +207,7 @@ export default function VisualNotesPanel({ service }) {
         headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !Number.isFinite(data.okClips)) throw new Error('clip week unavailable');
+      if (!res.ok || data.enabled === false || !Number.isFinite(data.okClips)) throw new Error('clip week unavailable');
       setClipWeek(data);
     } catch {
       setClipWeek(null);
@@ -248,6 +248,7 @@ export default function VisualNotesPanel({ service }) {
       }
       setMoments((prev) => prev.filter((item) => item.id !== moment.id));
       setMessage('Visual note removed.');
+      loadClipWeek();
     } catch (err) {
       setError(err.message || 'Could not remove visual note');
     } finally {

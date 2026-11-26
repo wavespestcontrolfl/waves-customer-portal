@@ -6,6 +6,7 @@ const {
   isVisualServiceNotesEnabled,
   normalizeMomentInsert,
   youtubeOkColumns,
+  youtubeOkFields,
   countOkClipsThisWeek,
   serviceTypeKey,
   templateCaptionForMoment,
@@ -175,11 +176,17 @@ describe('visual service notes', () => {
       expect(youtubeOkColumns({ mediaType: 'video', youtubeOk: 'maybe', technicianId: 't' })).toEqual({});
     });
 
-    test('formatted moment exposes youtubeOk and youtubeOkAt', () => {
+    test('the shared formatter (public report) never carries the YouTube mark; staff fields do', () => {
       const at = new Date('2026-11-24T15:00:00Z');
-      expect(formatVisualMoment({ id: 'm', youtube_ok_at: at, media_type: 'video' }))
-        .toMatchObject({ youtubeOk: true, youtubeOkAt: at });
-      expect(formatVisualMoment({ id: 'm', youtube_ok_at: null })).toMatchObject({ youtubeOk: false, youtubeOkAt: null });
+      const row = { id: 'm', youtube_ok_at: at, youtube_ok_by: 'tech-1', media_type: 'video', visibility_status: 'approved_customer' };
+      for (const includeInternal of [false, true]) {
+        const formatted = formatVisualMoment(row, { includeInternal });
+        expect(formatted).not.toHaveProperty('youtubeOk');
+        expect(formatted).not.toHaveProperty('youtubeOkAt');
+        expect(JSON.stringify(formatted)).not.toMatch(/youtube/i);
+      }
+      expect(youtubeOkFields(row)).toEqual({ youtubeOk: true, youtubeOkAt: at });
+      expect(youtubeOkFields({ id: 'm', youtube_ok_at: null })).toEqual({ youtubeOk: false, youtubeOkAt: null });
     });
   });
 
