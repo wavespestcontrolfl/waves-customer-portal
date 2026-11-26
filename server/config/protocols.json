@@ -2352,8 +2352,8 @@
       {
         "visit": 7,
         "month": "Any",
-        "primary": "Rodent Exclusion Re-inspection\nCheck every numbered seal from the exclusion visit: intact, chewed, pulled or moved; photograph each\nInspect top down for new entries, fresh droppings, rub marks or gnawing\nRepair a failed seal under the exclusion warranty; quote a new entry separately",
-        "secondary": "Check for bats and live animals before closing any reopened entry\nFresh activity inside with every seal intact: look for a missed entry before quoting trapping",
+        "primary": "Rodent Exclusion Re-inspection\nCheck every numbered seal from the exclusion visit: intact, chewed, pulled or moved; photograph each\nInspect top down for new entries, fresh droppings, rub marks or gnawing\nCheck for bats and live animals before closing any reopened entry\nA failed seal: repair it only when the customer has an active exclusion guarantee that covers the cause; otherwise quote the repair. Quote a new entry separately",
+        "secondary": "Fresh activity inside with every seal intact: look for a missed entry before quoting trapping",
         "material_cost": "materials",
         "labor_cost": "standard",
         "tiers": {
@@ -2376,15 +2376,15 @@
             "scope": "interior",
             "treatmentApplied": false
           },
-          "Repair a failed seal under the exclusion warranty; quote a new entry separately": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
           "Check for bats and live animals before closing any reopened entry": {
             "scope": "exterior",
             "treatmentApplied": false
           },
           "Fresh activity inside with every seal intact: look for a missed entry before quoting trapping": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "A failed seal: repair it only when the customer has an active exclusion guarantee that covers the cause; otherwise quote the repair. Quote a new entry separately": {
             "scope": "interior",
             "treatmentApplied": false
           }

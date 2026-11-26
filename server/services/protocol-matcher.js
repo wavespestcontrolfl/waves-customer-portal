@@ -115,6 +115,7 @@ const MATCH_RULES = [
     ],
     terms: [
       'trap check',
+      'trap only retainer',
       'rodent trapping follow up',
       'rodent trapping followup',
       'rodent follow up',
@@ -401,7 +402,9 @@ function programKeyForService(serviceType) {
     hasToken(normalized, 'mice') ||
     hasToken(normalized, 'exclusion') ||
     normalized.includes('seal up') ||
-    normalized.includes('entry point')
+    normalized.includes('entry point') ||
+    // A keyless trap-only retainer ("Standard Trap-Only Retainer Service") names no rodent.
+    normalized.includes('trap only retainer')
   ) return 'rodent';
   if (normalized.includes('mosquito') || normalized.includes('misting') || normalized.includes('no see um')) return 'mosquito';
   if (

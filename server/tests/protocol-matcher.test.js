@@ -120,6 +120,8 @@ describe('protocol matcher specialty routing', () => {
     }
     // The combined service places traps too: its own reason, so a follow-up of it is a trap check.
     expect(byKey('Rodent Exclusion & Trapping Service', 'rodent_exclusion')).toEqual(['rodent', 6, 'rodent_exclusion_trapping']);
+    // A legacy retainer booking with no catalog key still gets the trap check.
+    expect(match('Standard Trap-Only Retainer Service')).toEqual({ programKey: 'rodent', visit: 4, reason: 'rodent_followup' });
     expect(byKey('Rodent Exclusion Only Service', 'rodent_exclusion_only')).toEqual(['rodent', 3, 'rodent_exclusion']);
     const followup = (serviceType, serviceKey) => followupVisitMatch(matchServiceProtocol(protocols, serviceType, { serviceKey }), true).matchedVisit.visit;
     expect(followup('Rodent Exclusion & Trapping Service', 'rodent_exclusion')).toBe(4);
