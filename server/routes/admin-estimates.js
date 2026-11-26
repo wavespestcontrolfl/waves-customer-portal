@@ -902,16 +902,7 @@ function scopeRevision(priorSendSnapshot, scope, deliveredAt) {
   return { scope, scopeHistory: [...prior, { deliveredAt, scope }].slice(-DELIVERY_HISTORY_MAX) };
 }
 
-// Was this row issued before the send in progress? A first send of a draft has no sent_at, viewed_at or delivery witness; a
-// resend has at least one of them (sent_at is overwritten per send, so read it from the row as it stood BEFORE this send).
-function estimateIssuedBeforeSend(row) {
-  if (!row || typeof row !== 'object') return false;
-  if (row.sent_at || row.viewed_at) return true;
-  const data = parseEstimateData(row.estimate_data) || {};
-  return !!data.deliveryState?.firstDeliveredAt;
-}
-
-async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { delivered = true, deliveredAt = null, issuedBefore = false } = {}) {
+async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { delivered = true, deliveredAt = null } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data) || {};
   const estimateDataForBundle = { ...estimateData };
   delete estimateDataForBundle.sendSnapshot;
@@ -921,12 +912,9 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   const priorRules = require('../services/estimate-floor-signal-replay').savedLegacyPricingRulesSignal(estimateData).legacyPricingRules;
   if (typeof priorRules === 'boolean') estimateDataForBundle.sendSnapshot = { legacyPricingRules: priorRules };
   // The same for the two-story roof-point rule (rodent exclusion, 2026-11-26): its own stamp, read before the snapshot is dropped.
-  // A RESEND of an issued estimate that kept only its inputs reads legacy (a rebuild never raises a sold price); a first send
-  // of a draft prices on the current rule (issuedBefore: the row as it stood before this send).
-  // Without evidence, a FIRST send is explicitly current (false): the bundle build below replays the inputs, and its own
-  // inputs-only fallback must not read an estimate that is only now being issued as already sold.
-  const priorTwoStory = require('../services/estimate-floor-signal-replay').savedLegacyTwoStoryRoofSignal(estimateData, { inputsOnlyIsLegacy: issuedBefore }).legacyTwoStoryRoof
-    ?? (issuedBefore ? undefined : false);
+  // An unstamped estimate that kept only its inputs is a quote saved before the rule: it reads legacy on a first send and a
+  // resend alike, so the email total, the link and a failed-build readback all show the price staff saved.
+  const priorTwoStory = require('../services/estimate-floor-signal-replay').savedLegacyTwoStoryRoofSignal(estimateData).legacyTwoStoryRoof;
   if (typeof priorTwoStory === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyTwoStoryRoof: priorTwoStory };
   const snapshotAt = now().toISOString();
   const sendSnapshot = {
@@ -3709,7 +3697,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // A historical success cannot replace the delivered billing terms with
     // current configuration. Only a real handoff freezes a new quote.
     const snapshot = stampChannels.length
-      ? await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { deliveredAt: lastDeliveredAt, issuedBefore: estimateIssuedBeforeSend(estimate) })
+      ? await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now, { deliveredAt: lastDeliveredAt })
       : (parseEstimateData(freshForSnapshot.estimate_data) || {});
     // Only a VALIDATED bundle feeds the audit — same rule as the sibling
     // and superseded branches (codex pre-push P1).
@@ -3853,7 +3841,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       let raceBundle = null;
       try {
         const rebuilt = stampChannels.length
-          ? await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now, { issuedBefore: estimateIssuedBeforeSend(estimate) })
+          ? await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now)
           : preAcceptData;
         if (rebuilt?.sendSnapshot && !rebuilt.sendSnapshot.pricingBundleError) raceBundle = rebuilt.sendSnapshot;
       } catch { /* no validated pre-delivery bundle */ }
@@ -3919,7 +3907,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // real-channel test decides whether its scope stamp moves.
           const siblingExpiry = proposalExpiry(sibling) || ordinaryGroupExpiry;
           const snapshot = stampChannels.length
-            ? await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { deliveredAt: lastDeliveredAt, issuedBefore: estimateIssuedBeforeSend(sibling) })
+            ? await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { deliveredAt: lastDeliveredAt })
             : (parseEstimateData(sibling.estimate_data) || {});
           if (stampChannels.length && (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError)) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
@@ -6871,7 +6859,6 @@ module.exports = router;
 // builder, so a minted estimate's locked price replays exactly like a sent
 // one. Lazy-required by services to avoid load-order cycles.
 module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;
-module.exports.estimateIssuedBeforeSend = estimateIssuedBeforeSend;
 module.exports.applyLeadServiceForSend = applyLeadServiceForSend;
 module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
 module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;

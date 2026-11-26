@@ -213,10 +213,10 @@ describe('replay: the estimate-level rule stamp decides the factor', () => {
     expect(await recomputeTotal(invalidated(after))).toBe(780);
   });
 
-  test('an issued inputs-only estimate (no rows, no stamp, no bundle) replays at $600; an unsent draft and a fresh quote stay on $780', async () => {
+  test('an inputs-only estimate (no rows, no stamp, no bundle) replays at $600, marked or not; a fresh stamped quote stays on $780', async () => {
     const inputsOnly = () => ({ engineInputs: REQUEST() });
     // Issued (no never-issued mark): sold before the rule, so the replay never raises it.
-    expect(savedLegacyTwoStoryRoofSignal(inputsOnly())).toEqual({ legacyTwoStoryRoof: undefined });
+    expect(savedLegacyTwoStoryRoofSignal(inputsOnly())).toEqual({ legacyTwoStoryRoof: true });
     expect(savedFloorReplaySignals(inputsOnly()).legacyTwoStoryRoof).toBe(true);
     expect(extractEngineInputs(inputsOnly()).legacyTwoStoryRoof).toBe(true);
     expect(publicReplayTotal(inputsOnly())).toBe(600);
@@ -231,76 +231,49 @@ describe('replay: the estimate-level rule stamp decides the factor', () => {
     ]) expect(savedFloorReplaySignals(saved).legacyTwoStoryRoof).toBe(true);
     expect(savedFloorReplaySignals({ engineInputs: baseInput({ services: { flea: {} } }) }).legacyTwoStoryRoof).toBeUndefined();
     expect(savedFloorReplaySignals({ engineRequest: { profile: {}, selectedServices: ['PEST'] } }).legacyTwoStoryRoof).toBeUndefined();
-    // A draft the caller marked never-issued is not sold: current rule, $780.
+    // The never-issued mark (set on a draft in the bundle build) does not flip an inputs-only draft to the current rule.
     const draft = inputsOnly();
     draft[Symbol.for('waves.estimate.neverIssued')] = true;
-    expect(savedFloorReplaySignals(draft).legacyTwoStoryRoof).toBeUndefined();
-    expect(publicReplayTotal(draft)).toBe(780);
-    // A fresh unsent quote (stamped false by the engine) is untouched by the fallback.
+    expect(savedFloorReplaySignals(draft).legacyTwoStoryRoof).toBe(true);
+    expect(publicReplayTotal(draft)).toBe(600);
+    // A fresh quote (stamped false by the engine) is untouched by the fallback.
     expect(publicReplayTotal(freshQuote())).toBe(780);
-    // The first send of an inputs-only draft reads the plain stamp (no fallback), so its snapshot prices on the current rule.
-    expect(savedLegacyTwoStoryRoofSignal(inputsOnly())).toEqual({ legacyTwoStoryRoof: undefined });
+    // The plain stamp read gives the same answer as the replay signal.
+    expect(savedLegacyTwoStoryRoofSignal(inputsOnly())).toEqual({ legacyTwoStoryRoof: true });
   });
 
-  test('a resend of an issued inputs-only quote rebuilds at $600; the first send of an inputs-only draft rebuilds at $780', async () => {
-    const { buildEstimateSendSnapshot, estimateIssuedBeforeSend } = require('../routes/admin-estimates');
+  test('a first send and a resend of an inputs-only quote both read $600, on the email total, the link and a failed-build readback; a fresh stamped draft reads $780', async () => {
+    const { buildEstimateSendSnapshot } = require('../routes/admin-estimates');
     const { buildPricingBundle } = require('../routes/estimate-public');
     const data = { engineInputs: REQUEST() };
-    // The issued signal the builder is given: the row as it stood before this send.
-    expect(estimateIssuedBeforeSend({ status: 'draft', sent_at: null, viewed_at: null, estimate_data: JSON.stringify(data) })).toBe(false);
-    expect(estimateIssuedBeforeSend({ status: 'sent', sent_at: '2026-11-20T15:00:00Z', estimate_data: data })).toBe(true);
-    expect(estimateIssuedBeforeSend({ status: 'viewed', viewed_at: '2026-11-20T16:00:00Z', estimate_data: data })).toBe(true);
-    expect(estimateIssuedBeforeSend({ status: 'sending', estimate_data: { ...data, deliveryState: { firstDeliveredAt: '2026-11-20T15:00:00Z' } } })).toBe(true);
-    // The real builder, with the bundle build captured: the estimate data it hands the bundle build replays at the sold price.
-    const bundleInput = async (issuedBefore) => {
+    // The real builder, with the bundle build captured: the estimate data it hands the bundle build replays at the saved price.
+    const build = async (estimateData, row = {}) => {
       buildPricingBundle.mockClear();
-      const out = await buildEstimateSendSnapshot({ id: 'est-1', status: 'sending', estimate_data: data }, () => new Date('2026-11-26T12:00:00Z'), { delivered: false, issuedBefore });
-      const handed = buildPricingBundle.mock.calls[0][0].estimate_data;
-      return { handed, snapshot: out.sendSnapshot };
+      const out = await buildEstimateSendSnapshot({ id: 'est-1', status: 'sending', estimate_data: estimateData, ...row }, () => new Date('2026-11-26T12:00:00Z'), { delivered: false });
+      return { handed: buildPricingBundle.mock.calls[0][0].estimate_data, snapshot: out.sendSnapshot };
     };
-    const resend = await bundleInput(true);
-    expect(resend.handed.sendSnapshot).toEqual({ legacyTwoStoryRoof: true });
-    expect(publicReplayTotal(resend.handed)).toBe(600);
-    expect(resend.snapshot.legacyTwoStoryRoof).toBe(true);
-    const first = await bundleInput(false);
-    expect(first.handed.sendSnapshot).toEqual({ legacyTwoStoryRoof: false });
-    expect(publicReplayTotal(first.handed)).toBe(780);
-    expect(first.snapshot.legacyTwoStoryRoof).toBe(false);
-    const route = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
-    expect(route.match(/issuedBefore: estimateIssuedBeforeSend\((estimate|sibling)\)/g)).toHaveLength(3);
-  });
-
-  test('the bundle drop freezes every rule stamp from its own evidence, not just one', () => {
-    const bundle = { oneTimeBreakdown: { items: [{ service: 'rodent_exclusion', price: 600 }] } };
-    // A priced, unstamped snapshot is evidence for BOTH rules: both read legacy before the bundle goes.
-    const data = { engineInputs: REQUEST(), sendSnapshot: { pricingBundle: bundle } };
-    const copy = JSON.parse(JSON.stringify(data));
-    invalidateSendSnapshotPricingBundle(copy);
-    expect(copy.sendSnapshot).toEqual({ legacyPricingRules: true, legacyTwoStoryRoof: true });
-    expect(savedFloorReplaySignals(copy)).toMatchObject({ legacyPricingRules: true, legacyTwoStoryRoof: true });
-    // A stamp the snapshot already carries stays as it is, and the other is still resolved on its own.
-    const partial = { engineInputs: REQUEST(), sendSnapshot: { legacyPricingRules: false, pricingBundle: bundle } };
-    invalidateSendSnapshotPricingBundle(partial);
-    expect(partial.sendSnapshot).toEqual({ legacyPricingRules: false, legacyTwoStoryRoof: true });
-  });
-
-  test('an object and its JSON text read the same stamps (snapshot flag false on an inputs-only exclusion)', () => {
-    const data = { engineInputs: REQUEST(), sendSnapshot: { legacyTwoStoryRoof: false, legacyPricingRules: false } };
-    const text = JSON.stringify(data);
-    expect(savedLegacyTwoStoryRoofSignal(data, { inputsOnlyIsLegacy: true })).toEqual({ legacyTwoStoryRoof: false });
-    expect(savedLegacyTwoStoryRoofSignal(text, { inputsOnlyIsLegacy: true })).toEqual({ legacyTwoStoryRoof: false });
-    expect(savedFloorReplaySignals(text)).toMatchObject({ legacyPricingRules: false, legacyTwoStoryRoof: false });
-    expect(savedFloorReplaySignals(text)).toEqual(savedFloorReplaySignals(data));
-    // No stamp anywhere: both read the inputs-only fallback the same way.
-    const bare = { engineInputs: REQUEST() };
-    expect(savedLegacyTwoStoryRoofSignal(JSON.stringify(bare), { inputsOnlyIsLegacy: true })).toEqual(savedLegacyTwoStoryRoofSignal(bare, { inputsOnlyIsLegacy: true }));
-    expect(savedLegacyTwoStoryRoofSignal(JSON.stringify(bare))).toEqual({ legacyTwoStoryRoof: undefined });
+    for (const row of [{}, { sent_at: '2026-11-20T15:00:00Z', status: 'sent' }]) {
+      const built = await build(data, row);
+      expect(built.handed.sendSnapshot).toEqual({ legacyTwoStoryRoof: true });
+      expect(publicReplayTotal(built.handed)).toBe(600);
+      expect(built.snapshot.legacyTwoStoryRoof).toBe(true);
+    }
+    // A bundle build that throws after the handoff leaves a snapshot with an error and no stamp: the readback still prices $600.
+    buildPricingBundle.mockImplementationOnce(async () => { throw new Error('bundle failed'); });
+    const failed = await buildEstimateSendSnapshot({ id: 'est-1', status: 'sending', estimate_data: data }, () => new Date('2026-11-26T12:00:00Z'), { delivered: false });
+    expect(failed.sendSnapshot.pricingBundleError).toBe('bundle failed');
+    expect(publicReplayTotal({ ...data, sendSnapshot: failed.sendSnapshot })).toBe(600);
+    // A fresh draft saved by the estimate tool carries the engine's false stamp: it stays on the current rule.
+    const fresh = freshQuote();
+    const builtFresh = await build(fresh);
+    expect(builtFresh.snapshot.legacyTwoStoryRoof).toBe(false);
+    expect(publicReplayTotal(builtFresh.handed)).toBe(780);
   });
 
   test('the send-snapshot builder freezes the stamp beside the bundle', () => {
     const fs = require('fs');
     const route = fs.readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
-    expect(route).toContain('savedLegacyTwoStoryRoofSignal(estimateData, { inputsOnlyIsLegacy: issuedBefore })');
+    expect(route).toContain('savedLegacyTwoStoryRoofSignal(estimateData).legacyTwoStoryRoof');
     expect(route).toContain('sendSnapshot.legacyTwoStoryRoof = priorTwoStory === true;');
   });
 
