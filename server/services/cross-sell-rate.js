@@ -28,6 +28,7 @@
  */
 const { dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
+const { INTERNAL_TEST_CUSTOMERS, INTERNAL_TEST_CUSTOMER_IDS } = require('./internal-test-customers');
 
 const WINDOW_DAYS = 95;
 
@@ -97,6 +98,15 @@ function familiesSql(alias, typeColumn = 'service_type') {
 const ONE_TIME_ADDON_KEY_SQL = `(a.service_key_snapshot = 'waveguard_membership' OR a.service_key_snapshot = 'mosquito_misting_refill'
       OR starts_with(a.service_key_snapshot, 'area_addon_'))`;
 
+// The owner's test accounts never count (the same list the MRR figures leave out, plus the demo ids and Shakedown Test names).
+function internalTestExclusionSql(alias = 'c') {
+  const name = `LOWER(COALESCE(${alias}.first_name, '') || ' ' || COALESCE(${alias}.last_name, ''))`;
+  const parts = [`${name} NOT LIKE 'shakedown test%'`];
+  if (INTERNAL_TEST_CUSTOMERS.length) parts.push(`${name} NOT IN (${INTERNAL_TEST_CUSTOMERS.map(sqlLiteral).join(', ')})`);
+  if (INTERNAL_TEST_CUSTOMER_IDS.length) parts.push(`${alias}.id::text NOT IN (${INTERNAL_TEST_CUSTOMER_IDS.map(sqlLiteral).join(', ')})`);
+  return parts.join(' AND ');
+}
+
 // The counted visits, each with its family; and the (customer, family) pairs held on day `as of` (?, ?, ?, ?, ?).
 // plan_visits keeps a visit cancelled by the day (held_on_day false) so a service's first booking, and the channel
 // it came through, survive a later cancellation of that one visit; only held visits make a family held.
@@ -132,7 +142,7 @@ const COUNTED_VISITS_SQL = `
   held AS (
     SELECT v.customer_id, v.fam
     FROM v
-    JOIN customers c ON c.id = v.customer_id AND c.deleted_at IS NULL
+    JOIN customers c ON c.id = v.customer_id AND c.deleted_at IS NULL AND ${internalTestExclusionSql('c')}
       -- A churn stamp on or before the day drops the customer, unless this visit was booked after it (a reactivation).
       AND (c.churned_at IS NULL OR CAST(c.churned_at AS date) > CAST(? AS date)
            OR CAST(v.created_at AT TIME ZONE 'America/New_York' AS date) > CAST(c.churned_at AS date))

@@ -254,6 +254,18 @@ postgres('cross-sell rate (live Postgres)', () => {
       expect(await counts()).toEqual({ recurringCustomers: 3, multiServiceCustomers: 1 });
     });
 
+    test("the owner's test accounts never count", async () => {
+      const [listedFirst, ...listedLast] = require('../services/internal-test-customers').INTERNAL_TEST_CUSTOMERS[0].split(' ');
+      const listed = await customer(listedLast.join(' '), { first_name: listedFirst });
+      const shakedown = await customer('Test Two', { first_name: 'Shakedown' });
+      const real = await customer('Real');
+      for (const id of [listed, shakedown, real]) {
+        await visit(id, { ...PEST });
+        await visit(id, { ...LAWN });
+      }
+      expect(await counts()).toEqual({ recurringCustomers: 1, multiServiceCustomers: 1 });
+    });
+
     test('a series child with no recurring flag still counts', async () => {
       const c = await customer('LegacyChild');
       const parent = await visit(c, { ...PEST, scheduled_date: '2026-01-15' });
