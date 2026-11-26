@@ -297,8 +297,11 @@ async function loadChunksByLead(conn, leads, now) {
 
   const chunksByCall = new Map();
   if (calls.size) {
+    // Only calls that are still eligible research calls: one re-classified as
+    // a wrong number or spam since it was mined stops supplying reasons.
+    const eligible = (await eligibleCallsQuery({ onlyUnmined: false, conn }).whereIn('call_log.id', [...calls.keys()]).select('call_log.id')).map((r) => r.id);
     const chunks = await conn('call_research_chunks')
-      .whereIn('call_log_id', [...calls.keys()])
+      .whereIn('call_log_id', eligible)
       .select('call_log_id', 'speaker', 'tag', 'quote', 'context', 'topics');
     for (const c of chunks) chunksByCall.set(c.call_log_id, [...(chunksByCall.get(c.call_log_id) || []), c]);
   }
@@ -333,7 +336,10 @@ async function bookedLeadIds(conn, leads) {
   const out = new Set();
   for (const l of leads) {
     if (!LOST_STATUSES.has(l.status) || l.converted_at) continue; // only these can get a reason
-    const active = await leadLinkedVisits(conn, l).whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES).where(notUnclaimedHold).first('ss.id');
+    const active = await leadLinkedVisits(conn, l).whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES).where(notUnclaimedHold).first('ss.id')
+      // The lead's own funnel row can carry the deal with no visit linked to it
+      // (a wizard repeat settles onto the root's row): same rule as lead-staleness.js.
+      || await conn('ad_service_attribution').where('lead_id', l.id).whereIn('funnel_stage', ['booked', 'completed']).first('id');
     if (active) out.add(l.id);
   }
   return out;
@@ -352,7 +358,13 @@ async function existingCustomerLeadIds(conn, leads) {
   const before = (v, l) => (v.completed_at
     ? new Date(v.completed_at) < new Date(l.created_at)
     : dateOnlyString(v.scheduled_date) < etDateString(new Date(l.created_at)));
-  return new Set(leads.filter((l) => done.some((v) => v.customer_id === l.customer_id && before(v, l))).map((l) => l.id));
+  // Imported / legacy history often lives only in service_records (same two
+  // sources as estimate-conversion-guard.js).
+  const records = await conn('service_records').whereIn('customer_id', customerIds).where('status', 'completed')
+    .select('customer_id', 'service_date');
+  const recordBefore = (r, l) => dateOnlyString(r.service_date) < etDateString(new Date(l.created_at));
+  return new Set(leads.filter((l) => done.some((v) => v.customer_id === l.customer_id && before(v, l))
+    || records.some((r) => r.customer_id === l.customer_id && recordBefore(r, l))).map((l) => l.id));
 }
 
 // Write only the changed fields, and only while the lead is still live and its
