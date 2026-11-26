@@ -67,6 +67,14 @@ describe('the open estimate\'s price (payment-status contract)', () => {
     // the estimate's cadence is its application count (4 a year = quarterly), never a word in the label
     expect(check(PRICE, 'How much is quarterly pest control?')).toBe(true);
     expect(check(PRICE, 'How much is monthly pest control?')).toBe(false);
+    // bi-monthly is its own cadence (6 a year), not monthly plus bi-monthly
+    const SIX = 'Your estimate lists Pest Control at $90.00 per application, 6 applications a year.';
+    const six = paymentStatus.renderPaymentStatusSentences(withFacts({ estimateFacts: { perApplication: [{ label: 'Pest Control', cents: 9000, applications: 6 }] } }));
+    for (const q of ['How much is bi-monthly pest control?', 'How much is bimonthly pest control?']) expect(paymentStatus.checkPaymentStatusReply({ reply: SIX, sentences: six, inboundText: q }).ok).toBe(true);
+    expect(paymentStatus.checkPaymentStatusReply({ reply: SIX, sentences: six, inboundText: 'How much is monthly pest control?' }).ok).toBe(false);
+    // a service the alias table does not know, in any price grammar, is held for a person
+    for (const q of ['How much is ant control?', 'What does ant control cost?', 'What is the price of wasp removal?']) expect({ q, ok: check(PRICE, q) }).toEqual({ q, ok: false });
+    expect(check(PRICE, 'How much is the service?')).toBe(true);
     expect(check(LAWN, 'How much is monthly lawn care?')).toBe(false);
     expect(check(PRICE, 'Did you receive my payment?')).toBe(false);
     // not an invoice, balance or past-charge question unless it also names the estimate

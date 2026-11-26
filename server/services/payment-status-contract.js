@@ -650,10 +650,12 @@ const PLAN_SERVICES = [/\bpest/i, /\blawn/i, /\bmosquito/i, /\btermite/i, /\b(?:
 // "how many ant treatments": a word before the visit noun that is no generic count word names a service the table may not know.
 const NAMED_SERVICE_ASK_RE = /\bhow many\s+(?!(?:prepaid|more|total|remaining|visits?|appointments?|applications?|treatments?|services?|times|do|did|are|is|have|has|i|we|of|my|our|the|plan|any|still)\b)[a-z-]+\s+(?:visits?|appointments?|applications?|treatments?|services?)\b/i;
 const NAMED_PLAN_ASK_RE = /\b(?:my|our|the)\s+(?!(?:prepaid|current|whole|entire|annual|yearly|monthly|quarterly|regular|same|new|old|existing|service|payment|waveguard|wave|pay|own|last|next|other|first)\b)[a-z-]+\s+plan\b/i;
+// "ant control", "what does ant control cost": a word before a service noun that is no generic word names a service the table may not know.
+const NAMED_SERVICE_NOUN_RE = /\b(?!(?:the|my|our|your|this|that|each|every|a|an|any|one|both|all|regular|ongoing|recurring|same|whole|full|pest|lawn|per|of|for|and|or|is|does|do|it|what|how|much|cost|price|monthly|quarterly|annual|weekly)\b)[a-z-]+\s+(?:control|treatments?|services?|spray(?:ing)?|removal|prevention|application)\b/i;
 const FOR_SERVICE_ASK_RE = /\b(?:visits?|appointments?|applications?|treatments?|services?)\s+(?:for|of|on)\s+(?!(?:my|our|the|this|next|that|me|us|you|a|an|any|each|every|plan)\b)[a-z-]+/i;
 // A cadence the customer named ("monthly", "quarterly") must be in the plan's own label too: a quarterly plan's count never answers a monthly one.
 // (paired with the applications a year it means: an estimate sentence carries its cadence as that count, a prepaid plan's label names it)
-const PLAN_CADENCES = [[/\bmonthly\b/i, 12], [/\bquarterly\b/i, 4], [/\bbi-?monthly\b/i, 6], [/\bweekly\b/i, 52], [/\bannual(?:ly)?\b/i, 1]];
+const PLAN_CADENCES = [[/(?<!bi-)\bmonthly\b/i, 12], [/\bquarterly\b/i, 4], [/\bbi-?monthly\b/i, 6], [/\bweekly\b/i, 52], [/\bannual(?:ly)?\b/i, 1]];
 // The service a copied estimate or prepaid sentence is about: its own label.
 const sentenceServiceLabel = (sentence) => String((/^Your prepaid (.+) plan has /.exec(sentence) || /^Your estimate lists (.+) at \$/.exec(sentence))?.[1] || '');
 const FOR_PRICE_ASK_RE = /\bhow much\b[^.?!]{0,20}\bfor\s+(?!(?:my|our|the|this|it|that|a|an|each|every|one|everything|all|both|me|us)\b)[a-z-]+/i;
@@ -662,7 +664,7 @@ function planServiceOffTarget(sentence, inbound) {
   const applications = /per application, (\d{1,2}) applications? a year\.$/.exec(sentence)?.[1];
   if (PLAN_CADENCES.some(([cadence, perYear]) => cadence.test(inbound) && !(applications ? Number(applications) === perYear : cadence.test(label)))) return true;
   const asked = PLAN_SERVICES.filter((service) => service.test(inbound));
-  if (asked.length === 0) return NAMED_SERVICE_ASK_RE.test(inbound) || FOR_SERVICE_ASK_RE.test(inbound) || NAMED_PLAN_ASK_RE.test(inbound) || FOR_PRICE_ASK_RE.test(inbound); // an unrecognized service name needs a person
+  if (asked.length === 0) return NAMED_SERVICE_ASK_RE.test(inbound) || FOR_SERVICE_ASK_RE.test(inbound) || NAMED_PLAN_ASK_RE.test(inbound) || FOR_PRICE_ASK_RE.test(inbound) || NAMED_SERVICE_NOUN_RE.test(inbound); // an unrecognized service name needs a person
   return !asked.every((service) => service.test(label)); // naming two services ("Lawn Pest Control") needs a plan that names both
 }
 // An estimate's listed price answers a question about the price, cost or estimate, never a payment, receipt or count question.
