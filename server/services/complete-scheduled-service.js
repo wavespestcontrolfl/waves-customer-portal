@@ -6351,6 +6351,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               productId: block.productId || null,
               productName: block.productName || null,
               ...(block.evidence ? { evidence: block.evidence } : {}),
+              ...(block.approvable === false ? { approvable: false } : {}),
             })),
           };
       }

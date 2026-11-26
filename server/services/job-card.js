@@ -1931,8 +1931,10 @@ function orderFor(product, packSize, shortage, { includePricing = false } = {}) 
   };
 }
 
-// The approval engine's repeat-group findings (repeatGroupFinding): repeat_<type>_group, or the fungicide FRAC one.
-const ROTATION_CODES = /^(repeat_(moa|frac|irac|hrac)_group|fungicide_frac_rotation_approval)$/;
+// The approval engine's repeat-group findings (repeatGroupFinding): repeat_<type>_group, or the fungicide FRAC one; and its
+// label limit on applications in a row (successive_application_limit: a third Velista in a row). All are warnings beside
+// the amount (owner 2026-10-09, "show the mix amount"): a hard stop on the label limit is the owner's call, not made here.
+const ROTATION_CODES = /^(repeat_(moa|frac|irac|hrac)_group|fungicide_frac_rotation_approval|successive_application_limit)$/;
 const isRotationWarning = (block) => ROTATION_CODES.test(String(block?.code || ''));
 
 async function rotationNote(dbh, facts, product) {
