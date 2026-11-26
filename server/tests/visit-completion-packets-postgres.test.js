@@ -156,6 +156,9 @@ function acceptanceInvoiceNotes(estimateId, detail = '$99.00 setup fee plus firs
 
 async function prepareAcceptanceInvoice({
   coverage = 'exact', status = 'draft', withAdjustments = false, scheduledPrices = null, uppercaseStamp = false,
+  // Lawn work is never taxed (TaxCalculator.isGroundsTreatment), so a commercial invoice that must read as one taxable
+  // family names a second taxable service instead.
+  secondService = 'Lawn Care',
 } = {}) {
   const estimateId = randomUUID();
   fixture.estimateIds.push(estimateId);
@@ -166,12 +169,12 @@ async function prepareAcceptanceInvoice({
   await mockPg('scheduled_services').where({ id: pestId }).update({ source_estimate_id: estimateId,
     service_type: 'Quarterly Pest Control', estimated_price: prices[0], recurring_parent_id: null });
   await mockPg('scheduled_services').where({ id: lawnId }).update({ source_estimate_id: estimateId,
-    service_type: 'Lawn Care', estimated_price: prices[1], recurring_parent_id: null });
+    service_type: secondService, estimated_price: prices[1], recurring_parent_id: null });
   const primary = [
     { client_id: `scheduled_${pestId}_primary`, description: 'Quarterly Pest Control', quantity: 1,
       unit_price: 120, accepted_service_type: 'Quarterly Pest Control', accepted_service_id: fixture.catalogId },
-    { client_id: `scheduled_${lawnId}_primary`, description: 'Lawn Care', quantity: 1,
-      unit_price: withAdjustments ? 120 : 100, accepted_service_type: 'Lawn Care', accepted_service_id: fixture.catalogId },
+    { client_id: `scheduled_${lawnId}_primary`, description: secondService, quantity: 1,
+      unit_price: withAdjustments ? 120 : 100, accepted_service_type: secondService, accepted_service_id: fixture.catalogId },
   ];
   if (coverage === 'aggregate') primary.splice(0, primary.length,
     { description: 'First service application', quantity: 1, unit_price: 220 });
@@ -3472,7 +3475,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     ['commercial acceptance followed by a verified exemption', 'commercial', 'commercial', true],
   ])('%s requires office review', async (_label, initialType, currentType, exempt) => {
     await mockPg('customers').where({ id: fixture.customerId }).update({ property_type: initialType, zip: '34209' });
-    const { invoice } = await prepareAcceptanceInvoice({ scheduledPrices: [240, null] });
+    const { invoice } = await prepareAcceptanceInvoice({ scheduledPrices: [240, null], secondService: 'Mosquito Control' });
     const before = await mockPg('invoices').where({ id: invoice.id }).first();
     expect(Number(before.tax_rate) > 0).toBe(initialType === 'commercial');
     await mockPg('customers').where({ id: fixture.customerId }).update({ property_type: currentType });
@@ -3493,7 +3496,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('customers').where({ id: fixture.customerId }).update({
       property_type: 'commercial', zip: '34209',
     });
-    const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true });
+    const { invoice, deposit } = await prepareAcceptanceInvoice({ withAdjustments: true, secondService: 'Mosquito Control' });
     const before = await mockPg('invoices').where({ id: invoice.id }).first();
     expect(before).toMatchObject({ subtotal: '339.00', discount_amount: '18.00', tax_rate: '0.0700',
       tax_amount: '22.47', total: '293.47' });
@@ -3511,7 +3514,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('customers').where({ id: fixture.customerId }).update({
       property_type: 'commercial', zip: '34209',
     });
-    const { invoice, pestId, lawnId } = await prepareAcceptanceInvoice();
+    const { invoice, pestId, lawnId } = await prepareAcceptanceInvoice({ secondService: 'Mosquito Control' });
     const lines = invoice.line_items.map((line) => {
       if (line.client_id === `scheduled_${pestId}_primary`) return { ...line, unit_price: 50.01, amount: 50.01 };
       if (line.client_id === `scheduled_${lawnId}_primary`) return { ...line, unit_price: 51, amount: 51 };
