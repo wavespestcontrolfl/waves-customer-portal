@@ -106,7 +106,8 @@ jest.setTimeout(120000);
       expect(r).toMatchObject({ status: 'retired', retired_by: admin.id, retire_reason: 'wrong area' });
       expect(await events(d.id)).toEqual(['drafted', 'approved', 'retired']);
       const audits = await root('audit_log').where({ resource_type: 'company_fact', resource_id: d.id }).orderBy('created_at').select('action', 'actor_id', 'metadata');
-      expect(audits.map((x) => x.action)).toEqual(['company_fact.approved', 'company_fact.retired']);
+      // Both audit rows can share one created_at (same statement clock), so the order is not fixed: compare as a set.
+      expect(audits.map((x) => x.action).sort()).toEqual(['company_fact.approved', 'company_fact.retired']);
       expect(JSON.stringify(audits)).not.toContain('We service zone');
     });
 
