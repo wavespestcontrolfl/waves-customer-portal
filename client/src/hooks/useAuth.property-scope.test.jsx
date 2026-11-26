@@ -23,7 +23,8 @@ vi.mock('../utils/api', () => ({
     verifyCode: vi.fn(),
     getAuthProperties: vi.fn(async () => ({ properties: [] })),
     selectAuthProperty: vi.fn(),
-    setTokens: vi.fn(function setTokens(t, r) { this.token = t; this.refreshToken = r; }),
+    // Like the real client, publish the new access token to storage too.
+    setTokens: vi.fn(function setTokens(t, r) { this.token = t; this.refreshToken = r; localStorage.setItem('waves_token', t); }),
     adoptTokens: vi.fn(function adoptTokens(t, r) { this.token = t; this.refreshToken = r; }),
     clearTokens: vi.fn(function clearTokens() { this.token = null; this.refreshToken = null; }),
     request: vi.fn(async () => ({ success: true })),
