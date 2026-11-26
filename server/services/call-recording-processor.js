@@ -245,6 +245,7 @@ function commercialAssessmentRoutingOptions(call, makeBookable, gates = {}, v1Vi
 }
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
+const { stampInvalidReason } = require('./call-invalid-reason');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, mapServiceCategoryToLegacy, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { flagCallBookingRain } = require('./call-booking-rain-flag');
@@ -11164,6 +11165,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
   try {
     const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
     let spamVerdictResult = null;
+    let decidedDisposition = null;
     if (isEnabled('callSpamClassifier')) {
       const lineTypeRow = await db('phone_line_types')
         .where({ phone: contactPhone }).first().catch(() => null);
@@ -11203,6 +11205,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         },
         thirdPartyNatureDefault: callApplicantHandlingLive(),
       });
+      decidedDisposition = disposition;
       const written = await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
       await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction: v2ForDisposition, procGeneration });
       // ...and once more after the write: a confirm that landed between the read
@@ -11217,6 +11220,8 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         }
       }
     }
+    // One bad-call reason per call (call_log.invalid_reason), read from the signals above. Fail soft.
+    await stampInvalidReason(db, call.id, { legacy: extracted, v2: v2ForDisposition, spamVerdict: spamVerdictResult, disposition: decidedDisposition });
     if (customerId) {
       await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at, callerPhone: clarifyAskTargetPhone(call) });
     }
@@ -15490,6 +15495,8 @@ const CallRecordingProcessor = {
         // this pass finished nothing. See the note on the rejection path.
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // The veto path ends here without the zero-triage layers: record the bad-call reason now.
+      await stampInvalidReason(db, call.id, { legacy: extracted, v2Result, outOfAreaHold: v2OutOfAreaOnlyHold });
       // An office callback's verdict settles (spam) or gives back (anything
       // else) its parent voicemail (settleParentForCallbackVerdict, dark
       // GATE_CALLBACK_SPAM_CLOSES_PARENT).

@@ -6161,6 +6161,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // MONDAYS 7:58AM + 1:58PM — Bad inbound calls per lead source (owner 2026-11-26, "ok build"). One
+  // admin notification for the last Monday-to-Sunday week: per source, inbound calls, answered by a
+  // person, voicemail, each bad-call reason and the median answer time. The week-named dedupe key
+  // makes the 1:58PM run a no-op after a successful raise, so a failed run or a deploy over 7:58
+  // still reports that week. Read-only: sends nothing to a customer. No GATE_* (owner rule 2026-11-05).
+  // =========================================================================
+  cron.schedule('58 7,13 * * 1', async () => {
+    try {
+      await runExclusive('bad-call-count-weekly', async () => {
+        const result = await require('./call-bad-call-count').runWeeklyBadCallAlert();
+        logger.info(`Bad-call count: ${result.calls} call(s), ${result.invalid} bad (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Bad-call count failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEDNESDAYS 7:00AM + 1:00PM — Waves Pest Insider planner. Issues go out on the 1st and 3rd
   // Thursday of the month; the day before, this plans and builds the issue with the real builder
   // and records it in pest_insider_issues. Any other Wednesday it does nothing.
