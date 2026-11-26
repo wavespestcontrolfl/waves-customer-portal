@@ -72,6 +72,8 @@ const AMT = '\\$\\d+\\.\\d{2}';
 const TENDER = '(?: (?:card|ACH))?';
 const DAY = '[A-Z][a-z]{2} \\d{1,2}, \\d{4}';
 const INVOICE = '[A-Za-z0-9][A-Za-z0-9-]{0,29}';
+// a service name inside a prepaid-plan sentence (no period or comma, so the sentence cannot split or pose as another one)
+const PLAN_LABEL = "[A-Za-z][A-Za-z0-9 &'()/+-]{1,58}";
 const SHAPES = Object.freeze({
   payment_received: new RegExp(`^We received your ${AMT}${TENDER} payment on ${DAY}\\.$`),
   payment_partly_refunded: new RegExp(`^We received your ${AMT}${TENDER} payment on ${DAY}, and ${AMT} of it was refunded\\.$`),
@@ -89,6 +91,9 @@ const SHAPES = Object.freeze({
   // the money every reply may need to state (owner 2026-10-01 ~23:58Z): the plan price, the card charge, and Zelle per target invoice
   dues_monthly: new RegExp(`^Your monthly plan price is ${AMT}\\.$`),
   dues_card_charge: new RegExp(`^When your dues are charged to the credit card on file, the monthly charge is ${AMT}: ${AMT} dues plus a ${AMT} credit-card fee\\.$`),
+  // prepaid recurring plans (owner 2026-11-25, texting AI fix step 2): rendered from the plan rollup (sms-staff-facts.js), copied the same
+  // way. A prepaid plan sentence states visits, never money.
+  prepaid_visits_left: new RegExp(`^Your prepaid ${PLAN_LABEL} plan has \\d{1,3} of \\d{1,3} prepaid visits? left\\.$`),
   zelle_offer: new RegExp(`^You can pay invoice ${INVOICE} by Zelle to [^,\\n]{3,80}, with your name or the invoice number in the Zelle memo\\.$`),
   zelle_invoice_unavailable: new RegExp(`^Zelle isn't available for invoice ${INVOICE} right now\\.$`),
   zelle_not_offered: /^We don't take Zelle right now\.$/,
@@ -241,7 +246,26 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   const depositUnknown = billing.hasDepositActivity !== false;
   const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length || depositUnknown || !everyRowRenders(billing, rows, todayParts))
     ? null : absenceSentence(billing, rows, todayParts);
-  return [...out, ...(absence ? [absence] : []), ...duesSentences(context), ...zelleSentences(billing.zelleFacts)];
+  return [...out, ...(absence ? [absence] : []), ...duesSentences(context), ...prepaidSentences(context), ...zelleSentences(billing.zelleFacts)];
+}
+
+const labelOk = (label) => new RegExp(`^${PLAN_LABEL}$`).test(String(label || ''));
+
+// Prepaid recurring plans (context.prepaidPlans, sms-staff-facts.loadPrepaidPlanFacts): visits left of the visits paid for.
+function prepaidSentences(context) {
+  const out = [];
+  const plans = Array.isArray(context?.prepaidPlans) ? context.prepaidPlans : [];
+  // Two series of one service (an exhausted one beside its renewal) read the same label with different counts: a label cannot tell the
+  // customer's plans apart, so a repeated label renders none of them and a person answers.
+  const labelCount = new Map();
+  for (const plan of plans) labelCount.set(String(plan?.label).toLowerCase(), (labelCount.get(String(plan?.label).toLowerCase()) || 0) + 1);
+  for (const plan of plans.slice(0, 3)) {
+    const { remaining, paid } = plan || {};
+    if (labelCount.get(String(plan?.label).toLowerCase()) === 1 && labelOk(plan?.label) && Number.isInteger(remaining) && Number.isInteger(paid) && paid > 0 && paid < 1000 && remaining >= 0 && remaining <= paid) {
+      out.push({ kind: 'prepaid_visits_left', text: `Your prepaid ${plan.label} plan has ${remaining} of ${paid} prepaid visit${paid === 1 ? '' : 's'} left.` });
+    }
+  }
+  return out;
 }
 
 // The monthly plan price, and the card charge only when the lane resolved it exactly (context.customer.billingLane, the same facts the
@@ -600,9 +624,24 @@ const sentenceTender = (t) => (/ card payment\b/.test(t) ? 'card' : / ACH paymen
 const RECEIPT_STATUS_ASK_RE = /\b(?:receiv\w*|got|get|gotten|post(?:ed)?|clear(?:ed)?|process(?:ed)?|land(?:ed)?|arriv\w*|show(?:s|ed|ing)? up)\b[^.?!]{0,40}\b(?:payments?|transfers?|zelle|money|funds?|it|that)\b|\b(?:payments?|transfers?|zelle|money|funds?)\b[^.?!]{0,40}\b(?:receiv\w*|post(?:ed)?|clear(?:ed)?|process(?:ed)?|land(?:ed)?|arriv\w*|show(?:s|ed|ing)? up|go(?:ne)? through|went through)\b/i;
 const inboundAsksPaymentStatus = (inbound) => inboundIsGenericStatusQuestion(inbound) || RECEIPT_SCOPE_RE.test(inbound) || RECEIPT_STATUS_ASK_RE.test(inbound);
 const isZelleTenderLine = (t) => ZELLE_WORD_RE.test(t) && sentenceFamily(t) == null;
+// A prepaid-plan sentence answers the service the customer named: when the message names a service ("pest", "lawn", ...) and the plan's own
+// label names none of them, it is another plan's count, and a person answers.
+const PLAN_SERVICES = [/\bpest/i, /\blawn/i, /\bmosquito/i, /\btermite/i, /\b(?:rodents?|rats?|mice|mouse)\b/i, /\b(?:trees?|shrubs?)\b/i, /\bbed ?bugs?/i, /\bflea/i, /\b(?:cock)?roach|\bpalmetto/i];
+// "how many ant treatments": a word before the visit noun that is no generic count word names a service the table may not know.
+const NAMED_SERVICE_ASK_RE = /\bhow many\s+(?!(?:prepaid|more|total|remaining|visits?|appointments?|applications?|treatments?|services?|times|do|did|are|is|have|has|i|we|of|my|our|the|plan|any|still)\b)[a-z-]+\s+(?:visits?|appointments?|applications?|treatments?|services?)\b/i;
+function prepaidCountOffTarget(sentence, inbound) {
+  const label = String(/^Your prepaid (.+) plan has /.exec(sentence)?.[1] || '');
+  const asked = PLAN_SERVICES.filter((service) => service.test(inbound));
+  if (asked.length === 0) return NAMED_SERVICE_ASK_RE.test(inbound); // an unrecognized service name needs a person
+  return !asked.every((service) => service.test(label)); // naming two services ("Lawn Pest Control") needs a plan that names both
+}
 function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
   if (!inbound || !copied.length) return false;
+  // a question about the customer's own remaining count is answered only by a prepaid-count copy, never by another true billing sentence
+  if (asksCount(inbound) && !copied.some((t) => SHAPES.prepaid_visits_left.test(t))) return true;
+  // ...and a prepaid count answers only a question about the plan's count or visit coverage, never a payment, receipt or invoice question (even one that says "prepaid")
+  if (copied.some((t) => SHAPES.prepaid_visits_left.test(t)) && !asksCount(inbound)) return true;
   const { invoiceNumbersNamed } = require('./zelle-target-invoice');
   const named = invoiceNumbersNamed(inbound);
   const stripZeros = (v) => String(v).replace(/^0+/, '') || '0';
@@ -624,6 +663,7 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const statusAsked = inboundAsksPaymentStatus(inbound);
   return copied.some((sentence) => {
     const t = String(sentence);
+    if (SHAPES.prepaid_visits_left.test(t)) return prepaidCountOffTarget(t, inbound);
     // a Zelle offer / unavailability line answers a question about Zelle, or a GENERIC how-to-pay question - never a receipt question
     // (round 75) or a question about another way to pay ("Can I pay by check?", round 78)
     if (isZelleTenderLine(t) && (statusAsked || !(ZELLE_WORD_RE.test(inbound) || inboundIsGenericHowToPay(inbound)))) return true;
@@ -654,9 +694,38 @@ function attributesOffTarget(t, { namedDates, namedTenders, amounts }) {
 // grammar ("fifty dollars", "45/mo") and no mention of Zelle - whatever the wording, in any scope. (An unparseable check fails closed.)
 const MONEY_FIGURE_RE = /\$\s?\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars?|bucks|usd)\b/i;
 const ZELLE_WORD_RE = /\bzelle\b/i;
-function remainderHasMoney(remainder) {
+// The visit COUNT of a prepaid plan ("3 visits left", "seven prepaid visits") is a plan status like an amount: only the rendered
+// prepaid sentence may state it. Broad on purpose; a false hold goes to staff, a missed count would state a plan status unchecked.
+const COUNT_NUM = '(?:\\d{1,3}|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|couple|few|several|once|twice)';
+const PREPAID_COUNT_RE = new RegExp(`\\b(?:visits?|appointments?|applications?|treatments?)\\s+(?:are\\s+|is\\s+)?(?:still\\s+)?(?:left|remaining|remain)\\b|\\b(?:left|remaining)\\s+(?:prepaid\\s+)?(?:visits?|appointments?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+prepaid\\s+(?:\\w+\\s+)?(?:visits?|appointments?|applications?|treatments?)\\b|\\bplan\\b[^.?!]{0,25}\\b(?:covers?|covered|covering|has|have)\\s+(?:\\w+\\s+){0,2}${COUNT_NUM}\\s+(?:\\w+\\s+)?(?:visits?|appointments?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+more\\s+(?:visits?|appointments?|applications?|treatments?)\\b`, 'i');
+// ...and a short answer to a question that ASKS for the count ("Three more.", "Three.", "3.", "None left.") carries no
+// count word in its own words either. The question decides: an unknown customer message counts as asking (unknown is scoped).
+const COUNT_ASK_RE = /\b(?:how many|number of)\b[^.?!]{0,30}\b(?:prepaid|visits?|appointments?|applications?|treatments?|services?|times)\b[^.?!]{0,40}\b(?:left|remaining|remain|prepaid|paid|used|covered|more|on (?:my|our|the) (?:plan|account)|(?:do|did) (?:i|we) have\b|(?:i|we) (?:have|get|got)\b)|\b(?:visits?|appointments?|applications?|treatments?)\s+(?:(?:are|is|do i have|do we have)\s+)?(?:still\s+)?(?:left|remaining|remain|covered)\b|\b(?:left|remaining)\s+(?:prepaid\s+)?(?:visits?|appointments?|applications?|treatments?)\b|\bprepaid\b[^.?!]{0,40}\b(?:left|remaining|remain)\b|\b(?:left|remaining)\b[^.?!]{0,40}\bprepaid\b|\b(?:how many|number of)\b[^.?!]{0,20}\bprepaid\b|\b(?:do|does|did|have|has|are there|is there)\b[^.?!]{0,20}\b(?:any|still|more)\b[^.?!]{0,20}\b(?:visits?|appointments?|applications?|treatments?)\b[^.?!]{0,30}\b(?:left|remaining|remain|covered|on (?:my|our|the) (?:plan|account)|prepaid)\b|\bhow many\b[^.?!]{0,30}\b(?:left|remaining|remain)\b[^.?!]{0,30}\b(?:plan|account|prepaid)\b|\bhow many\b[^.?!]{0,20}\b(?:on|in|with) (?:my|our|the) (?:plan|account)\b/i;
+const COUNT_ANSWER_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:more|left|remaining|total|(?:\\w+\\s+)?(?:visits?|appointments?|applications?|treatments?|services?|times))\\b|\\b(?:no|none|nothing)\\s+(?:more|left|remaining)\\b|(?:^|[.!?]\\s+)(?:(?:about|just|only)\\s+)?${COUNT_NUM}\\s*(?:[.!?]|$)`, 'i');
+// A question that asks for the count is answered by the rendered sentence ALONE: once the copies are removed only inert text (a greeting,
+// thanks) may remain, whatever words an invented count would use ("You have three.", "Three.", "a couple left"). With the question unknown,
+// the count words themselves are the detector.
+// "Do you have any appointments left on Friday?" asks for an open slot, not for the visits left on the plan, unless it also names the plan.
+const SLOT_ASK_RE = /\b(?:openings?|slots?|available|availability|open)\b[^.?!]{0,30}\b(?:appointments?|visits?)\b|\b(?:appointments?|visits?)\b[^.?!]{0,30}\b(?:available|open|(?:on |this |next )?(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|this week|next week)\b/i;
+const PLAN_WORD_RE = /\b(?:prepaid|my plan|my account|paid for|covered|remaining)\b/i;
+// ...nor is a question about money, or about time as the thing counted ("How much money is left on my prepaid plan?", "How many hours are left?";
+// but "How many visits do I have left this year?" counts visits).
+const MONEY_OR_TIME_ASK_RE = /\b(?:money|balance|dollars?|credit|funds?|cash)\b|\$|\bhow many\s+(?:more\s+)?(?:hours?|minutes?|days?|weeks?|months?|years?)\b/i;
+const asksCount = (inbound) => COUNT_ASK_RE.test(String(inbound ?? '')) && !MONEY_OR_TIME_ASK_RE.test(String(inbound)) && !(SLOT_ASK_RE.test(String(inbound)) && !PLAN_WORD_RE.test(String(inbound)));
+// A reply that answers an availability question with an open slot ("We have two appointments left on Friday.") is not a plan count: the same
+// exception the question side makes, and only when the reply carries a day or opening cue and names no plan.
+const SLOT_REPLY_CUE_RE = /\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|openings?|slots?|available|this week|next week)\b/i;
+const isSlotAnswer = (body, inbound) => inbound != null && SLOT_ASK_RE.test(String(inbound)) && !PLAN_WORD_RE.test(String(inbound)) && !PLAN_WORD_RE.test(body) && SLOT_REPLY_CUE_RE.test(body);
+const claimsPrepaidCount = (text, inboundText = null) => {
+  const body = String(text ?? '');
+  if (PREPAID_COUNT_RE.test(body)) return !isSlotAnswer(body, inboundText);
+  if (inboundText == null) return COUNT_ANSWER_RE.test(body);
+  // (a digit-only clause reads as inert, so any digit counts as text here)
+  return asksCount(inboundText) && (!remainderIsInert(body) || /\d/.test(body));
+};
+function remainderHasMoney(remainder, inboundText = null) {
   const text = String(remainder ?? '');
-  if (MONEY_FIGURE_RE.test(text) || ZELLE_WORD_RE.test(text)) return true;
+  if (MONEY_FIGURE_RE.test(text) || ZELLE_WORD_RE.test(text) || claimsPrepaidCount(text, inboundText)) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
@@ -707,7 +776,7 @@ function checkPaymentStatusReply({ reply, sentences, inboundText = null, scopeTe
   if (text.length > MAX_REPLY_CHARS) return { ok: false, copied: [], remainder: canonText(text) };
   const copied = copiedSentences(text, texts);
   const remainder = withoutCompanyPolicyCopies(withoutCopies(text, copied), inboundText);
-  const ok = !copiesOffTarget(copied, inboundText) && !remainderHasMoney(remainder) && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped });
+  const ok = !copiesOffTarget(copied, inboundText) && !remainderHasMoney(remainder, inboundText) && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped });
   return { ok, copied, remainder };
 }
 
@@ -908,6 +977,7 @@ module.exports = {
   isPaymentScoped,
   autoSendScopeBlock,
   remainderIsInert,
+  claimsPrepaidCount,
   // every module regex, for the adversarial-input timing test
-  REGEXES: { TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
+  REGEXES: { PREPAID_COUNT_RE, COUNT_ASK_RE, COUNT_ANSWER_RE, TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
 };

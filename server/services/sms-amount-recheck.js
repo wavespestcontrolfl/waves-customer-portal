@@ -176,7 +176,8 @@ function bodyHasPaymentStatusVocabulary(body) {
 function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = null, statusVocabulary = true } = {}) {
   const text = String(body || '');
   if (!text) return false;
-  if (bodyAmountCents(text).length || ZELLE_WORD_RE.test(text)) return true;
+  // a prepaid visit count (the rendered sentence or the model's own words) is judged and fingerprinted like an amount, whatever the customer asked
+  if (bodyAmountCents(text).length || ZELLE_WORD_RE.test(text) || paymentStatus.claimsPrepaidCount(text, inboundMessage)) return true;
   if (statusVocabulary && strictForVersion(promptVersion)
       && paymentStatus.assertsPaymentStatus(text, { inboundText: inboundMessage == null ? null : String(inboundMessage) })) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
@@ -186,10 +187,15 @@ const bodyNeedsBillingBoundaryCheck = bodyNeedsPaymentRecheck;
 
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing
 // context is a failed read, not an empty account.
-async function loadCustomerContext(customerId, dbh = db) {
+// `staffFacts` ({ prepaid: true }, ...): also the facts a copied texting-AI sentence is rendered from, so it is re-rendered from live rows.
+async function loadCustomerContext(customerId, dbh = db, staffFacts = null) {
   const customerRow = await dbh('customers').where({ id: customerId }).first();
-  return customerRow ? require('./context-aggregator').getContextForCustomer(customerRow) : null;
+  return customerRow ? require('./context-aggregator').getContextForCustomer(customerRow, staffFacts ? { includeSmsStaffFacts: staffFacts } : {}) : null;
 }
+// The staff facts (sms-staff-facts) a copied sentence is rendered from: the option that reads them, the context key and the sentence shape.
+// Only the facts a copy needs are read at send, and a read that FAILED (null) is an outage.
+const STAFF_FACT_SENTENCES = [{ option: 'prepaid', key: 'prepaidPlans', shape: 'prepaid_visits_left' }];
+const staffFactsFor = (copied) => STAFF_FACT_SENTENCES.filter(({ shape }) => copied.some((t) => paymentStatus.SHAPES[shape].test(t)));
 
 /**
  * THE CONTRACT at send time. The snapshot (input_snapshot.payment_status_snapshot) names the sentences the draft copied; they are the
@@ -212,7 +218,7 @@ async function paymentStatusVerdict({ customerId, body, snapshot = null, inbound
   const remainder = autoSend || text.length > paymentStatus.MAX_REPLY_CHARS ? afterCopies : paymentStatus.withoutCompanyPolicyCopies(afterCopies, inboundMessage);
   const inboundText = inboundMessage == null ? null : String(inboundMessage);
   const scoped = snapshot?.scoped === true || authorized.length > 0;
-  if (paymentStatus.remainderHasMoney(remainder) || paymentStatus.assertsPaymentStatus(remainder, { inboundText, scoped })) {
+  if (paymentStatus.remainderHasMoney(remainder, inboundText) || paymentStatus.assertsPaymentStatus(remainder, { inboundText, scoped })) {
     return { reason: 'payment_status_unauthorized', zelle: null };
   }
   // a copied sentence about a different record than the one the customer named answers nothing (Codex round-59 P2)
@@ -229,14 +235,16 @@ async function paymentStatusSendBlockReason(args = {}) {
 }
 // Every copied sentence must still be one the records render right now (a fresh read; unreadable => fail closed). A copied Zelle
 // sentence is re-rendered from the LIVE Zelle facts of the invoice it named (snapshot.zelle.invoice_id).
-async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh, autoSend = false }) {
+async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh, autoSend }) {
   if (!customerId) return { reason: 'payment_status_recheck_no_customer', zelle: null };
   if (snapshot.customer_id && String(snapshot.customer_id) !== String(customerId)) return { reason: 'payment_status_changed', zelle: null };
   try {
-    const context = ctx || await loadCustomerContext(customerId, dbh);
+    const needs = staffFactsFor(copied);
+    const context = ctx || await loadCustomerContext(customerId, dbh, needs.length ? Object.fromEntries(needs.map(({ option }) => [option, true])) : null);
     // Codex round-75 P2: the aggregator reports an inner read failure as billing.unavailable (not a throw) - an outage, retryable,
-    // never "the sentence is no longer true"
-    if (!context || context.billing?.unavailable === true) return { reason: 'payment_status_recheck_failed', zelle: null };
+    // never "the sentence is no longer true"; so is a staff-fact lookup that failed (null), where a successful read that no longer
+    // renders the sentence is "changed"
+    if (!context || context.billing?.unavailable === true || needs.some(({ key }) => context[key] == null)) return { reason: 'payment_status_recheck_failed', zelle: null };
     const copiesZelle = copied.some((t) => ZELLE_WORD_RE.test(t));
     const zelle = copiesZelle ? await liveZelleFacts({ customerId, invoiceId: snapshot?.zelle?.invoice_id || null, dbh }) : null;
     // Codex round-71 P2: an UNREADABLE Zelle state (a target invoice whose eligibility could not be verified) is an outage, not a change -

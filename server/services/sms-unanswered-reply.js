@@ -140,7 +140,8 @@ function draftStamp({ autoSendSafe, requireReview, lintPass, verifierEnabled, fa
  * follow-up phrase) is the same both times; live ETA is left out on both
  * sides (no GPS/Distance Matrix call; the executor rechecks ETA itself), as
  * are OPEN TIMES, LABEL FACTS and re-service state, which have their own
- * send-time rechecks. Database reads only, no model call.
+ * send-time rechecks. The prepaid visits left (includeSmsStaffFacts) are part of the block the drafter wrote from, so they are part
+ * of the hash. Database reads only, no model call.
  */
 async function factsFingerprintFor(customer, at, dbh = db) {
   // Both sides render from the stored row itself, never a caller's partial
@@ -149,7 +150,7 @@ async function factsFingerprintFor(customer, at, dbh = db) {
   if (!row) return null;
   const ContextAggregator = require('./context-aggregator');
   const { buildFactsBlock } = require('./sms-shadow-drafter');
-  const context = await ContextAggregator.getContextForCustomer(row, { includeLiveEta: false, includeVisitLoops: true });
+  const context = await ContextAggregator.getContextForCustomer(row, { includeLiveEta: false, includeVisitLoops: true, includeSmsStaffFacts: require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS') });
   const block = buildFactsBlock(context, { now: at });
   return require('node:crypto').createHash('sha256').update(String(block)).digest('hex');
 }

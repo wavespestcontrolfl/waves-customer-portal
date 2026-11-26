@@ -10,6 +10,10 @@ jest.mock('../services/visit-loops-facts', () => ({
   emptyVisitLoops: () => ({ lateAlert: null, pastWindow: null, weOwe: [], customerWaiting: [] }),
 }));
 
+jest.mock('../services/sms-staff-facts', () => ({
+  loadPrepaidPlanFacts: jest.fn(async () => [{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]),
+}));
+
 const db = require('../models/db');
 db.schema = { hasTable: async () => true };
 const { loadVisitLoops } = require('../services/visit-loops-facts');
@@ -115,5 +119,33 @@ describe('getContextForCustomer asOf', () => {
     expect(calls.some(([m, a]) => m === 'where' && a[0] === 'created_at' && a[1] === '<' && a[2] === before)).toBe(true);
     expect(cap(calls, 'created_at', '<=')).toBe(true);
     expect(cap(calls, 'updated_at', '<=')).toBe(true);
+  });
+});
+
+// Texting AI facts (owner 2026-11-25): the prepaid visits left are OPT IN (includeSmsStaffFacts): never for another caller or a frozen replay; the
+// drafting callers pass the gate as the opt-in, and the send-time recheck asks regardless of it.
+describe('getContextForCustomer texting AI staff facts', () => {
+  const staffFacts = require('../services/sms-staff-facts');
+
+  test('an opted-in live context carries the prepaid plans, read for the customer', async () => {
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true });
+    expect(context.prepaidPlans).toEqual([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]);
+    expect(staffFacts.loadPrepaidPlanFacts).toHaveBeenCalledWith(customer.id, { db });
+  });
+
+  test('every other caller (no opt-in, or the drafter\'s gate off) and a frozen replay read none of it', async () => {
+    const plain = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
+    expect(plain.prepaidPlans).toBeNull();
+    const gateOff = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: false });
+    expect(gateOff.prepaidPlans).toBeNull();
+    const replay = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true, asOf: ASOF });
+    expect(replay.prepaidPlans).toBeNull();
+    expect(staffFacts.loadPrepaidPlanFacts).not.toHaveBeenCalled();
+  });
+
+  test('the send-time recheck still reads it after the drafting gate is rolled back', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: { prepaid: true } });
+    expect(context.prepaidPlans).toHaveLength(1);
   });
 });
