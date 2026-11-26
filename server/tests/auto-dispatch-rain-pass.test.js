@@ -382,9 +382,25 @@ describe('auto-dispatch rain pass', () => {
         ], { nwsOnly: true }),
       });
       expect(rows.every((r) => r.reason === 'no_forecast')).toBe(true);
-      // two areas, two tries each; the third and fourth areas are never asked.
-      expect(weather.getNwsHourlyRain).toHaveBeenCalledTimes(4);
+      // two areas, two tries each; the third and fourth areas are asked the cache only.
+      expect(weather.getNwsHourlyRain).toHaveBeenCalledTimes(6);
+      expect(weather.getNwsHourlyRain.mock.calls.slice(4).map((c) => c[2])).toEqual([{ cacheOnly: true }, { cacheOnly: true }]);
       expect(weather.getHourlyRainOutlook).not.toHaveBeenCalled();
+    });
+
+    test('after the cutoff a fresh cached NWS answer still counts', async () => {
+      weather.getNwsHourlyRain.mockImplementation(async (lat, lng, opts) => (opts && opts.cacheOnly && lat < 27.45 ? hourlyFor() : null));
+      const rows = await planRainPass({
+        now: NOW, db: {},
+        deps: deps([
+          wetStop(), wetStop({ id: 'v2', point: { lat: 27.5, lng: -82.4 } }),
+          wetStop({ id: 'v4', point: { lat: 27.7, lng: -82.4 } }),
+        ], { nwsOnly: true }),
+      });
+      // Stops are judged v2, v4, then visit-1: two areas fail, then visit-1's area is read from the cache only.
+      expect(weather.getNwsHourlyRain.mock.calls.at(-1)).toEqual([27.4, -82.4, { cacheOnly: true }]);
+      expect(rows.find((r) => r.visit.id === 'visit-1')).toMatchObject({ wet: true });
+      expect(rows.filter((r) => r.reason === 'no_forecast')).toHaveLength(2);
     });
   });
 });
