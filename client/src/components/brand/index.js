@@ -12,3 +12,4 @@ export { default as TrustFooter } from './TrustFooter';
 export { default as PublicStateCard } from './PublicStateCard';
 export { default as HelpPhoneLink } from './HelpPhoneLink';
 export { WavesShellContext, useWavesShell } from './WavesShellContext';
+export { default as BackToAccountButton, HeaderBackToAccount } from './BackToAccount';

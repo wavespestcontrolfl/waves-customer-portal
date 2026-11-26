@@ -5,7 +5,8 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import DocumentActionBar from './DocumentActionBar';
 
-const shell = vi.hoisted(() => ({ native: false, plugins: false }));
+const shell = vi.hoisted(() => ({ native: false, plugins: false, session: false }));
+vi.mock('../native/platform', () => ({ hasSessionToken: () => shell.session }));
 vi.mock('../native/nativeFile', () => ({
   isNativeApp: () => shell.native,
   canSaveNative: () => shell.native && shell.plugins,
@@ -32,5 +33,22 @@ describe('DocumentActionBar Download PDF', () => {
     if (shown) expect(download).toBeInTheDocument();
     else expect(download).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Portal Login' })).toBeInTheDocument();
+  });
+});
+
+describe('DocumentActionBar account link', () => {
+  it('says Portal Login and goes to /login with no customer session', () => {
+    shell.session = false;
+    render(<DocumentActionBar pdfUrl="/x.pdf" />);
+    expect(screen.getByRole('link', { name: 'Portal Login' })).toHaveAttribute('href', '/login');
+    expect(screen.queryByRole('link', { name: 'My account' })).toBeNull();
+  });
+
+  it('says My account and goes to / for a signed-in customer', () => {
+    shell.session = true;
+    render(<DocumentActionBar pdfUrl="/x.pdf" />);
+    expect(screen.getByRole('link', { name: 'My account' })).toHaveAttribute('href', '/');
+    expect(screen.queryByRole('link', { name: 'Portal Login' })).toBeNull();
+    shell.session = false;
   });
 });
