@@ -33,7 +33,7 @@ const sendgrid = require('./sendgrid-mail');
 const NewsletterSender = require('./newsletter-sender');
 const { wrapNewsletter, bodyIsDarkAware } = require('./email-template');
 const { validateNewsletterDraft, lockedPricesForSend } = require('./newsletter-validator');
-const { requiresClaimValidation, isFlagshipType, PEST_INSIDER_TYPE, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
+const { requiresClaimValidation, isFlagshipType, PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
@@ -1209,26 +1209,6 @@ async function maybeHandleProofApproval(email) {
       await sendNewsletterProof(send.id);
     } catch (reproofErr) {
       logger.error(`[newsletter-proof] re-proof after stale approval failed for ${send.id}: ${reproofErr.message}`);
-    }
-    return true;
-  }
-
-  // A weekly draft proofed before the first-readers step has no audience phase, and the sender
-  // refuses it. Refuse the approval the same way as a stale one: drop the old proof and send a
-  // fresh proof, whose copy names the real audience (sendNewsletterProof records the phase).
-  if (send.newsletter_type === FLAGSHIP_TYPE_KEY && !send.audience_phase) {
-    logger.info(`[newsletter-proof] send ${send.id} has no audience phase — refusing approval, re-proofing`);
-    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
-      subject: send.subject,
-      errors: ['This weekly draft has no audience step recorded (first readers or everyone) — approval refused. A fresh proof is on its way; reply APPROVED to that one.'],
-    });
-    try {
-      await db('newsletter_sends')
-        .where({ id: send.id, proof_token: token })
-        .update({ proof_token: null, proof_sent_at: null, proof_refused_at: new Date(), updated_at: new Date() });
-      await sendNewsletterProof(send.id);
-    } catch (reproofErr) {
-      logger.error(`[newsletter-proof] re-proof after approval with no audience phase failed for ${send.id}: ${reproofErr.message}`);
     }
     return true;
   }

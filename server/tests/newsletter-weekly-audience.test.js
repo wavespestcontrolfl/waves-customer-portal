@@ -21,7 +21,7 @@ const NewsletterSubscribers = require('../services/newsletter-subscribers');
 const warm = require('../services/newsletter-warm-audience');
 const {
   WARM_ISSUES, PHASE_WARM, PHASE_ALL, WEEKLY_WARM_PLAN, phaseForSentWarmIssues,
-  planWeeklyAudience, ensureFlagshipAudience, warmPhaseNote, sentWarmIssueCount,
+  planWeeklyAudience, ensureFlagshipAudience, recordFlagshipAudience, warmPhaseNote, sentWarmIssueCount,
 } = require('../services/newsletter-weekly-audience');
 
 const FLAGSHIP = 'local-weekly-fresh-events';
@@ -127,6 +127,14 @@ describe('ensureFlagshipAudience', () => {
     const knex = fakeKnex({ sentWarm: '0' });
     await expect(ensureFlagshipAudience(send, { knex })).resolves.toBe(send);
     expect(knex).not.toHaveBeenCalled();
+  });
+});
+
+describe('recordFlagshipAudience', () => {
+  test('a failed plan is logged and the draft comes back untouched, never thrown', async () => {
+    warm.warmAudienceQuery.mockRejectedValue(new Error('db down'));
+    const send = { id: 'send-1', newsletter_type: FLAGSHIP, status: 'draft', audience_phase: null };
+    await expect(recordFlagshipAudience(send, { knex: fakeKnex({ sentWarm: '0' }) })).resolves.toBe(send);
   });
 });
 

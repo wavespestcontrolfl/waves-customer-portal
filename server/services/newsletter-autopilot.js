@@ -50,6 +50,7 @@ const {
 } = require('./newsletter-portfolio');
 const { featureScoreFloor } = require('./event-scoring');
 const { getFlagshipType } = require('../config/newsletter-types');
+const { recordFlagshipAudience } = require('./newsletter-weekly-audience');
 
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
 
@@ -835,14 +836,9 @@ async function autoDraftFlagship() {
   logger.info(`[newsletter-autopilot] Draft created: sendId=${send.id}, events=${actualLineup.length}`);
 
   // First-readers step (owner 2026-11-26): the draft records which audience phase it uses,
-  // warm readers only for the first weekly issues, then everyone. A failure here never kills the
+  // warm readers only for the first weekly issues, then everyone. A failure never kills the
   // draft: the proof step records the phase too, and the sender refuses an issue with none.
-  try {
-    const { ensureFlagshipAudience } = require('./newsletter-weekly-audience');
-    await ensureFlagshipAudience(send);
-  } catch (e) {
-    logger.warn(`[newsletter-autopilot] audience phase not recorded: ${e.message}`);
-  }
+  await recordFlagshipAudience(send);
 
   // 10. Proof-approval flow (gated OFF by default): email the owner a proof
   //     copy; replying "approved" queues Thursday's 6 AM send. Under

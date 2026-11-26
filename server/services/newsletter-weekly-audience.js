@@ -126,6 +126,16 @@ async function ensureFlagshipAudience(send, { asOf = new Date(), knex = db } = {
   return (await knex('newsletter_sends').where({ id: send.id }).first()) || send;
 }
 
+/** ensureFlagshipAudience that logs a failure instead of throwing (the autopilot's draft must survive it). */
+async function recordFlagshipAudience(send, options) {
+  try {
+    return await ensureFlagshipAudience(send, options);
+  } catch (err) {
+    logger.warn(`[newsletter-weekly-audience] audience phase not recorded for send ${send?.id}: ${err.message}`);
+    return send;
+  }
+}
+
 /**
  * What the owner's copy says about the audience: { phase, issueNumber, of } for a warm issue,
  * null for anything else (the copy then reads as before).
@@ -146,5 +156,6 @@ module.exports = {
   warmSegmentFilter,
   planWeeklyAudience,
   ensureFlagshipAudience,
+  recordFlagshipAudience,
   warmPhaseNote,
 };

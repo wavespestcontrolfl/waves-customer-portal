@@ -532,19 +532,6 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
-  test('approval of a weekly draft with no audience phase is refused and a fresh proof is requested', async () => {
-    const { sendsChain } = wireDb({ sends: { first: { ...PROOFED_DRAFT, audience_phase: null } } });
-    const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
-    expect(r).toBe(true);
-    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
-      errors: [expect.stringContaining('no audience step recorded')],
-    }));
-    // the old proof is dropped (so the fresh one can go out) and nothing is queued or sent
-    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ proof_token: null, proof_sent_at: null }));
-    expect(sendsChain.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
-    expect(mockSendCampaign).not.toHaveBeenCalled();
-  });
-
   test('duplicate approval reply is a no-op', async () => {
     wireDb({ sends: { first: { ...PROOFED_DRAFT, proof_approved_at: new Date() } } });
     const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
