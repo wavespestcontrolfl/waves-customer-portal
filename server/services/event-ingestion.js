@@ -10,9 +10,9 @@
  *   - 'scrape' → pullScrapeSource (P3b leg 2, Playwright + Claude
  *     extraction). For SPA event aggregators that don't expose
  *     RSS or iCal.
- *   - 'json'  → not implemented yet; sources with this feed_type are
- *     skipped with a warn-level log so the cron can pre-seed them
- *     without failing.
+ *   - 'json'  → pullJsonSource: a structured JSON endpoint mapped by the
+ *     adapter named in scrape_config.jsonAdapter (event-json-adapters.js),
+ *     no browser and no LLM call.
  *
  * Each pull is bounded by:
  *   - 15s HTTP timeout
@@ -44,6 +44,7 @@ const logger = require('./logger');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { yieldTrackingUpdateFor, checkAndNotifySourceHealth } = require('./event-source-health');
 const { mergeEvents, pickSurvivor, computeSurvivorBackfill, EVENT_MERGE_LOCK_KEY } = require('./event-dedup');
+const { JSON_ADAPTERS } = require('./event-json-adapters');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
 // (a feed correcting/rescheduling a previously-expired event), re-queue the row
@@ -1367,6 +1368,43 @@ async function pullScrapeSource(source) {
   return { upserted, dropped, total: claudeEvents.length };
 }
 
+// JSON feed handler: fetch the endpoint (following WordPress-style paging),
+// map every item through the source's adapter, then reuse the scrape path's
+// validation + upsert so windows, ET parsing and dedup keys stay in one place.
+const MAX_JSON_PAGES = 5;
+
+async function fetchJsonPages(source) {
+  const ua = source.scrape_config?.userAgent || DEFAULT_BOT_UA;
+  const items = [];
+  for (let page = 1; page <= MAX_JSON_PAGES; page += 1) {
+    const url = new URL(source.feed_url);
+    if (page > 1) url.searchParams.set('page', String(page));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+    let totalPages = 1;
+    try {
+      const resp = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': ua, Accept: 'application/json' } });
+      if (!resp.ok) throw new Error(`Status code ${resp.status}`);
+      totalPages = Number(resp.headers.get('x-wp-totalpages')) || 1;
+      const body = await resp.json();
+      if (!Array.isArray(body)) throw new Error('JSON feed is not an array');
+      items.push(...body);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (page >= totalPages) break;
+  }
+  return items;
+}
+
+async function pullJsonSource(source) {
+  const adapter = JSON_ADAPTERS[source.scrape_config?.jsonAdapter];
+  if (!adapter) throw new Error(`Unknown scrape_config.jsonAdapter '${source.scrape_config?.jsonAdapter}'`);
+  const events = adapter(await fetchJsonPages(source)).slice(0, MAX_ITEMS_PER_FEED);
+  const { upserted, dropped } = await upsertExtractedEvents(source, events);
+  return { upserted, dropped, total: events.length };
+}
+
 async function ingestSource(source) {
   const startedAt = Date.now();
   try {
@@ -1377,11 +1415,13 @@ async function ingestSource(source) {
       result = await pullIcalSource(source);
     } else if (source.feed_type === 'scrape') {
       result = await pullScrapeSource(source);
+    } else if (source.feed_type === 'json') {
+      result = await pullJsonSource(source);
     } else {
-      // 'json' not implemented yet — skip gracefully so the cron can
-      // pre-seed sources without failing. Don't increment
-      // consecutive_failures (those are for real failures).
-      logger.warn(`[event-ingestion] Skipping ${source.name} — feed_type=${source.feed_type} not implemented yet`);
+      // Unknown feed_type — skip gracefully so the cron can pre-seed
+      // sources without failing. Don't increment consecutive_failures
+      // (those are for real failures).
+      logger.warn(`[event-ingestion] Skipping ${source.name} — feed_type=${source.feed_type} not implemented`);
       return { source: source.name, skipped: true };
     }
 
@@ -1479,6 +1519,7 @@ module.exports = {
   parseExtractedStartAt, // exported for the ET-timezone-drift regression tests
   extractedEventDedupKeys, // exported for the dedup-key-stability regression tests
   upsertExtractedEvents, // exported for the legacy-key-migration DB test
+  pullJsonSource, // exported for the JSON-feed pull test
   recurrenceMetadataFromIcalEvent,
   recoverEventObjectsFromTruncatedJson,
   escapeBareXmlEntities,
