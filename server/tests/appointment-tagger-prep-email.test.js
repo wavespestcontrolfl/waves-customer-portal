@@ -19,13 +19,6 @@ jest.mock('../services/sms-template-renderer', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
-  emailTemplateAutomationsMode: jest.fn(() => 'live'),
-}));
-jest.mock('../services/email-template-automation-executor', () => ({
-  processTrigger: jest.fn(async () => ({
-    automation_count: 1,
-    results: [{ automation_key: 'prep', run: { id: 'run-1', status: 'queued' }, deduped: false }],
-  })),
 }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
@@ -37,11 +30,9 @@ jest.mock('../services/automation-runner', () => ({
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
-const executor = require('../services/email-template-automation-executor');
+const { isEnabled } = require('../config/feature-gates');
 const AppointmentTagger = require('../services/appointment-tagger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { formatDisplayDate } = require('../utils/date-only');
 
 const FUTURE_DATE = etDateString(addETDays(new Date(), 7));
 const PAST_DATE = etDateString(addETDays(new Date(), -1));
@@ -66,21 +57,11 @@ function service(overrides = {}) {
 
 let customerRow;
 let priorBookingRow;
-let automationActiveRow;
 let priorPrepInteraction;
 let servicePrepRow;
 let servicePrepUpdateResult;
 let serviceUpdates;
 let trxRaw;
-
-// isPrepAutomationActive lookup (email_template_automations) — a row = active.
-function automationsQuery() {
-  const q = {
-    where: jest.fn(() => q),
-    first: jest.fn(async () => automationActiveRow),
-  };
-  return q;
-}
 
 // customer_interactions — hasSentPrepSms dedupe lookup (.where().first()) plus
 // the post-send marker insert.
@@ -122,11 +103,11 @@ function priorBookingQuery() {
   return q;
 }
 
-describe('appointment tagger prep email automation', () => {
+describe('appointment tagger prep email', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    // This describe covers the TRANSACTIONAL prep lane — the behavior for all
-    // unwired pests, and for wired ones whenever the sequence gate is off.
+    // No treatment sequence is wired in this describe: the prep email only
+    // goes out through the Automations-tab sequence (see the next describe).
     isEnabled.mockImplementation((key) => key !== 'treatmentAutomationEnroll');
     customerRow = {
       id: 'cust-1',
@@ -135,7 +116,6 @@ describe('appointment tagger prep email automation', () => {
       email: 'taylor@example.com',
     };
     priorBookingRow = null;
-    automationActiveRow = { id: 'auto-1' };
     priorPrepInteraction = null;
     servicePrepRow = { prep_token: null, prep_template_key: null };
     servicePrepUpdateResult = [{}];
@@ -143,11 +123,8 @@ describe('appointment tagger prep email automation', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return priorBookingQuery();
       if (table === 'customer_interactions') return interactionsQuery();
-      if (table === 'email_template_automations') return automationsQuery();
       return customersQuery();
     });
-    // Standalone sends run inside db.transaction with a pg advisory lock; the
-    // trx handle dispatches to the same per-table query mocks.
     const trx = (table) => db(table);
     trxRaw = jest.fn(async () => ({}));
     trx.raw = trxRaw;
@@ -180,7 +157,6 @@ describe('appointment tagger prep email automation', () => {
           return q;
         }
         if (table === 'customer_interactions') return interactionsQuery();
-        if (table === 'email_template_automations') return automationsQuery();
         return customersQuery();
       });
     }
@@ -206,19 +182,9 @@ describe('appointment tagger prep email automation', () => {
 
       await AppointmentTagger.onServiceScheduled('svc-1');
 
-      expect(executor.processTrigger).not.toHaveBeenCalled();
       expect(automationRunner.enrollCustomer).not.toHaveBeenCalled();
       expect(renderSmsTemplate).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
-    });
-
-    test('the same path for a household roach job still queues prep.cockroach', async () => {
-      mockBooking(bookingRow('German Roach Initial Service (3-Visit)'));
-
-      await AppointmentTagger.onServiceScheduled('svc-1');
-
-      expect(executor.processTrigger).toHaveBeenCalledTimes(1);
-      expect(executor.processTrigger.mock.calls[0][0].automationKey).toBe('prep.cockroach');
     });
 
     test('a prior car job does not count as a prior household roach booking', async () => {
@@ -230,132 +196,18 @@ describe('appointment tagger prep email automation', () => {
     });
   });
 
-  test('cockroach booking emits appointment.booked scoped to prep.cockroach', async () => {
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
-    const call = executor.processTrigger.mock.calls[0][0];
-    expect(call.triggerEventKey).toBe('appointment.booked');
-    expect(call.automationKey).toBe('prep.cockroach');
-    expect(call.triggerEventId).toBe('appointment_booked:svc-1');
-    expect(call.entityType).toBe('scheduled_service');
-    expect(call.entityId).toBe('svc-1');
-    expect(call.executeImmediately).toBe(false);
-    expect(call.recipient).toEqual({ email: 'taylor@example.com', type: 'customer', id: 'cust-1', role: 'primary' });
-    expect(call.payload).toMatchObject({
-      scheduled_service_id: 'svc-1',
-      customer_id: 'cust-1',
-      customer_email: 'taylor@example.com',
-      first_name: 'Taylor',
-      service_type: 'Cockroach Treatment - Interior',
-      service_date: formatDisplayDate(FUTURE_DATE),
-      property_address: '123 Palm Ave, Bradenton, 34211',
-    });
-    // prep_url is the tokened public prep page; only the portal link keeps
-    // pointing at the login-gated visits tab.
-    expect(call.payload.prep_url).toMatch(/\/prep\/[0-9a-f]{32}$/);
-    expect(call.payload.customer_portal_url).toContain('?tab=visits');
-  });
-
-  test('prep_url reuses an existing service prep token', async () => {
-    const existing = 'ab'.repeat(16);
-    servicePrepRow = { prep_token: existing, prep_template_key: 'prep.cockroach' };
-
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    const call = executor.processTrigger.mock.calls[0][0];
-    expect(call.payload.prep_url).toContain(`/prep/${existing}`);
-    // Same key → no realignment write.
-    expect(serviceUpdates.some((p) => p && p.prep_template_key)).toBe(false);
-  });
-
-  test('a reused token with a different stored key is NOT retargeted at queue time', async () => {
-    servicePrepRow = { prep_token: 'cd'.repeat(16), prep_template_key: 'prep.flea' };
-
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    // The stored key is what the last DELIVERED guide rendered; it moves
-    // (with prep_sent_at) only when the new send confirms — in the
-    // executor's markServicePrepSent, never here.
-    expect(serviceUpdates.some((p) => p && p.prep_template_key)).toBe(false);
-  });
-
-  test('queueing the guide email never stamps prep_sent_at (delivery does)', async () => {
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    // The executor stamps prep_sent_at when the run actually reaches
-    // 'sent' — a queued run can still skip, suppress, or fail.
-    expect(serviceUpdates.some((p) => p && p.prep_sent_at !== undefined)).toBe(false);
-  });
-
-  test('prep_url degrades to the portal visits tab when the token mint fails', async () => {
-    db.mockImplementation((table) => {
-      if (table === 'scheduled_services') {
-        const q = priorBookingQuery();
-        q.select = jest.fn(() => { throw new Error('boom'); });
-        return q;
-      }
-      if (table === 'customer_interactions') return interactionsQuery();
-      if (table === 'email_template_automations') return automationsQuery();
-      return customersQuery();
-    });
-
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
-    const call = executor.processTrigger.mock.calls[0][0];
-    expect(call.payload.prep_url).toContain('?tab=visits');
-  });
-
-  test('flea booking maps to prep.flea and renders the auto_flea SMS companion', async () => {
+  test('with the sequence gate off no guide email goes out: nothing enrolls and no prep SMS sends', async () => {
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const { enrollCustomer } = require('../services/automation-runner');
 
-    await AppointmentTagger.triggerPestPrep(
-      service({ service_type: 'Flea Treatment - Interior & Exterior' }),
-      'flea',
-    );
-
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
-    const call = executor.processTrigger.mock.calls[0][0];
-    expect(call.automationKey).toBe('prep.flea');
-    expect(call.payload.project_type).toBe('Flea Treatment');
-    expect(renderSmsTemplate).toHaveBeenCalledWith(
-      'auto_flea',
-      { first_name: 'Taylor' },
-      { workflow: 'appointment_tagger_prep', entity_type: 'scheduled_service', entity_id: 'svc-1' },
-    );
-  });
-
-  test('no prep SMS when the guide email run was deduped or skipped (re-run safety)', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    executor.processTrigger.mockResolvedValueOnce({
-      automation_count: 1,
-      results: [{ automation_key: 'prep.cockroach', run: { id: 'run-1', status: 'queued' }, deduped: true }],
-    });
-
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
     await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'flea');
 
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    expect(enrollCustomer).not.toHaveBeenCalled();
     expect(renderSmsTemplate).not.toHaveBeenCalled();
-  });
-
-  test('no prep SMS when the automation is inactive (zero results)', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    executor.processTrigger.mockResolvedValueOnce({ automation_count: 0, results: [] });
-
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    expect(renderSmsTemplate).not.toHaveBeenCalled();
-  });
-
-  test('skips prep entirely when the customer already had a same-family booking', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    priorBookingRow = { id: 'svc-0' };
-
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    expect(executor.processTrigger).not.toHaveBeenCalled();
-    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('classifier tags flea service types', () => {
@@ -366,51 +218,21 @@ describe('appointment tagger prep email automation', () => {
     expect(AppointmentTagger.classifyAppointmentType('flea & tick service').tag).toBe('flea');
   });
 
-  test('bed bug booking maps to prep.bed_bug', async () => {
-    await AppointmentTagger.triggerPestPrep(
-      service({ service_type: 'Bed Bug Treatment' }),
-      'bed_bug',
-    );
-
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
-    const call = executor.processTrigger.mock.calls[0][0];
-    expect(call.automationKey).toBe('prep.bed_bug');
-    expect(call.payload.project_type).toBe('Bed Bug Treatment Service');
-  });
-
-  describe('bed bug heat and hybrid jobs get the heat prep sheet', () => {
-    test('heat pest type maps to prep.bed_bug_heat and the companion text reuses auto_bed_bug', async () => {
-      const { renderSmsTemplate } = require('../services/sms-template-renderer');
-      await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Heat Treatment' }), 'bed_bug_heat');
-
-      expect(executor.processTrigger).toHaveBeenCalledTimes(1);
-      expect(executor.processTrigger.mock.calls[0][0].automationKey).toBe('prep.bed_bug_heat');
-      expect(renderSmsTemplate).toHaveBeenCalledWith('auto_bed_bug', { first_name: 'Taylor' }, expect.any(Object));
-    });
-
-    test('a heat job takes the transactional email even with the sequence gate on (step 0 is the chemical guide)', async () => {
+  describe('bed bug heat and hybrid jobs', () => {
+    test('a heat job takes no sequence enrollment even with the sequence gate on (step 0 is the chemical guide)', async () => {
       isEnabled.mockImplementation(() => true);
-      const automationRunner = require('../services/automation-runner');
+      const { enrollCustomer } = require('../services/automation-runner');
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
       await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Hybrid Heat + Residual Program' }), 'bed_bug_heat');
 
-      expect(automationRunner.enrollCustomer).not.toHaveBeenCalled();
-      expect(executor.processTrigger.mock.calls[0][0].automationKey).toBe('prep.bed_bug_heat');
-    });
-
-    test('a phone-only heat customer gets no inline chemical steps', async () => {
-      const { renderSmsTemplate } = require('../services/sms-template-renderer');
-      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-      await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug_heat');
-
-      expect(renderSmsTemplate).not.toHaveBeenCalledWith('auto_bed_bug_no_email', expect.anything(), expect.anything());
+      expect(enrollCustomer).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
     test('a prior chemical bed bug booking counts as the same family for heat (first-time only)', async () => {
-      priorBookingRow = { id: 'earlier' };
-      await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Heat Treatment' }), 'bed_bug_heat');
-
-      expect(executor.processTrigger).not.toHaveBeenCalled();
+      await AppointmentTagger.hasPriorSameTypeBooking(service({ service_type: 'Bed Bug Heat Treatment' }), 'bed_bug_heat');
+      const q = db.mock.results.at(-1).value;
+      expect(q.whereIn).toHaveBeenCalledWith('appointment_type', ['bed_bug']);
     });
 
     test.each([
@@ -441,237 +263,6 @@ describe('appointment tagger prep email automation', () => {
         spy.mockRestore();
       }
     });
-  });
-
-  test('DATE column returned as a UTC-midnight Date keeps the ET calendar day', async () => {
-    await AppointmentTagger.triggerPestPrep(
-      service({ scheduled_date: new Date(`${FUTURE_DATE}T00:00:00Z`) }),
-      'cockroach',
-    );
-
-    expect(executor.processTrigger.mock.calls[0][0].payload.service_date).toBe(formatDisplayDate(FUTURE_DATE));
-  });
-
-  test('skips past-dated appointments (regenerate-brief re-runs)', async () => {
-    await AppointmentTagger.triggerPestPrep(service({ scheduled_date: PAST_DATE }), 'cockroach');
-
-    expect(executor.processTrigger).not.toHaveBeenCalled();
-  });
-
-  test('skips terminal-status appointments', async () => {
-    for (const status of ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show']) {
-      await AppointmentTagger.triggerPestPrep(service({ status }), 'cockroach');
-    }
-
-    expect(executor.processTrigger).not.toHaveBeenCalled();
-  });
-
-  test('payload carries the calendar date for the send-time appointment.past exit', async () => {
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    expect(executor.processTrigger.mock.calls[0][0].payload.service_date_ymd).toBe(FUTURE_DATE);
-  });
-
-  test('skips when the emailTemplateAutomations gate is off', async () => {
-    emailTemplateAutomationsMode.mockReturnValue('off');
-
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    expect(executor.processTrigger).not.toHaveBeenCalled();
-  });
-
-  // Shadow must never change a LIVE send (#5154 coordinator finding): a
-  // queued:true here reads to the caller as "the guide email is handled,
-  // send the companion SMS" — in shadow the queued run finalizes 'shadow'
-  // (nothing actually sends), so shadow must return exactly what off does.
-  test('triggerPrepEmailGuide in shadow mode returns gate_off and creates no run; in live mode it queues', async () => {
-    emailTemplateAutomationsMode.mockReturnValue('shadow');
-
-    const shadowResult = await AppointmentTagger.triggerPrepEmailGuide(service(), 'cockroach');
-
-    expect(shadowResult).toEqual({ queued: false, reason: 'gate_off' });
-    expect(executor.processTrigger).not.toHaveBeenCalled();
-
-    emailTemplateAutomationsMode.mockReturnValue('live');
-    const liveResult = await AppointmentTagger.triggerPrepEmailGuide(service(), 'cockroach');
-
-    expect(liveResult.queued).toBe(true);
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
-  });
-
-  test('routes to the service contact when one is set', async () => {
-    customerRow = {
-      ...customerRow,
-      service_contact_name: 'Jamie Onsite',
-      service_contact_email: 'onsite@example.com',
-    };
-
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    const call = executor.processTrigger.mock.calls[0][0];
-    expect(call.recipient.email).toBe('onsite@example.com');
-    expect(call.payload.customer_email).toBe('onsite@example.com');
-    expect(call.payload.first_name).toBe('Jamie');
-  });
-
-  test('still sends via the service contact when the primary email is blank', async () => {
-    customerRow = {
-      ...customerRow,
-      email: '',
-      service_contact_name: 'Jamie Onsite',
-      service_contact_email: 'onsite@example.com',
-    };
-
-    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
-
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
-    expect(executor.processTrigger.mock.calls[0][0].recipient.email).toBe('onsite@example.com');
-    // Whose address this is rides with the run (codex #6363 r10 P1).
-    expect(executor.processTrigger.mock.calls[0][0].recipient.role).toBe('service_contact');
-  });
-
-  test('no email on file falls back to the self-contained prep SMS', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-    customerRow = { ...customerRow, email: '' };
-    renderSmsTemplate.mockResolvedValueOnce('Bed bug prep steps...');
-    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
-
-    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
-
-    // No email means no guide email — but the phone-only customer still gets
-    // the self-contained prep text (auto_bed_bug_no_email), not the companion.
-    expect(executor.processTrigger).not.toHaveBeenCalled();
-    expect(renderSmsTemplate).toHaveBeenCalledWith(
-      'auto_bed_bug_no_email',
-      { first_name: 'Taylor' },
-      { workflow: 'appointment_tagger_prep', entity_type: 'scheduled_service', entity_id: 'svc-1' },
-    );
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
-      body: 'Bed bug prep steps...',
-      metadata: expect.objectContaining({ prep_variant: 'standalone', pest_type: 'bed_bug' }),
-    });
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('prep.bed_bug'));
-  });
-
-  test('no email AND the prep automation is inactive → no standalone SMS (kill switch honored)', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    customerRow = { ...customerRow, email: '' };
-    automationActiveRow = null; // automation paused/disabled
-
-    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
-
-    // A paused automation suppresses email-capable customers (zero executor
-    // results); the phone-only fallback must respect the same pause.
-    expect(executor.processTrigger).not.toHaveBeenCalled();
-    expect(renderSmsTemplate).not.toHaveBeenCalled();
-  });
-
-  test('standalone prep SMS is not resent when one was already logged (replay safety)', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-    customerRow = { ...customerRow, email: '' };
-    priorPrepInteraction = { id: 'int-1' }; // a prep SMS was already logged
-
-    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
-
-    expect(renderSmsTemplate).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-  });
-
-  test('standalone dedupe check + marker run inside an advisory-lock transaction', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-    customerRow = { ...customerRow, email: '' };
-    renderSmsTemplate.mockResolvedValueOnce('Bed bug prep steps...');
-    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
-
-    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
-
-    // Concurrent replays (booking hook vs regenerate-brief) serialize on the
-    // customer+pest advisory lock so both can't pass the marker check.
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(trxRaw).toHaveBeenCalledWith(
-      'SELECT pg_advisory_xact_lock(hashtext(?))',
-      ['prep_sms:cust-1:bed_bug'],
-    );
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-  });
-
-  test('companion SMS is suppressed when standalone prep was already texted (email added later)', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-    // Customer got the self-contained prep text while phone-only; staff later
-    // added an email and onServiceScheduled replayed. The guide email queues
-    // (first run for this appointment) — that alone is the right follow-up;
-    // a second prep text would be a duplicate.
-    priorPrepInteraction = { id: 'int-1' };
-
-    await AppointmentTagger.triggerPestPrep(service(), 'bed_bug');
-
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1); // email still queues
-    expect(renderSmsTemplate).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-  });
-
-  test('flea with no email on file renders the auto_flea_no_email variant', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    customerRow = { ...customerRow, email: '' };
-
-    await AppointmentTagger.triggerPestPrep(
-      service({ email: null, service_type: 'Flea Treatment - Interior & Exterior' }),
-      'flea',
-    );
-
-    expect(executor.processTrigger).not.toHaveBeenCalled();
-    expect(renderSmsTemplate).toHaveBeenCalledWith(
-      'auto_flea_no_email',
-      { first_name: 'Taylor' },
-      { workflow: 'appointment_tagger_prep', entity_type: 'scheduled_service', entity_id: 'svc-1' },
-    );
-  });
-
-  test('no standalone fallback when the email skip reason is not "no email"', async () => {
-    const { renderSmsTemplate } = require('../services/sms-template-renderer');
-
-    // gate off, terminal, past, and dedupe all skip the email for reasons
-    // other than a missing address — none should trigger the standalone SMS.
-    // (Both gates off: cockroach is sequence-wired now, so the first isEnabled
-    // call is the treatmentAutomationEnroll check — a bare mockReturnValueOnce
-    // would land there instead of the email-automations gate.)
-    isEnabled.mockReturnValue(false);
-    emailTemplateAutomationsMode.mockReturnValue('off');
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-    isEnabled.mockImplementation((key) => key !== 'treatmentAutomationEnroll');
-    // Gate back live so the next two calls actually reach (and are skipped
-    // by) the terminal-status/past-date checks this test means to cover —
-    // not the gate short-circuit again.
-    emailTemplateAutomationsMode.mockReturnValue('live');
-
-    await AppointmentTagger.triggerPestPrep(service({ status: 'cancelled' }), 'cockroach');
-    await AppointmentTagger.triggerPestPrep(service({ scheduled_date: PAST_DATE }), 'cockroach');
-
-    executor.processTrigger.mockResolvedValueOnce({
-      automation_count: 1,
-      results: [{ automation_key: 'prep.cockroach', run: { id: 'run-1', status: 'queued' }, deduped: true }],
-    });
-    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-
-    expect(renderSmsTemplate).not.toHaveBeenCalled();
-  });
-
-  test('executor failure is logged and does not throw', async () => {
-    executor.processTrigger.mockRejectedValueOnce(new Error('boom'));
-
-    await expect(AppointmentTagger.triggerPestPrep(service(), 'cockroach')).resolves.toBeUndefined();
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('boom'));
-  });
-
-  test('unknown pest type does not emit', async () => {
-    await AppointmentTagger.triggerPrepEmailGuide(service(), 'termite');
-
-    expect(executor.processTrigger).not.toHaveBeenCalled();
   });
 });
 
@@ -732,7 +323,6 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return priorBookingQuery();
       if (table === 'customer_interactions') return interactionsQuery();
-      if (table === 'email_template_automations') return automationsQuery();
       if (table === 'automation_enrollments') return enrollmentsQuery();
       if (table === 'automation_templates') return templatesQuery();
       if (table === 'automation_steps') return stepsQuery();
@@ -752,9 +342,7 @@ describe('treatment automation sequence (one guide email, Automations-tab source
 
     await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
 
-    // ONE email: the sequence enrolls; the transactional prep automation is
-    // never triggered.
-    expect(executor.processTrigger).not.toHaveBeenCalled();
+    // ONE email: the sequence enrolls.
     expect(enrollCustomer).toHaveBeenCalledTimes(1);
     expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'bed_bug',
@@ -773,13 +361,24 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     expect(serviceUpdates.some((p) => p && p.prep_sent_at !== undefined)).toBe(false);
   });
 
-  test('gate off: the transactional prep lane runs unchanged and nothing enrolls', async () => {
+  test('gate off: nothing enrolls and no prep SMS sends', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
     isEnabled.mockImplementation((key) => key !== 'treatmentAutomationEnroll');
 
     await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
 
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
     expect(enrollCustomer).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a same-family earlier booking skips prep entirely', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    priorBookingRow = { id: 'svc-0' };
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
   });
 
   test('cockroach and flea bookings route to their sequences too (all three pests wired)', async () => {
@@ -789,9 +388,7 @@ describe('treatment automation sequence (one guide email, Automations-tab source
       'flea',
     );
 
-    // ONE email each: sequences enroll, the transactional prep automation is
-    // never triggered for wired pests.
-    expect(executor.processTrigger).not.toHaveBeenCalled();
+    // ONE email each: the sequences enroll.
     expect(enrollCustomer).toHaveBeenCalledTimes(2);
     expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'cockroach' }));
     expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'flea' }));
@@ -882,7 +479,6 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     await AppointmentTagger.triggerPestPrep(service({ scheduled_date: PAST_DATE, service_type: 'Bed Bug Treatment' }), 'bed_bug');
 
     expect(enrollCustomer).not.toHaveBeenCalled();
-    expect(executor.processTrigger).not.toHaveBeenCalled();
   });
 
   test('service-contact account routes the enrollment to the on-site contact', async () => {

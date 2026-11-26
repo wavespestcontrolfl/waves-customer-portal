@@ -173,21 +173,7 @@ async function markDeliverySent(delivery, result = {}, knex = db) {
     last_error: null,
     updated_at: new Date(),
   };
-  // The email division's visit follow-ups (lc.first_visit_pest,
-  // lc.why_91_days) are owed from this transition. A sent delivery is never
-  // retried, so their intent markers are written in the SAME transaction as
-  // the sent mark; the caller dispatches them after it commits. With the
-  // automations gate off this is the plain update it always was.
-  const Emitters = require('../email-template-automation-emitters');
-  let followUps = null;
-  if (Emitters.reportFollowUpsEnabled() && typeof knex.transaction === 'function') {
-    followUps = await knex.transaction(async (trx) => {
-      await trx('service_report_deliveries').where({ id: delivery.id }).update(sentPatch);
-      return Emitters.recordPestReportDeliveredIntents(trx, { serviceRecordId: delivery.service_record_id });
-    });
-  } else {
-    await knex('service_report_deliveries').where({ id: delivery.id }).update(sentPatch);
-  }
+  await knex('service_report_deliveries').where({ id: delivery.id }).update(sentPatch);
   await mergeServiceRecordDeliveryNotes(delivery.service_record_id, {
     serviceReportV1EmailStatus: 'sent',
     serviceReportV1EmailSentAt: sentAt.toISOString(),
@@ -195,7 +181,6 @@ async function markDeliverySent(delivery, result = {}, knex = db) {
     serviceReportV1EmailMessageId: result.messageId || null,
     serviceReportV1EmailAttachedPdf: !!result.attachedPdf,
   }, knex);
-  return followUps;
 }
 
 async function markDeliverySkipped(delivery, result = {}, knex = db) {
@@ -505,10 +490,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
       verifySendSealHeld,
     });
     if (result.ok) {
-      const followUps = await markDeliverySent(delivery, result, knex);
-      // After the sent mark (and the follow-ups' intent markers) committed.
-      // Never throws; null (gate off, not a pest report) is a no-op.
-      await require('../email-template-automation-emitters').dispatchPestReportDelivered(followUps);
+      await markDeliverySent(delivery, result, knex);
       return { status: 'sent', result };
     }
     if (result.skipped) {

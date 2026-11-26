@@ -116,7 +116,6 @@ function amountsStaleNote(reason) {
   const what = AMOUNT_BLOCK_NOTES[reason] || 'This scheduled reply states an amount, payment status or payment instruction that is no longer accurate';
   return `${what} (${reason || 'amount_recheck'}) — review the thread.`;
 }
-const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
@@ -5305,41 +5304,6 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[bounce-recovery] held-recovery tick failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // EVERY MIN — Email template automation executor. Sends due delayed/retry
-  // runs created by trigger-mapped email template automations. Runs in
-  // EVERY mode (codex P1 round 6 on #5154): with the gate off, executeRun
-  // settles each due run skipped (gate_off) without reading, previewing or
-  // sending anything, so a run due during an outage is dropped rather than
-  // sent stale when the gate returns. processTrigger creates no runs while
-  // off, so this only drains what was already queued.
-  // =========================================================================
-  cron.schedule('* * * * *', async () => {
-    try {
-      const EmailTemplateAutomationExecutor = require('./email-template-automation-executor');
-      await EmailTemplateAutomationExecutor.processDueRuns();
-    } catch (err) {
-      logger.error(`Email template automation tick failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // EVERY 15 MIN — Email template automation lifecycle reconciliation sweep.
-  // Retry safety net for the direct estimate.expired / review.linked_5star
-  // emitters: replays 'pending' rows in the email_template_automation_intents
-  // outbox (codex round 3 on #5154 — durable markers written in the SAME
-  // transaction as the transition that earns them; NOT re-derived by
-  // guessing from entity timestamps, which round 2 tried and Codex found
-  // ambiguous). No-op (no query) when the mode is off.
-  // =========================================================================
-  cron.schedule('*/15 * * * *', async () => {
-    try {
-      await require('./email-template-automation-emitters').sweepMissedLifecycleEvents();
-    } catch (err) {
-      logger.error(`[email-template-automation] lifecycle sweep tick failed: ${scrubSentryText(err && err.message ? err.message : err)}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -215,7 +215,6 @@
  *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11; a plan bundled with another recurring service gets no prepay offer, so it has no online accept: decide its staff route before the flip, #8016)
  *   GATE_PORTAL_PLAN_START=true (owner 2026-11-19, "BUILD": a signed-in customer with no recurring plan who taps "Add ... to my plan" on the portal pricing card gets a server-priced estimate for that option and books a first visit through the normal estimate accept flow (pick a time, save a card, confirm), instead of a request that waits for the office. It has a gate because it shows a bookable price and leads to card capture and booking. Off = the card files the same request as today and the pricing answer carries no planStart hint. Kill = unset)
  *   GATE_SIGNUP_SINGLE_EMAIL=true (ONE email at recurring signup: the accepted-onboarding email also carries the property and the plan (no payment section: the "Auto Pay is set up" email stays its own email, owner 2026-09-30), and the separate membership.started / welcome emails are skipped ONLY when that combined email was accepted for sending — each still sends if it was not; same-day later acceptances get a short per-property email; the welcome TEXT is unchanged; strict === 'true', read at call time; dark in dev AND prod)
- *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=shadow (runs created + finalized as would_send, nothing dispatched) | true (live sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
  *   GATE_WIZARD_SUPERSEDES_FORM_DRAFT=true (owner 2026-11-21, "build": an old web-form draft estimate that has no price and that nobody touched no longer blocks the website quote wizard. The wizard makes its own estimate beside it, so the person gets the booking link on the page, in the email and by text. The old draft is not changed and stays in the list. Still blocks: any other open estimate for the phone, a draft with a price, a draft that was changed after it was made, a draft of another person or for another address, a draft younger than 30 minutes, a draft that waits for the customer's answer. While on, every address check also reads six words inside a street name as one street, short or in full: Point/Pt, Glen/Gln, Grove/Grv, Beach/Bch, Vista/Vis, Shores/Shrs; that is how the web form and the wizard write one street in two ways. Off = the old draft blocks as before and the address checks are as before. It can text a customer, so the flip is the owner's. Kill: unset.)
@@ -2711,57 +2710,6 @@ const gates = {
   // entitlement / autoVerify intent-filter. Kill = unset; both OSes fall back
   // to the browser on their next association re-validation.
   universalLinks: process.env.GATE_UNIVERSAL_LINKS === 'true',
-
-  // Email Template Automations — executes trigger-mapped template sends from
-  // the email template automation catalog. Off by default in prod until each
-  // trigger has been verified with run history and idempotency checks.
-  // Three modes via GATE_EMAIL_TEMPLATE_AUTOMATIONS (see
-  // emailTemplateAutomationsMode() below, the canonical live-read reader):
-  // unset/anything else = kill (off); 'shadow' = runs are created and
-  // finalized as would_send with NOTHING dispatched — for checking volumes
-  // for two weeks before anything goes live; 'true' = live sends. This
-  // boolean entry only decides whether the executor runs AT ALL (shadow
-  // counts as on, same as live) — logGateStatus and every reader BELOW this
-  // rule reads it; the shadow-vs-live SEND decision is
-  // emailTemplateAutomationsMode()'s alone.
-  //
-  // SHADOW NEVER CHANGES A LIVE SEND. An existing producer ALREADY sent a
-  // customer email/SMS on this boolean alone before shadow mode existed —
-  // routing it into the executor on the boolean (true in shadow too)
-  // would have shadow silently REPLACE its live send with a would_send
-  // no-op. It now gates on `emailTemplateAutomationsMode() === 'live'`
-  // instead, so shadow leaves it byte-identical to today's gate-off
-  // behavior:
-  //   - server/services/appointment-tagger.js (~line 657,
-  //     triggerPrepEmailGuide): 'live' only ⇒ queues through the executor;
-  //     off/shadow ⇒ returns { queued:false, reason:'gate_off' }, same as
-  //     today, so the caller's companion-SMS branch never promises a guide
-  //     email shadow mode won't actually send.
-  // Every OTHER reader keeps reading this boolean (shadow counts as on,
-  // same as live) because none of them sends anything outside the executor
-  // itself: the admin trigger/process-due test routes (admin-email-templates.js
-  // ~lines 850, 873), and the new estimate.expired / review.linked_5star
-  // emitters (email-template-automation-emitters.js) — all of them route
-  // INTO the executor, which is where the shadow-vs-live decision actually
-  // lives (executeRun's dispatch chokepoint). A producer must read this
-  // boolean ONLY when every one of its own sends already goes exclusively
-  // through the executor with no direct-send fallback of its own.
-  // The scheduler's due-run tick (scheduler.js, processDueRuns) reads no
-  // gate at all: it runs in every mode, and with the mode off executeRun
-  // settles each due run skipped (gate_off) instead of sending it.
-  //
-  // ONE SOURCE OF TRUTH (codex P1 round 4): this boolean is DERIVED from
-  // emailTemplateAutomationsMode() at call time — on exactly when the mode
-  // is 'shadow' or 'live' — in every environment. It used to be computed
-  // separately (always true outside production), so a non-prod explicit
-  // 'false'/'off' kill switch left it on while the mode read 'off': the
-  // lifecycle emitters then passed their gate check, got the executor's
-  // off-mode no-op and settled their intent markers 'processed', and the
-  // admin trigger route reported success instead of "disabled". In
-  // production the result is unchanged ('shadow'/'true' on, anything else
-  // off); it now also follows a mid-process env change the same way the
-  // mode reader always has.
-  get emailTemplateAutomations() { return emailTemplateAutomationsMode() !== 'off'; },
 
   // Treatment Automation Enroll — for wired pests (bed_bug only for now; the
   // per-pest map in appointment-tagger.js controls which, so flipping this
@@ -6866,23 +6814,6 @@ function askWavesJevCheckMode() {
   return mode === 'shadow' || mode === 'enforce' ? mode : 'off';
 }
 
-// Email Template Automations shadow rollout — read at CALL time (same
-// convention as askWavesTopicRoutingLive/askWavesEmergencyCheckLive above),
-// so the executor's per-run shadow-vs-live decision needs no redeploy once
-// the `emailTemplateAutomations` boolean gate above is already on. PROD:
-// 'shadow' = runs created and finalized as would_send, nothing dispatched;
-// 'true' = live sends; anything else (unset included) = off. NON-PROD:
-// keeps today's default of 'live' (existing tests exercise the executor
-// with the gate implicitly on) unless the env var explicitly overrides it —
-// 'shadow' to exercise shadow mode locally, or an explicit false/off kill.
-function emailTemplateAutomationsMode() {
-  const raw = String(process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS || '').trim().toLowerCase();
-  if (raw === 'shadow') return 'shadow';
-  if (raw === 'true') return 'live';
-  if (process.env.NODE_ENV === 'production') return 'off';
-  return (raw === 'false' || raw === 'off') ? 'off' : 'live';
-}
-
 // GATE_VISIT_PREP_PHOTOS read at CALL time — strict `=== 'true'`, same
 // convention as estimateConsultationOfferLive(). The one canonical reader
 // for every entry point (appointment-public.js's new POST + the GET's
@@ -8301,7 +8232,7 @@ function callRingFactLive() {
   return process.env.GATE_CALL_RING_FACT === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 // Own-line reader exports go BELOW the object export above: an assignment above it is replaced with the object and lost
 // (these three read undefined, so off, from #7911 and #7929 until 2026-11-18). feature-gates-own-line-exports.test.js checks it.
 // GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.

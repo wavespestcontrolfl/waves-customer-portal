@@ -92,13 +92,10 @@ const liveVisit = (extra = {}) => ({ id: 'svc-9', status: 'confirmed', scheduled
 let servicePrepRow = null;
 let serviceUpdates = [];
 let scheduledQueries = [];
-// Automated-lane rows for the abandoned-reservation check: [] = none.
-let runRows = [];
 let enrollmentRows = [];
 let enrollmentUpdates = [];
 let enrollmentWheres = [];
 let stepSendRow = null;
-let lastRunsQuery = null;
 // Manual-delivery traces for the abandoned-reservation check: null = none.
 let manualEmailRow = null;
 let manualEmailQueries = [];
@@ -132,7 +129,6 @@ function livenessQuery(rows) {
   };
   return q;
 }
-jest.mock('../services/email-template-automation-executor', () => ({ RUNNABLE_STATUSES: ['queued', 'scheduled', 'retry_scheduled'] }));
 jest.mock('../services/automation-runner', () => ({ advanceEnrollment: jest.fn(async () => ({ sent: true, done: false })) }));
 const { advanceEnrollment } = require('../services/automation-runner');
 // Rows affected by an awaited .update() (the prep-page claim); 1 = claimed.
@@ -206,7 +202,6 @@ beforeEach(() => {
     }
     if (table === 'email_messages') { const q = traceQuery(manualEmailRow); manualEmailQueries.push(q); return q; }
     if (table === 'sms_log') return traceQuery(manualSmsRow);
-    if (table === 'email_template_automation_runs') { lastRunsQuery = livenessQuery(runRows); return lastRunsQuery; }
     if (table === 'automation_enrollments' || table === 'automation_enrollments as e') return livenessQuery(enrollmentRows);
     if (table === 'automation_step_sends') return traceQuery(stepSendRow);
     if (table === 'prep_guide_views') return traceQuery(viewRow);
@@ -229,11 +224,9 @@ beforeEach(() => {
   // The dispatch-boundary stamp recheck runs in a transaction under the
   // prefs advisory lock; the trx reads the same mocked tables.
   db.transaction = jest.fn(async (fn) => fn(Object.assign((table) => db(table), { raw: jest.fn(async () => undefined) })));
-  runRows = [];
   enrollmentRows = [];
   enrollmentUpdates = [];
   enrollmentWheres = [];
-  lastRunsQuery = null;
   stepSendRow = null;
   manualEmailRow = null;
   manualEmailQueries = [];
@@ -657,7 +650,6 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates).toEqual([]);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     // No liveness / trace tables are consulted for another guide's page.
-    expect(lastRunsQuery).toBeNull();
     expect(manualEmailQueries).toEqual([]);
     // Both: the email still goes (portal link, not the page), the text is
     // the failed leg with the page's reason.
@@ -667,33 +659,15 @@ describe('sendPrepToCustomer', () => {
     expect(serviceUpdates).toEqual([]);
   });
 
-  test('a same-guide page still owned by a queued / running automation refuses the manual send (it would send the prep twice); a finished lane lets it through', async () => {
+  test('a same-guide page whose guide already went out lets the manual send through', async () => {
     upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea' };
     servicePrepRow = { prep_token: 'h'.repeat(32), prep_template_key: 'prep.flea' };
-    runRows = [{ status: 'scheduled', idempotency_key: 'run-k2' }];
-    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: false, reason: 'prep_send_pending' });
-    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-
-    runRows = [{ status: 'sent', idempotency_key: 'run-k2' }];
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: true });
-
-    // An UNKEYED visit with a runnable run for this guide is pending too: a
-    // pre-dispatch failure released the executor's fresh claim ahead of its
-    // retry, and a manual claim now would be followed by the retry's send
-    // (pre-push Codex P1 on 4f6261cc3).
-    upcomingVisitRow = { ...VISIT, prep_template_key: null };
-    servicePrepRow = { prep_token: null, prep_template_key: null };
-    runRows = [{ status: 'retry_scheduled', idempotency_key: 'run-k2' }];
-    serviceUpdates = [];
-    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: false, reason: 'prep_send_pending' });
-    expect(serviceUpdates).toEqual([]);
   });
 
   test('a live enrolment holds the same-guide page whether or not its template is enabled (a held one resumes on re-enable); a confirmed manual send settles the customer\'s live enrolment (GH Codex #3856 r23 P1)', async () => {
     upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea' };
     servicePrepRow = { prep_token: 'h'.repeat(32), prep_template_key: 'prep.flea' };
-    runRows = [];
     enrollmentRows = [{ id: 'enr-1', status: 'active', template_enabled: true }];
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: false, reason: 'prep_send_pending' });
     enrollmentRows = [{ id: 'enr-1', status: 'active', template_enabled: false }];
@@ -712,7 +686,6 @@ describe('sendPrepToCustomer', () => {
     // parks the manual send while such an enrolment is live, so this is
     // the held case: the template is disabled.
     enrollmentRows = [{ id: 'enr-1', status: 'active', template_enabled: false, current_step: 0, template_key: 'flea' }];
-    runRows = [{ status: 'completed' }];
     upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.flea' };
     // (automationLaneLive still parks it — a live step-0 enrolment holds the page.)
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: false, reason: 'prep_send_pending' });
@@ -945,8 +918,6 @@ describe('sendPrepToCustomer', () => {
         return q;
       }
       if (table === 'customer_interactions') return { insert: interactionsInsert };
-      // The unkeyed candidate's liveness read (no runnable run).
-      if (table === 'email_template_automation_runs') return livenessQuery([]);
       return customersQuery();
     });
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' }))

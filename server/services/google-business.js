@@ -5,7 +5,6 @@ function getGoogle() {
   return _googleapis;
 }
 const logger = require('./logger');
-const { scrubSentryText } = require('../utils/sentry-scrub');
 const {
   deliverOpsDigest, readCleanWatermark, digestRowFields, alertClassFor, ringOnRefreshFrom,
   normalizeItemKeys, itemSetHashFor, itemKeysMetaFor,
@@ -1043,12 +1042,6 @@ class GoogleBusinessService {
       synced_at: syncStart ? new Date(syncStart).toISOString() : db.fn.now(),
       ...replyFields,
     };
-    // The customer_id null->set transition here is now recorded as a durable
-    // intent marker (codex round 3 on #5154), not by stamping updated_at
-    // (round 2's fix — superseded: a sweep that reads updated_at cannot tell
-    // this genuine attribution apart from an unrelated repair that also
-    // bumps it). See the marker write inside the transaction below and
-    // email-template-automation-emitters.js's file banner.
     // Monotonic liveness: an older overlapping runner must never regress a
     // newer runner's synced_at — writing its earlier fetch start over a
     // fresher token would make the newer runner's reconcile see
@@ -1058,13 +1051,6 @@ class GoogleBusinessService {
       ? db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [new Date(syncStart).toISOString()])
       : db.fn.now();
     let result;
-    // review.linked_5star's durable intent marker id for THIS review's
-    // attribution transition, if one happened in this call (codex round 3
-    // on #5154) — set inside whichever branch below actually writes the
-    // customer_id transition, threaded through to _applyPostWriteSideEffects
-    // so the direct emit call can settle the SAME marker it was recorded
-    // for, transactionally, instead of the sweep guessing from a timestamp.
-    let attributionIntentId = null;
     if (existing) {
       // A Places-first row that parked waiting for its GBP identity re-enters
       // the auto-reply queue once this authoritative sync attaches the name.
@@ -1088,24 +1074,6 @@ class GoogleBusinessService {
           return 'yielded';
         }
         await trx('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
-        // review.linked_5star's durable intent marker (codex round 3 on
-        // #5154), written in this SAME transaction as the customer_id
-        // null->set transition, before any further processing — a rollback
-        // of this update rolls back the marker too. Five-star only: a
-        // marker for any other rating would never be settled (the direct
-        // emitter's own star_rating!==5 guard returns before touching a
-        // marker id) and would sit 'pending' forever.
-        if (!existing.customer_id && row.customer_id && Number(row.star_rating) === 5) {
-          const { recordAutomationIntent } = require('./email-template-automation-emitters');
-          const intent = await recordAutomationIntent(trx, {
-            triggerEventKey: 'review.linked_5star',
-            entityType: 'review',
-            entityId: existing.id,
-            occurredAt: new Date(),
-            payload: { review_id: existing.id, customer_id: row.customer_id, location_id: row.location_id, star_rating: row.star_rating },
-          });
-          attributionIntentId = intent?.id || null;
-        }
         // Conditional on the row STILL being parked for that reason (an admin
         // Skip in the meantime wins).
         await applyRequeueOnIdentity(existing.id, live, normalized, { conn: trx });
@@ -1159,26 +1127,8 @@ class GoogleBusinessService {
           review_created_at: normalized.review_created_at,
           star_rating: normalized.star_rating,
         });
-        // A brand-new review the name matcher already tied to a customer is
-        // ALSO an attribution transition (codex round 3 on #5154) — the
-        // insert and the marker commit together so a rollback of one rolls
-        // back both.
-        const insertedId = await db.transaction(async (trx) => {
-          const [insertedReview] = await trx('google_reviews').insert({ ...row, ...autoReply }).returning('id');
-          const newId = insertedReview?.id || insertedReview;
-          if (row.customer_id && Number(row.star_rating) === 5) {
-            const { recordAutomationIntent } = require('./email-template-automation-emitters');
-            const intent = await recordAutomationIntent(trx, {
-              triggerEventKey: 'review.linked_5star',
-              entityType: 'review',
-              entityId: newId,
-              occurredAt: new Date(),
-              payload: { review_id: newId, customer_id: row.customer_id, location_id: row.location_id, star_rating: row.star_rating },
-            });
-            attributionIntentId = intent?.id || null;
-          }
-          return newId;
-        });
+        const [insertedReview] = await db('google_reviews').insert({ ...row, ...autoReply }).returning('id');
+        const insertedId = insertedReview?.id || insertedReview;
         result = { id: insertedId, inserted: true };
       } catch (err) {
         // Overlapping runners (hourly job vs manual sync vs deploy instance)
@@ -1202,27 +1152,13 @@ class GoogleBusinessService {
         // write and the reply sync apply only while this runner's fetch
         // start is at least as new as the stored liveness token.
         const loserCustomerId = winner.customer_id || customerId || null;
-        const loserUpdated = await db.transaction(async (trx) => {
-          const loserWrite = trx('google_reviews').where({ id: winner.id });
-          if (syncStart) loserWrite.whereRaw('(synced_at IS NULL OR synced_at <= ?::timestamptz)', [new Date(syncStart).toISOString()]);
-          const updated = await loserWrite.update({
-            ...providerRow,
-            synced_at: monotonicSyncedAt,
-            // Same existing-link-first rule as the row build above.
-            customer_id: loserCustomerId,
-          });
-          if ((Array.isArray(updated) ? updated.length : updated) > 0 && !winner.customer_id && loserCustomerId && Number(providerRow.star_rating) === 5) {
-            const { recordAutomationIntent } = require('./email-template-automation-emitters');
-            const intent = await recordAutomationIntent(trx, {
-              triggerEventKey: 'review.linked_5star',
-              entityType: 'review',
-              entityId: winner.id,
-              occurredAt: new Date(),
-              payload: { review_id: winner.id, customer_id: loserCustomerId, location_id: providerRow.location_id, star_rating: providerRow.star_rating },
-            });
-            attributionIntentId = intent?.id || null;
-          }
-          return updated;
+        const loserWrite = db('google_reviews').where({ id: winner.id });
+        if (syncStart) loserWrite.whereRaw('(synced_at IS NULL OR synced_at <= ?::timestamptz)', [new Date(syncStart).toISOString()]);
+        const loserUpdated = await loserWrite.update({
+          ...providerRow,
+          synced_at: monotonicSyncedAt,
+          // Same existing-link-first rule as the row build above.
+          customer_id: loserCustomerId,
         });
         if ((Array.isArray(loserUpdated) ? loserUpdated.length : loserUpdated) > 0) {
           await applySyncReplyFields(winner.id, winnerReplyFields, { expectedReply: winner.review_reply ?? null });
@@ -1235,7 +1171,7 @@ class GoogleBusinessService {
         result = { id: winner.id, inserted: false };
       }
     }
-    await this._applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications, attributionIntentId });
+    await this._applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications });
     return result;
   }
 
@@ -1245,7 +1181,7 @@ class GoogleBusinessService {
   // (a failed reinstatement clear or suppression mark cannot skip the
   // attribution-moment thank-you), and the first failure is tagged on the
   // result for the caller to surface as gbp_side_effect.
-  async _applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications, attributionIntentId = null }) {
+  async _applyPostWriteSideEffects({ result, row, normalized, existing, syncStart, pendingRestoredNotifications, pendingUnlinkedNotifications }) {
     // Everything below is post-write: the row is stored and its synced_at
     // token advanced. A failure here must not read as a storage failure to
     // the caller (the loop skips the removal reconcile on storage failures
@@ -1326,20 +1262,6 @@ class GoogleBusinessService {
             source: 'google_review',
           });
         }, (outcome) => outcome && outcome.reason === 'error');
-        // review.linked_5star (email_template_automation, dark/shadow) —
-        // same attribution moment, 5-star only. Never throws (emitter's own
-        // contract); this is a SEPARATE catalog from the thank-you sequence
-        // above, so a failure here must never affect it. attributionIntentId
-        // is the durable marker THIS same transition's own transaction
-        // recorded (codex round 3 on #5154) — passed through so this call
-        // settles that marker (processed / pending-with-error /
-        // unrecoverable) instead of the sweep guessing from a timestamp.
-        await sideEffect('review.linked_5star emit', async () => {
-          const { emitReviewLinked5Star } = require('./email-template-automation-emitters');
-          return emitReviewLinked5Star({
-            reviewId: result.id, customerId: row.customer_id, locationId: row.location_id, starRating: row.star_rating,
-          }, attributionIntentId);
-        });
       }
     } else if (result.inserted) {
       // New review we couldn't tie to a customer — alert the office to match
@@ -1502,18 +1424,10 @@ class GoogleBusinessService {
       }
       const ownerReply = review.owner_response?.text || null;
       const customerId = await this._findCustomerIdByReviewerName(reviewerName);
-      // Named ahead of the branch below so the review.linked_5star emitter
-      // (after both branches) has the row's id either way — existing.id on
-      // the update path, the freshly inserted id on the insert path.
-      let placesReviewRowId = existing?.id || null;
       // The review's Google post time either way: the stored row's on the
       // update path, Places' `time` on the insert path. The thank-you's age
       // rule reads it (an edit moves Places' `time`; the stored date does not).
       const placesPostedAt = existing ? existing.review_created_at : new Date(review.time * 1000).toISOString();
-      // review.linked_5star's durable intent marker id, set inside whichever
-      // branch below actually writes the customer_id transition (codex
-      // round 3 on #5154) — mirrors _upsertGbpReview's attributionIntentId.
-      let placesAttributionIntentId = null;
       if (existing) {
         // A row in Google's CURRENT Places sample is proof a review is live —
         // but proof about THIS row only when the identity corroborates.
@@ -1539,11 +1453,6 @@ class GoogleBusinessService {
           // Existing link first — mirror of _upsertGbpReview (GH codex r1).
           customer_id: existing.customer_id || customerId,
         };
-        // The customer_id null->set transition here is recorded as a durable
-        // intent marker inside the transaction below (codex round 3 on
-        // #5154), not by stamping updated_at (round 2's fix — superseded,
-        // same reason as _upsertGbpReview: a sweep reading updated_at cannot
-        // tell a genuine attribution apart from an unrelated repair).
         // synced_at participates in the authoritative reconcile's claim
         // predicate (synced_at < syncStart ⇒ stampable) — refreshing it
         // asserts "seen live just now". An uncorroborated same-name match
@@ -1574,17 +1483,6 @@ class GoogleBusinessService {
             return 'yielded';
           }
           await trx('google_reviews').where({ id: existing.id }).update(upd);
-          if (!existing.customer_id && upd.customer_id && Number(upd.star_rating) === 5) {
-            const { recordAutomationIntent } = require('./email-template-automation-emitters');
-            const intent = await recordAutomationIntent(trx, {
-              triggerEventKey: 'review.linked_5star',
-              entityType: 'review',
-              entityId: existing.id,
-              occurredAt: new Date(),
-              payload: { review_id: existing.id, customer_id: upd.customer_id, location_id: loc.id, star_rating: upd.star_rating },
-            });
-            placesAttributionIntentId = intent?.id || null;
-          }
           // Owner reply first (a landed uncertain write becomes posted), then
           // the reviewer-edit reconciliation on the post-sync row (codex r39).
           // A Places owner reply that differs from the local one goes through
@@ -1644,7 +1542,7 @@ class GoogleBusinessService {
         // chance to enter the pipeline.
         const { autoReplyInsertFields } = require('./review-reply/runner');
         const insertStarRating = review.rating || 0;
-        placesReviewRowId = await db.transaction(async (trx) => {
+        await db.transaction(async (trx) => {
           const [insertedReview] = await trx('google_reviews').insert({
             google_review_id: googleId,
             location_id: loc.id,
@@ -1660,20 +1558,6 @@ class GoogleBusinessService {
             ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesPostedAt, star_rating: insertStarRating }),
           }).returning('id');
           const newId = insertedReview?.id || null;
-          // A brand-new Places-sourced review the name matcher already tied
-          // to a customer is ALSO an attribution transition (codex round 3
-          // on #5154) — insert and marker commit together.
-          if (newId && customerId && Number(insertStarRating) === 5) {
-            const { recordAutomationIntent } = require('./email-template-automation-emitters');
-            const intent = await recordAutomationIntent(trx, {
-              triggerEventKey: 'review.linked_5star',
-              entityType: 'review',
-              entityId: newId,
-              occurredAt: new Date(),
-              payload: { review_id: newId, customer_id: customerId, location_id: loc.id, star_rating: insertStarRating },
-            });
-            placesAttributionIntentId = intent?.id || null;
-          }
           return newId;
         });
         newCount++;
@@ -1696,18 +1580,6 @@ class GoogleBusinessService {
             reviewCreatedAt: placesPostedAt,
             source: 'google_review_places',
           });
-          // review.linked_5star (email_template_automation, dark/shadow) —
-          // same attribution moment as the GBP feed path. Never throws
-          // (emitter's own contract); a failure here must not touch the
-          // thank-you sequence above (a separate catalog).
-          try {
-            const { emitReviewLinked5Star } = require('./email-template-automation-emitters');
-            await emitReviewLinked5Star({
-              reviewId: placesReviewRowId, customerId: effectiveCustomerId, locationId: loc.id, starRating: review.rating || 0,
-            }, placesAttributionIntentId);
-          } catch (emitErr) {
-            logger.warn(`[gbp] review.linked_5star emit failed for review ${placesReviewRowId}: ${scrubSentryText(emitErr && emitErr.message ? emitErr.message : emitErr)}`);
-          }
         }
       } else if (!existing) {
         // Newly inserted, unmatched → alert the office to match it. Deferred

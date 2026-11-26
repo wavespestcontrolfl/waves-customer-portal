@@ -33,7 +33,7 @@ describe('knownGateCatalog', () => {
 
   test('gates that take a timestamp or mode are never classified as on/off', () => {
     for (const name of [
-      'GATE_PEST_STRANDED_RECOVERY', 'GATE_EMAIL_TEMPLATE_AUTOMATIONS', 'GATE_SMS_OPERATIONAL_ACTIONS_SINCE',
+      'GATE_PEST_STRANDED_RECOVERY', 'GATE_SMS_OPERATIONAL_ACTIONS_SINCE',
       // off | shadow | auto, and shadow | true — read only through their mode lists in this file.
       'GATE_REVIEW_AUTO_REPLY', 'GATE_SMS_SPAM_CLASSIFIER',
       // off | watch — read only through alertCatalogMode().

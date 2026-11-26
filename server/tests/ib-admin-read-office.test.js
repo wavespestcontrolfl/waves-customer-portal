@@ -19,7 +19,7 @@ const { validateReviewedRow } = require('../../scripts/build-ib-admin-read-catal
 const AUTH = 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJvZmZpY2UiOiJ0b2tlbiJ9.c2lnbmF0dXJl';
 const READ = 'read_admin_data';
 const FIND = 'find_admin_reads';
-const OFFICE_ENDPOINTS = ['/admin/dispatch/alerts', '/admin/email-templates', '/admin/email-templates/automations', '/admin/schedule/blackout-dates'];
+const OFFICE_ENDPOINTS = ['/admin/dispatch/alerts', '/admin/email-templates', '/admin/schedule/blackout-dates'];
 const owner = (extra = {}) => ({ fullAccess: true, isAdmin: true, staffAuthorization: AUTH, ...extra });
 const office = (extra = {}) => ({ fullAccess: false, isAdmin: true, staffAuthorization: AUTH, ...extra });
 const json = (body) => ({ status: 200, headers: { get: (k) => ({ 'content-type': 'application/json' })[String(k).toLowerCase()] ?? null }, text: async () => JSON.stringify(body) });
@@ -77,7 +77,7 @@ describe('the office login', () => {
       const matches = (await find(q, office())).matches;
       expect(matches.every((m) => OFFICE_ENDPOINTS.includes(m.endpoint))).toBe(true);
     }
-    expect((await find('email templates', office())).matches.map((m) => m.endpoint)).toEqual(expect.arrayContaining(['/admin/email-templates', '/admin/email-templates/automations']));
+    expect((await find('email templates', office())).matches.map((m) => m.endpoint)).toEqual(expect.arrayContaining(['/admin/email-templates']));
     expect((await find('blackout dates', office())).matches.map((m) => m.endpoint)).toContain('/admin/schedule/blackout-dates');
   });
 

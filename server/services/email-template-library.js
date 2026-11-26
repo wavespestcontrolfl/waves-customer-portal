@@ -1382,8 +1382,8 @@ function prepareTemplateSend({
   return { effectiveSuppressionGroupKey, asmGroupId, effectiveUnsubscribeUrl, rendered };
 }
 
-// NO-PROVIDER preflight for email-template-automation-executor.js's shadow
-// mode: would the identical live sendTemplate attempt reach the provider?
+// NO-PROVIDER preflight (used by autopay-setup-link.js): would the
+// identical live sendTemplate attempt reach the provider?
 // Built from the SAME guard chain sendTemplate runs (codex P2 rounds on
 // #5154), never a mirror of it: resolveTemplateForSend, prepareTemplateSend
 // (ASM group / unsubscribe URL / marketing-compliance guard, render,

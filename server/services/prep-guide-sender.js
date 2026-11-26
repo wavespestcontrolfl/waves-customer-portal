@@ -450,19 +450,11 @@ function manualPrepTriggerId(customerId, templateKey, visitId) {
   return `manual_prep:${customerId}:${templateKey}:${visitId || 'none'}`;
 }
 
-// Is an automated lane still ABOUT to deliver key on this visit — a
-// transactional run that is runnable / running (the executor's own set,
-// GH Codex #3856 r12 P1) or a live sequence enrolment whose first step
-// stamps that key? Refuses a manual send of the SAME guide that would
-// duplicate it (pre-push Codex P1 on 52bbb43b1). Throws on a read failure.
+// Is an automated lane still ABOUT to deliver key on this visit — a live
+// sequence enrolment whose first step stamps that key? Refuses a manual send
+// of the SAME guide that would duplicate it (pre-push Codex P1 on 52bbb43b1).
+// Throws on a read failure.
 async function automationLaneLive(visit, key, customerId) {
-  const { RUNNABLE_STATUSES } = require('./email-template-automation-executor');
-  const live = [...RUNNABLE_STATUSES, 'running'];
-  const run = await db('email_template_automation_runs')
-    .where({ entity_type: 'scheduled_service', entity_id: visit.id, template_key: key })
-    .whereIn('status', live)
-    .first('id');
-  if (run) return true;
   const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[key];
   if (!sequenceKey) return false;
   // Held enrolments count too: toggling the automation off HOLDS an active
