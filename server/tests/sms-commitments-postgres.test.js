@@ -3134,7 +3134,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(new Date(row.due_at).toISOString()).toBe(stated);
   });
 
-  test('reading a bell leaves work open and the real notification writer re-alerts after its rolling window', async () => {
+  test('reading a bell leaves work open and an open bell stays the one standing row, however old', async () => {
     const actualNotifications = jest.requireActual('../services/notification-service');
     NotificationService.notifyAdmin.mockImplementation(actualNotifications.notifyAdmin.bind(actualNotifications));
     result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
@@ -3150,12 +3150,12 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     await mockPg('notifications').where({ id: first.id }).update({ created_at: new Date(Date.now() - 25 * 3600000) });
     await refreshSmsCommitments({ conn: mockPg, verify, now });
-    expect(await mockPg('notifications')).toHaveLength(2);
-    expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(1);
+    // A promise rings once: the open row of a day ago is refreshed, never joined by a second row.
+    expect(await mockPg('notifications')).toHaveLength(1);
     expect((await mockPg('call_commitments').first()).status).toBe('open');
   });
 
-  test('a merge updates bell ownership even after the rolling dedupe window expires', async () => {
+  test('a merge updates bell ownership of an old open bell', async () => {
     const actualNotifications = jest.requireActual('../services/notification-service');
     NotificationService.notifyAdmin.mockImplementation(actualNotifications.notifyAdmin.bind(actualNotifications));
     result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
@@ -3171,7 +3171,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('sms_log').where({ id: message.id }).update({ customer_id: winner });
     await refreshSmsCommitments({ conn: mockPg, verify, now });
     const bells = await mockPg('notifications');
-    expect(bells).toHaveLength(2);
+    expect(bells).toHaveLength(1);
     for (const bell of bells) {
       expect(bell.link).toBe(`/admin/customers?customerId=${winner}&tab=comms`);
       expect(bell.metadata.customerId).toBe(winner);
@@ -3921,12 +3921,10 @@ postgres('SMS commitments on PostgreSQL', () => {
           sms_log_id: smsLogId, commitment_id: ids[0], commitment_ids: ids }), ...over }).returning('id').then(([row]) => row.id);
 
       beforeEach(() => {
-        process.env.GATE_ALERT_RING_ONCE = 'true';
         // The real alert service writes the rows; the mock still records each call.
         const actual = jest.requireActual('../services/notification-service');
         NotificationService.notifyAdmin.mockImplementation(actual.notifyAdmin.bind(actual));
       });
-      afterEach(() => { delete process.env.GATE_ALERT_RING_ONCE; });
 
       test('two texts ring one alert: the second joins it with a ring, and a later check of either changes nothing', async () => {
         const first = await addCommitment();
@@ -4521,16 +4519,13 @@ postgres('SMS commitments on PostgreSQL', () => {
 
       test('gate true: the far visit also holds nothing for a promise that shares its text with an overdue sibling; both ring', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        process.env.GATE_ALERT_RING_ONCE = 'true';
-        try {
-          const held = await staffPromise();
-          const report = await overdueReport(randomUUID());
-          await mockPg('scheduled_services').insert(farVisitRow());
-          await tick();
-          expect(rings()).toBe(2);
-          const rungIds = NotificationService.notifyAdmin.mock.calls.map(([, , , options]) => options.metadata.commitment_id);
-          expect(rungIds).toEqual(expect.arrayContaining([held.id, report]));
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        const held = await staffPromise();
+        const report = await overdueReport(randomUUID());
+        await mockPg('scheduled_services').insert(farVisitRow());
+        await tick();
+        expect(rings()).toBe(2);
+        const rungIds = NotificationService.notifyAdmin.mock.calls.map(([, , , options]) => options.metadata.commitment_id);
+        expect(rungIds).toEqual(expect.arrayContaining([held.id, report]));
       });
 
       // An alert an earlier ring left open (the promise was overdue before the visit was booked).
@@ -4543,62 +4538,53 @@ postgres('SMS commitments on PostgreSQL', () => {
 
       test('gate true: an alert that rang before the visit was booked closes while the visit is ahead; after the window a fresh one rings', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        process.env.GATE_ALERT_RING_ONCE = 'true';
-        try {
-          const held = await staffPromise();
-          const alert = await openAlert([held.id]);
-          await mockPg('scheduled_services').insert(visitRow());
-          await tick();
-          expect(rings()).toBe(0);
-          const closed = await alertOf(alert);
-          expect(closed.done_at).not.toBeNull();
-          expect(closed).toMatchObject({ done_by: 'sms-commitments', resolution: expect.stringMatching(/^On track: a visit is booked until /) });
-          await tick(5 * 3600000);
-          expect(rings()).toBe(1);
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        const held = await staffPromise();
+        const alert = await openAlert([held.id]);
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(0);
+        const closed = await alertOf(alert);
+        expect(closed.done_at).not.toBeNull();
+        expect(closed).toMatchObject({ done_by: 'sms-commitments', resolution: expect.stringMatching(/^On track: a visit is booked until /) });
+        await tick(5 * 3600000);
+        expect(rings()).toBe(1);
       });
 
       test('gate true: the alert stays open while another promise from the text is open, without the held promise', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        process.env.GATE_ALERT_RING_ONCE = 'true';
-        try {
-          const row = await staffPromise();
-          // A second open promise from the same text, of a kind rule 3 never holds, due later.
-          await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'send_report',
-            description: 'send the service report', channel: 'sms', due_at: at(3 * 86400000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
-            evidence: JSON.stringify([{ quote: "I'll adjust the payment terms", sms_log_id: message.id, matched: true, speaker: 'agent' }]),
-            sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } });
-          const other = await mockPg('call_commitments').where({ kind: 'send_report' }).first('id');
-          const shared = await openAlert([row.id, other.id]);
-          await mockPg('scheduled_services').insert(visitRow());
-          await tick();
-          // The customer's one alert stays open for the other promise.
-          expect((await alertOf(shared)).done_at).toBeNull();
-          // The usual closer rewrites it to the promise still open: a quiet refresh, no ring.
-          expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-          const [, , , refreshed] = NotificationService.notifyAdmin.mock.calls[0];
-          expect(refreshed).toMatchObject({ dedupeKey: `sms-commitment-customer:${message.customer_id}`, dedupeOpenOnly: true });
-          expect(refreshed.ringOnRefresh()).toBe(false);
-          expect(refreshed.metadata.commitment_ids).toEqual([other.id]);
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        const row = await staffPromise();
+        // A second open promise from the same text, of a kind rule 3 never holds, due later.
+        await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'send_report',
+          description: 'send the service report', channel: 'sms', due_at: at(3 * 86400000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
+          evidence: JSON.stringify([{ quote: "I'll adjust the payment terms", sms_log_id: message.id, matched: true, speaker: 'agent' }]),
+          sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } });
+        const other = await mockPg('call_commitments').where({ kind: 'send_report' }).first('id');
+        const shared = await openAlert([row.id, other.id]);
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        // The customer's one alert stays open for the other promise.
+        expect((await alertOf(shared)).done_at).toBeNull();
+        // The usual closer rewrites it to the promise still open: a quiet refresh, no ring.
+        expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+        const [, , , refreshed] = NotificationService.notifyAdmin.mock.calls[0];
+        expect(refreshed).toMatchObject({ dedupeKey: `sms-commitment-customer:${message.customer_id}`, dedupeOpenOnly: true });
+        expect(refreshed.ringOnRefresh()).toBe(false);
+        expect(refreshed.metadata.commitment_ids).toEqual([other.id]);
       });
 
       test('gate true: two overdue promises from one text, both held by the visit: the shared alert closes, no refresh', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        process.env.GATE_ALERT_RING_ONCE = 'true';
-        try {
-          const held = await staffPromise();
-          // A second overdue promise from the same text, of a kind rule 3 holds too.
-          const [second] = await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'callback',
-            description: 'call them back Monday', channel: 'sms', due_at: at(1000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
-            evidence: JSON.stringify([{ quote: 'follow up with you Monday', sms_log_id: message.id, matched: true, speaker: 'agent' }]),
-            sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } }).returning('id');
-          const shared = await openAlert([held.id, second.id]);
-          await mockPg('scheduled_services').insert(visitRow());
-          await tick();
-          expect(rings()).toBe(0);
-          expect((await alertOf(shared)).done_at).not.toBeNull();
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        const held = await staffPromise();
+        // A second overdue promise from the same text, of a kind rule 3 holds too.
+        const [second] = await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'callback',
+          description: 'call them back Monday', channel: 'sms', due_at: at(1000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
+          evidence: JSON.stringify([{ quote: 'follow up with you Monday', sms_log_id: message.id, matched: true, speaker: 'agent' }]),
+          sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } }).returning('id');
+        const shared = await openAlert([held.id, second.id]);
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        expect(rings()).toBe(0);
+        expect((await alertOf(shared)).done_at).not.toBeNull();
       });
 
       // A second overdue promise from the same text, of a kind rule 3 never holds.
@@ -4612,84 +4598,62 @@ postgres('SMS commitments on PostgreSQL', () => {
       test.each([['after', 'ffffffff-ffff-4fff-bfff-ffffffffffff'], ['before', '00000000-0000-4000-8000-000000000001']])(
         'gate true: an overdue sibling scanned %s the held promise rings an alert without it (Codex #6974 r3)', async (_order, siblingId) => {
           process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-          process.env.GATE_ALERT_RING_ONCE = 'true';
-          try {
-            const held = await staffPromise();
-            // The held promise's stored check says "can't tell": that must not set the alert's state either.
-            await mockPg('call_commitments').where({ id: held.id })
-              .update({ sms_context: mockPg.raw("sms_context || jsonb_build_object('fulfillment_check', jsonb_build_object('verdict', 'uncertain'))") });
-            const report = await overdueReport(siblingId);
-            await mockPg('scheduled_services').insert(visitRow());
-            await tick();
-            expect(rings()).toBe(1);
-            const [, , , rung] = NotificationService.notifyAdmin.mock.calls[0];
-            expect(rung.metadata).toMatchObject({ commitment_id: report, commitment_ids: [report], verification: 'open' });
-          } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+          const held = await staffPromise();
+          // The held promise's stored check says "can't tell": that must not set the alert's state either.
+          await mockPg('call_commitments').where({ id: held.id })
+            .update({ sms_context: mockPg.raw("sms_context || jsonb_build_object('fulfillment_check', jsonb_build_object('verdict', 'uncertain'))") });
+          const report = await overdueReport(siblingId);
+          await mockPg('scheduled_services').insert(visitRow());
+          await tick();
+          expect(rings()).toBe(1);
+          const [, , , rung] = NotificationService.notifyAdmin.mock.calls[0];
+          expect(rung.metadata).toMatchObject({ commitment_id: report, commitment_ids: [report], verification: 'open' });
         });
 
-      test.each([['true', true], [undefined, false]])('gate true, GATE_ALERT_RING_ONCE %p: the sibling settling closes the shared alert while the visit holds the other promise: %p', async (ringOnce, closes) => {
+      test('gate true: the sibling settling closes the shared alert while the visit holds the other promise', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        if (ringOnce) process.env.GATE_ALERT_RING_ONCE = ringOnce;
-        try {
-          const held = await staffPromise();
-          const report = await overdueReport(randomUUID());
-          const shared = await openAlert([held.id, report]);
-          await mockPg('scheduled_services').insert(visitRow());
-          await mockPg('call_commitments').where({ id: report }).update({ status: 'fulfilled' });
-          await mockPg.transaction((trx) => closeSmsCommitmentAlerts(trx, { commitmentId: report, smsLogId: message.id, now: at(NOW) },
-            { done_at: trx.fn.now(), done_by: 'sms-commitments', resolution: 'The text follow-up was done' }));
-          expect((await alertOf(shared)).done_at !== null).toBe(closes);
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        const held = await staffPromise();
+        const report = await overdueReport(randomUUID());
+        const shared = await openAlert([held.id, report]);
+        await mockPg('scheduled_services').insert(visitRow());
+        await mockPg('call_commitments').where({ id: report }).update({ status: 'fulfilled' });
+        await mockPg.transaction((trx) => closeSmsCommitmentAlerts(trx, { commitmentId: report, smsLogId: message.id, now: at(NOW) },
+          { done_at: trx.fn.now(), done_by: 'sms-commitments', resolution: 'The text follow-up was done' }));
+        expect((await alertOf(shared)).done_at !== null).toBe(true);
       });
 
       test('gate true: an alert a person already marked done stays theirs (the on-track close touches open rows only)', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        process.env.GATE_ALERT_RING_ONCE = 'true';
-        try {
-          const held = await staffPromise();
-          const alert = await openAlert([held.id]);
-          const person = randomUUID();
-          await mockPg('notifications').where({ id: alert }).update({ done_at: at(-60000), done_by: person, resolution: 'Called them' });
-          await mockPg('scheduled_services').insert(visitRow());
-          await tick();
-          expect(await alertOf(alert)).toMatchObject({ done_by: person, resolution: 'Called them' });
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
-      });
-
-      test('gate true without GATE_ALERT_RING_ONCE: the earlier alert stays open (a closed row would absorb the next ring for a day)', async () => {
-        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         const held = await staffPromise();
         const alert = await openAlert([held.id]);
+        const person = randomUUID();
+        await mockPg('notifications').where({ id: alert }).update({ done_at: at(-60000), done_by: person, resolution: 'Called them' });
         await mockPg('scheduled_services').insert(visitRow());
         await tick();
-        expect(rings()).toBe(0);
-        expect((await alertOf(alert)).done_at).toBeNull();
+        expect(await alertOf(alert)).toMatchObject({ done_by: person, resolution: 'Called them' });
       });
 
       test('gate true: a held promise comes back without a second ring while the alert still shows a promise from its text', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        process.env.GATE_ALERT_RING_ONCE = 'true';
-        try {
-          const actual = jest.requireActual('../services/notification-service');
-          NotificationService.notifyAdmin.mockImplementation(actual.notifyAdmin.bind(actual));
-          const held = await staffPromise();
-          const report = await overdueReport(randomUUID());
-          await tick();
-          await mockPg('scheduled_services').insert(visitRow());
-          await tick();
-          const [alert] = await mockPg('notifications');
-          expect(alert.metadata.commitment_ids).toEqual([report]);
-          // A person reads the alert. The visit window ends and the held promise is still open.
-          await mockPg('notifications').where({ id: alert.id }).update({ read_at: new Date() });
-          const read = await mockPg('notifications').where({ id: alert.id }).first();
-          await tick(5 * 3600000);
-          const [back, ...more] = await mockPg('notifications');
-          expect(more).toHaveLength(0);
-          // It is listed again, after the promise the alert already showed. The alert stays read and in its place.
-          expect(back.metadata.commitment_ids).toEqual([report, held.id]);
-          expect(back).toMatchObject({ done_at: null, read_at: read.read_at, created_at: read.created_at });
-          expect(back.metadata.rungAt).toEqual(read.metadata.rungAt);
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        const actual = jest.requireActual('../services/notification-service');
+        NotificationService.notifyAdmin.mockImplementation(actual.notifyAdmin.bind(actual));
+        const held = await staffPromise();
+        const report = await overdueReport(randomUUID());
+        await tick();
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        const [alert] = await mockPg('notifications');
+        expect(alert.metadata.commitment_ids).toEqual([report]);
+        // A person reads the alert. The visit window ends and the held promise is still open.
+        await mockPg('notifications').where({ id: alert.id }).update({ read_at: new Date() });
+        const read = await mockPg('notifications').where({ id: alert.id }).first();
+        await tick(5 * 3600000);
+        const [back, ...more] = await mockPg('notifications');
+        expect(more).toHaveLength(0);
+        // It is listed again, after the promise the alert already showed. The alert stays read and in its place.
+        expect(back.metadata.commitment_ids).toEqual([report, held.id]);
+        expect(back).toMatchObject({ done_at: null, read_at: read.read_at, created_at: read.created_at });
+        expect(back.metadata.rungAt).toEqual(read.metadata.rungAt);
       });
 
       // The alert stayed open for another text while the visit held the only promise of this one. An alert keyed on
@@ -4697,66 +4661,60 @@ postgres('SMS commitments on PostgreSQL', () => {
       // rings again the same way.
       test('gate true: a held promise rings the open customer alert again after the visit window when no promise from its text is on it', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        process.env.GATE_ALERT_RING_ONCE = 'true';
-        try {
-          const actual = jest.requireActual('../services/notification-service');
-          NotificationService.notifyAdmin.mockImplementation(actual.notifyAdmin.bind(actual));
-          const held = await staffPromise();
-          const [other] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_body: 'I will send the service report today.', created_at: at(500) }).returning('id');
-          const report = await overdueReport(randomUUID(), other.id);
-          await tick();
-          await mockPg('scheduled_services').insert(visitRow());
-          await tick();
-          const [alert, ...more] = await mockPg('notifications');
-          expect(more).toHaveLength(0);
-          expect(alert.metadata.commitment_ids).toEqual([report]);
-          await mockPg('notifications').where({ id: alert.id }).update({ read_at: new Date() });
-          const read = await mockPg('notifications').where({ id: alert.id }).first();
-          await tick(5 * 3600000);
-          const [back, ...rest] = await mockPg('notifications');
-          expect(rest).toHaveLength(0);
-          // The same row rings: unread again, with the promise that came back first.
-          expect(back.metadata.commitment_ids).toEqual([held.id, report]);
-          expect(back).toMatchObject({ id: alert.id, done_at: null, read_at: null });
-          expect(back.metadata.rungAt).toBeTruthy();
-          expect(back.metadata.rungAt).not.toEqual(read.metadata.rungAt);
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        const actual = jest.requireActual('../services/notification-service');
+        NotificationService.notifyAdmin.mockImplementation(actual.notifyAdmin.bind(actual));
+        const held = await staffPromise();
+        const [other] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_body: 'I will send the service report today.', created_at: at(500) }).returning('id');
+        const report = await overdueReport(randomUUID(), other.id);
+        await tick();
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        const [alert, ...more] = await mockPg('notifications');
+        expect(more).toHaveLength(0);
+        expect(alert.metadata.commitment_ids).toEqual([report]);
+        await mockPg('notifications').where({ id: alert.id }).update({ read_at: new Date() });
+        const read = await mockPg('notifications').where({ id: alert.id }).first();
+        await tick(5 * 3600000);
+        const [back, ...rest] = await mockPg('notifications');
+        expect(rest).toHaveLength(0);
+        // The same row rings: unread again, with the promise that came back first.
+        expect(back.metadata.commitment_ids).toEqual([held.id, report]);
+        expect(back).toMatchObject({ id: alert.id, done_at: null, read_at: null });
+        expect(back.metadata.rungAt).toBeTruthy();
+        expect(back.metadata.rungAt).not.toEqual(read.metadata.rungAt);
       });
 
       test('gate true: a promise the customer alert spoke for, then held by a visit, does not ring "kept late" when its late record lands', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        process.env.GATE_ALERT_RING_ONCE = 'true';
-        try {
-          const actual = jest.requireActual('../services/notification-service');
-          NotificationService.notifyAdmin.mockImplementation(actual.notifyAdmin.bind(actual));
-          const held = await staffPromise();
-          const report = await overdueReport(randomUUID());
-          // Both are overdue with no visit booked: one alert lists both.
-          await tick();
-          const [alert, ...more] = await mockPg('notifications');
-          expect(more).toHaveLength(0);
-          expect([...alert.metadata.commitment_ids].sort()).toEqual([held.id, report].sort());
-          // A visit is booked: the held promise leaves the alert, which stays open for the other one.
-          await mockPg('scheduled_services').insert(visitRow());
-          await tick();
-          const kept = await mockPg('notifications').where({ id: alert.id }).first();
-          expect(kept.done_at).toBeNull();
-          expect(kept.metadata.commitment_ids).toEqual([report]);
-          // The alert keeps the text it spoke for, as an alert keyed on that text kept its key after it closed.
-          expect(kept.metadata.spoke_for).toEqual([message.id]);
-          await applySmsCommitmentUpdate(mockPg, report, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
-          // After the visit window the records show the held promise done, later than promised.
-          const late = at(4.5 * 3600000);
-          const [guide] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'prep_guide', admin_user_id: null,
-            message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: late }).returning('id');
-          dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
-          NotificationService.notifyAdmin.mockClear();
-          expect(await refreshSmsCommitments({ conn: mockPg, now: at(5 * 3600000) })).toMatchObject({ fulfilled: 1 });
-          // The alert had spoken for it: no second ring, and the promise closes on this check.
-          expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-          expect((await mockPg('call_commitments').where({ id: held.id }).first()).status).toBe('fulfilled');
-          expect(await mockPg('notifications')).toHaveLength(1);
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        const actual = jest.requireActual('../services/notification-service');
+        NotificationService.notifyAdmin.mockImplementation(actual.notifyAdmin.bind(actual));
+        const held = await staffPromise();
+        const report = await overdueReport(randomUUID());
+        // Both are overdue with no visit booked: one alert lists both.
+        await tick();
+        const [alert, ...more] = await mockPg('notifications');
+        expect(more).toHaveLength(0);
+        expect([...alert.metadata.commitment_ids].sort()).toEqual([held.id, report].sort());
+        // A visit is booked: the held promise leaves the alert, which stays open for the other one.
+        await mockPg('scheduled_services').insert(visitRow());
+        await tick();
+        const kept = await mockPg('notifications').where({ id: alert.id }).first();
+        expect(kept.done_at).toBeNull();
+        expect(kept.metadata.commitment_ids).toEqual([report]);
+        // The alert keeps the text it spoke for, as an alert keyed on that text kept its key after it closed.
+        expect(kept.metadata.spoke_for).toEqual([message.id]);
+        await applySmsCommitmentUpdate(mockPg, report, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
+        // After the visit window the records show the held promise done, later than promised.
+        const late = at(4.5 * 3600000);
+        const [guide] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'prep_guide', admin_user_id: null,
+          message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: late }).returning('id');
+        dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
+        NotificationService.notifyAdmin.mockClear();
+        expect(await refreshSmsCommitments({ conn: mockPg, now: at(5 * 3600000) })).toMatchObject({ fulfilled: 1 });
+        // The alert had spoken for it: no second ring, and the promise closes on this check.
+        expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+        expect((await mockPg('call_commitments').where({ id: held.id }).first()).status).toBe('fulfilled');
+        expect(await mockPg('notifications')).toHaveLength(1);
       });
 
       // Closed history of an older build's key: no code writes these keys any more, but a closed row still counts as
@@ -4765,24 +4723,21 @@ postgres('SMS commitments on PostgreSQL', () => {
         ['a closed alert an older build keyed on its text', () => `sms-commitment-source:${message.id}`, 0],
         ['no earlier alert', null, 1]])('a promise kept late whose only earlier alert is %s', async (_name, olderKey, rang) => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        process.env.GATE_ALERT_RING_ONCE = 'true';
-        try {
-          const held = await staffPromise();
-          if (olderKey) {
-            await mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert', title: 'Comms — follow up with Synthetic Fixture', body: 'old',
-              done_at: at(3600000), done_by: STAFF, read_at: at(3600000),
-              metadata: JSON.stringify({ dedupeKey: olderKey(held), triggerKey: 'sms_operational_followup', customerId: message.customer_id, sms_log_id: message.id, commitment_id: held.id }) });
-          }
-          const [guide] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'prep_guide', admin_user_id: null,
-            message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: at(4.5 * 3600000) }).returning('id');
-          dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
-          NotificationService.notifyAdmin.mockClear();
-          // Quiet: the promise closes on this check. With no alert that spoke for it, the late record rings first and
-          // the row closes on a later tick.
-          expect(await refreshSmsCommitments({ conn: mockPg, now: at(5 * 3600000) })).toMatchObject({ fulfilled: 1 - rang });
-          expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(rang);
-          expect((await mockPg('call_commitments').where({ id: held.id }).first()).status).toBe(rang ? 'open' : 'fulfilled');
-        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+        const held = await staffPromise();
+        if (olderKey) {
+          await mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert', title: 'Comms — follow up with Synthetic Fixture', body: 'old',
+            done_at: at(3600000), done_by: STAFF, read_at: at(3600000),
+            metadata: JSON.stringify({ dedupeKey: olderKey(held), triggerKey: 'sms_operational_followup', customerId: message.customer_id, sms_log_id: message.id, commitment_id: held.id }) });
+        }
+        const [guide] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'prep_guide', admin_user_id: null,
+          message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: at(4.5 * 3600000) }).returning('id');
+        dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
+        NotificationService.notifyAdmin.mockClear();
+        // Quiet: the promise closes on this check. With no alert that spoke for it, the late record rings first and
+        // the row closes on a later tick.
+        expect(await refreshSmsCommitments({ conn: mockPg, now: at(5 * 3600000) })).toMatchObject({ fulfilled: 1 - rang });
+        expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(rang);
+        expect((await mockPg('call_commitments').where({ id: held.id }).first()).status).toBe(rang ? 'open' : 'fulfilled');
       });
 
       test.each(['other', 'callback', 'technician_follow_up'])('gate true: a %s promise is held the same way', async (kind) => {

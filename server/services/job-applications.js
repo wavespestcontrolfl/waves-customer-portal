@@ -196,7 +196,7 @@ const CONTACT_PHONE_LAST_TEN_SQL = "right(regexp_replace(COALESCE(contact_snapsh
 
 /**
  * Files ONE Careers application from a phone call whose caller was a job
- * applicant (GATE_CALL_APPLICANT_HANDLING). A sibling of createJobApplication,
+ * applicant. A sibling of createJobApplication,
  * not a loosening of it: the public form's validator stays exactly as it was.
  *
  * COMMS-FREE by contract: this writes one job_applications row and nothing

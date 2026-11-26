@@ -266,7 +266,7 @@ customer's message by this rule.
    `ringSmsCustomerBell` in `server/services/sms-operational-actions.js`). The row lists its promises
    in `metadata.commitment_ids` (and `itemKeys`), the promises of the text that rang last first. A promise joins
    when its own overdue check rings, together with the other open promises from its text. The row
-   rings exactly when the row of one text rang before the fold (`GATE_ALERT_RING_ONCE` on): when it
+   rings exactly when the row of one text rang before the fold: when it
    first appears and again, unread and moved to the top, when a promise joins from a text that has
    no promise on the row. A text with a promise on the open row never rings it again (owner
    2026-10-22: one text, one ring). A promise that is done, dismissed, expired or held by a booked

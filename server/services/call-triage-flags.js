@@ -951,12 +951,12 @@ function duplicateAddressCards(list, dropped) {
   return ADDRESS_UNVERIFIED_PEERS.filter((f) => list.includes(f));
 }
 
-// GATE_CALL_APPLICANT_HANDLING. A job applicant or a vendor/partner on the line
+// A job applicant or a vendor/partner on the line
 // is not a customer: the cards that ask the office to finish a CUSTOMER record
 // (service address, name, email read-back, SMS consent capture, an unconfirmed
 // visit) have nothing to act on. Same shape as noActionCallCards: card codes
 // only. The route decision, the flags and the routing verdict keep everything.
-// Callers pass the gate value in, so this stays pure. `callback_number_needed`
+// `callback_number_needed`
 // and `caller_phone_missing` are NOT here: the office needs a number to reach
 // the applicant back. `caller_not_authorized` IS here: a vendor, lender or tax
 // office is not a customer who must be authorized to book (2026-11-04 audit: 6
@@ -1032,8 +1032,8 @@ function thirdPartyCallNeedsNoCustomerCards(extraction) {
   return !sr.service_intent || THIRD_PARTY_DEFAULT_INTENTS.has(sr.service_intent);
 }
 
-function thirdPartyCustomerOnlyCards(extraction, { gateOn = false } = {}) {
-  if (gateOn !== true || !isThirdPartyCallNature(extraction)) return [];
+function thirdPartyCustomerOnlyCards(extraction) {
+  if (!isThirdPartyCallNature(extraction)) return [];
   if (!thirdPartyCallNeedsNoCustomerCards(extraction)) return [];
   return [...THIRD_PARTY_CUSTOMER_ONLY_CARDS];
 }

@@ -7,7 +7,6 @@ const { dispatchWithFallback } = require('./llm/call');
 const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-commitments');
 const { parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etDateString, formatETDay, validCalendarDate, addETDays } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
-const { gateEnvValue } = require('../config/feature-gates');
 
 // The shared proposal rule_version column is varchar(16).
 const VERSION = 'sms-ops-v22';
@@ -119,8 +118,6 @@ function isQuestionSource(source) {
 const NOT_A_CREDENTIAL = /\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see|broken|disabled|reset|removed|inactive|expired|invalid|off|down|gone|lost|stuck|jammed|dead|out|open|locked|unlocked)\b|n['’]t|^n[ /]?a$/i;
 // Owner ruling 2026-10-04: a client's access code saves from the client's own
 // wording, not only from the strict form ("Gate code is 1234" was dropped).
-// Read at call time so the flip needs no redeploy.
-const accessCodeCaptureEnabled = () => gateEnvValue('GATE_ACCESS_CODE_CAPTURE');
 // The WHOLE message must be this one sentence. Two review passes showed that a
 // list of refused words on free text never closes (a retraction, a hedge, a
 // spelled key symbol, a second number each got through in turn), so nothing
@@ -147,7 +144,7 @@ function matchesNaturalAccessCode({ field, value }, { messageBody = '', properti
 }
 
 function matchesAccessCode(item, context) {
-  return matchesExplicitAccessCode(item) || (accessCodeCaptureEnabled() && matchesNaturalAccessCode(item, context));
+  return matchesExplicitAccessCode(item) || matchesNaturalAccessCode(item, context);
 }
 
 function matchesExplicitAccessCode({ quote, field, value }) {
@@ -242,7 +239,7 @@ Facts:
 - Capture explicitly reported operational facts and instructions, not diagnoses or technical recommendations. Keep the customer's equipment/irrigation reports distinguished from verified findings.
 - value must be an exact substring of quote, except contact_preference which must be call, text or email. Capture only the useful operational preference, never its medical explanation.
 - For EVERY fact, quote must retain the whole CURRENT message, including every sentence and qualifier. For controller locations, notes, instructions, pet details and irrigation issues, value MUST equal quote. Never shorten a message to a standalone instruction that omits another clause. If separate topics do not belong together in the field, mark duration uncertain for staff review.
-- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.${accessCodeCaptureEnabled() ? ' A plain "gate code" with no side, back or yard word is the neighborhood gate (field neighborhood_gate_code). For a code, value is the code alone with its # or * symbol.' : ''}
+- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess. A plain "gate code" with no side, back or yard word is the neighborhood gate (field neighborhood_gate_code). For a code, value is the code alone with its # or * symbol.
 - An instruction for today/one visit/vacation is visit_only, not durable. Ambiguous duration is uncertain. A change to payment, billing, ownership or communication consent is an obligation to resolve, never a profile fact.
 - property_id may identify the sole provided property. With zero or multiple properties, use null, including requests covering all properties; opaque ids alone cannot prove which address the customer means. Never infer another person's authority or merge accounts.
 
