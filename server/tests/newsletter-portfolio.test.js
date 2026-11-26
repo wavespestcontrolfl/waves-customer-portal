@@ -111,7 +111,7 @@ describe('local first (owner 2026-11-26)', () => {
     expect(result.selected.map((e) => e.id)).not.toContain(untagged.id);
   });
 
-  test.each(['St. Petersburg', 'St. Pete Beach', 'Clearwater Beach', 'Palm Harbor', 'Indian Shores', 'Temple Terrace', 'Tierra Verde', 'Sun City Center', 'Tampa'])('untagged %s counts as away', (city) => {
+  test.each(['St. Petersburg', 'St. Pete Beach', 'Clearwater Beach', 'Palm Harbor', 'Indian Shores', 'Temple Terrace', 'Tierra Verde', 'Sun City Center', 'Palmetto Bay', '', 'Tampa'])('untagged %s counts as away', (city) => {
     const tagged = [1, 2].map((i) => ev({ region_zone: 'pinellas', editorial_score: 96 - i, source_id: `p-${i}` }));
     const untagged = ev({ region_zone: null, city, editorial_score: 93, source_id: 'u-1' });
     const result = selectPortfolio([...tagged, untagged]);
