@@ -908,19 +908,24 @@ function etWhen(startAt) {
   };
 }
 
+const PLAIN_FREE_PRICE = /^\s*(?:free(?:\s+(?:admission|entry))?|\$?\s*0+(?:\.0+)?)\s*[.!]?\s*$/i;
+
 // One event's display pieces, shared by the HTML and text renderers.
 function shortEventView(ev) {
   const when = etWhen(ev.startAt);
   const name = (ev.sourceTitle || ev.title || '').trim();
   const labels = Array.isArray(ev.labels) ? ev.labels : [];
   const url = safeUrl(ev.eventUrl);
+  const priceText = (typeof ev.priceText === 'string' && ev.priceText.trim()) ? ev.priceText.trim() : null;
   return {
     when,
     heading: ev.town ? `${name} · ${ev.town}` : name,
-    // The strict Free label (deriveEventLabels): an unqualified "Free" only
-    // when the row is unambiguously all-free; otherwise the locked price text.
-    free: labels.includes('Free'),
-    priceText: (typeof ev.priceText === 'string' && ev.priceText.trim()) ? ev.priceText.trim() : null,
+    // An unqualified "Free" only when the record shows free admission for
+    // everyone: the strict Free label AND no price text, or a price text that
+    // says nothing more than free / $0. A qualified one ("Free for members")
+    // keeps its locked price text, so the qualification is never dropped.
+    free: labels.includes('Free') && (!priceText || PLAIN_FREE_PRICE.test(priceText)),
+    priceText,
     venue: ev.venue || null,
     why: typeof ev.why === 'string' ? ev.why.trim() : '',
     eventId: ev.eventId ? String(ev.eventId).toLowerCase() : null,
@@ -1066,36 +1071,29 @@ function issuePoll(pollQuizId) {
   return pollQuizId && isNewsletterPoll(pollQuizId) ? pollQuizId : null;
 }
 
-// The fact line's locked price is excised by the claim scan only as
+// The claim scan excises a locked price in the text part only as
 // "Tickets: <price>" with the SAME event's {{evclick:<id>}} token within 200
-// characters after it (newsletter-validator.js, text mode). Keep a margin.
-const TEXT_PRICE_TOKEN_WINDOW = 180;
-
+// characters after it (newsletter-validator.js, text mode). So a priced
+// event's text rides the price on the details line, right next to its token:
+// no venue or sentence length can push the two apart. An event with no
+// details link has no token to verify the price against; the text part
+// leaves the price out and the HTML part still shows it.
 function textEventBlock(e) {
-  const build = (withPrice) => {
-    const facts = [];
-    if (e.when) facts.push(e.when.dateLabel, e.when.timeLabel);
-    if (e.free) facts.push('Free');
-    else if (withPrice && e.priceText) facts.push(`Tickets: ${e.priceText}`);
-    let line = facts.join(' • ');
-    if (e.venue) line = line ? `${line} · ${e.venue}` : e.venue;
-    const lines = [e.heading];
-    if (line) lines.push(line);
-    if (e.why) lines.push(stripMd(e.why));
-    // "Details:", NOT "Tickets & info": a Free fact line right above would
-    // read "Free Tickets ..." and trip the claim scan's free-tickets pattern.
-    if (e.href) lines.push(`Details: ${e.href}`);
-    return lines.join('\n');
-  };
-  const block = build(true);
-  if (!e.priceText || e.free) return block;
-  // A locked price the scan cannot tie to this event's token (no link, or the
-  // token sits too far below the price) is left out of the text part rather
-  // than risk a send-gate block on the dollar sign; the HTML part still shows it.
-  const priceAt = block.indexOf(`Tickets: ${e.priceText}`);
-  const tokenAt = block.indexOf('{{evclick:');
-  const distance = tokenAt - (priceAt + `Tickets: ${e.priceText}`.length);
-  return tokenAt === -1 || distance > TEXT_PRICE_TOKEN_WINDOW ? build(false) : block;
+  const facts = [];
+  if (e.when) facts.push(e.when.dateLabel, e.when.timeLabel);
+  if (e.free) facts.push('Free');
+  let line = facts.join(' • ');
+  if (e.venue) line = line ? `${line} · ${e.venue}` : e.venue;
+  const lines = [e.heading];
+  if (line) lines.push(line);
+  if (e.why) lines.push(stripMd(e.why));
+  // "Details:", NOT "Tickets & info": a Free fact line right above would
+  // read "Free Tickets ..." and trip the claim scan's free-tickets pattern.
+  if (e.href) {
+    const priced = !e.free && e.priceText && e.href.startsWith('{{evclick:');
+    lines.push(`${priced ? `Tickets: ${e.priceText} · ` : ''}Details: ${e.href}`);
+  }
+  return lines.join('\n');
 }
 
 // Plain-text alternative: the same pieces in the same order as the HTML. The
@@ -1166,6 +1164,21 @@ const PEST_INSIDER_UNSAVED = 'a Waves Pest Insider issue needs its planned audie
 // its reviewed facts by services/pest-insider (planner: schedule.js); the old
 // model-written monthly format this writer once produced is gone.
 const PEST_INSIDER_NOT_WRITTEN_HERE = 'a Waves Pest Insider issue is built by its planner (services/pest-insider), not by this draft writer';
+
+// The short weekly format needs exactly 3 "This weekend" points and a
+// sentence for every event. A writer reply without them is a shape error like
+// the other refusals below: it throws before anything is saved, so the caller
+// retries or skips the week (nothing half-written ships).
+function assertShortFormatShape(draft) {
+  const points = (draft.weekendPoints || []).filter((p) => typeof p === 'string' && p.trim());
+  if (points.length !== WEEKEND_POINT_LIMIT) {
+    throw new Error(`Newsletter writer returned ${points.length} weekend point(s); the short format needs exactly ${WEEKEND_POINT_LIMIT}.`);
+  }
+  const missing = (draft.events || []).filter((ev) => typeof ev.why !== 'string' || !ev.why.trim());
+  if (missing.length > 0) {
+    throw new Error(`Newsletter writer gave no sentence for ${missing.length} event(s): ${missing.map((ev) => ev.sourceTitle || ev.eventId).join('; ')}.`);
+  }
+}
 
 async function createNewsletterDraft({
   prompt,
@@ -1375,6 +1388,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   //      lockEventFactsFromDb; this extends the same defense to the prose the
   //      model authors outside the events array.
   sanitizeProseFields(draft);
+  assertShortFormatShape(draft);
 
   // 4b. No generated hero image: the short weekly format (owner 2026-11-26)
   //     has no hero or event visuals, so that image spend ends here.

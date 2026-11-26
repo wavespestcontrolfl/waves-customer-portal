@@ -77,6 +77,15 @@ describe('short weekly format: one event', () => {
     const free = await assembleWeeklyNewsletter(issue([mk(1, { labels: ['Free'], priceText: '$0' })]));
     expect(free).toContain('5:00 PM • Free · Venue 1');
     expect(free).not.toContain('data-db-price');
+    // A qualified free ("Free for members") keeps its price text even though
+    // the strict Free label fires; only a plain free / $0 reads "Free".
+    const members = await assembleWeeklyNewsletter(issue([mk(1, { labels: ['Free'], priceText: 'Free for members' })]));
+    expect(members).toContain('<span data-db-price="a0000001-0000-4000-8000-000000000001">Free for members</span>');
+    expect(members).not.toMatch(/• Free ·/);
+    for (const plain of ['Free', 'free admission', '$0', '$0.00', 'Free!']) {
+      const h = await assembleWeeklyNewsletter(issue([mk(1, { labels: ['Free'], priceText: plain })]));
+      expect(h).toContain('5:00 PM • Free · Venue 1');
+    }
     const unknown = await assembleWeeklyNewsletter(issue([mk(1)]));
     expect(unknown).toContain('Fri, Nov 27 • 5:00 PM · Venue 1');
   });
@@ -198,23 +207,36 @@ describe('short weekly format: plain-text part', () => {
     expect(body).not.toMatch(/Pro tip|\[ \]|P\.S\.|\*\*/);
   });
 
-  test('the locked price rides as "Tickets: <price>" and the claim scan passes it by the event/price pair', () => {
+  test('the locked price rides as "Tickets: <price>" right before its own details token, and the claim scan passes it by the event/price pair', () => {
     const body = text([mk(1, { priceText: 'From $25' })]);
-    expect(body).toContain('Fri, Nov 27 • 5:00 PM • Tickets: From $25 · Venue 1');
+    expect(body).toContain('Fri, Nov 27 • 5:00 PM · Venue 1\nA good reason to go to number 1.\nTickets: From $25 · Details: {{evclick:a0000001-0000-4000-8000-000000000001}}');
     expect(findHallucinatedClaims(body, [{ eventId: ID(1), price: 'From $25' }], 'text')).toEqual([]);
     // Event A's line wearing Event B's real price still blocks.
     expect(findHallucinatedClaims(body, [{ eventId: ID(2), price: 'From $25' }], 'text')).not.toEqual([]);
   });
 
-  test('a price the scan could not tie to its own details token is left out of the text part (HTML keeps it)', async () => {
-    const longWhy = `${'A very long sentence about why this one is worth the drive. '.repeat(5)}`.trim();
-    const far = text([mk(1, { priceText: 'From $25', why: longWhy })]);
-    expect(far).not.toContain('$25');
-    expect(findHallucinatedClaims(far, [{ eventId: ID(1), price: 'From $25' }], 'text')).toEqual([]);
+  test('sentence and venue length cannot remove a price: it sits next to its token, so the claim scan still passes it', () => {
+    const longWhy = 'A very long sentence about why this one is worth the whole drive, the parking and the wait, twice over, with a lot of extra words. '.repeat(4).trim();
+    const longVenue = 'The Extremely Long Named Municipal Waterfront Park and Amphitheater Complex at the Old Bay Pier';
+    const body = text([mk(1, { priceText: 'From $25', why: longWhy, venue: longVenue })]);
+    expect(body).toContain('Tickets: From $25 · Details: {{evclick:a0000001');
+    expect(findHallucinatedClaims(body, [{ eventId: ID(1), price: 'From $25' }], 'text')).toEqual([]);
+  });
+
+  test('an event with no details link has no token to verify its price against: the text part omits it, the HTML keeps it', async () => {
     const noLink = text([mk(1, { priceText: 'From $25', eventUrl: null })]);
     expect(noLink).not.toContain('$25');
-    const html = await assembleWeeklyNewsletter(issue([mk(1, { priceText: 'From $25', why: longWhy })]));
+    const noId = text([mk(1, { priceText: 'From $25', eventId: null })]);
+    expect(noId).not.toContain('$25');
+    expect(findHallucinatedClaims(noId, [{ eventId: ID(1), price: 'From $25' }], 'text')).toEqual([]);
+    const html = await assembleWeeklyNewsletter(issue([mk(1, { priceText: 'From $25', eventUrl: null })]));
     expect(html).toContain('From $25');
+  });
+
+  test('a qualified free ("Free for members") is carried in the text part too, never shortened to "Free"', () => {
+    const body = text([mk(1, { labels: ['Free'], priceText: 'Free for members' })]);
+    expect(body).toContain('Tickets: Free for members · Details: {{evclick:a0000001');
+    expect(body).not.toMatch(/• Free/);
   });
 
   test('events follow the same day order as the HTML', () => {
@@ -254,6 +276,11 @@ describe('short weekly format: every send gate still passes', () => {
     }, { recipientCount: 10, lockedPrices });
     expect(errors).toEqual([]);
     expect(validateVoice({ subject: 'Weekend picks', htmlBody: html, textBody }, 'waves_phase_3_local').warnings).toEqual([]);
+    // The subscribe line counts as the issue's CTA, so the advisory warning stays quiet.
+    const warned = validateNewsletterDraft({
+      subject: 'Weekend picks', preview_text: 'p', html_body: html, text_body: textBody, newsletter_type: 'local-weekly-fresh-events',
+    }, { recipientCount: 10, lockedPrices });
+    expect(warned.warnings).not.toContain('No Waves CTA detected');
   });
 
   test('a model sentence that invents a price still hard-blocks the send', async () => {

@@ -147,7 +147,7 @@ describe('Waves Newsletter polls', () => {
     db.mockImplementation(() => lineupQuery);
     mockDispatch.mockResolvedValue({ ok: true, json: {
       selectedSubject: 'Local picks',
-      weekendPoints: ['Art walk Saturday in Bradenton'],
+      weekendPoints: ['Art walk Saturday in Bradenton', 'Harbor views all afternoon', 'Local artists on the water'],
       events: [{ eventId, why: 'Local artists show their work along the harbor.' }],
       signoff: '— The Waves Team',
       textBody: 'WRITER TEXT WITH NO POLL',
@@ -161,6 +161,45 @@ describe('Waves Newsletter polls', () => {
       expect(issue.textBody.split(`{{quiz-text:${P2}}}`)).toHaveLength(2);
       expect(issue.textBody).toContain('Harbor Art Walk');
       expect(issue.textBody).not.toContain('WRITER TEXT WITH NO POLL');
+    } finally {
+      db.mockReset();
+      mockDispatch.mockReset();
+    }
+  });
+
+  test.each([
+    ['only two weekend points', { weekendPoints: ['One', 'Two'] }, /exactly 3/],
+    ['a blank weekend point', { weekendPoints: ['One', '  ', 'Three'] }, /exactly 3/],
+    ['no weekend points at all', { weekendPoints: undefined }, /exactly 3/],
+    ['a blank sentence for an event', { events: [{ eventId: 'b0000000-0000-4000-8000-000000000001', why: '   ' }] }, /no sentence/],
+    ['a sentence that is only a URL', { events: [{ eventId: 'b0000000-0000-4000-8000-000000000001', why: 'https://spam.example/x' }] }, /no sentence/],
+  ])('the weekly draft is refused before it is saved when the writer gives %s', async (_name, change, message) => {
+    const eventId = 'b0000000-0000-4000-8000-000000000001';
+    mockEventRows.splice(0, mockEventRows.length, {
+      id: eventId, title: 'Harbor Art Walk', description: 'Local artists along the harbor.',
+      start_at: '2026-12-05T22:00:00Z', end_at: null, venue_name: 'Harbor Park', venue_address: '1 Harbor Way',
+      city: 'Bradenton', event_url: 'https://events.example.com/art-walk', image_url: null, categories: ['arts'],
+      is_free: true, admin_status: 'approved', event_type: 'one_time', recurrence_type: 'none',
+      freshness_status: 'fresh_one_time', times_featured: 0, last_featured_at: null, pulled_at: '2026-11-28T12:00:00Z',
+      price_text: null, family_friendly: true, audience_tags: [], novelty_type: null, region_zone: null,
+      score_breakdown: {}, source_name: 'Synthetic source',
+    });
+    const lineupQuery = {};
+    ['leftJoin', 'select', 'whereIn', 'whereNull', 'whereNotIn', 'orderByRaw']
+      .forEach((m) => { lineupQuery[m] = jest.fn(() => lineupQuery); });
+    db.mockImplementation(() => lineupQuery);
+    mockDispatch.mockResolvedValue({ ok: true, json: {
+      selectedSubject: 'Local picks',
+      weekendPoints: ['Art walk Saturday', 'Harbor views', 'Local artists'],
+      events: [{ eventId, why: 'Local artists show their work along the harbor.' }],
+      signoff: '— The Waves Team',
+      ...change,
+    } });
+    try {
+      await expect(createNewsletterDraft({
+        prompt: 'Weekend events.', eventIds: [eventId], newsletterType: 'local-weekly-fresh-events',
+        issueReference: '2026-12-01T11:00:00Z', persist: false,
+      })).rejects.toThrow(message);
     } finally {
       db.mockReset();
       mockDispatch.mockReset();
