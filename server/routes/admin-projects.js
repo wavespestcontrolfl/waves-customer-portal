@@ -3639,24 +3639,9 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // report-only send is no longer a blind fire. No side effects: nothing
     // claimed, no token minted, nothing sent.
     if (req.body?.dry_run) {
-      const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {}, { applyReportRule: true });
-      let previewCopies = [];
-      if (project.project_type === 'wdo_inspection') {
-        const prefs = customer
-          ? await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null)
-          : null;
-        const [billing] = getInvoiceEmailRecipients(customer || {}, prefs || {});
-        previewCopies = wdoReportCopyEmails(
-          parseFindings(project),
-          [previewRecipient.email, customer?.email, billing?.email],
-        );
-      }
       return res.json({
         dry_run: true,
-        email_routing: {
-          recipient: previewRecipient.email || null,
-          report_copies: previewCopies,
-        },
+        email_routing: await manualSendPreviewRouting(customer, project),
         ...heldSendDryRunKeys(project),
       });
     }
@@ -4456,12 +4441,21 @@ async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownC
 // The held report email's provider handoff: under the customer's communications lock, the account holder and the
 // send-time recipient are read again, and the email goes only if the address is still the one it was prepared for (a
 // corrected email during the PDF work refuses; the release retries with the new one). Fails closed on a failed read.
-function heldReportRecipientHandoff({ customerId, expectedEmail, state }) {
+// The project row is read there too, FOR SHARE: still this customer's (an account merge moves it), still this
+// attempt's delivery claim; and the customer is still a live row (a merged-away customer is soft-deleted).
+function heldReportRecipientHandoff({ customerId, expectedEmail, state, ownClaim }) {
   const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
   const norm = (email) => String(email || '').trim().toLowerCase();
   return (dispatch) => withCustomerCommsLock(db, customerId, async (trx) => {
-    const fresh = await loadProjectCustomer(customerId, { strict: true, database: trx, forShare: true }).catch(() => null);
-    const now = fresh ? await ProjectEmail.resolveProjectEmailRecipientForSend(fresh, { applyReportRule: true }).catch(() => null) : null;
+    const liveProject = await trx('projects').where(ownClaim).forShare().first('customer_id').catch(() => null);
+    const fresh = liveProject && String(liveProject.customer_id) === String(customerId)
+      ? await loadProjectCustomer(customerId, { strict: true, database: trx, forShare: true }).catch(() => null)
+      : null;
+    if (!fresh || fresh.deleted_at) {
+      state.boundaryBlock = { code: 'REPORT_OWNER_CHANGED' };
+      return { ok: false };
+    }
+    const now = await ProjectEmail.resolveProjectEmailRecipientForSend(fresh, { applyReportRule: true }).catch(() => null);
     if (!now?.email || norm(now.email) !== norm(expectedEmail)) {
       state.boundaryBlock = { code: 'REPORT_RECIPIENT_CHANGED' };
       return { ok: false };
@@ -4509,7 +4503,7 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
       isResend: false,
       recipient: emailRecipient,
       handoffState,
-      withProviderHandoff: heldReportRecipientHandoff({ customerId: customer.id, expectedEmail: emailRecipient.email, state: handoffState }),
+      withProviderHandoff: heldReportRecipientHandoff({ customerId: customer.id, expectedEmail: emailRecipient.email, state: handoffState, ownClaim }),
       attachments: wdoPdf ? [wdoPdf.attachment] : [],
       idempotencyKey: `project.report_ready:${refreshed.id}:hold_release:${String(invoice.id).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40)}:${filingKeyPart(wdoFiling)}:${recipientHash}${blocks ? `:b${blocks}` : ''}`,
     });
@@ -4950,14 +4944,33 @@ async function holdDryRunKeys({ holdRequested, isWdoProject, project, invoice, i
   if (!holdRequested) return keys;
   // Who gets the report once it is paid: the release's own recipient and exclusion rule (sendHeldReport), so the
   // confirm shows the addresses payment will email, before anyone authorizes the hold.
+  return { ...keys, report_hold_release: await heldReleaseRouting(customer, project) };
+}
+
+// Who a held report's release emails: the send-time recipient and the named requestors with only that recipient left
+// out (the rule sendHeldReportEmailAndCopies applies). The previews of both sends show it.
+async function heldReleaseRouting(customer, project) {
   const recipient = await ProjectEmail.resolveProjectEmailRecipientForSend(customer || {}, { applyReportRule: true }).catch(() => null);
-  return {
-    ...keys,
-    report_hold_release: {
-      recipient: recipient?.email || null,
-      copies: wdoReportCopyEmails(parseFindings(project), [recipient?.email]),
-    },
-  };
+  return { recipient: recipient?.email || null, copies: wdoReportCopyEmails(parseFindings(project), [recipient?.email]) };
+}
+
+// The manual Send report preview: a held WDO report shows the release's own routing (it sends through the release
+// step); any other report the plain send's recipient and copies (recipient, account email and billing left out).
+async function manualSendPreviewRouting(customer, project) {
+  if (project.project_type === 'wdo_inspection' && isReportHeld(project) && project.invoice_id) {
+    const { recipient, copies } = await heldReleaseRouting(customer, project);
+    return { recipient, report_copies: copies };
+  }
+  const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {}, { applyReportRule: true });
+  let previewCopies = [];
+  if (project.project_type === 'wdo_inspection') {
+    const prefs = customer
+      ? await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null)
+      : null;
+    const [billing] = getInvoiceEmailRecipients(customer || {}, prefs || {});
+    previewCopies = wdoReportCopyEmails(parseFindings(project), [previewRecipient.email, customer?.email, billing?.email]);
+  }
+  return { recipient: previewRecipient.email || null, report_copies: previewCopies };
 }
 
 function createSendHold(project, holdRequested) {

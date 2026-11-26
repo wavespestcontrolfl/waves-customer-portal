@@ -1909,6 +1909,33 @@ describe('audit fixes', () => {
       expect(body.channels.email.error).toMatch(/press Send report again/);
     });
 
+    test('the report handoff refuses when the project moved to another customer or this attempt lost its claim', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const args = ProjectEmail.sendProjectReportReady.mock.calls[0][0];
+      const dispatch = jest.fn();
+      mockTables({ project: wdoProject({ customer_id: 'customer-2' }) });
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      mockTables({ project: null });
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      mockTables({ customer: { ...CUSTOMER, deleted_at: '2026-11-25T00:00:00Z' } });
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(args.handoffState.boundaryBlock).toEqual({ code: 'REPORT_OWNER_CHANGED' });
+    });
+
+    test('the manual Send report preview of a held report lists the release routing (a named billing contact gets its copy)', async () => {
+      const findings = { ...FINDINGS, report_sent_to: 'Billing Desk <billing@example.com>, ABC Title <closing@abctitle.com>' };
+      mockTables({ project: { ...wdoProject({ report_hold_status: 'held', findings }), invoice_id: 'inv-1' } });
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'notification_prefs'
+        ? chain({ first: jest.fn(async () => ({ billing_email: 'billing@example.com' })) })
+        : base(table)));
+      const body = await withServer(async (baseUrl) => (await post(baseUrl, '/admin/projects/project-1/send', { dry_run: true })).json());
+      expect(body.email_routing.recipient).toBe(CUSTOMER.email);
+      expect(body.email_routing.report_copies).toEqual(expect.arrayContaining(['billing@example.com', 'closing@abctitle.com']));
+    });
+
     test('the confirmed fingerprint covers the notes the invoice PDF prints', () => {
       const { billingFingerprintHash } = projectsRouter._private;
       expect(billingFingerprintHash(invoiceRow({ notes: 'Thanks!' }))).not.toBe(billingFingerprintHash(invoiceRow({ notes: 'Pay by Friday' })));

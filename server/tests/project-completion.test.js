@@ -679,6 +679,30 @@ describe('closeoutReportLink: a closeout never publishes a report held until its
   });
 });
 
+describe('heldSendInFlight: a closeout waits while a held report is being sent', () => {
+  const { heldSendInFlight } = require('../services/project-completion');
+  const fresh = new Date().toISOString();
+  const stale = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+  test.each([
+    ['the paid release holds the claim', { report_hold_status: 'releasing', delivery_status: 'sending', updated_at: fresh }, true],
+    ['a manual Send report of a held report holds the claim', { report_hold_status: 'held', delivery_status: 'sending', updated_at: fresh }, true],
+    ['a crashed claim past the takeover window', { report_hold_status: 'releasing', delivery_status: 'sending', updated_at: stale }, false],
+    ['a held report with no send running', { report_hold_status: 'held', delivery_status: null, updated_at: fresh }, false],
+    ['an ordinary send of a report that is not held', { report_hold_status: null, delivery_status: 'sending', updated_at: fresh }, false],
+  ])('%s', (_label, project, expected) => {
+    expect(heldSendInFlight(project)).toBe(expected);
+  });
+
+  test('the closeout asks it right after it locks the project, and refuses with release_in_progress', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '../services/project-completion.js'), 'utf8');
+    const lock = source.indexOf("const project = await trx('projects').where({ id: projectId }).forUpdate().first();");
+    const ask = source.indexOf('if (heldSendInFlight(project)) {');
+    expect(lock).toBeGreaterThan(0);
+    expect(ask).toBeGreaterThan(lock);
+    expect(source.slice(ask, ask + 400)).toContain("err.code = 'release_in_progress'");
+  });
+});
+
 describe('closeout never writes report_token while a hold is live', () => {
   test('the closed-status update names report_token only when the closeout owns the link', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../services/project-completion.js'), 'utf8');

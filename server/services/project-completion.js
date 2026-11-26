@@ -164,6 +164,13 @@ async function closeoutReportLink(trx, project, customer) {
   return { held: false, token, reportPath: await projectReportPathForProject(trx, { ...project, report_token: token }, customer) };
 }
 
+// A held report's send that holds the delivery claim now: the release (releasing) or a manual Send report (held +
+// 'sending'), within the claim's 10-minute takeover window.
+function heldSendInFlight(project) {
+  return isReportHeld(project) && String(project.delivery_status || '') === 'sending'
+    && Date.now() - new Date(project.updated_at || 0).getTime() < 10 * 60 * 1000;
+}
+
 function positiveMoney(value) {
   const amount = Number(value);
   return Number.isFinite(amount) && amount > 0 ? amount : 0;
@@ -666,6 +673,16 @@ async function completeProjectBackedService({
     if (!project) {
       const err = new Error('Project not found');
       err.status = 404;
+      throw err;
+    }
+    // A held report being sent right now (GATE_WDO_REPORT_HOLD: the paid release, or a manual Send report): the send
+    // is publishing its link and portal stamps, and a closeout in between would write the visit's link as unsent.
+    // Closing waits a moment.
+    // (A claim older than the 10-minute takeover window is a crashed send: it does not block.)
+    if (heldSendInFlight(project)) {
+      const err = new Error('The report is being sent right now. Give it a moment, then close the project.');
+      err.status = 409;
+      err.code = 'release_in_progress';
       throw err;
     }
 
@@ -1336,6 +1353,7 @@ module.exports = {
   buildServiceRecordProjectCompletionUpdate,
   closeoutReportLink,
   completeProjectBackedService,
+  heldSendInFlight,
   createProjectFollowupAlert,
   findExistingCompletionInvoice,
   hasMembership,
