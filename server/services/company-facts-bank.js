@@ -82,41 +82,33 @@ const ABBREVIATION_END_RE = /(?:\b[a-z]\.){2,}$|\b(?:mr|mrs|ms|dr|vs|approx|inc)
 // ("safe" is a hard block).
 const SAFETY_CLAIM_RE = /\bsafe(?:r|st|ly)?\b|\bnon[\s-]?toxic\b|\bharmless\b|\ball[\s-]?natural\b|\b(?:no|zero|without)\s+(?:harsh\s+|harmful\s+)?(?:chemicals?|toxins?|pesticides?)\b|\b(?:chemical|toxin|poison|pesticide)[\s-]?free\b|\b(?:eco|environmentally|child|kid|pet|family)[\s-]?friendly\b|\b(?:organic|green)\s+(?:pest|treatment|product|spray)/i;
 
-// Prices written without a currency sign. (1) a rate: a number per/a/each/slash a billing unit ("99 per visit", "49/mo", "49 a month");
-// (2) a number near a price word ("costs 99", "starts at 49", "the fee is 129.99"), unless it is a count or measure ("only 3 visits",
-// "costs 2 hours") or a year ("costs have risen since 2024"); (3) a two-decimal figure that is not a measure ("129.99").
-// Counts and times that are not prices ("3 visits", "every 90 days", "2 hours", "1 acre", "4 quarterly visits", years) pass.
+// Prices written without a currency sign. A structural rule, not word adjacency (owner: facts state no amounts; over-blocking is fine,
+// the owner rewords). price_amount blocks:
+//   (1) a SENTENCE that holds a price cue (cost, price, fee, charge, rate, quote, pay, bill, starts at, as low as, dollars, discount,
+//       deposit...) AND any amount in that same sentence: a digit, or a number word (one to nineteen, tens, hundred, thousand, dozen, half),
+//       except a time of day ("nine a.m.", "8:30 pm", "nine in the morning"). So "the price covers three visits" blocks.
+//   (2) a RATE anywhere: an amount, digit or number word taken whole, followed by per / a / each / a slash and a billing unit
+//       ("99 per visit", "49/mo", "forty-nine a month", "five a month").
+// A sentence with no cue and no rate passes: "five acres", "three visits a year", "every 90 days", "one hundred twenty square feet".
 const AMOUNT_SRC = '\\d{1,3}(?:,\\d{3})+(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?';
-const UNIT_SRC = '(?:square|sq|visits?|days?|hours?|hrs?|minutes?|mins?|weeks?|months?|years?|acres?|feet|foot|ft|inch(?:es)?|miles?|times|treatments?|applications?|services?|stops?|trucks?|techs?|technicians?|people|customers?|properties|homes?|houses?|units?|zones?|rooms?|pests?|ants?|%|percent|a\\.?m\\.?|p\\.?m\\.?|st|nd|rd|th)\\b';
 const BILLING_UNIT_SRC = '(?:mo(?:nth)?|months?|visits?|applications?|treatments?|services?|years?|yr|quarters?|weeks?|wk|times?)\\b';
 const RATE_RE = new RegExp(`(?<![\\d.,])(?:${AMOUNT_SRC})(?!\\d|[.,]\\d)\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
-const PRICE_WORD_NUMBER_RE = new RegExp(`\\b(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as|only|just)\\b([^.\\d]{0,20})(?<![\\d.,])(${AMOUNT_SRC})(?!\\d|[.,]\\d)(?!\\s*${UNIT_SRC})`, 'gi');
-// Prices in words: teens, tens ("forty-nine", "forty nine"), and hundreds or thousands ("a hundred", "two hundred fifty"). A bare unit word
-// ("three", "one") is an amount only as a rate ("five per application", "five a month", "nine/mo"); "three visits", "one acre" and
-// "just one tech" are ordinary counts. A number is matched whole: it may not be followed by another number word ("twenty" of
-// "twenty-five acres", "one hundred" of "one hundred twenty square feet"), so the unit check always sees the complete number.
 const UNIT_WORD = 'one|two|three|four|five|six|seven|eight|nine';
 const TENS_WORD = `(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\\s](?:${UNIT_WORD}))?`;
 const TEEN_WORD = 'ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
 const ANY_NUMBER_WORD = `(?:${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)`;
+// A number word is taken whole: "twenty" of "twenty-five" is not a number of its own.
 const WHOLE_NUMBER = `(?![-\\s]+(?:and\\s+)?${ANY_NUMBER_WORD}\\b)`;
 const WORD_AMOUNT_SRC = `(?:(?:a|an|${UNIT_WORD})\\s+(?:hundred|thousand)(?:\\s+(?:and\\s+)?(?:${TENS_WORD}|${TEEN_WORD}|${UNIT_WORD}))?|${TENS_WORD}|${TEEN_WORD})${WHOLE_NUMBER}`;
-const WORD_RATE_RE = new RegExp(`\\b(?:${WORD_AMOUNT_SRC}|(?:${UNIT_WORD})\\b${WHOLE_NUMBER})\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
-const WORD_PRICE_RE = new RegExp(`\\b(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as)\\b[^.\\d]{0,20}\\b${WORD_AMOUNT_SRC}\\b(?!\\s*${UNIT_SRC})`, 'i');
-// One through nine DIRECTLY after an explicit price cue is a price whatever follows ("costs five", "fee is nine", "starts at nine"), except
-// a time of day ("starts at nine a.m.", "...in the morning"). "only"/"just" are not cues: "only three visits" and "just one tech" pass.
-const PRICE_CUE_SRC = '(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as)';
-const WORD_CUE_UNIT_RE = new RegExp(`\\b${PRICE_CUE_SRC}(?:\\s+(?:is|are|of|at|about|around))?\\s+(?:${UNIT_WORD})\\b${WHOLE_NUMBER}(?!\\s*(?:a\\.?m\\b|p\\.?m\\b|o'clock|in\\s+the\\s+(?:morning|afternoon|evening)))`, 'i');
-const DECIMAL_FIGURE_RE = new RegExp(`(?<![\\d.])\\d{1,4}\\.\\d{2}(?!\\d)(?!\\s*${UNIT_SRC})`, 'i');
-const YEAR_CONTEXT_RE = /\b(?:in|since|by|until|during|before|after|year|years)\b/i;
+const WORD_RATE_RE = new RegExp(`\\b(?:${WORD_AMOUNT_SRC}|(?:${UNIT_WORD}|half|dozen)\\b${WHOLE_NUMBER})\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
+const PRICE_CUE_RE = /\b(?:costs?|costing|prices?|priced|pricing|fees?|charges?|charged|charging|rates?|quotes?|quoted|pays?|paying|paid|billed|bills?|starts?\s+at|starting\s+(?:at|from)|as\s+low\s+as|dollars?|bucks|cents?|discounts?|deposits?)\b/i;
+const AMOUNT_WORD_SRC = `(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen|half)`;
+const ANY_AMOUNT_RE = new RegExp(`\\d|\\b${AMOUNT_WORD_SRC}\\b`, 'i');
+const TIME_OF_DAY_RE = new RegExp(`\\b(?:\\d{1,2}(?:[:.]\\d{2})?|${AMOUNT_WORD_SRC})\\s*(?:a\\.?m\\b\\.?|p\\.?m\\b\\.?|o'clock\\b)|\\b(?:\\d{1,2}|${AMOUNT_WORD_SRC})\\s+in\\s+the\\s+(?:morning|afternoon|evening)\\b`, 'gi');
 
 function hasUnmarkedPrice(text) {
-  if (RATE_RE.test(text) || DECIMAL_FIGURE_RE.test(text) || WORD_RATE_RE.test(text) || WORD_PRICE_RE.test(text) || WORD_CUE_UNIT_RE.test(text)) return true;
-  for (const m of text.matchAll(PRICE_WORD_NUMBER_RE)) {
-    const isYear = /^(?:19|20)\d{2}$/.test(m[2]) && YEAR_CONTEXT_RE.test(m[1]);
-    if (!isYear) return true;
-  }
-  return false;
+  if (RATE_RE.test(text) || WORD_RATE_RE.test(text)) return true;
+  return splitSentences(text).some((sentence) => PRICE_CUE_RE.test(sentence) && ANY_AMOUNT_RE.test(sentence.replace(TIME_OF_DAY_RE, ' ')));
 }
 
 // [code, regex]: each is a hard block on its own.
@@ -155,14 +147,18 @@ function loadScreens() {
   return screens;
 }
 
-function countSentences(text) {
-  let count = 0;
-  let previous = '';
+/** Sentences of a line: split after . ! ? and white space (any case), but not after a dotted abbreviation. */
+function splitSentences(text) {
+  const out = [];
   for (const part of String(text).split(SENTENCE_END_RE).filter((piece) => piece.trim())) {
-    if (!previous || !ABBREVIATION_END_RE.test(previous.trim())) count += 1;
-    previous = part;
+    if (out.length && ABBREVIATION_END_RE.test(out[out.length - 1].trim())) out[out.length - 1] += ` ${part}`;
+    else out.push(part);
   }
-  return count;
+  return out;
+}
+
+function countSentences(text) {
+  return splitSentences(text).length;
 }
 
 /** The full catalog names (4+ characters, normalised) plus the explicit brand aliases. */

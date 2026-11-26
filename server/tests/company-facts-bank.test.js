@@ -59,6 +59,16 @@ describe('hard blocks', () => {
     ['a one-digit word price after priced at', 'Plans are priced at seven.', 'price_amount'],
     ['a one-digit word price after billed', 'The service is billed three.', 'price_amount'],
     ['a one-digit word price after as low as', 'Plans run as low as six.', 'price_amount'],
+    // Intended over-blocking (structural rule: a price cue plus ANY amount in one sentence): the owner rewords, facts state no amounts.
+    ['a cue and a count', 'The price covers three visits.', 'price_amount'],
+    ['a cue and a measurement', 'Lots start at twenty-five acres.', 'price_amount'],
+    ['a cue and a spaced measurement', 'Lots start at twenty five acres.', 'price_amount'],
+    ['a cue and a thousand-foot measurement', 'Lots start at 1,000 square feet.', 'price_amount'],
+    ['a cue and a word measurement', 'It costs one hundred twenty square feet of coverage.', 'price_amount'],
+    ['a cue and a year', 'Costs have gone up since 2024.', 'price_amount'],
+    ['a cue and a half', 'The deposit is half.', 'price_amount'],
+    ['a cue and a dozen', 'There is a discount of a dozen.', 'price_amount'],
+    ['a cue with the amount at the end of the sentence', 'Our rates changed after the long winter season to something near ninety.', 'price_amount'],
     ['a rate word and a number', 'Our rate is 75 for a quarterly visit.', 'price_amount'],
     ['four lowercase sentences', 'we serve parrish. we serve ruskin. we serve wimauma. we serve palmetto.', 'too_many_sentences'],
     ['another currency symbol', 'The initial application is \u20AC50.', 'dollar_amount'],
@@ -125,15 +135,12 @@ describe('hard blocks', () => {
     'Lawns up to 1 acre are included.',
     'We do 4 quarterly visits.',
     'We started in 2009.',
-    'Costs have gone up since 2024.',
     'We open at 8.30 am.',
     'Only 3 visits are needed.',
     'Just 2 visits are included.',
     'Lots up to 0.25 acre are covered.',
     'Only 12 visits are needed.',
     'Only 120 visits are needed.',
-    'Lots start at 1,000 square feet.',
-    'Lots start at 1,000 sq ft.',
     'Only 1,200 customers are covered.',
     'We make three visits a year.',
     'We return every ninety days.',
@@ -145,16 +152,24 @@ describe('hard blocks', () => {
     'The visit takes twenty minutes.',
     'We cover a hundred acres.',
     'We do five applications.',
+    'We cover five acres.',
+    'Lots up to twenty-five acres are covered.',
+    'Lots up to twenty five acres are covered.',
+    'Lots are one hundred twenty square feet.',
+    'Lawns of 1,000 square feet are included.',
+    'We start at 8:30 pm on Fridays.',
     'Our crews start at nine a.m.',
     'We open at nine in the morning.',
-    'Lots start at twenty-five acres.',
-    'Lots start at twenty five acres.',
-    'Lots start at one hundred twenty square feet.',
-    'It costs one hundred twenty square feet of coverage.',
-    'Lots start at fifty-five hundred square feet.',
     'We come back every 90 days for a quarterly visit.',
   ])('not a price: %s', (text) => {
     expect(blocksOf(text)).not.toContain('price_amount');
+  });
+
+  test('the cue and the amount must share a SENTENCE: a cue in one sentence and a count in the next passes, unless a rate joins them', () => {
+    expect(blocksOf('Ask the office about the price. We make three visits a year.')).not.toContain('price_amount');
+    expect(blocksOf('The price covers every visit. We make three visits a year.')).not.toContain('price_amount');
+    expect(blocksOf('The price covers three visits. We come every ninety days.')).toContain('price_amount');
+    expect(blocksOf('We visit often. Plans are five a month.')).toContain('price_amount'); // a rate blocks anywhere
   });
 
   test('lowercase sentence starts count, and abbreviations do not split a sentence', () => {
