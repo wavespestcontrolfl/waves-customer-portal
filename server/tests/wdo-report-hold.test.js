@@ -2292,11 +2292,43 @@ describe('audit fixes', () => {
       expect(dispatch).not.toHaveBeenCalled();
     });
 
-    test('a bounced or dropped report email moves the key, so the next attempt can send a fresh copy', async () => {
-      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'bounced' });
-      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+    test('the key moves only when the email ledger shows this key ended in a bounce or drop', async () => {
+      const counted = (u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks');
+      // the ledger answers the key with its terminal failed row: a fresh copy may go next time
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, deduped: true, reason: 'bounced' });
+      let { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
       await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
-      expect((updates.projects || []).some((u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks'))).toBe(true);
+      expect((updates.projects || []).some(counted)).toBe(true);
+      // a plain error (a template or database read failed): the key stays, an accepted earlier copy is found next time
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'template lookup failed', deliveryOutcome: 'not_sent' });
+      ({ updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) }));
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect((updates.projects || []).some(counted)).toBe(false);
+    });
+
+    test('a refused held send never relinks the project to the invoice it named', async () => {
+      const relinks = [];
+      mockTables({ project: wdoProject({ invoice_id: 'inv-1' }), invoice: invoiceRow({ id: 'inv-2' }) });
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'projects') {
+          const u = c.update;
+          c.update = jest.fn(async (payload) => { if (payload && payload.invoice_id === 'inv-2') relinks.push(payload); return u(payload); });
+        }
+        return c;
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor({ invoice_id: 'inv-2', expected_billing_fingerprint: 'stale' }));
+        expect(res.status).toBe(409);
+      });
+      expect(relinks).toEqual([]);
+    });
+
+    test('an address-only correction on the invoice changes the confirmed-bill fingerprint', () => {
+      const { billingFingerprintHash } = projectsRouter._private;
+      expect(billingFingerprintHash(invoiceRow({ customer_address_snapshot: { line1: '1 Old St' } })))
+        .not.toBe(billingFingerprintHash(invoiceRow({ customer_address_snapshot: { line1: '2 New St' } })));
     });
 
     test('a staff release judges missing details on the claimed row: no override reason, no send', async () => {

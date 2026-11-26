@@ -3261,7 +3261,9 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
   if (invoiceId) {
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
-    await persistProjectInvoiceLink(project, explicit.id);
+    // A held send links its invoice only when the hold is armed (armReportHold writes the link under the project
+    // lock, after every hold check): a refused held send never relinks the project.
+    if (!holdRequested) await persistProjectInvoiceLink(project, explicit.id);
     // This is the normal final-send path (UI posts the previewed draft's id), so
     // reprice it too if the WDO fee changed since the dry-run. Only the untouched
     // auto-created draft is affected; a hand-picked/edited invoice is left as-is.
@@ -4646,10 +4648,10 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
     // A boundary refusal because the invoice is no longer settled (a refund or a reversal): the report is correctly
     // held again, so this is no delivery failure (no block counted, no attempt, no bell).
     const unsettledAtHandoff = !result.ok && handoffState.boundaryBlock?.code === 'HELD_INVOICE_UNSETTLED';
-    // Any definite non-send (refused, bounced, dropped, failed before the provider) moves the key: nothing reached the
-    // customer, so the next attempt may send a fresh copy (the library would otherwise answer the old terminal row
-    // forever). An unknown outcome keeps the key.
-    if (!result.ok && !unknownOutcomeHeld && !unsettledAtHandoff) {
+    // The key moves only on proof that nothing reached the customer: a refusal (blocked), or the email ledger answering
+    // this key with its terminal failed row (deduped: bounced or dropped), which it would otherwise answer forever. A
+    // plain error keeps the key: an earlier attempt with it may have been accepted, and the next retry finds it.
+    if (!result.ok && !unknownOutcomeHeld && !unsettledAtHandoff && (result.blocked || result.deduped)) {
       await db('projects').where(ownClaim).update({
         delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || jsonb_build_object('release_email_blocks', coalesce((delivery_channels->>'release_email_blocks')::int, 0) + 1)"),
       }).catch((err) => logger.warn(`[projects] release email block not counted for ${refreshed.id}: ${err.message}`));
@@ -5249,8 +5251,9 @@ function billingFingerprint(inv) {
   return JSON.stringify([
     require('../services/invoice-helpers').approvedInvoiceVersionDigest(inv),
     money(inv.subtotal), money(inv.discount_amount), money(inv.tax_amount), Number(inv.tax_rate) || 0,
-    // ...and the title and due date the email and PDF print.
+    // ...and the title, due date and billing address the email and PDF print.
     String(inv.title || ''), inv.due_date ? require('../utils/date-only').dateOnlyString(inv.due_date) : null,
+    typeof inv.customer_address_snapshot === 'string' ? inv.customer_address_snapshot : JSON.stringify(inv.customer_address_snapshot ?? null),
   ]);
 }
 
@@ -5281,6 +5284,10 @@ async function armReportHold({ hold, project, invoice, expectedFingerprint, deli
     const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
     const locked = await trx('projects').where({ id: project.id }).forUpdate().first();
     assertHoldArmable({ locked, lockedInvoice, intendedCustomerIds: [project.customer_id, invoice.customer_id] });
+    // The project still points at the invoice staff confirmed (another request relinking it meanwhile refuses).
+    if (locked.invoice_id && String(locked.invoice_id) !== String(invoice.id)) {
+      throw holdRefusal(409, 'hold_invoice_changed', 'This report was linked to a different invoice while it was being sent. Nothing was sent. Refresh and send again.');
+    }
     // Known before any refusal below: a refused resend of an existing hold must leave that hold in place.
     hold.wasHeld = locked.report_hold_status === 'held';
     // The no-charge rule on the LOCKED project: a fee changed to $0 since this send read the project bills nothing.
