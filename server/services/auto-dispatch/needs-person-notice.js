@@ -63,6 +63,8 @@ const REASON_KIND = {
   SOUTH_DAY_KEPT: 'no_slot',
   NO_SLOT_MATCHING_PREFERENCE: 'no_slot',
   DRIFT_ANCHOR_STALE: 'no_slot',
+  // A visit the night run never loads (index.js unloadedLiveVisitIds): a person moves it.
+  NOT_AUTO_DISPATCHED: 'not_auto',
 };
 
 const noticeKey = (id, date) => `${KEY_PREFIX}${id}:${date}`;
@@ -110,6 +112,7 @@ function whyFor(item, subject) {
   if (item.kind === 'move_limit') return `${subject} used all its automatic day moves and ${still}.`;
   const reason = {
     no_near_slot: 'every open slot adds too much drive', no_slot: 'no open slot fits it',
+    not_auto: 'auto-dispatch does not move this visit',
   }[item.kind] || 'auto-dispatch did not move it';
   return `${subject} ${now}, and ${reason}.`;
 }
