@@ -5037,13 +5037,14 @@ function prepGuideSection(context) {
   let used = 0;
   for (const section of guide.sections) {
     const heading = sanitizeSingleLine(section?.heading, 100);
+    if (heading && !prepGuideLineOk(heading)) continue; // a heading that fails the screen drops its whole section: its steps never sit under the previous heading
     const kept = [];
     for (const raw of Array.isArray(section?.sentences) ? section.sentences : []) {
       const sentence = sanitizeSingleLine(raw, 260);
       if (prepGuideLineOk(sentence)) kept.push(sentence);
     }
     const room = kept.filter((sentence) => { sentences += 1; used += sentence.length; return sentences <= PREP_GUIDE_MAX_SENTENCES && used <= PREP_GUIDE_MAX_CHARS; });
-    if (room.length) lines.push(...(prepGuideLineOk(heading) ? [`${heading}:`] : []), ...room.map((sentence) => `- ${sentence}`));
+    if (room.length) lines.push(...(heading ? [`${heading}:`] : []), ...room.map((sentence) => `- ${sentence}`));
     if (room.length < kept.length) break;
   }
   return lines.length ? `PREP GUIDE (our written prep guide for this customer's booked ${sanitizeSingleLine(guide.label, 60)}; repeat its sentences as written, for the section they sit under and this service only, never for another service):\n${lines.join('\n')}\n` : '';
