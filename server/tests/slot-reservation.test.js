@@ -992,14 +992,14 @@ describe('slot reservation helpers', () => {
   });
 
   describe('commitReservation — self-serve notice window (owner ruling 2026-09-23)', () => {
-    function wire({ reservationExpiresAt }) {
+    function wire({ reservationExpiresAt, customerId = null }) {
       const dateProbeBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }) };
       const reservationBuilder = {
         where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), forUpdate: jest.fn().mockReturnThis(),
         first: jest.fn().mockResolvedValue({
           id: 'scheduled-123', source_estimate_id: 'estimate-456', scheduled_date: '2027-05-20',
           window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1',
-          reservation_expires_at: reservationExpiresAt,
+          reservation_expires_at: reservationExpiresAt, customer_id: customerId,
         }),
       };
       const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
@@ -1059,16 +1059,18 @@ describe('slot reservation helpers', () => {
       } finally { jest.useRealTimers(); }
     });
 
-    test('an ALREADY-COMMITTED row inside the window still replays idempotently (an accepted visit is never un-accepted)', async () => {
+    test.each([
+      ['no customer and no hold timestamp', null, 'RESERVATION_EXPIRED'],
+      ['a customer already on it', 'customer-1', 'SLOT_UNAVAILABLE'],
+    ])('a row that is no longer a hold is never returned as a committed checkout (%s)', async (_label, customerId, code) => {
       jest.useFakeTimers();
       jest.setSystemTime(new Date('2027-05-19T15:00:00Z'));
       try {
-        const { trx, updateBuilder } = wire({ reservationExpiresAt: null });
-        const row = await slotReservation.commitReservation({
+        const { trx, updateBuilder } = wire({ reservationExpiresAt: null, customerId });
+        await expect(slotReservation.commitReservation({
           scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
           estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control' }, trx,
-        });
-        expect(row).toMatchObject({ id: 'scheduled-123' });
+        })).rejects.toMatchObject({ code });
         expect(updateBuilder.update).not.toHaveBeenCalled();
       } finally { jest.useRealTimers(); }
     });

@@ -202,13 +202,12 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
     const res = await putAccept(token, { existingAppointmentId: id, ...extra });
     expect(res.status).toBe(409);
     const body = await res.json();
-    // A tab that predates the field gets a reload banner with no code (its 409
-    // handler shows the message); a current page gets the slot code.
+    // A tab that predates the field gets the stale-page code both deployed
+    // clients answer, with a reload message; a current page gets the slot code.
     if (reloadRequired) {
-      expect(body.code).toBeUndefined();
+      expect(body.code).toBe('LAWN_LIMITS_STALE');
       expect(body.reloadRequired).toBe(true);
       expect(body.error).toMatch(/reload/i);
-      expect(body.error).not.toMatch(/expired|slot no longer available/i);
     } else {
       expect(body.code).toBe('SLOT_UNAVAILABLE');
     }

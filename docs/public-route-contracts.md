@@ -7322,8 +7322,9 @@ adopts it sends `existingAppointmentWasHold` (boolean: whether this page showed
 a hold). `true`, or no boolean when the visit was made from this estimate and
 has a customer, answers 409 `SLOT_UNAVAILABLE` so the page re-reads instead of
 rewriting a visit the customer never saw. When the boolean was missing the 409
-has no `code`, a message asking for a page reload, and `reloadRequired: true`
-(a page loaded before the field cannot send it on a retry). A body with a `slotId` whose slot is now a visit staff
+carries the stale-page code `LAWN_LIMITS_STALE` (both deployed pages already
+answer it), a message asking for a page reload, and `reloadRequired: true` (a
+page loaded before the field cannot send it on a retry). A body with a `slotId` whose slot is now a visit staff
 booked for this estimate's own customer adopts that one visit when it is
 unambiguous (no second booking, no live unclaimed hold beside it, proven again
 under the date lock) and the locked visit is still at the picked slot, from

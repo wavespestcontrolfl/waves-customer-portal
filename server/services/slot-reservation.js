@@ -2235,9 +2235,11 @@ async function commitReservation({
     // booking's price, service and window with the checkout's.
     if (row.customer_id != null) throw capacityError('reservation_already_booked');
     if (!row.reservation_expires_at) {
-      // Already committed. Idempotent — return the existing row rather
-      // than throw; a double-click on accept shouldn't fail.
-      return row;
+      // No customer and no hold timestamp: not a hold. A caller must not read
+      // this as a committed checkout, so it falls into the expired-hold recovery.
+      const err = new Error('reservation is no longer a hold');
+      err.code = 'RESERVATION_EXPIRED';
+      throw err;
     }
     // A make-room hold refreshed or re-assigned since the pre-read: same recoverable code as the capacity technician check.
     requireMakeRoomUnchanged(row, preRow, preparedCapacity);

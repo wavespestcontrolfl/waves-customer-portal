@@ -1816,36 +1816,35 @@ function adoptableAppointmentStatuses() {
 }
 
 // This estimate's rows at a slot the customer submitted (a parsed slotId).
-// `includeUnassigned` widens a technician slot to the unassigned rows too: a
-// booking or hold with no technician still occupies that start.
-function estimateRowsAtSlot(conn, estimate, slot, { includeUnassigned = false } = {}) {
+function estimateRowsAtSlot(conn, estimate, slot) {
   return conn('scheduled_services')
     .where({
       source_estimate_id: estimate.id,
       scheduled_date: slot.date,
       window_start: slot.windowStart,
     })
-    .modify((q) => {
-      if (!slot.techId) return;
-      if (includeUnassigned) q.where((b) => { b.where('technician_id', slot.techId).orWhereNull('technician_id'); });
-      else q.where('technician_id', slot.techId);
-    });
+    .modify((q) => { if (slot.techId) q.where('technician_id', slot.techId); });
 }
 
 // A staff booking at a submitted slot is recoverable only when it stands alone:
-// no second booking and no unclaimed hold still live (or inside the commit
-// grace) beside it. Run before the accept transaction and again under the
-// date lock, since either can appear in between.
-async function recoveredSlotIsAmbiguous(conn, estimate, slot, bookedId, holdGraceMinutes) {
-  // Any booking that still occupies the slot counts, whether or not the accept
-  // could adopt it (the in-progress statuses are adoptable only behind a gate).
-  const secondBooking = await estimateRowsAtSlot(conn, estimate, slot, { includeUnassigned: true })
+// no other booking, from any estimate, and no unclaimed hold still live (or
+// inside the commit grace), at that date and start on the booking's technician
+// (or with none). Any booking that still occupies the slot counts, whether or
+// not the accept could adopt it. Run before the accept transaction and again
+// under the date lock, since either can appear in between.
+async function recoveredSlotIsAmbiguous(conn, slot, booked, holdGraceMinutes) {
+  const atStart = () => conn('scheduled_services')
+    .where({ scheduled_date: slot.date, window_start: slot.windowStart })
+    .modify((q) => {
+      if (booked.technician_id) q.where((b) => { b.where('technician_id', booked.technician_id).orWhereNull('technician_id'); });
+    });
+  const otherBooking = await atStart()
     .whereNotNull('customer_id')
     .whereNotIn('status', require('../services/stops-ahead').NOT_A_ROUTE_STOP_STATUSES)
-    .whereNot({ id: bookedId })
-    .first();
-  if (secondBooking) return true;
-  const openHold = await estimateRowsAtSlot(conn, estimate, slot, { includeUnassigned: true })
+    .whereNot({ id: booked.id })
+    .first('id');
+  if (otherBooking) return true;
+  const openHold = await atStart()
     .whereNull('customer_id')
     .whereNotNull('reservation_expires_at')
     .whereRaw('reservation_expires_at >= NOW() - make_interval(mins => ?)', [holdGraceMinutes])
@@ -10831,7 +10830,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // recheck below then judge the visit like any adopted one.
         if (!estimate.customer_id
           || String(staffBooked.customer_id) !== String(estimate.customer_id)
-          || await recoveredSlotIsAmbiguous(db, estimate, parsed, staffBooked.id, holdGraceMinutes)) {
+          || await recoveredSlotIsAmbiguous(db, parsed, staffBooked, holdGraceMinutes)) {
           return res.status(409).json(HOLD_EXPIRED_409);
         }
         recoveredSlot = parsed;
@@ -11021,11 +11020,13 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           && existingAppointmentRow.source_estimate_id != null
           && String(existingAppointmentRow.source_estimate_id) === String(estimate.id)))) {
       // A tab that predates the field cannot send the boolean on a retry. It
-      // gets a body with no code and none of the words its 409 handler keys on
-      // ("expired", "slot no longer available"), so that handler shows this
-      // message as the banner; a reload loads the new bundle, which sends it.
+      // gets the stale-page code both deployed clients already answer: the
+      // server-rendered page shows the message and reloads itself, the React
+      // page refetches and shows the message. A reload loads a page that sends
+      // the field.
       if (typeof shownAsHold !== 'boolean') {
         return res.status(409).json({
+          code: 'LAWN_LIMITS_STALE',
           error: 'This page is out of date. Please reload it to see your updated booking.',
           reloadRequired: true,
         });
@@ -12295,7 +12296,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // still the only booking or hold there. Another row can land after the
         // preflight read, and the locked row recheck below sees only this visit.
         await acquireOccupancyLock(trx, recoveredSlot.date);
-        if (await recoveredSlotIsAmbiguous(trx, estimate, recoveredSlot, existingAppointmentRow.id, holdGraceMinutes)) {
+        if (await recoveredSlotIsAmbiguous(trx, recoveredSlot, existingAppointmentRow, holdGraceMinutes)) {
           throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
         }
       }
