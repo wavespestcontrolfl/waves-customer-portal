@@ -6046,6 +6046,13 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+Recurring mosquito above 2 acres (owner 2026-11-26): a `mosquito` service on a
+measured lot above 87,120 sq ft (gross lot or treatable area) answers `202` with
+`quote_required: true`, `reason: "mosquito_lot_above_2_acres"`, no price fields,
+and the message "Mosquito control for a property this size is priced by our
+team — we'll review your lot and send your exact price shortly." The office bell
+reads "Lot above 2 acres: set the mosquito price by hand". Lots at or below
+2 acres price as before; an unmeasured lot keeps `mosquito_treatable_area_unverified`.
 A `leadId` that names a web-form lead (`lead_type` `form_submission`; its
 id reaches a visitor only through the quiz hand-off) is written only while
 that lead passes the hand-off's rule: open, not deleted, not commercial
