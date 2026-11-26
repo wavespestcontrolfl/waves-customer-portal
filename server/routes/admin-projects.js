@@ -4010,7 +4010,7 @@ function projectEmailFailureMessage(result) {
 // while the report was being delivered keeps its closed status (closed_at stays set and closeout artifacts key on it).
 const SENT_UNLESS_CLOSED = () => db.raw("CASE WHEN status = 'closed' THEN status ELSE 'sent' END");
 
-async function sendWdoReportCopies({ req, project, customer, reportUrl, attachment, excludeEmails, isResend, keyPart = 'initial', ownClaim = null }) {
+async function sendWdoReportCopies({ req, project, customer, reportUrl, attachment, excludeEmails, isResend, keyPart = 'initial', ownClaim = null, copyHandoff = null }) {
   const emails = wdoReportCopyEmails(parseFindings(project), excludeEmails);
   if (!emails.length) return null;
   const sent = [];
@@ -4026,11 +4026,14 @@ async function sendWdoReportCopies({ req, project, customer, reportUrl, attachme
     // (but valid) address could push the key past email_messages'
     // varchar(260) and fail the insert instead of sending.
     const emailKey = crypto.createHash('sha256').update(email).digest('hex').slice(0, 16);
+    // A release's copy runs the release's locked pre-send check in its provider handoff.
+    const handoffState = copyHandoff ? { boundaryBlock: null } : null;
     try {
       const result = await ProjectEmail.sendProjectReportReady({
         project,
         customer,
         reportUrl,
+        ...(copyHandoff ? { withProviderHandoff: copyHandoff(email, handoffState), handoffState } : {}),
         attachments: attachment ? [attachment] : [],
         // name 'there' keeps the template greeting generic — the customer's
         // first name on a title company's copy would read wrong.
@@ -4465,34 +4468,79 @@ async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownC
   const { channels } = await sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim, staffSend });
   // The FDACS PDF rides on the email only: no text without it.
   if (!channels.email.ok) return { channels: { ...channels, sms: { ok: false, error: 'Skipped — email delivery did not succeed' } } };
-  channels.sms = await sendHeldReportTextOnce({ project: link.refreshed, customer, invoice, reportUrl: link.reportUrl, wdoFiling, ownClaim });
+  channels.sms = await sendHeldReportTextOnce({ project: link.refreshed, customer, invoice, reportUrl: link.reportUrl, wdoFiling, ownClaim, requireSettled: !staffSend });
   return { channels };
 }
 
-// The held report email's provider handoff: under the customer's communications lock, the account holder and the
-// send-time recipient are read again, and the email goes only if the address is still the one it was prepared for (a
-// corrected email during the PDF work refuses; the release retries with the new one). Fails closed on a failed read.
-// The project row is read there too, FOR SHARE: still this customer's (an account merge moves it), still this
-// attempt's delivery claim; and the customer is still a live row (a merged-away customer is soft-deleted).
-function heldReportRecipientHandoff({ customerId, expectedEmail, state, ownClaim }) {
+// ONE locked pre-send check for every leg of a held report's release (the email, each requestor copy, the text),
+// run inside that leg's provider handoff and held until the provider request returns. Lock order is the one an
+// account merge takes (customers, then the rows that point at them): the customer-comms advisory lock (plus the
+// phone lock for the text), the customer rows FOR SHARE, the bound invoice FOR SHARE, the project FOR SHARE last.
+// It checks: the customer is still a live row; for the automatic release, the invoice is still settled and still
+// billed to the same account; the project still holds this attempt's claim, still belongs to the customer, and was
+// not recorded as sent another way. `check(trx, fresh)` is the leg's own target check. Any failed read blocks.
+async function heldReleaseAuthority(trx, { customerId, invoice, ownClaim, requireSettled }) {
+  const customer = await loadProjectCustomer(customerId, { strict: true, database: trx, forShare: true });
+  if (!customer || customer.deleted_at) return { block: 'REPORT_OWNER_CHANGED' };
+  if (requireSettled) {
+    const inv = await trx('invoices').where({ id: invoice.id }).forShare().first('status', 'customer_id');
+    if (!inv || !['paid', 'prepaid'].includes(String(inv.status || '').toLowerCase())
+      || String(inv.customer_id) !== String(invoice.customer_id)) return { block: 'HELD_INVOICE_UNSETTLED' };
+  }
+  const project = await trx('projects').where(ownClaim).forShare().first();
+  if (!project || String(project.customer_id) !== String(customerId) || project.sent_outside_portal_at) {
+    return { block: 'REPORT_OWNER_CHANGED' };
+  }
+  return { customer, project };
+}
+
+// The handoff for an EMAIL leg (the report email or one requestor copy): `state.boundaryBlock` names a refusal.
+function heldReportEmailLegHandoff({ customerId, invoice, ownClaim, requireSettled, state, check }) {
   const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
-  const norm = (email) => String(email || '').trim().toLowerCase();
-  return (dispatch) => withCustomerCommsLock(db, customerId, async (trx) => {
-    const liveProject = await trx('projects').where(ownClaim).forShare().first('customer_id').catch(() => null);
-    const fresh = liveProject && String(liveProject.customer_id) === String(customerId)
-      ? await loadProjectCustomer(customerId, { strict: true, database: trx, forShare: true }).catch(() => null)
-      : null;
-    if (!fresh || fresh.deleted_at) {
-      state.boundaryBlock = { code: 'REPORT_OWNER_CHANGED' };
+  return async (dispatch) => {
+    let dispatched = false;
+    try {
+      return await withCustomerCommsLock(db, customerId, async (trx) => {
+        const fresh = await heldReleaseAuthority(trx, { customerId, invoice, ownClaim, requireSettled });
+        const block = fresh.block || (await check(trx, fresh));
+        if (block) {
+          state.boundaryBlock = { code: block };
+          return { ok: false };
+        }
+        dispatched = true;
+        await dispatch(trx);
+        return { ok: true };
+      });
+    } catch (err) {
+      if (dispatched) throw err;
+      state.boundaryBlock = { code: 'HELD_RELEASE_READ_FAILED' };
       return { ok: false };
     }
-    const now = await ProjectEmail.resolveProjectEmailRecipientForSend(fresh, { applyReportRule: true }).catch(() => null);
-    if (!now?.email || norm(now.email) !== norm(expectedEmail)) {
-      state.boundaryBlock = { code: 'REPORT_RECIPIENT_CHANGED' };
-      return { ok: false };
-    }
-    await dispatch(trx);
-    return { ok: true };
+  };
+}
+
+const normEmail = (email) => String(email || '').trim().toLowerCase();
+
+// The report email: still the send-time recipient (a corrected email during the PDF work refuses; the release
+// retries with the new one).
+function heldReportRecipientHandoff({ customerId, expectedEmail, state, ownClaim, invoice, requireSettled }) {
+  return heldReportEmailLegHandoff({
+    customerId, invoice, ownClaim, requireSettled, state,
+    check: async (trx, fresh) => {
+      const now = await ProjectEmail.resolveProjectEmailRecipientForSend(fresh.customer, { applyReportRule: true, database: trx });
+      return now?.email && normEmail(now.email) === normEmail(expectedEmail) ? null : 'REPORT_RECIPIENT_CHANGED';
+    },
+  });
+}
+
+// One requestor copy: the address is still named on the form as it is now, and is not the report's recipient.
+function heldReportCopyHandoff({ customerId, copyEmail, primaryEmail, state, ownClaim, invoice, requireSettled }) {
+  return heldReportEmailLegHandoff({
+    customerId, invoice, ownClaim, requireSettled, state,
+    check: async (_trx, fresh) => (
+      wdoReportCopyEmails(parseFindings(fresh.project), [primaryEmail]).map(normEmail).includes(normEmail(copyEmail))
+        ? null : 'REPORT_COPY_REMOVED'
+    ),
   });
 }
 
@@ -4534,7 +4582,7 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
       isResend: false,
       recipient: emailRecipient,
       handoffState,
-      withProviderHandoff: heldReportRecipientHandoff({ customerId: customer.id, expectedEmail: emailRecipient.email, state: handoffState, ownClaim }),
+      withProviderHandoff: heldReportRecipientHandoff({ customerId: customer.id, expectedEmail: emailRecipient.email, state: handoffState, ownClaim, invoice, requireSettled: !staffSend }),
       attachments: wdoPdf ? [wdoPdf.attachment] : [],
       idempotencyKey: `project.report_ready:${refreshed.id}:hold_release:${String(invoice.id).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40)}:${filingKeyPart(wdoFiling)}:${recipientHash}${blocks ? `:b${blocks}` : ''}`,
     });
@@ -4565,6 +4613,9 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
     // each copy is keyed to the filing it carries, so a corrected filing after a retry reaches the requestors
     keyPart: `release:${filingKeyPart(wdoFiling)}`,
     ownClaim,
+    copyHandoff: (copyEmail, state) => heldReportCopyHandoff({
+      customerId: customer.id, copyEmail, primaryEmail: emailRecipient.email, state, ownClaim, invoice, requireSettled: !staffSend,
+    }),
   });
   if (copies) channels.report_copies = copies;
   return { channels };
@@ -4573,7 +4624,7 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
 // The text has no provider-side dedupe, so the leg is claimed on the row (per invoice and filing) BEFORE it is
 // dispatched, fenced on the release claim: a retry after a crash finds the mark and never texts twice. The text
 // is at-most-once: a crash between the mark and the provider loses a courtesy copy, never repeats it.
-async function sendHeldReportTextOnce({ project, customer, invoice, reportUrl, wdoFiling, ownClaim }) {
+async function sendHeldReportTextOnce({ project, customer, invoice, reportUrl, wdoFiling, ownClaim, requireSettled }) {
   const mark = `${invoice.id}:${filingKeyPart(wdoFiling)}`;
   const stored = typeof project.delivery_channels === 'string' ? safeJsonParse(project.delivery_channels) : project.delivery_channels;
   if (stored?.release_sms === mark) return { ok: true, deduped: true };
@@ -4586,29 +4637,40 @@ async function sendHeldReportTextOnce({ project, customer, invoice, reportUrl, w
   // request by the locked handoff.
   const current = await loadProjectCustomer(customer.id, { strict: true }).catch(() => null);
   if (!current || current.deleted_at) return { ok: false, error: 'Text not sent: the customer could not be read' };
-  return sendHeldReportText({ project, customer: current, invoice, reportUrl, ownClaim });
+  const sent = await sendHeldReportText({ project, customer: current, invoice, reportUrl, ownClaim, requireSettled });
+  // A text that definitely did not go (a number corrected at the last moment, quiet hours, a block) gives its mark
+  // back, so the next attempt can text the right number. Only an unknown outcome keeps it (never texts twice).
+  if (!sent.ok && sent.notSent) {
+    await db('projects').where(ownClaim).update({ delivery_channels: db.raw("delivery_channels - 'release_sms'") })
+      .catch((err) => logger.warn(`[projects] release text mark not returned for ${project.id}: ${err.message}`));
+  }
+  return sent;
 }
 
 // The release text's provider handoff: the bearer link goes only to the number on the customer row as it is at the
-// request. Under the customer-comms and phone locks, the project is read FOR SHARE on this attempt's claim (still
-// this customer's) and the customer row FOR SHARE (a phone write waits for the request, or commits first and vetoes).
-function heldReportSmsHandoff({ customerId, phone, ownClaim }) {
+// request, under the customer-comms and phone locks and the same locked check as the email legs.
+function heldReportSmsHandoff({ customerId, phone, ownClaim, invoice, requireSettled }) {
   const { withSmsConsentLock } = require('../utils/customer-comms-lock');
-  return (dispatch) => withSmsConsentLock(db, { phone, customerId }, async (trx) => {
-    const liveProject = ownClaim ? await trx('projects').where(ownClaim).forShare().first('customer_id').catch(() => null) : null;
-    const fresh = liveProject && String(liveProject.customer_id) === String(customerId)
-      ? await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id', 'phone').catch(() => null)
-      : null;
-    if (!fresh || normalizeUsPhone(fresh.phone) !== phone) {
-      return { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false };
+  const refused = { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false };
+  return async (dispatch) => {
+    let dispatched = false;
+    try {
+      return await withSmsConsentLock(db, { phone, customerId }, async (trx) => {
+        const fresh = await heldReleaseAuthority(trx, { customerId, invoice, ownClaim, requireSettled });
+        if (fresh.block || normalizeUsPhone(fresh.customer.phone) !== phone) return refused;
+        dispatched = true;
+        return dispatch(trx);
+      });
+    } catch (err) {
+      if (dispatched) throw err;
+      return refused;
     }
-    return dispatch(trx);
-  });
+  };
 }
 
 // The text is a courtesy copy of the link: a blocked or quiet-hours text
 // never undoes a delivered report.
-async function sendHeldReportText({ project, customer, invoice, reportUrl, ownClaim }) {
+async function sendHeldReportText({ project, customer, invoice, reportUrl, ownClaim, requireSettled }) {
   const normalizedPhone = normalizeUsPhone(customer.phone);
   if (!normalizedPhone) {
     return { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
@@ -4629,11 +4691,13 @@ async function sendHeldReportText({ project, customer, invoice, reportUrl, ownCl
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: 'project_report_hold_release',
       metadata: { original_message_type: 'project_report', project_id: project.id, invoice_id: invoice.id },
-      withSmsHandoff: heldReportSmsHandoff({ customerId: customer.id, phone: normalizedPhone, ownClaim }),
+      withSmsHandoff: heldReportSmsHandoff({ customerId: customer.id, phone: normalizedPhone, ownClaim, invoice, requireSettled }),
     });
-    return result.sent ? { ok: true } : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+    if (result.sent) return { ok: true };
+    const { classifyDeliveryCertainty } = require('../services/messaging/send-customer-message');
+    return { ok: false, error: result.reason || result.code || 'SMS send blocked/failed', notSent: classifyDeliveryCertainty(result) === 'not_sent' };
   } catch (err) {
-    return { ok: false, error: err.message };
+    return { ok: false, error: err.message, notSent: false };
   }
 }
 

@@ -164,8 +164,10 @@ function resolveProjectEmailRecipient(customer = {}, { applyReportRule = false }
 async function resolveProjectEmailRecipientForSend(customer = {}, opts = {}) {
   const recipient = resolveProjectEmailRecipient(customer, opts);
   if (!isServiceContactRole(recipient.role)) return recipient;
+  // `opts.database`: a caller holding a transaction (a locked pre-send check) reads the contact's choice on it.
   const declines = await require('./contact-notification-prefs')
-    .contactDeclinesChannel(customer.id, { phone: customer.service_contact_phone, role: recipient.role }, 'email');
+    .contactDeclinesChannel(customer.id, { phone: customer.service_contact_phone, role: recipient.role }, 'email',
+      ...(opts.database ? [{ dbh: opts.database }] : []));
   if (!declines) return recipient;
   const primary = getPrimaryContact(customer);
   return {

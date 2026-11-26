@@ -61,6 +61,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
+  classifyDeliveryCertainty: (o) => (o?.deliveryOutcome === 'not_sent' || o?.blocked === true ? 'not_sent' : (o?.deliveryOutcome === 'accepted' ? 'sent' : 'unknown')),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderRequiredSmsTemplate: jest.fn(async (_key, vars) => `Hi ${vars.first_name}, your Waves ${vars.project_type} report is ready: ${vars.report_url}`),
@@ -1985,6 +1986,84 @@ describe('audit fixes', () => {
       expect(token).toBe('tok-1');
       expect(tokenOnly).toBe(!attached);
       expect(url === null).toBe(!attached);
+    });
+  });
+
+  describe('advisor redesign phase 1: one locked pre-send check for every release leg', () => {
+    async function releaseArgs(findings) {
+      mockTables({ project: wdoProject({ report_hold_status: 'held', ...(findings ? { findings } : {}) }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      return ProjectEmail.sendProjectReportReady.mock.calls;
+    }
+
+    test('the report email refuses when the invoice reopened after the link was published', async () => {
+      const [[args]] = await releaseArgs();
+      const dispatch = jest.fn();
+      mockTables({ project: wdoProject({ report_hold_status: 'releasing' }), invoice: invoiceRow({ status: 'sent' }) });
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      expect(args.handoffState.boundaryBlock).toEqual({ code: 'HELD_INVOICE_UNSETTLED' });
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('the check locks customers, then the invoice, then the project (an account merge locks in that order)', async () => {
+      const [[args]] = await releaseArgs();
+      const base = db.getMockImplementation();
+      const order = [];
+      db.mockImplementation((table) => {
+        const c = base(table);
+        c.forShare = jest.fn(() => { order.push(table); return c; });
+        return c;
+      });
+      expect(await args.withProviderHandoff(jest.fn())).toEqual({ ok: true });
+      const firstOf = (t) => order.indexOf(t);
+      expect(firstOf('customers')).toBeGreaterThanOrEqual(0);
+      expect(firstOf('customers')).toBeLessThan(firstOf('invoices'));
+      expect(firstOf('invoices')).toBeLessThan(firstOf('projects'));
+    });
+
+    test('the project recorded as sent another way refuses every leg', async () => {
+      const [[args]] = await releaseArgs();
+      mockTables({ project: wdoProject({ report_hold_status: 'releasing', sent_outside_portal_at: '2026-11-26T10:00:00Z' }), invoice: invoiceRow({ status: 'paid' }) });
+      expect(await args.withProviderHandoff(jest.fn())).toEqual({ ok: false });
+      expect(args.handoffState.boundaryBlock).toEqual({ code: 'REPORT_OWNER_CHANGED' });
+    });
+
+    test('a failed read inside the check blocks the send', async () => {
+      const [[args]] = await releaseArgs();
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'invoices') c.first = jest.fn(async () => { throw new Error('db blip'); });
+        return c;
+      });
+      const dispatch = jest.fn();
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('each requestor copy runs the check, and a copy removed from the form is not sent', async () => {
+      const findings = { ...FINDINGS, report_sent_to: 'ABC Title <closing@abctitle.com>' };
+      const calls = await releaseArgs(findings);
+      const copy = calls.map(([a]) => a).find((a) => a.recipient?.role === 'report_copy');
+      expect(typeof copy.withProviderHandoff).toBe('function');
+      const dispatch = jest.fn();
+      expect(await copy.withProviderHandoff(dispatch)).toEqual({ ok: true });
+      mockTables({ project: wdoProject({ report_hold_status: 'releasing', findings: { ...FINDINGS, report_sent_to: '' } }), invoice: invoiceRow({ status: 'paid' }) });
+      expect(await copy.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      expect(copy.handoffState.boundaryBlock).toEqual({ code: 'REPORT_COPY_REMOVED' });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    test('the text refuses when the invoice reopened, and a text that definitely did not go gives its mark back', async () => {
+      sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'RECIPIENT_CHANGED' });
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect((updates.projects || []).some((u) => u.delivery_channels?.sql === "delivery_channels - 'release_sms'")).toBe(true);
+      const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'project_report_hold_release')[0];
+      mockTables({ project: wdoProject({ report_hold_status: 'releasing' }), invoice: invoiceRow({ status: 'refunded' }) });
+      const dispatch = jest.fn();
+      expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'RECIPIENT_CHANGED' }));
+      expect(dispatch).not.toHaveBeenCalled();
     });
   });
 
