@@ -20,6 +20,9 @@ const REVIEWED = [
   ['mosquito', 3, 'Suspend Polyzone', 1.1, 'fl_oz'],
   // Tekko Pro IGR, EPA 53883-335, "CONTROL OF COCKROACHES AND CRICKETS": 2 oz per gallon of water, 1 gallon per 1,000 sq ft.
   ['cockroach', 1, 'Tekko Pro IGR', 2, 'fl_oz'],
+  // The same label use on the two vehicle cards: the label lists "Transportation Equipment (automobiles, boxcars, buses, boats, trucks ...)".
+  ['cockroach', 4, 'Tekko Pro IGR', 2, 'fl_oz'],
+  ['cockroach', 5, 'Tekko Pro IGR', 2, 'fl_oz'],
   // Tekko Pro IGR, EPA 53883-335, fleas: "Dilute spray solution: 1 oz. per gal. of water ... Spray rate: 1 gal. per 1,500 ft2", so
   // 1 fl oz per 1,500 sq ft. The flea card sprays the shared Antapex tank at 1 gallon per 1,000 sq ft, so the tank carries 0.66 fl oz
   // per gallon (0.66 per 1,000 sq ft, under the label's 0.667). Below the catalog's 1 per gallon: the close-out starts and is
@@ -114,14 +117,15 @@ describe('card lines that carry a label rate for their own pest', () => {
     // Owner 2026-11-25 (D11): "EC3 stops on cockroach jobs". The Tekko Pro label (53883-335) lists transportation equipment:
     // automobiles, buses, boats and trucks.
     expect(JSON.stringify(protocols.cockroach)).not.toContain('Gentrol');
-    expect(protocols.cockroach.visits.map((visit) => visit.visit)).toEqual([1, 2, 3]);
-    for (const [name, serviceKey] of [
-      ['Cockroach Treatment', 'cockroach_control'], ['German Roach Cleanout', 'german_roach'], ['German Roach Cleanout', null],
-      ['Cockroach Control Service', null], ['Vehicle German Roach Treatment (2 Visits)', 'vehicle_german_roach'],
-      ['Vehicle Roach Add-On', 'vehicle_roach_addon'], ['RV Roach Treatment', null],
+    // Visits 4 and 5 are the vehicle job and the vehicle add-on (roach-vehicle-card-spray-volume.test.js).
+    expect(protocols.cockroach.visits.map((visit) => visit.visit)).toEqual([1, 2, 3, 4, 5]);
+    for (const [name, serviceKey, card] of [
+      ['Cockroach Treatment', 'cockroach_control', 1], ['German Roach Cleanout', 'german_roach', 1], ['German Roach Cleanout', null, 1],
+      ['Cockroach Control Service', null, 1], ['Vehicle German Roach Treatment (2 Visits)', 'vehicle_german_roach', 4],
+      ['Vehicle Roach Add-On', 'vehicle_roach_addon', 5], ['RV Roach Treatment', null, 1],
     ]) {
       const match = matchServiceProtocol(protocols, name, serviceKey ? { serviceKey } : {});
-      expect([name, match.matchedVisit.visit]).toEqual([name, 1]);
+      expect([name, match.matchedVisit.visit]).toEqual([name, card]);
       expect(match.matchedVisit.completionDefaultProducts).toContain('Tekko Pro IGR');
     }
   });
@@ -256,8 +260,8 @@ describe('the tank calculator on a visit with two Tekko Pro cards', () => {
     tables.scheduled_service_addons = [{ service_name: 'Flea Treatment', category: 'pest_control', service_key: 'flea_tick' }];
     const result = await mix();
     expect(result.amount).toBeNull();
-    // The hold names each service's own rate, so the tech can mix a tank for each.
-    expect(result.reason).toBe('Tekko Pro IGR has a different rate on each service on this visit: German Roach Cleanout 2 fl oz per gallon; Flea Treatment 0.66 fl oz per gallon. Mix a separate tank for each');
+    // The hold names each service's own rate with the spray volume it holds at, so the tech can mix a tank for each.
+    expect(result.reason).toBe('Tekko Pro IGR has a different rate on each service on this visit: German Roach Cleanout 2 fl oz per gallon at 1 gal per 1,000 sq ft; Flea Treatment 0.66 fl oz per gallon at 1 gal per 1,000 sq ft. Mix a separate tank for each');
   });
 
   test('a held flea line holds the dose whichever service is the visit and whichever the add-on', async () => {

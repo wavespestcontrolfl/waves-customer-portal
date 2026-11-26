@@ -494,7 +494,8 @@ describe('a later stage named anywhere in a flea, cockroach or bed bug name', ()
     ['German Roach Treatment 2 bedrooms', ['cockroach', 1, 'german_roach_cleanout']],
     ['Flea Treatment 2 rooms', ['flea', 1, 'flea_service']],
     ['Bed Bug Treatment 3 Bedrooms', ['bed_bug', 2, 'bed_bug_treatment']],
-    ['Vehicle German Roach Treatment (2 Visits)', ['cockroach', 1, 'german_roach_cleanout']],
+    // The live catalog name of the vehicle job: its own first card (the vehicle card), not the follow-up.
+    ['Vehicle German Roach Treatment (2 Visits)', ['cockroach', 4, 'vehicle_roach']],
     ['German Roach Initial Service (3-Visit)', ['cockroach', 1, 'german_roach_cleanout']],
     ['Bed Bug Treatment Service', ['bed_bug', 2, 'bed_bug_treatment']],
     ['Cockroach Treatment Service', ['cockroach', 1, 'cockroach_control']],

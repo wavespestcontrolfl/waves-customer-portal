@@ -61,6 +61,24 @@ const MATCH_RULES = [
     serviceKeys: ['flea_tick'],
     terms: ['flea', 'fleas'],
   },
+  // A car, truck or van job has its own cards: the house card's kitchens and appliance motors do not apply, and the
+  // labels' limits inside a vehicle do. The catalog key routes it whatever the visit is named. The add-on (the rider on
+  // a home German roach job) is gel bait and growth regulator only; the vehicle job adds the non-repellent treatment.
+  // Both sit before the German roach rule, whose terms their names also carry.
+  {
+    programKey: 'cockroach',
+    visit: 5,
+    reason: 'vehicle_roach_addon',
+    serviceKeys: ['vehicle_roach_addon'],
+    terms: ['vehicle roach add on', 'vehicle roach addon', 'vehicle german roach add on'],
+  },
+  {
+    programKey: 'cockroach',
+    visit: 4,
+    reason: 'vehicle_roach',
+    serviceKeys: ['vehicle_german_roach'],
+    terms: ['vehicle german roach', 'vehicle roach', 'vehicle cockroach'],
+  },
   {
     programKey: 'cockroach',
     visit: 1,

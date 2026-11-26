@@ -54,6 +54,16 @@ function labelUseRate(meta, product) {
   return { amount, unit: String(declared.unit) };
 }
 
+// The spray volume the line's label rate is stated over, in gallons per 1,000 sq ft (labelRatePerGallon.carrierGalPer1000),
+// when the line's label rate applies to this product; else null. A per-gallon rate is a label amount per area only at that
+// volume: Tekko Pro on cockroaches is 2 fl oz per gallon at 1 gallon per 1,000 sq ft, so a sprayer that puts out 2 gallons
+// per 1,000 sq ft would put down twice the label amount from the same mix.
+function labelRateCarrier(meta, product) {
+  if (!labelUseRate(meta, product)) return null;
+  const carrier = Number(meta?.labelRatePerGallon?.carrierGalPer1000);
+  return carrier > 0 && Number.isFinite(carrier) ? carrier : null;
+}
+
 // Why a weaker-mix line gives this row no rate at all, or null: 'registration' (another or no EPA number) or 'catalog_rate'
 // (the row's catalog rate cannot be compared with the card's).
 function labelRateHeld(meta, product) {
@@ -104,4 +114,4 @@ function cardStartRateFields(meta, product) {
   return { cardStartRate: amount };
 }
 
-module.exports = { labelUseRate, labelRateHeld, labelRateHoldText, completionRateFields, cardStartRateFields, normalizeEpa };
+module.exports = { labelUseRate, labelRateCarrier, labelRateHeld, labelRateHoldText, completionRateFields, cardStartRateFields, normalizeEpa };
