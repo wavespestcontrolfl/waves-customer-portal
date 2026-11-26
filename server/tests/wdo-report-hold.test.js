@@ -829,6 +829,17 @@ describe('manual send releases a held report early, and never races the sweep', 
     });
   });
 
+  test('/send on a HELD report that delivers nothing unpublishes the link it minted (still held, unpaid, no live link)', async () => {
+    ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'rejected by provider' });
+    const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null, invoice_id: 'inv-1' }) });
+    await withServer(async (baseUrl) => { await post(baseUrl, '/admin/projects/project-1/send'); });
+    const projectUpdates = updates.projects || [];
+    const minted = projectUpdates.find((u) => typeof u.report_token === 'string');
+    expect(minted?.portal_visible).toBe(false);
+    const finalize = projectUpdates.find((u) => u.delivery_claim_token === null && 'delivery_status' in u && u.delivery_status !== 'sending');
+    expect(finalize).toEqual(expect.objectContaining({ report_token: null }));
+  });
+
   test('/send on a HELD report of a CLOSED project releases it and keeps the closed status', async () => {
     const { updates } = mockTables({ project: wdoProject({ status: 'closed', report_hold_status: 'held' }) });
     await withServer(async (baseUrl) => {
@@ -1724,6 +1735,65 @@ describe('audit fixes', () => {
       expect(projectUpdates.findIndex((u, i) => i > stampIdx && u.report_hold_status === null)).toBe(-1);
     });
 
+    test('an invoice email of unknown outcome is not recorded as an email delivery (the invoice still becomes sent)', async () => {
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'timeout', deliveryOutcome: 'uncertain' });
+      mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      expect(InvoiceService.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({ email: false }));
+    });
+
+    test('a held resend whose email is accepted closes the earlier unknown-outcome invoice bell', async () => {
+      const holdService = require('../services/project-report-hold');
+      const close = jest.spyOn(holdService, 'closeInvoiceEmailBell').mockResolvedValue();
+      mockTables({ project: wdoProject({ report_hold_status: 'held', invoice_id: 'inv-1' }) });
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      expect(close).toHaveBeenCalledWith('project-1');
+      close.mockRestore();
+    });
+
+    test('a held send whose customer row now has a different phone skips the pay-link text', async () => {
+      mockTables();
+      const base = db.getMockImplementation();
+      let customerReads = 0;
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'customers') {
+          const original = c.first;
+          c.first = jest.fn(async (...a) => {
+            customerReads += 1;
+            const row = await original(...a);
+            return a[0] === 'phone' && row ? { ...row, phone: '9415550177' } : row;
+          });
+        }
+        return c;
+      });
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      expect(sendCustomerMessage.mock.calls.some(([a]) => a.entryPoint === 'admin_project_report_with_invoice')).toBe(false);
+      expect(customerReads).toBeGreaterThan(0);
+    });
+
+    test('arming judges release readiness on the customer read inside the arming transaction', async () => {
+      // the preflight customer has an email; the row read under the arming locks has none
+      mockTables();
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'customers') {
+          const originalForShare = c.forShare;
+          c.forShare = jest.fn(() => {
+            c.first = jest.fn(async () => ({ ...CUSTOMER, email: '' }));
+            return originalForShare ? originalForShare.call(c) : c;
+          });
+        }
+        return c;
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        expect(res.status).toBeGreaterThanOrEqual(400);
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+    });
+
     test('the dry run hands back a fingerprint of the invoice the operator confirms, and the send refuses a changed bill', async () => {
       mockTables();
       const fingerprint = await withServer(async (baseUrl) => {
@@ -1832,8 +1902,8 @@ describe('audit fixes', () => {
       const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
       await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
       const renewals = (updates.projects || []).filter((u) => u.updated_at && u.report_hold_locked_at && !('report_hold_status' in u));
-      // the link stamp, the check right before the provider calls, and the courtesy text mark
-      expect(renewals).toHaveLength(3);
+      // the link stamp, the check right before the provider calls, the one requestor copy, and the courtesy text mark
+      expect(renewals).toHaveLength(4);
     });
   });
 
@@ -1973,6 +2043,84 @@ describe('audit fixes', () => {
       expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
       expect(dispatch).not.toHaveBeenCalled();
       expect(args.handoffState.boundaryBlock).toEqual({ code: 'REPORT_OWNER_CHANGED' });
+    });
+
+    test('the release text holds the number on the customer row through the provider request (a corrected phone vetoes)', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'project_report_hold_release')[0];
+      expect(typeof sms.withSmsHandoff).toBe('function');
+      const dispatch = jest.fn(async () => ({ ok: true, sid: 'SM1' }));
+      expect(await sms.withSmsHandoff(dispatch)).toEqual({ ok: true, sid: 'SM1' });
+      mockTables({ customer: { ...CUSTOMER, phone: '9415550199' } });
+      expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'RECIPIENT_CHANGED' }));
+      mockTables({ project: wdoProject({ customer_id: 'customer-2' }) });
+      expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'RECIPIENT_CHANGED' }));
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    test('the release text goes to the phone as it is after the PDF and email work', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      const base = db.getMockImplementation();
+      let customerReads = 0;
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'customers') {
+          const original = c.first;
+          c.first = jest.fn(async (...a) => {
+            customerReads += 1;
+            const row = await original(...a);
+            return customerReads > 1 && row ? { ...row, phone: '9415550177' } : row;
+          });
+        }
+        return c;
+      });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'project_report_hold_release')?.[0];
+      expect(sms?.to).toMatch(/9415550177$/);
+    });
+
+    test('the paid-report text is allowed its locked handoff by the sender', () => {
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../services/messaging/send-customer-message.js'), 'utf8');
+      expect(source).toMatch(/input\.entryPoint === 'project_report_hold_release'\s*\n\s*&& input\.metadata\?\.original_message_type === 'project_report'/);
+    });
+
+    test('a failure bell raised just after a release finished is closed again', async () => {
+      const holdService = require('../services/project-report-hold');
+      const raise = jest.spyOn(holdService, 'raiseReleaseFailedBell').mockResolvedValue(true);
+      const close = jest.spyOn(holdService, 'closeReleaseFailedBell').mockResolvedValue();
+      // the release fails (no PDF) and the revert finds the row held; the marker write then finds it released
+      mockTables({
+        project: wdoProject({ report_hold_status: 'held' }),
+        invoice: invoiceRow({ status: 'paid' }),
+        projectUpdateResult: (payload) => (payload.delivery_channels?.sql?.includes('release_bell') ? 0 : 1),
+      });
+      buildWdoReportPDFBuffer.mockRejectedValueOnce(new Error('render failed'));
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(raise).toHaveBeenCalled();
+      expect(close).toHaveBeenCalledWith('project-1');
+      raise.mockRestore();
+      close.mockRestore();
+    });
+
+    test('a release that crashed counts as a failed attempt with a reason', async () => {
+      const holdService = require('../services/project-report-hold');
+      const updates = [];
+      db.mockImplementation(() => chain({ update: jest.fn(async (payload) => { updates.push(payload); return 1; }) }));
+      await holdService._internals.recoverStaleReleasingClaims();
+      expect(updates[0].report_hold_attempts).toBeTruthy();
+      expect(updates[0].report_hold_last_error).toMatch(/did not finish/);
+    });
+
+    test('a requestor copy that fails makes the release partial', async () => {
+      const findings = { ...FINDINGS, report_sent_to: 'ABC Title <closing@abctitle.com>' };
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', findings }), invoice: invoiceRow({ status: 'paid' }) });
+      ProjectEmail.sendProjectReportReady
+        .mockImplementationOnce(async () => ({ ok: true }))
+        .mockImplementationOnce(async () => ({ ok: false, error: 'bounced' }));
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const released = (updates.projects || []).find((u) => u.report_hold_status === 'released');
+      expect(released?.delivery_status).toBe('partial');
     });
 
     test('the manual Send report preview of a held report lists the release routing (a named billing contact gets its copy)', async () => {

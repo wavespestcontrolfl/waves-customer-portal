@@ -699,7 +699,13 @@ async function sendCustomerMessageCore(input) {
     // number is re-read (a phone correction can never send the answer to the old number).
     || (input.audience === 'customer' && input.purpose === 'support_resolution'
       && input.entryPoint === 'admin_portal_answer'
-      && input.metadata?.original_message_type === 'portal_answer');
+      && input.metadata?.original_message_type === 'portal_answer')
+    // The paid WDO report's text (admin-projects.js heldReportSmsHandoff, GATE_WDO_REPORT_HOLD): a bearer report
+    // link sent by the payment sweep with no one watching, so the phone locks, the project claim and the customer
+    // row are held through the provider request while the number is re-read.
+    || (input.audience === 'customer' && input.purpose === 'support_resolution'
+      && input.entryPoint === 'project_report_hold_release'
+      && input.metadata?.original_message_type === 'project_report');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }

@@ -51,6 +51,10 @@ async function recoverStaleReleasingClaims() {
       report_hold_status: 'held',
       report_hold_locked_at: null,
       report_hold_next_attempt_at: db.fn.now(),
+      // A release that never finished is a failed attempt: it counts toward the stuck-hold bucket and the drawer
+      // shows why, so a report that crashes every time cannot retry unseen for ever.
+      report_hold_attempts: db.raw('coalesce(report_hold_attempts, 0) + 1'),
+      report_hold_last_error: 'The last automatic send did not finish. It retries by itself.',
       // The release took the shared send claim; a crashed release must give it back.
       delivery_status: db.raw("CASE WHEN delivery_status = 'sending' THEN 'failed' ELSE delivery_status END"),
       delivery_claim_token: null,
@@ -244,7 +248,19 @@ async function closeReleaseFailedBell(projectId) {
   }
 }
 
+// After a held invoice resend whose email was accepted: the "check the customer got the invoice" bell is answered.
+async function closeInvoiceEmailBell(projectId) {
+  try {
+    await require('./admin-alert-episodes').closeAdminAlertKeys(db, [invoiceEmailBellKey(projectId)], 'wdo_invoice_email_delivered', {
+      resolution: 'The invoice email was delivered.',
+    });
+  } catch (err) {
+    logger.warn(`[report-hold] invoice email bell not closed for ${projectId}: ${err.message}`);
+  }
+}
+
 module.exports = {
+  closeInvoiceEmailBell,
   sweepHeldReportReleases,
   isReportHeld,
   REPORT_UNSHARED_SQL,

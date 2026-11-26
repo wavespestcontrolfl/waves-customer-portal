@@ -3675,10 +3675,24 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         code: 'send_in_progress',
       });
     }
-    const revertSendClaim = async () => {
+    // A held report that had no link before this send: the link this send mints is unpublished again when nothing
+    // is delivered (the report stays held, unpaid, and with no live link in the portal).
+    const mintsHeldLink = project.project_type === 'wdo_inspection' && isReportHeld(project) && !project.report_token;
+    const unmintHeldLink = mintsHeldLink ? { report_token: null, ...(projectCols.portal_visible ? { portal_visible: false } : {}) } : {};
+    const heldHandback = {
+      // A send that took over a crashed release's claim and delivered nothing hands the report back to the sweep at
+      // once, rather than leaving it 'releasing' until the stale-claim recovery ages it out.
+      ...(projectCols.report_hold_status ? {
+        report_hold_status: db.raw("CASE WHEN report_hold_status = 'releasing' THEN 'held' ELSE report_hold_status END"),
+        report_hold_locked_at: db.raw("CASE WHEN report_hold_status = 'releasing' THEN NULL ELSE report_hold_locked_at END"),
+      } : {}),
+    };
+    // `beforeSend`: an exit before any provider call, so the link this send minted cannot be in anyone's hands. The
+    // error path passes false (a throw can come after the email went out).
+    const revertSendClaim = async ({ beforeSend = true } = {}) => {
       await db('projects')
         .where({ id: project.id, delivery_status: 'sending', delivery_claim_token: sendClaimToken })
-        .update({ delivery_status: previousDeliveryStatus, delivery_claim_token: null, updated_at: db.fn.now() })
+        .update({ delivery_status: previousDeliveryStatus, delivery_claim_token: null, updated_at: db.fn.now(), ...(beforeSend ? unmintHeldLink : {}), ...heldHandback })
         .catch((err) => logger.warn(`[projects] send claim revert failed for ${project.id}: ${err.message}`));
     };
     revertSendClaimOnError = revertSendClaim;
@@ -3693,7 +3707,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       report_token: token,
       updated_at: db.fn.now(),
     };
-    if (projectCols.portal_visible) tokenUpdate.portal_visible = portalAttachment.portalAttached;
+    // A held report is shown in the portal only once it is delivered (the finalize below).
+    if (projectCols.portal_visible) tokenUpdate.portal_visible = mintsHeldLink ? false : portalAttachment.portalAttached;
     if (projectCols.portal_visibility) {
       tokenUpdate.portal_visibility = portalAttachment.completionProfile?.portalVisibility || project.portal_visibility || 'token_only';
     }
@@ -3720,7 +3735,6 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const updatedProject = await db('projects').where({ id: req.params.id }).first();
     const reportPath = await projectReportPathForProject(db, updatedProject, customer || {});
     const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
-    await restoreHeldVisitReportLink(updatedProject, reportPath, portalAttachment.portalAttached);
     const typeCfg = getProjectType(project.project_type);
     const typeLabel = typeCfg?.label || 'Service';
     const firstName = customer?.first_name || 'there';
@@ -3911,6 +3925,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       Object.assign(deliveryUpdate, pretreatSentSnapshot(updatedProject, projectCols));
       // A manual send of a held report is the early release: the hold clears in the same write as the sent stamp.
       Object.assign(deliveryUpdate, heldReportReleaseFieldsIfHeld(updatedProject));
+      if (mintsHeldLink && projectCols.portal_visible) deliveryUpdate.portal_visible = portalAttachment.portalAttached;
       if (wdoFiling && projectCols.wdo_sent_filings) {
         // Atomic jsonb append — /send has no send claim, so a concurrent send
         // must not lose a filing record to read-modify-write.
@@ -3919,6 +3934,9 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           [JSON.stringify([wdoFiling])],
         );
       }
+    } else {
+      // (An email of unknown outcome may have carried the link: it stays live.)
+      Object.assign(deliveryUpdate, heldHandback, channels.email?.uncertain ? {} : unmintHeldLink);
     }
 
     // Fenced finalize: only the request that still owns the claim may write
@@ -3933,6 +3951,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       logger.error(`[projects] send finalize fenced off for ${project.id} — claim superseded by a stale-takeover; outcome not recorded`);
     }
 
+    if (finalized && delivered) await restoreHeldVisitReportLink(updatedProject, reportPath, portalAttachment.portalAttached);
     await closeHoldBellOnManualRelease(updatedProject, delivered);
     const sendAction = delivered
       ? (project.sent_at || project.status === 'sent' ? 'project_report_resent' : 'project_report_sent')
@@ -3971,7 +3990,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       ...(readiness.missing.length > 0 ? { readiness_override: hasReadinessOverride } : {}),
     });
   } catch (err) {
-    if (revertSendClaimOnError) await revertSendClaimOnError().catch(() => {});
+    if (revertSendClaimOnError) await revertSendClaimOnError({ beforeSend: false }).catch(() => {});
     next(err);
   }
 });
@@ -3991,12 +4010,18 @@ function projectEmailFailureMessage(result) {
 // while the report was being delivered keeps its closed status (closed_at stays set and closeout artifacts key on it).
 const SENT_UNLESS_CLOSED = () => db.raw("CASE WHEN status = 'closed' THEN status ELSE 'sent' END");
 
-async function sendWdoReportCopies({ req, project, customer, reportUrl, attachment, excludeEmails, isResend, keyPart = 'initial' }) {
+async function sendWdoReportCopies({ req, project, customer, reportUrl, attachment, excludeEmails, isResend, keyPart = 'initial', ownClaim = null }) {
   const emails = wdoReportCopyEmails(parseFindings(project), excludeEmails);
   if (!emails.length) return null;
   const sent = [];
   const failed = [];
   for (const email of emails) {
+    // A release sends each copy only while it still owns its claim (the renewal also keeps the lease alive through a
+    // long list); a lost claim stops the list, and the new owner sends the rest under the same keys.
+    if (ownClaim && !(await db('projects').where(ownClaim).update(RELEASE_LEASE_RENEWAL()).catch(() => 0))) {
+      failed.push({ email, error: 'the release claim was lost' });
+      continue;
+    }
     // The email is hashed into the idempotency key, not embedded: a long
     // (but valid) address could push the key past email_messages'
     // varchar(260) and fail the insert instead of sending.
@@ -4261,9 +4286,13 @@ function makeHeldReverter({ project, claim, ctx, source }) {
           `Paid report release blocked: ${String(reason || 'release failed').slice(0, 200)}`, { source }).catch(() => {});
       }
       if (await hold.raiseReleaseFailedBell({ project, customer: ctx.customer, reason })) {
-        await db('projects').where({ id: project.id, report_hold_status: 'held' }).update({
+        const marked = await db('projects').where({ id: project.id, report_hold_status: 'held' }).update({
           delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || '{\"release_bell\": true}'::jsonb"),
-        }).catch((err) => logger.warn(`[projects] release bell marker not stored for ${project.id}: ${err.message}`));
+        }).catch((err) => { logger.warn(`[projects] release bell marker not stored for ${project.id}: ${err.message}`); return null; });
+        // A release that finished between the check above and the raise closed its bells BEFORE this one existed.
+        // Every releaser closes after its release commits, so the row no longer being held here means this bell is
+        // stale: close it (one of the two sides always sees the other).
+        if (marked === 0) await hold.closeReleaseFailedBell(project.id);
       }
     }
     return { released: false, reason: String(reason || 'release_failed') };
@@ -4317,7 +4346,9 @@ async function stampHeldReportLink({ project, projectCols, ownClaim, customer, i
   // transaction: a credit reversal or refund that reopened it during the PDF work keeps the report held.
   const published = await db.transaction(async (trx) => {
     // Project row first, then the invoice: the order arming takes them in.
-    if (!(await trx('projects').where({ ...ownClaim, invoice_id: invoice.id }).forUpdate().first('id'))) return 'lost';
+    // ...and still this customer's: the portal decision and the report path above were made for this customer.
+    const lockedProject = await trx('projects').where({ ...ownClaim, invoice_id: invoice.id }).forUpdate().first('id', 'customer_id');
+    if (!lockedProject || String(lockedProject.customer_id) !== String(customer.id)) return 'lost';
     const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('status');
     if (!locked || !['paid', 'prepaid'].includes(String(locked.status || '').toLowerCase())) return 'unsettled';
     return (await trx('projects').where({ ...ownClaim, invoice_id: invoice.id }).update(tokenUpdate)) ? 'ok' : 'lost';
@@ -4533,6 +4564,7 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
     isResend: false,
     // each copy is keyed to the filing it carries, so a corrected filing after a retry reaches the requestors
     keyPart: `release:${filingKeyPart(wdoFiling)}`,
+    ownClaim,
   });
   if (copies) channels.report_copies = copies;
   return { channels };
@@ -4550,12 +4582,33 @@ async function sendHeldReportTextOnce({ project, customer, invoice, reportUrl, w
     delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ release_sms: mark })]),
   });
   if (!claimed) return { ok: false, error: 'Text not sent: the release claim was lost' };
-  return sendHeldReportText({ project, customer, invoice, reportUrl });
+  // The phone as it is NOW (a number corrected during the PDF and email work gets the text), then held to the provider
+  // request by the locked handoff.
+  const current = await loadProjectCustomer(customer.id, { strict: true }).catch(() => null);
+  if (!current || current.deleted_at) return { ok: false, error: 'Text not sent: the customer could not be read' };
+  return sendHeldReportText({ project, customer: current, invoice, reportUrl, ownClaim });
+}
+
+// The release text's provider handoff: the bearer link goes only to the number on the customer row as it is at the
+// request. Under the customer-comms and phone locks, the project is read FOR SHARE on this attempt's claim (still
+// this customer's) and the customer row FOR SHARE (a phone write waits for the request, or commits first and vetoes).
+function heldReportSmsHandoff({ customerId, phone, ownClaim }) {
+  const { withSmsConsentLock } = require('../utils/customer-comms-lock');
+  return (dispatch) => withSmsConsentLock(db, { phone, customerId }, async (trx) => {
+    const liveProject = ownClaim ? await trx('projects').where(ownClaim).forShare().first('customer_id').catch(() => null) : null;
+    const fresh = liveProject && String(liveProject.customer_id) === String(customerId)
+      ? await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id', 'phone').catch(() => null)
+      : null;
+    if (!fresh || normalizeUsPhone(fresh.phone) !== phone) {
+      return { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false };
+    }
+    return dispatch(trx);
+  });
 }
 
 // The text is a courtesy copy of the link: a blocked or quiet-hours text
 // never undoes a delivered report.
-async function sendHeldReportText({ project, customer, invoice, reportUrl }) {
+async function sendHeldReportText({ project, customer, invoice, reportUrl, ownClaim }) {
   const normalizedPhone = normalizeUsPhone(customer.phone);
   if (!normalizedPhone) {
     return { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
@@ -4576,6 +4629,7 @@ async function sendHeldReportText({ project, customer, invoice, reportUrl }) {
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: 'project_report_hold_release',
       metadata: { original_message_type: 'project_report', project_id: project.id, invoice_id: invoice.id },
+      withSmsHandoff: heldReportSmsHandoff({ customerId: customer.id, phone: normalizedPhone, ownClaim }),
     });
     return result.sent ? { ok: true } : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
   } catch (err) {
@@ -4585,8 +4639,10 @@ async function sendHeldReportText({ project, customer, invoice, reportUrl }) {
 
 // The released stamp, fenced on the claim. False when a stale takeover owns the row now.
 async function finalizeHeldRelease({ project, projectCols, ownClaim, channels, customer, wdoFiling, source }) {
-  const successful = [channels.email, channels.sms].filter((c) => c?.ok).length;
-  const available = 1 + (customer.phone ? 1 : 0);
+  // A failed requestor copy (the realtor or title company named on the form) makes the release partial, so the
+  // drawer shows it: the hold is released and nothing retries a copy.
+  const successful = [channels.email, channels.sms, channels.report_copies].filter((c) => c?.ok).length;
+  const available = 1 + (customer.phone ? 1 : 0) + (channels.report_copies ? 1 : 0);
   const filingAppend = wdoFiling && projectCols.wdo_sent_filings
     ? { wdo_sent_filings: db.raw("coalesce(wdo_sent_filings, '[]'::jsonb) || ?::jsonb", [JSON.stringify([wdoFiling])]) }
     : {};
@@ -4607,10 +4663,12 @@ async function finalizeHeldRelease({ project, projectCols, ownClaim, channels, c
 async function recordHeldRelease({ project, invoice, link, channels, source }) {
   const hold = require('../services/project-report-hold');
   const typeLabel = getProjectType(link.refreshed.project_type)?.label || 'Service';
+  // The bell first, and the log best effort: the report is delivered and recorded, so nothing here may undo that
+  // or leave the "send the paid report" bell open.
+  await hold.closeReleaseFailedBell(project.id);
   await logProjectActivity(null, project, 'project_report_released_after_payment',
     `Paid report released: ${typeLabel} (invoice ${invoice.invoice_number || invoice.id} paid)`,
-    { report_token_prefix: String(link.token).slice(0, 6), invoice_id: invoice.id, channels, source });
-  await hold.closeReleaseFailedBell(project.id);
+    { report_token_prefix: String(link.token).slice(0, 6), invoice_id: invoice.id, channels, source }).catch(() => {});
   logger.info(`[projects] hold release delivered ${project.id} source=${source} email=${channels.email.ok} sms=${channels.sms?.ok}`);
 }
 
@@ -5056,7 +5114,7 @@ const billingFingerprintHash = (inv) => crypto.createHash('sha1').update(billing
 // re-read under those locks (hold and sent state, the invoice's payer ownership, no payment started),
 // and ONE conditional write that names the invoice it binds. A request that lost a race refuses
 // instead of retargeting, and a refusal rolls the whole arming back.
-async function armReportHold({ hold, project, invoice, customer, expectedFingerprint, deliveryClaimToken }) {
+async function armReportHold({ hold, project, invoice, expectedFingerprint, deliveryClaimToken }) {
   await db.transaction(async (trx) => {
     const locked = await trx('projects').where({ id: project.id }).forUpdate().first();
     const ownerId = (await require('../services/pay-combined').lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id)) || invoice.customer_id;
@@ -5064,6 +5122,12 @@ async function armReportHold({ hold, project, invoice, customer, expectedFingerp
     // invoice row. Taking it here, in the same order, means a credit cannot be issued between this balance read and
     // the hold stamp: the row stays locked until this transaction commits.
     const lockedCustomer = await trx('customers').where({ id: ownerId }).forUpdate().first('id', 'account_credits');
+    // The release's readiness (a recipient that accepts email, the account holder) is judged on the customer as it is
+    // now, read in this transaction before the invoice lock (customers before invoices).
+    const currentCustomer = await loadProjectCustomer(locked.customer_id, { strict: true, database: trx, forShare: true }).catch(() => null);
+    if (!currentCustomer || currentCustomer.deleted_at) {
+      throw holdRefusal(409, 'hold_customer_changed', 'The customer record changed while this was being sent. Nothing was sent. Refresh and send again.');
+    }
     const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
     assertHoldArmable({ locked, lockedInvoice, intendedCustomerIds: [project.customer_id, invoice.customer_id] });
     // Known before any refusal below: a refused resend of an existing hold must leave that hold in place.
@@ -5080,7 +5144,7 @@ async function armReportHold({ hold, project, invoice, customer, expectedFingerp
       || String(expectedFingerprint || '') !== billingFingerprintHash(lockedInvoice)) {
       throw holdRefusal(409, 'hold_invoice_changed', 'The invoice changed while this was being sent. Nothing was sent. Refresh and send again.');
     }
-    const notReleasable = await holdReleasabilityRefusal(locked, customer);
+    const notReleasable = await holdReleasabilityRefusal(locked, currentCustomer);
     if (notReleasable) throw holdRefusal(notReleasable.status, notReleasable.code, notReleasable.error);
     // On every held send, a first send and a resend alike: credit issued since the preflight would settle the bill.
     if (!lockedCustomer || Number(lockedCustomer.account_credits) > 0) {
@@ -5247,16 +5311,19 @@ async function heldInvoiceEmailRecipient(customer, invoice) {
   return { email: resolved.to, name: resolved.recipient?.name || '', role: resolved.recipient?.role || 'billing' };
 }
 
-// The one bell for an invoice email of unknown outcome: the hold stays, and staff check whether it arrived.
+// The one bell for an invoice email of unknown outcome: the hold stays, and staff check whether it arrived. A later
+// held send whose email was accepted closes it (the customer has the invoice now).
 async function ringUncertainInvoiceEmailBell({ hold, delivered, channels, project, customer }) {
+  const reportHold = require('../services/project-report-hold');
+  if (hold.active && channels.email?.ok) await reportHold.closeInvoiceEmailBell(project.id);
   if (!(hold.active && delivered && channels.email?.uncertain)) return;
-  await require('../services/project-report-hold').raiseInvoiceEmailUncertainBell({ project, customer, reason: channels.email.error });
+  await reportHold.raiseInvoiceEmailUncertainBell({ project, customer, reason: channels.email.error });
 }
 
-// What the invoice's delivery record says about the email leg (an unknown outcome on a held send counts as reached).
-function invoiceEmailReached({ isPayerInvoice, hold, channels }) {
-  if (isPayerInvoice) return Boolean(channels.payer_email?.ok);
-  return Boolean(channels.email?.ok || (hold.active && channels.email?.uncertain));
+// Only an accepted email stamps email_sent_at. An unknown outcome on a held send still promotes the invoice to sent
+// (it stays payable, so the hold can settle) but records no email delivery.
+function invoiceEmailReached({ isPayerInvoice, channels }) {
+  return Boolean(isPayerInvoice ? channels.payer_email?.ok : channels.email?.ok);
 }
 
 // A held send delivers the INVOICE only: the email that carries the pay link is the delivery. An unknown email outcome
@@ -5953,8 +6020,15 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // itself lives in the email-only FDACS PDF and a bare pay-link text would be
     // wrong; for non-WDO the report link is in the text, so it sends regardless.
     const normalized = normalizeUsPhone(customer.phone);
+    // A held send's pay-link text goes only to the number on the customer row now (a phone corrected during the
+    // send skips the text; the invoice email already carries the pay link).
+    const phoneNow = hold.active && normalized
+      ? await db('customers').where({ id: customer.id }).first('phone').catch(() => null)
+      : null;
     if (!normalized) {
       channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
+    } else if (hold.active && normalizeUsPhone(phoneNow?.phone) !== normalized) {
+      channels.sms = { ok: false, error: 'Skipped: the phone number changed during the send' };
     } else if (isWdoProject && !channels.email?.ok) {
       channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
     } else {
@@ -6032,7 +6106,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (invoiceDelivered) {
       await InvoiceService.markDeliverySent(invoice.id, {
         sms: !!channels.sms?.ok,
-        email: invoiceEmailReached({ isPayerInvoice, hold, channels }),
+        email: invoiceEmailReached({ isPayerInvoice, channels }),
         source: 'project_report_with_invoice',
         payUrl,
         actorTechnicianId: req.technicianId || null,
