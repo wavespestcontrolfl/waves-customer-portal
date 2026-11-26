@@ -246,11 +246,17 @@ it('choosing Separate is the same one request with that choice', async () => {
   expect(body(0)).toMatchObject({ comboMove: 'separate', scheduledDate: '2035-01-03' });
 });
 
-it('the slot check and the best-times hint are both told that this save writes the length (durationEdit)', () => {
+it('the slot check is told that this save writes the length only while the form has one (durationEdit)', () => {
   render(<Harness />);
   fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
-  expect(slotCheckState.args).toMatchObject({ serviceId: 'fixture-visit', durationEdit: true });
-  expect(bestTimesState.args).toMatchObject({ serviceId: 'fixture-visit', durationEdit: true });
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  expect(slotCheckState.args).toMatchObject({ serviceId: 'fixture-visit', durationEdit: true, durationMinutes: 60 });
+  const duration = within(dialog).getByText('Duration').parentElement.querySelector('input[type="number"]');
+  fireEvent.change(duration, { target: { value: '90' } });
+  expect(slotCheckState.args).toMatchObject({ durationEdit: true, durationMinutes: 90 });
+  // A blank Duration: the save keeps the stored length, so the check reads the stored length.
+  fireEvent.change(duration, { target: { value: '' } });
+  expect(slotCheckState.args).toMatchObject({ durationEdit: false, durationMinutes: 0 });
 });
 
 it('the best-times rows rank for the form\'s services and carry the move choice; the server adds the shared stop', () => {

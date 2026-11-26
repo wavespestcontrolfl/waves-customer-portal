@@ -1658,15 +1658,18 @@ const pickedBlock = (window, minutes) => ({ window_start: window.start, window_e
 // stored length, and on its window alone when the visit has none, as the save judges it.
 async function pickedSlotAsks(slots, caller) {
   const stored = await storedLengths(slots, caller);
-  const moved = (p) => !p.durationEdit && stored.has(uuidDigits(p.serviceId));
+  // The read of the lengths failed: a move's length is not known, so that slot is not asked about (no
+  // technician, no line). A line on the length sent could disagree with the save.
+  const unread = (p) => stored === null && !!p.serviceId && !p.durationEdit;
+  const moved = (p) => !p.durationEdit && !!stored && stored.has(uuidDigits(p.serviceId));
   const lengthOf = (p) => (moved(p) ? stored.get(uuidDigits(p.serviceId)) : p.durationMinutes);
-  return slots.map((p) => ({ technicianId: p.technicianId, date: p.date, block: pickedBlock(p.window, lengthOf(p)) }));
+  return slots.map((p) => ({ technicianId: unread(p) ? null : p.technicianId, date: p.date, block: pickedBlock(p.window, lengthOf(p)) }));
 }
 
 // GATE_TECH_SHIFT_HOURS: the stored length of each visit a picked slot moves, keyed as uuidDigits reads its
 // id. One read, and only for a slot that can get a line and is a move: it names a visit, it is no edit of
 // the length, and it names a technician the caller may ask about. The gate off, or no such slot: no read.
-// A failed read is logged and gives no length (the slot is then judged on the length sent). A technician
+// A failed read is logged and gives null: no move of the check gets a line (pickedSlotAsks). A technician
 // caller gets the length of its own visits only (mayAskShiftOf on the visit's technician): a line that
 // appears or not at a picked hour would tell the stored length of any visit whose id it sends. Another
 // technician's visit is judged on the length sent, as a visit that is not found.
@@ -1682,6 +1685,7 @@ async function storedLengths(slots, caller) {
       .forEach((row) => lengths.set(uuidDigits(row.id), row.estimated_duration_minutes));
   } catch (err) {
     logger.info(`[slot-check] stored visit lengths not read: ${err.message}`);
+    return null;
   }
   return lengths;
 }

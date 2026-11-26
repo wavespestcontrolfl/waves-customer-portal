@@ -5182,10 +5182,24 @@ describe('rain-out service', () => {
           expect((await asked(move, visitOf(null))).length).toBe(90);
         });
 
-        test('a read of the visit that fails is logged, and the slot is judged on the length sent', async () => {
+        test('a read of the visit that fails is logged: a move gets no line, an edit and a new appointment are still asked about', async () => {
           const logger = require('../services/logger');
           const read = chain({ then: (resolve, reject) => Promise.reject(new Error('lengths unread')).then(resolve, reject) });
-          expect((await asked({ serviceId: VISIT, durationMinutes: 60 }, { read })).length).toBe(60);
+          reader.mockClear();
+          db.mockClear();
+          wireDb({ scheduled_services: [read] });
+          reader.mockImplementation(async (_id, asks) => asks.map(() => LINE));
+          const result = await RainOut.checkSlots({
+            targets: [
+              slot('16:00', '17:00', { technicianId: TECH_A, serviceId: VISIT, durationMinutes: 60 }),
+              slot('16:00', '17:00', { technicianId: TECH_A, serviceId: VISIT, durationMinutes: 120, durationEdit: true }),
+              slot('16:00', '17:00', { technicianId: TECH_A, durationMinutes: 45 }),
+            ],
+            caller: ADMIN,
+          });
+          // The move keeps its overlap answer and has no line; the reader is asked about the other two only.
+          expect(result).toEqual({ ok: true, results: [{ conflicts: [] }, { conflicts: [], shiftWarning: LINE }, { conflicts: [], shiftWarning: LINE }] });
+          expect(reader.mock.calls[0][1].map((ask) => ask.block.estimated_duration_minutes)).toEqual([120, 45]);
           expect(logger.info).toHaveBeenCalledWith('[slot-check] stored visit lengths not read: lengths unread');
         });
       });
