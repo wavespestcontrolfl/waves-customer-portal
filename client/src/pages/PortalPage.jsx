@@ -187,7 +187,7 @@ async function downloadCalendarIcs(path, fileName = 'Waves_Visit.ics') {
   // '/api' (default '/api', or a full cross-origin API URL), so splice.
   const abs = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
   const r = await fetch(abs);
-  if (!r.ok) throw new Error(`Calendar download failed (${r.status})`);
+  if (!r.ok) throw Object.assign(new Error(`Calendar download failed (${r.status})`), { status: r.status });
   const blob = await r.blob();
   if (await saveBlobNative(blob, fileName)) return;
   const blobUrl = URL.createObjectURL(blob);
@@ -335,6 +335,9 @@ function AddToCalendarButton({ visit, style }) {
   // server serves the file while the deadline is >= now (inclusive), so the timer fires 1 ms past it, never at it.
   // `tick` re-arms the timer when the delay saturates the setTimeout ceiling.
   const [tick, setTick] = useState(0);
+  // The shown deadline can run past the server's real cutoff (a day-only visit's deadline is end of day, so no hour is
+  // exposed). So the tap is what proves the file is still served: a refusal hides the button and says so.
+  const [refused, setRefused] = useState(false);
   const deadline = calendarLinkEndsAt(visit)?.getTime();
   useEffect(() => {
     const ms = deadline - Date.now() + 1;
@@ -342,11 +345,13 @@ function AddToCalendarButton({ visit, style }) {
     const timer = setTimeout(() => setTick((t) => t + 1), Math.min(ms, 2147483647));
     return () => clearTimeout(timer);
   }, [deadline, tick]);
-  if (!visit?.calendarUrl || !calendarLinkStillLive(visit)) return null;
+  if (refused || !visit?.calendarUrl || !calendarLinkStillLive(visit)) return null;
   return (
     <button type="button" onClick={() => {
-      downloadCalendarIcs(visit.calendarUrl).catch(() => {
-        showCustomerAlert('Could not download the calendar file. Please try again.');
+      downloadCalendarIcs(visit.calendarUrl).catch((err) => {
+        const gone = err?.status === 404 || err?.status === 410;
+        setRefused(gone);
+        showCustomerAlert(gone ? 'Calendar file is no longer available.' : 'Could not download the calendar file. Please try again.');
       });
     }} data-glass-accent="" style={style}>Add to Calendar</button>
   );
@@ -3353,7 +3358,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Text us', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
-    { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: onBalanceTap },
+    { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
     { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${Number.isInteger(referralReward) ? referralReward : referralReward.toFixed(2)} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
   return (

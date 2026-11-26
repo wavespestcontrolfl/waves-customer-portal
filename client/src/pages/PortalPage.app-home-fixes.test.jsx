@@ -130,6 +130,16 @@ describe('fix 5: money and schedule dead ends on Home retry', () => {
     expect(api.getBalance).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the Billing shortcut opening Billing when the balance read failed (only the tile retries)', async () => {
+    const onSwitchTab = vi.fn();
+    api.getBalance.mockRejectedValue(new Error('balance down'));
+    render(<DashboardTab customer={customer} onSwitchTab={onSwitchTab} onOpenPlanService={() => {}} />);
+    await screen.findByText('Billing unavailable');
+    fireEvent.click(screen.getAllByRole('button', { name: /^Billing/ }).find((b) => !/unavailable/.test(b.textContent)));
+    expect(onSwitchTab).toHaveBeenCalledWith('billing');
+    expect(api.getBalance).toHaveBeenCalledTimes(1);
+  });
+
   it('gives the failed schedule card a Try again button that reads the next visit again', async () => {
     api.getNextService.mockRejectedValueOnce(new Error('schedule down')).mockResolvedValue({
       next: { id: 'v1', date: futureDate, serviceType: 'Recovered visit', customerConfirmed: true },
@@ -284,6 +294,31 @@ describe('fix 9: visits', () => {
     fireEvent.click(buttons[1]);
     await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
     expect(String(fetchSpy.mock.calls[0][0])).toMatch(/calendar\.ics$/);
+  });
+
+  it('hides the button and says so when the server refuses the calendar file on tap', async () => {
+    const live = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    api.getSchedule.mockResolvedValue({ upcoming: [
+      { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: live },
+    ] });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValue({ ok: false, status: 404 });
+    render(<><CustomerDialogHost /><ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} /></>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to Calendar' }));
+    expect(await screen.findByText('Calendar file is no longer available.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add to Calendar' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the button after a network failure and offers a retry message', async () => {
+    const live = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    api.getSchedule.mockResolvedValue({ upcoming: [
+      { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: live },
+    ] });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Failed to fetch'));
+    render(<><CustomerDialogHost /><ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} /></>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Add to Calendar' }));
+    expect(await screen.findByText('Could not download the calendar file. Please try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add to Calendar' })).toBeInTheDocument();
   });
 
   it('removes Add to Calendar at the server deadline while the Visits tab stays open', async () => {
