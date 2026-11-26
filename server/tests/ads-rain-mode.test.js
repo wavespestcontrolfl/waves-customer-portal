@@ -5,7 +5,10 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/weather-forecast', () => ({ getNwsHourlyRain: jest.fn() }));
+jest.mock('../services/weather-forecast', () => ({
+  getNwsHourlyRain: jest.fn(),
+  getNwsHourlyRainPatient: (...args) => jest.requireActual('../services/weather-forecast').getNwsHourlyRainPatient(...args),
+}));
 jest.mock('../services/mrms-qpe', () => ({ fetchMrmsDailyRain: jest.fn() }));
 
 const rainMode = require('../services/ads/rain-mode');
