@@ -169,4 +169,23 @@ describe('one-time pest small job', () => {
     expect(oneTimeChoiceAmountForEstimate(SHOWN, { engineResult: full })).toBe(otLine(full).price);
     expect(otLine(full).price).toBeGreaterThanOrEqual(ONE_TIME.pest.floor);
   });
+
+  test('the one-time choice honors a staff manual discount on the small-job line (codex #8603 r1)', () => {
+    process.env[GATE] = 'true';
+    const small = generateEstimate({ ...inputFor(SMALL), services: { pest: { frequency: 'quarterly' }, oneTimePest: SMALL } });
+    const line = otLine(small);
+    line.manualFinalOneTime = 135;
+    const SHOWN = { show_one_time_option: true };
+    expect(oneTimeChoiceAmountForEstimate(SHOWN, { engineResult: small })).toBe(135);
+    expect(acceptedOneTimeChoiceListForEstimate(SHOWN, { engineResult: small })[0].price).toBe(135);
+  });
+
+  test('a standalone small-job estimate keeps its one-spot name and scope through the legacy mapper (codex #8603 r1)', () => {
+    process.env[GATE] = 'true';
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const legacy = mapV1ToLegacyShape(generateEstimate(inputFor(SMALL)));
+    const rows = JSON.stringify(legacy);
+    expect(rows).toMatch(/small job: one spot/);
+    expect(rows).toMatch(/One spot only/);
+  });
 });

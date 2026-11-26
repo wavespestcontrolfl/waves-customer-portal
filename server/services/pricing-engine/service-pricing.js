@@ -6493,6 +6493,11 @@ function priceOneTimePestSmallJob({ urgency, afterHours, isRecurringCustomer, ro
   return {
     service: 'one_time_pest',
     name: 'One-Time Pest Control (small job: one spot)',
+    // The legacy mapper names a one-time row from display.name / label, never
+    // name, so the one-spot scope must ride on label and detail to reach the
+    // customer's estimate.
+    label: 'One-Time Pest Control (small job: one spot)',
+    detail: 'One spot only: one nest, one room or one small area.',
     smallJob: true,
     // The flat price this line was sold on: a saved estimate replays on it, never on today's config.
     smallJobBasePrice: flatPrice,

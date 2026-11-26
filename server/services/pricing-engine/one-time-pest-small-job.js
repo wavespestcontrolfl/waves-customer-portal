@@ -53,7 +53,12 @@ function oneTimePestSmallJobReplaySignal(estData) {
 // The amount of the saved small-job line, for the estimate page's one-time choice, or null.
 function storedSmallJobChoice(estData) {
   const line = storedSmallJobLine(estData);
-  const price = Number(line?.price);
+  // The saved line's NET amount: a staff manual discount is stamped as
+  // manualFinalOneTime (the engine keeps price gross), then the other
+  // sold-net aliases, then the gross price.
+  const price = [line?.manualFinalOneTime, line?.priceAfterDiscount, line?.totalAfterDiscount, line?.price]
+    .map((v) => (v === '' || v == null ? NaN : Number(v)))
+    .find((v) => Number.isFinite(v) && v > 0);
   return line && Number.isFinite(price) && price > 0
     ? { price, label: line.name || 'One-Time Pest Control (small job: one spot)' }
     : null;
