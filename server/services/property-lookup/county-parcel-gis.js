@@ -1117,7 +1117,8 @@ async function querySitusLike(county, layerUrl, fields, likeBody, timeoutMs, dia
 // fail-open: any miss returns null and the caller falls to its next source.
 // Charlotte's ownership layer carries no living-area figure — unsupported.
 const SUBDIVISION_MEDIAN_FIELDS = {
-  Manatee: { nameField: 'PAR_SUBDIV_NAME', livingField: 'BLDGS_SQFT_LIVING', lotField: 'LAND_SQFT_CAMA' },
+  // oneUpper: the Manatee layer's firewall rejects two UPPER() calls joined by AND or OR (measured 2026-11-22).
+  Manatee: { nameField: 'PAR_SUBDIV_NAME', livingField: 'BLDGS_SQFT_LIVING', lotField: 'LAND_SQFT_CAMA', oneUpper: true },
   Sarasota: { nameField: 'subd', livingField: 'living', lotField: 'lsqft' },
 };
 const SUBDIVISION_MEDIAN_MIN_SAMPLES = 8;
@@ -1158,17 +1159,23 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs, { exact
   const safe = String(whereName || '').replace(/'/g, '').trim();
   if (!cfg || !safe) return null;
   const upper = safe.toUpperCase();
-  // ONE UPPER() call per query: the Manatee layer's firewall answers an HTML
-  // "Request Rejected" page when two UPPER() calls are joined by AND or OR
-  // (measured 2026-11-22). So the base-plat form asks a plain prefix and the
-  // delimiter rule (the base itself, or the base and a space) is applied
-  // here on the returned names.
-  const nameClause = exact
-    ? `UPPER(${cfg.nameField}) = '${upper}'`
-    : `UPPER(${cfg.nameField}) LIKE '${upper}%'`;
-  const nameOk = (name) => {
-    if (exact) return true;
-    const n = String(name ?? '').toUpperCase();
+  // A county with `oneUpper` (Manatee: its firewall answers an HTML "Request
+  // Rejected" page for two UPPER() calls joined by AND or OR) gets the
+  // base-plat form as ONE prefix test; the delimiter rule (the base itself,
+  // or the base and a space) is then applied here on the returned names.
+  // Other counties keep the delimiter rule on the server, so a longer plat
+  // that only shares the prefix never uses up the page cap.
+  const field = `UPPER(${cfg.nameField})`;
+  const mode = (exact && 'exact') || (cfg.oneUpper && 'prefix') || 'base';
+  const nameClause = {
+    exact: `${field} = '${upper}'`,
+    prefix: `${field} LIKE '${upper}%'`,
+    base: `(${field} = '${upper}' OR ${field} LIKE '${upper} %')`,
+  }[mode];
+  const filterNames = mode === 'prefix';
+  const keepRow = (attrs) => {
+    if (!filterNames) return true;
+    const n = String(attrs(cfg.nameField) ?? '').toUpperCase();
     return n === upper || n.startsWith(`${upper} `);
   };
   const values = [];
@@ -1179,7 +1186,7 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs, { exact
     const params = new URLSearchParams({
       f: 'json',
       where: `${nameClause} AND ${cfg.livingField} > 0`,
-      outFields: [cfg.livingField, cfg.lotField, exact ? null : cfg.nameField].filter(Boolean).join(','),
+      outFields: [cfg.livingField, cfg.lotField, filterNames ? cfg.nameField : null].filter(Boolean).join(','),
       returnGeometry: 'false',
       resultRecordCount: String(SUBDIVISION_PAGE_SIZE),
       // A stable sort makes resultOffset pages disjoint (ArcGIS gives no
@@ -1205,7 +1212,7 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs, { exact
     for (const f of features) {
       const attrs = ciAttr(f?.attributes || {});
       const living = positiveOrNull(attrs(cfg.livingField));
-      if (living && nameOk(attrs(cfg.nameField))) values.push({ living, lot: cfg.lotField ? positiveOrNull(attrs(cfg.lotField)) : null });
+      if (living && keepRow(attrs)) values.push({ living, lot: cfg.lotField ? positiveOrNull(attrs(cfg.lotField)) : null });
     }
     // No rows with the limit flag set would loop on the same offset forever.
     if (data?.exceededTransferLimit !== true || features.length === 0) return values.sort((a, b) => a.living - b.living);

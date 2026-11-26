@@ -632,6 +632,17 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
     expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9, subdivisionQueried: 'EXAMPLE PLAT' });
   });
 
+  test('Sarasota keeps the delimiter rule on the server (two UPPER() calls; its layer answers them)', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ features: [{ attributes: { living: 2101 } }] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ features: [1558, 1678, 1920, 1920, 2277, 2421, 2421, 3070, 3101].map((v) => ({ attributes: { living: v } })) }) });
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Sarasota', subdivision: 'EXAMPLE PLAT' });
+    const base = decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ');
+    expect(base).toContain("(UPPER(subd) = 'EXAMPLE PLAT' OR UPPER(subd) LIKE 'EXAMPLE PLAT %')");
+    expect(base).not.toMatch(/outFields=[^&]*subd/);
+    expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
+  });
+
   test('null below the sample floor, on layer failure, and for an unsupported county', async () => {
     global.fetch = jest.fn().mockResolvedValue(living([2101, 2200, 2300]));
     await expect(lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'TINY PLAT' })).resolves.toBeNull();

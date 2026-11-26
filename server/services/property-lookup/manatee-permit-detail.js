@@ -492,17 +492,19 @@ async function findPermitBuildingFacts({ parcelPin, looseKey, addressMatches = n
   // (a 9-digit parcel number is stored padded to 10 digits).
   const { parcelTiers, guardAddressTier } = require('./manatee-permit-sync');
   const tiers = [
-    ...parcelTiers(parcelPin, looseKey).map((narrow) => ({ narrow, addressTier: false })),
-    looseKey ? { narrow: (query) => guardAddressTier(query.where('address_loose_key', looseKey), parcelPin), addressTier: true } : null,
+    // The padded-pin tier (the second parcel tier) is held to the street check too: a padded pin can be another
+    // parcel's own number, and two streets can share the loose key.
+    ...parcelTiers(parcelPin, looseKey).map((narrow, i) => ({ narrow, addressTier: false, streetCheck: i > 0 })),
+    looseKey ? { narrow: (query) => guardAddressTier(query.where('address_loose_key', looseKey), parcelPin), addressTier: true, streetCheck: true } : null,
   ].filter(Boolean);
   let row = null;
-  for (const { narrow, addressTier } of tiers) {
+  for (const { narrow, addressTier, streetCheck } of tiers) {
     const query = narrow(db('construction_permit_records')
       .where('detail_status', 'ok')
       .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')")
       .orderByRaw('issued_date DESC NULLS LAST')
       .orderBy('detail_fetched_at', 'desc'));
-    if (addressTier && typeof addressMatches === 'function') {
+    if (streetCheck && typeof addressMatches === 'function') {
       // The loose key (house number + first street word + ZIP) is shared by
       // "100 Oak St" and "100 Oak Ln": the caller's full-street check picks
       // the candidate, so a newer permit on the other street never hides
