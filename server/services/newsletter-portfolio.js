@@ -47,21 +47,24 @@ const VENUE_CAP = 2;
 const SOURCE_CAP = 2;
 const CLASS_CAP = 1;
 // Tampa Bay zones are 45-75 minutes from most readers: together they fill at
-// most AWAY_CAP slots. An event with no region_zone falls back to its city
-// (the normalizer's own cityToZone map), so an untagged Clearwater event
-// still counts as away.
-const AWAY_ZONES = new Set(['tampa', 'pinellas']);
+// most AWAY_CAP slots ('away' = an untagged event from a town not known to
+// be local; see awayZoneOf).
+const AWAY_ZONES = new Set(['tampa', 'pinellas', 'away']);
 const AWAY_CAP = 2;
-// A city string can carry punctuation ("St. Petersburg") or name a beach town
-// the zone map does not list ("St. Pete Beach"), so the away check also reads
-// the punctuation-free city against the Tampa Bay place words.
-const AWAY_CITY_RX = /\b(?:st pete|st petersburg|saint petersburg|clearwater|largo|dunedin|gulfport|palm harbor|oldsmar|pinellas park|belleair|kenneth city|redington|madeira beach|treasure island|indian rocks|indian shores|belleair beach|st pete beach|temple terrace|plant city|lutz|wesley chapel|apollo beach|ruskin|seminole|pinellas|safety harbor|tarpon springs|tampa|ybor|brandon|riverview|hillsborough)\b/;
+// An event with no region_zone counts as LOCAL only when its city is a known
+// home-zone town (the normalizer's cityToZone map, after stripping
+// punctuation, or a home-zone place word). Any other untagged city counts as
+// away: a list of away towns can never be complete, and local first means an
+// unknown town must not slip past the cap.
+const HOME_CITY_RX = /\b(?:bradenton|palmetto|parrish|ellenton|lakewood ranch|anna maria|holmes beach|bradenton beach|longboat|cortez|myakka|sarasota|siesta|osprey|nokomis|venice|laurel|englewood|north port|wellen|port charlotte|punta gorda|lido|casey key|manasota|rotonda|placida|boca grande|myakka city|university park|fruitville|gulf cove)\b/;
 function awayZoneOf(event) {
   const zone = norm(event?.region_zone);
   if (zone) return zone;
   const city = norm(event?.city);
   if (!city) return '';
-  return cityToZone(city) || (AWAY_CITY_RX.test(city) ? 'pinellas' : '');
+  const mapped = cityToZone(city);
+  if (mapped) return mapped;
+  return HOME_CITY_RX.test(city) ? 'sarasota' : 'away';
 }
 const isAway = (event) => AWAY_ZONES.has(awayZoneOf(event));
 

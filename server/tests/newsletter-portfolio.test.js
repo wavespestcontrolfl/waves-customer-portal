@@ -111,7 +111,7 @@ describe('local first (owner 2026-11-26)', () => {
     expect(result.selected.map((e) => e.id)).not.toContain(untagged.id);
   });
 
-  test.each(['St. Petersburg', 'St. Pete Beach', 'Clearwater Beach', 'Palm Harbor', 'Indian Shores', 'Temple Terrace', 'Tampa'])('untagged %s counts as away', (city) => {
+  test.each(['St. Petersburg', 'St. Pete Beach', 'Clearwater Beach', 'Palm Harbor', 'Indian Shores', 'Temple Terrace', 'Tierra Verde', 'Sun City Center', 'Tampa'])('untagged %s counts as away', (city) => {
     const tagged = [1, 2].map((i) => ev({ region_zone: 'pinellas', editorial_score: 96 - i, source_id: `p-${i}` }));
     const untagged = ev({ region_zone: null, city, editorial_score: 93, source_id: 'u-1' });
     const result = selectPortfolio([...tagged, untagged]);
@@ -123,6 +123,12 @@ describe('local first (owner 2026-11-26)', () => {
     const survivors = [ev({ region_zone: 'tampa', source_id: 'x1' }), ev({ region_zone: 'pinellas', source_id: 'x2' }), ev({ region_zone: 'sarasota', source_id: 'x3' })];
     expect(capsAllow(survivors, ev({ region_zone: 'pinellas', source_id: 'x4' }))).toBe(false);
     expect(capsAllow(survivors, ev({ region_zone: 'manatee', source_id: 'x5' }))).toBe(true);
+  });
+
+  test.each(['Holmes Beach', 'Myakka City', 'Venice'])('untagged local %s is not counted as away', (city) => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'tampa', editorial_score: 96 - i, source_id: `t-${i}` }));
+    const local = ev({ region_zone: null, city, editorial_score: 93, source_id: 'u-3' });
+    expect(selectPortfolio([...tagged, local]).selected.map((e) => e.id)).toContain(local.id);
   });
 
   test('an untagged local city is not counted as away', () => {
