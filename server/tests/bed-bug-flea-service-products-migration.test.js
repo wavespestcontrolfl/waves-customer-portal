@@ -95,7 +95,7 @@ describe('20261127120000 bed bug and flea service products', () => {
     const rateOf = (name) => Object.values(flea.lineMeta).find((meta) => meta.catalogProductHints?.length === 1 && meta.catalogProductHints[0] === name);
     // Antapex 10 g per gallon and Tekko Pro 0.66 fl oz per gallon in one tank at 1 gallon per 1,000 sq ft.
     expect(rateOf('Atticus Antapex WSG').tankRatePerGallon).toEqual({ amount: 10, unit: 'g' });
-    expect(rateOf('Tekko Pro IGR').labelRatePerGallon).toMatchObject({ amount: 0.66, unit: 'fl_oz' });
+    expect(rateOf('Tekko Pro IGR').labelRatePerGallon).toMatchObject({ amount: 0.66, unit: 'fl_oz', carrierGalPer1000: 1 });
     expect(migration.ANTAPEX_USAGE).toMatchObject({ usage_amount: 10, usage_unit: 'g', usage_per_1000sf: 10 });
     expect(migration.TEKKO_USAGE).toMatchObject({ usage_amount: 0.66, usage_unit: 'fl_oz', usage_per_1000sf: 0.66 });
     // Both go down at treatment 1 only: treatment 2's card lists neither, so the package is costed once.
