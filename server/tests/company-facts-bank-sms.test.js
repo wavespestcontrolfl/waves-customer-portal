@@ -279,8 +279,9 @@ describe('bank sentences are GENERAL company sentences for the reply guards, nev
     expect(validateComplianceCopy({ reply: 'Thanks, absolutely.', factsBlock: block(facts(...lines, FACT_B)), inboundMessage: ASK }).ok).toBe(false);
   });
 
-  test('answer words are found with the reply guard\'s own clause boundaries: unspaced em dashes and conjunctions', async () => {
-    const lines = ['We service docks\u2014absolutely.', 'We service docks -- yes.', 'We service docks and absolutely yes.', 'We service docks, but sure.'];
+  test('answer words are found with the reply guard\'s own clause boundaries: unspaced em dashes, conjunctions, spaced hyphens and en dashes', async () => {
+    const lines = ['We service docks\u2014absolutely.', 'We service docks -- yes.', 'We service docks and absolutely yes.', 'We service docks, but sure.',
+      'We service docks \u2013 absolutely.', 'We service docks - yes.'];
     await approveEver(...lines, FACT_B);
     const own = labelFacts.bankSentencesFromBlock(block(facts(...lines, FACT_B)));
     expect(own).toEqual([FACT_B]);

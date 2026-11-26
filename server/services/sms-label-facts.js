@@ -1446,8 +1446,11 @@ const BANK_SENTENCES_MAX = 80;
 function carriesAnswerForce(text) {
   // the reply guard's own clause boundaries (clausesOf: commas, semicolons, colons, em dashes with or without spaces, "--", and the
   // conjunctions and, but, so, then ...), never a second splitter
+  // conjunctions and, but, so, then ...), never a second splitter. A bank line is also cut at a spaced single hyphen or en dash
+  // ("We service docks – absolutely."), which clausesOf leaves whole: that is stricter only, never a looser read.
   const clauses = clausesOf(text).map((c) => c.clause);
-  return [text, ...clauses].some((part) => hasAnswerForce(part) || hasAnswerForce(peelFriendlyEnds(part)));
+  const dashPieces = String(text).split(/\s[-–]\s/).filter((piece) => piece.trim());
+  return [text, ...clauses, ...dashPieces].some((part) => hasAnswerForce(part) || hasAnswerForce(peelFriendlyEnds(part)));
 }
 function isNeutralBankPiece(piece) {
   const text = canonText(piece).toLowerCase();
