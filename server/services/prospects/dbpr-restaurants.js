@@ -935,8 +935,8 @@ function firstVisitKeys(records, cutoff) {
 }
 
 // The same visits' license id and date as the run's own read lists them (source_key -> { license_id, visitDate }).
-// The stored row keeps its first license id and date, so a visit the newer file corrected is read with the file's
-// values: the right page's address, checked against the right date.
+// The stored row keeps its first license id and date (and the business they name), so a visit the newer file
+// corrected is not read: its answer would sit on the stored business and date (readReports skips it).
 function currentVisits(records, keys) {
   const wanted = new Set(keys);
   return new Map(records.filter((record) => wanted.has(record.source_key))
@@ -964,7 +964,12 @@ async function readReports(deps, result, keys, visits = new Map()) {
   const pending = await deps.store.pendingInspections({ cutoff: reportCutoff(deps.now), limit: REPORT_MAX_PER_RUN, keys });
   for (let i = 0; i < pending.length; i += 1) {
     if (i > 0) await deps.sleep(REPORT_GAP_MS);
-    const report = await readOneReport({ ...pending[i], ...visits.get(pending[i].source_key) }, deps);
+    const current = visits.get(pending[i].source_key);
+    if (current && (current.license_id !== pending[i].license_id || current.visitDate !== pending[i].visitDate)) {
+      result.reportsSkipped += 1;
+      continue;
+    }
+    const report = await readOneReport(pending[i], deps);
     if (!report) {
       result.reportsFailed += 1;
       await deps.store.bumpAttempts(pending[i].id);
@@ -991,7 +996,7 @@ async function readReports(deps, result, keys, visits = new Map()) {
  */
 async function syncRestaurantProspects(deps = {}) {
   const started = Date.now();
-  const result = { failures: 0, files: {}, reportsRead: 0, reportsFailed: 0, reportsLeft: 0, pestFound: 0, elapsedMs: 0 };
+  const result = { failures: 0, files: {}, reportsRead: 0, reportsFailed: 0, reportsLeft: 0, reportsSkipped: 0, pestFound: 0, elapsedMs: 0 };
   if (syncDisabled()) return { ...result, skipped: 'disabled' };
   const ctx = { fetchText: defaultFetchText, sleep: defaultSleep, store: defaultStore, now: new Date(), ...deps };
   const { keys, visits } = await syncFiles(ctx, result);

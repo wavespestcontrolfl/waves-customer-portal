@@ -893,7 +893,7 @@ describe('syncRestaurantProspects', () => {
   test('each page is read against its own row: the file\'s count, the visit\'s date and its number', async () => {
     store = makeStore([
       pendingRow('a', '9000', { violation35: 2 }), // the page lists one 35 row: fewer than the file counted
-      pendingRow('b', '9001'), // the file dates it Nov 17: the Nov 16 page is another visit's
+      pendingRow('b', '9001', { visitDate: '2026-11-17' }), // another visit's page (the file dates it Nov 17 too)
       pendingRow('c', '9002', { visitNumber: 2 }), // a later visit
       pendingRow('d', '9003'),
     ]);
@@ -904,13 +904,15 @@ describe('syncRestaurantProspects', () => {
     expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 3 });
   });
 
-  test('a visit the newer file corrected is read with the file\'s license id and date, not the stored ones', async () => {
-    // The stored row kept its first license id (4999) and date (Nov 10); the file now says 5001 and Nov 16.
-    store = makeStore([pendingRow('a', '9000', { license_id: '4999', visitDate: '2026-11-10' })]);
-    fetchText = fetchWith(visitsFile(['9000']), { 9000: PEST_PAGE });
+  test('a visit the newer file corrected (another license id or date than the stored row) is not read, at no attempt', async () => {
+    // The stored rows kept their first license id or date; the file now says 5001 and Nov 16. An answer would sit on
+    // the stored business and date, so neither is read. The third row matches and reads.
+    store = makeStore([pendingRow('a', '9000', { license_id: '4999' }), pendingRow('b', '9001', { visitDate: '2026-11-10' }), pendingRow('c', '9002')]);
+    fetchText = fetchWith(visitsFile(['9000', '9001', '9002']), { 9000: PEST_PAGE, 9001: PEST_PAGE, 9002: PEST_PAGE });
     const result = await sync({ fetchText, store });
-    expect(reportCalls()[0][0]).toBe('https://www.myfloridalicense.com/inspectionDetail.asp?InspVisitID=9000&id=5001');
-    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 0, pestFound: 1 });
+    expect(reportCalls().map(([url]) => new URL(url).searchParams.get('InspVisitID'))).toEqual(['9002']);
+    expect(store.bumpAttempts).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 0, reportsSkipped: 2, pestFound: 1 });
   });
 
   test('a failed read beside a page whose save was skipped is not a failed run: a page did read', async () => {
