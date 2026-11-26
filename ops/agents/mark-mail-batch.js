@@ -117,18 +117,20 @@ async function main() {
       const result = await markBatch({ batch, ids });
       if (result.batchExists) console.log(`Batch "${batch}" already exists: nothing marked. A batch name is used once; pick a new name for new homes.`);
       else console.log(`Marked ${result.marked.length} home(s) as mailed in batch "${batch}".`);
-      if (result.notMailable.length) console.log(`  ${result.notMailable.length} id(s) not marked (not eligible, not priced, or already mailed)`);
+      if (result.knownNow && result.knownNow.length) console.log(`  ${result.knownNow.length} home(s) NOT marked, Waves knows the address now (a customer, a lead or a member): ${result.knownNow.join(', ')}`);
+      if (result.notMailable.length) console.log(`  ${result.notMailable.length} id(s) not marked (not eligible, not priced, already mailed, or known to Waves now)`);
     } else if (!labelsPath) {
       // The same answer --execute would give: a used batch name marks nothing.
       if (batch && await db('mail_prospects').where({ mail_batch: batch }).first('id')) {
         console.log(`Batch "${batch}" already exists: --execute would mark nothing. A batch name is used once; pick a new name for new homes.`);
         return;
       }
-      const { homes, notMailable } = await wouldMark({ ids });
+      const { homes, knownNow, notMailable } = await wouldMark({ ids });
       console.log(`Homes ready to mark as mailed: ${homes.length}`);
       for (const h of homes.slice(0, 200)) console.log(`  would mark prospect ${h.id}: $${h.monthly} a month (annual ${h.annual}, setup ${h.setupFee})`);
       if (homes.length > 200) console.log(`  ... and ${homes.length - 200} more`);
-      if (notMailable.length) console.log(`  ${notMailable.length} of the given ids are not ready (not eligible, not priced, or already mailed)`);
+      if (knownNow.length) console.log(`  ${knownNow.length} home(s) left out, Waves knows the address now (a customer, a lead or a member): ${knownNow.join(', ')}`);
+      if (notMailable.length) console.log(`  ${notMailable.length} of the given ids are not ready (not eligible, not priced, already mailed, or known to Waves now)`);
       console.log('Dry run: nothing written. Pass --execute --batch <name> to mark.');
     }
     if (labelsPath) {
