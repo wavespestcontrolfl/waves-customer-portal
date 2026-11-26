@@ -2336,10 +2336,10 @@ describe('NotificationBell customer alerts strip, tabs and link taps', () => {
       await waitFor(() => expect(seen.path).toBe('/?tab=billing'));
     });
 
-    it('keeps a full load for another origin and for a file or API path', async () => {
+    it('keeps a full load for another origin, a file or API path, a link with a request id or hash, and any non-tab page', async () => {
       const original = window.location;
       const assign = vi.fn();
-      for (const link of ['https://example.org/x', '/api/files/report.pdf']) {
+      for (const link of ['https://example.org/x', '/api/files/report.pdf', '/?tab=messages&requestId=42', '/?tab=property#irrigation', '/?requestId=42', '/pay/abc123']) {
         mockList(link);
         const hrefSetter = vi.fn();
         Object.defineProperty(window, 'location', {

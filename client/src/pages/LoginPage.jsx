@@ -120,21 +120,38 @@ function ResendNotice() {
   return (
     <div className="portal-login-note" role="status">
       <Icon name="info" size={16} strokeWidth={2} style={{ marginTop: 1 }} />
-      <span>New code sent. It can take a few seconds to arrive.</span>
+      <span>If this number is on a Waves account, a new code is on its way.</span>
     </div>
   );
 }
 
-// Counts the Resend button's wait down once a second.
+// The Resend button's wait. It stores when the wait ends and recomputes the
+// seconds left from the clock on every tick and when the app comes back to the
+// foreground, so time spent suspended (the customer went to Messages for the
+// code) counts.
 function useResendCooldown() {
+  const [until, setUntil] = useState(0);
   const [left, setLeft] = useState(0);
+  const refresh = useCallback(() => {
+    const remaining = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+    setLeft(remaining);
+    if (remaining === 0) setUntil(0);
+  }, [until]);
   useEffect(() => {
-    if (left <= 0) return undefined;
-    const timer = setTimeout(() => setLeft((n) => n - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [left]);
-  const start = useCallback(() => setLeft(RESEND_COOLDOWN_SECONDS), []);
-  const clear = useCallback(() => setLeft(0), []);
+    if (!until) return undefined;
+    refresh();
+    const timer = setInterval(refresh, 1000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [until, refresh]);
+  const start = useCallback(() => {
+    setUntil(Date.now() + RESEND_COOLDOWN_SECONDS * 1000);
+    setLeft(RESEND_COOLDOWN_SECONDS);
+  }, []);
+  const clear = useCallback(() => { setUntil(0); setLeft(0); }, []);
   return { left, start, clear };
 }
 

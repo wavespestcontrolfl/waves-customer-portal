@@ -43,17 +43,18 @@ function notificationSettingsHref(type) {
   return role === 'technician' ? '/admin/today/more#notifications' : null;
 }
 
-// A customer notification link that points inside this app opens by SPA
-// navigation (no full page reload). Returns the in-app path, or null when the
-// target is another origin, an API/file path or an admin path, which keep the
-// full load.
-function sameOriginAppPath(href) {
+// Only a plain portal tab link ("/" with a `tab` query and nothing else) opens
+// by SPA navigation for a customer. Every other link keeps the full page load:
+// server-owned links, links that carry a request id or other params (a card that
+// is already on screen must not keep its old data), hash targets, other origins,
+// API/file paths and admin paths. Returns the in-app path, or null.
+function portalTabPath(href) {
   try {
-    if (typeof href !== 'string' || typeof window === 'undefined') return null;
+    if (typeof href !== 'string') return null;
     const url = new URL(href, window.location.origin);
-    if (url.origin !== window.location.origin) return null;
-    if (/^\/(api|admin)(\/|$)/.test(url.pathname) || /\.[a-z0-9]{2,5}$/i.test(url.pathname)) return null;
-    return `${url.pathname}${url.search}${url.hash}`;
+    if (url.origin !== window.location.origin || url.pathname !== '/' || url.hash) return null;
+    const keys = [...url.searchParams.keys()];
+    return keys.length === 1 && keys[0] === 'tab' ? `/${url.search}` : null;
   } catch {
     return null;
   }
@@ -613,8 +614,8 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   const [pushError, setPushError] = useState(null);
   const biometricLocked = useBiometricLock();
   const pushPromptRequested = useRef(false);
-  // Present inside the app's router; null in a bare render, which then falls back to a full load.
-  const routerNavigator = useContext(NavigationContext)?.navigator || null;
+  // Present inside the app's router; empty in a bare render, which then falls back to a full load.
+  const routerContext = useContext(NavigationContext);
   const bellRef = useRef(null);
   const panelRef = useRef(null);
   // The customer shell keeps its bottom navigation through 899px, including
@@ -770,12 +771,12 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     }
   }, [open, type]);
 
-  // Open a notification's link. A customer's same-origin portal link uses the
+  // Open a notification's link. A customer's plain portal tab link uses the
   // router (no reload); everything else, and every admin link, loads the page.
   const openLink = (href) => {
     setOpen(false);
-    const appPath = type === 'customer' && routerNavigator ? sameOriginAppPath(href) : null;
-    if (appPath) routerNavigator.push(appPath);
+    const appPath = type === 'customer' && routerContext?.navigator ? portalTabPath(href) : null;
+    if (appPath) routerContext.navigator.push(appPath);
     else window.location.href = href;
   };
 
@@ -1435,7 +1436,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
             <div style={{ padding: '8px 20px 16px', flexShrink: 0 }}>
               <div style={{
                 display: 'flex', gap: 4,
-                background: isDark ? '#F4F4F5' : 'rgba(27,44,91,0.07)',
+                background: '#F4F4F5',
                 borderRadius: 999, padding: 4, width: 'fit-content',
               }}>
                 {[
@@ -1451,10 +1452,9 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                       style={{
                         padding: '8px 20px', borderRadius: 999, border: 'none',
                         background: active ? '#FFFFFF' : 'transparent',
-                        color: isDark ? (active ? '#18181B' : '#71717A') : (active ? CUSTOMER_SURFACE.text : CUSTOMER_SURFACE.muted),
-                        fontSize: 14, fontWeight: type === 'admin' ? 500 : 600, cursor: 'pointer',
+                        color: active ? '#18181B' : '#71717A',
+                        fontSize: 14, fontWeight: 500, cursor: 'pointer',
                         boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
-                        minHeight: isDark ? undefined : 44,
                       }}
                     >{label}</button>
                   );
@@ -1496,7 +1496,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                   <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>No notifications yet</div>
                 </div>
               )}
-              {!loading && type === 'admin' && tab === 'whats_new' && (
+              {!loading && tab === 'whats_new' && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>Nothing new right now</div>
                 </div>
@@ -1788,35 +1788,42 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
 // requirement is surfaced via the error-message path inside
 // ensurePushSubscription, not pre-emptively here, so Android/desktop
 // users don't see an irrelevant warning.
+// The customer app gets plain customer words and the customer palette; the
+// staff words stay on the admin bell only.
+const STRIP_COPY = {
+  customer: {
+    title: 'Turn on app alerts',
+    body: 'Get an alert when your tech is on the way, your report is ready, or your schedule changes.',
+    button: 'Turn on alerts',
+    busy: 'Turning on…',
+  },
+  staff: {
+    title: 'Get push notifications on this device',
+    body: 'Banner alerts for failed payments, overdue invoices, unmapped calls, and more.',
+    button: 'Enable push',
+    busy: 'Enabling…',
+  },
+};
+const STRIP_LOOK = {
+  customer: {
+    bg: CUSTOMER_SURFACE.soft, border: CUSTOMER_SURFACE.softBorder, text: CUSTOMER_SURFACE.text,
+    muted: CUSTOMER_SURFACE.muted, button: CUSTOMER_SURFACE.text, pad: '14px 20px', titleSize: 15,
+    bodySize: 14, bodyLine: 1.4, buttonSize: 14, buttonWeight: 600, buttonRadius: 10, minHeight: 44,
+  },
+  staff: {
+    bg: '#F4F4F5', border: '#E4E4E7', text: '#18181B', muted: '#52525B', button: '#18181B',
+    pad: '12px 16px', titleSize: 13, bodySize: 12, bodyLine: undefined, buttonSize: 13,
+    buttonWeight: 500, buttonRadius: 6, minHeight: undefined,
+  },
+};
+
 function PushEnableStrip({ admin, customer, enabling, error, onClick }) {
-  // The customer app gets plain customer words and the customer palette. The
-  // staff words below stay on the admin bell only.
-  const copy = customer
-    ? {
-        title: 'Turn on app alerts',
-        body: 'Get an alert when your tech is on the way, your report is ready, or your schedule changes.',
-        button: 'Turn on alerts',
-        busy: 'Turning on…',
-      }
-    : {
-        title: 'Get push notifications on this device',
-        body: 'Banner alerts for failed payments, overdue invoices, unmapped calls, and more.',
-        button: 'Enable push',
-        busy: 'Enabling…',
-      };
-  const look = customer
-    ? {
-        bg: CUSTOMER_SURFACE.soft, border: CUSTOMER_SURFACE.softBorder, text: CUSTOMER_SURFACE.text,
-        muted: CUSTOMER_SURFACE.muted, button: CUSTOMER_SURFACE.text, titleSize: 15, bodySize: 14,
-        buttonSize: 14, buttonRadius: 10, minHeight: 44,
-      }
-    : {
-        bg: '#F4F4F5', border: '#E4E4E7', text: '#18181B', muted: '#52525B', button: '#18181B',
-        titleSize: 13, bodySize: 12, buttonSize: 13, buttonRadius: 6, minHeight: undefined,
-      };
+  const kind = customer ? 'customer' : 'staff';
+  const copy = STRIP_COPY[kind];
+  const look = STRIP_LOOK[kind];
   return (
     <div style={{
-      padding: customer ? '14px 20px' : '12px 16px',
+      padding: look.pad,
       background: look.bg,
       borderBottom: `1px solid ${look.border}`,
       fontSize: look.titleSize,
@@ -1825,7 +1832,7 @@ function PushEnableStrip({ admin, customer, enabling, error, onClick }) {
       <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
         <span style={{ fontWeight: admin ? 500 : 600 }}>{copy.title}</span>
       </div>
-      <div style={{ marginBottom: 8, color: look.muted, fontSize: look.bodySize, lineHeight: customer ? 1.4 : undefined }}>
+      <div style={{ marginBottom: 8, color: look.muted, fontSize: look.bodySize, lineHeight: look.bodyLine }}>
         {copy.body}
       </div>
       <button
@@ -1839,7 +1846,7 @@ function PushEnableStrip({ admin, customer, enabling, error, onClick }) {
           border: 'none',
           borderRadius: look.buttonRadius,
           fontSize: look.buttonSize,
-          fontWeight: customer ? 600 : 500,
+          fontWeight: look.buttonWeight,
           cursor: enabling ? 'wait' : 'pointer',
         }}
       >

@@ -131,13 +131,13 @@ describe('customer login recovery', () => {
       expect(authMocks.verifyCode).toHaveBeenCalledTimes(1);
     });
 
-    it('shows "New code sent" and holds Resend for 30 seconds', async () => {
+    it('promises a code only conditionally and holds Resend for 30 seconds', async () => {
       await reachCodeStep();
       vi.useFakeTimers({ shouldAdvanceTime: false });
       try {
         await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Resend code' })); });
         expect(authMocks.sendCode).toHaveBeenCalledTimes(2);
-        expect(screen.getByText(/New code sent/)).toBeInTheDocument();
+        expect(screen.getByText(/If this number is on a Waves account, a new code is on its way/)).toBeInTheDocument();
         const wait = screen.getByRole('button', { name: /Resend code in 30s/ });
         expect(wait).toBeDisabled();
         fireEvent.click(wait);
@@ -154,13 +154,31 @@ describe('customer login recovery', () => {
       }
     });
 
+    it('counts time the app spent suspended when it comes back to the foreground', async () => {
+      await reachCodeStep();
+      vi.useFakeTimers({ shouldAdvanceTime: false });
+      try {
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Resend code' })); });
+        expect(screen.getByRole('button', { name: /Resend code in 30s/ })).toBeDisabled();
+        // The app is suspended: the clock moves 29 s but no timer runs.
+        vi.setSystemTime(Date.now() + 29000);
+        await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+        expect(screen.getByRole('button', { name: /Resend code in 1s/ })).toBeDisabled();
+        vi.setSystemTime(Date.now() + 2000);
+        await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+        expect(screen.getByRole('button', { name: 'Resend code' })).toBeEnabled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('does not claim a new code was sent when the resend fails', async () => {
       await reachCodeStep();
       authMocks.sendCode.mockResolvedValueOnce(false);
       fireEvent.click(screen.getByRole('button', { name: 'Resend code' }));
       await waitFor(() => expect(authMocks.sendCode).toHaveBeenCalledTimes(2));
       await act(async () => {});
-      expect(screen.queryByText(/New code sent/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/If this number is on a Waves account, a new code is on its way/)).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Resend code' })).toBeEnabled();
     });
   });
