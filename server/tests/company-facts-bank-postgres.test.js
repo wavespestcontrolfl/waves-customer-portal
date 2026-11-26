@@ -480,14 +480,20 @@ jest.setTimeout(120000);
       await Bank.refreshBankFacts(opts());
       expect(Bank.getApprovedBankFacts().map((f) => f.id)).toEqual([good.id]);
     });
-    test('an approved row with a named approver but no approval event in the history is not served; with the event it is', async () => {
+    test('an approved row with a named approver but no OWNER approval event in the history is not served; with the owner event it is', async () => {
       const text = 'We service Ruskin on Thursdays.';
       const [inserted] = await root('company_fact_bank').insert({
         topic: 'Import', fact_text: text, text_sha256: Bank._test.sha256(text), status: 'approved', approved_at: root.fn.now(), approved_by: owner.id, source: 'import',
       }).returning('*');
       await Bank.refreshBankFacts(opts());
       expect(Bank.getApprovedBankFacts()).toEqual([]);
-      await root('company_fact_bank_events').insert({ fact_id: inserted.id, action: 'approved', actor_id: owner.id });
+      // A matching row and event written by a non-owner, one without the owner flag, and one for other wording: none is an owner approval.
+      for (const detail of [{ owner: false, text_sha256: inserted.text_sha256 }, {}, { owner: true, text_sha256: Bank._test.sha256('other') }]) {
+        await root('company_fact_bank_events').insert({ fact_id: inserted.id, action: 'approved', actor_id: owner.id, detail: JSON.stringify(detail) });
+      }
+      await Bank.refreshBankFacts(opts());
+      expect(Bank.getApprovedBankFacts()).toEqual([]);
+      await root('company_fact_bank_events').insert({ fact_id: inserted.id, action: 'approved', actor_id: owner.id, detail: JSON.stringify({ owner: true, text_sha256: inserted.text_sha256 }) });
       await Bank.refreshBankFacts(opts());
       expect(Bank.getApprovedBankFacts().map((f) => f.id)).toEqual([inserted.id]);
     });

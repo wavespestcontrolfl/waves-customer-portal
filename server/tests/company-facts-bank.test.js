@@ -41,6 +41,9 @@ describe('hard blocks', () => {
     ['a slash rate', 'Plans are 49/mo.', 'price_amount'],
     ['a two-decimal figure', 'The fee is 129.99.', 'price_amount'],
     ['a thousands figure after a price word', 'We charge 1,200 for the job.', 'price_amount'],
+    ['a thousands price per visit', 'Plans are 1,200 per visit.', 'price_amount'],
+    ['a decimal price per month', 'Plans are 12.50/mo.', 'price_amount'],
+    ['a plain price a month', 'Plans are 1200 a month.', 'price_amount'],
     ['a rate word and a number', 'Our rate is 75 for a quarterly visit.', 'price_amount'],
     ['four lowercase sentences', 'we serve parrish. we serve ruskin. we serve wimauma. we serve palmetto.', 'too_many_sentences'],
     ['another currency symbol', 'The initial application is \u20AC50.', 'dollar_amount'],
@@ -112,6 +115,11 @@ describe('hard blocks', () => {
     'Only 3 visits are needed.',
     'Just 2 visits are included.',
     'Lots up to 0.25 acre are covered.',
+    'Only 12 visits are needed.',
+    'Only 120 visits are needed.',
+    'Lots start at 1,000 square feet.',
+    'Lots start at 1,000 sq ft.',
+    'Only 1,200 customers are covered.',
     'We come back every 90 days for a quarterly visit.',
   ])('not a price: %s', (text) => {
     expect(blocksOf(text)).not.toContain('price_amount');
@@ -195,7 +203,7 @@ describe('snapshot', () => {
   });
   // A database handle that answers only the two reads the loader makes.
   // `events` are the 'approved' history rows; by default each row has one by its own approver.
-  const fakeDb = (rows, products = [], events = rows.map((r) => ({ fact_id: r.id, actor_id: r.approved_by }))) => (table) => {
+  const fakeDb = (rows, products = [], events = rows.map((r) => ownerEvent(r))) => (table) => {
     const answers = { products_catalog: products.map((name) => ({ name })), company_fact_bank_events: events };
     const chain = {
       where: () => chain, orderBy: () => chain, whereIn: () => chain, whereNotIn: () => chain,
@@ -204,6 +212,8 @@ describe('snapshot', () => {
     return chain;
   };
   const T0 = 1_800_000_000_000;
+  // The 'approved' history row approveFact writes: owner flag and the approved text hash in the detail.
+  const ownerEvent = (r, over = {}) => ({ fact_id: r.id, actor_id: r.approved_by, detail: { owner: true, text_sha256: r.text_sha256 }, ...over });
   const OWNER = 'bbbbbbbb-0000-4000-8000-000000000001';
 
   beforeEach(() => { Bank._test.resetSnapshot(); jest.clearAllMocks(); });
@@ -294,8 +304,8 @@ describe('snapshot', () => {
     ];
     // Row 4 has no 'approved' event at all; row 5's event names another person.
     const events = [
-      { fact_id: rows[0].id, actor_id: OWNER }, { fact_id: rows[1].id, actor_id: OWNER }, { fact_id: rows[2].id, actor_id: OWNER },
-      { fact_id: rows[4].id, actor_id: 'cccccccc-0000-4000-8000-000000000002' },
+      ownerEvent(rows[0]), ownerEvent(rows[1]), ownerEvent(rows[2]),
+      ownerEvent(rows[4], { actor_id: 'cccccccc-0000-4000-8000-000000000002' }),
     ];
     const facts = await Bank._test.loadVerifiedFacts(fakeDb(rows, [], events));
     expect(facts.map((f) => f.id)).toEqual([rows[0].id]);
@@ -315,6 +325,24 @@ describe('snapshot', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test('an approval that is not the owner\'s, or is for other wording, does not count: an import with a matching row and event is dropped', async () => {
+    const rows = [
+      approved(1, CLEAN),
+      approved(2, 'We service Ruskin on Thursdays.'),
+      approved(3, 'We service Wimauma on Fridays.'),
+      approved(4, 'We service Gibsonton on Mondays.'),
+      approved(5, 'We service Riverview on Wednesdays.'),
+    ];
+    const events = [
+      ownerEvent(rows[0]),
+      ownerEvent(rows[1], { detail: { owner: false, text_sha256: rows[1].text_sha256 } }), // a non-owner approver, same person on the row
+      ownerEvent(rows[2], { detail: { text_sha256: rows[2].text_sha256 } }), // no owner flag (an import)
+      ownerEvent(rows[3], { detail: { owner: true, text_sha256: sha256('other wording') } }), // owner approval of other text
+      ownerEvent(rows[4], { detail: null }),
+    ];
+    expect((await Bank._test.loadVerifiedFacts(fakeDb(rows, [], events))).map((f) => f.id)).toEqual([rows[0].id]);
   });
 
   test('"We use safe pesticides" written around the service is dropped at load', async () => {

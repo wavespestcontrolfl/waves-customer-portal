@@ -87,10 +87,10 @@ const SAFETY_CLAIM_RE = /\bsafe(?:r|st|ly)?\b|\bnon[\s-]?toxic\b|\bharmless\b|\b
 // "costs 2 hours") or a year ("costs have risen since 2024"); (3) a two-decimal figure that is not a measure ("129.99").
 // Counts and times that are not prices ("3 visits", "every 90 days", "2 hours", "1 acre", "4 quarterly visits", years) pass.
 const AMOUNT_SRC = '\\d{1,3}(?:,\\d{3})+(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?';
-const UNIT_SRC = '(?:visits?|days?|hours?|hrs?|minutes?|mins?|weeks?|months?|years?|acres?|feet|foot|ft|inch(?:es)?|miles?|times|treatments?|applications?|services?|stops?|trucks?|techs?|technicians?|people|customers?|properties|homes?|houses?|units?|zones?|rooms?|pests?|ants?|%|percent|a\\.?m\\.?|p\\.?m\\.?|st|nd|rd|th)\\b';
+const UNIT_SRC = '(?:square|sq|visits?|days?|hours?|hrs?|minutes?|mins?|weeks?|months?|years?|acres?|feet|foot|ft|inch(?:es)?|miles?|times|treatments?|applications?|services?|stops?|trucks?|techs?|technicians?|people|customers?|properties|homes?|houses?|units?|zones?|rooms?|pests?|ants?|%|percent|a\\.?m\\.?|p\\.?m\\.?|st|nd|rd|th)\\b';
 const BILLING_UNIT_SRC = '(?:mo(?:nth)?|months?|visits?|applications?|treatments?|services?|years?|yr|quarters?|weeks?|wk|times?)\\b';
-const RATE_RE = new RegExp(`(?<![\\d.])(?:${AMOUNT_SRC})\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
-const PRICE_WORD_NUMBER_RE = new RegExp(`\\b(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as|only|just)\\b([^.\\d]{0,20})(?<![\\d.])(${AMOUNT_SRC})(?![\\d.]\\d)(?!\\s*${UNIT_SRC})`, 'gi');
+const RATE_RE = new RegExp(`(?<![\\d.,])(?:${AMOUNT_SRC})(?!\\d|[.,]\\d)\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
+const PRICE_WORD_NUMBER_RE = new RegExp(`\\b(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as|only|just)\\b([^.\\d]{0,20})(?<![\\d.,])(${AMOUNT_SRC})(?!\\d|[.,]\\d)(?!\\s*${UNIT_SRC})`, 'gi');
 const DECIMAL_FIGURE_RE = new RegExp(`(?<![\\d.])\\d{1,4}\\.\\d{2}(?!\\d)(?!\\s*${UNIT_SRC})`, 'i');
 const YEAR_CONTEXT_RE = /\b(?:in|since|by|until|during|before|after|year|years)\b/i;
 
@@ -480,7 +480,8 @@ async function approveFact(id, input, actor, { dbi = db } = {}) {
       warnings_acknowledged: Boolean(check.warnings.length && acknowledgeWarnings),
       updated_at: trx.fn.now(),
     }).returning('*');
-    await addEvent(trx, id, 'approved', actor, { superseded_id: supersededId, warnings: check.warnings.map((w) => w.code) });
+    // owner + text_sha256 are what snapshot load trusts: the approval was made by the owner account, for exactly this wording.
+    await addEvent(trx, id, 'approved', actor, { superseded_id: supersededId, warnings: check.warnings.map((w) => w.code), owner: true, text_sha256: row.text_sha256 });
     await recordAuditEvent({
       actor_type: 'technician', actor_id: actor.id || null, action: AUDIT_APPROVED, resource_type: 'company_fact', resource_id: id,
       metadata: { text_sha256: row.text_sha256, superseded_id: supersededId, warnings: check.warnings.map((w) => w.code) }, critical: true, trx,
@@ -573,14 +574,19 @@ let appliedRead = 0; // the newest-started read whose result is in `state`
 let refreshTimer = null;
 let lastDropKey = '';
 
-/** Who approved each row, from the history: Map of fact id -> Set of actor ids on an 'approved' event. */
+/**
+ * The owner approvals in the history: Map of fact id -> list of { actor, sha } from 'approved' events that record owner === true
+ * and the text hash that was approved (approveFact writes both, after checking actor.isOwner).
+ */
 async function readApprovers(dbi, ids) {
   const approvers = new Map();
   if (!ids.length) return approvers;
-  const events = await dbi('company_fact_bank_events').where({ action: 'approved' }).whereIn('fact_id', ids).select('fact_id', 'actor_id');
+  const events = await dbi('company_fact_bank_events').where({ action: 'approved' }).whereIn('fact_id', ids).select('fact_id', 'actor_id', 'detail');
   for (const e of events) {
-    if (!approvers.has(e.fact_id)) approvers.set(e.fact_id, new Set());
-    approvers.get(e.fact_id).add(e.actor_id);
+    const detail = e.detail && typeof e.detail === 'object' ? e.detail : {};
+    if (detail.owner !== true) continue;
+    if (!approvers.has(e.fact_id)) approvers.set(e.fact_id, []);
+    approvers.get(e.fact_id).push({ actor: e.actor_id, sha: detail.text_sha256 });
   }
   return approvers;
 }
@@ -595,8 +601,10 @@ function warningsCovered(row, warnings) {
 /** Why a stored approved row must not be served, or '' when it may be. Codes only. */
 function loadProblem(row, check, approvers) {
   if (row.text_sha256 !== sha256(String(row.fact_text || '').trim())) return 'hash_mismatch';
-  // Provenance: a named approver, an approval time, and the approval event of that same person in the history.
-  if (!row.approved_by || !row.approved_at || !(approvers.get(row.id) || new Set()).has(row.approved_by)) return 'no_approval_record';
+  // Provenance: a named approver, an approval time, and an OWNER approval event in the history by that same person for this exact wording
+  // (an import, or a row and event written by a non-owner, has none).
+  const ownerApproved = (approvers.get(row.id) || []).some((a) => a.actor === row.approved_by && a.sha === row.text_sha256);
+  if (!row.approved_by || !row.approved_at || !ownerApproved) return 'no_approval_record';
   if (check.blocks.length) return check.blocks.join('+');
   // Warning words need the owner's tick; a row without it (written around the service, or newly matched by a widened screen) is not served.
   if (check.warnings.length > 0 && !warningsCovered(row, check.warnings)) return 'warnings_not_acknowledged';
