@@ -25,17 +25,26 @@
  *   4. writes the run to system_settings 'ads.rain_mode.last' and 'ads.rain_mode.history' (last HISTORY_MAX), and the
  *      day's latest call to 'ads.rain_mode.days' (one row per sold day, kept DAYS_MAX), the record the ad results
  *      report joins on.
- *   5. scores past days: a day whose call is recorded and not yet scored reads the measured radar rain (mrms-qpe.js)
- *      at each area, least recently tried first. An area with WET_INCHES or more was wet; a wet day has half or more
- *      of all areas wet. A radar gap that could flip that waits (SCORE_GIVE_UP_DAYS, then the areas read decide,
- *      marked partial). The score is kept on the day's row: the areas measured wet, wet_day, hit (the latest call)
- *      and cutoff_hit (the first call made before the day, from 2 PM the day before: the one the ads act on).
+ *   5. scores past days: a day whose call is recorded and not yet scored reads the MEASURED RAIN IN WORK HOURS at each
+ *      area (scheduling/work-hour-rain.js: IEM airport hourly gauge reads, area -> station map there), least recently
+ *      tried first. An area is wet with RAIN_HOURS or more work hours of measurable rain (0.01 in); a wet day has half
+ *      or more of all areas wet. A gap that could flip that waits (SCORE_GIVE_UP_DAYS, then the areas read decide,
+ *      marked partial). The score is kept on the day's row (score.basis 'work_hours'): the area readings, wet_areas,
+ *      wet_day, hit (the latest call) and cutoff_hit (the first settled call made before the day, from 2 PM the day
+ *      before: the one the ads act on). The first grader compared a DAILY radar total (mrms-qpe.js, WET_INCHES) with a
+ *      work-hours rule and scored 2026-11-25 wrong; that daily score stays on the row as score_daily, for comparison.
+ *   6. keeps the forecast numbers: per area the NWS chance of each work hour of the sold day, as `cutoff_chances` (frozen
+ *      with the cutoff) and `latest_chances` (an hour the feed already dropped keeps its earlier reading), so a past
+ *      day can be replayed.
+ *   Campaigns of google_ads, google_lsa and facebook are classified and recorded; only rain_class set by hand marks an
+ *   lsa or facebook campaign (a route line is a Google Ads label). Nothing is written to any ad platform.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
 const { getNwsHourlyRain, getNwsHourlyRainPatient } = require('../weather-forecast');
 const { fetchMrmsDailyRain } = require('../mrms-qpe');
 const { ZONE_COORDS } = require('../scheduling/forecast-zones');
+const workHours = require('../scheduling/work-hour-rain');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 // One sold-day rule for the budget run and this record; one route-line classifier with ads/route-fill.js.
@@ -52,7 +61,9 @@ const RAIN_PCT = 70;
 const RAIN_HOURS = 4;
 const MIN_AREAS = 3;
 // Measured radar rain that counts an area as wet that day.
+// Used by the daily grader kept as score_daily.
 const WET_INCHES = 0.25;
+const RAIN_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
 // Past days scored in one run, oldest first; the rest wait for the next run.
 const SCORE_MAX = 3;
 // A day still not settled by measured rain this many days later is scored from the areas read.
@@ -70,7 +81,7 @@ function parseJson(v, fallback) {
 function rainClassOf(campaign) {
   const meta = parseJson(campaign?.metadata, {});
   if (meta && ['indoor', 'outdoor'].includes(meta.rain_class)) return meta.rain_class;
-  if (routeLineOf(campaign)) return 'outdoor';
+  if ((!campaign?.platform || campaign.platform === 'google_ads') && routeLineOf(campaign)) return 'outdoor';
   return null;
 }
 
@@ -99,6 +110,7 @@ async function forecastDay(day, { read = getNwsHourlyRain } = {}) {
   const zones = Object.keys(ZONE_COORDS);
   const areas = [];
   const unread = [];
+  const chances = {};
   // No one waits on this cron: the patient NWS read (long wait, one retry). The first prod ticks (2026-11-24) lost 4 of
   // 6 areas to the 2.5 s default at the busy top of the hour.
   await Promise.all(zones.map(async (zone) => {
@@ -106,6 +118,7 @@ async function forecastDay(day, { read = getNwsHourlyRain } = {}) {
     const counted = Array.isArray(hours) ? countWetHours(hours, day) : null;
     const total = (DAY_CLOSE - DAY_OPEN) / HOUR;
     if (!counted || counted.missing >= total) { unread.push(zone); return; }
+    chances[zone] = workHours.workHourChances(hours, day);
     let rain = null;
     if (counted.wet >= RAIN_HOURS) rain = true;
     else if (counted.wet + counted.missing < RAIN_HOURS) rain = false;
@@ -116,7 +129,7 @@ async function forecastDay(day, { read = getNwsHourlyRain } = {}) {
   const settled = areas.filter((a) => a.rain !== null);
   let call = 'unknown';
   if (settled.length >= MIN_AREAS) call = settled.filter((a) => a.rain).length * 2 >= settled.length ? 'rain' : 'dry';
-  return { day, call, areas, unread };
+  return { day, call, areas, unread, chances };
 }
 
 /** What the rule would set for a campaign of `rainClass` under `call`: 'base' | 'stop' | null (no change). */
@@ -130,7 +143,7 @@ function decideCampaign(rainClass, call) {
  * The day's measured radar rain by area: readings kept from earlier tries (`row.measured_so_far`) stand, and only the
  * areas still without a reading are read again.
  */
-async function measureDay(row, { fetchRain = fetchMrmsDailyRain } = {}) {
+async function measureDailyDay(row, { fetchRain = fetchMrmsDailyRain } = {}) {
   const kept = parseJson(row.measured_so_far, {}) || {};
   const entries = await Promise.all(Object.keys(ZONE_COORDS).map(async (zone) => {
     if (Number.isFinite(kept[zone])) return [zone, kept[zone]];
@@ -144,11 +157,11 @@ async function measureDay(row, { fetchRain = fetchMrmsDailyRain } = {}) {
 }
 
 /**
- * The score from `measured`, or null while radar gaps could still change it. Wet day = half or more of all areas
- * measured wet. A gap counts both ways: the score waits until the areas still missing could not flip it, or, after
+ * The DAILY radar score from `measured` (kept as score_daily), or null while radar gaps could still change it. Wet day =
+ * half or more of all areas measured wet. A gap counts both ways: the score waits until the areas still missing could not flip it, or, after
  * SCORE_GIVE_UP_DAYS, is taken from the areas read (marked partial; none read = a final score with no grade).
  */
-function scoreFrom(row, measured, now) {
+function scoreDailyFrom(row, measured, now) {
   const all = Object.entries(measured);
   const read = all.filter(([, inches]) => inches != null);
   const wetAreas = read.filter(([, inches]) => inches >= WET_INCHES).map(([zone]) => zone);
@@ -158,8 +171,7 @@ function scoreFrom(row, measured, now) {
   else if ((wetAreas.length + missing) * 2 < all.length) wetDay = false;
   const partial = wetDay === null;
   if (partial) {
-    const ageDays = (Date.parse(`${etDateString(now)}T00:00:00Z`) - Date.parse(`${row.day}T00:00:00Z`)) / 86400000;
-    if (ageDays < SCORE_GIVE_UP_DAYS) return null;
+    if (ageDaysOf(row, now) < SCORE_GIVE_UP_DAYS) return null;
     // Past the give-up days with no reading at all: a final, ungraded score, so the day stops taking a retry slot.
     wetDay = read.length ? wetAreas.length * 2 >= read.length : null;
   }
@@ -174,9 +186,32 @@ function scoreFrom(row, measured, now) {
   };
 }
 
-/** The day's score (measureDay + scoreFrom), or null while it must wait. */
-async function scoreDay(row, { fetchRain, now = new Date() } = {}) {
-  return scoreFrom(row, await measureDay(row, { fetchRain }), now);
+const ageDaysOf = (row, now) => (Date.parse(`${etDateString(now)}T00:00:00Z`) - Date.parse(`${row.day}T00:00:00Z`)) / 86400000;
+
+/**
+ * The score from the measured rain in the work hours (work-hour-rain.js), or null while it could still change: an hour the
+ * gauges did not report, or a read that failed (never a give-up). After SCORE_GIVE_UP_DAYS, on a successful read, the areas
+ * settled decide (wetDayFrom final), marked partial; none settled = a final score with no grade, so the day stops taking a
+ * retry slot.
+ */
+async function scoreDay(row, { fetchObs = workHours.fetchHourlyObs, now = new Date() } = {}) {
+  const obs = await Promise.resolve().then(() => fetchObs(row.day)).catch(() => null);
+  // A read that failed (IEM refused, timed out) is "not read this run": never a score, never a give-up.
+  if (!obs) return null;
+  const measured = workHours.measureAreas(obs, Object.keys(ZONE_COORDS), RAIN_HOURS);
+  const aged = ageDaysOf(row, now) >= SCORE_GIVE_UP_DAYS;
+  const { wet_areas: wetAreas, wet_day: wetDay, partial } = workHours.wetDayFrom(measured, { final: aged });
+  if (partial && !aged) return null;
+  return {
+    basis: 'work_hours',
+    partial,
+    scored_at: new Date().toISOString(),
+    measured,
+    wet_areas: wetAreas,
+    wet_day: wetDay,
+    hit: row.call === 'unknown' || wetDay === null ? null : (row.call === 'rain') === wetDay,
+    cutoff_hit: ['rain', 'dry'].includes(row.cutoff_call) && wetDay !== null ? (row.cutoff_call === 'rain') === wetDay : null,
+  };
 }
 
 async function loadDays(conn) {
@@ -204,42 +239,64 @@ async function saveRun(conn, run, days, now) {
   });
 }
 
+/** Per area and work hour, the new chance where there is one, else the earlier one (the feed drops hours already over). */
+function mergeChances(prior, next) {
+  const out = { ...(prior || {}) };
+  for (const [zone, hours] of Object.entries(next || {})) {
+    out[zone] = hours.map((v, i) => (v ?? out[zone]?.[i] ?? null));
+  }
+  return out;
+}
+
 /**
  * The day's row after a run, or null when there is still nothing to keep. The latest call moves only when the
  * forecast settles. The cutoff is taken once, at the first run from 2 PM the day before (`cutoffRun`; a Sunday run
- * sells Monday all day, only its 2 PM and later runs count): the call in force then, kept or settled, or 'unknown'
- * when there was none. cutoff_at marks it taken, so a later call never replaces it.
+ * sells Monday all day, only its 2 PM and later runs count) that has a settled call in force, kept or new. A run with no
+ * settled call freezes nothing: a later run before the day starts may still take it (2026-11-26: the first post-2 PM run
+ * that failed to settle used to freeze 'unknown'). cutoff_at marks it taken, so a later call never replaces it.
+ * `chances`: the forecast numbers. latest_chances merges every run (an hour the feed dropped keeps its reading); call_chances
+ * holds the unmerged readings of the run that supplied the call, and cutoff_chances copies those with the cutoff, so the
+ * numbers match the call that was graded.
  */
 function nextDayRow(prior, { day, forecast, call, cutoffRun, at }) {
   const next = { ...(prior || {}), day };
   if (forecast.call !== 'unknown') {
     Object.assign(next, { call: forecast.call, at, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) });
   }
-  if (!next.cutoff_at && cutoffRun) Object.assign(next, { cutoff_call: call, cutoff_at: at });
-  return next.call || next.cutoff_at ? next : null;
+  // The readings behind the call in force, unmerged: the run that settled it (this one, or an earlier one carried forward).
+  if (forecast.call !== 'unknown' && forecast.chances) next.call_chances = forecast.chances;
+  if (forecast.chances && Object.keys(forecast.chances).length) next.latest_chances = mergeChances(next.latest_chances, forecast.chances);
+  // A settled cutoff is never replaced; one written as 'unknown' by the earlier code may be, by a settled call before the day.
+  if ((!next.cutoff_at || next.cutoff_call === 'unknown') && cutoffRun && call !== 'unknown') {
+    Object.assign(next, { cutoff_call: call, cutoff_at: at, cutoff_chances: next.call_chances || null });
+  }
+  return next.call || next.cutoff_at || next.latest_chances ? next : null;
 }
 
 /**
- * Scores up to SCORE_MAX past, unscored days (in place), least recently tried first, so a day waiting on radar gaps
- * never blocks the days after it. Returns the days scored.
+ * Scores up to SCORE_MAX past days (in place) that have a call and no work-hour score, least recently tried first, so a
+ * day waiting on gauge gaps never blocks the days after it. A day scored by the first, daily-radar grader is graded
+ * again here and keeps that score as score_daily. Returns the days scored.
  */
 async function scorePastDays(days, now, opts) {
   const today = etDateString(now);
   const tried = (d) => days[d].score_tried_at || '';
   const due = Object.keys(days)
-    .filter((d) => d < today && !days[d].score && days[d].call)
+    .filter((d) => d < today && days[d].score?.basis !== 'work_hours' && days[d].call)
     .sort((a, b) => tried(a).localeCompare(tried(b)) || a.localeCompare(b))
     .slice(0, SCORE_MAX);
   const scored = [];
   for (const day of due) {
-    const measured = await measureDay(days[day], opts);
-    const score = scoreFrom(days[day], measured, now);
+    const score = await scoreDay(days[day], { ...opts, now });
     if (score) {
-      const { measured_so_far: _kept, ...row } = days[day];
-      days[day] = { ...row, score };
+      const { measured_so_far: _kept, score: old, ...row } = days[day];
+      const daily = old?.basis ? null : old;
+      // A day first graded here also gets the daily radar score, best effort, for comparison.
+      const scoreDaily = daily || row.score_daily || await measureDailyDay(days[day], opts).then((m) => scoreDailyFrom(days[day], m, now)).catch(() => null);
+      days[day] = { ...row, score, score_daily: scoreDaily || null };
       scored.push(day);
     } else {
-      days[day] = { ...days[day], score_tried_at: now.toISOString(), measured_so_far: measured };
+      days[day] = { ...days[day], score_tried_at: now.toISOString() };
     }
   }
   return scored;
@@ -248,14 +305,15 @@ async function scorePastDays(days, now, opts) {
 /**
  * One run. Returns { day, call, campaigns, scored, problems }. Problems: an unknown call, a failed save.
  */
-async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) {
+async function recordRun({ now = new Date(), conn = db, read, fetchRain, fetchObs } = {}) {
   const problems = [];
   const day = soldDay(now);
   const forecast = await forecastDay(day, { read });
   const days = await loadDays(conn);
   // An unknown forecast never replaces the day's last settled call (made at 2 PM the day before, or later).
   const call = forecast.call === 'unknown' ? (days[day]?.call || 'unknown') : forecast.call;
-  const rows = await conn('ad_campaigns').where('platform', 'google_ads');
+  // Record only: LSA and Facebook campaigns are classified too (rain_class set by hand), and nothing is written to a platform.
+  const rows = await conn('ad_campaigns').where((q) => q.whereIn('platform', RAIN_PLATFORMS));
   const campaigns = rows
     .filter((c) => ['active', 'paused'].includes(c.status))
     .map((c) => {
@@ -263,6 +321,7 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
       return {
         campaign_id: c.id,
         campaign_name: c.campaign_name,
+        platform: c.platform || 'google_ads',
         status: c.status,
         rain_class: rainClass,
         would: decideCampaign(rainClass, call),
@@ -287,7 +346,7 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
       const next = nextDayRow(days[day], { day, forecast, call, cutoffRun: day > etDateString(now) && etParts(now).hour >= 14, at: run.at });
       if (next) days[day] = next;
     }
-    scored = await scorePastDays(days, now, { fetchRain });
+    scored = await scorePastDays(days, now, { fetchRain, fetchObs });
     await saveRun(conn, run, days, now);
   } catch (err) {
     problems.push(`the run was not saved: ${err.message}`);
@@ -312,6 +371,7 @@ module.exports = {
   RAIN_PCT,
   RAIN_HOURS,
   WET_INCHES,
+  RAIN_PLATFORMS,
   SCORE_MAX,
   SCORE_GIVE_UP_DAYS,
   rainClassOf,
@@ -320,6 +380,7 @@ module.exports = {
   decideCampaign,
   scoreDay,
   nextDayRow,
+  mergeChances,
   recordRun,
   recordRainMode,
 };
