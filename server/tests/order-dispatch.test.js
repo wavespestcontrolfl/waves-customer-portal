@@ -91,7 +91,7 @@ jest.mock('../models/db', () => {
 const { auditVendorOrder } = require('../services/audit-log');
 const dispatch = require('../services/procurement/order-dispatch');
 
-const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', GATE_AUTO_ORDER_SITEONE: 'true', STICKERMULE_API_KEY: 'test-key', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
+const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', GATE_AUTO_ORDER_SITEONE: 'true', GATE_AUTO_ORDER_HISTORY_TOTAL: 'false', STICKERMULE_API_KEY: 'test-key', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
 const baseRequest = () => ({ id: 'req-1', product_id: 'prod-sticker', status: 'open', source: 'auto_reorder', requested_quantity: '500', unit: 'each', metadata: { vendorId: 'vend-sm', vendorSku: '4242' } });
 const stickerMule = { id: 'vend-sm', name: 'Sticker Mule', code: 25, active: true };
 const sticker = { id: 'prod-sticker', name: 'Yard sign sticker', active: true, auto_reorder_enabled: true, inventory_on_hand: '40', low_stock_threshold: '100', auto_reorder_vendor_id: 'vend-sm', reorder_quantity: '500', inventory_unit: 'each' };
@@ -946,6 +946,65 @@ test('an adapter without a vendor-confirmed pre-submit total never auto-places: 
   expect(notify.mock.calls[0][3].detail).toMatch(/item 4242 × 500/);
   const ledger = lastLedgerPatch();
   expect(ledger.placed_at).toBeUndefined();
+});
+
+// GATE_AUTO_ORDER_HISTORY_TOTAL (owner 2026-11-26): a history-total adapter places on the last identical order's total.
+describe('history-total placement', () => {
+  const historyAdapter = (amountCents = 31400) => mockAdapter({ preSubmitTotal: 'history', place: jest.fn(async () => ({ externalOrderNumber: 'SM-1', amountCents, response: {}, evidence: {} })) });
+  const driftAlerts = () => notify.mock.calls.filter((c) => String(c[3]?.dedupeKey).startsWith('auto-order-price:'));
+  beforeEach(() => { process.env.GATE_AUTO_ORDER_HISTORY_TOTAL = 'true'; });
+
+  test('gate on: places on the history quote and rings nothing when the total matches', async () => {
+    const a = historyAdapter();
+    expect(await run(a)).toMatchObject({ status: 'placed', amountCents: 31400 });
+    expect(a.place).toHaveBeenCalledWith(expect.objectContaining({ quoteCents: 31400 }));
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('gate off: still parks no_vendor_confirmed_total and places nothing', async () => {
+    process.env.GATE_AUTO_ORDER_HISTORY_TOTAL = 'false';
+    const a = historyAdapter();
+    expect(await run(a)).toMatchObject({ status: 'needs_review', reason: 'no_vendor_confirmed_total' });
+    expect(a.place).not.toHaveBeenCalled();
+  });
+
+  test('final total more than max(5%, $2) off the history total rings ONE price alert (vendor read-back, both directions)', async () => {
+    expect(await run(historyAdapter(34000))).toMatchObject({ status: 'placed', amountCents: 34000 });
+    expect(driftAlerts()).toHaveLength(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(driftAlerts()[0][3].detail).toMatch(/placed at \$340\.00.*last identical order was \$314\.00/);
+    notify.mockClear();
+    await run(historyAdapter(28000));
+    expect(driftAlerts()).toHaveLength(1);
+  });
+
+  test('final total within tolerance (5%) rings nothing', async () => {
+    expect(await run(historyAdapter(32900))).toMatchObject({ status: 'placed', amountCents: 32900 });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('a small order uses the $2 floor, not 5%', async () => {
+    const a = mockAdapter({ preSubmitTotal: 'history', bindingQuote: jest.fn(async () => ({ cents: 1000, source: 'order SM-0' })), place: jest.fn(async () => ({ externalOrderNumber: 'SM-1', amountCents: 1190, response: {}, evidence: {} })) });
+    await run(a);
+    expect(notify).not.toHaveBeenCalled(); // $1.90 apart: under the $2 floor
+    a.place.mockImplementation(async () => ({ externalOrderNumber: 'SM-2', amountCents: 1210, response: {}, evidence: {} }));
+    mockState.ledgerRows = [];
+    await run(a);
+    expect(driftAlerts()).toHaveLength(1);
+  });
+
+  test('the history quote above the per-order cap still refuses before anything is sent', async () => {
+    process.env.AUTO_ORDER_MAX_PER_ORDER_CENTS = '10000';
+    const a = historyAdapter();
+    expect(await run(a)).toMatchObject({ status: 'needs_review', reason: 'over_per_order_cap' });
+    expect(a.place).not.toHaveBeenCalled();
+  });
+
+  test('a final total over the cap parks over_cap_after_placement with its own bell and no price alert', async () => {
+    process.env.AUTO_ORDER_MAX_PER_ORDER_CENTS = '35000';
+    expect(await run(historyAdapter(40000))).toMatchObject({ status: 'needs_review', reason: 'over_cap_after_placement' });
+    expect(driftAlerts()).toHaveLength(0);
+  });
 });
 
 test('the real Sticker Mule adapter is history-total + count quantity; the real SiteOne adapter is vendor-total + package quantity + login', () => {

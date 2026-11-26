@@ -75,9 +75,11 @@
  * Only an adapter whose pre-submit total is VENDOR-CONFIRMED (preSubmitTotal
  * 'vendor': SiteOne reads the checkout total live) auto-places. Sticker Mule
  * ('history') is fully prepared — SKU, quantity, last identical charge,
- * cap reservation — but parks needs_review 'no_vendor_confirmed_total' with
- * that figure in the bell; accepting history-total placement is an owner
- * ruling, not a code default.
+ * cap reservation — and parks needs_review 'no_vendor_confirmed_total' with
+ * that figure in the bell, unless GATE_AUTO_ORDER_HISTORY_TOTAL is on (owner
+ * ruling 2026-11-26): then it places on the last identical order's total, the
+ * caps bind on that figure and again on the vendor's read-back total, and a
+ * final total more than max(5%, $2) off the history total rings one alert.
  *
  * The sweep consults canAutoOrder() and skips its "order manually" bell for
  * a vendor this module will order from, so every request ends either
@@ -99,6 +101,7 @@ const { fitAction } = require('../admin-alert-names');
 const { raiserFor, ringOnRefreshAfterConversion } = require('../admin-alert-injected');
 
 const GATE = 'GATE_AUTO_ORDER';
+const HISTORY_TOTAL_GATE = 'GATE_AUTO_ORDER_HISTORY_TOTAL';
 const RESTOCK_TAB = '/admin/inventory?tab=restock';
 // Advisory-lock key for the cap reservation (hashtext of this string).
 const CAPS_LOCK_KEY = 'vendor-order-caps';
@@ -1002,12 +1005,12 @@ async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quan
   const quoteCents = bq.cents;
   const cap = await reserveUnderCaps(conn, ctx.ledger.id, quoteCents, { env });
   if (!cap.ok) return { parked: await park(conn, { ...ctx, reason: cap.reason, message: `${cap.message} (${vendor.name} total for the last identical order${bq.source ? `, ${bq.source}` : ''})`, amountCents: quoteCents }) };
-  if (adapter.preSubmitTotal !== 'vendor') {
+  if (adapter.preSubmitTotal !== 'vendor' && !(adapter.preSubmitTotal === 'history' && gateEnvValue(HISTORY_TOTAL_GATE))) {
     // A historical charge is not a vendor-confirmed current total: price,
     // tax or shipping may have moved since, and a cap can only be
     // enforced BEFORE money moves. Park with everything the office needs
     // for a one-minute manual reorder (pre-push audit P0; owner ruling
-    // pending on accepting history-total placement).
+    // 2026-11-26: GATE_AUTO_ORDER_HISTORY_TOTAL accepts history-total placement).
     return { parked: await park(conn, { ...ctx, reason: 'no_vendor_confirmed_total', message: `${vendor.name}'s API confirms no current total before ordering; the last identical order (${bq.source || 'history'}) was ${dollars(quoteCents)}, which fits the caps. Reorder item ${vendorSku} × ${quantity} by hand.`, amountCents: quoteCents }) };
   }
   return { quoteCents };
@@ -1034,6 +1037,30 @@ async function reservePostSubmitAmount(conn, ledger, cents, env) {
   if (cents == null) return { ok: false, reason: 'caps_unconfigured' };
   const reservation = await ledgerReservation(conn, ledger);
   return reserveUnderCaps(conn, ledger.id, cents, { env, accountingAt: reservation.createdAt, postPlacement: true });
+}
+
+// A history-total order (Sticker Mule) was admitted on the last identical order's total; the
+// vendor's read-back total can differ. More than max(5%, $2) apart rings ONE alert (deduped per ledger row).
+async function alertHistoryTotalDrift({ ctx, adapter, vendor, finalCents, quoteCents }) {
+  if (adapter.preSubmitTotal !== 'history' || !(quoteCents > 0) || Math.abs(finalCents - quoteCents) <= Math.max(Math.round(quoteCents * 0.05), 200)) return;
+  const { ledger, request, product, notify } = ctx;
+  try {
+    await raiserFor(notify)('system', {
+      area: 'Inventory',
+      action: fitAction('Inventory', product.name, [(n) => `check the ${n} order price`, () => 'check the order price']),
+      why: `Placed at ${dollars(finalCents)}; the last identical order was ${dollars(quoteCents)}.`,
+      severity: 'needs-you',
+      link: RESTOCK_TAB,
+      subject: { type: 'check', id: `auto-order-price:${ledger.id}` },
+      doneWhen: 'auto_order_reviewed',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `auto-order-price:${ledger.id}`,
+      detail: `${vendor.name} order for ${product.name} was placed at ${dollars(finalCents)}. The last identical order was ${dollars(quoteCents)}, so the order went out on that history total.`,
+      metadata: { vendorOrderId: ledger.id, restockRequestId: request.id, productName: product.name, vendorName: vendor.name },
+    });
+  } catch (err) { logger.warn(`[order-dispatch] price-drift alert failed for ledger ${ledger.id}: ${err.message}`); }
 }
 
 async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
@@ -1378,7 +1405,9 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     }
     const overCap = await parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env });
     if (overCap) return overCap;
-    return await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
+    const recorded = await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
+    await alertHistoryTotalDrift({ ctx, adapter, vendor, finalCents, quoteCents });
+    return recorded;
   } catch (err) {
     // Run-level failures are scoped to THIS adapter for the batch loop: the
     // other vendors' requests still dispatch (Codex r8 P1).
