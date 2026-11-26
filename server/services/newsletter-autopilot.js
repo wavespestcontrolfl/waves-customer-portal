@@ -43,7 +43,7 @@ const {
   loadSharedYearPool,
 } = require('./newsletter-event-selection');
 const {
-  selectPortfolio, rankAlternates, effectiveScore, unmetConstraints, capsAllow,
+  selectPortfolio, rankAlternates, effectiveScore, unmetConstraints,
   MAX_COUNT: MAX_PORTFOLIO,
 } = require('./newsletter-portfolio');
 const { featureScoreFloor } = require('./event-scoring');
@@ -347,16 +347,15 @@ function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
  * land beside both away picks.
  */
 function refillWithinCaps({ safeEventIds, refillPool, refillExisting, lineupEvents }) {
-  const ids = [...safeEventIds];
+  // The portfolio selector with the survivors seeded: its cardinality repair
+  // finds a fuller lineup when a greedy refill would strand one (two caps
+  // competing for the last slots).
+  const ids = safeEventIds.map(String);
   const survivors = lineupEvents.filter((ev) => ids.includes(String(ev.id)));
-  for (const alt of refillPool) {
-    if (ids.length >= MAX_PORTFOLIO) break;
-    const id = String(alt.id);
-    if (ids.includes(id) || !refillExisting.has(id) || !capsAllow(survivors, alt)) continue;
-    ids.push(id);
-    survivors.push(alt);
-  }
-  return ids;
+  const pool = refillPool.filter((ev) => refillExisting.has(String(ev.id)) && !ids.includes(String(ev.id)));
+  const { selected } = selectPortfolio(pool, { seeded: survivors, maxCount: MAX_PORTFOLIO });
+  const added = selected.map((ev) => String(ev.id)).filter((id) => !ids.includes(id));
+  return [...ids, ...added];
 }
 
 async function autoDraftFlagship() {

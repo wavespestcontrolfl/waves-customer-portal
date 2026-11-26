@@ -31,4 +31,25 @@ describe('refillWithinCaps', () => {
     });
     expect(ids).toEqual(['c']);
   });
+
+  test('competing caps: the refill finds the fuller lineup a greedy pick would miss', () => {
+    const lineupEvents = [
+      ev('s1', 'tampa', { source_id: 'X', editorial_score: 95 }),
+      ev('s2', 'sarasota', { source_id: 'A' }),
+      ev('s3', 'manatee', { source_id: 'Y' }),
+    ];
+    const refillPool = [
+      ev('p1', 'pinellas', { source_id: 'A', editorial_score: 84 }),
+      ev('p2', 'pinellas', { source_id: 'B', editorial_score: 83 }),
+      ev('p3', 'south_sarasota', { source_id: 'A', editorial_score: 82 }),
+    ];
+    const ids = refillWithinCaps({
+      safeEventIds: ['s1', 's2', 's3'],
+      refillPool,
+      refillExisting: new Set(['p1', 'p2', 'p3']),
+      lineupEvents,
+    });
+    expect(ids).toHaveLength(5);
+    expect(ids).toEqual(expect.arrayContaining(['s1', 's2', 's3', 'p2', 'p3']));
+  });
 });

@@ -52,24 +52,17 @@ const CLASS_CAP = 1;
 const AWAY_ZONES = new Set(['tampa', 'pinellas', 'away']);
 const AWAY_CAP = 2;
 // An event with no region_zone counts as LOCAL only when its city is a known
-// home-zone town (the normalizer's cityToZone map, after stripping
-// punctuation, or an exact home-zone town name). Any other untagged city counts as
+// home-zone town in the normalizer's cityToZone map (after stripping
+// punctuation). Any other untagged city counts as
 // away: a list of away towns can never be complete, and local first means an
 // unknown town must not slip past the cap.
-const HOME_CITIES = new Set([
-  'bradenton', 'west bradenton', 'palmetto', 'parrish', 'ellenton', 'lakewood ranch', 'anna maria',
-  'anna maria island', 'holmes beach', 'bradenton beach', 'longboat key', 'cortez', 'myakka city',
-  'sarasota', 'siesta key', 'lido key', 'osprey', 'nokomis', 'casey key', 'venice', 'laurel',
-  'englewood', 'north port', 'wellen park', 'port charlotte', 'punta gorda', 'rotonda', 'rotonda west',
-  'placida', 'boca grande', 'university park', 'fruitville', 'gulf cove', 'manasota key',
-]);
 function awayZoneOf(event) {
   const zone = norm(event?.region_zone);
   if (zone) return zone;
   const city = norm(event?.city);
   // No location at all is not proof of a local event: count it as away.
   if (!city) return 'away';
-  return cityToZone(city) || (HOME_CITIES.has(city) ? 'sarasota' : 'away');
+  return cityToZone(city) || 'away';
 }
 const isAway = (event) => AWAY_ZONES.has(awayZoneOf(event));
 
