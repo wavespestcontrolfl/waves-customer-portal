@@ -548,6 +548,22 @@ describe("Company facts tab", () => {
     expect(screen.getByLabelText(/Topic/)).toHaveValue("My new topic");
   });
 
+  it("tells an editor that its draft was deleted without claiming a reload, and keeps what was typed (NOT_FOUND)", async () => {
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: [fact({ id: ID_A, topic: "Topic A" })], nextCursor: null } } },
+      failWith: (method) => (method === "PATCH" ? { code: "NOT_FOUND", status: 404 } : null),
+    });
+    mount();
+    await screen.findByText("Topic A");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "My new topic" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("This draft was deleted. Your text is still here to copy.")).toBeInTheDocument();
+    expect(screen.queryByText(/reloaded/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Topic/)).toHaveValue("My new topic");
+  });
+
   it("recovers from a changed field the same way as a changed wording (STALE_FACT)", async () => {
     const patches = [];
     serve({
@@ -736,5 +752,108 @@ describe("Company facts tab", () => {
     await screen.findByText("Topic Z");
     expect(screen.getAllByText("Topic X")).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Save changes" })).toHaveLength(1);
+  });
+
+  it("ignores Load more while a refresh runs, and the next Load more works after it", async () => {
+    let release;
+    let hold = false;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const book = { first: { facts: [fact({ id: ID_A, topic: "Topic A" }), fact({ id: ID_B, topic: "Topic B" })], nextCursor: "C2" }, C2: { facts: [fact({ id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", topic: "Topic Late" })], nextCursor: null } };
+    serve({ owner: true, pages: { draft: book } });
+    const base = adminFetch.getMockImplementation();
+    const listReads = [];
+    adminFetch.mockImplementation(async (path, options) => {
+      if (path.startsWith("/admin/company-facts?")) { listReads.push(path); if (hold) await gate; }
+      return base(path, options);
+    });
+    mount();
+    await screen.findByText("Topic A");
+    listReads.length = 0;
+    hold = true;
+    fireEvent.click(screen.getAllByRole("button", { name: "Check again" })[0]);
+    await waitFor(() => expect(listReads).toHaveLength(1)); // the refresh is in flight
+    expect(screen.getByRole("button", { name: "Load more" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(listReads).toHaveLength(1); // no cursor read was started
+    hold = false;
+    release();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Load more" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("Topic Late")).toBeInTheDocument();
+  });
+
+  it("drops a Load more page when a refresh starts while it is in flight", async () => {
+    let release;
+    let hold = false;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const book = { first: { facts: [fact({ id: ID_A, topic: "Topic A" })], nextCursor: "C2" }, C2: { facts: [fact({ id: ID_B, topic: "Topic Slow Page" })], nextCursor: null } };
+    serve({ owner: true, pages: { draft: book } });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (path, options) => {
+      if (hold && path.includes("cursor=C2")) await gate;
+      return base(path, options);
+    });
+    mount();
+    await screen.findByText("Topic A");
+    hold = true;
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument());
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The refresh won: page one with its own cursor, and the slow page was not added behind its back.
+    expect(screen.queryByText("Topic Slow Page")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
+  });
+
+  it("closes the discard confirmation and refreshes the card when the discard is refused as stale", async () => {
+    const reads = [];
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: [fact()], nextCursor: null } } },
+      failWith: (method) => (method === "DELETE" ? { code: "STALE_TEXT", status: 409 } : null),
+    });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (path, options) => { if (path.startsWith("/admin/company-facts?")) reads.push(path); return base(path, options); });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    reads.length = 0;
+    fireEvent.click(screen.getAllByRole("button", { name: "Discard" }).at(-1));
+    expect(await screen.findByText(/The wording changed after you opened it/)).toBeInTheDocument();
+    expect(screen.queryByText("Discard this draft for good?")).not.toBeInTheDocument();
+    await waitFor(() => expect(reads.length).toBeGreaterThan(0));
+  });
+
+  it.each([
+    ["approved meanwhile", { code: "NOT_A_DRAFT", status: 409 }, /already approved or changed this draft/],
+    ["deleted meanwhile", { code: "NOT_FOUND", status: 404 }, /already deleted\. The list was reloaded/],
+  ])("closes the discard confirmation, reloads the list and says so when the draft was %s", async (_label, failure, message) => {
+    const reads = [];
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: [fact()], nextCursor: null } } },
+      failWith: (method) => (method === "DELETE" ? failure : null),
+    });
+    const base = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation(async (path, options) => { if (path.startsWith("/admin/company-facts?")) reads.push(path); return base(path, options); });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    reads.length = 0;
+    fireEvent.click(screen.getAllByRole("button", { name: "Discard" }).at(-1));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByText("Discard this draft for good?")).not.toBeInTheDocument();
+    await waitFor(() => expect(reads.length).toBeGreaterThan(0));
+  });
+
+  it("labels the preview as read by voice calls and email drafts, not texting", async () => {
+    serve({ owner: true, pages: { approved: { first: { facts: [fact({ status: "approved", approved_at: "2026-11-25T16:00:00Z" })], nextCursor: null } } } });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    expect(await screen.findByText("Preview — voice calls and email drafts use these facts")).toBeInTheDocument();
+    expect(screen.getByText(/Texting does not use them yet/)).toBeInTheDocument();
+    expect(screen.queryByText(/agents do not read/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/as the agents get them now/)).not.toBeInTheDocument();
   });
 });

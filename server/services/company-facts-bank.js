@@ -3,8 +3,8 @@
 /**
  * Company facts bank (owner 2026-11-25 "all rec"): owner-approved lines the agents may state beside the code lines
  * in COMPANY_FACTS (services/sms-company-facts.js). The DB row is the source of truth, the opposite of
- * knowledge_base mirroring code. PR 1: the writer, the checks and the runtime snapshot. NO reader yet: nothing in
- * this release calls getApprovedBankFacts or renderBankFactsLines, and an empty bank changes nothing, so there is
+ * knowledge_base mirroring code. PR 1: the writer, the checks and the runtime snapshot. Readers: the voice agent (relay-conversation buildBasePrompt, per call) and email
+ * drafts (email-actions companyFactsSystemEntry, per draft); texting comes later. An empty bank changes nothing, so there is
  * no gate (the off switch is retiring the row).
  *
  * Life cycle: draft -> approved -> retired. A retired line comes back only as a NEW draft (restoreAsDraft). An edit
@@ -263,6 +263,16 @@ function renderBankFactsLines(facts = getApprovedBankFacts()) {
   return list.length ? list.map((f) => `- ${f.text}`).join('\n') : '';
 }
 
+/**
+ * The section a reader appends right after the code lines of COMPANY_FACTS: one header line, then `- line` per fact.
+ * '' for an empty bank (the reader's prompt or entry is then byte-identical to before). One header for voice and email.
+ */
+const BANK_SECTION_HEADER = 'More company facts (approved by the owner; state these plainly, same as the company facts above):';
+function renderBankFactsSection(facts = getApprovedBankFacts()) {
+  const lines = renderBankFactsLines(facts);
+  return lines ? `${BANK_SECTION_HEADER}\n${lines}` : '';
+}
+
 /** Hash of the approved ids and text hashes, in approval order: '' for an empty bank. For readers that stamp a version. */
 function bankVersionHash(facts = getApprovedBankFacts()) {
   const list = Array.isArray(facts) ? facts : [];
@@ -415,10 +425,15 @@ async function editApprovedRow(trx, row, f, actor) {
 /** What the editor (or the discard button) saw when it opened, as sent: { baseTextSha256, baseUpdatedAt, expectStatus }, every part optional. */
 function openedState(input) {
   const open = input && typeof input === 'object' ? input : {};
+  const given = (key) => open[key] !== undefined && open[key] !== null;
+  // A precondition that is sent but malformed is a bad request, never silently ignored (an ignored guard would let the write through).
+  if (given('baseTextSha256') && !(typeof open.baseTextSha256 === 'string' && /^[0-9a-f]{64}$/i.test(open.baseTextSha256.trim()))) throw new FactError('INVALID_PRECONDITION', 400);
+  if (given('baseUpdatedAt') && !(typeof open.baseUpdatedAt === 'string' && !Number.isNaN(Date.parse(open.baseUpdatedAt)))) throw new FactError('INVALID_PRECONDITION', 400);
+  if (given('expectStatus') && !['draft', 'approved'].includes(open.expectStatus)) throw new FactError('INVALID_PRECONDITION', 400);
   return {
-    base: typeof open.baseTextSha256 === 'string' ? open.baseTextSha256.trim().toLowerCase() : '',
-    baseUpdatedAt: typeof open.baseUpdatedAt === 'string' ? Date.parse(open.baseUpdatedAt) : NaN,
-    expectStatus: ['draft', 'approved'].includes(open.expectStatus) ? open.expectStatus : '',
+    base: given('baseTextSha256') ? open.baseTextSha256.trim().toLowerCase() : '',
+    baseUpdatedAt: given('baseUpdatedAt') ? Date.parse(open.baseUpdatedAt) : NaN,
+    expectStatus: given('expectStatus') ? open.expectStatus : '',
   };
 }
 
@@ -642,6 +657,8 @@ let generation = 0;
 let startedReads = 0; // refreshes started, in order
 let appliedRead = 0; // the newest-started read whose result is in `state`
 let refreshTimer = null;
+let lazyStartInTests = false; // test hook: Jest skips the lazy start unless a test turns it on
+let stopped = false; // stopBankRefresh() ran: a later read does not start the refresh again
 let lastDropKey = '';
 
 /**
@@ -731,7 +748,7 @@ async function refreshBankFacts({ dbi = db, now = Date.now } = {}) {
     logger.warn(`[company-facts-bank] snapshot refresh failed (code ${err?.code || 'unknown'}); keeping the last copy until it goes stale`);
   }
   // Through the age-checked getter: a failed read must not hand a caller a copy past its five minutes.
-  return getApprovedBankFacts({ now: now() });
+  return freshFacts(now());
 }
 
 /**
@@ -743,10 +760,20 @@ const readVerifiedFacts = async ({ dbi = db } = {}) => {
   return { facts: kept, consideredIds };
 };
 
-/** The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS. */
-function getApprovedBankFacts({ now = Date.now() } = {}) {
+// The age-checked copy, with no side effect: what refreshBankFacts hands back and what getApprovedBankFacts serves.
+function freshFacts(now) {
   if (!state.loadedAt || now - state.loadedAt > STALE_MS) return [];
   return state.facts;
+}
+
+/**
+ * The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS.
+ * The first read in a process that never started the refresh (managed dev, a process without the scheduler) starts it, once:
+ * that read still returns [] and never waits for the load, so a call or a draft is never held up. Jest skips this unless a test turns it on.
+ */
+function getApprovedBankFacts({ now = Date.now() } = {}) {
+  if (!refreshTimer && !stopped && (process.env.NODE_ENV !== 'test' || lazyStartInTests)) startBankRefresh();
+  return freshFacts(now);
 }
 
 /** After an approve or retire in THIS process: drop the copy (fail closed), then reload at once. */
@@ -756,15 +783,17 @@ function invalidate(opts = {}) {
   return refreshBankFacts(opts);
 }
 
-/** Boot hook (scheduler.js, before the GATE_CRON_JOBS return): load now, then every minute. */
+/** Boot hook (scheduler.js, before the GATE_CRON_JOBS return): load now, then every minute. Idempotent; a first read starts it too. */
 function startBankRefresh() {
   if (refreshTimer) return;
+  stopped = false;
   refreshBankFacts().catch(() => {});
   refreshTimer = setInterval(() => { refreshBankFacts().catch(() => {}); }, REFRESH_MS);
   if (typeof refreshTimer.unref === 'function') refreshTimer.unref();
 }
 
 function stopBankRefresh() {
+  stopped = true;
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = null;
 }
@@ -778,6 +807,7 @@ module.exports = {
   STALE_MS,
   STATUSES,
   SOURCES,
+  BANK_SECTION_HEADER,
   checkFactText,
   createDraft,
   editFact,
@@ -792,9 +822,10 @@ module.exports = {
   readVerifiedFacts,
   refreshBankFacts,
   renderBankFactsLines,
+  renderBankFactsSection,
   bankVersionHash,
   invalidate,
   startBankRefresh,
   stopBankRefresh,
-  _test: { sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
+  _test: { setLazyStart: (on) => { lazyStartInTests = on === true; }, sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = null; stopped = false; state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
 };
