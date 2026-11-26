@@ -448,10 +448,13 @@ describe('confirmBooking: an hour no technician\'s shift holds is refused (GATE_
   test('refused SLOT_TAKEN before any insert, asked with the visit\'s own day, start and end', async () => {
     const holds = jest.fn(() => false);
     load = jest.spyOn(eligibility, 'loadAnyShiftHolds').mockResolvedValue(holds);
-    const { scheduledQueries } = wireConfirm({ zones: [] });
+    const { scheduledQueries, trx } = wireConfirm({ zones: [] });
     await expect(Availability.confirmBooking(null, 'cust-1', DATE, '14:00', null))
       .rejects.toMatchObject({ code: 'SLOT_TAKEN', statusCode: 409, message: expect.stringMatching(/no longer offered/i) });
-    expect(load).toHaveBeenCalledWith(db);
+    // Read once, on the booking transaction (under the scheduling locks), for the visit's own day.
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledWith(trx, { dateFrom: DATE, dateTo: DATE });
+    expect(lockKeys(trx).length).toBeGreaterThan(0);
     expect(holds).toHaveBeenCalledWith(DATE, 14 * 60, 15 * 60);
     expect(scheduledQueries.every((q) => !q.insert.mock.calls.length)).toBe(true);
     expect(findConflictingVisits).not.toHaveBeenCalled();

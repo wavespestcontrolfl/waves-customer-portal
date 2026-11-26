@@ -581,12 +581,23 @@ function anyShiftHolds(technicianIds, shiftOf, date, startMin, endMin) {
  * can be given to (applyAssignable), read once. Returns
  * (date, startMin, endMin) => boolean. Gate off: nothing is read and every
  * hour holds. A failed read throws: the caller offers and books nothing.
+ *
+ * `dateFrom` / `dateTo` (YYYY-MM-DD, the dates the caller will ask about): a
+ * technician who is out or off on a date (absentTechDays, as the finders
+ * read it) does not count on that date, and a date on which every
+ * technician is out holds no hour. With no technician at all there is
+ * nothing to judge by, and every hour holds.
  */
-async function loadAnyShiftHolds(conn, { now = new Date() } = {}) {
+async function loadAnyShiftHolds(conn, { now = new Date(), dateFrom = null, dateTo = null } = {}) {
   if (!techShiftHoursLive()) return () => true;
   const technicianIds = (await applyAssignable(conn('technicians')).select('technicians.id')).map((row) => row.id);
+  if (!technicianIds.length) return () => true;
   const shiftOf = await loadTechShifts(conn, { technicianIds, now });
-  return (date, startMin, endMin) => anyShiftHolds(technicianIds, shiftOf, date, startMin, endMin);
+  const out = dateFrom && dateTo ? await absentTechDays(conn, { dateFrom, dateTo, technicianIds }) : new Set();
+  return (date, startMin, endMin) => {
+    const working = technicianIds.filter((id) => !out.has(`${id}:${date}`));
+    return working.length > 0 && anyShiftHolds(working, shiftOf, date, startMin, endMin);
+  };
 }
 
 /** Minutes after midnight as 'HH:MM'. Pure. */

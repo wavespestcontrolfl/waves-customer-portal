@@ -46,7 +46,7 @@ describe('anyShiftHolds', () => {
 
 describe('loadAnyShiftHolds', () => {
   /** A fake knex: `technicians` answers the assignable list, then the shift rows; `time_entries` has no clock-in. */
-  function fakeConn(techRows, { fail = false } = {}) {
+  function fakeConn(techRows, { fail = false, absences = [] } = {}) {
     const calls = [];
     const conn = (table) => {
       const state = { table, wheres: [] };
@@ -55,6 +55,7 @@ describe('loadAnyShiftHolds', () => {
           if (prop === 'then') {
             return (resolve, reject) => {
               if (fail) return Promise.reject(new Error('synthetic read failure')).then(resolve, reject);
+              if (table === 'technician_absences') return Promise.resolve(absences).then(resolve, reject);
               if (table !== 'technicians') return Promise.resolve([]).then(resolve, reject);
               const shiftRead = state.wheres.some(([method, column]) => method === 'whereNotNull' && column === 'shift_start');
               const rows = shiftRead ? techRows.filter((r) => r.shift_start && r.shift_end) : techRows.filter((r) => r.assignable !== false);
@@ -95,6 +96,24 @@ describe('loadAnyShiftHolds', () => {
     process.env.GATE_TECH_SHIFT_HOURS = 'true';
     const { conn } = fakeConn([]);
     expect((await loadAnyShiftHolds(conn, { now: NOW }))(DAY, 900, 960)).toBe(true);
+  });
+
+  test('a technician who is out on a date does not count on that date; a date with every technician out holds no hour', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    const rows = [{ id: A, shift_start: '08:00:00', shift_end: '12:00:00' }, { id: B, shift_start: '12:00:00', shift_end: '17:00:00' }];
+    const NEXT = '2027-03-03';
+    const { conn, calls } = fakeConn(rows, { absences: [{ technician_id: B, absence_date: DAY }, { technician_id: A, absence_date: NEXT }, { technician_id: B, absence_date: NEXT }] });
+    const holds = await loadAnyShiftHolds(conn, { now: NOW, dateFrom: DAY, dateTo: NEXT });
+    expect(calls).toContainEqual(['technician_absences', 'whereBetween', 'absence_date', [DAY, NEXT]]);
+    // B is out on DAY: only A's morning holds.
+    expect(holds(DAY, 540, 600)).toBe(true);
+    expect(holds(DAY, 840, 900)).toBe(false);
+    // Both are out the next day.
+    expect(holds(NEXT, 540, 600)).toBe(false);
+    // With no dates given, absences are not read and B's afternoon holds.
+    const all = fakeConn(rows, { absences: [{ technician_id: B, absence_date: DAY }] });
+    expect((await loadAnyShiftHolds(all.conn, { now: NOW }))(DAY, 840, 900)).toBe(true);
+    expect(all.calls.some(([table]) => table === 'technician_absences')).toBe(false);
   });
 
   test('gate on, a failed read throws', async () => {

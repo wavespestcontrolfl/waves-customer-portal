@@ -161,7 +161,10 @@ class AvailabilityEngine {
 
     // GATE_TECH_SHIFT_HOURS (D4): this engine books a visit with no technician on it, so an hour is offered only
     // when some technician's shift holds it (technician-eligibility.js loadAnyShiftHolds). Gate off: every hour, no read.
-    const shiftHolds = await require('./technician-eligibility').loadAnyShiftHolds(db);
+    const shiftHolds = await require('./technician-eligibility').loadAnyShiftHolds(db, {
+      dateFrom: etDateString(addETDays(today, config.advance_days_min)),
+      dateTo: etDateString(addETDays(today, config.advance_days_max)),
+    });
     for (let i = config.advance_days_min; i <= config.advance_days_max; i++) {
       // ET calendar math — toISOString() reads the UTC date (already tomorrow
       // between 8 PM and midnight ET) and getDay() reads the UTC weekday, so
@@ -661,11 +664,6 @@ class AvailabilityEngine {
     if (pastCustomerLastStart(startMin)) {
       throw bookingError('That time is no longer offered — please pick another slot', 'SLOT_TAKEN');
     }
-    // GATE_TECH_SHIFT_HOURS (D4): the commit-side mirror of getAvailableSlots' accept(). No technician's shift holds
-    // the hour (the hours changed after the offer): refuse. Gate off: nothing is read.
-    if (!(await require('./technician-eligibility').loadAnyShiftHolds(db))(dateStr, startMin, endMin)) {
-      throw bookingError('That time is no longer offered — please pick another slot', 'SLOT_TAKEN');
-    }
 
     // Shared CSPRNG generator (utils/slot-offer-token.js) — this row is served
     // by the same public /booking/status/:code as the /book confirm path, so a
@@ -762,6 +760,13 @@ class AvailabilityEngine {
       // refused here, before the occupancy validation and the insert.
       if (violatesSelfServeNotice({ date: dateStr, startTime })) {
         throw bookingError('That time is too soon to book online — please pick another slot', 'SLOT_TAKEN');
+      }
+      // GATE_TECH_SHIFT_HOURS (D4): the commit-side mirror of getAvailableSlots' accept(), read under the scheduling
+      // locks. No working technician's shift holds the hour (the hours changed after the offer): refuse, before the
+      // occupancy validation and the insert. Gate off: nothing is read.
+      const shiftHolds = await require('./technician-eligibility').loadAnyShiftHolds(trx, { dateFrom: dateStr, dateTo: dateStr });
+      if (!shiftHolds(dateStr, startMin, endMin)) {
+        throw bookingError('That time is no longer offered — please pick another slot', 'SLOT_TAKEN');
       }
 
       // Rows the tech-blind probe below must ignore — the onboarding

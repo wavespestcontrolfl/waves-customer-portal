@@ -473,7 +473,7 @@ describe('offer: an hour no technician\'s shift holds is not offered (GATE_TECH_
     load = jest.spyOn(eligibility, 'loadAnyShiftHolds').mockResolvedValue(holds);
     const starts = startsOf(await engine.getAvailableSlots('Palmetto', 'est-1'));
     expect(load).toHaveBeenCalledTimes(1);
-    expect(load).toHaveBeenCalledWith(db);
+    expect(load).toHaveBeenCalledWith(db, { dateFrom: DATE, dateTo: DATE });
     expect(starts.length).toBeGreaterThan(0);
     for (const start of starts) expect(start >= '10:00' && start <= '13:00').toBe(true);
     expect(starts).not.toContain('09:00');
