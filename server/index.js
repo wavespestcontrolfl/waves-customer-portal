@@ -1197,6 +1197,7 @@ app.use('/api/social/series', require('./routes/social-series-ingest'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));
+app.use('/api/admin/company-facts', require('./routes/admin-company-facts'));
 app.use('/api/admin/notifications', require('./routes/admin-notifications'));
 app.use('/api/admin/claude-ideas', require('./routes/admin-claude-ideas'));
 app.use('/api/admin/needs-me', require('./routes/admin-needs-me'));

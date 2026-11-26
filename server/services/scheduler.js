@@ -1051,6 +1051,10 @@ function initScheduledJobs() {
   // or observe to 'true' reaches this process too.
   require('./sms-prompt-patch').startPatchRefresh();
 
+  // Company facts bank (owner 2026-11-25): the approved-lines snapshot loads here too, before the cronJobs return below, so a process with
+  // crons disabled never serves a retired line past the 5-minute stale rule. Nothing reads the bank yet; an empty bank changes nothing.
+  require('./company-facts-bank').startBankRefresh();
+
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.
   if (!isEnabled('cronJobs')) {

@@ -257,5 +257,10 @@ module.exports = {
   stopPatchRefresh,
   resolvePromptPatch,
   PROMISE_WORDS,
+  // The screens the company facts bank reuses for its approve-time checks (services/company-facts-bank.js).
+  INJECTION_RE,
+  PRICE_RE,
+  PROMISE_RE,
+  HANDOFF_RE,
   _test: { PROMISE_RE },
 };
