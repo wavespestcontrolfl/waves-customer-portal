@@ -306,11 +306,19 @@ function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDisco
 // only the estimate's own tier at the estimate's own rate (engineTierRecord, savedEstimateTier), the row and the line
 // count the same visits, the row's net annual is the line's, and the list annual's per-visit share at that rate is the
 // visit's net to the cent. The list price is then that per-visit share, and the row carries the list annual
-// (annualBeforeDiscount), so the tier proof every list-price row passes (tierPricedRow) proves this row too. Any other
-// row, or a disagreement, returns null: the row keeps its own net as its base and one invoice line.
-function engineListBasis(raw, line, amount, ownBase, { estimateTier = null, engineLineItems = null } = {}) {
-  if (!estimateTier || !Array.isArray(engineLineItems) || amount === null || money(ownBase) !== amount) return null;
-  if (money(raw.priceAfterDiscount) !== null || money(raw.annualBeforeDiscount) !== null) return null;
+// (annualBeforeDiscount); that list price is taken only when the tier proof every list-price row passes
+// (acceptedDiscountRows: namingTier, tierPricedRow and each row rule) names the whole saving as the tier, and nothing
+// else. A row with a WaveGuard record of its own is not this shape. Any other row, or a disagreement, returns null:
+// the row keeps its own net as its base, no saving, and one invoice line.
+// The net-only shape: no net or list figure of its own beside the base, and no WaveGuard record of its own.
+function netOnlyRow(raw) {
+  return money(raw.priceAfterDiscount) === null && money(raw.annualBeforeDiscount) === null
+    && !(object(raw.discount).appliedDiscounts || []).some((item) => item?.type === 'waveguard');
+}
+
+function engineListBasis(raw, line, amount, ownBase, context = {}) {
+  const { estimateTier = null, engineLineItems = null } = context;
+  if (!estimateTier || !Array.isArray(engineLineItems) || amount === null || money(ownBase) !== amount || !netOnlyRow(raw)) return null;
   const { recurringServiceKey: rowServiceKey } = require('../routes/estimate-public');
   const serviceKey = rowServiceKey({ ...raw, service: raw.service || line.serviceKey || undefined });
   const record = engineTierRecord(engineLineItems, serviceKey);
@@ -318,7 +326,10 @@ function engineListBasis(raw, line, amount, ownBase, { estimateTier = null, engi
   if (!record || record.tier !== estimateTier.tier || Math.abs(record.rate - rate) > 1e-9) return null;
   const [item] = serviceEngineLines(engineLineItems, serviceKey);
   const listCents = engineListCents(raw, item, rate, amount);
-  return listCents === null ? null : { base: listCents / 100, row: { ...raw, annualBeforeDiscount: money(item.annualBeforeDiscount) } };
+  if (listCents === null) return null;
+  const basis = { base: listCents / 100, row: { ...raw, annualBeforeDiscount: money(item.annualBeforeDiscount) } };
+  const rows = acceptedDiscountRows(basis.row, basis.base, money(basis.base - amount), { ...context, serviceKey: line.serviceKey });
+  return rows.length === 1 && rows[0].named && rows[0].percent !== undefined ? basis : null;
 }
 
 // The engine line's list price for one visit, in cents, when its figures are the row's: the same visit count, the same

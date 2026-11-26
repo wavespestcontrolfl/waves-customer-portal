@@ -183,9 +183,16 @@ describe('completion estimate evidence', () => {
     expect(quote(lawnRow(), silver([engineLawn()], null))).toEqual(oneLine);
     // A row with its own list or net figures is priced by them, never by the engine line.
     expect(quote(lawnRow({ priceAfterDiscount: 106.8 }), silver())).toEqual(oneLine);
-    // A row whose recorded rate is not the tier's keeps one line through the list-price rules.
-    expect(quote(lawnRow({ discount: { effectiveDiscount: 0, appliedDiscountPercent: 0 } }), silver())[2])
-      .toEqual([['Accepted estimate discount', 11.87, undefined, false]]);
+    // The engine list price is taken only when the list-price rules name the whole saving as the tier: a row that
+    // recorded another rate (0%), a row flagged out of percentage discounts, or a service credit keeps its own net as
+    // its base, with no saving, so no surface sees a list price the row never proved.
+    expect(quote(lawnRow({ discount: { effectiveDiscount: 0, appliedDiscountPercent: 0 } }), silver())).toEqual(oneLine);
+    expect(quote(lawnRow({ excludeFromPctDiscount: true }), silver())).toEqual(oneLine);
+    expect(quote(lawnRow({ serviceSpecificDiscounts: [{ amount: 5 }] }), silver())).toEqual(oneLine);
+    // A row with a WaveGuard record of its own is not the net-only shape: its record is never paired with the engine's
+    // list price (a Gold record would print Gold for a Silver saving).
+    expect(quote(lawnRow({ discount: { effectiveDiscount: 0.1, appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.1 }] } }), silver()))
+      .toEqual(oneLine);
     // The tree-and-shrub shape that rounds another way: $565 a year over 6 visits at 20% is $75.34 a visit, but the row
     // saved $451.92 a year and bills $75.32. The figures disagree by 2 cents, so the row keeps one line.
     const shrub = engineLawn({ service: 'tree_shrub', name: 'Tree & Shrub', annual: 565, perApp: 94.17, frequency: 6,
