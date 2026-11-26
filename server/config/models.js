@@ -222,6 +222,8 @@ const DEFAULTS = Object.freeze({
   LIVE_CALL: 'claude-haiku-5-5',
   // SiteOne deals bell end-date read (owner 2026-11-19 "B"): one small extraction per deal email, Haiku 5.5.
   DEAL_END_DATE: 'claude-haiku-5-5',
+  // Alert clear-up agent (owner 2026-11-26: a larger model on the paid API, this lane only): Sonnet 5.5, the ROUTINE id.
+  ALERT_CLEAR: 'claude-sonnet-5-5',
   CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
   CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
   VOICE_JUDGE: 'claude-opus-4-8',
@@ -374,6 +376,11 @@ const LIVE_CALL = process.env.MODEL_LIVE_CALL || DEFAULTS.LIVE_CALL;
 // Pinned here, not on a tier: the owner chose Haiku 5.5 for it on the 2026-11-19 scope page (FAST is Sonnet 5,
 // about 19 times the price in the trial). Override via MODEL_DEAL_END_DATE.
 const DEAL_END_DATE = process.env.MODEL_DEAL_END_DATE || DEFAULTS.DEAL_END_DATE;
+
+// Alert clear-up agent (services/alert-clear-agent.js, GATE_ALERT_CLEAR_AGENT): decides whether an open admin alert about a customer
+// text, email, voicemail or missed call is answered. Pinned here, not on a tier: the owner chose a Sonnet-class model on the paid API
+// for this one lane (2026-11-26), and nobody reads the output (code checks the proof it names). Override via MODEL_ALERT_CLEAR.
+const ALERT_CLEAR = process.env.MODEL_ALERT_CLEAR || DEFAULTS.ALERT_CLEAR;
 
 // Call-research miner's Anthropic leg (fallback by default). Pinned here per
 // the registry convention rather than riding FLAGSHIP: extraction-model
@@ -930,6 +937,7 @@ module.exports = {
   LAWN_CHALLENGE,
   LIVE_CALL,
   DEAL_END_DATE,
+  ALERT_CLEAR,
   CALL_RESEARCH_ANTHROPIC,
   CALL_EXTRACTION_ANTHROPIC,
   VOICE_JUDGE,

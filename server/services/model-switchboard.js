@@ -80,6 +80,7 @@ const SELECTORS = [
   { key: 'LAWN_CHALLENGE', env: 'MODEL_LAWN_CHALLENGE', description: 'Lawn diagnostic adversarial challenge', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'LIVE_CALL', env: 'MODEL_LIVE_CALL', description: 'Live-call upset-caller check (owner 2026-11-16: Haiku 5.5; dark behind GATE_LIVE_CALL_UPSET_ALERT)', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'DEAL_END_DATE', env: 'MODEL_DEAL_END_DATE', description: 'SiteOne deals bell offer end date (owner 2026-11-19: Haiku 5.5; dark behind GATE_SITEONE_DEAL_AI_END_DATE)', accepts: { providers: ['anthropic'], cap: 'text' } },
+  { key: 'ALERT_CLEAR', env: 'MODEL_ALERT_CLEAR', description: 'Alert clear-up agent (owner 2026-11-26: Sonnet 5.5 on the paid API; shadow only behind GATE_ALERT_CLEAR_AGENT)', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VOICE_JUDGE', env: 'MODEL_VOICE_JUDGE', description: 'Voice relay eval judge (pinned: moving it re-baselines the voice agent scorecard)', accepts: { providers: ['anthropic'], cap: 'text' } },
   // deep: true — its only call sites are the newsletterWriter policy through
   // llm/call.js, whose wire cap gives always-thinking models (Opus 5.5, Fable)
@@ -609,6 +610,7 @@ const LANES = [
   L('kb_audit', 'Knowledge-base nightly audit', 'knowledge-base.js', 'deep', T('ROUTINE'), P('deepAnalysis', 'fallback')),
   L('wiki_compiler', 'Wiki compiler + agronomic wiki', 'knowledge/wiki-compiler.js, agronomic-wiki.js', 'deep', T('ROUTINE'), P('deepAnalysis', 'fallback')),
   L('quarantine_arbiter', 'Contact quarantine arbiter', 'contact-quarantine-arbiter.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
+  L('alert_clear_agent', 'Alert clear-up agent (shadow)', 'alert-clear-agent.js', 'fastText', T('ALERT_CLEAR'), null, { inbound: true, note: 'GATE_ALERT_CLEAR_AGENT=shadow; the proof the model names is checked in code' }),
   L('live_call_early_summary', 'Live call · summary from the live text', 'live-call-early-summary.js', 'fastText', T('LIVE_CALL'), null, { inbound: true }),
   L('call_self_audit', 'Call self-audit', 'call-self-audit.js', 'deep', T('DEEP'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('call_incidents', 'Call self-audit second reader', 'call-incidents.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true, note: 'one leg per call: the provider the audit did NOT answer on (usually the OpenAI primary; the Anthropic fallback when the audit fell back to OpenAI); GATE_CALL_INCIDENTS' }),
@@ -709,6 +711,7 @@ const LANE_AREA = {
   contact_pass: 'calls',
   call_sound_check: 'calls',
   live_call_early_summary: 'calls',
+  alert_clear_agent: 'office',
   call_self_audit: 'calls',
   call_incidents: 'calls',
   live_call_assist: 'calls',
@@ -885,6 +888,7 @@ const LANE_DESCRIBE = {
   transcript_label: 'Labels who is speaking',
   contact_pass: 'Second listen for spelled emails and addresses',
   call_sound_check: 'Listens to each new call recording and notes caller mood, talk-over, rushed answers and risky claims (dark: GATE_CALL_SOUND_CHECK)',
+  alert_clear_agent: 'Decides whether each open alert about a customer text, email, voicemail or missed call has been answered; records its verdict and closes nothing (shadow, dark: GATE_ALERT_CLEAR_AGENT)',
   live_call_early_summary: 'Summarizes a call from its live text the moment it ends, with the office\'s next step and what staff promised the caller, until the recording pipeline\'s summary lands (GATE_CALL_EARLY_SUMMARY)',
   call_self_audit: 'Audits the extraction against the transcript',
   call_incidents: 'Second opinion that confirms a self-audit disagreement',

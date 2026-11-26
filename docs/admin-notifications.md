@@ -310,6 +310,20 @@ customer's message by this rule.
    closes once a person called back, answered the customer's call, texted or emailed that
    customer after the bell (never the email-change bell).
    Details in `docs/gates-and-env.md`.
+   The alert clear-up agent (`server/services/alert-clear-agent.js`, owner 2026-11-26, `GATE_ALERT_CLEAR_AGENT=shadow`, PR 1 of 2)
+   watches the same four customer-contact bells (`inbound_sms`, `inbound_email`, `voicemail_callback`, `missed_call`) and, every 10
+   minutes, records in `alert_clear_verdicts` whether each open one is `answered`, `nothing_to_answer` or `still_owed`. SHADOW ONLY: it
+   closes, edits and rings no bell and sends no text, email or call; the verdicts are scored against what staff did for a week before
+   any live mode is built. It reads what came before the bell and every record created after it (texts, calls, visits, estimates,
+   email-thread messages). Plain rules go first: an unknown missed call with no voicemail, a text-back already sent and 24 hours of
+   silence is `nothing_to_answer`; a delivered staff text, a sent staff email or a call a person answered (the call's `answered_by`,
+   never seconds alone) after the bell is `answered`, proof = that record. A bell that says we owe a quote, a callback or a promise
+   (title "we still owe", or `doneWhen: 'promise_fulfilled'`) is closed only by that rule or a sent estimate, never by the model.
+   Everything else is ONE Claude call (lane `alert_clear_agent`, tier `ALERT_CLEAR`, Sonnet class, paid API, 150 a day at most). The
+   model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or
+   a real record (never an automated text, an expired link or an unsent Gmail draft). An "ok" or "yes" to an offered time needs a
+   booking after it, and a finished visit never answers a question about its result. Any doubt, error or refusal is `still_owed`.
+   A bell is judged again only when a new record appears after it.
    A complaint-call bell (`Comms — call <name> about a complaint`, `doneWhen: 'complaint_answered'`, dedupe key
    `call-complaint:<call id>`) rings once per call, right after the call gets the final label `complaint_escalated`,
    for a known customer (never a test customer or a sandbox call) and only for a call that ended in the last 24 hours.
