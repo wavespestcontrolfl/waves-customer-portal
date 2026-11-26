@@ -98,9 +98,7 @@ const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, areaAddOnConfig } = require('../services/pricing-engine/constants');
-const {
-  oneTimePestHomeAgeExcludedForEstimate, quarterlyPerAppWithoutHomeAge, storedPestAgeAdj, oneTimePestNoHomeAgeReplaySignal,
-} = require('../services/pricing-engine/one-time-pest-home-age');
+const { storedOneTimeAnchorPerApp, oneTimePestNoHomeAgeReplaySignal } = require('../services/pricing-engine/one-time-pest-home-age');
 const { isRetiredTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
@@ -21263,11 +21261,8 @@ function oneTimePestChoiceAmountFromBreakdown(breakdown = {}) {
   return oneTimeChoiceAmountFromBreakdown(breakdown, 'pest_control');
 }
 
-// homeAgeAdj: the plan's home-age adjustment to take back out of the quarterly rate
-// (GATE_ONE_TIME_PEST_NO_HOME_AGE, owner 2026-11-26: a one-time price is the same
-// for an older and a newer home). 0 = price from the rate as it is.
-function oneTimePestChoiceAmountFromPerApp(perApp, homeAgeAdj = 0) {
-  const amount = Number(quarterlyPerAppWithoutHomeAge(perApp, homeAgeAdj));
+function oneTimePestChoiceAmountFromPerApp(perApp) {
+  const amount = Number(perApp);
   if (!Number.isFinite(amount) || amount <= 0) return null;
   const multiplier = Number(ONE_TIME.pest?.multiplier);
   const floor = Number(ONE_TIME.pest?.floor);
@@ -21304,7 +21299,7 @@ function pestTierPerApp(row = {}) {
   return null;
 }
 
-function oneTimePestChoiceAmountFromResultStats(estData = {}, homeAgeAdj = 0) {
+function oneTimePestChoiceAmountFromResultStats(estData = {}) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData && typeof estData === 'object' ? estData : {});
@@ -21317,7 +21312,7 @@ function oneTimePestChoiceAmountFromResultStats(estData = {}, homeAgeAdj = 0) {
   ];
   if (!tiers.length) return null;
   const tier = tiers.find(rowLooksQuarterly) || tiers[0];
-  return oneTimePestChoiceAmountFromPerApp(pestTierPerApp(tier), homeAgeAdj);
+  return oneTimePestChoiceAmountFromPerApp(pestTierPerApp(tier));
 }
 
 function pestPerAppFromFrequency(frequency = {}) {
@@ -21326,36 +21321,39 @@ function pestPerAppFromFrequency(frequency = {}) {
   return pestTierPerApp(pestRow);
 }
 
-function oneTimePestChoiceAmountFromFrequencies(frequencies = [], homeAgeAdj = 0) {
+function oneTimePestChoiceAmountFromFrequencies(frequencies = []) {
   if (!Array.isArray(frequencies) || !frequencies.length) return null;
   const ordered = [
     ...frequencies.filter(rowLooksQuarterly),
     ...frequencies.filter((row) => !rowLooksQuarterly(row)),
   ];
   for (const frequency of ordered) {
-    const amount = oneTimePestChoiceAmountFromPerApp(pestPerAppFromFrequency(frequency), homeAgeAdj);
+    const amount = oneTimePestChoiceAmountFromPerApp(pestPerAppFromFrequency(frequency));
     if (amount) return amount;
   }
   return null;
 }
 
-function oneTimePestChoiceAmountFromRecurringServices(recurringServices = [], homeAgeAdj = 0) {
+function oneTimePestChoiceAmountFromRecurringServices(recurringServices = []) {
   const services = Array.isArray(recurringServices) ? recurringServices : [];
   for (const service of services) {
     if (!isPestServiceName(service?.name || service?.label || service?.service)) continue;
-    const amount = oneTimePestChoiceAmountFromPerApp(pestTierPerApp(service), homeAgeAdj);
+    const amount = oneTimePestChoiceAmountFromPerApp(pestTierPerApp(service));
     if (amount) return amount;
   }
   return null;
 }
 
 function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
-  const homeAgeAdj = oneTimePestHomeAgeExcludedForEstimate(estData) ? storedPestAgeAdj(estData) : 0;
-  return oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies, homeAgeAdj)
-    || oneTimePestChoiceAmountFromResultStats(estData, homeAgeAdj)
+  // GATE_ONE_TIME_PEST_NO_HOME_AGE (owner 2026-11-26): a plan priced on that rule
+  // saved the quarterly rate with no home-age adjustment. The one-time choice is
+  // built from that saved rate, so it shows and charges the same amount whatever
+  // the gate says later. No saved rate = the amount derived as before.
+  return oneTimePestChoiceAmountFromPerApp(storedOneTimeAnchorPerApp(estData))
+    || oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies)
+    || oneTimePestChoiceAmountFromResultStats(estData)
     || oneTimePestChoiceAmountFromRecurringServices(
       recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
-      homeAgeAdj,
     )
     || oneTimePestChoiceAmountFromBreakdown(
       pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData),

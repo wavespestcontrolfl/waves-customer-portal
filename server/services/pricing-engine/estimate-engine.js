@@ -250,19 +250,14 @@ const { deriveModifiers, deriveNotes } = require('./modifiers');
 const { trustedUnitBand } = require('./unit-band-pricing');
 const { oneTimePestNoHomeAgeLive, quarterlyPerAppWithoutHomeAge } = require('./one-time-pest-home-age');
 
-// The quarterly per-visit price a one-time pest line on the same estimate is
-// priced from. GATE_ONE_TIME_PEST_NO_HOME_AGE (owner 2026-11-26): the home-age
-// adjustment stays on the plan and comes out of the one-time price. A stored
-// estimate replayed as sold keeps the rule its one-time line was priced on
-// (input.oneTimePestNoHomeAgeReplay, read from the saved row by the server).
-function oneTimePestPlanAnchor(input, pestLine) {
-  const perApp = pestLine?.basePrice;
-  const exclude = input.savedEstimateReplay === true
+// GATE_ONE_TIME_PEST_NO_HOME_AGE (owner 2026-11-26): whether this pricing run
+// keeps the home-age adjustment out of one-time pest prices. A stored estimate
+// replayed as sold keeps the rule it was priced on (input.oneTimePestNoHomeAgeReplay,
+// read from the saved plan line by the server), whatever the gate says today.
+function oneTimePestHomeAgeExcluded(input) {
+  return input.savedEstimateReplay === true
     ? input.oneTimePestNoHomeAgeReplay === true
     : oneTimePestNoHomeAgeLive();
-  if (!exclude) return { perApp, homeAgeExcluded: false };
-  const withoutAge = quarterlyPerAppWithoutHomeAge(perApp, pestLine?.pestAgeAdj);
-  return { perApp: withoutAge, homeAgeExcluded: withoutAge !== perApp };
 }
 const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
@@ -1420,6 +1415,12 @@ function generateEstimate(input) {
           };
         });
       }
+      // The quarterly rate a one-time pest price is built from, with no home-age
+      // adjustment (footprint-priced home plan only; the band has none). Saved on
+      // the line: the one-time line below and the estimate page price from it.
+      if (!['trusted', 'untrusted'].includes(bandVerdict.status) && result.service === 'pest_control' && oneTimePestHomeAgeExcluded(input)) {
+        result.oneTimeAnchorPerApp = quarterlyPerAppWithoutHomeAge(result.basePrice, result.pestAgeAdj, pestProgramFloorPerVisitResolved);
+      }
       lineItems.push(result);
       // A fail-closed band line (quoteRequired, $0) is not an active
       // recurring service: it must not grant the recurring-customer perk,
@@ -1985,7 +1986,7 @@ function generateEstimate(input) {
       addCommercialManualQuote('pest_control');
     } else {
       const oneTimeVerdict = trustedUnitBand(input, 'oneTimePest', { roachType: services.oneTimePest.roachType || 'none' });
-      const oneTimePestAnchor = oneTimePestPlanAnchor(input, lineItems.find(l => l.service === 'pest_control'));
+      const planPestLine = lineItems.find(l => l.service === 'pest_control');
       const result = oneTimeVerdict.status === 'trusted'
         ? priceOneTimePestUnitBand(property, {
           band: oneTimeVerdict.band,
@@ -2006,10 +2007,9 @@ function generateEstimate(input) {
         // Anchor on the QUARTERLY rate (basePrice), never the selected-frequency
         // perApp — a monthly/bimonthly perApp is discounted and would understate
         // the one-time price.
-        recurringPestPerApp: services.pest ? oneTimePestAnchor.perApp : null,
+        recurringPestPerApp: services.pest ? (planPestLine?.oneTimeAnchorPerApp ?? planPestLine?.basePrice) : null,
         roachType: services.oneTimePest.roachType || 'none',
       });
-      if (oneTimePestAnchor.homeAgeExcluded && result?.service === 'one_time_pest') result.homeAgeExcluded = true;
       lineItems.push(result);
     }
   }

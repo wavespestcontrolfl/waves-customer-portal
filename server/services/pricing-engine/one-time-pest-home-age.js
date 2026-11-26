@@ -7,8 +7,14 @@
 // the same estimate as a pest plan, and the one-time choice the estimate page derives
 // from the plan's quarterly rate. A one-time job priced alone never carried it.
 //
+// With the gate on, the engine stamps the plan line with the quarterly rate that has
+// no age adjustment (`oneTimeAnchorPerApp`). The one-time line on the same estimate
+// and the estimate page both price from that saved number. The page never reads the
+// gate: an estimate shows and charges the rule it was priced on, and an estimate
+// with no stamp prices exactly as before.
+//
 // The gate is read at CALL time, strict 'true', and ships dark: it changes a price,
-// so the owner flips it. Off = both paths price exactly as before. Kill = unset.
+// so the owner flips it. Kill = unset (new quotes only; a stamped quote keeps its price).
 const { PEST } = require('./constants');
 
 function oneTimePestNoHomeAgeLive() {
@@ -16,49 +22,38 @@ function oneTimePestNoHomeAgeLive() {
 }
 
 // The quarterly per-visit price with the home-age adjustment taken back out.
-// The list price is max(floor, parts + age). For a positive age adjustment,
-// max(floor, price - age) is exactly the price of the same home with no age
-// adjustment. Zero, negative (a hand-set discount) or unreadable adjustments
-// leave the price as it is.
-function quarterlyPerAppWithoutHomeAge(perApp, pestAgeAdj) {
+// The list price is max(floor, parts + age), so for a positive adjustment
+// max(floor, price - age) is exactly the price of the same home with none.
+// `floor` is the floor the plan line was priced with (the quote-time floor on a
+// replay); without one, the live floor, as the pest pricer itself resolves it.
+function quarterlyPerAppWithoutHomeAge(perApp, pestAgeAdj, floor) {
   const amount = Number(perApp);
   const age = Number(pestAgeAdj);
   if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(age) || age <= 0) return perApp;
-  const floor = Number(PEST.floor);
-  return Math.max(Number.isFinite(floor) && floor > 0 ? floor : 0, Math.round((amount - age) * 100) / 100);
+  const given = Number(floor);
+  const live = Number(PEST.floor);
+  const resolved = Number.isFinite(given) && given > 0 ? given : (Number.isFinite(live) && live > 0 ? live : 0);
+  return Math.max(resolved, Math.round((amount - age) * 100) / 100);
 }
 
-function savedLineItems(estData) {
-  return [estData?.engineResult, estData?.result, estData]
-    .flatMap((source) => (Array.isArray(source?.lineItems) ? source.lineItems : []));
+// The age-free quarterly rate the saved pest plan line was stamped with, or null
+// when the estimate was not priced on this rule.
+function storedOneTimeAnchorPerApp(estData) {
+  const line = [estData?.engineResult, estData?.result, estData]
+    .flatMap((source) => (Array.isArray(source?.lineItems) ? source.lineItems : []))
+    .find((l) => l?.service === 'pest_control');
+  const anchor = Number(line?.oneTimeAnchorPerApp);
+  return Number.isFinite(anchor) && anchor > 0 ? anchor : null;
 }
 
-// The home-age adjustment the saved pest plan line was priced with (0 when the
-// estimate stores none, so an estimate with no stored adjustment never moves).
-function storedPestAgeAdj(estData) {
-  const line = savedLineItems(estData).find((l) => l?.service === 'pest_control');
-  const age = Number(line?.pestAgeAdj);
-  return Number.isFinite(age) && age > 0 ? age : 0;
-}
-
-// Saved-estimate replay signal: true only when the saved one-time pest line was
-// priced with the age adjustment removed. A quote keeps the rule it was sold on.
+// Saved-estimate replay signal: a quote keeps the rule it was priced on.
 function oneTimePestNoHomeAgeReplaySignal(estData) {
-  return savedLineItems(estData).some((l) => l?.service === 'one_time_pest' && l.homeAgeExcluded === true);
-}
-
-// Whether the estimate page takes the age adjustment out of the one-time choice.
-// An estimate that saved a one-time pest line follows that line's own rule, as
-// the engine replay does; a plan-only estimate (no saved line) follows the gate.
-function oneTimePestHomeAgeExcludedForEstimate(estData) {
-  const saved = savedLineItems(estData).filter((l) => l?.service === 'one_time_pest');
-  return saved.length ? saved.some((l) => l.homeAgeExcluded === true) : oneTimePestNoHomeAgeLive();
+  return storedOneTimeAnchorPerApp(estData) !== null;
 }
 
 module.exports = {
-  oneTimePestHomeAgeExcludedForEstimate,
   oneTimePestNoHomeAgeLive,
   quarterlyPerAppWithoutHomeAge,
-  storedPestAgeAdj,
+  storedOneTimeAnchorPerApp,
   oneTimePestNoHomeAgeReplaySignal,
 };
