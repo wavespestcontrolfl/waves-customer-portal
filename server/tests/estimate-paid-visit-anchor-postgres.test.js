@@ -98,7 +98,11 @@ postgres('paid-visit anchor for annual renewals (real PostgreSQL)', () => {
 
   test('excludes another customer, holds, catalog assessments and retained history; same-day visits order by start time', async () => {
     const assessment = await trx('services').where({ service_key: 'lawn_inspection' }).first('id');
-    const paidService = await trx('services').whereNot({ service_key: 'lawn_inspection' }).whereNotNull('service_key').first('id');
+    const paidService = await trx('services')
+      .whereNotIn('service_key', ['lawn_inspection', 'pest_re_service', 'lawn_re_service', 'rodent_trapping_followup'])
+      .whereRaw("name !~* '\\mre-{0,1}service\\M'")
+      .orderBy('service_key')
+      .first('id');
     expect(assessment).toBeTruthy();
     expect(paidService).toBeTruthy();
     const otherCustomerId = randomUUID();
