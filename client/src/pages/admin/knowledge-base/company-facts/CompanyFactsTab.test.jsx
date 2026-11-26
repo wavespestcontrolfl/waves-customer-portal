@@ -847,12 +847,50 @@ describe("Company facts tab", () => {
     await waitFor(() => expect(reads.length).toBeGreaterThan(0));
   });
 
-  it("labels the preview as read by voice calls and email drafts, not texting", async () => {
+  it("says approved facts are not served, not that none exist, when every approved fact fails the checks", async () => {
+    serve({
+      owner: true,
+      excluded: ["a1", "a2"],
+      pages: { approved: { first: { facts: [
+        fact({ id: "a1", topic: "First", fact_text: "First line.", status: "approved", approved_at: "2026-11-25T16:00:00Z" }),
+        fact({ id: "a2", topic: "Noon", fact_text: "We open at noon.", status: "approved", approved_at: "2026-11-25T17:00:00Z" }),
+      ], nextCursor: null } } },
+    });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    expect(await screen.findByText(/2 approved facts are not served because they no longer pass the checks \(First, Noon\)/)).toBeInTheDocument();
+    expect(screen.queryByText("No approved facts yet.")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("How the approved facts will read")).not.toBeInTheDocument();
+  });
+
+  it("a late discard refusal does not close an editor opened since; the notice still shows", async () => {
+    let release;
+    const promise = new Promise((resolve) => { release = resolve; });
+    serve({
+      owner: true,
+      hold: { method: "DELETE", promise },
+      pages: { draft: { first: { facts: [fact({ id: ID_A, topic: "Topic A" })], nextCursor: null } } },
+      failWith: (method) => (method === "DELETE" ? { code: "NOT_A_DRAFT", status: 409 } : null),
+    });
+    const showFeedback = mount();
+    await screen.findByText("Topic A");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Discard" }).at(-1)); // the request is now in flight
+    fireEvent.click(screen.getByRole("button", { name: "Keep" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "Typed since" } });
+    release();
+    await waitFor(() => expect(showFeedback).toHaveBeenCalledWith(expect.stringMatching(/already approved or changed this draft/)));
+    expect(screen.getByLabelText(/Topic/)).toHaveValue("Typed since"); // the editor is still open
+  });
+
+  it("labels the preview as read by voice calls, email drafts and texting drafts", async () => {
     serve({ owner: true, pages: { approved: { first: { facts: [fact({ status: "approved", approved_at: "2026-11-25T16:00:00Z" })], nextCursor: null } } } });
     mount();
     fireEvent.click(screen.getByRole("button", { name: "Approved" }));
-    expect(await screen.findByText("Preview — voice calls and email drafts use these facts")).toBeInTheDocument();
-    expect(screen.getByText(/Texting does not use them yet/)).toBeInTheDocument();
+    expect(await screen.findByText("Preview — voice calls, email drafts and texting drafts use these facts")).toBeInTheDocument();
+    expect(screen.getByText(/Texting drafts use them too/)).toBeInTheDocument();
+    expect(screen.queryByText(/Texting does not use them yet/)).not.toBeInTheDocument();
     expect(screen.queryByText(/agents do not read/)).not.toBeInTheDocument();
     expect(screen.queryByText(/as the agents get them now/)).not.toBeInTheDocument();
   });
