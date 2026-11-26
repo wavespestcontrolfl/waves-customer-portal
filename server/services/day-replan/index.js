@@ -30,7 +30,7 @@
  * eligibility.isPersonPlacedVisit, and an unreadable history keeps the stop fixed) and time_told (the customer has a
  * known time from a delivered text, email, call or booking, by the no-show detector's promise reader). A stop held only by
  * first_or_one_time or time_told may still start up to 2 hours LATER than the slot the customer was told
- * (TOLD_SHIFT_MIN, toldStart; owner 2026-11-24, "we give a 2 hr window"): the planner keeps it inside that band
+ * (TOLD_SHIFT_MIN, toldStart; owner 2026-11-24, "we give a 2 hr window"): the planner keeps it inside that band (capped at 2 hours after the EARLIEST hour told for that date: toldCap, owner 2026-11-25 *cap 2*)
  * (limitToldShift) and the writer re-checks the new hour. No known told slot on the day keeps it fixed. A staff placement
  * and a customer confirmation alone no longer fix a stop (owner 2026-11-22: "i dont think it matters if staff pick it or
  * tom confirmed it"; that evening, "this is all too limiting").
@@ -203,18 +203,23 @@ async function loadToldLevels(conn, rows, now, dateStr) {
     return toldFactsOf(facts, ids, dateStr);
   } catch (err) {
     logger.warn(`[day-replan] the told-level read failed (${err.message}); the day stays fixed`);
-    return { told: new Set(ids), dayTold: new Set(), toldStart: new Map() };
+    return { told: new Set(ids), dayTold: new Set(), toldStart: new Map(), toldCap: new Map() };
   }
 }
 
-/** { told, dayTold, toldStart } from ONE loadPromiseFacts answer (the planner's day read and the writer's re-read). */
+/** { told, dayTold, toldStart, toldCap } from ONE loadPromiseFacts answer (the planner's day read and the writer's re-read). */
 function toldFactsOf(facts, ids, dateStr) {
   const level = (id) => (facts.get(id) || facts.get(String(id)) || { level: 'none' }).level;
-  const starts = new Map(ids.map((id) => [id, (facts.get(id) || facts.get(String(id)) || {}).start]).filter(([, start]) => start instanceof Date));
+  const fact = (id) => facts.get(id) || facts.get(String(id)) || {};
+  const starts = new Map(ids.map((id) => [id, fact(id).start]).filter(([, start]) => start instanceof Date));
+  // toldCap: the earliest hour told for this date (firstStart; owner 2026-11-25 *cap 2*). A fact without it caps at
+  // its own start, the 11-24 rule.
+  const firsts = new Map([...starts].map(([id, start]) => [id, fact(id).firstStart instanceof Date ? fact(id).firstStart : start]));
   return {
     told: new Set(ids.filter((id) => level(id) === 'hour')),
     dayTold: new Set(ids.filter((id) => level(id) === 'day')),
     toldStart: toldStartsOnDate(starts, dateStr),
+    toldCap: toldStartsOnDate(firsts, dateStr),
   };
 }
 
@@ -331,15 +336,23 @@ function officeReviewPending(row) {
  * the `setTime` map) fixes the stop first, whatever the customer was told, so a day-only notice does not free it; a
  * context without `askRecorded` (a hand-built one) ignores `setTime`.
  */
-/** True when the stop starts at the slot its customer was told (toldStart, ET minutes) or up to TOLD_SHIFT_MIN later. */
-function withinToldShift(row, toldStart) {
-  const told = toldStart ? toldStart.get(row.id) : undefined;
-  if (!Number.isFinite(told) || row.window_start == null) return false;
-  const shift = hhmmToMin(row.window_start) - told;
-  return shift >= 0 && shift <= TOLD_SHIFT_MIN;
+/** The latest start (ET minutes) a told stop may take: TOLD_SHIFT_MIN after the EARLIEST hour told for this date
+ *  (toldCap; owner 2026-11-25 *cap 2*, so 9 -> 11 -> 1 PM cannot happen), never more than TOLD_SHIFT_MIN after the
+ *  current told slot. No cap entry = the current told slot (a hand-built context). */
+function toldShiftEnd(id, told, toldCap) {
+  const first = toldCap ? toldCap.get(id) : undefined;
+  return Math.min(told, Number.isFinite(first) ? first : told) + TOLD_SHIFT_MIN;
 }
 
-function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, setTime, toldStart }) {
+/** True when the stop starts at the slot its customer was told (toldStart, ET minutes) or later, up to toldShiftEnd. */
+function withinToldShift(row, toldStart, toldCap) {
+  const told = toldStart ? toldStart.get(row.id) : undefined;
+  if (!Number.isFinite(told) || row.window_start == null) return false;
+  const start = hhmmToMin(row.window_start);
+  return start >= told && start <= toldShiftEnd(row.id, told, toldCap);
+}
+
+function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, setTime, toldStart, toldCap }) {
   if (askRecorded === true) {
     const set = setTime ? setTime.get(row.id) : 'set_time_unread';
     if (set) return set;
@@ -350,7 +363,7 @@ function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, setTime
   // A stop told an hour may start up to 2 hours later than the told slot, never earlier (owner 2026-11-24); the writer
   // checks the new hour too, so any other move stops as first_or_one_time or time_told.
   const dayOnly = !!dayTold && dayTold.has(row.id);
-  const shift = withinToldShift(row, toldStart);
+  const shift = withinToldShift(row, toldStart, toldCap);
   if (!dayOnly && !shift && (row.is_recurring !== true || row.recurring_parent_id == null)) return 'first_or_one_time';
   if (!dayOnly && (!personPlaced || personPlaced.has(row.id))) return 'person_placed';
   if (!shift && (!told || told.has(row.id))) return 'time_told';
@@ -470,11 +483,11 @@ async function attachPrefs(conn, entries) {
  * A movable stop its customer was told an hour for takes only hours from that slot to TOLD_SHIFT_MIN later: its `pref`
  * becomes the overlap of the preference and that band. No overlap keeps the stop fixed (time_told).
  */
-function limitToldShift(entries, toldStart) {
+function limitToldShift(entries, toldStart, toldCap) {
   for (const entry of entries) {
     const told = !entry.why && toldStart ? toldStart.get(entry.row.id) : undefined;
     if (!Number.isFinite(told)) continue;
-    const band = { startMin: told, endMin: told + TOLD_SHIFT_MIN + 1 };
+    const band = { startMin: told, endMin: toldShiftEnd(entry.row.id, told, toldCap) + 1 };
     const pref = entry.pref ? { startMin: Math.max(entry.pref.startMin, band.startMin), endMin: Math.min(entry.pref.endMin, band.endMin) } : band;
     if (pref.startMin >= pref.endMin) entry.why = 'time_told';
     else entry.pref = pref;
@@ -549,7 +562,7 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
   const origin = homeFromMap(env.techHomes, techId);
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
-  limitToldShift(entries, dayContext.toldStart);
+  limitToldShift(entries, dayContext.toldStart, dayContext.toldCap);
   const planned = planEntries(env, { rows, entries, blocks, origin, techId, dayContext });
   const plan = { entries, blocks, origin, dayContext, ...planned, hash: versionHash(dayContext.allRows) };
   return planned.verdict.accepted ? plan : withPackPlan(env, plan, { rows, techId });
