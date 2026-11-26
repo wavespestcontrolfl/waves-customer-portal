@@ -227,7 +227,9 @@ async function recordPoint({ tech, point }) {
 }
 
 
-async function processTrackingEvent({ logId, eventType, payload }) {
+// `verified`: the receiver matched the webhook secret under the enforce verification mode (log and
+// disabled modes accept unmatched requests). Passed to truck clock-in only; nothing else reads it.
+async function processTrackingEvent({ logId, eventType, payload, verified = false }) {
   try {
     const normalizedEventType = normalizeEventType(eventType);
     const imei = extractImei(payload);
@@ -296,6 +298,7 @@ async function processTrackingEvent({ logId, eventType, payload }) {
           arrival,
           logId,
           payload,
+          verified,
         });
       } catch (err) {
         logger.error(`[webhooks-bouncie] truck clock-in failed: ${err.message}`);
@@ -381,7 +384,7 @@ router.post('/', async (req, res) => {
   }
 
   setImmediate(() => {
-    processTrackingEvent({ logId, eventType, payload }).catch((err) => {
+    processTrackingEvent({ logId, eventType, payload, verified: verify.matched === true && verify.mode === 'enforce' }).catch((err) => {
       logger.error(`[webhooks-bouncie] setImmediate error: ${err.message}`);
     });
   });

@@ -912,6 +912,19 @@ async function createTruckStartShift(trx, technicianId, { at, now = new Date(), 
 }
 
 /**
+ * The approved-day, approved-week and paid-week guards for a shift the job leaves as it is (an early
+ * or within-tolerance tap): throws the same 409 as an edit would, so the job records a review.
+ */
+async function assertTruckStartDayOpen(trx, shift) {
+  await assertEntryMutable(trx, {
+    technician_id: shift.technician_id,
+    clock_in: shift.clock_in,
+    status: 'completed',
+    approval_status: shift.approval_status || 'pending',
+  }, 'review', [staffWorkDate(shift.clock_in)], null);
+}
+
+/**
  * Move a shift's start BACK to the truck's first-arrival time (the technician's favor). The
  * original start is kept in original_clock_in and the audit log. Refuses an approved, disputed
  * or paid day and any other shift in the gap. An open shift stays open (status active); a closed
@@ -1725,5 +1738,6 @@ module.exports = {
   lockTruckStartDay,
   createTruckStartShift,
   moveShiftStartToTruck,
+  assertTruckStartDayOpen,
   TRUCK_START_SOURCE,
 };

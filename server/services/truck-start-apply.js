@@ -13,7 +13,9 @@
  * the technician's work day (time-tracking lockTruckStartDay):
  *
  *   Eligibility, else the outcome is skipped:<reason> and the row is final:
- *     the GPS time is real (event_time_known) and not in the future; it falls on the row's
+ *     the event was verified (the receiver matched its webhook secret under enforce) and its GPS
+ *     time is real (event_time_known); the time is not beyond the future tolerance (a time up to
+ *     2 minutes ahead leaves the row pending until it arrives); it falls on the row's
  *     Eastern work day and before that day's 11 PM auto-close, and the tick itself runs
  *     before the close; the technician is active; the vehicle agreement was COMPLETED at or
  *     before the GPS time (a later signature never backdates pay).
@@ -33,6 +35,9 @@
  *   The outcome is stamped on the row (applied_at, applied_action, applied_detail) in the same
  *   transaction as the shift write, so a crash before commit leaves the row for the next tick
  *   and a row with applied_at is never processed again.
+ *
+ * The 11 PM close is serialized with the job (CLOSE_BARRIER_SQL above): the clock is re-read after the
+ * day's locks, and the closer waits for writes in flight before it lists open shifts.
  *
  * The bell is raised after the commit (never inside the transaction); applied_detail.notified
  * records that it went out and the next tick retries a bell that failed. Sends nothing to a
@@ -58,6 +63,22 @@ const ALERT_LINK = '/admin/timetracking?tab=entries';
 const ALERT_CATEGORY = 'payroll';
 
 const SKIP = 'skipped:';
+
+// The 11 PM auto-close (time-tracking-crons.js) lists open shifts once. A shift written by this job
+// must either be committed before that scan or never be written: every row transaction takes this
+// advisory lock SHARED first and re-reads the clock after the day's locks; the closer takes it
+// EXCLUSIVE (waitForTruckStartWrites) before its scan, so it waits for every write in flight, and a
+// write that starts after it reads a clock that is already past 11 PM.
+const CLOSE_BARRIER_SQL = "hashtextextended('truck-start-close', 0)";
+
+async function waitForTruckStartWrites() {
+  await db.transaction((trx) => trx.raw(`SELECT pg_advisory_xact_lock(${CLOSE_BARRIER_SQL})`));
+}
+
+// A GPS time that is still ahead of the clock (within the tolerance) waits: the shift would exist
+// before its own start, and a backup clock-in would find it already open.
+const isDeferred = (eventAt, now) => eventAt.getTime() > now.getTime();
+const laterOf = (a, b) => (a.getTime() >= b.getTime() ? a : b);
 const errTag = (err) => (err && (err.code || err.name)) || 'error';
 
 // 11 PM Eastern of the work day: the auto-close cron (time-tracking-crons.js) closes every
@@ -72,6 +93,7 @@ function autoCloseAt(workDate) {
  */
 function skipReason({ row, workDate, technician, agreementOk, now }) {
   const eventAt = row.event_at instanceof Date ? row.event_at : new Date(row.event_at);
+  if (row.event_verified !== true) return 'event_unverified';
   if (row.event_time_known !== true) return 'event_time_unknown';
   if (Number.isNaN(eventAt.getTime())) return 'event_time_invalid';
   if (eventAt.getTime() - now.getTime() > FUTURE_TOLERANCE_MS) return 'event_in_future';
@@ -104,14 +126,17 @@ function decideDay({ entries, eventAt, now }) {
   if (shifts.length > 1) return review('several_shifts', { shifts: shifts.length });
 
   const shift = shifts[0];
+  // The office's own say first: these are checked before any time comparison, so an early or
+  // within-tolerance tap on such a shift is still a review, not a quiet pass.
+  if (shift.status === 'edited' || shift.edited_by || shift.original_clock_in) return review('shift_edited_by_office');
+  if (!['active', 'completed'].includes(shift.status)) return review('shift_not_open');
+  if (shift.approval_status && shift.approval_status !== 'pending') return review('shift_not_pending');
+
   const clockIn = new Date(shift.clock_in);
   const clockOut = shift.clock_out ? new Date(shift.clock_out) : null;
   if (clockOut && clockOut.getTime() <= eventAt.getTime()) return review('shift_closed_before_arrival');
 
   if (clockIn.getTime() > eventAt.getTime()) {
-    if (shift.status === 'edited' || shift.edited_by || shift.original_clock_in) return review('shift_edited_by_office');
-    if (!['active', 'completed'].includes(shift.status)) return review('shift_not_open');
-    if (shift.approval_status && shift.approval_status !== 'pending') return review('shift_not_pending');
     return {
       action: 'moved_earlier',
       detail: {
@@ -126,8 +151,8 @@ function decideDay({ entries, eventAt, now }) {
 
   const earlyMs = eventAt.getTime() - clockIn.getTime();
   const detail = { shift_id: shift.id, minutes_early: Math.round((earlyMs / MIN) * 100) / 100 };
-  if (earlyMs > EARLY_TOLERANCE_MS) return { action: 'flag_early_tap', detail };
-  return { action: 'ok_within_tolerance', detail };
+  if (earlyMs > EARLY_TOLERANCE_MS) return { action: 'flag_early_tap', detail, shift };
+  return { action: 'ok_within_tolerance', detail, shift };
 }
 
 const needsBell = (action) => action === 'flag_early_tap' || action === 'needs_review';
@@ -147,7 +172,7 @@ const REVIEW_WHY = {
 };
 
 // The one admin bell for a flag or a review (docs/admin-notifications.md). Never throws:
-// returns true when the bell went out.
+// returns true only when a notification id came back.
 async function raiseStartBell({ row, technician, workDate, action, detail }, raise) {
   try {
     const first = String(technician?.name || 'technician').trim().split(/\s+/)[0].slice(0, 20) || 'technician';
@@ -168,7 +193,7 @@ async function raiseStartBell({ row, technician, workDate, action, detail }, rai
       };
     }
     const { raiseAdminAlert } = raise ? { raiseAdminAlert: raise } : require('./admin-alert-compose');
-    await raiseAdminAlert(ALERT_CATEGORY, {
+    const receipt = await raiseAdminAlert(ALERT_CATEGORY, {
       ...spec,
       severity: 'needs-you',
       link: ALERT_LINK,
@@ -180,6 +205,12 @@ async function raiseStartBell({ row, technician, workDate, action, detail }, rai
       bellDefault: true,
       metadata: { technicianId: row.technician_id, workDate, truckStart: action },
     });
+    // notifyAdmin resolves null when its insert fails, and a suppressed alert has no id: only a
+    // persisted notification (a deduplicated existing one included) counts as sent.
+    if (!receipt || !receipt.id) {
+      logger.error('[truck-start] bell not persisted, next tick retries');
+      return false;
+    }
     return true;
   } catch (err) {
     logger.error(`[truck-start] bell not raised (${errTag(err)})`);
@@ -210,9 +241,10 @@ async function stamp(trx, rowId, now, action, detail) {
  * Apply one row. Returns null when another tick holds it or it is already applied, else
  * { rowId, action, detail, bell? } with what was stamped.
  */
-async function applyRow(rowId, now) {
+async function applyRow(rowId, tickNow) {
   let result = null;
   await db.transaction(async (trx) => {
+    await trx.raw(`SELECT pg_advisory_xact_lock_shared(${CLOSE_BARRIER_SQL})`);
     const row = await trx('truck_clock_in_shadow')
       .where({ id: rowId })
       .whereNull('applied_at')
@@ -222,19 +254,24 @@ async function applyRow(rowId, now) {
     if (!row) return;
     const workDate = row.work_date_text;
     const eventAt = new Date(row.event_at);
+    let now = laterOf(tickNow, new Date());
     const done = async (action, detail, extra = {}) => {
       await stamp(trx, row.id, now, action, detail);
       result = { rowId: row.id, action, detail, row, workDate, ...extra };
     };
 
-    // Cheap checks that need no lock: an unreal time or a closed day is final.
+    // Cheap checks that need no day lock: an unreal time or a closed day is final.
     const early = skipReason({ row, workDate, technician: { active: true }, agreementOk: true, now });
     if (early) {
       await done(`${SKIP}${early}`, { reason: early });
       return;
     }
+    if (isDeferred(eventAt, now)) return;
 
     const { technician, entries } = await timeTracking.lockTruckStartDay(trx, row.technician_id, workDate);
+    // The clock again, now that the locks are held (they may have taken a while): the 11 PM
+    // cut-off and the "not in the future" rule are judged on this reading.
+    now = laterOf(tickNow, new Date());
     let agreementOk = false;
     if (technician?.active === true) {
       agreementOk = await hasCompletedIssuedRecord(trx, row.technician_id, VEHICLE_AGREEMENT_KEY, eventAt, { completedBy: eventAt });
@@ -244,11 +281,14 @@ async function applyRow(rowId, now) {
       await done(`${SKIP}${reason}`, { reason }, { technician });
       return;
     }
+    if (isDeferred(eventAt, now)) return;
 
     const decision = decideDay({ entries, eventAt, now });
     let { action, detail } = decision;
-    if (decision.mutate) {
-      // A savepoint: a refusal (approved or paid week, an overlap) undoes only the attempt.
+    if (decision.mutate || decision.shift) {
+      // A savepoint: a refusal (approved or paid week, an overlap) undoes only the attempt. A
+      // no-change outcome on a shift runs the same approved/paid-week guard, so an early or
+      // within-tolerance tap on a closed week is a review too.
       try {
         await trx.transaction(async (sp) => {
           if (decision.mutate === 'create') {
@@ -256,8 +296,10 @@ async function applyRow(rowId, now) {
               at: eventAt, now, lat: row.lat, lng: row.lng,
             });
             detail = { ...detail, shift_id: shift.id };
-          } else {
+          } else if (decision.mutate) {
             await timeTracking.moveShiftStartToTruck(sp, decision.mutate.move, { at: eventAt, now });
+          } else {
+            await timeTracking.assertTruckStartDayOpen(sp, decision.shift);
           }
         });
       } catch (err) {
@@ -312,16 +354,19 @@ async function applyTruckStarts({ now = new Date(), raise = null, technicianIds 
     }
   }
 
-  // A bell that failed after its commit: today's flagged rows still marked notified=false.
+  // A bell that failed after its commit (or a process that stopped before it): every stamped,
+  // unnotified flag or review, whatever its date, keyed by the row's OWN work date. Only the
+  // shift writes above are limited to the current day.
   const pending = await scoped(db('truck_clock_in_shadow as s'), 's.technician_id')
     .join('technicians as t', 't.id', 's.technician_id')
-    .where('s.work_date', workDate)
     .whereIn('s.applied_action', ['flag_early_tap', 'needs_review'])
     .whereRaw("s.applied_detail->>'notified' = 'false'")
-    .select('s.id', 's.technician_id', 's.event_at', 's.applied_action', 's.applied_detail', 't.name');
+    .orderBy('s.applied_at')
+    .limit(BATCH)
+    .select('s.id', 's.technician_id', 's.event_at', 's.applied_action', 's.applied_detail', 't.name', db.raw('s.work_date::text AS work_date_text'));
   for (const row of pending) {
     const sent = await raiseStartBell({
-      row, technician: { name: row.name }, workDate, action: row.applied_action, detail: row.applied_detail || {},
+      row, technician: { name: row.name }, workDate: row.work_date_text, action: row.applied_action, detail: row.applied_detail || {},
     }, raise);
     if (sent) { await markNotified(row.id); summary.bells += 1; }
   }
@@ -332,5 +377,6 @@ module.exports = {
   applyTruckStarts,
   EARLY_TOLERANCE_MS,
   MAX_START_LAG_MS,
-  _test: { skipReason, decideDay, applyRow, autoCloseAt },
+  waitForTruckStartWrites,
+  _test: { skipReason, decideDay, applyRow, autoCloseAt, isDeferred },
 };

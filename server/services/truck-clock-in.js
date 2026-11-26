@@ -28,7 +28,8 @@
  *
  * Modes (truckClockInMode()): off = nothing runs; shadow and start = decide and record
  * (the row is written with the real GPS time whether or not the technician is already
- * clocked in or the agreement is unsigned; event_time_known says the GPS time was real).
+ * clocked in or the agreement is unsigned; event_time_known says the GPS time was real; event_verified says the receiver matched its
+ * secret under enforce, and start mode records only verified triggers).
  * Clock-out, the 9 PM reminder and the 11 PM close are not touched. Sends nothing.
  */
 const db = require('../models/db');
@@ -178,7 +179,7 @@ function remember(key) {
   decidedToday.add(key);
 }
 
-function claimRow(techId, workDate, fired, decision) {
+function claimRow(techId, workDate, fired, decision, verified) {
   return {
     technician_id: techId,
     work_date: workDate,
@@ -189,6 +190,7 @@ function claimRow(techId, workDate, fired, decision) {
     lat: fired.lat,
     lng: fired.lng,
     event_time_known: fired.eventKnown === true,
+    event_verified: verified === true,
   };
 }
 
@@ -208,15 +210,19 @@ async function insertClaim(conn, row) {
  * Returns { action, ... } for tests and logs: 'off', 'maintenance', 'no_trigger',
  * 'already_decided' or 'recorded'.
  */
-async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, logId = null, payload = null, now = new Date() } = {}) {
+async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, logId = null, payload = null, verified = false, now = new Date() } = {}) {
   const mode = truckClockInMode();
   // shadow and start both record; only start also lets truck-start-apply write the shift.
-  if (mode !== 'shadow' && mode !== 'start') return { action: 'off' };
+  if (!RECORDING_MODES.has(mode)) return { action: 'off' };
   if (!tech?.id) return { action: 'no_trigger' };
   if (isStaffMaintenanceEnabled()) return { action: 'maintenance' };
 
   const fired = detectTrigger({ eventType, point, arrival, now });
   if (!fired) return { action: 'no_trigger' };
+  // `start` writes paid time from the row, so only a webhook whose secret matched under the enforce
+  // verification mode may claim the day (an unverified one would also block the verified one that
+  // follows). Shadow still records everything; the row says whether it was verified.
+  if (refusesUnverified(mode, verified)) return { action: 'no_trigger', reason: 'unverified' };
 
   const workDate = staffWorkDate(fired.eventAt);
   const key = `${tech.id}:${workDate}`;
@@ -239,7 +245,7 @@ async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, l
 
   // Shadow: decide and record, never write time_entries.
   const decision = await decideClockIn(tech.id);
-  const claimId = await insertClaim(db, claimRow(tech.id, workDate, fired, decision));
+  const claimId = await insertClaim(db, claimRow(tech.id, workDate, fired, decision, verified));
   remember(key);
   // Another instance or sample won the day between the check and the insert.
   if (!claimId) return { action: 'already_decided', workDate };
@@ -254,6 +260,9 @@ async function maybeClockInFromTruck({ tech, eventType, point, arrival = null, l
     skipReason: decision.skipReason,
   };
 }
+
+const RECORDING_MODES = new Set(['shadow', 'start']);
+const refusesUnverified = (mode, verified) => mode === 'start' && verified !== true;
 
 function resetMemo() {
   decidedToday.clear();

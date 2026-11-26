@@ -111,6 +111,7 @@ postgres('truck sets the shift start on PostgreSQL (GATE_TRUCK_CLOCK_IN=start)',
     lat: 27.3,
     lng: -82.5,
     event_time_known: true,
+    event_verified: true,
     ...over,
   });
   const shadowRow = (technicianId) => database('truck_clock_in_shadow')
@@ -127,7 +128,11 @@ postgres('truck sets the shift start on PostgreSQL (GATE_TRUCK_CLOCK_IN=start)',
     staff_write_generation: ACTIVE_WRITE_GENERATION,
     ...over,
   }).returning('*').then((rows) => rows[0]);
-  const tick = (technicianIds, now = et('10:00')) => apply.applyTruckStarts({ now, raise, technicianIds });
+  // The tick's clock is also the system clock (the job re-reads Date after it holds its locks).
+  const tick = (technicianIds, now = et('10:00')) => {
+    jest.setSystemTime(now);
+    return apply.applyTruckStarts({ now, raise, technicianIds });
+  };
   const at = (hhmm, day = DAY) => et(hhmm, day);
 
   test('case A: no entry that day, the shift starts at the GPS time (not at the tick)', async () => {
@@ -456,6 +461,133 @@ postgres('truck sets the shift start on PostgreSQL (GATE_TRUCK_CLOCK_IN=start)',
       await tick([tech], et('22:59', summerDay));
       expect((await shadowRow(tech)).applied_action).toBe('clocked_in');
       expect((await shifts(tech))[0].clock_in.toISOString()).toBe('2031-07-17T02:59:00.000Z');
+    });
+  });
+
+  describe('audit round 1', () => {
+    test('a row from an unverified webhook, or from before the column, is never paid', async () => {
+      const unverified = await makeTech();
+      const legacy = await makeTech();
+      await shadow(unverified, at('08:00'), { event_verified: false });
+      await shadow(legacy, at('08:00'), { event_verified: null });
+      await tick([unverified, legacy], at('08:01'));
+      expect((await shadowRow(unverified)).applied_action).toBe('skipped:event_unverified');
+      expect((await shadowRow(legacy)).applied_action).toBe('skipped:event_unverified');
+      expect(await shifts(unverified)).toHaveLength(0);
+      expect(await shifts(legacy)).toHaveLength(0);
+    });
+
+    test('a tick that waits on a lock past 11 PM writes nothing (the clock is re-read after the locks)', async () => {
+      const tech = await makeTech();
+      await shadow(tech, at('22:58'));
+      const weekStart = require('../utils/staff-time-work-date').staffWeekStartForWorkDate(DAY);
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      let locked;
+      const lockTaken = new Promise((resolve) => { locked = resolve; });
+      const holder = database.transaction(async (trx) => {
+        await timeTracking.lockStaffWeek(trx, tech, weekStart);
+        locked();
+        await held;
+      });
+      await lockTaken;
+      const running = tick([tech], at('22:58:30'));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      jest.setSystemTime(at('23:00:20'));
+      release();
+      await holder;
+      await running;
+      expect((await shadowRow(tech)).applied_action).toBe('skipped:after_auto_close');
+      expect(await shifts(tech)).toHaveLength(0);
+    });
+
+    test('the 11 PM closer waits for a write in flight, and a later write is refused by the clock', async () => {
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      let locked;
+      const lockTaken = new Promise((resolve) => { locked = resolve; });
+      const inFlight = database.transaction(async (trx) => {
+        await trx.raw("SELECT pg_advisory_xact_lock_shared(hashtextextended('truck-start-close', 0))");
+        locked();
+        await held;
+      });
+      await lockTaken;
+      let barrierDone = false;
+      const barrier = apply.waitForTruckStartWrites().then(() => { barrierDone = true; });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(barrierDone).toBe(false);
+      release();
+      await inFlight;
+      await barrier;
+      expect(barrierDone).toBe(true);
+    });
+
+    test('a GPS time slightly ahead leaves the row pending, then applies it once the time has come', async () => {
+      const tech = await makeTech();
+      await shadow(tech, at('08:01:30'));
+      const early = await tick([tech], at('08:00'));
+      expect(early).toMatchObject({ applied: 0, skipped: 0, errors: 0 });
+      expect((await shadowRow(tech)).applied_at).toBeNull();
+      expect(await shifts(tech)).toHaveLength(0);
+      await tick([tech], at('08:02'));
+      expect((await shadowRow(tech)).applied_action).toBe('clocked_in');
+      expect((await shifts(tech))[0].clock_in.toISOString()).toBe(at('08:01:30').toISOString());
+    });
+
+    test('a bell whose receipt is null is not marked sent; the next tick sends it once', async () => {
+      const tech = await makeTech();
+      await addShift(tech, at('07:40'));
+      await shadow(tech, at('08:00'), { would_clock_in: false, skip_reason: 'already_clocked_in' });
+      raise.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+      await tick([tech], at('08:01'));
+      expect((await shadowRow(tech)).applied_detail.notified).toBe(false);
+      await tick([tech], at('08:03'));
+      expect((await shadowRow(tech)).applied_detail.notified).toBe(true);
+      expect(raise).toHaveBeenCalledTimes(3);
+    });
+
+    test('an unsent review bell is retried the next Eastern day under its own work date; shifts are not written then', async () => {
+      const tech = await makeTech();
+      await addShift(tech, at('07:40'));
+      await shadow(tech, at('08:00'), { would_clock_in: false, skip_reason: 'already_clocked_in' });
+      raise.mockRejectedValueOnce(new Error('down')).mockRejectedValueOnce(new Error('down'));
+      await tick([tech], at('08:01'));
+      expect((await shadowRow(tech)).applied_detail.notified).toBe(false);
+      // The process was down overnight. A new day's row for the same technician is also pending.
+      await shadow(tech, at('06:01', NEXT_DAY), { work_date: NEXT_DAY });
+      await tick([tech], at('06:00', NEXT_DAY));
+      const first = await database('truck_clock_in_shadow').where({ technician_id: tech, work_date: DAY }).first();
+      expect(first.applied_detail.notified).toBe(true);
+      expect(bells).toHaveLength(1);
+      expect(bells[0].opts.dedupeKey).toBe(`truck-start:${tech}:${DAY}`);
+      expect(bells[0].opts.metadata.workDate).toBe(DAY);
+      // The new day's row (6:01 AM) is a minute ahead of the 6:00 AM tick, so it waits.
+      expect((await database('truck_clock_in_shadow').where({ technician_id: tech, work_date: NEXT_DAY }).first()).applied_at).toBeNull();
+    });
+
+    test.each([
+      ['an office-edited shift starting 3 minutes before the truck', { status: 'edited', edited_by: null }, '07:57', 'shift_edited_by_office'],
+      ['an approved shift starting 14 minutes before the truck', { approval_status: 'approved' }, '07:46', 'shift_not_pending'],
+      ['a disputed shift starting 3 minutes before the truck', { approval_status: 'disputed' }, '07:57', 'shift_not_pending'],
+    ])('%s is a review with a bell, not a quiet pass', async (_label, over, clockIn, reason) => {
+      const tech = await makeTech();
+      await addShift(tech, at(clockIn), at('12:00'), over);
+      await shadow(tech, at('08:00'), { would_clock_in: false, skip_reason: 'already_clocked_in' });
+      await tick([tech], at('08:01'));
+      const row = await shadowRow(tech);
+      expect(row.applied_action).toBe('needs_review');
+      expect(row.applied_detail.reason).toBe(reason);
+      expect(bells).toHaveLength(1);
+    });
+
+    test('an early tap on an approved day is a review (the week guard runs on a no-change outcome too)', async () => {
+      const tech = await makeTech();
+      await addShift(tech, at('07:56'));
+      await database('time_entry_daily_summary').insert({ technician_id: tech, work_date: DAY, status: 'approved' });
+      await shadow(tech, at('08:00'), { would_clock_in: false, skip_reason: 'already_clocked_in' });
+      await tick([tech], at('08:01'));
+      expect((await shadowRow(tech)).applied_detail.reason).toBe('week_closed');
+      expect(bells).toHaveLength(1);
     });
   });
 

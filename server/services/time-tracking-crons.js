@@ -214,6 +214,14 @@ function initTimeTrackingCrons() {
     logger.info('[time-tracking-cron] Running 11 PM force auto-clock-out');
     try {
       await runExclusive('time-tracking-11pm-autoclose', async () => {
+      // A truck-set shift (truck-start-apply) that passed its clock check before 11 PM is committed
+      // before this scan lists the open shifts; one that starts later reads a clock past 11 PM and
+      // writes nothing. A barrier that cannot be taken never stops the close.
+      try {
+        await require('./truck-start-apply').waitForTruckStartWrites();
+      } catch (err) {
+        logger.error(`[time-tracking-cron] truck start barrier failed: ${errTag(err)}`);
+      }
       const activeShifts = await db('time_entries')
         .where({ entry_type: 'shift', status: 'active' })
         .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')

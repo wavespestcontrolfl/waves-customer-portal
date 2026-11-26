@@ -15,14 +15,14 @@ const db = require('../models/db');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const { applyTruckStarts, _test } = require('../services/truck-start-apply');
 
-const { skipReason, decideDay, autoCloseAt } = _test;
+const { skipReason, decideDay, autoCloseAt, isDeferred } = _test;
 const MIN = 60 * 1000;
 // Wednesday 2026-11-25, 10:00 AM EST (UTC-5).
 const NOW = new Date('2026-11-25T15:00:00.000Z');
 const WORK_DATE = '2026-11-25';
 const at = (minutesFromNow) => new Date(NOW.getTime() + minutesFromNow * MIN);
 const tech = { id: 't1', active: true };
-const row = (over = {}) => ({ event_at: at(-3), event_time_known: true, ...over });
+const row = (over = {}) => ({ event_at: at(-3), event_time_known: true, event_verified: true, ...over });
 const shift = (over = {}) => ({
   id: 's1', entry_type: 'shift', status: 'active', approval_status: 'pending', clock_in: at(-3), clock_out: null,
   edited_by: null, original_clock_in: null, ...over,
@@ -44,6 +44,8 @@ describe('skipReason (eligibility; every reason is final for the day)', () => {
   });
 
   test.each([
+    ['webhook not verified (log or disabled mode)', { row: row({ event_verified: false }) }, 'event_unverified'],
+    ['row from before the verified column', { row: row({ event_verified: null }) }, 'event_unverified'],
     ['event time was not the GPS time', { row: row({ event_time_known: false }) }, 'event_time_unknown'],
     ['event time unknown on a row from before the column', { row: row({ event_time_known: null }) }, 'event_time_unknown'],
     ['event time is not a date', { row: row({ event_at: 'nope' }) }, 'event_time_invalid'],
@@ -56,8 +58,12 @@ describe('skipReason (eligibility; every reason is final for the day)', () => {
     expect(eligible(over)).toBe(expected);
   });
 
-  test('two minutes ahead is within the tolerance', () => {
+  test('two minutes ahead is within the tolerance, but the job waits for it (isDeferred)', () => {
     expect(eligible({ row: row({ event_at: at(2) }) })).toBeNull();
+    expect(isDeferred(at(2), NOW)).toBe(true);
+    expect(isDeferred(at(0.01), NOW)).toBe(true);
+    expect(isDeferred(at(0), NOW)).toBe(false);
+    expect(isDeferred(at(-1), NOW)).toBe(false);
   });
 
   test('an arrival at or after 11 PM Eastern is refused', () => {
@@ -115,6 +121,23 @@ describe('decideDay', () => {
     ['approved', { approval_status: 'approved' }, 'shift_not_pending'],
   ])('case B is refused for a shift %s', (_label, over, reason) => {
     expect(decide([shift({ clock_in: at(8), ...over })], at(-3))).toMatchObject({ action: 'needs_review', detail: { reason } });
+  });
+
+  test.each([
+    ['edited by the office', { status: 'edited' }],
+    ['edited_by set', { edited_by: 'admin-1' }],
+    ['already moved once', { original_clock_in: at(-20) }],
+    ['in review', { approval_status: 'disputed' }],
+    ['approved', { approval_status: 'approved' }],
+  ])('a shift %s is a review even when the tap is early or within tolerance', (_label, over) => {
+    // 3 minutes before the truck: would be ok_within_tolerance; 14 minutes: would be flag_early_tap.
+    expect(decide([shift({ clock_in: at(-6), ...over })], at(-3))).toMatchObject({ action: 'needs_review' });
+    expect(decide([shift({ clock_in: at(-17), ...over })], at(-3))).toMatchObject({ action: 'needs_review' });
+  });
+
+  test('a no-change outcome carries the shift so the week guard can run on it', () => {
+    expect(decide([shift({ clock_in: at(-6) })], at(-3)).shift.id).toBe('s1');
+    expect(decide([shift({ clock_in: at(-17) })], at(-3)).shift.id).toBe('s1');
   });
 
   test('case C: more than 5 minutes earlier flags the tap and changes nothing', () => {
@@ -197,7 +220,7 @@ describe('the owner bell passes the admin notification rules', () => {
     db.mockImplementation(() => {
       call += 1;
       if (call === 1) return chain([]);
-      return chain([{ id: 'r1', technician_id: 't1', event_at: at(-3), applied_action: action, applied_detail: detail, name: 'Alex Rivera-Montgomery-Longname' }]);
+      return chain([{ id: 'r1', technician_id: 't1', event_at: at(-3), applied_action: action, applied_detail: detail, work_date_text: WORK_DATE, name: 'Alex Rivera-Montgomery-Longname' }]);
     });
     db.raw = jest.fn();
     await applyTruckStarts({ now: NOW, raise: async (category, spec, opts) => { raised.push({ category, spec, opts }); return { id: 'n1' }; } });
@@ -208,5 +231,53 @@ describe('the owner bell passes the admin notification rules', () => {
     if (action === 'flag_early_tap') {
       expect(raised[0].spec.why).toBe('Clocked in 14 min before the truck arrived at the first stop — shop stop or check.');
     }
+  });
+
+  const flaggedRow = (over = {}) => ({
+    id: 'r1', technician_id: 't1', event_at: at(-3), applied_action: 'needs_review', applied_detail: { reason: 'several_shifts' },
+    work_date_text: WORK_DATE, name: 'Alex Rivera', ...over,
+  });
+  const runWith = async (raise, rowOver) => {
+    process.env.GATE_TRUCK_CLOCK_IN = 'start';
+    const chains = [];
+    let call = 0;
+    db.mockImplementation(() => {
+      call += 1;
+      const c = chain(call === 1 ? [] : [flaggedRow(rowOver)]);
+      chains.push(c);
+      return c;
+    });
+    db.raw = jest.fn();
+    const summary = await applyTruckStarts({ now: NOW, raise });
+    return { summary, chains };
+  };
+
+  test.each([
+    ['null (insert failed)', null],
+    ['undefined', undefined],
+    ['a suppressed alert with no id', { id: null, suppressed: true }],
+  ])('a receipt of %s is not a sent bell: nothing is stamped notified', async (_label, receipt) => {
+    const raise = jest.fn().mockResolvedValue(receipt);
+    const { summary, chains } = await runWith(raise);
+    expect(raise).toHaveBeenCalledTimes(1);
+    expect(summary.bells).toBe(0);
+    // chains[1] is the retry query; a stamp would be a third db() call with update().
+    expect(chains).toHaveLength(2);
+  });
+
+  test('a persisted id (a deduplicated existing one too) is a sent bell and is stamped', async () => {
+    const raise = jest.fn().mockResolvedValue({ id: 'existing-id', deduped: true });
+    const { summary, chains } = await runWith(raise);
+    expect(summary.bells).toBe(1);
+    expect(chains).toHaveLength(3);
+    expect(chains[2].update).toHaveBeenCalledTimes(1);
+  });
+
+  test('a review bell left from an earlier Eastern day is retried under the row\'s own work date', async () => {
+    const raise = jest.fn().mockResolvedValue({ id: 'n1' });
+    await runWith(raise, { work_date_text: '2026-11-24' });
+    expect(raise.mock.calls[0][2].dedupeKey).toBe('truck-start:t1:2026-11-24');
+    expect(raise.mock.calls[0][1].subject.id).toBe('truck-start:t1:2026-11-24');
+    expect(raise.mock.calls[0][2].metadata.workDate).toBe('2026-11-24');
   });
 });
