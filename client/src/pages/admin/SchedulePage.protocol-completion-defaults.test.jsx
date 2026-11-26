@@ -249,6 +249,8 @@ it('a service with no protocol card shows "Inspection only, no product" on the c
   });
   expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
   expect(screen.queryByText('Protocol actions unavailable.')).toBeNull();
+  // Inspection only: no action picker, so no generic treatment ("Applied interior treatment") can be ticked.
+  expect(screen.queryByLabelText('Add protocol action')).toBeNull();
 });
 
 it('a service with a card shows no such line', async () => {
@@ -259,6 +261,7 @@ it('a service with a card shows no such line', async () => {
   await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('/completion-actions'))).toBe(true));
   expect(await screen.findByText('Apply cockroach gel bait')).toBeTruthy();
   expect(screen.queryByText(NO_CARD_NOTE)).toBeNull();
+  expect(screen.getByLabelText('Add protocol action')).toBeTruthy();
 });
 
 it('does NOT seed on a declined outcome, even once the server response lands', async () => {

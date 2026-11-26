@@ -43,6 +43,17 @@ async function call(path, query) {
   return { status: res.status.mock.calls[0]?.[0] || 200, body: JSON.parse(JSON.stringify(res.json.mock.calls[0][0])) };
 }
 
+const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+// The booked visit the routes read: its catalog key.
+function bookedAs(serviceKey) {
+  db.mockImplementation((table) => {
+    if (table === 'products_catalog') return readQuery([{ id: 'tau', name: 'Taurus SC', aliases: [] }]);
+    if (table === 'scheduled_services') return readQuery([{ id: VISIT, service_key: serviceKey, followup_source_service_id: null }]);
+    if (table === 'product_aliases') return readQuery([]);
+    throw new Error(`Unexpected table: ${table}`);
+  });
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   db.raw = jest.fn((sql) => sql);
@@ -94,6 +105,18 @@ describe('the matcher: a service no rule claims has no card', () => {
     expect(match('Tick Control Service')).toEqual(['pest', 4, 'tick_service', true]);
   });
 
+  // The close-out reads these keys as regular pest work (the house mix): the card must not go when the name says nothing.
+  test.each(['pest_general_quarterly', 'pest_general_monthly', 'pest_general_bimonthly', 'pest_general_semiannual', 'one_time_pest_control', 'pest_re_service', 'pest_initial_cleanout'])(
+    'a booking named "Re-Service" with the general pest key %s keeps the general pest card', (key) => {
+      expect(match('Re-Service', key)).toEqual(['pest', 1, 'general_pest', true]);
+    },
+  );
+
+  test('a bare "Re-Service" with no key, or with another service\'s key no rule claims, has no card', () => {
+    expect(match('Re-Service')).toEqual(NO_CARD);
+    expect(match('Re-Service', 'bee_wasp_removal')).toEqual(NO_CARD);
+  });
+
   test('another program\'s own default card is unchanged: only the pest catch-all had no meaning', () => {
     // A lawn name with no rule still reads as the lawn program (its plan engine owns the visit).
     expect(match('Lawn Assessment').slice(0, 1)).toEqual(['lawn']);
@@ -108,11 +131,11 @@ describe('the matcher: a service no rule claims has no card', () => {
 describe('the Waves Assessment card', () => {
   const visit = protocols.assessment.visits[0];
 
-  test('the catalog key (lawn_inspection since the rename) and the name both reach it', () => {
+  test('the catalog key (lawn_inspection since the rename) reaches it, whatever the visit is named', () => {
     expect(match('Waves Assessment', 'lawn_inspection')).toEqual(['assessment', 1, 'waves_assessment', true]);
-    expect(match('Waves Assessment')).toEqual(['assessment', 1, 'waves_assessment', true]);
-    // The key routes the visit whatever it is named.
     expect(match('Lawn Inspection', 'lawn_inspection')).toEqual(['assessment', 1, 'waves_assessment', true]);
+    // Every booked assessment carries the key (production read 2026-11-26). A row with no key has no card: inspection only.
+    expect(match('Waves Assessment')).toEqual(NO_CARD);
   });
 
   test('no line of the card is a product or records a treatment', () => {
@@ -174,12 +197,23 @@ describe('a service with no card on the schedule panel and the close-out', () =>
   });
 
   test('the Waves Assessment gets its card\'s steps as actions, none a treatment', async () => {
-    const { status, body } = await call('/completion-actions', { serviceType: 'Waves Assessment' });
+    bookedAs('lawn_inspection');
+    const { status, body } = await call('/completion-actions', { serviceType: 'Waves Assessment', visitId: VISIT });
     expect(status).toBe(200);
     expect(body).toMatchObject({ programKey: 'assessment', programName: 'Waves Assessment Protocol', visit: { visit: 1 } });
     expect(body.noProtocol).toBeUndefined();
     expect(body.actions.length).toBeGreaterThan(8);
     expect(body.actions.some((action) => action.treatmentApplied || action.product)).toBe(false);
+  });
+
+  test('a booked assessment under a lawn name gets its own card, never the lawn month\'s applications', async () => {
+    bookedAs('lawn_inspection');
+    const { status, body } = await call('/completion-actions', { serviceType: 'Lawn Inspection', scheduledServiceId: VISIT, month: 'Nov' });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ programKey: 'assessment', programName: 'Waves Assessment Protocol' });
+    expect(body.actions.some((action) => action.treatmentApplied || action.product)).toBe(false);
+    // "Lawn Assessment" with the same key, too.
+    expect((await call('/completion-actions', { serviceType: 'Lawn Assessment Service', scheduledServiceId: VISIT, month: 'Nov' })).body.programKey).toBe('assessment');
   });
 
   test('the close-out seeds no product for a service with no card', () => {

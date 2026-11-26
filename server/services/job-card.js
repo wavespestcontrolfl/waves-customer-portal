@@ -2409,7 +2409,10 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // (unknown treatment), so the mix path never doses a searched product.
   const mistingNonTreatment = isMistingDesignConsultation({ serviceKey: svc.service_key, name: svc.service_type })
     || isMistingSystemServiceUnconfigured({ serviceKey: svc.service_key, name: svc.service_type });
-  const primaryKey = mistingNonTreatment
+  // A visit with no category whose name and key no rule claims (the matcher's no_protocol: a bare "Barrier Treatment") has no card,
+  // so it is no treatment either: the search never doses a product on it.
+  const noCard = !svc.service_category && matchServiceProtocol(protocols, svc.service_type, { serviceKey: svc.service_key || null }).reason === 'no_protocol';
+  const primaryKey = mistingNonTreatment || noCard
     ? null
     : (svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined);
   const treatment = primaryKey !== null;

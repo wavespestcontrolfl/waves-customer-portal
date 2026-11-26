@@ -1306,7 +1306,13 @@ router.get('/completion-actions', async (req, res, next) => {
     let appointmentMonth = null;
     let noCard = false;
 
-    if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
+    const lawnName = normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf');
+    // A booked Waves Assessment keeps its own card under a lawn name too (its catalog row was "Lawn Inspection" before the rename):
+    // for a lawn name that reads as an inspection, the visit's key is read before the name sends it to the lawn program's
+    // applications. Any other lawn visit costs no extra read.
+    const bookedCard = lawnName && req.query.scheduledServiceId && /\b(inspection|assessment)\b/.test(normalizeText(serviceType))
+      ? await matchForBookedVisit({ ...req, query: { ...req.query, visitId: req.query.scheduledServiceId } }, protocols, serviceType) : null;
+    if (lawnName && bookedCard?.programKey !== 'assessment') {
       programKey = 'lawn';
       // Celsius and Blindside are not labeled for bahiagrass, so under v13 a bahia lawn (any of its
       // spellings, in any of the three inputs) gets no chips, never another grass's: decided on the raw
@@ -1334,7 +1340,7 @@ router.get('/completion-actions', async (req, res, next) => {
       }
     } else {
       // Raw month (see /match): an unusable value keeps the rule visit.
-      const matched = await matchForBookedVisit(req, protocols, serviceType);
+      const matched = bookedCard || await matchForBookedVisit(req, protocols, serviceType);
       programKey = matched.programKey;
       program = matched.program;
       visit = matched.matchedVisit || program?.visits?.[0] || null;

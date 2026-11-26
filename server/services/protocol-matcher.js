@@ -299,6 +299,7 @@ const MATCH_RULES = [
     terms: ['termite', 'wdo', 'wood destroying', 'swarmer', 'swarm'],
   },
   // The Waves Assessment (catalog key lawn_inspection since its 2026-06 rename): a free walk of the property, no product.
+  // By its key only: every booked assessment carries it (production read 2026-11-26), and a row with no key has no card.
   {
     programKey: 'assessment',
     visit: 1,
@@ -328,7 +329,10 @@ const MATCH_RULES = [
     // The general-pest catalog rows: "Initial Pest Cleanout" is a general
     // active-infestation treatment, not the German-roach cleanout its name
     // would otherwise match.
-    serviceKeys: ['pest_general_quarterly', 'pest_general_monthly', 'pest_initial_cleanout'],
+    // The other general pest rows keep this card under any name (a booking named "Re-Service" with the one-time key): the
+    // close-out already reads these keys as regular pest work, and a service no rule claims gets no card (below).
+    serviceKeys: ['pest_general_quarterly', 'pest_general_monthly', 'pest_initial_cleanout',
+      'pest_general_bimonthly', 'pest_general_semiannual', 'one_time_pest_control', 'pest_re_service', 'pest_rodent_quarterly'],
     terms: ['pest', 'quarterly', 'bimonthly', 'bi-monthly', 'monthly', 'perimeter'],
   },
   {
@@ -410,8 +414,6 @@ function programKeyForService(serviceType) {
   const normalized = normalize(serviceType);
   // The misting SYSTEM's plan phrase is its own program (a keyless row); bare "misting" below stays the barrier program.
   if (normalized.includes('misting service plan')) return 'mosquito_misting';
-  // A keyless "Waves Assessment" row: its own card, before "lawn" or "pest" can claim a longer name.
-  if (normalized.includes('waves assessment')) return 'assessment';
   // 'turf' is the commercial turf-treatment synonym for the lawn program
   // ("Commercial Turf Treatment Program") — must route to the lawn protocol,
   // not fall through to pest.
@@ -580,12 +582,10 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
   const normalized = normalize(serviceType);
   // The catalog service key outranks the name: a rule that claims the key
   // is the match, and the program is that rule's.
-  const keyRule = serviceKey ? MATCH_RULES.find((rule) => rule.serviceKeys?.includes(serviceKey)) || null : null;
+  // (No rule lists an empty key, so a visit with no key finds none. No rule belongs to the lawn program: its plan engine owns the visit.)
+  const keyRule = MATCH_RULES.find((rule) => rule.serviceKeys?.includes(serviceKey));
   const fallbackProgramKey = keyRule?.programKey || programKeyForService(serviceType);
-  const rules = MATCH_RULES.filter((rule) => {
-    if (fallbackProgramKey === 'lawn') return false;
-    return rule.programKey === fallbackProgramKey;
-  });
+  const rules = MATCH_RULES.filter((rule) => rule.programKey === fallbackProgramKey);
   const matchedRule = ruleFor(keyRule, rules, normalized, serviceType, fallbackProgramKey);
   const programKey = matchedRule?.programKey || fallbackProgramKey;
   const program = protocols?.[programKey] || null;

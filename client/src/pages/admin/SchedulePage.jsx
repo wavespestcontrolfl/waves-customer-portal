@@ -19411,6 +19411,9 @@ export function CompletionPanel({
     : completionImprovements && isLawn
       ? [...protocolActions, ...LAWN_FIELD_ACTIONS]
       : protocolActions;
+  // A service with no protocol card (owner pick D18; the server's noProtocol answer) is inspection only: the form offers no
+  // action to tick, the generic treatment chips included. A specialty form (bee and wasp) keeps its own actions.
+  const noProtocolCard = !specialtyCompletion && protocolActionMeta?.noProtocol === true;
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
   // A regular pest visit has no Protocol actions field (owner 2026-10-04):
   // the product rows say what was done. An action a restored draft already
@@ -20889,7 +20892,7 @@ export function CompletionPanel({
                 ) : (
                   <>
                     {/* A service with no protocol card (owner pick D18): the server's own line, in place of a list of actions. */}
-                    {!specialtyCompletion && protocolActionMeta?.noProtocol && (
+                    {noProtocolCard && (
                       <div role="note" style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginBottom: 8 }}>
                         {protocolActionMeta.note}
                       </div>
@@ -20906,7 +20909,7 @@ export function CompletionPanel({
                         Protocol actions unavailable.
                       </div>
                     )}
-                    <select
+                    {!noProtocolCard && <select
                       aria-label="Add protocol action"
                       value=""
                       onChange={(e) => handleProtocolActionSelect(e.target.value)}
@@ -20925,7 +20928,7 @@ export function CompletionPanel({
                               {chip.label}
                             </option>
                           ))}
-                    </select>
+                    </select>}
                     {bermudaConditionLines.map((line) => (
                       <div key={line} style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginTop: 6 }}>
                         {line}
@@ -23431,7 +23434,7 @@ export function CompletionPanel({
                 </span>
               ) : (
                 <>
-                  {!specialtyCompletion && protocolActionMeta?.noProtocol && (
+                  {noProtocolCard && (
                     <div role="note" style={{ fontSize: 14, color: D.muted, marginBottom: 6 }}>
                       {protocolActionMeta.note}
                     </div>
@@ -23443,7 +23446,7 @@ export function CompletionPanel({
                       Protocol actions unavailable.
                     </div>
                   )}
-                  <select
+                  {!noProtocolCard && <select
                     aria-label="Add protocol action"
                     value=""
                     onChange={(e) => handleProtocolActionSelect(e.target.value)}
@@ -23462,7 +23465,7 @@ export function CompletionPanel({
                             {chip.label}
                           </option>
                         ))}
-                  </select>
+                  </select>}
                   {bermudaConditionLines.map((line) => (
                     <div key={line} style={{ fontSize: 14, color: D.muted }}>{line}</div>
                   ))}
