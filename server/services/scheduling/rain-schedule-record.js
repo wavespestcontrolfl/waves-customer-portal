@@ -7,7 +7,7 @@
  * system_settings rows (schedule.rain_record.*): no scheduled_services row or other visit table, no text, no email and
  * no admin notification. It is not behind a gate for that reason: it can reach no customer, move no visit, spend no
  * money. Both weather reads are free: the NWS hourly forecast (getNwsHourlyRain, never the paid Open-Meteo backup the
- * booking pages fall back to) and the MRMS radar relay (fetchMrmsDailyRain, the free IEM service). Nothing here
+ * booking pages fall back to) and the IEM airport hourly gauges (scheduling/work-hour-rain.js). Nothing here
  * geocodes, asks for a road time or calls Google or any map service: a visit's point is the one stored on the visit
  * (rain-pass loadPoints), and a day move is planned from the occupancy snapshot alone, with no drive estimate. Travel
  * time between proposed moves is not checked (record only).
@@ -32,29 +32,40 @@
  *   2. for each outdoor visit of that day, in order of start then id, proposes the first that applies:
  *        reorder   a same-day re-time to the nearest dry open hour rain-pass found (or the next one, if taken).
  *        day_move  only when no dry open hour exists AND the whole day is wet (4 or more work hours at 70% or more at
- *                  the visit's point): the first later work day inside the forecast (Monday to Saturday, not a closure
- *                  day) with a start where its technician is free for the visit's own length and the span reads
- *                  below DRY_PCT. One visit, one date, `series: false`: a plan series is never shifted.
- *        none      a wet visit with no dry hour on a day that is not wholly wet, no dry day found (unread_forecast when
- *                  no day qualified and an hour of one could not be read), or a visit whose forecast or point could
+ *                  the visit's point): the NEXT WORK DAY only (owner 2026-11-26: a texted rain move lands later the same
+ *                  day or the next work day; Monday to Saturday, a closure day is skipped) at a start where its
+ *                  technician is free for the visit's own length and the span reads below DRY_PCT. `plan_moves` names
+ *                  what the move does to the plan: 'whole_plan' for a recurring visit (owner 2026-11-26: a rain-out move
+ *                  shifts the whole plan), 'one_visit' otherwise and for a lawn round moved 7 days or less
+ *                  (lawn-rounds.js datesMoveSeries). Recorded only.
+ *        call_list a wet visit on a wholly wet day with no dry slot on the next work day: it would go to the office call
+ *                  list, not a text. Unread forecast hours on that day keep it unread_forecast, never call_list.
+ *        none      a wet visit with no dry hour on a day that is not wholly wet, or a visit whose forecast or point could
  *                  not be read. The reason is kept. Unread is never dry.
  *      At most MAX_PROPOSALS (10) reorders and day moves per target day, one per physical stop. A visit past the cap
  *      is recorded as `cap` with what it would have been.
  *   3. freezes the cutoff proposals on the day's row. The recheck is kept beside them and never replaces them.
- *   4. scores past days against measured radar rain (MRMS daily rain at the visit's point, WET_INCHES or more = wet):
- *      a reorder or day move on a wet visit is a hit, on a dry visit a false alarm; a none or cap on a wet visit is a
- *      miss, on a dry visit ok. MRMS gives a daily total, not the hours, so "wet" means wet that day. Visits are stored
- *      by id only (no name, no address, no coordinates); their point is read again from the visit at score time.
- *      Visits the forecast read as dry are counted, not stored, so they are not scored.
+ *   4. scores past days against the measured rain in the visit's own hours (work-hour-rain.js: the nearest airport
+ *      gauges to the visit's point, hourly): wet = measurable rain (0.01 in) in any hour from the visit's start through
+ *      RAIN_AFTER_HOURS after its end. A reorder, day move or call_list on a wet visit is a hit, on a dry visit a false
+ *      alarm; a none or cap on a wet visit is a miss, on a dry visit ok. An hour no gauge reported is unread, never dry:
+ *      the day waits (SCORE_GIVE_UP_DAYS), then the visits read decide. Visits are stored by id and span only (no name,
+ *      address or coordinates); their point is read again from the visit at score time. The score also grades the day
+ *      per forecast area (`day`: wet_areas, wet_day). Days the first grader scored from a DAILY radar total are graded
+ *      again, and that score stays on the row as score_daily.
+ *   5. keeps the forecast numbers: each entry (cutoff, recheck) holds `chances`, per forecast area the NWS chance of each
+ *      work hour, and each visit its peak (a forecast_dry visit too) and `span`, so a past day can be replayed.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
 const { getNwsHourlyRain, getNwsHourlyRainPatient } = require('../weather-forecast');
-const { fetchMrmsDailyRain } = require('../mrms-qpe');
 const rainPass = require('../auto-dispatch/rain-pass');
 const rainMode = require('../ads/rain-mode');
-const { inRainHorizon, withCatalogKeys } = require('./rain-fit');
+const workHours = require('./work-hour-rain');
+const { withCatalogKeys, RAIN_AFTER_HOURS } = require('./rain-fit');
+const { loadSeriesRows, planMovesOf } = require('./rain-plan-moves');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
+const { ZONE_COORDS } = require('./forecast-zones');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const LAST_KEY = 'schedule.rain_record.last';
@@ -68,6 +79,10 @@ const CUTOFF_HOUR = 14;
 // A day-move target needs its hour read below DRY_PCT through the drying hours, as rain-pass reads a same-day hour.
 const { DRY_PCT } = rainPass;
 const ACTIONS = new Set(['reorder', 'day_move']);
+// A call_list would not be a move but is a rain call all the same: graded like one.
+const RAIN_CALLS = new Set([...ACTIONS, 'call_list']);
+// The next work day is looked for this many days ahead (a Friday cutoff: Saturday; a closure week can push it further).
+const NEXT_WORK_SCAN = 8;
 
 const toMin = (hhmm) => {
   const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
@@ -117,22 +132,12 @@ const clashes = (taken, tech, date, start, end) => {
 };
 
 /**
- * The first later work day with a free, dry span for this visit, from free read-only data only. Candidate dates: after
- * the planned date, inside the rain horizon, Monday to Saturday, not a closure day (the strict blackout reader: a
- * failed read throws, never fails open). On each date the earliest start (on the hour, inside DAY_OPEN to DAY_CLOSE)
- * where the visit's own length is free for its technician (the occupancy snapshot, with the same technician scoping as
- * the probe) and not held by a target accepted earlier, and whose span plus the drying hours reads fully below
- * DRY_PCT at the visit's stored point. { target, unread }: `unread` is true when no date qualified and a free span
- * could not be judged for want of an hour's reading. Travel time between proposed moves is not checked.
+ * The next work day after the planned date (owner 2026-11-26: a texted rain move lands later the same day or the next work
+ * day): Monday to Saturday, not a closure day (the strict blackout reader: a failed read throws, never fails open). null
+ * when none falls in NEXT_WORK_SCAN days.
  */
-async function dryDayFor(row, hourly, ctx) {
-  const { day, today, taken, occupied } = ctx;
-  const length = row.visit.reach.endMin - row.visit.reach.startMin;
-  const dates = [];
-  for (let date = plusDays(day, 1); inRainHorizon(date, today); date = plusDays(date, 1)) {
-    if (dayOfWeek(date) !== 0) dates.push(date);
-  }
-  if (!dates.length) return { target: null, unread: false };
+async function nextWorkDay(day, ctx) {
+  const dates = Array.from({ length: NEXT_WORK_SCAN }, (_, i) => plusDays(day, i + 1));
   let closed;
   try {
     closed = await ctx.blackouts(dates[0], dates[dates.length - 1]);
@@ -142,16 +147,29 @@ async function dryDayFor(row, hourly, ctx) {
     err.planning = true;
     throw err;
   }
+  return dates.find((date) => dayOfWeek(date) !== 0 && !closed.has(date)) || null;
+}
+
+/**
+ * The dry, free start on the next work day, from free read-only data only: the earliest start (on the hour, inside
+ * DAY_OPEN to DAY_CLOSE) where the visit's own length is free for its technician (the occupancy snapshot, with the same
+ * technician scoping as the probe) and not held by a target accepted earlier, and whose span plus the drying hours reads
+ * fully below DRY_PCT at the visit's stored point. { target, unread }: `unread` is true when no start qualified and a free
+ * span could not be judged for want of an hour's reading. No next work day = no target, not unread. Travel time between
+ * proposed moves is not checked.
+ */
+async function dryDayFor(row, hourly, ctx) {
+  const { day, taken, occupied } = ctx;
+  const length = row.visit.reach.endMin - row.visit.reach.startMin;
+  const date = await nextWorkDay(day, ctx);
+  if (!date) return { target: null, unread: false };
   let unread = false;
-  for (const date of dates) {
-    if (closed.has(date)) continue;
-    for (let start = DAY_OPEN; start + length <= DAY_CLOSE; start += 60) {
-      if (occupied(row.visit, date, start, start + length) || clashes(taken, techOf(row), date, start, start + length)) continue;
-      const rain = rainPass.spanRain(hourly, date, start, start + length);
-      if (rain.complete && rain.peak < DRY_PCT) return { target: { date, start: toHHMM(start), end: start + length, startMin: start }, unread: false };
-      // A reading at or above DRY_PCT settles the hour as not dry; only a missing hour leaves it undecided.
-      if (!rain.complete && !(rain.peak >= DRY_PCT)) unread = true;
-    }
+  for (let start = DAY_OPEN; start + length <= DAY_CLOSE; start += 60) {
+    if (occupied(row.visit, date, start, start + length) || clashes(taken, techOf(row), date, start, start + length)) continue;
+    const rain = rainPass.spanRain(hourly, date, start, start + length);
+    if (rain.complete && rain.peak < DRY_PCT) return { target: { date, start: toHHMM(start), end: start + length, startMin: start }, unread: false };
+    // A reading at or above DRY_PCT settles the hour as not dry; only a missing hour leaves it undecided.
+    if (!rain.complete && !(rain.peak >= DRY_PCT)) unread = true;
   }
   return { target: null, unread };
 }
@@ -182,14 +200,16 @@ async function reorderStart(row, ctx) {
  */
 async function proposeFor(row, ctx) {
   const { day, read, open, taken } = ctx;
-  const base = { id: String(row.visit.id), start: row.start };
+  // `span`: the visit's own minutes, so a past day can be graded on the rain in its hours.
+  const base = { id: String(row.visit.id), start: row.start, span: [row.visit.reach.startMin, row.visit.reach.endMin] };
   if (row.visit.memberIds?.length > 1) base.stop_ids = row.visit.memberIds;
   if (['no_point', 'no_forecast', 'error'].includes(row.reason)) {
     return { ...base, decision: 'none', reason: row.reason === 'no_forecast' ? 'unread_forecast' : row.reason };
   }
   if (!row.wet) {
     // A visit the forecast reads dry is stored too, as none/forecast_dry: a rain the forecast missed scores as a miss.
-    // Only a span read in full is dry; an hour with no reading is unread.
+    // Only a span read in full is dry; an hour with no reading is unread. The peak is kept for the replay.
+    if (row.peak != null) base.peak = row.peak;
     return { ...base, decision: 'none', reason: row.dry === true ? 'forecast_dry' : 'unread_forecast' };
   }
   base.peak = row.peak;
@@ -213,10 +233,12 @@ async function proposeFor(row, ctx) {
   if (wet < rainMode.RAIN_HOURS && wet + missing >= rainMode.RAIN_HOURS) return { ...base, decision: 'none', reason: 'unread_forecast' };
   if (wet < rainMode.RAIN_HOURS) return { ...base, decision: 'none', reason: 'no_dry_hour' };
   const { target, unread } = await dryDayFor(row, hourly, ctx);
-  if (!target) return { ...base, decision: 'none', reason: unread ? 'unread_forecast' : 'no_dry_day' };
-  if (!open) return { ...base, decision: 'cap', would: 'day_move', to_date: target.date, to_start: target.start };
+  // No dry slot today and none on the next work day: the visit goes to the office call list (no text).
+  if (!target) return unread ? { ...base, decision: 'none', reason: 'unread_forecast' } : { ...base, decision: 'call_list', reason: 'no_dry_slot' };
+  const plan_moves = planMovesOf(row.visit, ctx.series, target.date);
+  if (!open) return { ...base, decision: 'cap', would: 'day_move', to_date: target.date, to_start: target.start, plan_moves };
   taken.push({ tech: techOf(row), date: target.date, start: target.startMin, end: target.end });
-  return { ...base, decision: 'day_move', to_date: target.date, to_start: target.start, series: false };
+  return { ...base, decision: 'day_move', to_date: target.date, to_start: target.start, plan_moves };
 }
 
 /** The day's proposals, in order of start then id, capped. { proposals, checked, dry }. */
@@ -269,7 +291,12 @@ async function planDay({ now, conn, day, today, read, deps }) {
   const RainOut = deps.rainOut || require('../rain-out');
   let snapshot = null;
   const rainOut = {
-    loadOccupancy: async (args) => { snapshot = await RainOut.loadOccupancy(args); return snapshot; },
+    // Widened to the next work day's reach: rain-pass reads three days from today, a Friday cutoff's next work day is Monday.
+    loadOccupancy: async (args) => {
+      const reach = plusDays(day, NEXT_WORK_SCAN);
+      snapshot = await RainOut.loadOccupancy({ ...args, dateTo: args.dateTo > reach ? args.dateTo : reach });
+      return snapshot;
+    },
     conflictsForTarget: (...args) => RainOut.conflictsForTarget(...args),
   };
   // Every service is classed by the catalog (catalogGate null), not by name while the rain-pass gate is off, and a
@@ -297,8 +324,12 @@ async function planDay({ now, conn, day, today, read, deps }) {
     snapshot, visit.id, date, { start: toHHMM(start), end: toHHMM(end) },
     { excludeServiceIds: visit.memberIds, technicianId: visit.technician_id },
   ).length > 0;
+  // The recurrence columns of the recurring visits, read once, for what a day move does to the plan (a failed read leaves
+  // every recurring visit 'whole_plan').
+  const recurring = rows.filter((row) => row.wet && row.visit.is_recurring).map((row) => row.visit.id);
+  const series = recurring.length ? await (deps.loadSeries || loadSeriesRows)(conn, recurring) : new Map();
   const decided = await decideDay(rows, {
-    day, today, read: readHourly, occupied, blackouts: closedDays(conn, deps),
+    day, today, read: readHourly, occupied, blackouts: closedDays(conn, deps), series,
     dayHours: rainPass.serviceDay(deps),
     earliestMin: day === today ? parts.hour * 60 + parts.minute : 0,
   });
@@ -307,15 +338,17 @@ async function planDay({ now, conn, day, today, read, deps }) {
   const eligible = decided.proposals.filter((p) => p.reason !== 'no_point').length;
   const unread = decided.proposals.filter((p) => ['unread_forecast', 'error'].includes(p.reason)).length;
   const problem = eligible > 0 && unread === eligible ? `forecast unread for all ${unread} outdoor visit(s) on ${day}` : null;
-  return { ...decided, problem };
+  // The forecast numbers per area for the work hours (the ads record's reader, NWS only), kept so the day can be replayed.
+  const forecast = await rainMode.forecastDay(day, { read }).catch(() => null);
+  return { ...decided, problem, chances: forecast?.chances || null };
 }
 
 // --- scoring ---------------------------------------------------------------------------------------------------
 
 const verdictOf = (decision, wet) => {
-  // No verdict while the radar is unread, or when that run made no proposal for the visit.
+  // No verdict while the gauges are unread, or when that run made no proposal for the visit.
   if (wet == null || !decision) return null;
-  if (ACTIONS.has(decision)) return wet ? 'hit' : 'false_alarm';
+  if (RAIN_CALLS.has(decision)) return wet ? 'hit' : 'false_alarm';
   return wet ? 'miss' : 'ok';
 };
 
@@ -329,42 +362,39 @@ const tally = (proposals, visits, field) => {
 };
 
 /**
- * The day's measured rain by visit id: readings kept from earlier tries stand. Visits with no point (moved away, row
- * gone) are never read and never wait; a visit with a point and no radar reading yet is a gap.
+ * The rain in each visit's own hours (work-hour-rain.js spanWet: the visit's start through RAIN_AFTER_HOURS after its
+ * end, at the nearest gauges to its point). A visit stored before the span was kept reads one hour from its start. Visits
+ * with no point (moved away, row gone) are never read and never wait; a visit with a point and an unread hour is a gap.
  */
-async function measureDay(row, ids, { fetchRain, loadPoints, conn }) {
-  const measured = { ...(parseJson(row.measured_so_far, {}) || {}) };
-  const need = ids.filter((id) => !Number.isFinite(measured[id]));
+async function measureVisits(proposals, ids, obs, { loadPoints, conn }) {
+  const points = ids.length ? await loadPoints(conn, ids) : new Map();
+  const measured = {};
   const gaps = [];
-  if (need.length) {
-    const points = await loadPoints(conn, need);
-    await Promise.all(need.map(async (id) => {
-      const point = points.get(String(id));
-      if (!point) { measured[id] = null; return; }
-      const out = await Promise.resolve()
-        .then(() => fetchRain({ latitude: point.lat, longitude: point.lng, start: row.day, end: row.day }))
-        .catch(() => null);
-      const inches = out?.days?.[0]?.inches;
-      measured[id] = Number.isFinite(inches) ? inches : null;
-      if (measured[id] == null) gaps.push(id);
-    }));
+  for (const id of ids) {
+    const point = points.get(String(id));
+    if (!point) { measured[id] = { wet: null, inches: null }; continue; }
+    const p = proposals.find((q) => q.id === id && Array.isArray(q.span)) || proposals.find((q) => q.id === id);
+    const start = p?.span ? p.span[0] : toMin(p?.start);
+    const end = p?.span ? p.span[1] : start + 60;
+    measured[id] = obs ? workHours.spanWet(obs, point, start, end, RAIN_AFTER_HOURS) : { wet: null, inches: null };
+    if (measured[id].wet == null) gaps.push(id);
   }
   return { measured, gaps };
 }
 
-/** The day's score, or null while radar gaps could still change it (after SCORE_GIVE_UP_DAYS the visits read decide). */
-async function scoreDay(row, now, opts) {
+/** The day's score, or null while gaps could still change it (after SCORE_GIVE_UP_DAYS the visits read decide). */
+async function scoreDay(row, now, { fetchObs = workHours.fetchHourlyObs, ...opts }) {
   const proposals = [...(row.cutoff?.proposals || []), ...(row.recheck?.proposals || [])];
   // A visit that never had a point cannot be read at all.
   const ids = [...new Set(proposals.filter((p) => p.reason !== 'no_point').map((p) => p.id))];
-  const { measured, gaps } = await measureDay(row, ids, opts);
+  const obs = await Promise.resolve().then(() => fetchObs(row.day)).catch(() => null);
+  const { measured, gaps } = await measureVisits(proposals, ids, obs, opts);
   const partial = gaps.length > 0;
-  if (partial && etDateString(now) < plusDays(row.day, rainMode.SCORE_GIVE_UP_DAYS)) return { wait: measured };
+  if (partial && etDateString(now) < plusDays(row.day, rainMode.SCORE_GIVE_UP_DAYS)) return null;
   const visits = {};
   for (const id of ids) {
-    const inches = measured[id];
-    const wet = Number.isFinite(inches) ? inches >= rainMode.WET_INCHES : null;
     const decision = (field) => (row[field]?.proposals || []).find((p) => p.id === id)?.decision;
+    const { wet, inches } = measured[id];
     visits[id] = {
       inches: Number.isFinite(inches) ? inches : null,
       wet,
@@ -372,34 +402,40 @@ async function scoreDay(row, now, opts) {
       recheck: verdictOf(decision('recheck'), wet),
     };
   }
+  // The day by forecast area (the ads record's wet-day rule), to read beside the visits.
+  const zones = Object.keys(ZONE_COORDS);
+  const areas = workHours.measureAreas(obs, zones, rainMode.RAIN_HOURS);
   return {
-    score: {
-      partial,
-      scored_at: new Date().toISOString(),
-      visits,
-      cutoff: row.cutoff ? tally(row.cutoff.proposals, visits, 'cutoff') : null,
-      recheck: row.recheck ? tally(row.recheck.proposals, visits, 'recheck') : null,
-    },
+    basis: 'work_hours',
+    partial,
+    scored_at: new Date().toISOString(),
+    visits,
+    day: { ...workHours.wetDayFrom(areas), wet_hours: Object.fromEntries(zones.map((z) => [z, areas[z].wet_hours])) },
+    cutoff: row.cutoff ? tally(row.cutoff.proposals, visits, 'cutoff') : null,
+    recheck: row.recheck ? tally(row.recheck.proposals, visits, 'recheck') : null,
   };
 }
 
-/** Scores up to SCORE_MAX past, unscored days (in place), least recently tried first. Returns the days scored. */
+/**
+ * Scores up to SCORE_MAX past days (in place) with no work-hour score, least recently tried first. A day the first, daily
+ * radar grader scored is graded again here; that score stays on the row as score_daily. Returns the days scored.
+ */
 async function scorePastDays(days, now, opts) {
   const today = etDateString(now);
   const tried = (d) => days[d].score_tried_at || '';
   const due = Object.keys(days)
-    .filter((d) => d < today && !days[d].score && (days[d].cutoff || days[d].recheck))
+    .filter((d) => d < today && days[d].score?.basis !== 'work_hours' && (days[d].cutoff || days[d].recheck))
     .sort((a, b) => tried(a).localeCompare(tried(b)) || a.localeCompare(b))
     .slice(0, rainMode.SCORE_MAX);
   const scored = [];
   for (const day of due) {
-    const out = await scoreDay(days[day], now, opts);
-    if (out.score) {
-      const { measured_so_far: _kept, ...row } = days[day];
-      days[day] = { ...row, score: out.score };
+    const score = await scoreDay(days[day], now, opts);
+    if (score) {
+      const { measured_so_far: _kept, score: old, ...row } = days[day];
+      days[day] = { ...row, score, ...(old && !old.basis ? { score_daily: old } : {}) };
       scored.push(day);
     } else {
-      days[day] = { ...days[day], score_tried_at: now.toISOString(), measured_so_far: out.wait };
+      days[day] = { ...days[day], score_tried_at: now.toISOString() };
     }
   }
   return scored;
@@ -439,7 +475,7 @@ async function saveRun(conn, run, days, now) {
  */
 function nextDayRow(prior, { day, kind, plan, at }) {
   const next = { ...(prior || {}), day };
-  const entry = { at, checked: plan.checked, dry: plan.dry, proposals: plan.proposals };
+  const entry = { at, checked: plan.checked, dry: plan.dry, proposals: plan.proposals, chances: plan.chances || null };
   if (kind === 'cutoff' && !next.cutoff) next.cutoff = entry;
   if (kind === 'recheck') next.recheck = entry;
   return next;
@@ -449,7 +485,7 @@ function nextDayRow(prior, { day, kind, plan, at }) {
  * One run. Never throws: a failure is logged and kept on the 'last' record. Returns
  * { day, kind, proposals, scored, problems }.
  */
-async function recordScheduleRain({ now = new Date(), conn = db, read = getNwsHourlyRain, fetchRain = fetchMrmsDailyRain, deps = {} } = {}) {
+async function recordScheduleRain({ now = new Date(), conn = db, read = getNwsHourlyRain, fetchObs, deps = {} } = {}) {
   const problems = [];
   const { day, kind, today } = targetDay(now);
   const tick = `${today}T${String(etParts(now).hour).padStart(2, '0')}`;
@@ -467,7 +503,7 @@ async function recordScheduleRain({ now = new Date(), conn = db, read = getNwsHo
     }
     // Scoring is its own try: a failure there never drops the day's decision made above.
     try {
-      run.scored = await scorePastDays(days, now, { fetchRain, loadPoints: deps.loadPoints || rainPass.loadPoints, conn });
+      run.scored = await scorePastDays(days, now, { fetchObs, loadPoints: deps.loadPoints || rainPass.loadPoints, conn });
     } catch (err) {
       problems.push(`scoring failed: ${err.message}`);
       run.error = `scoring failed: ${err.message}`;
