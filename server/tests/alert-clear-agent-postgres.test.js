@@ -374,6 +374,18 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(await hasVoicemail({})).toBe(false);
   });
 
+  test('an email alert for a linked customer also reads texts on the customer\'s own number, with or without a customer id', async () => {
+    const number = phone(71);
+    const address = `p${tag}@example.test`;
+    const cid = await customer({ email: address, phone: number });
+    const [mail] = await db('emails').insert({ gmail_id: `g-${randomUUID()}`, cc_address: '', bcc_address: '', gmail_thread_id: `th-${tag}-p`, from_address: address, to_address: 'contact@wavespestcontrol.com', subject: 'Hi', body_text: 'hello', received_at: T0, label_ids: JSON.stringify(['INBOX']), customer_id: cid }).returning('id');
+    made.emails.push(mail.id);
+    const unlinked = await sms({ customer_id: null, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'unlinked person text to the customer number', created_at: at(10), metadata: { human_authored: 'true' } });
+    const row = await alert('inbound_email', 'Email from Test', '/admin/communications#tab=email', { payload: { emailId: mail.id } });
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.events.filter((e) => e.proof === 'staff_text').map((e) => e.id)).toEqual([String(unlinked)]);
+  });
+
   test('the open alerts are paged from a cursor and wrap around', async () => {
     const ids = [];
     for (let i = 0; i < 3; i += 1) ids.push((await alert('inbound_sms', `Paging ${i}`, '/x')).id);

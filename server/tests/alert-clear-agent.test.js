@@ -256,7 +256,8 @@ describe('the model verdict and the proof check', () => {
 
   test('the fixed facts are computed in code from the timeline', () => {
     const facts = agent.computeFacts(timelineOf([ev({ type: 'email', id: 'em-2', key: 'email:em-2:draft', draft: true }), booking]));
-    expect(facts).toMatchObject({ staffTextAfter: false, bookingOrDateChangeAfter: true, onlyDrafts: true, estimateSentAfter: false, customerOnFile: true });
+    // a booking is another answer, so it is NOT drafts-only
+    expect(facts).toMatchObject({ staffTextAfter: false, bookingOrDateChangeAfter: true, onlyDrafts: false, estimateSentAfter: false, customerOnFile: true });
   });
 });
 
@@ -638,5 +639,32 @@ describe('quiet missed call: later call rows are contact evidence', () => {
     });
     await agent.runAlertClearAgent({ now: new Date(ALERT_AT.getTime() + 25 * 3600 * 1000), deps });
     expect(saved(deps).every((r) => r.rule !== 'quiet_unknown_missed_call')).toBe(true);
+  });
+});
+
+describe('what the model reads is part of the fingerprint, and the facts and notes it gets are exact', () => {
+  test('a changed status note or body on the same record re-judges', () => {
+    const base = agent.fingerprintOf(alertRow(), timelineOf([ev()]), NOW);
+    expect(agent.fingerprintOf(alertRow(), timelineOf([ev({ line: 'WAVES AUTOMATED TEXT (reminder): a different body' })]), NOW)).not.toBe(base);
+    expect(agent.fingerprintOf(alertRow(), timelineOf([ev()]), NOW)).toBe(base);
+  });
+
+  test('drafts-only is true only when Waves wrote drafts and nothing else answered', () => {
+    const draft = ev({ type: 'email', id: 'd1', key: 'email:d1:draft', draft: true, line: 'DRAFT' });
+    const incoming = ev({ type: 'email', id: 'in1', key: 'email:in1:in', inbound: true, line: 'CUSTOMER EMAIL' });
+    const only = (events) => agent.computeFacts(timelineOf(events)).onlyDrafts;
+    expect(only([draft, incoming])).toBe(true);
+    expect(only([draft, ev({ type: 'estimate', id: 'e1', key: 'estimate:e1', proof: 'estimate_sent' })])).toBe(false);
+    expect(only([draft, ev({ type: 'email', id: 's1', key: 'email:s1:sent', proof: 'staff_email' })])).toBe(false);
+    expect(only([draft, staffText()])).toBe(false);
+    expect(only([incoming])).toBe(false);
+  });
+
+  test('a recording whose transcript is pending or failed never reads as "no voicemail"', () => {
+    expect(agent.voicemailNote({ recording_sid: 'RE1', transcription_status: 'pending' }, true)).toMatch(/unread, so this is NOT a call with no voicemail/);
+    expect(agent.voicemailNote({ recording_sid: 'RE1', transcription_status: 'failed' }, true)).toMatch(/failed/);
+    expect(agent.voicemailNote({ recording_sid: 'RE1', transcription_status: 'completed', transcription: '[NO SPEECH]' }, false)).toMatch(/no speech/);
+    expect(agent.voicemailNote({}, false)).toBe('No voicemail left.');
+    expect(agent.voicemailNote({ recording_sid: 'RE1', transcription: 'please call me back' }, true)).toMatch(/please call me back/);
   });
 });

@@ -431,7 +431,9 @@ async function emailTimeline(r, alert, bellAt) {
   const ctx = before.slice().reverse().map((x) => `${x.inbound ? 'CUSTOMER' : 'WAVES'} (${clean(mail.subject, 80)}): ${clean(String(x.b || '').split(/On .{5,60} wrote:/)[0], 500)}`);
   const customerId = uuidOrNull(mail.customer_id) || uuidOrNull(parseMeta(meta.payload).customerId);
   const replyTo = extractEmailAddresses(mail.from_address)[0] || null;
-  const events = await eventsAfter(r, anchor, customerId ? { customerId } : { customerId: null, phone: null }, { threadId: mail.gmail_thread_id, replyTo });
+  // The linked customer's own number: texts and calls on it count too (the contact witnesses' rule).
+  const person = customerId ? await r.read('customer-phone', () => r.conn('customers').where('id', customerId).whereNull('deleted_at').select('phone')) : [];
+  const events = await eventsAfter(r, anchor, { customerId, phone: person[0]?.phone || null }, { threadId: mail.gmail_thread_id, replyTo });
   const offer = before.find((x) => !x.inbound);
   const reply = { lastBody: String(mail.body_text || '').split(/On .{5,60} wrote:/)[0].slice(0, 600), prevOutbound: offer ? String(offer.b || '') : '' };
   return timelineOf(anchor, bellAt, `email:${emailId}`, { customerKnown: !!customerId, ctx, events, reply });
@@ -464,6 +466,16 @@ function voicemailLeft(call) {
   return !!(call.transcription || call.vt);
 }
 
+// What the model is told about the voicemail. A recording whose transcript is pending or failed is a voicemail nobody has read yet:
+// it must never read as "no voicemail".
+function voicemailNote(call, hasVoicemail) {
+  const text = clean(call.transcription || call.vt || call.ai_summary || call.call_summary, 600);
+  if (hasVoicemail && text) return `Voicemail or call text: ${text}`;
+  if (hasVoicemail) return `A voicemail was recorded but its text is not available yet (transcription ${call.transcription_status || 'not finished'}): the message is unread, so this is NOT a call with no voicemail.`;
+  if (call.recording_sid || call.recording_url) return 'A recording exists but holds no speech: the caller hung up on the greeting.';
+  return text ? `Call text: ${text}` : 'No voicemail left.';
+}
+
 // The call a bell is about, from the bell's own fields: payload, the top-level id a hold voicemail bell carries, or the link.
 const callRefsOf = (alert) => {
   const meta = parseMeta(alert.metadata);
@@ -488,10 +500,9 @@ async function callTimeline(r, alert, bellAt) {
   // A hold voicemail bell rings when the hold ended, not when the call began: a person who spoke with the caller on hold
   // never answered it. It is judged from its own time, and its own call is left out.
   const anchor = hold ? bellAt : (callStartedAt(call) || toDate(call.created_at));
-  const voicemail = clean(call.transcription || call.vt || call.ai_summary || call.call_summary, 600);
-  const ctx = [`CALLER: ${clean(alert.title, 120)}. Rang ${call.duration_seconds || 0} sec. ${voicemail ? `Voicemail or call text: ${voicemail}` : 'No voicemail left.'}`];
-  const events = await eventsAfter(r, anchor, { customerId, phone }, { ownCallId: call.id });
   const hasVoicemail = voicemailLeft(call);
+  const ctx = [`CALLER: ${clean(alert.title, 120)}. Rang ${call.duration_seconds || 0} sec. ${voicemailNote(call, hasVoicemail)}`];
+  const events = await eventsAfter(r, anchor, { customerId, phone }, { ownCallId: call.id });
   const textBackSent = alert.category === 'missed_call' && !customerId && await textBackWasSent(r, call.id);
   // The trigger carries the call's voicemail evidence and customer link: a late transcript or a late link is a new look.
   const trigger = `call:${callId}:vm${hasVoicemail ? 1 : 0}:t${call.transcription_status || ''}:c${customerId || ''}`;
@@ -517,14 +528,15 @@ async function buildTimeline(alert, { conn = db } = {}) {
 
 function computeFacts(timeline) {
   const has = (...kinds) => timeline.events.some((e) => kinds.includes(e.proof) && e.at > timeline.alertAt);
-  const staffReply = has('staff_text', 'staff_email', 'human_call');
+  // Drafts-only: Waves wrote email after the alert and every one of those emails is a draft, with no other answer of any kind.
+  const anyAnswer = timeline.events.some((e) => e.proof && e.at > timeline.alertAt);
   return {
     staffTextAfter: has('staff_text'),
     staffEmailAfter: has('staff_email'),
     humanCallAfter: has('human_call'),
     bookingOrDateChangeAfter: has('booking', 'date_change'),
     estimateSentAfter: has('estimate_sent'),
-    onlyDrafts: timeline.events.some((e) => e.draft) && !staffReply,
+    onlyDrafts: timeline.events.some((e) => e.draft) && !anyAnswer,
     customerOnFile: !!timeline.customerKnown,
   };
 }
@@ -534,7 +546,8 @@ function computeFacts(timeline) {
 function fingerprintOf(alert, timeline, now) {
   const contextHash = crypto.createHash('sha1').update((timeline.ctx || []).join('\n')).digest('hex');
   const parts = [timeline.trigger || '', timeline.bellAt ? toDate(timeline.bellAt).toISOString() : '', toDate(timeline.alertAt).toISOString(), contextHash,
-    ...(timeline.unreadable ? [] : timeline.events.map((e) => e.key).sort())];
+    // Each event with a hash of what the model reads of it (body, summary, status notes), not just its id and state.
+    ...(timeline.unreadable ? [] : timeline.events.map((e) => `${e.key}:${crypto.createHash('sha1').update(String(e.line || '')).digest('hex').slice(0, 12)}`).sort())];
   if (alert.category === 'missed_call') parts.push(now - timeline.alertAt >= DAY_MS ? 'q24' : 'q0');
   return crypto.createHash('sha1').update(parts.join('|')).digest('hex');
 }
@@ -821,5 +834,5 @@ module.exports = {
   runAlertClearAgent,
   // exported for tests
   defaultDeps, scopeToContact, buildTimeline, computeFacts, fingerprintOf, ruleVerdict, settleAiReply, parseJudgeReply, judgeInput, isOwedAlert, guardBareYes,
-  makeBudget, unchanged, smsEvent, callEvent, callModel, NoKeyError, clean, MAX_ALERTS, SYSTEM_PROMPT,
+  makeBudget, unchanged, voicemailNote, smsEvent, callEvent, callModel, NoKeyError, clean, MAX_ALERTS, SYSTEM_PROMPT,
 };
