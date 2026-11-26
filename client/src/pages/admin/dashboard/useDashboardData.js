@@ -9,6 +9,7 @@ const REQUESTS = [
   ["alerts", "/admin/dashboard/alerts", "today"],
   ["today", "/admin/dashboard/today-completion", "today"],
   ["staleVisits", "/admin/command-center/stale-visits", "today"],
+  ["buyerView", "/admin/dashboard/buyer-view", "today"],
   ["kpis", "/admin/dashboard/core-kpis", "shared", true],
   ["kpiTargets", "/admin/kpi-targets", "shared"],
   ["kpiHistory", "/admin/dashboard/kpi-history?days=90", "shared"],
@@ -51,6 +52,7 @@ const REQUIRED_SHAPE = {
   funnel: (value) => isRecord(value.funnel),
   officeCost: (value) => Array.isArray(value.months),
   opsMetrics: (value) => isRecord(value.errors),
+  buyerView: (value) => isRecord(value.revenue) && isRecord(value.officeCost),
   aging: (value) => isRecord(value.aging),
   reviewTrend: (value) => Array.isArray(value.trend),
 };

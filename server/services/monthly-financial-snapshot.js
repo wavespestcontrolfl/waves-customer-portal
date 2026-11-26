@@ -6,6 +6,9 @@
  *   paid_stops           = completed service_records in the month that are not callbacks
  *   office_cost_per_stop = office_cost / paid_stops (null when there are no paid stops)
  *
+ * The buyer-view columns (owner field time, book gross margin, SDE, owner-paid profit, recurring and prepaid money) come
+ * from monthly-snapshot-buyer-columns.js.
+ *
  * Reads reuse pnl-report.js (the P&L report for the cash-basis revenue and net income, the
  * pay-run category exclusion) and the dashboard gross-margin tile's formula
  * (SUM(gross_profit) / SUM(revenue) over costed visits), so the stored numbers match the
@@ -17,6 +20,7 @@ const { dateOnlyString } = require('../utils/date-only');
 const { pnlPayRunWagesLive } = require('../config/feature-gates');
 const { buildPnlReport } = require('./pnl-report');
 const { leaveOutPayRunCategory } = require('./pay-run-books');
+const { timeAllowance, buyerColumns } = require('./monthly-snapshot-buyer-columns');
 const logger = require('./logger');
 
 // Office categories, by expense_categories.name. Insurance, vehicle, ads, card fees,
@@ -62,16 +66,11 @@ function monthOffset(now, offset) {
 }
 
 /**
- * Owner office-time allowance for a month: hours x hourly rate, in dollars. Null or 0 on either input = not
- * counted (0). Both inputs are exact to two decimals (numeric(6,2), numeric(8,2)), so the product is taken on
- * integers, hundredths of an hour x cents, and rounded once, to whole cents: 2.50 h x $21.29 = 53.225 -> 53.23.
- * (A float product followed by a float round can land a cent off.)
+ * Owner office-time allowance for a month: hours x hourly rate, in dollars (timeAllowance: integer hundredths of an hour
+ * x cents, rounded once). Null or 0 on either input = not counted (0).
  */
 function ownerAllowance(financials) {
-  const hundredthsOfAnHour = Math.round(num(financials && financials.owner_office_hours_per_month) * 100);
-  const rateCents = Math.round(num(financials && financials.owner_office_hourly_rate) * 100);
-  if (hundredthsOfAnHour <= 0 || rateCents <= 0) return 0;
-  return Math.round((hundredthsOfAnHour * rateCents) / 100) / 100;
+  return timeAllowance(financials && financials.owner_office_hours_per_month, financials && financials.owner_office_hourly_rate);
 }
 
 /** office_cost / paid_stops, or null when there are no stops. */
@@ -172,6 +171,7 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
   const allowance = ownerAllowance(financials);
   const officeCost = round2(ledger + allowance);
   const cashRevenue = round2(pnl.revenue.total);
+  const buyer = await buyerColumns(db, { startDate, endDate, financials, pnl, officeAllowance: allowance, cashRevenue });
   return {
     month: monthStart,
     completed_job_revenue: jobs.revenue,
@@ -186,6 +186,7 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
     // buildPnlReport's coverage verdict: the balance ledger synced past month end, so the refunds, disputes and
     // card fees inside cash revenue and net income are final.
     pnl_complete: !!(pnl.coverage && pnl.coverage.complete),
+    ...buyer,
   };
 }
 

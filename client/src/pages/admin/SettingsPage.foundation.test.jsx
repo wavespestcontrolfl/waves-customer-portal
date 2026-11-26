@@ -186,14 +186,28 @@ describe("Settings new UI foundation", () => {
     expect(JSON.parse(call[1].body)).toEqual({ ownerOfficeHoursPerMonth: 12.5, ownerOfficeHourlyRate: 40 });
   });
 
+  it("saves the owner's field hourly wage in the same PUT, and the preview rounds like the snapshot (hundredths of an hour x cents, once)", async () => {
+    mount("operating-costs");
+    fireEvent.change(await screen.findByLabelText("Your office hours"), { target: { value: "2.5" } });
+    fireEvent.change(screen.getByLabelText("Your office hourly rate"), { target: { value: "21.29" } });
+    // 2.5 x 21.29 = 53.225 in whole cents; a float product reads 53.22499... and shows $53.22.
+    expect(screen.getByText("$53.23")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Your field hourly wage"), { target: { value: "25" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save costs" }));
+    await screen.findByText(/Saved\. The dashboard's EBITDA bridge/);
+    const call = fetch.mock.calls.find(([url, options]) => url === "/api/admin/revenue/settings" && options?.method === "PUT");
+    expect(JSON.parse(call[1].body)).toEqual({ ownerOfficeHoursPerMonth: 2.5, ownerOfficeHourlyRate: 21.29, ownerFieldHourlyRate: 25 });
+  });
+
   it("refuses owner office time the server would refuse: extra decimals and values past the columns, no PUT sent", async () => {
     mount("operating-costs");
     const hours = await screen.findByLabelText("Your office hours");
     expect(hours).toHaveAttribute("max", "9999.99");
     expect(hours).toHaveAttribute("step", "0.01");
     expect(screen.getByLabelText("Your office hourly rate")).toHaveAttribute("max", "999999.99");
+    expect(screen.getByLabelText("Your field hourly wage")).toHaveAttribute("max", "999999.99");
     const puts = () => fetch.mock.calls.filter(([url, options]) => url === "/api/admin/revenue/settings" && options?.method === "PUT");
-    for (const [label, value] of [["Your office hours", "12.345"], ["Your office hours", "10000"], ["Your office hourly rate", "1000000"]]) {
+    for (const [label, value] of [["Your office hours", "12.345"], ["Your office hours", "10000"], ["Your office hourly rate", "1000000"], ["Your field hourly wage", "25.005"]]) {
       fireEvent.change(screen.getByLabelText(label), { target: { value } });
       fireEvent.click(screen.getByRole("button", { name: "Save costs" }));
       expect(await screen.findByText(new RegExp(`"${label}" must be from 0 to`))).toBeInTheDocument();

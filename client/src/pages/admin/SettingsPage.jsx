@@ -888,9 +888,12 @@ const OVH_FIELDS_UI = [
 // The owner's own office time (company_financials owner_office_*): hours a month x an
 // hourly rate = the allowance the dashboard's "Office cost per stop" card adds to the
 // ledger's office costs. Blank or 0 = not counted. Saved with the same PUT as the costs above.
+// The field hourly wage (owner_field_hourly_rate) is a tech wage counted for the owner's completed stops (the job-costing
+// standard minutes, not clock time) in the dashboard's Buyer view profit and gross margin.
 const OWNER_OFFICE_FIELDS_UI = [
   { key: "ownerOfficeHoursPerMonth", col: "owner_office_hours_per_month", label: "Your office hours", hint: "hours a month you spend on office work instead of in the field", unit: "hours / month", max: 9999.99 },
   { key: "ownerOfficeHourlyRate", col: "owner_office_hourly_rate", label: "Your office hourly rate", hint: "what an hour of your office time is worth", unit: "$ / hour", max: 999999.99 },
+  { key: "ownerFieldHourlyRate", col: "owner_field_hourly_rate", label: "Your field hourly wage", hint: "what an hour of your field work is worth as a technician wage; counted for your completed stops at the standard minutes", unit: "$ / hour", max: 999999.99 },
 ];
 // The server (admin-revenue.js OWNER_OFFICE_FIELDS) refuses anything else: plain digits, at most two decimals, up to max.
 const OWNER_OFFICE_NUMBER = /^\d+(\.\d{1,2})?$/;
@@ -977,7 +980,10 @@ function OperatingCostsSettingsTab() {
       : <ActionFeedback className="min-h-20">Loading operating costs...</ActionFeedback>;
   }
 
-  const ownerAllowance = (Number(valueOf(OWNER_OFFICE_FIELDS_UI[0])) || 0) * (Number(valueOf(OWNER_OFFICE_FIELDS_UI[1])) || 0);
+  // The snapshot's rounding (services/monthly-snapshot-buyer-columns.js timeAllowance): hundredths of an hour x cents, rounded once.
+  const ownerAllowance = Math.round(
+    (Math.round((Number(valueOf(OWNER_OFFICE_FIELDS_UI[0])) || 0) * 100) * Math.round((Number(valueOf(OWNER_OFFICE_FIELDS_UI[1])) || 0) * 100)) / 100,
+  ) / 100;
   const monthlyTotal = OVH_FIELDS_UI.reduce((t, f) => {
     const v = Number(valueOf(f));
     return t + (Number.isFinite(v) ? v : 0);
@@ -1043,8 +1049,9 @@ function OperatingCostsSettingsTab() {
         <CardHeader>
           <CardTitle>Your own office time</CardTitle>
           <p className="mt-1 text-ui-body text-ink-secondary">
-            Added to the office costs on the dashboard's "Office cost per stop" card. Leave blank
-            (or 0) and your time is not counted.
+            Office hours x rate are added to the office costs on the dashboard's "Office cost per stop"
+            card. Your field wage is counted for the stops you complete, in the Buyer view's profit and
+            gross margin. Leave a figure blank (or 0) and that time is not counted.
           </p>
         </CardHeader>
         <CardBody className="divide-y divide-zinc-200">
@@ -1069,7 +1076,7 @@ function OperatingCostsSettingsTab() {
             </div>
           ))}
           <div className="flex justify-between gap-3 pt-4">
-            <span className="text-ink-secondary">Monthly allowance counted</span>
+            <span className="text-ink-secondary">Monthly office allowance counted</span>
             <span className="font-medium text-zinc-900 u-nums">
               ${ownerAllowance.toLocaleString("en-US", { maximumFractionDigits: 2 })}
             </span>

@@ -5,7 +5,9 @@
 // Computes the last N closed months (default 24; the current, unfinished month is never written) with the same
 // service the 2nd-of-the-month cron uses (services/monthly-financial-snapshot.js) and prints one line per month.
 // DRY RUN by default: nothing is written. `--apply` upserts the rows (one per month, a re-run replaces them).
-// Reads the expenses ledger, service_records, the P&L inputs and company_financials; sends nothing to anyone.
+// Reads the expenses ledger, service_records, the P&L inputs, company_financials, plan members and annual-prepay terms;
+// sends nothing to anyone. A dash means NULL: the figure could not be worked out (for example, no single owner login).
+// Older months use today's autopay state and today's prepay coverage status (no history of either is kept).
 //
 // Usage: node server/scripts/backfill-monthly-financial-snapshots.js [--months N] [--apply]
 require('dotenv').config();
@@ -24,7 +26,8 @@ async function main() {
 
   const now = new Date();
   console.log(`${apply ? 'APPLY' : 'DRY RUN'}: last ${months} closed months`);
-  console.log('month      stops  office_cost  owner_allow  per_stop  job_revenue  cash_revenue  gm%    net_income  net%');
+  console.log('month      stops  office_cost  owner_allow  per_stop  job_revenue  cash_revenue  gm%    net_income  net%'
+    + '  book_gm%  field_hrs  field_allow  owner_paid_profit  sde  recurring  mature  autopay_share  prepaid_owed');
   for (let offset = -months; offset <= -1; offset += 1) {
     const month = monthOffset(now, offset);
     const row = apply ? await upsertMonthSnapshot(month, db) : await computeMonthSnapshot(month, db);
@@ -39,6 +42,15 @@ async function main() {
       money(row.gross_margin_pct).padStart(5),
       money(row.net_income).padStart(10),
       money(row.net_margin_pct).padStart(5),
+      money(row.book_gross_margin_pct).padStart(8),
+      money(row.owner_field_hours).padStart(9),
+      money(row.owner_field_allowance).padStart(11),
+      money(row.owner_paid_profit).padStart(17),
+      money(row.sde).padStart(10),
+      money(row.recurring_revenue).padStart(9),
+      money(row.recurring_mature_revenue).padStart(6),
+      (row.autopay_renewing_share == null ? '-' : Number(row.autopay_renewing_share).toFixed(4)).padStart(13),
+      money(row.prepaid_owed).padStart(12),
     ].join('  '));
   }
   if (!apply) console.log('Dry run: nothing written. Re-run with --apply to store these rows.');

@@ -14,6 +14,14 @@ jest.mock('../config/feature-gates', () => ({
 const mockBuildPnl = jest.fn();
 jest.mock('../services/pnl-report', () => ({ buildPnlReport: (...a) => mockBuildPnl(...a) }));
 
+// The buyer columns have their own suites (monthly-snapshot-buyer-columns.test.js and the Postgres one); here only their
+// hand-off is checked: the arguments computeMonthSnapshot gives them and that their columns land on the stored row.
+const mockBuyerColumns = jest.fn();
+jest.mock('../services/monthly-snapshot-buyer-columns', () => ({
+  ...jest.requireActual('../services/monthly-snapshot-buyer-columns'),
+  buyerColumns: (...a) => mockBuyerColumns(...a),
+}));
+
 const svc = require('../services/monthly-financial-snapshot');
 const migration = require('../models/migrations/20261126100000_monthly_financial_snapshots');
 
@@ -50,6 +58,8 @@ function makeDb(results = {}) {
 beforeEach(() => {
   mockGate.payRunWages = false;
   mockBuildPnl.mockReset();
+  mockBuyerColumns.mockReset();
+  mockBuyerColumns.mockResolvedValue({ sde: 1800, prepaid_owed: 0 });
 });
 
 describe('monthWindow and monthOffset', () => {
@@ -201,8 +211,15 @@ describe('computeMonthSnapshot', () => {
       net_income: 1800,
       net_margin_pct: 20,
       pnl_complete: true,
+      sde: 1800,
+      prepaid_owed: 0,
     });
     expect(mockBuildPnl).toHaveBeenCalledWith(db, '2026-10-01', '2026-10-31');
+    // The buyer columns get the month's window, the settings row in effect, the P&L, the office allowance and cash revenue.
+    expect(mockBuyerColumns).toHaveBeenCalledWith(db, expect.objectContaining({
+      startDate: '2026-10-01', endDate: '2026-10-31', officeAllowance: 500, cashRevenue: 9000,
+      financials: { owner_office_hours_per_month: '10', owner_office_hourly_rate: '50' },
+    }));
   });
 
   test('the settings row is the one in effect on the month\'s last day, not the newest', async () => {
