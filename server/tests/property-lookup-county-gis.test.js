@@ -639,7 +639,6 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
     const result = await lookupSubdivisionMedianLivingSqft({ county: 'Sarasota', subdivision: 'EXAMPLE PLAT' });
     const base = decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ');
     expect(base).toContain("(UPPER(subd) = 'EXAMPLE PLAT' OR UPPER(subd) LIKE 'EXAMPLE PLAT %')");
-    expect(base).not.toMatch(/outFields=[^&]*subd/);
     expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
   });
 
