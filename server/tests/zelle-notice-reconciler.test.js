@@ -47,7 +47,7 @@ const OpenBalance = require('../services/open-balance');
 const { recordManualPayment } = require('../services/invoice-manual-payment');
 const NotificationService = require('../services/notification-service');
 const logger = require('../services/logger');
-const { recoverStaleClaims, sweepStaleClaims, RECORDED_BY, STALE_NOTICE_MS, _private: { settleOrPark } } = require('../services/zelle-notice-reconciler');
+const { recoverStaleClaims, sweepStaleClaims, retireMarkedEmails, RECORDED_BY, STALE_NOTICE_MS, _private: { settleOrPark } } = require('../services/zelle-notice-reconciler');
 
 // Received one hour ago on the real clock: the reconciler parks anything
 // older than STALE_NOTICE_MS (48h) at first decision, so an absolute date
@@ -486,6 +486,42 @@ describe('stale claim recovery', () => {
   test('the sync-cadence sweep runs stale-claim RECOVERY (a kill never strands a processing claim)', async () => {
     expect(await sweepStaleClaims()).toBe(0);
     expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { status: 'processing' }]); // recovery read
+  });
+
+  // Legacy rows from the removed email path; prod had 0 on 2026-11-26.
+  const feedMarkedEmails = (rows) => {
+    tables.emails.selects = [rows];
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = orig(table); if (table === 'emails') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
+  };
+
+  test('a retry-marked email with no notice row is parked for manual review, alerted, and its mark is overwritten', async () => {
+    feedMarkedEmails([{ id: 'email-marked', received_at: RECEIVED_AT }]);
+    claimed({ id: 'notice-m', payer_name: null, amount_cents: null });
+    expect(await retireMarkedEmails()).toBe(1);
+    expect(tables.emails.calls).toContainEqual(['where', { auto_action: 'zelle_notice_retry' }]);
+    expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ email_id: 'email-marked', source: 'capitalone_zelle', status: 'processing' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'parse_failed' });
+    expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_parked:parse_failed' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', expect.any(String), expect.stringContaining('left unprocessed'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-m' }));
+    expect(recordManualPayment).not.toHaveBeenCalled();
+  });
+
+  test('retirement is idempotent: a mark whose notice row already exists is only cleared, never alerted twice', async () => {
+    feedMarkedEmails([{ id: 'email-marked', received_at: RECEIVED_AT }]); // returning [] ⇒ the insert hit the email_id unique row
+    expect(await retireMarkedEmails()).toBe(1);
+    expect(updatesOf('inbound_payment_notices')).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(tables.emails.calls).toContainEqual(['where', { id: 'email-marked', auto_action: 'zelle_notice_retry' }]);
+    expect(updatesOf('emails')[0]).toMatchObject({ auto_action: null });
+  });
+
+  test('no marked emails ⇒ nothing written, and the sync sweep runs the retirement', async () => {
+    expect(await retireMarkedEmails()).toBe(0);
+    expect(insertsOf('inbound_payment_notices')).toHaveLength(0);
+    feedMarkedEmails([{ id: 'email-marked', received_at: RECEIVED_AT }]);
+    claimed({ id: 'notice-m', payer_name: null, amount_cents: null });
+    expect(await sweepStaleClaims()).toBe(1);
   });
 
   test('nothing stale ⇒ no writes', async () => {

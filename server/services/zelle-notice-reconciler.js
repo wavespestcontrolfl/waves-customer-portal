@@ -280,7 +280,7 @@ async function raise(alert, noticeId) {
   }
 }
 
-async function finishParked(notice, email, reason, { candidates = null, applyError = null, matchedInvoice = null } = {}) {
+async function finishParked(notice, email, reason, { candidates = null, applyError = null, matchedInvoice = null, why = null } = {}) {
   const moved = await db('inbound_payment_notices').where({ id: notice.id, status: 'processing', claim_token: notice.claim_token }).update({
     status: 'parked',
     park_reason: reason,
@@ -299,7 +299,7 @@ async function finishParked(notice, email, reason, { candidates = null, applyErr
     return { status: 'lost_claim', reason };
   }
   await stampEmail(email?.id, `zelle_notice_parked:${reason}`);
-  const alert = parkedAlert(notice, reason, { candidates, applyError });
+  const alert = parkedAlert(notice, reason, { candidates, applyError, why });
   if (!alert) logger.info(`[zelle-notice] notice ${notice.id} parked ${reason} with no candidate invoice — listed on the Invoices page, no alert`);
   await raise(alert, notice.id);
   return { status: 'parked', reason };
@@ -422,7 +422,46 @@ async function closeIfSettled(row) {
 // a processing claim (Apply / Ignore require `parked`, and a committed
 // settlement must still close).
 async function sweepStaleClaims() {
-  return recoverStaleClaims();
+  const recovered = await recoverStaleClaims();
+  const retired = await retireMarkedEmails().catch((err) => { logger.warn(`[zelle-notice] marked-email retirement failed: ${err.message}`); return 0; });
+  return recovered + retired;
+}
+
+// Legacy rows from the removed email path; prod had 0 on 2026-11-26. An email still marked
+// auto_action = 'zelle_notice_retry' was a Zelle notice whose first pass was cut off before any notice row
+// existed, and nothing re-offers it now. Surface each one for manual reconciliation exactly like a parked
+// notice (a parked review row on the Invoices page plus the review alert), which also overwrites the
+// mark. Idempotent: the notice row is unique per email, so a second pass finds no mark left; a mark
+// whose notice row already exists is simply cleared. Oldest first, small batch (indexed read).
+const RETIRE_BATCH = 25;
+async function retireMarkedEmails() {
+  const rows = await db('emails')
+    .where({ auto_action: 'zelle_notice_retry' })
+    .orderBy('received_at', 'asc')
+    .limit(RETIRE_BATCH)
+    .select('id', 'received_at');
+  let retired = 0;
+  for (const email of rows) {
+    try {
+      const [notice] = await db('inbound_payment_notices')
+        .insert({
+          email_id: email.id, source: 'capitalone_zelle', received_at: email.received_at || new Date(),
+          status: 'processing', claim_token: randomUUID(), candidates: null,
+        })
+        .onConflict('email_id').ignore().returning('*');
+      if (notice) {
+        await finishParked(notice, email, 'parse_failed', {
+          why: 'This Zelle email was left unprocessed, so check the bank first.',
+        });
+      } else {
+        await db('emails').where({ id: email.id, auto_action: 'zelle_notice_retry' }).update({ auto_action: null, updated_at: new Date() });
+      }
+      retired += 1;
+    } catch (err) {
+      logger.error(`[zelle-notice] retiring marked email ${email.id} failed: ${err.message}`);
+    }
+  }
+  return retired;
 }
 
 // The window starts when the MONEY WAS RECORDED (applied_at — both the
@@ -850,6 +889,7 @@ module.exports = {
   BANK_SOURCE,
   STALE_CLAIM_MS,
   recoverStaleClaims,
+  retireMarkedEmails,
   sweepStaleClaims,
   closeIfSettled,
   directZelleRecentlyRecorded,

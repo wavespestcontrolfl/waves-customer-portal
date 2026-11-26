@@ -63,6 +63,9 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         ...(hasOrders ? ['vo.id as order_id', 'vo.updated_at as order_updated_at', 'vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
       )
       .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
+      // Legacy rows from the removed email path; prod had 0 on 2026-11-26. Office lists carry a sent (or
+      // unconfirmed) order email's package quantity so Receive defaults to what arrives. float8 = a JS number or null.
+      .modify((q) => { if (officeDetail) q.leftJoin('vendor_order_emails as voe', 'voe.restock_request_id', 'prr.id').select(['voe.status as email_status', db.raw('voe.ordered_quantity::float8 as email_ordered_quantity')]); })
       .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
       .orderByRaw('prr.needed_by asc nulls last')
       .orderBy('prr.created_at', 'desc')
@@ -98,6 +101,7 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         // | failed | needs_review, with the vendor number, total and the
         // parked reason so the tab explains why a request still needs a hand.
         order: hasOrders ? restockOrderView(row, showSpend, officeDetail) : null,
+        emailOrder: ['sent', 'sending'].includes(row.email_status) ? { status: row.email_status, orderedQuantity: row.email_ordered_quantity } : null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,

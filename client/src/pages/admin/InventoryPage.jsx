@@ -3686,6 +3686,7 @@ function RestockActionCell({
             value={
               draft.quantity ??
               request.order?.orderedQuantity ??
+              request.emailOrder?.orderedQuantity ??
               request.requestedQuantity ??
               ""
             }

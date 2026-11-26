@@ -65,6 +65,12 @@ jest.mock('../services/procurement/order-dispatch', () => ({
   // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2).
   settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
   retireRequestBell: jest.fn(async (_conn, requestId) => { (mockState.retiredBells = mockState.retiredBells || []).push(requestId); }),
+  // a SiteOne order email sent, or sending; emailOutAfterRing = one that lands while the bell is written
+  emailOrderOutFor: jest.fn(async () => {
+    mockState.emailReads = (mockState.emailReads || 0) + 1;
+    if (mockState.emailOutAfterRing && mockState.emailReads > 1) return mockState.emailOutAfterRing;
+    return mockState.emailOut || null;
+  }),
 }));
 
 const { runSuppliesAutoReorderSweep, sweepFailureError } = require('../services/procurement/auto-reorder');
@@ -503,6 +509,65 @@ test('re-bell on an open auto request says what the REQUEST says, not the produc
   expect(opts.metadata).toMatchObject({ vendorId: 'vend-gemplers', vendorSku: '127544' });
 });
 
+test('an open auto request whose SiteOne order email is SENDING (outcome unknown) is NOT re-belled "order manually" — the vendor may already have it', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'SiteOne', metadata: { vendorId: 'vend-siteone' } };
+  mockState.autoOrder = false; // the bot is off; the email is how this request was ordered
+  mockState.emailOut = { po: 'WAVES-REQAUTO1', status: 'sending' };
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(r.renotified).toEqual([]);
+    expect(r.deduped).toEqual([expect.objectContaining({ requestId: 'req-auto' }), expect.objectContaining({ requestId: 'req-auto', reason: 'email_order_out' })]);
+    expect(notify).not.toHaveBeenCalled();
+  } finally { mockState.emailOut = null; }
+});
+
+test('an email claim that lands while the sweep re-rings "order manually" gets that bell retired right after', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'SiteOne', metadata: { vendorId: 'vend-siteone' } };
+  mockState.autoOrder = false;
+  mockState.emailOut = null; // no email when the sweep checks...
+  mockState.emailOutAfterRing = { po: 'WAVES-REQAUTO1', status: 'sending' }; // ...one claimed while it rings
+  mockState.emailReads = 0;
+  mockState.retiredBells = [];
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+    expect(mockState.retiredBells).toEqual(['req-auto']);
+  } finally { mockState.emailOutAfterRing = null; mockState.emailReads = 0; }
+});
+
+test('the sweep re-ring retires nothing when no email claim landed', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Gemplers', metadata: { vendorId: 'vend-gemplers' } };
+  mockState.autoOrder = false;
+  mockState.emailOut = null;
+  mockState.retiredBells = [];
+  const notify = jest.fn(async () => ({}));
+  await runSuppliesAutoReorderSweep({ notify });
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(mockState.retiredBells).toEqual([]);
+});
+
+test('an email claim that lands while a NEW request\'s first bell is written gets that bell retired right after (Codex #6866 r4 P2)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/p' };
+  mockState.emailOut = null;
+  mockState.emailOutAfterRing = { po: 'WAVES-REQ1', status: 'sending' }; // the first read is the post-ring one
+  mockState.emailReads = 1; // > 1 on the post-ring read
+  mockState.retiredBells = [];
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(r.created).toHaveLength(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(mockState.retiredBells).toEqual([r.created[0].requestId]);
+  } finally { mockState.emailOutAfterRing = null; mockState.emailReads = 0; }
+});
+
 // June 1 - Sept 30 N/P fertilizer hold (owner 2026-11-24 "YES"; fertilizer-blackout.js).
 describe('fertilizer blackout', () => {
   const fert = { ...lowSign, id: 'prod-fert', name: 'Synthetic 24-0-11 granular', inventory_unit: 'lb', category: 'fertilizer', fertilizer_analysis: null, analysis_n: 24, analysis_p: 0 };
@@ -568,6 +633,19 @@ describe('fertilizer blackout', () => {
     expect(mockState.inserted).toEqual([]);
     expect(notify).not.toHaveBeenCalled();
     expect(res.held).toEqual([{ productId: 'prod-sign', name: 'Synthetic product (unnamed)', requestId: null, reason: 'fertilizer_blackout' }]);
+  });
+
+  test('a held bell is NOT reopened while an order is emailed to the vendor (sending or sent)', async () => {
+    mockState.candidates = [fert];
+    mockState.heldBell = { id: 'n-held' };
+    mockState.existing = { id: 'req-open', status: 'open', source: 'auto_reorder', product_id: 'prod-fert', requested_quantity: '650', unit: 'lb', metadata: {} };
+    mockState.emailOut = { id: 'email-1', status: 'sending' };
+    try {
+      const notify = jest.fn(async () => ({ id: 'n' }));
+      await runSuppliesAutoReorderSweep({ notify, now: OCT1 });
+      expect(mockState.updates.filter((u) => u.table === 'notifications')).toEqual([]);
+      expect(notify).not.toHaveBeenCalled();
+    } finally { mockState.emailOut = null; }
   });
 });
 
