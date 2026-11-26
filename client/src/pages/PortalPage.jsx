@@ -11184,8 +11184,8 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'termite', name: 'Termite Bait Monitoring', icon: 'shield',
-    frequencies: ['Basic (annual inspection)', 'Premier (quarterly monitoring + warranty)'],
-    basePrice: 35, description: 'Bait station installation, quarterly monitoring, damage warranty (Premier)',
+    frequencies: ['Basic (annual inspection)', 'Premier (quarterly monitoring)'],
+    basePrice: 35, description: 'Bait station installation and quarterly monitoring. Coverage follows your signed termite agreement',
     products: ['Sentricon Always Active', 'Trelona ATBS'],
   },
   // Rodent bait is billed separately and excluded from WaveGuard plan
@@ -11242,7 +11242,7 @@ const SERVICE_COVERAGE = {
   lawn_care: { summary: 'Fertilization, weed control, fungicide. Callbacks for breakthrough weeds.', details: ['Custom fertilization for your turf type', 'Pre-emergent and post-emergent weed control', 'Fungicide treatments as needed', 'Thatch monitoring, plus soil testing when a lawn is not responding (any other soil test is an added fee)', 'Callback for breakthrough weeds between visits'] },
   mosquito: { summary: 'Barrier treatments Apr-Oct. Re-spray within 14 days of heavy rain.', details: ['Monthly perimeter barrier spray (Apr-Oct)', 'Standing water treatment with larvicide', 'Foliage and shrub line application', 'Free re-spray within 14 days of heavy rain', 'Event spray available on request'] },
   tree_shrub: { summary: 'Deep root feeding, insect & disease treatment, palm injections.', details: ['Deep root fertilization', 'Insect and disease treatment', 'Palm trunk injections (Arborjet)', 'Seasonal monitoring and reporting'] },
-  termite: { summary: 'Bait station installation and monitoring with damage warranty.', details: ['Bait station installation around perimeter', 'Quarterly monitoring inspections', 'Damage warranty (Premier tier)', 'Annual re-certification report'] },
+  termite: { summary: 'Bait station installation and monitoring. Coverage follows your signed termite agreement.', details: ['Bait station installation around perimeter', 'Quarterly monitoring inspections', 'Coverage follows your signed termite agreement', 'Annual re-certification report'] },
   rodent_bait: { summary: 'Exterior bait stations inspected and replenished on every visit.', details: ['Exterior rodent bait station inspection', 'Bait replenishment and rotation', 'Exclusion check around entry points'] },
 };
 
