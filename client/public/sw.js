@@ -661,12 +661,19 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
 // believed only when it fits the shell just fetched: it names every one of
 // the shell's own files, and the build's file list owns every file it names.
 // Null leaves the copy without a list, so it is never served first.
+//
+// It runs under the shell-refresh lock, so it has a deadline that covers the
+// headers and the whole body: a stall ends in null, and the copy is stored
+// with no list.
+const CUSTOMER_LIST_TIMEOUT_MS = 5000;
 async function fetchCustomerAssets(customerShell, assets, owned) {
   if (!customerShell || !owned) return null;
   try {
-    const response = await fetch(new Request(CUSTOMER_ASSETS_URL, { cache: 'reload' }));
-    if (!response.ok) return null;
-    const files = JSON.parse(await response.text());
+    const text = await withinDeadline(CUSTOMER_LIST_TIMEOUT_MS, async signal => {
+      const response = await fetch(new Request(CUSTOMER_ASSETS_URL, { cache: 'reload', ...(signal ? { signal } : {}) }));
+      return response.ok ? response.text() : null;
+    });
+    const files = text === null ? null : JSON.parse(text);
     if (!Array.isArray(files) || !files.length) return null;
     const listed = new Set(files);
     const ownedSet = new Set(owned);
@@ -698,17 +705,30 @@ async function copyKeepsBuild(cache, buildId) {
   const keep = await customerShellKeep(cache).catch(() => null);
   return Boolean(keep) && keep.buildId === buildId;
 }
-function fetchWithin(url, ms) {
+// One deadline over a whole read: `work` gets an abort signal (when the
+// worker has one) and ends the race with the timeout error when it runs late.
+function withinDeadline(ms, work) {
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
       if (controller) controller.abort();
-      reject(new Error(`Customer file timed out: ${url}`));
+      reject(new Error('Read timed out'));
     }, ms);
   });
-  const request = new Request(url, controller ? { signal: controller.signal } : undefined);
-  return Promise.race([fetch(request), timeout]).finally(() => clearTimeout(timer));
+  return Promise.race([work(controller ? controller.signal : null), timeout]).finally(() => clearTimeout(timer));
+}
+// The file's whole body, read under the deadline before anything takes the
+// asset-write lock: a body that stalls after its headers must never reach
+// cache.put, which would read it while holding that lock.
+function fetchBuffered(url, ms) {
+  return withinDeadline(ms, async signal => {
+    const response = await fetch(new Request(url, signal ? { signal } : undefined));
+    if (!response.ok) throw new Error(`Customer file failed (${response.status}): ${url}`);
+    if (response.redirected) throw new Error(`Customer file redirected: ${url}`);
+    const body = await response.arrayBuffer();
+    return { body, init: { status: response.status, statusText: response.statusText, headers: response.headers } };
+  });
 }
 async function cacheCustomerFiles(buildId, files) {
   const cache = await caches.open(CACHE_NAME);
@@ -716,15 +736,10 @@ async function cacheCustomerFiles(buildId, files) {
   await Promise.allSettled(files.map(async file => {
     const have = await cache.match(file);
     if (have && rawTagsOf(have).includes(buildId)) return;
-    let response = null;
-    if (!have) {
-      response = await fetchWithin(file, CUSTOMER_FILE_TIMEOUT_MS);
-      if (!response.ok) throw new Error(`Customer file failed (${response.status}): ${file}`);
-      if (response.redirected) throw new Error(`Customer file redirected: ${file}`);
-    }
+    const buffered = have ? null : await fetchBuffered(file, CUSTOMER_FILE_TIMEOUT_MS);
     await withAssetWrites(async () => {
       if (!(await copyKeepsBuild(cache, buildId))) return;
-      const latest = (await cache.match(file)) || response;
+      const latest = (await cache.match(file)) || (buffered && new Response(buffered.body, buffered.init));
       if (!latest) throw new Error(`Customer file gone: ${file}`);
       await cache.put(file, tagWithBuild(latest, [buildId]));
     });

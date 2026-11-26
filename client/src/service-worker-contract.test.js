@@ -28,6 +28,8 @@ function fakeCache() {
       const url = asRequest(key).url;
       if (this.putGate) { const gate = this.putGate(url); if (gate) await gate; }
       if (this.failPut && this.failPut(url)) { const e = new Error('Quota exceeded'); e.name = 'QuotaExceededError'; throw e; }
+      // The real put reads the whole body before it stores: a stalled one hangs here.
+      if (response.body && response.body.gate) await response.body.gate;
       store.set(url, response);
     },
     async delete(key) { if (this.deleteGate) await this.deleteGate; return store.delete(asRequest(key).url); },
@@ -56,12 +58,24 @@ class FakeResponse {
     if (this.bodyUsed) throw new TypeError('Response body is already used');
     return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate, url: this.url, redirected: this.redirected });
   }
-  async text() { if (this.gate) await this.gate; this.bodyUsed = true; return String(this.body); }
+  async text() {
+    if (this.gate) await this.gate;
+    // A body that sends its headers and then never ends (see StalledBody).
+    if (this.body && this.body.gate) await this.body.gate;
+    this.bodyUsed = true;
+    return this.body instanceof ArrayBuffer ? new TextDecoder().decode(this.body) : String(this.body);
+  }
+  async arrayBuffer() { return new TextEncoder().encode(await this.text()).buffer; }
   async json() { return JSON.parse(await this.text()); }
 }
 // A response whose body read is parked on a promise the test releases.
 class GatedResponse extends FakeResponse {
   constructor(body, init = {}) { super(body, init); this.gate = init.gate; }
+}
+// A body the test parks on a promise. Used as `body`, it stalls whoever reads it.
+class StalledBody {
+  constructor(gate = new Promise(() => {})) { this.gate = gate; }
+  toString() { return 'stalled body'; }
 }
 const fakeResponse = (body, ok = true) => new FakeResponse(body, { status: ok ? 200 : 500 });
 const gatedResponse = (body, gate) => new GatedResponse(body, { gate });
@@ -2442,6 +2456,63 @@ describe('service-worker saved-first customer copy', () => {
     releaseChunk();
     await settled;
     expect(await cache.match('/assets/Portal-NEW.js')).toBeUndefined();
+  });
+
+  it('reads a chunk body under its deadline before the write lock, so a body that stalls after its headers blocks no write', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    worker.setFetch(async (request) => (request.url.endsWith('Portal-NEW.js')
+      ? new FakeResponse(new StalledBody(), { status: 200 })
+      : net.serve(request)));
+    net.release();
+    const settled = (await load('/?waves-network=1').promise).settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    // The asset-write lock is free while the body is still stalled: a prune runs.
+    let pruned = false;
+    worker.pruneStaleAssets(cache, [worker.buildIdOf(NEW)]).then(() => { pruned = true; });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(pruned).toBe(true);
+    await vi.advanceTimersByTimeAsync(20000);
+    await settled;
+    expect(await cache.match('/assets/Portal-NEW.js')).toBeUndefined();
+  });
+
+  it('stores a chunk that arrives in time with its status, headers and a build tag', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    worker.setFetch(async (request) => (request.url.endsWith('Portal-NEW.js')
+      ? new FakeResponse('portal code', { status: 200, headers: { 'content-type': 'text/javascript' } })
+      : net.serve(request)));
+    net.release();
+    await (await load('/?waves-network=1').promise).settled();
+    const stored = await cache.match('/assets/Portal-NEW.js');
+    expect(await stored.text()).toBe('portal code');
+    expect(stored.status).toBe(200);
+    expect(stored.headers.get('content-type')).toBe('text/javascript');
+    expect(claimIds(stored)).toContain(worker.buildIdOf(NEW));
+  });
+
+  describe('the customer file list read', () => {
+    const stalls = {
+      'headers that never arrive': () => new Promise(() => {}),
+      'a body that never ends': () => new FakeResponse(new StalledBody(), { status: 200 }),
+    };
+    it.each(Object.keys(stalls))('ends at 5 s with %s: the copy is stored with no list and no chunk is fetched', async (name) => {
+      const { cache, worker, net, load } = await start({ savedAt: HOUR });
+      const fetched = [];
+      worker.setFetch(async (request) => {
+        fetched.push(request.url);
+        return request.url.includes('/customer-build-assets.json') ? stalls[name]() : net.serve(request);
+      });
+      net.release();
+      const settled = (await load('/?waves-network=1').promise).settled();
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(savedHtml);
+      await vi.advanceTimersByTimeAsync(1);
+      await settled;
+      const copy = await cache.match(CUSTOMER_SHELL_URL);
+      expect(await copy.text()).toBe(networkHtml);
+      expect(copy.headers.get('x-waves-copy-files')).toBeNull();
+      expect(fetched.some(url => url.endsWith('Portal-NEW.js'))).toBe(false);
+    });
   });
 
   it('does not fetch a chunk it already holds, and only claims it for the new build', async () => {
