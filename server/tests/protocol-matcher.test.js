@@ -181,21 +181,35 @@ describe('protocol matcher specialty routing', () => {
     expect(match('Tick Control Service')).toEqual({ programKey: 'pest', visit: 4, reason: 'tick_service' });
   });
 
-  test('bed bug cards: treatment 1, treatment 2, clearance check, heavy third treatment', () => {
+  test('bed bug cards: inspection, treatment 1, and one follow-up card for every later visit', () => {
     expect(match('Bed Bug Treatment Service')).toEqual({ programKey: 'bed_bug', visit: 2, reason: 'bed_bug_treatment' });
-    expect(match('Bed Bug Treatment 2')).toEqual({ programKey: 'bed_bug', visit: 3, reason: 'bed_bug_followup' });
-    expect(match('Bed Bug Follow-Up')).toEqual({ programKey: 'bed_bug', visit: 3, reason: 'bed_bug_followup' });
-    expect(match('Bed Bug Clearance Check')).toEqual({ programKey: 'bed_bug', visit: 4, reason: 'bed_bug_clearance' });
-    expect(match('Bed Bug Recheck')).toEqual({ programKey: 'bed_bug', visit: 4, reason: 'bed_bug_clearance' });
-    expect(match('Bed Bug Treatment 3')).toEqual({ programKey: 'bed_bug', visit: 5, reason: 'bed_bug_third_treatment' });
     expect(match('Bed Bug Inspection')).toEqual({ programKey: 'bed_bug', visit: 1, reason: 'bed_bug_inspection' });
+    // The stage of a later visit is not read from its name: every one of them is the follow-up card.
+    for (const name of ['Bed Bug Treatment 2', 'Bed Bug Follow-Up', 'Bed Bug Clearance Check', 'Bed Bug Recheck', 'Bed Bug Treatment 3', 'Third Bed Bug Treatment']) {
+      expect(match(name)).toEqual({ programKey: 'bed_bug', visit: 3, reason: 'bed_bug_followup' });
+    }
+    // A heavy grade alone is not a stage: a heavy job still starts with the inspection.
+    expect(match('Bed Bug Heavy Inspection')).toEqual({ programKey: 'bed_bug', visit: 1, reason: 'bed_bug_inspection' });
+    expect(protocols.bed_bug.visits.map((v) => v.visit)).toEqual([1, 2, 3]);
   });
 
-  test('a heat or hybrid bed bug booking gets the inspection / scope card, never the spray card', () => {
-    for (const name of ['Bed Bug Heat Treatment', 'Bed Bug Heat', 'Heat Bed Bug Service', 'Bed Bug Hybrid Treatment']) {
+  test('a bed bug booking that says heat or hybrid anywhere gets the inspection / scope card, never a spray card', () => {
+    for (const name of ['Bed Bug Heat Treatment', 'Bed Bug Heat', 'Heat Bed Bug Service', 'Bed Bug Hybrid Treatment', 'Bed Bug Treatment (Heat)', 'Bed Bug Treatment 2 - Heat', 'Bed Bug Follow-Up Hybrid']) {
       expect(match(name)).toEqual({ programKey: 'bed_bug', visit: 1, reason: 'bed_bug_heat_scope_review' });
     }
     expect(protocols.bed_bug.visits.find((v) => v.visit === 1).completionDefaultProducts).toBeUndefined();
+  });
+
+  test('an explicit stage in the name outranks the catalog service key', () => {
+    const keyed = (name) => {
+      const result = matchServiceProtocol(protocols, name, { serviceKey: 'flea_tick' });
+      return [result.programKey, result.matchedVisit.visit, result.reason];
+    };
+    // A second flea visit booked by hand (no follow-up link) must not prefill the growth regulator again.
+    expect(keyed('Flea Treatment 2')).toEqual(['flea', 2, 'flea_followup']);
+    expect(keyed('Flea Follow-Up')).toEqual(['flea', 2, 'flea_followup']);
+    expect(keyed('Flea Control Service')).toEqual(['flea', 1, 'flea_service']);
+    expect(keyed('Flea & Tick Yard Treatment')).toEqual(['flea', 1, 'flea_service']);
   });
 
   test('followupVisitMatch: a booked follow-up gets the program follow-up card', () => {
@@ -208,9 +222,8 @@ describe('protocol matcher specialty routing', () => {
     expect(followup('Cockroach Control Service')).toEqual(['cockroach', 3, 'cockroach_followup']);
     // A program with no follow-up card keeps its match, and so does any visit that is not a follow-up.
     expect(followup('Quarterly Pest Control')).toEqual(['pest', 1, 'general_pest']);
-    // A linked visit whose own name says its stage keeps that card: a clearance check, a third treatment, a scope review.
-    expect(followup('Bed Bug Clearance Check')).toEqual(['bed_bug', 4, 'bed_bug_clearance']);
-    expect(followup('Bed Bug Treatment 3')).toEqual(['bed_bug', 5, 'bed_bug_third_treatment']);
+    // A linked visit whose own name says something else keeps its card: a later-stage name, a scope review, an inspection.
+    expect(followup('Bed Bug Clearance Check')).toEqual(['bed_bug', 3, 'bed_bug_followup']);
     expect(followup('Bed Bug Heat Treatment')).toEqual(['bed_bug', 1, 'bed_bug_heat_scope_review']);
     expect(followup('Bed Bug Inspection')).toEqual(['bed_bug', 1, 'bed_bug_inspection']);
     const first = matchServiceProtocol(protocols, 'Flea Control Service');

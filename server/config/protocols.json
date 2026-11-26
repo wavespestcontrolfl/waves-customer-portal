@@ -2331,7 +2331,7 @@
     "notes": [
       "Flea is two treatments, 14 days apart. There is no third treatment (owner ruling 2026-11-23). If fleas remain after treatment 2, confirm the pet got a vet flea product, look for wildlife or stray cats, then call the office.",
       "The growth regulator goes down once, at treatment 1. It lasts up to 7 months indoors, and its label allows no indoor repeat before 21 days, so treatment 2 at day 14 has none.",
-      "Same tank, by the labels: the growth regulator label says it \"may be combined with an EPA registered adulticide\" and \"No label dosage rates may be exceeded\". Its own mix is 1 fl oz per gallon sprayed at 1 gallon per 1,500 sq ft. In the Antapex tank (1 gallon per 1,000 sq ft) the card uses 0.67 fl oz per gallon: the same amount on the floor, never more. A tank with the growth regulator alone uses the label mix.",
+      "Same tank, by the labels: the growth regulator label says it \"may be combined with an EPA registered adulticide\" and \"No label dosage rates may be exceeded\". Its own mix is 1 fl oz per gallon sprayed at 1 gallon per 1,500 sq ft. The Antapex label fixes 10 g per gallon at 1 gallon per 1,000 sq ft. So the shared tank carries the growth regulator at 0.66 fl oz per gallon: just under its label amount on the floor, never more. Do not mix it stronger.",
       "Never fog a flea job. The treatment 2 adulticide label says \"DO NOT use this product as a fogger\", and the treatment 1 adulticide is labeled indoors for spot, crack-and-crevice and surface spray only.",
       "Use only the products on this card. Fleas are not on the label of the cockroach growth regulator mix, and the outdoor perimeter pyrethroid is labeled for fleas outdoors only."
     ],
@@ -2345,8 +2345,8 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Flea Treatment 1\nInspect with a white-sock walk or a flea comb, and find where pets rest\nInterior spray: Antapex 10 g per gallon, 1 gallon per 1,000 sq ft, on carpet, rugs, floors, under furniture, under cushions, pet beds and closet floors\nGrowth regulator in the same tank: Tekko Pro 0.67 fl oz per gallon at 1 gallon per 1,000 sq ft (the label amount, 1 fl oz per 1,500 sq ft)",
-        "secondary": "Exterior, shaded pet zones only when pets rest outside: Antapex 10 g per gallon with Tekko Pro 1 fl oz per 1,500 sq ft\nConfirm the customer vacuumed and washed pet bedding before the visit\nTell the customer: vacuum every day for 14 days, and expect to see some fleas for up to 2 weeks as eggs hatch\nBook treatment 2 for day 14",
+        "primary": "Flea Treatment 1\nInspect with a white-sock walk or a flea comb, and find where pets rest\nInterior spray: Antapex 10 g per gallon, 1 gallon per 1,000 sq ft, on carpet, rugs, floors, under furniture, under cushions, pet beds and closet floors\nGrowth regulator in the same tank: Tekko Pro 0.66 fl oz per gallon at 1 gallon per 1,000 sq ft (just under its label amount, 1 fl oz per 1,500 sq ft)",
+        "secondary": "Exterior, shaded pet zones only when pets rest outside: the same tank mix, 1 gallon per 1,000 sq ft\nConfirm the customer vacuumed and washed pet bedding before the visit\nTell the customer: vacuum every day for 14 days, and expect to see some fleas for up to 2 weeks as eggs hatch\nBook treatment 2 for day 14",
         "lineMeta": {
           "Interior spray: Antapex 10 g per gallon, 1 gallon per 1,000 sq ft, on carpet, rugs, floors, under furniture, under cushions, pet beds and closet floors": {
             "scope": "interior",
@@ -2360,7 +2360,7 @@
               "unit": "g"
             }
           },
-          "Growth regulator in the same tank: Tekko Pro 0.67 fl oz per gallon at 1 gallon per 1,000 sq ft (the label amount, 1 fl oz per 1,500 sq ft)": {
+          "Growth regulator in the same tank: Tekko Pro 0.66 fl oz per gallon at 1 gallon per 1,000 sq ft (just under its label amount, 1 fl oz per 1,500 sq ft)": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
@@ -2368,11 +2368,11 @@
             ],
             "completionApplicationMethod": "spot_treatment",
             "tankRatePerGallon": {
-              "amount": 0.67,
+              "amount": 0.66,
               "unit": "fl_oz"
             }
           },
-          "Exterior, shaded pet zones only when pets rest outside: Antapex 10 g per gallon with Tekko Pro 1 fl oz per 1,500 sq ft": {
+          "Exterior, shaded pet zones only when pets rest outside: the same tank mix, 1 gallon per 1,000 sq ft": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
@@ -2426,6 +2426,7 @@
     "name": "Bed Bug Control Protocol",
     "notes": [
       "Bed bug is inspection first, then 2 treatments 14 days apart, then a clearance check. A third treatment is for heavy jobs only (owner ruling 2026-11-23).",
+      "Three cards: the inspection, treatment 1, and one follow-up card for every later visit (treatment 2 at day 14, each clearance check, and the third treatment on a heavy job).",
       "Heavy job, book 3 treatments at the sale if any one is true: more than 20 live bugs seen; 2 or more rooms; bugs off the bed (sofa, baseboards, outlets, wall hangings); heavy clutter or prep not done; an attached unit with the neighbor not checked; bug bombs, a failed treatment or a problem older than 3 months.",
       "Add the third treatment later if, at day 14, there is a live adult or large nymph or more than 10 bugs in the cups, or if, at day 28, any bug was caught since day 14.",
       "The job is clear when the interceptor cups are empty at 2 checks 14 days apart and the tech finds no live bugs.",
@@ -2458,7 +2459,7 @@
         "visit": 2,
         "month": "Any",
         "primary": "Bed Bug Treatment 1\nVacuum live bugs and eggs from seams, frames and baseboards, and bag the waste in the room\nCrossfire on mattress and box spring seams, bed frame, headboard and furniture seams: 13 fl oz in 115 fl oz of water makes 1 gallon for 1,000 sq ft, damp not wet\nAntapex 20 g per gallon as a crack-and-crevice and spot spray on baseboards, carpet edges and furniture frames, never on a mattress",
-        "secondary": "Silica dust (CimeXa) in wall voids, bed frame joints and under the box spring cover: a light film, about 2 oz per 100 sq ft, and none inside electrical boxes\nFit mattress and box spring encasements after the spray is dry, when the customer bought them\nPlace or reset interceptor cups under each bed and sofa leg\nDocument rooms treated, products, re-entry time and any area that could not be reached\nBook treatment 2 for day 14",
+        "secondary": "Silica dust (CimeXa) in wall voids, bed frame joints and under the box spring cover: a light film, about 2 oz per 100 sq ft, and none inside electrical boxes\nFit mattress and box spring encasements after the spray is dry, when the customer bought them\nPlace or reset interceptor cups under each bed and sofa leg\nDocument rooms treated, products, re-entry time and any area that could not be reached\nBook the follow-up visit for day 14",
         "material_cost": "inventory",
         "labor_cost": "room_count",
         "tiers": {
@@ -2498,50 +2499,10 @@
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Bed Bug Treatment 2 (day 14)\nCount and empty the interceptor cups, and note the count for each bed\nReinspect treated rooms and the rooms next to them: mattress seams, furniture seams, baseboards and customer-reported areas",
-        "secondary": "Retreat with Crossfire only where live bugs or fresh eggs are found\nTop up silica dust only where it was cleaned away\nA live adult or large nymph, or more than 10 bugs in the cups: tell the office to add the third treatment\nReinforce laundry, bagging, clutter and luggage precautions\nBook the clearance check for day 28",
-        "material_cost": "inventory",
-        "labor_cost": "follow_up",
-        "tiers": {
-          "bronze": false,
-          "silver": false,
-          "enhanced": true,
-          "premium": true
-        },
-        "notes": "Treatment 2 is a check first. Spray only where live bugs or fresh eggs are found.",
+        "primary": "Bed Bug Follow-Up Visit (every visit after treatment 1)\nCount and empty the interceptor cups, and note the count for each bed\nReinspect treated rooms and the rooms next to them: mattress seams, bed frame, furniture seams, baseboards and customer-reported areas\nDocument live activity, new evidence, or no activity",
+        "secondary": "Live bugs or fresh eggs found: first look for missed hiding places and untreated rooms, then retreat with Crossfire only where they are found\nBugs found off the bed: Antapex 20 g per gallon on those baseboards and furniture frames, never on a mattress\nTop up silica dust only where it was cleaned away\nDay 14, a live adult or large nymph, or more than 10 bugs in the cups: tell the office to add the third treatment\nDay 28 or later, any bug caught since the last visit: tell the office to add the third treatment\nA standard job gets 2 treatments and a heavy job 3. Never more without the office\nCups empty at 2 checks 14 days apart and no live bugs found: the job is clear. Nothing is sprayed at a clear check\nNot clear yet: book the next visit 14 days out, and reinforce laundry, bagging, clutter and luggage precautions",
         "lineMeta": {
-          "Retreat with Crossfire only where live bugs or fresh eggs are found": {
-            "scope": "interior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "MGK Crossfire Bed Bug Concentrate"
-            ],
-            "completionApplicationMethod": "spot_treatment"
-          }
-        }
-      },
-      {
-        "visit": 4,
-        "month": "Any",
-        "primary": "Bed Bug Clearance Check\nCount and empty the interceptor cups\nInspect mattress seams, bed frame, furniture seams and baseboards in every treated room\nDocument live activity, new evidence, or no activity",
-        "secondary": "Cups empty at 2 checks 14 days apart and no live bugs found: the job is clear\nAny bug since the last check: tell the office to add the third treatment\nNo product is applied at a clearance check",
-        "material_cost": "inspection",
-        "labor_cost": "follow_up",
-        "tiers": {
-          "bronze": false,
-          "silver": false,
-          "enhanced": false,
-          "premium": true
-        },
-        "notes": "The tech decides clearance from the cups and the inspection, not from the customer report alone."
-      },
-      {
-        "visit": 5,
-        "month": "Any",
-        "primary": "Bed Bug Treatment 3 (heavy jobs, day 28)\nCount and empty the interceptor cups, and reinspect every treated room and the rooms next to them\nRetreat every room that had activity with Crossfire on seams, frames and furniture",
-        "secondary": "Antapex 20 g per gallon on baseboards and furniture frames where bugs were found off the bed\nFirst look for missed hiding places and untreated rooms before adding product\nBook a clearance check 14 days after this treatment",
-        "lineMeta": {
-          "Retreat every room that had activity with Crossfire on seams, frames and furniture": {
+          "Live bugs or fresh eggs found: first look for missed hiding places and untreated rooms, then retreat with Crossfire only where they are found": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
@@ -2549,7 +2510,7 @@
             ],
             "completionApplicationMethod": "spot_treatment"
           },
-          "Antapex 20 g per gallon on baseboards and furniture frames where bugs were found off the bed": {
+          "Bugs found off the bed: Antapex 20 g per gallon on those baseboards and furniture frames, never on a mattress": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
@@ -2563,14 +2524,14 @@
           }
         },
         "material_cost": "inventory",
-        "labor_cost": "room_count",
+        "labor_cost": "follow_up",
         "tiers": {
           "bronze": false,
           "silver": false,
-          "enhanced": false,
+          "enhanced": true,
           "premium": true
         },
-        "notes": "Heavy jobs only. Booked at the sale by the heavy rule, or added after a failed day-14 or day-28 check."
+        "notes": "Every bed bug visit after treatment 1 uses this card: treatment 2 at day 14, each clearance check, and the third treatment on a heavy job. It is a check first. Spray only where live bugs or fresh eggs are found."
       }
     ]
   },

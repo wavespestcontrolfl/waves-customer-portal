@@ -83,9 +83,9 @@ describe('/completion-actions on a booked follow-up visit', () => {
     expect(await actions({ serviceType: 'Quarterly Pest Control', visitId: VISIT })).toMatchObject({ programKey: 'pest', visit: { visit: 1 } });
   });
 
-  test('a linked visit whose name says its stage keeps that card', async () => {
+  test('every later bed bug visit is the follow-up card; a linked heat booking keeps the scope review', async () => {
     visitRows = [{ followup_source_service_id: 'a-finished-visit' }];
-    expect(await actions({ serviceType: 'Bed Bug Clearance Check', visitId: VISIT })).toMatchObject({ programKey: 'bed_bug', visit: { visit: 4 } });
+    expect(await actions({ serviceType: 'Bed Bug Clearance Check', visitId: VISIT })).toMatchObject({ programKey: 'bed_bug', visit: { visit: 3 } });
     expect(await matched({ serviceType: 'Bed Bug Heat Treatment', visitId: VISIT })).toEqual(['bed_bug', 1, 'bed_bug_heat_scope_review']);
   });
 

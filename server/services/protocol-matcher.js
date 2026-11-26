@@ -7,35 +7,29 @@ const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = requ
 // ("Termite Installation Setup", "… Cartridge Replacement") are station work,
 // not the inspection their names fall to.
 const MATCH_RULES = [
-  // Bed bug cards (2026-11-25): 1 inspection, 2 treatment 1, 3 treatment 2 (day 14), 4 clearance check,
-  // 5 treatment 3 (heavy jobs). The numbered treatments sit above the plain "bed bug treatment" rule, whose
-  // terms would claim them. A booked follow-up of a treatment is treatment 2 (the one `_followup` rule).
+  // Bed bug cards (2026-11-25): 1 inspection, 2 treatment 1, 3 the follow-up card for every later visit (treatment 2
+  // at day 14, each clearance check, the third treatment on a heavy job). The stage of a later visit is never read
+  // from its name: one card covers them all. Waves does not sell heat, so a booking that says heat or hybrid anywhere
+  // gets the inspection / scope card (no product prefilled) and the office reviews the scope first.
+  // `explicitStage`: the name states the stage, so the rule outranks the booking's catalog service key.
   {
     programKey: 'bed_bug',
-    visit: 5,
-    reason: 'bed_bug_third_treatment',
-    terms: ['bed bug treatment 3', 'bed bug third treatment', 'third bed bug', 'bed bug heavy'],
-  },
-  {
-    programKey: 'bed_bug',
-    visit: 4,
-    reason: 'bed_bug_clearance',
-    terms: ['bed bug clearance', 'bed bug recheck', 'post treatment inspection'],
+    visit: 1,
+    reason: 'bed_bug_heat_scope_review',
+    explicitStage: true,
+    terms: ['heat', 'hybrid'],
   },
   {
     programKey: 'bed_bug',
     visit: 3,
     reason: 'bed_bug_followup',
+    explicitStage: true,
     followupOf: ['bed_bug_treatment'],
-    terms: ['bed bug follow', 'bed bug treatment 2', 'bed bug second treatment', 'second bed bug'],
-  },
-  // Waves does not sell heat. A booking named heat or hybrid gets the inspection / scope card (no product
-  // prefilled), never the spray card: the office reviews the scope first.
-  {
-    programKey: 'bed_bug',
-    visit: 1,
-    reason: 'bed_bug_heat_scope_review',
-    terms: ['heat bed bug', 'hybrid bed bug', 'bed bug heat', 'bed bug hybrid'],
+    terms: [
+      'bed bug follow', 'bed bug recheck', 'bed bug clearance', 'post treatment inspection',
+      'bed bug treatment 2', 'bed bug second treatment', 'second bed bug',
+      'bed bug treatment 3', 'bed bug third treatment', 'third bed bug',
+    ],
   },
   {
     programKey: 'bed_bug',
@@ -55,6 +49,7 @@ const MATCH_RULES = [
     programKey: 'flea',
     visit: 2,
     reason: 'flea_followup',
+    explicitStage: true,
     followupOf: ['flea_service'],
     terms: ['flea follow', 'flea recheck', 'flea treatment 2', 'flea second treatment', 'second flea'],
   },
@@ -451,6 +446,13 @@ function mistingSystemMatchOverride(serviceType, serviceKey) {
   return null;
 }
 
+// The rule for a booking: the first rule of its program whose terms the name carries, or the rule that claims its catalog
+// service key. The key wins, except over a rule marked `explicitStage` (the name itself says "treatment 2" or "heat").
+function ruleFor(keyRule, rules, normalized) {
+  const named = rules.find((rule) => rule.terms.some((term) => matchesTerm(normalized, term)));
+  return named?.explicitStage ? named : keyRule || named;
+}
+
 function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month = null } = {}) {
   const override = mistingSystemMatchOverride(serviceType, serviceKey);
   if (override) return override;
@@ -463,7 +465,7 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
     if (fallbackProgramKey === 'lawn') return false;
     return rule.programKey === fallbackProgramKey;
   });
-  const matchedRule = keyRule || rules.find((rule) => rule.terms.some((term) => matchesTerm(normalized, term)));
+  const matchedRule = ruleFor(keyRule, rules, normalized);
   const programKey = matchedRule?.programKey || fallbackProgramKey;
   const program = protocols?.[programKey] || null;
   if (!program) return { programKey, program: null, matchedVisit: null, matched: false, reason: 'program_missing' };

@@ -2234,8 +2234,13 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       dbh.raw = (sql) => sql;
       return jobCard.mixForProduct(first.id, tank, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
     };
-    // The card shares one tank at the Antapex volume, so the growth regulator is 0.67 fl oz per gallon: the label amount per square foot.
-    expect(await mix(tekko, antapex)).toMatchObject({ amount: 1.34, amountMax: null, unit: 'fl_oz', ratePerGallon: { lo: 0.67, hi: 0.67 }, rateSource: 'protocol' });
+    // The card shares one tank at the Antapex volume (1 gallon per 1,000 sq ft), so the growth regulator is 0.66 fl oz per gallon.
+    expect(await mix(tekko, antapex)).toMatchObject({ amount: 1.32, amountMax: null, unit: 'fl_oz', ratePerGallon: { lo: 0.66, hi: 0.66 }, rateSource: 'protocol' });
+    // Never above the label amount (1 fl oz per 1,500 sq ft), at any tank size: N gallons cover N x 1,000 sq ft.
+    for (const gallons of [1, 3, 5, 25, 110]) {
+      const out = await mix(tekko, antapex, gallons);
+      expect(out.amount).toBeLessThanOrEqual((gallons * 1000) / 1500);
+    }
     // Antapex is the card's 10 g per gallon, not the catalog's 10 to 30.
     expect(await mix(antapex, tekko)).toMatchObject({ amount: 20, amountMax: null, unit: 'g', ratePerGallon: { lo: 10, hi: 10 }, rateSource: 'protocol' });
     // A declared rate above the label's top never governs: the label band stands.
