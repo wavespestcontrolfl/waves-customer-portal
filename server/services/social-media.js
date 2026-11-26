@@ -1616,7 +1616,8 @@ async function readFacebookLinkPictureSize(postId, token) {
   }
 }
 
-// Best effort: only ever called on a post that is hidden and stays hidden.
+// True only when Facebook confirms the delete. The small-picture path ignores
+// the answer: that post is never published, so a lost delete leaves a hidden copy.
 async function deleteFacebookPost(postId, token) {
   try {
     const res = await fetch(`https://graph.facebook.com/v25.0/${postId}?access_token=${encodeURIComponent(token)}`, {
@@ -1655,7 +1656,9 @@ async function requestFacebookPublish(postId, token) {
       body: JSON.stringify({ is_published: true, access_token: token }),
     });
     if (res.ok) return null;
-    return new Error(`Facebook publish API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    const err = new Error(`Facebook publish API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    err.refused = res.status >= 400 && res.status < 500; // Facebook answered no (bad token, bad post)
+    return err;
   } catch (err) {
     return new Error(`Facebook publish failed: ${err.name}`); // never the message: it can quote the token
   }
@@ -1663,11 +1666,15 @@ async function requestFacebookPublish(postId, token) {
 
 // Make the hidden post public. Publishing the same post twice is harmless, so
 // a failed publish is asked once more on the SAME post before anything else.
-// Then the post's state decides:
-//   public  -> true: done (the first answer was lost), no second public post.
-//   hidden  -> delete it and throw; a retry of the whole post is then safe.
-//   unknown -> false: the post may be public. The caller records it as sent
-//              and never makes a new post that could double it.
+// Then:
+//   public                      -> true: done (an answer was lost).
+//   Facebook refused (4xx), or the post reads hidden
+//                               -> delete it. Confirmed: throw, so a retry of
+//                                  the whole post is safe. Not confirmed: false.
+//   anything else (no answer)   -> false: the post may be public.
+// false = the caller records the post as sent with its id and never makes a
+// new one, so a post that did go public is never doubled; the cost is a share
+// that may stay hidden.
 async function publishFacebookPost(postId, token) {
   let failure = await requestFacebookPublish(postId, token);
   if (!failure) return true;
@@ -1675,9 +1682,8 @@ async function publishFacebookPost(postId, token) {
   if (!failure) return true;
   const state = await readFacebookPostState(postId, token);
   if (state === 'public') return true;
-  if (state === 'hidden') {
-    await deleteFacebookPost(postId, token);
-    throw failure;
+  if (state === 'hidden' || failure.refused) {
+    if (await deleteFacebookPost(postId, token)) throw failure;
   }
   return false;
 }
