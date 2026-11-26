@@ -192,6 +192,30 @@ describe('estimate add-service request workflow', () => {
     expect(revision.updated.tier).toBe('Platinum');
   });
 
+  test('an add-service draft keeps an already-quoted flea package at the size rule it was sent under', async () => {
+    const fleaRow = (extra = {}) => ({ service: 'flea_package', name: 'Flea Elimination Package — 2 visits', price: 342, ...extra });
+    const fleaPrice = (revision) => [...(revision.draftEstimateData.result.oneTime.items || []), ...(revision.draftEstimateData.result.oneTime.specItems || [])]
+      .find((row) => row.service === 'flea_package').price;
+    const twoStory = (row) => {
+      const estimate = baseEstimate();
+      estimate.estimate_data.inputs = { ...estimate.estimate_data.inputs, homeSqFt: 3000, stories: 2, services: { ...estimate.estimate_data.inputs.services, flea: {} } };
+      estimate.estimate_data.result = { oneTime: { items: [row] } };
+      return estimate;
+    };
+
+    // Sent before 2026-11-26 (no stamp): the 3,000 sq ft two-story home stays on the ground-floor price.
+    const legacy = await buildEstimateServiceRevisionDraft(twoStory(fleaRow()), 'termite_bait');
+    expect(legacy.status).toBe('priced');
+    // 342 before the 15% recurring-plan discount the added pest/termite plan carries on a one-time line.
+    expect(fleaPrice(legacy)).toBe(291);
+    expect(legacy.draftEstimateData.inputs.fleaSizeBasisReplay).toBeUndefined();
+
+    // Quoted whole-home (stamped): the same home prices at the whole-home rule.
+    const current = await buildEstimateServiceRevisionDraft(twoStory(fleaRow({ price: 390, fleaSizeBasis: 'total_living_area' })), 'termite_bait');
+    expect(fleaPrice(current)).toBeGreaterThan(fleaPrice(legacy));
+    expect(fleaPrice(current)).toBe(332);
+  });
+
   test('builds a draft revision without mutating the live estimate', async () => {
     const estimate = baseEstimate();
     const originalMonthly = estimate.monthly_total;

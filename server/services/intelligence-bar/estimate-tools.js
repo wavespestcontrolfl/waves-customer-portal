@@ -1442,7 +1442,18 @@ function duplicateCurrentServices(services = {}, activeServices = [], quoteAddre
 // services make a recurring customer). Never merge this into the
 // echoed/stored engineInputs — a persisted copy would be rejected by the
 // guard on the next revision round-trip.
-function buildAgentPricingInput(engineInput, accountPricing) {
+// compute_estimate builds engine_input from a fixed field list that never carries livingAreaSqFt, so a draft that carries one
+// holds an area nothing verified. Both entry points drop it through this one function (pricing and the persisted inputs),
+// so the two cannot price the same measurements differently.
+function normalizeAgentEngineInputs(engineInputs) {
+  if (!engineInputs || typeof engineInputs !== 'object' || Array.isArray(engineInputs)
+    || !Object.prototype.hasOwnProperty.call(engineInputs, 'livingAreaSqFt')) return engineInputs;
+  const { livingAreaSqFt: _unverified, ...rest } = engineInputs;
+  return rest;
+}
+
+function buildAgentPricingInput(rawEngineInput, accountPricing) {
+  const engineInput = normalizeAgentEngineInputs(rawEngineInput);
   const priorQualifyingServices = accountPricing.priorQualifyingServices || [];
   return priorQualifyingServices.length
     ? { ...engineInput, priorQualifyingServices }
@@ -3376,6 +3387,7 @@ async function createAgentEstimateDraft(input, actionContext = {}) {
   const accountPricing = accountPricingFromContext(leadContext);
   const anchoredInput = {
     ...anchored.input,
+    engineInputs: normalizeAgentEngineInputs(anchored.input.engineInputs),
     evidenceVerification: verifyAgentEvidenceQuotes(anchored.input.evidence, leadContext),
   };
   const preview = await computeAgentDraftPreview(anchoredInput, accountPricing);

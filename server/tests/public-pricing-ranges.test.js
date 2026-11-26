@@ -84,6 +84,17 @@ describe('public pricing ranges', () => {
     }
   });
 
+  test('the flea range sweeps the total-living-area home sizes, not ground-floor footprints (owner ruling 2026-11-26)', () => {
+    const { priceFlea } = require('../services/pricing-engine/service-pricing');
+    const totals = (sizes) => sizes.map((homeSqFt) => priceFlea({ homeSqFt, stories: 1 }).total);
+    const homes = totals([1450, 1750, 2150, 2750, 3450]);
+    const row = computePublicPricingRanges({ refresh: true }).services.find((svc) => svc.key === 'flea_elimination');
+    expect(row.low).toBe(Math.floor(Math.min(...homes)));
+    expect(row.high).toBe(Math.ceil(Math.max(...homes)));
+    // Previously the footprint percentiles (1,085 to 3,070) were swept: 321 to 392 at the in-code config.
+    expect(row.high).toBeGreaterThan(Math.max(...totals([1085, 1475, 1865, 2425, 3070])));
+  });
+
   test('every service sweeps without errors', () => {
     expect(payload.errors).toEqual([]);
   });

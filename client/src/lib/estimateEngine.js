@@ -3535,13 +3535,16 @@ export function calculateEstimate(inputs) {
 
   /* ── Flea ────────────────────────────────────────────────── */
   if (svcFlea && !isCommercial) {
+    // Interior package sized on the home's TOTAL living area (owner ruling 2026-11-26 "whole home"), not the
+    // ground-floor footprint: a two-story 3,000 sq ft home prices like a one-story 3,000 sq ft home.
+    const fleaSizeSqFt = homeSqFt > 0 ? homeSqFt : 0;
     let fi = 225, ff = 125;
-    fi += interpolate(footprint, [
+    fi += interpolate(fleaSizeSqFt, [
       { at: 800, adj: -25 }, { at: 1200, adj: -15 }, { at: 1500, adj: -5 },
       { at: 2000, adj: 0 }, { at: 2500, adj: 15 }, { at: 3000, adj: 25 },
       { at: 4000, adj: 40 },
     ]);
-    ff += interpolate(footprint, [
+    ff += interpolate(fleaSizeSqFt, [
       { at: 800, adj: -15 }, { at: 1200, adj: -10 }, { at: 1500, adj: -3 },
       { at: 2000, adj: 0 }, { at: 2500, adj: 8 }, { at: 3000, adj: 15 },
       { at: 4000, adj: 25 },
@@ -3560,7 +3563,7 @@ export function calculateEstimate(inputs) {
     else if (landscapeComplexity === 'MODERATE') { fi += 5; ff += 5; }
     fi = Math.max(185, fi);
     ff = Math.max(95, ff);
-    specItems.push({ name: 'Flea (2-visit)', price: otP(fi + ff), det: '$' + fi + ' + $' + ff });
+    specItems.push({ name: 'Flea (2-visit)', price: otP(fi + ff), det: '$' + fi + ' + $' + ff, fleaSizeBasis: 'total_living_area' });
   }
 
   /* ── Wasp ────────────────────────────────────────────────── */
@@ -4122,6 +4125,7 @@ export function calculateEstimate(inputs) {
           price: s.price,
           service: s.service,
           detail: s.detail || s.det,
+          ...(s.fleaSizeBasis ? { fleaSizeBasis: s.fleaSizeBasis } : {}),
           quoteRequired: !!s.quoteRequired,
           reason: s.reason,
           commercialPricingMode: s.commercialPricingMode,

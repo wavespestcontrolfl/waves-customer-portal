@@ -6518,7 +6518,20 @@ router.post('/calculate-estimate', async (req, res) => {
     v1Input = await require('../services/area-addon-limits').attachQuoteAreaAddOnHistory(require('../models/db'), v1Input, options, { requesterRole: req.techRole });
     v1Input = await require('../services/pricing-engine/trusted-catalog-pricing')
       .withTrustedCatalogPricing(v1Input);
-    const v1 = pricingEngine.generateEstimate(v1Input);
+    // Reopened estimate (admin only): the save keeps a retained flea line of a DELIVERED estimate as sent unless the operator changed
+    // what moves its price, so the preview reads the same stored row and shows the number the save will persist.
+    let fleaRecord = null;
+    if (options?.reviseEstimateId && req.techRole === 'admin') {
+      const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (UUID.test(String(options.reviseEstimateId))) {
+        const storedRow = await require('../models/db')('estimates').where({ id: String(options.reviseEstimateId) }).first('status', 'sent_at', 'address', 'estimate_data');
+        const storedBlob = storedRow && (typeof storedRow.estimate_data === 'string'
+          ? (() => { try { return JSON.parse(storedRow.estimate_data); } catch { return null; } })()
+          : storedRow.estimate_data);
+        if (storedBlob) fleaRecord = require('../services/estimate-flea-size-replay').fleaPriceRecord(storedRow, storedBlob, { translate: translateV2CallToV1Input, nextAddress: options?.address });
+      }
+    }
+    const v1 = require('../services/estimate-flea-size-replay').generateWithFleaRecord(pricingEngine.generateEstimate, v1Input, fleaRecord);
     // The same zeroing the save-time recompute applies to a waived setup fee
     // (initialFee is only the $99 WaveGuard setup), before the mapper sums it.
     if (moveSetupFeeWaived && Array.isArray(v1?.lineItems)) {

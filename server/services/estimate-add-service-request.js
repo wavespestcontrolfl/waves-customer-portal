@@ -245,7 +245,9 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
   Object.assign(updatedInputs, require('./estimate-floor-signal-replay').savedLawnCostPlusSignal(estData));
 
   try {
-    const v1Result = generateEstimate(updatedInputs);
+    // A quoted flea package keeps the size rule it was sent under (estimate-flea-size-replay); the signal rides the engine call
+    // only, so the stored draft inputs stay clean. The area add-on and termite knobs are not replayed on this path.
+    const v1Result = generateEstimate({ ...updatedInputs, ...require('./estimate-flea-size-replay').fleaSizeReplayOverrides(estData) });
     const legacyResult = mapV1ToLegacyShape(v1Result);
     const newMonthly = Number(legacyResult?.recurring?.monthlyTotal || 0);
     const newAnnual = Number(legacyResult?.recurring?.annualAfterDiscount || newMonthly * 12);

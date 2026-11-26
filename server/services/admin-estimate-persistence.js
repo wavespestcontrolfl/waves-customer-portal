@@ -1349,6 +1349,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
     // Area add-on price knobs: the same stored-row reader the public replay uses.
     Object.assign(v1Input, require('./estimate-area-addon-knob-replay').areaAddOnReplayOverrides(estimateData));
+    // Flea interior size basis: a flea package quoted on the ground-floor footprint keeps that basis (owner ruling 2026-11-26).
+    Object.assign(v1Input, require('./estimate-flea-size-replay').fleaSizeReplayOverrides(estimateData));
     // Termite station-cost snapshot (plan 2026-09-03 §A1) — same reader the
     // public replay uses, so the authoritative recompute (membership
     // reconcile, opt-out, admin re-save) keeps a sent install at its quoted
@@ -1429,7 +1431,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
         v1Input.services.pest.version = resolvedVersion;
       }
     }
-    const v1 = generateEstimate(v1Input);
+    // A revision of a delivered estimate keeps a retained flea line's stored row as sent unless the operator changed what moves its price.
+    const v1 = require('./estimate-flea-size-replay').generateWithFleaRecord(generateEstimate, v1Input, deps.fleaRecord);
     // True setup-fee waiver: the legacy mapper counts the pest line's
     // initialFee into oneTime.total/year1, which would reintroduce the
     // waived $99 into the stored totals on every reprice of an
@@ -1487,7 +1490,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1504,7 +1507,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, fleaRecord });
   } catch (error) {
     // Fail-open is for BROKEN engines only. A failClosed policy rejection
     // (gated/invalid add-on in the replay) must block the save outright —
@@ -1541,6 +1544,13 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
       } else if (pestInput) {
         estimateData.engineInputs.services.pest = { version: result.pestPricingVersion };
       }
+    }
+    // Stamp the flea size rule into the replayable engineInputs (estimate-flea-size-replay): an inputs-only stored estimate
+    // has no priced row to carry it, and a flea request with no stamp replays as quoted before 2026-11-26.
+    const fleaBasisLine = (result.rawEngineResult && Array.isArray(result.rawEngineResult.lineItems) ? result.rawEngineResult.lineItems : [])
+      .find((line) => line && line.service === 'flea_package' && line.fleaSizeBasis);
+    if (fleaBasisLine && estimateData.engineInputs && typeof estimateData.engineInputs === 'object') {
+      estimateData.engineInputs.fleaSizeBasisStamp = fleaBasisLine.fleaSizeBasis;
     }
     // An authoritative reprice supersedes the lapse-reconcile's fail-closed
     // quote-required flag (set when a lapsed member's row could not be
@@ -2071,6 +2081,7 @@ async function resolveEstimateWritePayload({
   pricingOut = null, // optional side-channel: { fallbackReason } for post-commit alerts
   storedProposal = null, // revise only: the ROW's estimate_data.proposal (server-owned, see stripClientProposal)
   storedEstimateData = null, // revise only: the ROW's parsed estimate_data (the offer-tier parked state lives there)
+  storedEstimateRow = null, // revise only: the ROW itself (status / sent_at: whether the quote was delivered)
   requireLivePricing = false,
   priorPhone = null, // revise only: the ROW's customer_phone, so an unchanged echo is not re-judged
   moveAllowed = false, // create only: the saver is an admin, so body.moveId may start a new-home estimate
@@ -2234,6 +2245,14 @@ async function resolveEstimateWritePayload({
       throw errorWithStatus('Could not confirm this customer\'s visit history. Retry the save.', 503);
     }
   }
+  // Revise of a DELIVERED estimate only: a retained flea line keeps its stored row as sent unless the operator changed what moves its
+  // price (estimate-flea-size-replay generateWithFleaRecord; the preview endpoint applies the same record).
+  const fleaRecord = storedEstimateData
+    ? require('./estimate-flea-size-replay').fleaPriceRecord(storedEstimateRow, storedEstimateData, {
+      translate: (() => { try { return require('../routes/property-lookup-v2').translateV2CallToV1Input; } catch { return null; } })(),
+      nextAddress: body.address,
+    })
+    : null;
   const pricing = await resolveServerAuthoritativePricing({
     estimateData: trustedEstimateData,
     clientPreview,
@@ -2243,6 +2262,8 @@ async function resolveEstimateWritePayload({
     priorQualifyingServices,
     setupWaiverPriorQualifyingServices,
     recurringCustomer,
+    // Revise only: a flea line the stored estimate quoted on the ground-floor basis keeps it unless the revision edits the home size.
+    fleaRecord,
     // The add-ons' yearly-limit history, read here from the verified customer (never from the posted data).
     areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId }),
     returningVisitHistory,
@@ -2287,6 +2308,8 @@ async function resolveEstimateWritePayload({
   // priors + the cart on replay — so a non-member cannot restore a forged one.
   sanitizeClientIdentityFields(trustedEstimateData.engineInputs);
   sanitizeClientIdentityFields(trustedEstimateData.inputs);
+  // The public wizard's singular carrier is route-written, never an admin input: nothing reads a posted copy.
+  delete trustedEstimateData.engineInput;
   if (trustedEstimateData.engineRequest && typeof trustedEstimateData.engineRequest === 'object') {
     sanitizeClientIdentityFields(trustedEstimateData.engineRequest.options);
   }
@@ -3395,6 +3418,7 @@ async function reviseAdminEstimate({
     database,
     storedProposal,
     storedEstimateData,
+    storedEstimateRow: estimate,
     priorPhone: estimate.customer_phone,
     body: {
       ...body,

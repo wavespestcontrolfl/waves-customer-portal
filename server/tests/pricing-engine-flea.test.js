@@ -206,4 +206,155 @@ describe('flea treatment pricing', () => {
     expect(estimate.summary.oneTimeTotal).toBe(0);
     expect(estimate.summary.specialtyTotal).toBe(505);
   });
+
+  describe('interior size is the home\'s total living area (owner ruling 2026-11-26 "whole home")', () => {
+    const packageFor = (homeSqFt, stories, extra = {}) => generateEstimate({
+      homeSqFt,
+      stories,
+      lotSqFt: 7500,
+      propertyType: 'single_family',
+      services: { flea: {} },
+      ...extra,
+    }).lineItems.find((line) => line.service === 'flea_package');
+
+    test('a one-story home keeps its price at 1,200 / 2,000 / 3,000 / 4,000 sq ft', () => {
+      expect([1200, 2000, 3000, 4000].map((sqft) => packageFor(sqft, 1).total)).toEqual([325, 350, 390, 415]);
+    });
+
+    test('a two-story 3,000 sq ft home prices like a one-story 3,000 sq ft home', () => {
+      const twoStory = packageFor(3000, 2);
+      const oneStory = packageFor(3000, 1);
+      expect(twoStory).toMatchObject({ initial: 250, followUp: 140, total: 390, interiorSizeSqFt: 3000, fleaSizeBasis: 'total_living_area' });
+      expect(twoStory.total).toBe(oneStory.total);
+      expect(twoStory.footprintUsed).toBe(3000);
+    });
+
+    test('story count no longer moves the interior package', () => {
+      const totals = [1, 2, 3].map((stories) => packageFor(2400, stories).total);
+      expect(new Set(totals).size).toBe(1);
+      expect(packageFor(4500, 2).total).toBe(415);
+    });
+
+    test('a living-area input beats a ground-floor footprint; a footprint alone scales by stories', () => {
+      expect(priceFlea({ homeSqFt: 3000, stories: 2, footprint: 1500 }).footprintUsed).toBe(3000);
+      expect(priceFlea({ footprintSqFt: 1500, stories: 2 })).toMatchObject({ footprintUsed: 3000, footprintSource: 'footprintSqFt', total: 390 });
+      expect(priceFlea({ footprintSqFt: 2000 })).toMatchObject({ footprintUsed: 2000, total: 350 });
+    });
+
+    test('no usable size keeps the 2,000 fallback with manual review', () => {
+      expect(priceFlea({ lotSqFt: 7500 })).toMatchObject({
+        footprintUsed: 2000,
+        footprintWasDefaulted: true,
+        requiresManualReview: true,
+        total: 350,
+      });
+    });
+
+    test('an unknown-story association aggregate keeps the footprint-only rule', () => {
+      const result = priceFlea({ homeSqFt: 90000, stories: 1, footprintUnknown: true });
+      expect(result).toMatchObject({ footprintUsed: 2000, footprintWasDefaulted: true, requiresManualReview: true });
+    });
+
+    test('the exterior add-on is unchanged by home size or story count', () => {
+      const exterior = { fleaExterior: true, fleaExteriorAreaSqFt: 5000, fleaExteriorAreaSource: 'CONFIRMED_SQ_FT' };
+      const oneStory = packageFor(3000, 1, { services: { flea: exterior } });
+      const twoStory = packageFor(3000, 2, { services: { flea: exterior } });
+      expect(oneStory.adjustments.exteriorArea).toMatchObject({ initial: 95, followUp: 60, total: 155 });
+      expect(twoStory.adjustments.exteriorArea).toEqual(oneStory.adjustments.exteriorArea);
+      expect(twoStory.total).toBe(oneStory.total);
+    });
+
+    test('the legacy ground-floor basis (replay of a sent estimate) keeps the old price', () => {
+      const legacy = (homeSqFt, stories) => generateEstimate({
+        homeSqFt, stories, lotSqFt: 7500, propertyType: 'single_family',
+        services: { flea: {} },
+        fleaSizeBasisReplay: 'ground_floor',
+      }).lineItems.find((line) => line.service === 'flea_package');
+      expect(legacy(3000, 2)).toMatchObject({ total: 342, footprintUsed: 1500, fleaSizeBasis: 'ground_floor' });
+      expect(legacy(4500, 2).total).toBe(362);
+      expect(legacy(3000, 1).total).toBe(390);
+    });
+
+    describe('size provenance: what each input means (pre-push audit)', () => {
+      const flea = (extra, replay) => generateEstimate({
+        lotSqFt: 7500, propertyType: 'single_family', services: { flea: {} }, ...extra,
+        ...(replay ? { fleaSizeBasisReplay: 'ground_floor' } : {}),
+      }).lineItems.find((line) => line.service === 'flea_package');
+      const flags = (line) => ({ review: line.requiresManualReview, defaulted: line.footprintWasDefaulted, reasons: line.manualReviewReasons });
+
+      test('a public quote with no measured sq ft keeps exactly the review flags it had before the change', () => {
+        for (const stories of [1, 2]) {
+          const extra = { homeSqFt: 2000, stories, buildingSizeMeasured: false };
+          expect(flags(flea(extra))).toEqual(flags(flea(extra, true)));
+        }
+        // The 2,000 default is the whole home: a second story no longer halves it.
+        expect(flea({ homeSqFt: 2000, stories: 2, buildingSizeMeasured: false }).total).toBe(350);
+      });
+
+      test('a supplied footprint (the Intelligence Bar termite override) never beats a real living area', () => {
+        // buildingSizeMeasured is false when the tool omits it, even beside a real homeSqFt.
+        const extra = { homeSqFt: 3000, stories: 2, footprintSqFt: 1000, buildingSizeMeasured: false };
+        expect(flea(extra)).toMatchObject({ footprintUsed: 3000, total: 390 });
+        expect(flea({ homeSqFt: 3000, livingAreaSqFt: 2100, stories: 2, footprintSqFt: 1000 })).toMatchObject({ footprintUsed: 3000 });
+      });
+
+      test('livingAreaSqFt is read as a living area when homeSqFt is absent', () => {
+        expect(flea({ livingAreaSqFt: 2100, stories: 2, footprintSqFt: 1000 })).toMatchObject({ footprintUsed: 2100, footprintSource: 'livingAreaSqFt' });
+      });
+
+      test('an Intelligence Bar buildingSqFt-only quote (aliased into homeSqFt) is read as a living area, never multiplied by stories', () => {
+        // The lookup credential certifies buildingSqFt from the property home_sqft (a living area), so the alias is
+        // ambiguous and is read the way that never inflates a quote.
+        const ib = { homeSqFt: 1500, buildingSqFt: 1500, stories: 2 };
+        expect(flea(ib)).toMatchObject({ footprintUsed: 1500, total: 342 });
+        // ...but a person confirms the total living area: the line routes to review with the same price.
+        expect(flea(ib)).toMatchObject({ requiresManualReview: true, manualReviewReasons: expect.arrayContaining(['flea_home_size_source_unclear']) });
+        expect(flea(ib).warnings.join(' ')).toMatch(/ground floor only/);
+        // One story: the footprint IS the living area, no flag. A real living area on two stories: no flag.
+        expect(flea({ ...ib, stories: 1 })).toMatchObject({ requiresManualReview: false });
+        expect(flea({ ...ib, stories: 1 }).manualReviewReasons).not.toContain('flea_home_size_source_unclear');
+        expect(flea({ homeSqFt: 3000, stories: 2 }).manualReviewReasons).not.toContain('flea_home_size_source_unclear');
+        expect(flea({ homeSqFt: 3000, buildingSqFt: 1500, stories: 2 }).manualReviewReasons).not.toContain('flea_home_size_source_unclear');
+        expect(flea({ ...ib, livingAreaSqFt: 1500 }).manualReviewReasons).not.toContain('flea_home_size_source_unclear');
+        // A conflicting explicit living area wins over the alias and clears the review (the verified area is used).
+        expect(flea({ ...ib, livingAreaSqFt: 3000 })).toMatchObject({ footprintUsed: 3000, footprintSource: 'livingAreaSqFt', total: 390 });
+        expect(flea({ ...ib, livingAreaSqFt: 3000 }).manualReviewReasons).not.toContain('flea_home_size_source_unclear');
+        // compute_estimate (alias in homeSqFt) and the draft path (buildingSqFt alone) price the same measurements the same way,
+        // flags included, with and without a supplied footprint.
+        for (const extra of [{}, { footprintSqFt: 1500 }, { livingAreaSqFt: 3000 }]) {
+          const compute = flea({ homeSqFt: 1500, buildingSqFt: 1500, stories: 2, ...extra });
+          const draft = flea({ buildingSqFt: 1500, stories: 2, ...extra });
+          expect({ total: compute.total, used: compute.footprintUsed, review: compute.requiresManualReview, reasons: compute.manualReviewReasons })
+            .toEqual({ total: draft.total, used: draft.footprintUsed, review: draft.requiresManualReview, reasons: draft.manualReviewReasons });
+        }
+        // A building value beats a supplied footprint: footprint x stories is only for a true footprint-only input.
+        expect(flea({ buildingSqFt: 1500, footprintSqFt: 1500, stories: 2 })).toMatchObject({ total: 342, footprintUsed: 1500, requiresManualReview: true });
+        // homeSqFt equal to buildingSqFt never falls through to footprint x stories (2,200 priced as 3,200 before).
+        const audit = flea({ homeSqFt: 2200, footprintSqFt: 1600, buildingSqFt: 2200, stories: 2 });
+        expect(audit).toMatchObject({ footprintUsed: 2200, total: 359, requiresManualReview: true });
+        expect(audit.manualReviewReasons).toContain('flea_home_size_source_unclear');
+        expect(flea({ homeSqFt: 2200, footprintSqFt: 1600, stories: 2 })).toMatchObject({ footprintUsed: 2200, total: 359, requiresManualReview: false });
+        // A partial upper story (the tool accepts fractional stories) is still ambiguous.
+        expect(flea({ buildingSqFt: 1500, stories: 1.5 }).manualReviewReasons).toContain('flea_home_size_source_unclear');
+        // The ground-floor replay of a sent estimate never gains the flag (its price and flags stay as sent).
+        expect(flea(ib, true).manualReviewReasons).not.toContain('flea_home_size_source_unclear');
+        // An explicitly supplied footprint with no living area is a ground floor: scaled by stories.
+        expect(flea({ footprintSqFt: 1500, stories: 2 })).toMatchObject({ footprintUsed: 3000, total: 390 });
+      });
+
+      test('an Intelligence Bar quote with living area and two stories prices the whole home', () => {
+        expect(flea({ homeSqFt: 3000, stories: 2 })).toMatchObject({ footprintUsed: 3000, total: 390 });
+        expect(flea({ homeSqFt: 3000, stories: 2 }, true).total).toBe(342);
+      });
+
+      test('an aggregate or condo with footprintUnknown keeps the old flags and sizes', () => {
+        for (const extra of [{ homeSqFt: 90000, stories: 1 }, { homeSqFt: 90000, stories: 1, footprintSqFt: 1200 }]) {
+          const inputs = { ...extra, footprintUnknown: true };
+          expect(flags(flea(inputs))).toEqual(flags(flea(inputs, true)));
+          expect(flea(inputs).footprintUsed).toBe(flea(inputs, true).footprintUsed);
+          expect(flea(inputs).total).toBe(flea(inputs, true).total);
+        }
+      });
+    });
+  });
 });

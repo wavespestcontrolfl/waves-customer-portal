@@ -240,6 +240,30 @@ function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) 
   return null;
 }
 
+// The whole-home living area of a RESIDENTIAL property from the SERVER-SIDE lookup row only (never the body, never the client's
+// enriched profile): the lookup's living area, else the trusted footprint x the trusted story count. Null when no trusted building exists. The flea package
+// sizes on total living area (owner ruling 2026-11-26); when the customer gave no home size the route would otherwise price
+// it from the synthetic 2,000 default.
+function trustedFleaHomeSqFt(trustedTurf = {}, propertyRecord = null) {
+  // A multi-unit parcel's lookup area can be the summed area of every unit (a known story count does not set footprintUnknown):
+  // never one home's size.
+  const attestedUnits = Math.max(Number(trustedTurf?.unitCount) || 0, Number(trustedTurf?.parcel?.residentialUnits) || 0,
+    Number(propertyRecord?.residentialUnits) || 0, Number(propertyRecord?.parcel?.residentialUnits) || 0);
+  if (attestedUnits > 1) return null;
+  // The lookup's own living area is the whole home, trusted on its own guards (its verify flags and the aggregate marker), never
+  // on the story count: an unknown story count does not make a reliable living area unreliable.
+  const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
+  if (t.footprintUnknown !== true && lookupDimensionIsTrustworthy(t, 'homeSqFt')) {
+    const livingArea = Number(t.homeSqFt) > 0 ? Number(t.homeSqFt) : Number(t.livingAreaSqFt);
+    if (livingArea > 0) return Math.round(livingArea);
+  }
+  // A ground-floor footprint is scaled by stories only with a TRUSTED story count (trustedTreeShrubFootprintSqFt).
+  const footprint = trustedTreeShrubFootprintSqFt(t, propertyRecord);
+  if (footprint == null) return null;
+  const stories = Math.max(1, Math.min(3, Number(t.stories) || 1));
+  return Math.round(footprint * stories);
+}
+
 // Pool and pool-cage features for the website quote. GATE_CAGE_TWO_SIZES (owner
 // 2026-11-19, "hold"): a cage that today's four sizes call Large or Oversized keeps
 // its manual-quote hold. One invariant: the cage size and the hold come from the best
@@ -1809,8 +1833,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
     const treeShrubFootprintSqFt = trustedTreeShrubFootprintSqFt(trustedTurf, trustedRecord);
+    // Flea only: no home size was posted (the 2,000 default is about to be substituted) and the server's own lookup measured a
+    // residential home. Both fields are set here, never read from the body, and reach only priceFlea (nothing else changes).
+    // The wizard's untouched confirm-step placeholder (a wizard-shaped request, exactly 2,000, buildingSizeConfirmed not true) is the
+    // default too, never a customer-supplied size; a confirmed 2,000 sq ft home is genuine, and a direct API caller's explicit size
+    // (no enriched profile) is always genuine.
+    const homeSizeIsDefault = !(Number(homeSqFt) > 0) || (wizardShaped && buildingSizeConfirmed !== true && Number(homeSqFt) === 2000);
+    const fleaMeasuredHomeSqFt = !commercialDetected && services?.flea && homeSizeIsDefault
+      ? trustedFleaHomeSqFt(trustedTurf, trustedRecord)
+      : null;
     let engineInput = {
       homeSqFt: sqft,
+      ...(fleaMeasuredHomeSqFt ? { fleaMeasuredHomeSqFt, homeSqFtIsDefault: true } : {}),
       // Tree & Shrub open-parcel basis: the server-measured footprint, never
       // the body's homeSqFt; absent → the pricer parks the lot-based line.
       ...(treeShrubFootprintSqFt != null ? { treeShrubFootprintSqFt } : {}),
@@ -3408,6 +3442,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             guaranteeWindowDaysAfterFollowUp: item.guaranteeWindowDaysAfterFollowUp ?? null,
             maxIncludedRetreats: item.maxIncludedRetreats ?? null,
             exteriorStatus: item.exteriorStatus ?? null,
+            // Flea size rule the row was quoted under (estimate-flea-size-replay reads it; an unstamped flea row replays as pre-2026-11-26).
+            ...(item.fleaSizeBasis ? { fleaSizeBasis: item.fleaSizeBasis, footprintUsed: item.footprintUsed ?? null, footprintSource: item.footprintSource ?? null, ...(item.fleaPostedHomeSqFt ? { fleaPostedHomeSqFt: item.fleaPostedHomeSqFt } : {}) } : {}),
             // Palm-injection lines carry cadence ONLY as appsPerYear (the
             // palm pricer emits no visits/frequency) — dropping it here
             // left the mirrored draft cadence-less, so a palm-only handoff
@@ -4666,6 +4702,7 @@ module.exports = router;
 module.exports._internals = {
   isResidentialVerificationHold,
   trustedTreeShrubFootprintSqFt,
+  trustedFleaHomeSqFt,
   deriveAddressUnverified,
   findPriorOpenWizardLeadId,
   clampLeadText,

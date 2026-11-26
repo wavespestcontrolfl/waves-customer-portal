@@ -21,6 +21,12 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'preSlabTermiticidePricingKnobs',
   'trenchingTermiticidePricingKnobs',
   'areaAddOnPricingKnobs',
+  // Flea interior size basis a stored estimate replays under (estimate-flea-size-replay): a posted copy would pick the retired
+  // ground-floor price.
+  'fleaSizeBasisReplay',
+  // Route-set flea inputs of the public website quote (the server lookup's measured home beside the substituted 2,000 default).
+  'fleaMeasuredHomeSqFt',
+  'homeSqFtIsDefault',
   'palmAnnualRounding',
   'commercialFloorsArmedServices',
   'commercialFloorsArmed',

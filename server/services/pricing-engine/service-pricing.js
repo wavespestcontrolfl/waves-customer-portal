@@ -8685,6 +8685,76 @@ function fleaOfferConfig(cfg) {
   };
 }
 
+// Flea interior size basis. 'total_living_area' is the live rule; 'ground_floor'
+// is the pre-2026-11-26 rule (living area / stories), kept ONLY so a stored
+// estimate quoted that way replays at the price it was sent at.
+const FLEA_SIZE_BASIS_TOTAL = 'total_living_area';
+const FLEA_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
+
+// The size the interior flea package steps on: the home's total living area.
+// Same result shape as resolvePestFootprint. Order: the living-area inputs
+// first (homeSqFt, livingAreaSqFt; see the provenance flags below), then a measured ground-floor footprint
+// scaled up by the story count (a footprint alone is the best evidence left
+// of the whole home; buildingSqFt is a footprint too and scales the same way).
+// footprintUnknown (an association
+// aggregate whose summed living area is not one home) keeps the pest
+// footprint rules untouched: explicit footprint only, else the 2,000 fallback
+// with manual review.
+function resolveFleaInteriorSize(property = {}) {
+  // The profile clears footprintUnknown when a measured footprint exists, so the engine also passes the original flag.
+  if (property.footprintUnknown === true || property.fleaFootprintUnknown === true) {
+    return resolvePestFootprint({ ...property, footprintUnknown: true });
+  }
+  // The public quote route substituted its 2,000 sq ft default for a missing home size and passes the server lookup's measured
+  // whole home beside it (route-set, never from a client body): the measured value is the home, the default is not.
+  if (property.fleaHomeSqFtIsDefault === true && positiveFiniteNumber(property.fleaMeasuredHomeSqFt) !== null) {
+    return {
+      footprint: Math.round(positiveFiniteNumber(property.fleaMeasuredHomeSqFt)),
+      source: 'lookup_measured_home',
+      wasDefaulted: false,
+      requiresManualReview: false,
+      manualReviewReasons: [],
+      warnings: [],
+    };
+  }
+  const stories = positiveStories(property.stories);
+  const scaled = (value) => {
+    const parsed = positiveFiniteNumber(value);
+    return parsed === null ? null : Math.max(1, Math.round(parsed * stories));
+  };
+  // homeSqFt and livingAreaSqFt are the home's total living area; a supplied footprint never beats them. The Intelligence
+  // Bar cannot tell a building footprint from a living area in buildingSqFt (its lookup credential certifies buildingSqFt
+  // from the property's home_sqft, a living area), and it aliases buildingSqFt into homeSqFt, so that alias is read as a
+  // living area: the reading that never inflates a quote. buildingSizeMeasured is not read either (the tool defaults it
+  // to false beside a real homeSqFt). Through generateEstimate only a SUPPLIED footprint counts: the profile's footprint
+  // is homeSqFt / stories when none was supplied; a direct caller's footprint fields are read as given.
+  const suppliedFootprint = Object.prototype.hasOwnProperty.call(property, 'fleaExplicitFootprint')
+    ? [['footprintSqFt', property.fleaExplicitFootprint, scaled]]
+    : [['footprint', property.footprint, scaled], ['footprintSqFt', property.footprintSqFt, scaled]];
+  // homeSqFt equal to buildingSqFt may be the Intelligence Bar's alias of a building measurement rather than a living area.
+  // An explicit livingAreaSqFt wins over it. Otherwise the supplied value prices as a living area (never inflated) and the
+  // line routes to review on a multi-story home: an unclear size never raises the price without review. A supplied footprint
+  // x stories is used only when there is no homeSqFt, livingAreaSqFt or buildingSqFt value at all (a true footprint-only input).
+  const homeIsBuildingAlias = Number(property.buildingSqFt) > 0 && Number(property.homeSqFt) === Number(property.buildingSqFt);
+  const aliases = [
+    ...(homeIsBuildingAlias ? [['livingAreaSqFt', property.livingAreaSqFt, positiveFiniteNumber]] : []),
+    ['homeSqFt', property.homeSqFt, positiveFiniteNumber],
+    ['livingAreaSqFt', property.livingAreaSqFt, positiveFiniteNumber],
+    ['buildingSqFt', property.buildingSqFt, positiveFiniteNumber],
+    ...suppliedFootprint,
+  ];
+  for (const [source, value, parser] of aliases) {
+    const parsed = parser(value);
+    if (parsed !== null) {
+      return { footprint: parsed, source, wasDefaulted: false, requiresManualReview: false, manualReviewReasons: [], warnings: [] };
+    }
+  }
+  // Nothing usable. resolvePestFootprint reads the same fields with the same
+  // positive-number test, so it reaches the same dead end and returns the
+  // shared 2,000 fallback with its review reasons.
+  return resolvePestFootprint(property);
+}
+
 function priceFlea(property = {}) {
   const cfg = SPECIALTY.flea;
   const services = property.services || {};
@@ -8699,12 +8769,24 @@ function priceFlea(property = {}) {
     property.fleaOfferKey ?? property.offerKey ?? services.fleaOfferKey ?? fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? ''
   ).trim().toLowerCase();
   const singleVisitRequested = RETIRED_FLEA_SINGLE_KEYS.has(requestedOfferKey);
-  const footprintResolution = resolvePestFootprint({
-    ...property,
-    homeSqFt: property.homeSqFt
-      ? Math.round(Number(property.homeSqFt) / Number(property.stories || 1))
-      : property.homeSqFt,
-  });
+  // The interior package is sized on the home's TOTAL living area (owner ruling
+  // 2026-11-26 "whole home"): fleas live on every floor, so a 3,000 sq ft
+  // two-story home prices like a 3,000 sq ft one-story home. A stored estimate
+  // that was quoted on the ground-floor footprint replays with fleaSizeBasis
+  // 'ground_floor' (estimate-flea-size-replay.js) and keeps its price.
+  const fleaSizeBasis = property.fleaSizeBasis === FLEA_SIZE_BASIS_GROUND_FLOOR
+    ? FLEA_SIZE_BASIS_GROUND_FLOOR
+    : FLEA_SIZE_BASIS_TOTAL;
+  const footprintResolution = fleaSizeBasis === FLEA_SIZE_BASIS_GROUND_FLOOR
+    ? resolvePestFootprint({
+      ...property,
+      homeSqFt: property.homeSqFt
+        ? Math.round(Number(property.homeSqFt) / Number(property.stories || 1))
+        : property.homeSqFt,
+    })
+    : resolveFleaInteriorSize(property);
+  // Named `footprint` for the adjustment table (its keys keep the name), but
+  // under the whole-home basis it is the total living area, not a footprint.
   const footprint = footprintResolution.footprint;
   const lotSqFt = Number(property.lotSqFt ?? property.lotSizeSqFt ?? 7500) || 7500;
   const features = property.features || {};
@@ -8775,6 +8857,13 @@ function priceFlea(property = {}) {
     ? `Exterior flea spray — ${exterior.areaSqFt.toLocaleString()} sf${exterior.source === 'AI_ESTIMATE' ? ' AI estimate' : ''}`
     : null;
   const manualReviewReasons = [...footprintResolution.manualReviewReasons];
+  // Home size that may be the ground floor only (a buildingSqFt measurement, or the Intelligence Bar's alias of it in homeSqFt,
+  // on a multi-story home): priced as a living area, never inflated, but a person confirms the total living area before it
+  // goes out. Decided here from the inputs, so every entry point (compute_estimate, the draft path, a replay) agrees.
+  const homeSizeSourceUnclear = fleaSizeBasis === FLEA_SIZE_BASIS_TOTAL && positiveStories(property.stories) > 1
+    && (footprintResolution.source === 'buildingSqFt'
+      || (footprintResolution.source === 'homeSqFt' && Number(property.buildingSqFt) > 0 && Number(property.homeSqFt) === Number(property.buildingSqFt)));
+  if (homeSizeSourceUnclear) manualReviewReasons.push('flea_home_size_source_unclear');
   if (exteriorSelected && exterior.source === 'UNKNOWN') {
     manualReviewReasons.push('flea_exterior_area_source_unknown');
   }
@@ -8789,6 +8878,7 @@ function priceFlea(property = {}) {
   }
   const warnings = uniqueList([
     ...footprintResolution.warnings,
+    ...(homeSizeSourceUnclear ? ['Home size may be ground floor only: confirm total living area before sending.'] : []),
     ...(exteriorSelected ? (exterior.warnings || []) : []),
     ...(exteriorSourceSuspected && !exteriorSelected ? ['Exterior flea source suspected; guarantee scope is limited to treated interior areas.'] : []),
     ...(singleVisitRequested ? ['A single-visit flea knockdown was requested; flea is sold only as the two-visit Elimination Package — confirm the scope before sending.'] : []),
@@ -8846,12 +8936,20 @@ function priceFlea(property = {}) {
     reason: exterior.customQuoteReason || null,
     warning: warnings[0] || null,
     warnings,
-    requiresManualReview: footprintResolution.requiresManualReview || singleVisitRequested || !!(exteriorSelected && (exterior.needsConfirmation || exterior.requiresCustomQuote)),
+    requiresManualReview: footprintResolution.requiresManualReview || homeSizeSourceUnclear || singleVisitRequested || !!(exteriorSelected && (exterior.needsConfirmation || exterior.requiresCustomQuote)),
     manualReviewReasons: uniqueList(manualReviewReasons),
     areaSource: exterior.source,
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
+    // The size the interior package was stepped on and the rule that chose it.
+    // fleaSizeBasis rides onto the stored row: the replay reads it to keep a
+    // sent estimate on the rule it was quoted under.
+    interiorSizeSqFt: footprint,
+    fleaSizeBasis,
+    // The size the request posted when the route replaced it with the server lookup's measured home: a revision of the sent quote
+    // compares it to tell whether the operator edited the size (estimate-flea-size-replay generateWithFleaRecord).
+    ...(property.fleaHomeSqFtIsDefault === true && Number(property.homeSqFt) > 0 ? { fleaPostedHomeSqFt: Math.round(Number(property.homeSqFt)) } : {}),
     infestationComplexity,
     warrantyType: offer.warrantyType,
     warrantyLabel,
