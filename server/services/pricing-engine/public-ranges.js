@@ -503,7 +503,7 @@ function buildRows() {
     // code table (SPECIALTY.wdo.sizeTable), so a table edit moves it; the typical-home sweep can only widen it.
     values: wdoTableValues().concat(sweepValues(
       TYPICAL_HOMES.flatMap((homeSqFt) => [{ constructionMaterial: 'CBS' }, { constructionMaterial: 'WOOD_FRAME' }, { constructionMaterial: 'CBS', foundationType: 'CRAWLSPACE' }]
-        .map((construction) => ({ homeSqFt, ...construction }))),
+        .map((construction) => ({ homeSqFt, constructionTrusted: true, foundationTrusted: true, ...construction }))),
       (property) => sp.priceWDO(property),
       (r) => r.price)),
     notes: 'Wood-destroying organism inspection with official FDACS report. Price by home size and construction.',

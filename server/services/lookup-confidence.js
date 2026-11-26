@@ -341,26 +341,28 @@ function structuralFactIsRecordBacked({ record, field }) {
 }
 
 // The trust verdict the WDO price reads for one structural field of a PROFILE (the enriched lookup profile the estimator posts back,
-// or a saved older one). false = distrusted: the profile's own verdict flag says so, or its field evidence carries fieldVerify (a
-// saved profile from before the verdict flag still has the evidence), or it has no property record and no evidence for the field.
-// Anything else reads as trusted.
+// or a saved older one). Conservative (owner 2026-11-26): a reading is trusted ONLY with an explicit stamp true, or with field-specific
+// evidence from a source that is not a photo / AI / generic guess (a county record, a tech-verified value). The profile's own false
+// stamp and any fieldVerify evidence always win. Everything else (an old profile, a record-only profile, missing sources) is untrusted:
+// the WDO price falls back to block / slab and adds the staff note. This can only lower a quote versus the frame and crawl cells.
+const UNTRUSTED_EVIDENCE_SOURCES = new Set(['', 'satellite', 'ai', 'vision', 'generic', 'unknown']);
 function profileStructuralFactIsTrusted(profile, { field, flag }) {
   if (profile?.[flag] === false) return false;
-  const evidence = profile?.fieldEvidence?.[field] ?? profile?._fieldEvidence?.[field];
+  const stored = profile?.fieldEvidence?.[field] ?? profile?._fieldEvidence?.[field];
+  const evidence = Array.isArray(stored) ? stored[0] : stored;
   if (evidence?.fieldVerify) return false;
-  // No flag and no evidence for the field: a profile whose sources say the property record never answered (satellite only) is
-  // untrusted. A profile with no source record at all (hand-built, legacy) keeps the trusted default.
-  return !(profile?.dataSources && profile.dataSources.propertyRecord === false && !evidence);
+  if (profile?.[flag] === true) return true;
+  return !!evidence && !UNTRUSTED_EVIDENCE_SOURCES.has(String(evidence.sourceType || '').toLowerCase());
 }
 const WDO_STRUCTURAL_FIELDS = Object.freeze({
   construction: { field: 'constructionMaterial', flag: 'constructionTrusted' },
   foundation: { field: 'foundationType', flag: 'foundationTrusted' },
 });
-// { constructionTrusted?: false, foundationTrusted?: false }: only a false verdict is carried to the pricer.
+// { constructionTrusted, foundationTrusted }: always both, true or false; the pricer reads only a true as trusted.
 function structuralTrustVerdicts(profile) {
   return {
-    ...(profileStructuralFactIsTrusted(profile, WDO_STRUCTURAL_FIELDS.construction) ? {} : { constructionTrusted: false }),
-    ...(profileStructuralFactIsTrusted(profile, WDO_STRUCTURAL_FIELDS.foundation) ? {} : { foundationTrusted: false }),
+    constructionTrusted: profileStructuralFactIsTrusted(profile, WDO_STRUCTURAL_FIELDS.construction),
+    foundationTrusted: profileStructuralFactIsTrusted(profile, WDO_STRUCTURAL_FIELDS.foundation),
   };
 }
 

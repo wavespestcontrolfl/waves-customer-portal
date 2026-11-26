@@ -733,8 +733,8 @@ function calculatePropertyProfile(input) {
     constructionMaterial: input.constructionMaterial || null,
     foundationType: input.foundationType || null,
     // Lookup trust verdicts (false = weak evidence), read by the WDO price only. Absent = no verdict.
-    constructionTrusted: input.constructionTrusted === false ? false : undefined,
-    foundationTrusted: input.foundationTrusted === false ? false : undefined,
+    constructionTrusted: typeof input.constructionTrusted === 'boolean' ? input.constructionTrusted : undefined,
+    foundationTrusted: typeof input.foundationTrusted === 'boolean' ? input.foundationTrusted : undefined,
     roofType: input.roofType || null,
     nearWater: input.nearWater || (features.nearWater ? 'CLOSE' : 'NONE'),
     waterDistance: input.waterDistance || null,

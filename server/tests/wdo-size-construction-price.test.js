@@ -23,8 +23,11 @@ const MARK = SPECIALTY.wdo.sizeTable.staffNoteMarker;
 // The staff note on a priced line (undefined when none).
 const staffNote = (line) => (line.warnings || []).find((w) => typeof w === 'string' && w.startsWith(MARK));
 const LEGACY = SPECIALTY.wdo.brackets[0].price;
+// A reading counts only with an explicit trust stamp true (owner 2026-11-26): the fixtures carry it, the trust cases override it.
+const TRUSTED = { constructionTrusted: true, foundationTrusted: true };
+const wdo = (property, options) => priceWDO({ ...TRUSTED, ...property }, options);
 const baseInput = (overrides = {}) => ({
-  homeSqFt: 2000, stories: 1, lotSqFt: 10000, propertyType: 'single_family', zone: 'A',
+  homeSqFt: 2000, stories: 1, lotSqFt: 10000, propertyType: 'single_family', zone: 'A', ...TRUSTED,
   features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
   ...overrides,
 });
@@ -38,7 +41,7 @@ describe('priceWDO: the size + construction table', () => {
   const FRAME = ['WOOD_FRAME', 'frame', 'mixed', 'Wood Frame'];
 
   test('the legacy flat price is unchanged: $250 at every size', () => {
-    for (const homeSqFt of [900, 2500, 2501, 4000, 6000]) expect(priceWDO({ homeSqFt, footprint: homeSqFt }, { legacyWdoFlat: true }).price).toBe(LEGACY);
+    for (const homeSqFt of [900, 2500, 2501, 4000, 6000]) expect(wdo({ homeSqFt, footprint: homeSqFt }, { legacyWdoFlat: true }).price).toBe(LEGACY);
     expect(LEGACY).toBe(250);
   });
 
@@ -49,18 +52,18 @@ describe('priceWDO: the size + construction table', () => {
     [4001, 225, 250, 275], [6000, 225, 250, 275],
   ])('home %i sq ft: block $%i, frame $%i, crawl space $%i', (homeSqFt, block, frame, crawl) => {
     for (const c of BLOCK) {
-      const r = priceWDO({ homeSqFt, constructionMaterial: c, foundationType: 'SLAB' });
+      const r = wdo({ homeSqFt, constructionMaterial: c, foundationType: 'SLAB' });
       expect(r.price).toBe(block);
       expect(staffNote(r)).toBeUndefined();
     }
     for (const c of FRAME) {
-      const r = priceWDO({ homeSqFt, constructionMaterial: c });
+      const r = wdo({ homeSqFt, constructionMaterial: c });
       expect(r.price).toBe(frame);
       expect(staffNote(r)).toBeUndefined();
     }
     for (const foundationType of ['CRAWLSPACE', 'RAISED', 'crawl space']) {
       for (const constructionMaterial of ['CBS', 'WOOD_FRAME', undefined]) {
-        const r = priceWDO({ homeSqFt, constructionMaterial, foundationType });
+        const r = wdo({ homeSqFt, constructionMaterial, foundationType });
         expect(r.price).toBe(crawl);
         // A known crawl space is a stated fact: no construction note even when the walls are unknown.
         expect(staffNote(r)).toBeUndefined();
@@ -69,53 +72,59 @@ describe('priceWDO: the size + construction table', () => {
   });
 
   test('the size is the home living area; the footprint stands in only when none is known', () => {
-    expect(priceWDO({ homeSqFt: 3500, footprint: 1750, constructionMaterial: 'CBS' }).price).toBe(200);
-    expect(priceWDO({ footprint: 3500, constructionMaterial: 'CBS' }).price).toBe(200);
-    expect(priceWDO({ homeSqFt: 3500, footprint: 1750, constructionMaterial: 'CBS' }).sizeUsed).toBe(3500);
+    expect(wdo({ homeSqFt: 3500, footprint: 1750, constructionMaterial: 'CBS' }).price).toBe(200);
+    expect(wdo({ footprint: 3500, constructionMaterial: 'CBS' }).price).toBe(200);
+    expect(wdo({ homeSqFt: 3500, footprint: 1750, constructionMaterial: 'CBS' }).sizeUsed).toBe(3500);
   });
 
   test('slab and basement foundations do not take the crawl-space column', () => {
-    expect(priceWDO({ homeSqFt: 3000, constructionMaterial: 'CBS', foundationType: 'SLAB' }).price).toBe(175);
-    expect(priceWDO({ homeSqFt: 3000, constructionMaterial: 'CBS', foundationType: 'BASEMENT' }).price).toBe(175);
+    expect(wdo({ homeSqFt: 3000, constructionMaterial: 'CBS', foundationType: 'SLAB' }).price).toBe(175);
+    expect(wdo({ homeSqFt: 3000, constructionMaterial: 'CBS', foundationType: 'BASEMENT' }).price).toBe(175);
   });
 
   test('unknown or untrusted construction prices as block and adds the internal staff note, never a guess up', () => {
     for (const constructionMaterial of [undefined, null, '', 'UNKNOWN', 'METAL']) {
-      const r = priceWDO({ homeSqFt: 3000, constructionMaterial });
+      const r = wdo({ homeSqFt: 3000, constructionMaterial });
       expect(r.price).toBe(175);
       expect(staffNote(r)).toBeTruthy();
     }
     // A lookup value the record's evidence marks weak is treated as unknown: wood frame untrusted stays on the block price.
-    const weak = priceWDO({ homeSqFt: 3000, constructionMaterial: 'WOOD_FRAME', constructionTrusted: false });
+    const weak = wdo({ homeSqFt: 3000, constructionMaterial: 'WOOD_FRAME', constructionTrusted: false });
     expect(weak.price).toBe(175);
     expect(staffNote(weak)).toBeTruthy();
     // A weak crawl-space read is dropped (priced as a slab) and the staff note says so.
-    const weakCrawl = priceWDO({ homeSqFt: 3000, constructionMaterial: 'CBS', foundationType: 'CRAWLSPACE', foundationTrusted: false });
+    const weakCrawl = wdo({ homeSqFt: 3000, constructionMaterial: 'CBS', foundationType: 'CRAWLSPACE', foundationTrusted: false });
     expect(weakCrawl.price).toBe(175);
     expect(staffNote(weakCrawl)).toBeTruthy();
-    // Only an explicit false distrusts: no verdict reads as trusted.
-    expect(priceWDO({ homeSqFt: 3000, constructionMaterial: 'WOOD_FRAME', constructionTrusted: undefined }).price).toBe(200);
+    // Only an explicit true trusts: no stamp reads untrusted (block price + the note), never a guess up.
+    const unstamped = wdo({ homeSqFt: 3000, constructionMaterial: 'WOOD_FRAME', constructionTrusted: undefined });
+    expect(unstamped.price).toBe(175);
+    expect(staffNote(unstamped)).toBeTruthy();
+    expect(wdo({ homeSqFt: 3000, constructionMaterial: 'CBS', foundationType: 'CRAWLSPACE', foundationTrusted: undefined }).price).toBe(175);
   });
 
-  // Trust applies per field: a weak foundation prices as a slab (walls then pick the column), a weak construction reads as unknown.
+  // Trust applies per field and only an explicit true counts: an untrusted or unstamped foundation prices as a slab (walls then pick
+  // the column), an untrusted or unstamped construction reads as unknown.
   describe.each([
     ['WOOD_FRAME', 'SLAB'], ['WOOD_FRAME', 'CRAWLSPACE'], ['CBS', 'SLAB'], ['CBS', 'CRAWLSPACE'], ['UNKNOWN', 'SLAB'], ['UNKNOWN', 'CRAWLSPACE'],
   ])('walls %s on a %s foundation, 3,000 sq ft (block $175, frame $200, crawl $225)', (walls, foundation) => {
     test.each([
-      [undefined, undefined], [false, undefined], [undefined, false], [false, false],
+      [true, true], [false, true], [true, false], [false, false], [undefined, undefined], [true, undefined], [undefined, true],
     ])('constructionTrusted=%s foundationTrusted=%s', (constructionTrusted, foundationTrusted) => {
-      const r = priceWDO({ homeSqFt: 3000, constructionMaterial: walls, foundationType: foundation, constructionTrusted, foundationTrusted });
-      const crawl = foundation === 'CRAWLSPACE' && foundationTrusted !== false;
-      const wallsKnown = walls !== 'UNKNOWN' && constructionTrusted !== false;
+      const r = wdo({ homeSqFt: 3000, constructionMaterial: walls, foundationType: foundation, constructionTrusted, foundationTrusted });
+      const crawl = foundation === 'CRAWLSPACE' && foundationTrusted === true;
+      const wallsKnown = walls !== 'UNKNOWN' && constructionTrusted === true;
       const price = crawl ? 225 : (wallsKnown && walls === 'WOOD_FRAME' ? 200 : 175);
-      const noted = (!wallsKnown && !crawl) || (foundation === 'CRAWLSPACE' && foundationTrusted === false);
+      const noted = (!wallsKnown && !crawl) || (foundation === 'CRAWLSPACE' && foundationTrusted !== true);
       expect(r.price).toBe(price);
       expect(!!staffNote(r)).toBe(noted);
+      // A conservative rule can only lower a quote versus the frame / crawl cells, never raise it.
+      expect(r.price).toBeLessThanOrEqual(wdo({ homeSqFt: 3000, constructionMaterial: walls, foundationType: foundation }).price);
     });
   });
 
   test('the reported case: wood frame trusted, crawl space untrusted, 3,000 sq ft = frame on slab $200 plus the note', () => {
-    const r = priceWDO({ homeSqFt: 3000, constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE', foundationTrusted: false });
+    const r = wdo({ homeSqFt: 3000, constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE', foundationTrusted: false });
     expect(r.price).toBe(200);
     expect(r.wdoConstructionClass).toBe('frame');
     expect(staffNote(r)).toBeTruthy();
@@ -123,12 +132,12 @@ describe('priceWDO: the size + construction table', () => {
 
   test('every living-area input the engine accepts sizes the table before the footprint', () => {
     // 4,000 sq ft of living area over two stories is a 2,000 sq ft footprint: the table reads the living area ($200 block).
-    expect(priceWDO({ livingAreaSqFt: 4000, stories: 2, constructionMaterial: 'CBS' }).price).toBe(200);
-    expect(priceWDO({ livingAreaSqFt: 4000, stories: 2, constructionMaterial: 'CBS' }).sizeUsed).toBe(4000);
-    expect(priceWDO({ homeSqFt: 4000, stories: 2, constructionMaterial: 'CBS' }).price).toBe(200);
+    expect(wdo({ livingAreaSqFt: 4000, stories: 2, constructionMaterial: 'CBS' }).price).toBe(200);
+    expect(wdo({ livingAreaSqFt: 4000, stories: 2, constructionMaterial: 'CBS' }).sizeUsed).toBe(4000);
+    expect(wdo({ homeSqFt: 4000, stories: 2, constructionMaterial: 'CBS' }).price).toBe(200);
     // homeSqFt wins when both are given; a footprint alone still sizes it.
-    expect(priceWDO({ homeSqFt: 1800, livingAreaSqFt: 4000, constructionMaterial: 'CBS' }).sizeUsed).toBe(1800);
-    expect(priceWDO({ footprint: 4000, constructionMaterial: 'CBS' }).price).toBe(200);
+    expect(wdo({ homeSqFt: 1800, livingAreaSqFt: 4000, constructionMaterial: 'CBS' }).sizeUsed).toBe(1800);
+    expect(wdo({ footprint: 4000, constructionMaterial: 'CBS' }).price).toBe(200);
     expect(price({ livingAreaSqFt: 4000, homeSqFt: undefined, stories: 2, constructionMaterial: 'CBS' })).toBe(200);
   });
 
@@ -154,6 +163,10 @@ describe('estimate engine: fresh quotes', () => {
     expect(weakFoundation.price).toBe(200);
     expect(staffNote(weakFoundation)).toBeTruthy();
     expect(price({ homeSqFt: 3000, constructionMaterial: 'WOOD_FRAME' })).toBe(200);
+    // No stamp on the engine input reads untrusted: block price + the note.
+    const unstamped = wdoLine(estimate({ homeSqFt: 3000, constructionMaterial: 'WOOD_FRAME', constructionTrusted: undefined, foundationTrusted: undefined }));
+    expect(unstamped.price).toBe(175);
+    expect(staffNote(unstamped)).toBeTruthy();
   });
 
   test('every fresh run stamps the metadata and the WDO line false; a legacy run stamps true and prices $250', () => {
@@ -165,7 +178,7 @@ describe('estimate engine: fresh quotes', () => {
     expect(wdoLine(legacy).legacyWdoFlat).toBe(true);
     expect(wdoLine(legacy).price).toBe(250);
     // Legacy equals the old pricer line for line.
-    expect(wdoLine(legacy)).toEqual(expect.objectContaining(priceWDO({ footprint: wdoLine(legacy).footprintUsed, homeSqFt: 2000 }, { legacyWdoFlat: true })));
+    expect(wdoLine(legacy)).toEqual(expect.objectContaining(wdo({ footprint: wdoLine(legacy).footprintUsed, homeSqFt: 2000 }, { legacyWdoFlat: true })));
   });
 
   test('the legacy rule does not touch other services', () => {
@@ -401,40 +414,53 @@ describe('a saved profile with field evidence but no trust flag', () => {
   const priceOf = (input) => wdoLine(generateEstimate(input));
   const translate = (p) => translateV2CallToV1Input(p, ['WDO'], { urgency: 'ROUTINE' });
 
-  test('the translator derives the verdicts from fieldVerify evidence', () => {
-    // Trusted (no evidence, or evidence without fieldVerify): disputed-free wood frame prices as frame ($200), no note.
-    for (const fieldEvidence of [undefined, {}, { constructionMaterial: { fieldVerify: false } }]) {
-      const trusted = priceOf(translate(profile({ fieldEvidence })));
-      expect(trusted.price).toBe(200);
-      expect(staffNote(trusted)).toBeUndefined();
+  const COUNTY = { sourceType: 'county', fieldVerify: false };
+
+  test('the translator trusts only a stamp true or field-specific non-satellite evidence', () => {
+    // County evidence without fieldVerify: wood frame prices as frame ($200), no note.
+    const trusted = priceOf(translate(profile({ fieldEvidence: { constructionMaterial: COUNTY, foundationType: COUNTY } })));
+    expect(trusted.price).toBe(200);
+    expect(staffNote(trusted)).toBeUndefined();
+    // An explicit true stamp also trusts.
+    expect(priceOf(translate(profile({ constructionTrusted: true, foundationTrusted: true }))).price).toBe(200);
+    // Everything else is untrusted: no evidence, empty evidence, evidence with no source, a satellite / AI source.
+    for (const fieldEvidence of [undefined, {}, { constructionMaterial: { fieldVerify: false } }, { constructionMaterial: { sourceType: 'satellite', fieldVerify: false } }, { constructionMaterial: { sourceType: 'generic', fieldVerify: false } }]) {
+      const untrusted = priceOf(translate(profile({ fieldEvidence })));
+      expect(untrusted.price).toBe(175);
+      expect(staffNote(untrusted)).toBeTruthy();
     }
-    // Disputed walls: block price plus the note.
-    const disputed = priceOf(translate(profile({ fieldEvidence: { constructionMaterial: { fieldVerify: true } } })));
+    // A tech-verified value is trusted.
+    expect(priceOf(translate(profile({ fieldEvidence: { constructionMaterial: { sourceType: 'verified', fieldVerify: false } } }))).price).toBe(200);
+    // Disputed walls (fieldVerify) override a true stamp: block price plus the note.
+    const disputed = priceOf(translate(profile({ constructionTrusted: true, fieldEvidence: { constructionMaterial: { ...COUNTY, fieldVerify: true } } })));
     expect(disputed.price).toBe(175);
     expect(staffNote(disputed)).toBeTruthy();
     // Disputed crawl-space read on trusted walls: frame on a slab plus the note.
-    const crawl = priceOf(translate(profile({ foundationType: 'CRAWLSPACE', fieldEvidence: { foundationType: { fieldVerify: true } } })));
+    const crawl = priceOf(translate(profile({ foundationType: 'CRAWLSPACE', fieldEvidence: { constructionMaterial: COUNTY, foundationType: { ...COUNTY, fieldVerify: true } } })));
     expect(crawl.price).toBe(200);
     expect(staffNote(crawl)).toBeTruthy();
-    // Both disputed.
-    const both = priceOf(translate(profile({ foundationType: 'CRAWLSPACE', fieldEvidence: { constructionMaterial: { fieldVerify: true }, foundationType: { fieldVerify: true } } })));
-    expect(both.price).toBe(175);
-    // An explicit posted flag still wins.
-    expect(translate(profile({ constructionTrusted: false })).constructionTrusted).toBe(false);
+    // Trusted crawl space prices as crawl.
+    expect(priceOf(translate(profile({ foundationType: 'CRAWLSPACE', fieldEvidence: { constructionMaterial: COUNTY, foundationType: COUNTY } }))).price).toBe(225);
+    // An explicit posted false wins over evidence.
+    expect(translate(profile({ constructionTrusted: false, fieldEvidence: { constructionMaterial: COUNTY } })).constructionTrusted).toBe(false);
   });
 
   test('the estimator builder (call pipeline and revision path) carries the same verdicts', () => {
     const facts = { home: { value: 3000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] }, lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] }, newConstruction: false, tenant: false };
     const intent = { decision: 'draft', category: 'RESIDENTIAL', is_commercial: false, services: { wdo: {} }, address: '1 Test St' };
     const build = (lookupEnriched) => buildEngineInput({ intent, propertyFacts: facts, context: {}, lookupEnriched });
-    const trusted = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', fieldEvidence: {} });
-    expect(trusted.constructionTrusted).toBeUndefined();
+    const trusted = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', fieldEvidence: { constructionMaterial: COUNTY, foundationType: COUNTY } });
+    expect(trusted.constructionTrusted).toBe(true);
     expect(priceOf(trusted).price).toBe(200);
-    const disputed = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', fieldEvidence: { constructionMaterial: { fieldVerify: true } } });
+    // No stamp and no evidence: untrusted.
+    const bare = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', fieldEvidence: {} });
+    expect(bare.constructionTrusted).toBe(false);
+    expect(priceOf(bare).price).toBe(175);
+    const disputed = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', fieldEvidence: { constructionMaterial: { ...COUNTY, fieldVerify: true } } });
     expect(disputed.constructionTrusted).toBe(false);
     expect(priceOf(disputed).price).toBe(175);
     expect(staffNote(priceOf(disputed))).toBeTruthy();
-    const crawl = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE', fieldEvidence: { foundationType: { fieldVerify: true } } });
+    const crawl = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE', fieldEvidence: { constructionMaterial: COUNTY, foundationType: { ...COUNTY, fieldVerify: true } } });
     expect(crawl.foundationTrusted).toBe(false);
     expect(priceOf(crawl).price).toBe(200);
   });
@@ -492,15 +518,21 @@ describe('tech-verified phrasings reach the WDO line', () => {
 
 describe('a profile with no verdict flag and no evidence', () => {
   const { structuralTrustVerdicts } = require('../services/lookup-confidence');
+  const COUNTY = { sourceType: 'county', fieldVerify: false };
 
-  test('a satellite-only profile (no property record, no field evidence) is untrusted; a record-backed or source-less one is trusted', () => {
-    const satellite = { constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE', dataSources: { propertyRecord: false, satellite: true, fieldEvidence: false } };
-    expect(structuralTrustVerdicts(satellite)).toEqual({ constructionTrusted: false, foundationTrusted: false });
-    expect(structuralTrustVerdicts({ ...satellite, dataSources: { propertyRecord: true } })).toEqual({});
-    expect(structuralTrustVerdicts({ constructionMaterial: 'WOOD_FRAME' })).toEqual({});
-    // Evidence for the field (a tech verified it) keeps it trusted even with no record.
-    expect(structuralTrustVerdicts({ ...satellite, fieldEvidence: { constructionMaterial: { sourceType: 'verified', fieldVerify: false } } }))
-      .toEqual({ foundationTrusted: false });
+  test('only a stamp true or field-specific non-satellite evidence is trusted; old, record-only and source-less profiles are not', () => {
+    const base = { constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE' };
+    const untrusted = { constructionTrusted: false, foundationTrusted: false };
+    expect(structuralTrustVerdicts(base)).toEqual(untrusted);
+    expect(structuralTrustVerdicts({ ...base, dataSources: { propertyRecord: true } })).toEqual(untrusted);
+    expect(structuralTrustVerdicts({ ...base, dataSources: { propertyRecord: false, satellite: true } })).toEqual(untrusted);
+    expect(structuralTrustVerdicts({ ...base, fieldEvidence: { constructionMaterial: { sourceType: 'satellite', fieldVerify: false } } })).toEqual(untrusted);
+    expect(structuralTrustVerdicts({ ...base, constructionTrusted: true, foundationTrusted: true })).toEqual({ constructionTrusted: true, foundationTrusted: true });
+    expect(structuralTrustVerdicts({ ...base, fieldEvidence: { constructionMaterial: COUNTY } })).toEqual({ constructionTrusted: true, foundationTrusted: false });
+    expect(structuralTrustVerdicts({ ...base, fieldEvidence: { constructionMaterial: { sourceType: 'verified', fieldVerify: false } } }).constructionTrusted).toBe(true);
+    // fieldVerify beats a true stamp; a false stamp beats evidence.
+    expect(structuralTrustVerdicts({ ...base, constructionTrusted: true, fieldEvidence: { constructionMaterial: { ...COUNTY, fieldVerify: true } } }).constructionTrusted).toBe(false);
+    expect(structuralTrustVerdicts({ ...base, constructionTrusted: false, fieldEvidence: { constructionMaterial: COUNTY } }).constructionTrusted).toBe(false);
   });
 
   test('through the translator: a satellite-only wood frame prices block with the note', () => {
@@ -509,6 +541,67 @@ describe('a profile with no verdict flag and no evidence', () => {
     const line = wdoLine(generateEstimate(input));
     expect(line.price).toBe(175);
     expect(staffNote(line)).toBeTruthy();
+  });
+});
+
+describe('one shared normalizer at every entry', () => {
+  const { normalizeCountyConstruction } = require('../services/property-lookup/ai-property-lookup')._private;
+  const { normalizeConstruction, normalizeFoundation } = require('../services/pricing-engine/structural-facts');
+  const fs = require('fs');
+  const path = require('path');
+
+  test('county ingestion: "steel frame" is metal, so the quote is block + the staff note', () => {
+    expect(normalizeCountyConstruction('STEEL FRAME')).toBe('METAL');
+    expect(normalizeCountyConstruction('FRAME STUCCO')).toBe('MIXED');
+    expect(normalizeCountyConstruction('CONCRETE BLOCK')).toBe('CBS');
+    expect(normalizeCountyConstruction('CMU')).toBe('CBS');
+    expect(normalizeCountyConstruction('WOOD FRAME')).toBe('WOOD_FRAME');
+    expect(normalizeCountyConstruction('vinyl')).toBeNull();
+    const line = wdoLine(estimate({ homeSqFt: 3000, constructionMaterial: normalizeCountyConstruction('STEEL FRAME') }));
+    expect(line.price).toBe(175);
+    expect(staffNote(line)).toBeTruthy();
+  });
+
+  test('the WDO service override goes through the same normalizer: "concrete piers" prices as a raised foundation', () => {
+    expect(price({ homeSqFt: 3000, constructionMaterial: 'CBS', services: { wdo: { foundationType: 'concrete piers' } } })).toBe(225);
+    expect(price({ homeSqFt: 3000, services: { wdo: { constructionType: 'brick veneer over frame' } } })).toBe(200);
+    expect(price({ homeSqFt: 3000, services: { wdo: { constructionType: 'steel frame' } } })).toBe(175);
+    expect(price({ homeSqFt: 3000, services: { wdo: { constructionType: 'wood frame', foundationType: 'stem wall' } } })).toBe(225);
+  });
+
+  test('priceWDO normalizes whatever string arrives, as a last step', () => {
+    expect(wdo({ homeSqFt: 3000, constructionMaterial: 'Concrete Block / Stucco', foundationType: 'Concrete Pilings' }).price).toBe(225);
+    expect(wdo({ homeSqFt: 3000, constructionMaterial: 'steel frame' }).price).toBe(175);
+    expect(staffNote(wdo({ homeSqFt: 3000, constructionMaterial: 'steel frame' }))).toBeTruthy();
+  });
+
+  test('no other non-test file in server/ keeps its own text matcher for construction or foundation', () => {
+    const SHARED = path.join('services', 'pricing-engine', 'structural-facts.js');
+    const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return ['node_modules', 'tests', 'migrations', 'seeds'].includes(entry.name) ? [] : walk(full);
+      return entry.name.endsWith('.js') ? [full] : [];
+    });
+    const serverDir = path.join(__dirname, '..');
+    // A regex literal that tells wood frame / block / crawl / piling apart in free text is a matcher of its own.
+    const matchers = [
+      /\/[^/\n]*\bCRAWL[^/\n]*\//, /\/[^/\n]*(PILING|STILT)[^/\n]*\//,
+      /\/[^/\n]*WOOD\|FRAME[^/\n]*\//, /\/[^/\n]*(CBS\|BLOCK|BLOCK\|CBS|MASONRY\|CONCRETE)[^/\n]*\//,
+    ];
+    const offenders = walk(serverDir)
+      .filter((file) => !file.endsWith(SHARED))
+      .filter((file) => {
+        const text = fs.readFileSync(file, 'utf8');
+        return matchers.some((rx) => rx.test(text.replace(/^\s*(\/\/|\*).*$/gm, '')));
+      })
+      .map((file) => path.relative(serverDir, file));
+    expect(offenders).toEqual([]);
+  });
+
+  test('both normalizers agree with the verified-entry wrappers', () => {
+    const cache = require('../services/property-lookup/lookup-cache');
+    for (const text of ['steel frame', 'brick veneer over frame', 'CBS']) expect(cache.sanitizeVerifiedValue('constructionMaterial', text)).toBe(normalizeConstruction(text));
+    for (const text of ['concrete piers', 'slab']) expect(cache.sanitizeVerifiedValue('foundationType', text)).toBe(normalizeFoundation(text));
   });
 });
 

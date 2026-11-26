@@ -11,6 +11,7 @@ const {
   WAVEGUARD,
 } = require('./constants');
 const { newRuleListPrice } = require('./one-time-pest-price');
+const { normalizeConstruction, normalizeFoundation, wdoWallColumn, foundationIsCrawlClass } = require('./structural-facts');
 const { areaAddOnLimitVerdict, limitText } = require('./area-addon-limits');
 const { areaAddOnKnobsFor } = require('./area-addon-config');
 const { resolveLawnCostPlusBasis, costPlusFloorTuning, liveLawnMarketSchedule } = require('./lawn-cost-plus-knobs');
@@ -8601,20 +8602,8 @@ function priceBedBug(rooms, method = 'CHEMICAL', footprint = 2000) {
   });
 }
 
-// WDO construction class for the size table (owner 2026-11-26): 'block' (concrete block / masonry / stucco), 'frame' (wood frame or mixed),
-// or null when the value is empty, unknown or a type the table does not name (metal): those price as block with a staff note.
-const WDO_BLOCK_CONSTRUCTION = /^(CBS|BLOCK|CONCRETE|CONCRETE_BLOCK|MASONRY|BRICK|STUCCO)$/;
-const WDO_FRAME_CONSTRUCTION = /^(WOOD_FRAME|FRAME|WOOD|MIXED)$/;
 // The home's living area on a property: the one helper the WDO table reads (homeSqFt first, then livingAreaSqFt).
 const wdoLivingArea = (property) => positiveFiniteNumber(property.homeSqFt) ?? positiveFiniteNumber(property.livingAreaSqFt);
-function wdoConstructionClass(raw) {
-  const key = String(raw || '').trim().toUpperCase().replace(/[\s-]+/g, '_');
-  if (WDO_BLOCK_CONSTRUCTION.test(key)) return 'block';
-  if (WDO_FRAME_CONSTRUCTION.test(key)) return 'frame';
-  return null;
-}
-// A crawl space or raised (pier / piling) foundation prices in its own column, whatever the walls are made of.
-const wdoFoundationIsCrawl = (raw) => /^(CRAWLSPACE|CRAWL_SPACE|CRAWL|RAISED|PIER|PILING|STILT)/.test(String(raw || '').trim().toUpperCase().replace(/[\s-]+/g, '_'));
 
 // Size = the home's living area, from the engine's own living-area inputs (homeSqFt, then livingAreaSqFt, the order the flea
 // pricer reads them); a quote with none prices on the footprint the legacy path reads.
@@ -8624,17 +8613,19 @@ function wdoSizeTier(property, footprint) {
   return { size, tier: tiers.find((t) => size <= t.maxSqFt) || tiers[tiers.length - 1] };
 }
 
-// Trust applies per field. A weak (false) construction reads as unknown (null): block + a staff note.
+// Walls: whatever text arrives is normalized by the shared normalizer (structural-facts.js), and a reading counts only when it is
+// stamped trusted (=== true). An unstamped, untrusted or unrecognised reading is unknown (null): block + a staff note, never a guess up.
 function wdoWallClass(property, options) {
-  if ((options.constructionTrusted ?? property.constructionTrusted) === false) return null;
-  return wdoConstructionClass(options.constructionType ?? property.constructionMaterial);
+  if ((options.constructionTrusted ?? property.constructionTrusted) !== true) return null;
+  return wdoWallColumn(normalizeConstruction(options.constructionType ?? property.constructionMaterial));
 }
 
-// A weak foundation is not used: the home prices as on a slab. `dropped` = that discarded read claimed a crawl space or raised foundation.
+// Foundation: same rule. An untrusted reading is not used (the home prices as on a slab); `dropped` = that discarded read claimed a
+// crawl space or raised foundation.
 function wdoFoundation(property, options) {
-  const claimsCrawl = wdoFoundationIsCrawl(options.foundationType ?? property.foundationType);
-  const distrusted = (options.foundationTrusted ?? property.foundationTrusted) === false;
-  return { crawl: claimsCrawl && !distrusted, dropped: claimsCrawl && distrusted };
+  const claimsCrawl = foundationIsCrawlClass(normalizeFoundation(options.foundationType ?? property.foundationType));
+  const trusted = (options.foundationTrusted ?? property.foundationTrusted) === true;
+  return { crawl: claimsCrawl && trusted, dropped: claimsCrawl && !trusted };
 }
 
 // A trusted crawl space is a stated fact on its own and wins; the walls decide the rest.
@@ -8659,7 +8650,7 @@ function wdoStaffNote({ tier, column, wallsKnown, crawl, dropped }) {
 // options.legacyWdoFlat (from the quote's own rule stamp, see estimate-engine legacyWdoFlat) runs the flat price the quote was
 // sold at, unchanged. Otherwise the size + construction table. The construction and size read are the ones on the property passed
 // in: a replay passes the quote's stored inputs, never a live lookup. constructionTrusted / foundationTrusted === false marks a
-// lookup value the record's own evidence flags as weak, judged per field: never a guess up.
+// lookup value the record's own evidence flags as weak; only a stamped-true reading is used, per field: never a guess up.
 function priceWDO(input, options = {}) {
   const property = typeof input === 'number' || typeof input === 'string'
     ? { footprint: input }

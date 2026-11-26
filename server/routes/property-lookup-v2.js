@@ -3121,10 +3121,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       rc?.constructionMaterial, ai?.constructionVisible, 'UNKNOWN'
     ),
     foundationType: inferFoundation(rc, ai),
-    // The WDO price reads these (owner 2026-11-26): false = the value is satellite-only or the record's own evidence marks it weak.
-    // Stamped only as false; an absent verdict reads as trusted.
-    ...(structuralFactIsRecordBacked({ record: rc, field: 'constructionMaterial' }) ? {} : { constructionTrusted: false }),
-    ...(structuralFactIsRecordBacked({ record: rc, field: 'foundationType' }) ? {} : { foundationTrusted: false }),
+    // The WDO price reads these (owner 2026-11-26): true only when the property RECORD supplies the value with no weak-evidence mark.
+    // Satellite-only, merged-weak or missing values are false; a profile with no stamp reads untrusted.
+    constructionTrusted: structuralFactIsRecordBacked({ record: rc, field: 'constructionMaterial' }),
+    foundationTrusted: structuralFactIsRecordBacked({ record: rc, field: 'foundationType' }),
     roofType: mergeField(rc?.roofType, ai?.roofMaterial, 'UNKNOWN'),
     // Roof-style evidence for a later barrel-vs-flat tile price (owner
     // 2026-11-19). Read-only: the county's own words (roofType above folds
@@ -6352,9 +6352,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     yearBuilt: p.yearBuilt,
     constructionMaterial: p.constructionMaterial,
     foundationType: p.foundationType,
-    // The trust verdicts the WDO price reads: the posted flag, or (a saved older profile) its fieldVerify evidence.
-    constructionTrusted: structuralTrustVerdicts(p).constructionTrusted,
-    foundationTrusted: structuralTrustVerdicts(p).foundationTrusted,
+    // The trust verdicts the WDO price reads: a posted true stamp, or field-specific evidence from a non-satellite source; else untrusted.
+    ...structuralTrustVerdicts(p),
     roofType: p.roofType,
     nearWater: p.nearWater,
     waterDistance: p.waterDistance,
