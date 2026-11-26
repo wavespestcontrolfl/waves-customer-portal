@@ -187,11 +187,20 @@ async function saveSummary(callSid, { summary, ...extras }, now) {
 // The alert's why: the staff name, then the model's one-line account of the call (or the summary's first sentence),
 // cut to the 110-character budget. A line the notification rules refuse (a second sentence, a date, a code) is
 // skipped for the next one; the last resort is a fixed line.
+// Words that may go on a lock screen: names redacted as every alert does, and none at all when the line holds an
+// access code (gate, door, alarm), a card number, a security code or an SSN: those lines fall back to fixed copy.
+function bannerWords(words) {
+  const { redactedWords } = require('./admin-alert-names');
+  const plain = redactedWords(words);
+  if (!plain) return '';
+  const { redactAccessCodes } = require('./context-aggregator');
+  return redactAccessCodes(plain) === plain && scrubPans(plain) === plain ? plain : '';
+}
+
 function whyFor(name, reply) {
   const lead = `${name || 'The office'}'s call: `;
-  const { redactedWords } = require('./admin-alert-names');
   for (const words of [reply.alert_line, firstSentence(reply.summary)]) {
-    const plain = redactedWords(words);
+    const plain = bannerWords(words);
     const why = plain ? `${lead}${cutAtWord(plain, MAX_WHY_CHARS - lead.length)}` : '';
     if (why && !breaksAlertRules(why)) return why;
   }
@@ -201,8 +210,7 @@ function whyFor(name, reply) {
 // The alert's action (the bell title after "Comms — "): the model's title, or a fixed line when it breaks the rules.
 function actionFor(name, reply) {
   const room = MAX_HEADLINE_CHARS - 'Comms — '.length;
-  const { redactedWords } = require('./admin-alert-names');
-  const plain = reply.alert_title ? redactedWords(reply.alert_title) : '';
+  const plain = reply.alert_title ? bannerWords(reply.alert_title) : '';
   const title = plain ? cutAtWord(plain, room) : '';
   return title && !breaksAlertRules(title) ? title : `read ${name || 'the office'}'s call summary`;
 }
@@ -224,9 +232,8 @@ async function officeAlertBlock(callSid, meta) {
 }
 
 // ONE admin alert per call answered by a staff member who is not the owner (see officeAlertBlock). A needs-you row
-// when the call left a next step, else an FYI row. A quarantined call raises nothing. A quarantine racing the insert is
-// covered both ways: purgeLiveUtterances deletes a row already written, and a re-check after the insert deletes a row
-// written after the purge. Never throws: the saved summary stands whatever happens here.
+// when the call left a next step, else an FYI row. A quarantined call raises nothing: the insert runs under the purge's
+// lock after a re-check, and a purge after it deletes the row. Never throws: the saved summary stands.
 async function alertOfficeCall(callSid, reply) {
   try {
     const call = await db('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id', 'metadata');
@@ -234,21 +241,40 @@ async function alertOfficeCall(callSid, reply) {
     if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
     if (!call || (await officeAlertBlock(callSid, meta))) return;
     const name = staffNameOf(meta.forward_acceptance);
-    const dedupeKey = `live-call-next-step:${callSid}`;
-    await raiseAdminAlert('live_call_next_step', {
+    await db.transaction(async (trx) => {
+      // The purge's own lock (live-call-transcription.js purgeLiveUtterances): a purge waits for this insert to
+      // commit, then deletes the row; a purge that committed first is seen here and nothing is written.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_live_utterances:${callSid}`]);
+      const clear = await trx('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id');
+      if (clear) await raiseOfficeAlert(trx, callSid, call.id, name, reply);
+    });
+  } catch (err) {
+    logger.warn(`[live-call-early-summary] next-step alert failed: ${err?.code || err?.name || 'error'}`);
+  }
+}
+
+function raiseOfficeAlert(trx, callSid, callId, name, reply) {
+  return raiseAdminAlert('live_call_next_step', {
       area: 'Comms',
       action: actionFor(name, reply),
       why: whyFor(name, reply),
       severity: reply.next_step ? 'needs-you' : 'fyi',
-      link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
-      subject: { type: 'call', id: String(call.id) },
+      link: `/admin/communications#tab=calls&call=${encodeURIComponent(callId)}`,
+      subject: { type: 'call', id: String(callId) },
       doneWhen: 'office_followed_up',
       who: 'person',
-    }, { bell: true, fyiRow: true, dedupeKey, bannerKind: 'live_call_next_step' });
-    if (await quarantinedNow(callSid)) await db('notifications').whereRaw("metadata ->> 'dedupeKey' = ?", [dedupeKey]).del();
-  } catch (err) {
-    logger.warn(`[live-call-early-summary] next-step alert failed: ${err?.code || err?.name || 'error'}`);
-  }
+    }, { bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${callSid}`, bannerKind: 'live_call_next_step', trx });
+}
+
+// The promises the staff side really said: a promise is kept only when most of its words (3+ letters) appear in one
+// "Agent:" line, so a caller's words or a model's guess never show under a staff member's name.
+const words = (t) => (String(t || '').toLowerCase().match(/[a-z0-9']{3,}/g) || []);
+function groundedPromises(promises, transcript) {
+  const agentLines = String(transcript || '').split('\n').filter((l) => l.startsWith('Agent: ')).map((l) => new Set(words(l)));
+  return promises.filter((p) => {
+    const ws = words(p);
+    return ws.length > 0 && agentLines.some((line) => ws.filter((w) => line.has(w)).length / ws.length >= 0.6);
+  });
 }
 
 /**
@@ -262,8 +288,9 @@ async function writeEarlySummary(callSid, { now = () => new Date() } = {}) {
     const { text, utterances } = await transcriptFor(callSid);
     if (utterances < MIN_UTTERANCES) return { written: false, reason: 'too_short' };
     if (await quarantinedNow(callSid)) return { written: false, reason: 'quarantined' };
-    const reply = await summarize(text);
-    if (!reply) return { written: false, reason: 'no_summary' };
+    const parsed = await summarize(text);
+    if (!parsed) return { written: false, reason: 'no_summary' };
+    const reply = { ...parsed, promises: groundedPromises(parsed.promises, text) };
     const written = await saveSummary(callSid, reply, now());
     if (written) await alertOfficeCall(callSid, reply);
     return { written, reason: null };
@@ -280,4 +307,4 @@ function afterCallStopped(callSid, { settleMs = SETTLE_MS } = {}) {
   if (typeof timer?.unref === 'function') timer.unref();
 }
 
-module.exports = { afterCallStopped, writeEarlySummary, _test: { cleanSummary, parseReply, transcriptFor, SETTLE_MS, HEAD_CHARS, TAIL_CHARS } };
+module.exports = { afterCallStopped, writeEarlySummary, _test: { cleanSummary, parseReply, groundedPromises, transcriptFor, SETTLE_MS, HEAD_CHARS, TAIL_CHARS } };

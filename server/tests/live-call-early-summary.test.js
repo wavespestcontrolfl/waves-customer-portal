@@ -272,7 +272,7 @@ describe('writeEarlySummary', () => {
 const JSON_REPLY = {
   summary: 'The caller has ants again. A free return visit is set for Thursday at 9.',
   next_step: 'Text Dana E. the roach quote today.',
-  promises: ["I'll text you the quote in a few minutes."],
+  promises: ['You are set for Thursday at 9.'],
   alert_title: 'text Dana E. a roach quote',
   alert_line: 'Dana E. wants a roach quote; Virginia promised a text.',
 };
@@ -349,7 +349,7 @@ describe('the alert after an office call', () => {
       doneWhen: 'office_followed_up',
       who: 'person',
     });
-    expect(opts).toEqual({ bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${SID}`, bannerKind: 'live_call_next_step' });
+    expect(opts).toEqual({ bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${SID}`, bannerKind: 'live_call_next_step', trx: expect.any(Function) });
   });
 
   test('no next step: an fyi alert that still names the call, with the fallback action', async () => {
@@ -430,6 +430,22 @@ describe('the alert after an office call', () => {
     expect(mockRaise).not.toHaveBeenCalled();
   });
 
+  test('a promise no staff line says (a caller line or a model guess) is dropped', async () => {
+    setCall({ acceptance: staffAnswer });
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ['You are set for Thursday at 9.', 'Thursday morning works.', 'We will waive the fee forever.'] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual(['You are set for Thursday at 9.']);
+  });
+
+  test('a gate code in the model words never reaches the banner: fixed copy instead', async () => {
+    setCall({ acceptance: staffAnswer });
+    reply(JSON.stringify({ ...JSON_REPLY, alert_title: 'use gate code 4821 for Dana', alert_line: 'Dana E. says the gate code is 4821.', summary: 'The gate code is 4821. Tech visits Thursday.' }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    const [, spec] = mockRaise.mock.calls[0];
+    expect(spec.action).toBe("read Virginia's call summary");
+    expect(`${spec.action} ${spec.why}`).not.toMatch(/4821/);
+  });
+
   test('an unknown answerer (no number) is not proof of a staff answer: no alert', async () => {
     setCall({ acceptance: { ...staffAnswer, answered_by_number: null } });
     reply(JSON.stringify(JSON_REPLY));
@@ -447,16 +463,16 @@ describe('the alert after an office call', () => {
     expect(mockRaise).not.toHaveBeenCalled();
   });
 
-  test('a quarantine that lands while the alert is written: the row is deleted after the insert', async () => {
+  test('a quarantine that commits before the locked re-check: nothing is written', async () => {
     setCall({ acceptance: staffAnswer });
-    mockRaise.mockImplementationOnce(async () => {
+    db.transaction.mockImplementationOnce(async (fn) => {
       db.__state.call.metadata.live_transcription.quarantined_at = new Date(T0 + 70000).toISOString();
-      return { id: 'n1' };
+      return fn(db);
     });
     reply(JSON.stringify(JSON_REPLY));
     await early.writeEarlySummary(SID, { now: NOW });
-    expect(mockRaise).toHaveBeenCalledTimes(1);
-    expect(db.__state.deletedAlertKeys).toContain(`live-call-next-step:${SID}`);
+    expect(mockRaise).not.toHaveBeenCalled();
+    expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_live_utterances:${SID}`]);
   });
 
   test('a phone number in the model title is redacted before the bell row', async () => {
@@ -469,6 +485,7 @@ describe('the alert after an office call', () => {
   test('a card-number quarantine deletes the office-call alert row with the summary', async () => {
     setCall({ acceptance: staffAnswer, liveState: { early_summary: { text: 'x' } } });
     say(CALL);
+    db.__state.deletedAlertKeys = [];
     await liveText.purgeLiveUtterances(SID);
     expect(db.__state.deletedAlertKeys).toContain(`live-call-next-step:${SID}`);
   });
