@@ -259,7 +259,8 @@ function RefundTakeBacks({ call, preview, generation, onChanged }) {
   for (const one of preview.takeBackAnswers || []) rows.set(`${one.checkId}:${one.visitId}`, { ...one, isNew: false });
   for (const one of preview.takeBackToSet || []) rows.set(`${one.checkId}:${one.visitId}`, { ...(rows.get(`${one.checkId}:${one.visitId}`) || {}), ...one, isNew: true });
   const applied = (preview.takeBacks || []).filter(one => one.cents !== 0);
-  if (!rows.size && !applied.length) return null;
+  // A balance still owed (frozen on a final week, or live) keeps the section visible even with no live answer, prompt or movement.
+  if (!rows.size && !applied.length && !(preview.outstandingTakeBackCents > 0)) return null;
   return <div className="grid gap-2" aria-label="Refunds on paid stops">
     <h3 className="m-0 text-ui-body font-medium text-zinc-900">Refunds on paid stops</h3>
     {rows.size > 0 && <Table aria-label="Paid stops with a refund">

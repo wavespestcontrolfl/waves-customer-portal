@@ -1179,6 +1179,37 @@ postgres('production share refunds', () => {
     });
   });
 
+  describe('round ten: a bounce before settlement changes the statement signals', () => {
+    it('puts the stripe_failed_refunds ids of the charge or intent in the pay, stmt and orphan-stmt signals', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_fence', stripe_charge_id: 'ch_fence' });
+      const [payer] = await trx('payers').insert({ display_name: 'Sample Payer' }).returning('id');
+      const [stmt] = await trx('payer_statements').insert({
+        payer_id: payer.id, period_start: '2026-09-01', period_end: '2026-09-30', terms_snapshot: 'due_on_receipt', token: randomUUID(), stripe_payment_intent_id: 'pi_stmt_fence',
+      }).returning('id');
+      await trx('invoices').where({ id: invoiceId }).update({ payer_statement_id: stmt.id });
+      await paymentOf(customerId, { stripe_payment_intent_id: 'pi_fence', stripe_charge_id: 'ch_fence', refund_amount: '10.00' });
+      await paymentOf(customerId, { statement_id: stmt.id, customer_id: null, stripe_payment_intent_id: 'pi_stmt_fence', stripe_charge_id: 'ch_stmt_fence', refund_amount: '8.00' });
+      await trx('stripe_orphan_charges').insert({
+        stripe_payment_intent_id: 'pi_stmt_fence', stripe_charge_id: 'ch_stmt_fence', amount: '8.00', source: 'statement_pay_webhook', original_db_error: 'statement partial refund',
+      });
+      const before = (await signals([visit])).get(visit);
+      expect(before.filter((one) => /^(pay|stmt|orphan-stmt):/.test(one))).toHaveLength(4);
+      expect(before.some((one) => /:x[0-9a-f]{10}$/.test(one))).toBe(false);
+      // A refund of the statement charge bounced before settlement and a refund of the card charge bounced before its row existed.
+      await trx('stripe_failed_refunds').insert([
+        { stripe_refund_id: 're_stmt_bounced', stripe_charge_id: 'ch_stmt_fence', stripe_payment_intent_id: 'pi_stmt_fence', context: 'refund.failed before settlement row' },
+        { stripe_refund_id: 're_card_bounced', stripe_charge_id: 'ch_fence', stripe_payment_intent_id: 'pi_fence', context: 'refund.failed before settlement row' },
+      ]);
+      const after = (await signals([visit])).get(visit);
+      expect(after).toHaveLength(4);
+      for (const one of after) expect(one).toMatch(/:x[0-9a-f]{10}$/);
+      expect(after.filter((one) => /^(pay|stmt|orphan-stmt):/.test(one)).every((one) => !before.includes(one))).toBe(true);
+    });
+  });
+
   describe('a parked refund the bank bounced is not a refund signal', () => {
     it('skips a parked refund whose id is fenced as failed, and keeps a reconciled one', async () => {
       const id = await tech('Sample Alpha');

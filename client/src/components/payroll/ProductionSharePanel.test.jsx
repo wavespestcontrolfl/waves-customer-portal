@@ -224,6 +224,12 @@ describe('Production share preview', () => {
       expect(screen.getByLabelText('Take back ($, up to the credit paid)')).toHaveValue('');
     });
 
+    it('keeps the section when a frozen balance is still owed, with no live answer, prompt or movement', async () => {
+      await open({ takeBackToSet: [], takeBackAnswers: [], takeBacks: [], outstandingTakeBackCents: 50000 });
+      expect(screen.getByText(/Still owed and not yet taken: \$500\.00/)).toBeInTheDocument();
+      expect(screen.queryByLabelText('Paid stops with a refund')).toBeNull();
+    });
+
     it('shows no section for a week with no refunds on paid stops', async () => {
       const call = vi.fn(async (path) => answerFor(path, { takeBackToSet: [], takeBackAnswers: [], takeBacks: [] }));
       render(<ProductionSharePanel call={call} technicians={TECHS} />);

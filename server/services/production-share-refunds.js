@@ -60,6 +60,17 @@
  *   credit:<customer_credit_ledger id>       the credit row a full refund writes: source 'adjustment', delta above 0 and exactly the note of
  *                                            customer-credit.js refundCreditNote (a payer transfer or a void write other notes)
  *   inv-refunded:<invoice id>                the invoice status is 'refunded'
+ * Failure marker each family carries (a refund the bank bounced must change or remove its signal, so an answer reopens and movement stops):
+ *   pay            payments.metadata.failed_refund_ids (the id is dropped from the identity hash; the webhook also rewinds refund_amount) AND
+ *                  stripe_failed_refunds by the row's charge or intent (':x<hash>' suffix: a bounce fenced before a row existed)
+ *   stmt           the same two markers as pay
+ *   orphan         a partial refund: stripe_failed_refunds by refund id, or payments.metadata.failed_refund_ids of the charge's rows (EXCLUDED);
+ *                  a partial dispute: the case is resolved when it closes won (EXCLUDED); no refund id exists to fence
+ *   orphan-stmt    stripe_failed_refunds by the row's charge or intent (':x<hash>' suffix); the row itself never changes (unclear, see above)
+ *   deposit        estimate_deposits.failed_refund_ids (':f<hash>' suffix)
+ *   credit         none: a bounce of a full refund does not reverse the credit already returned (the bounce notice says it may need a claw-back), so the
+ *                  row keeps standing and the stop stays under review; the bounce still shows in inv-refunded and pay
+ *   inv-refunded   the invoice status itself: the bounce restores the invoice, and the signal disappears
  * A take-back SOURCE is a stop row with creditCents > 0 on a finalized check of a finalized run whose share is above $0. A refund on a stop of a
  * $0-share check is no take-back source: that week paid no share. (The credit ledger is wider on purpose: paidLedger, production-share.js, lets a
  * finalized check OWN every positive-credit stop on it, so a stop moved out of a $0-share week is still already paid; only the source rule needs a share.)
@@ -67,7 +78,7 @@
  * latter also holding an annual term's prepay invoice) UNION the live visit links, so a deleted visit or a relinked invoice still asks.
  * pay and stmt signals carry the Stripe refund identity when the webhooks recorded it (payments.stripe_refund_id and
  * metadata.stamped_refund_ids): a failed refund followed by a new one of the same amount is a new signal. Legacy rows fall back to cents.
- ONE RULE for an owner answer: it is IN FORCE only while the FULL signal set of its source now (the signals its check froze and the new ones)
+ * ONE RULE for an owner answer: it is IN FORCE only while the FULL signal set of its source now (the signals its check froze and the new ones)
  * EQUALS the set stored with it, which is the full set the owner saw. With no answer, the first prompt is any difference between the full set now
  * and the frozen baseline. Any difference, a new signal or a covered signal
  * gone (a refund reversed), lists the source in takeBackToSet again (reason 'new' or 'changed', the answer shown as the previous total),
@@ -113,6 +124,11 @@ const REFUND_IDENTITY_SQL = `COALESCE((SELECT ':' || left(md5(string_agg(x.id, '
 // a source holding such a signal is listed again EVERY week (reason 'unclear', the answer shown as the previous total) so the owner re-checks it; the
 // answer he saved keeps being applied meanwhile (see addSource).
 const UNCLEAR_SIGNAL_PREFIX = 'orphan-stmt:';
+// The refund ids the bank bounced BEFORE settlement are fenced in stripe_failed_refunds, keyed by charge and PaymentIntent (no payments row exists
+// to hold them). A hash of the sorted ids that match a charge or intent is in the pay, stmt and orphan-stmt signals, so a bounce changes them,
+// reopens an answer and suspends movement. '' when nothing is fenced.
+const failedFenceSql = (intent, charge) => `COALESCE((SELECT ':x' || left(md5(string_agg(ff.stripe_refund_id, ',' ORDER BY ff.stripe_refund_id)), 10)
+      FROM stripe_failed_refunds ff WHERE ff.stripe_payment_intent_id = ${intent} OR ff.stripe_charge_id = ${charge}), '')`;
 const STATUS_SUFFIX_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 AND p.status IN ('refunded', 'disputed') THEN ':' || p.status ELSE '' END";
 const AMOUNT_OR_STATE_SQL = "CASE WHEN COALESCE(p.refund_amount, 0) > 0 THEN round(p.refund_amount * 100)::bigint::text ELSE p.status END";
 
@@ -189,7 +205,7 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
       FROM invoices AS i JOIN payments p ON p.statement_id = i.payer_statement_id
       WHERE i.payer_statement_id IS NOT NULL AND i.id IN (SELECT invoice_id FROM invs)
     ), found AS (
-      SELECT v.origin, 'pay:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL} || ${STATUS_SUFFIX_SQL} AS signal
+      SELECT v.origin, 'pay:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL} || ${STATUS_SUFFIX_SQL} || ${failedFenceSql('p.stripe_payment_intent_id', 'p.stripe_charge_id')} AS signal
       FROM invs v
       JOIN invoices vi ON vi.id = v.invoice_id
       JOIN payments p ON ${paymentRefundShownSql('p')} AND (
@@ -199,7 +215,7 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
         -- a manual payment names its invoice in the description the office writer builds, 'Invoice <number> — <method>' (as the commission ledger reads it)
         OR (p.customer_id = vi.customer_id AND vi.invoice_number IS NOT NULL AND starts_with(p.description, 'Invoice ' || vi.invoice_number || ' — ')))
       UNION
-      SELECT v.origin, 'stmt:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL} || ${STATUS_SUFFIX_SQL}
+      SELECT v.origin, 'stmt:' || p.id::text || ':' || ${AMOUNT_OR_STATE_SQL} || ${REFUND_IDENTITY_SQL} || ${STATUS_SUFFIX_SQL} || ${failedFenceSql('p.stripe_payment_intent_id', 'p.stripe_charge_id')}
       FROM invs v
       JOIN invoices i ON i.id = v.invoice_id AND i.payer_statement_id IS NOT NULL
       JOIN payments p ON p.statement_id = i.payer_statement_id AND ${paymentRefundShownSql('p')}
@@ -208,7 +224,7 @@ async function refundSourcesOf(conn, visitIds, frozen = new Map()) {
       -- key '<pi>:partial-refund:<refund id>'), and a statement charge's parked case (source statement_pay_webhook). A won dispute parks under
       -- its own key (':dispute-won:') and is no refund. A refund the bank bounced is fenced in stripe_failed_refunds and is no refund either.
       SELECT v.origin, CASE WHEN o.source = 'statement_pay_webhook'
-          THEN '${UNCLEAR_SIGNAL_PREFIX}' || o.id::text || ':' || round(o.amount * 100)::bigint::text || ':' || (extract(epoch FROM o.updated_at) * 1000000)::bigint::text
+          THEN '${UNCLEAR_SIGNAL_PREFIX}' || o.id::text || ':' || round(o.amount * 100)::bigint::text || ':' || (extract(epoch FROM o.updated_at) * 1000000)::bigint::text || ${failedFenceSql('o.stripe_payment_intent_id', 'o.stripe_charge_id')}
           ELSE 'orphan:' || o.id::text END
       FROM invs v
       JOIN stripe_orphan_charges o ON (o.invoice_id = v.invoice_id
