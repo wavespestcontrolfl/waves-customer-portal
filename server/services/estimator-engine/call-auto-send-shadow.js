@@ -107,7 +107,7 @@ function termiteRequested(extractions) {
   return extractions.some((x) => {
     const sr = x.service_request || {};
     const scope = [
-      sr.primary_category, sr.category, sr.service_name, sr.requested_service,
+      sr.primary_service_category, sr.specific_service_name, sr.primary_category, sr.requested_service,
       ...(Array.isArray(sr.secondary_categories) ? sr.secondary_categories : []),
       x.requested_service, x.matched_service, x.service_interest,
     ].filter((v) => typeof v === 'string');
@@ -121,7 +121,10 @@ function termiteRequested(extractions) {
 // confidence, constraint flags, open questions, current customer, home
 // size, new construction). New lane reasons therefore hold by default.
 const LANE_REASONS_NOT_HOLDS = [
-  /^pest visit count:/, /^partial draft:/, /^constraints the engine can't express:/,
+  /^pest visit count:/,
+  // Only the unpriced kind: a manual item whose PROVISIONAL amount is in the
+  // customer total (an oversize lawn) is a field-verification price.
+  /^partial draft:(?!.*PROVISIONAL)/, /^constraints the engine can't express:/,
   /^composer confidence (medium|high)$/, /^open questions:/, /^existing active customer/,
   /^home\/building sqft from fallback source/, /^new construction/,
 ];

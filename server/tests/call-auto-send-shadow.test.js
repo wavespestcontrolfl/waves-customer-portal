@@ -38,6 +38,8 @@ describe('callAutoSendShadowVerdict', () => {
     ['quote_not_promised', (i) => { i.context.extraction = null; }],
     ['lane_review_reason', (i) => { i.laneReasons = ['lot sqft from fallback source (subdivision_median)']; }],
     ['lane_review_reason', (i) => { i.laneReasons = ['engine low pricing confidence: lawn_care']; }],
+    ['lane_review_reason', (i) => { i.laneReasons = ['partial draft: lawn_care still needs manual scoping — their PROVISIONAL amounts are included in the totals; verify before send']; }],
+    ['termite_hold', (i) => { i.context.extraction.service_request = { quote_promised: true, primary_service_category: 'wdo' }; }],
     ['current_customer_reprice_pending', (i) => { i.context.isExistingCustomer = true; }],
     ['termite_hold', (i) => { i.intent.services.termite = { system: 'trelona' }; }],
     ['termite_hold', (i) => { i.intent.constraint_flags = [{ flag: 'possible_termite_swarmers', note: 'flying insects' }]; }],
