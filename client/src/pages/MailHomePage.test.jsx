@@ -263,6 +263,9 @@ it('shows the lower price when the booking was made below the price on the page,
   await pickFirstTime();
   fillAndSubmit();
   expect(await screen.findByTestId('booked-price')).toHaveTextContent('Your price is now $100 per application.');
+  // The price card above shows the booked price too.
+  expect(screen.getByTestId('application-price')).toHaveTextContent('$100');
+  expect(screen.getByTestId('monthly-price')).toHaveTextContent('About $33.33 a month');
 });
 
 it('shows the lower setup fee when only the fee dropped', async () => {
@@ -278,6 +281,8 @@ it('says there is no setup fee when the booked fee is zero', async () => {
   await pickFirstTime();
   fillAndSubmit();
   expect(await screen.findByTestId('booked-setup')).toHaveTextContent('No setup fee.');
+  // The price card above agrees: the setup line it showed is gone.
+  expect(screen.queryByText(/One-time setup: \$99/)).not.toBeInTheDocument();
 });
 
 it('a booking at the price on the page shows no price line', async () => {

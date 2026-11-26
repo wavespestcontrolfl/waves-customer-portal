@@ -868,6 +868,20 @@ describe('the printed price is held for a mailed home', () => {
     expect(draftIdFor('prospect-1', contact, { ...capped, liveSetupCents: 4900 })).toBe(draftIdFor('prospect-1', contact, { annualCents: 62700, setupCents: 4900 }));
   });
 
+  test('a card that promised no setup fee freezes an explicit zero when the engine now has one, and conversion adds none', async () => {
+    mockRow = held(); // printed setup fee 0
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 627, priceSetupFee: 99, priceDigest: 'd5' });
+    quote.judge.mockReturnValue({ price: { annual: 627, setupFee: 99, digest: 'd5' } });
+    const res = await bookHome(TOKEN, INPUT(), deps);
+    expect(res).toMatchObject({ status: 200, body: { price: { setupFee: 0 } } });
+    const frozen = JSON.parse(updates[0].estimate_data.bindings[0]);
+    expect(frozen.setupFeeQuote).toEqual({ amount: 0, kind: 'waveguard_membership' });
+    // The converter's own rule: a frozen zero means the quote disclosed no fee, so a later conversion adds none.
+    const { shouldIncludeWaveGuardSetupFeeForRecurring } = require('../services/estimate-converter');
+    const recurring = [{ service: 'pest_control', name: 'Pest Control' }];
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurring, estimateData: frozen })).toBe(false);
+  });
+
   test('a concurrent submission that createSelfBooking answers as a replay carries no price', async () => {
     booking.createSelfBooking.mockResolvedValue({ ok: true, body: { replayed: true, booking: { id: 'b1' } } });
     const res = await bookHome(TOKEN, INPUT(), deps);

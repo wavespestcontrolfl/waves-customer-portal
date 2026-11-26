@@ -450,7 +450,7 @@ function savedPriceHolds(saved, terms, deps) {
 // frozen as the wizard freezes it (estimate_data.setupFeeQuote = { amount, kind: 'waveguard_membership' }, public-quote.js
 // decideSetupFeeQuote). booking.js bills a pest setup fee only from that field (stampDisclosedSetupFee reads
 // estimate_data.setupFeeQuote.amount), never from result.oneTime.membershipFee. A zero fee writes no quote, as the wizard
-// writes none. Only a live draft is touched.
+// writes none (unless the held card price is zero and the engine's fee is not: then an explicit zero). Only a live draft is touched.
 //
 // The draft also carries the prospect it was made for (estimate_data.mailProspectId, written here, never from a request):
 // the server-side link the first-booking claim and the retry recovery follow, instead of any string a caller can send.
@@ -461,7 +461,9 @@ async function markEstimate(estimateId, prospectId, terms, shownKey, deps) {
   const conn = deps.db || db;
   const set = { source: 'quote_wizard', lead_source: LEAD_SOURCE, lead_source_detail: LEAD_SOURCE_DETAIL };
   const merged = { mailProspectId: String(prospectId), mailShownKey: shownKey };
-  if (terms.setupCents > 0) merged.setupFeeQuote = { amount: terms.setupCents / 100, kind: 'waveguard_membership' };
+  // A card that promised no setup fee while the engine now has one freezes an explicit ZERO: an absent quote reads as a
+  // legacy estimate and a later conversion would add the live fee (estimate-converter shouldIncludeWaveGuardSetupFeeForRecurring).
+  if (terms.setupCents > 0 || terms.liveSetupCents > 0) merged.setupFeeQuote = { amount: terms.setupCents / 100, kind: 'waveguard_membership' };
   set.estimate_data = conn.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(merged)]);
   await conn('estimates').where({ id: estimateId, status: 'draft' }).whereNull('archived_at').update(set);
 }

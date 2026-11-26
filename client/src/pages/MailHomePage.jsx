@@ -37,6 +37,14 @@ function lowerTermsOf(bookedPrice, shownPrice) {
   return Object.keys(lower).length ? lower : null;
 }
 
+// The booked screen's state from the booking answer. A lower booked price also goes to the price card above (through
+// onBookedLower), so the card agrees with this screen.
+function bookedStateOf(body, picked, price, onBookedLower) {
+  const lower = lowerTermsOf(body.price, price);
+  if (lower && onBookedLower) onBookedLower(body.price);
+  return { date: body.date || picked.date, window: body.window || {}, lower };
+}
+
 // Cents only when the amount is not whole: $37 a month, $37.50 a month.
 function formatMoney(value) {
   const n = Number(value);
@@ -200,7 +208,7 @@ function BookedTerms({ lower }) {
 
 // Shown for a home that has a price. onNeedCall(true) tells the page this card carries the call button, so the page
 // does not show a second one.
-function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged }) {
+function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged, onBookedLower }) {
   const [times, setTimes] = useState({ status: 'loading', offers: [] }); // loading | ready | call
   const [day, setDay] = useState(null);
   const [picked, setPicked] = useState(null);
@@ -286,7 +294,7 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged })
       if (r.ok && body.booked) {
         // The price the booking was made on, kept only when it is lower than the one this page showed (the card's price
         // is held 60 days and never goes up; when ours went down the booking takes the lower one).
-        setBooked({ date: body.date || picked.date, window: body.window || {}, lower: lowerTermsOf(body.price, price) });
+        setBooked(bookedStateOf(body, picked, price, onBookedLower));
       } else if (body.error === 'slot_taken' || body.error === 'invalid_offer') {
         setPicked(null);
         setNotice('That time was just taken. Pick another time.');
@@ -442,12 +450,15 @@ export default function MailHomePage() {
   const [status, setStatus] = useState('loading'); // loading | ready | unavailable
   const [pickerHasCall, setPickerHasCall] = useState(false);
   const [priceStale, setPriceStale] = useState(false);
+  // The price a booking was made on when it is lower than the page's (a held postcard price that went down).
+  const [bookedPrice, setBookedPrice] = useState(null);
   useGlassSurface(true);
 
   useEffect(() => {
     let alive = true;
     setStatus('loading');
     setPriceStale(false); // a price_changed answer belongs to the home it was for, not the next link
+    setBookedPrice(null);
     fetch(`${API_BASE}/public/home/${encodeURIComponent(token)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((json) => {
@@ -473,7 +484,7 @@ export default function MailHomePage() {
   const city = addressCase(data.address.city) || null;
   const price = data.price;
   // The price card shows no price once a booking answered price_changed; the picker keeps the price it was opened with.
-  const cardPrice = priceStale ? null : price;
+  const cardPrice = priceStale ? null : (bookedPrice && price ? { ...price, ...bookedPrice } : price);
   const setupFee = cardPrice && Number(cardPrice.setupFee) > 0 ? Number(cardPrice.setupFee) : null;
 
   return (
@@ -523,7 +534,7 @@ export default function MailHomePage() {
         )}
       </BrandCard>
 
-      {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} onPriceChanged={() => setPriceStale(true)} /> : null}
+      {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} onPriceChanged={() => setPriceStale(true)} onBookedLower={setBookedPrice} /> : null}
 
       <BrandCard style={{ marginTop: SP.md }}>
         <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>What the plan includes</h2>
