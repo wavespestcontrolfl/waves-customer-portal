@@ -387,6 +387,18 @@ postgres('ops buyer metrics (live Postgres)', () => {
       expect(routeFill.scheduledStops).toBe(2);
     });
 
+    it('an assigned appointment and its add-on line are one stop even when only the appointment carries a property', async () => {
+      const home = randomUUID();
+      await trx('customer_properties').insert({
+        id: home, customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: true,
+        address_line1: '120 Example Lane', city: 'Lakewood Ranch', zip: '34211', active: true, address_key: randomUUID(),
+      });
+      await upcoming('2037-12-01', { technician_id: owner, window_start: '09:00', property_id: home });
+      await upcoming('2037-12-01', { technician_id: owner, window_start: '09:00', property_id: null, service_type: 'Lawn Care Visit' }); // add-on line
+      const { routeFill } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      expect(routeFill.scheduledStops).toBe(1);
+    });
+
     it('an unclaimed estimate slot hold is not a stop, live or expired; claiming it adds exactly one stop', async () => {
       await upcoming('2037-12-01', { technician_id: owner }); // a real stop
       const hold = randomUUID();
