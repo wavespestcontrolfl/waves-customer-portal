@@ -1431,8 +1431,8 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
 // The safety rules of the misting, mosquito, flea and bed bug programs as a procedure field ({ safety: [...] }), or {} for any other
 // program (they keep their procedure). Flea and bed bug are indoor sprays: people and pets out until dry, fish tanks covered, nothing
 // fogged. Mosquito: the wind limit, the strips from water and storm drains, and no fogger (owner 2026-11-25, D7). Rodent: gloves, the
-// bleach spray before bagging, the P100 fit test, no glue boards, bats before sealing (D9).
-const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent'];
+// bleach spray before bagging, the P100 fit test, no glue boards, bats before sealing (D9). Palm injection: PPE, no food palms, disinfect the bit between palms (D8).
+const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug', 'rodent', 'palm_injection'];
 function mistingSafetyField(program, effectiveProgramKey) {
   if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};
   return { safety: program.safety_rules.map((rule) => String(rule)) };
@@ -1462,7 +1462,7 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
     ...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),
     // The misting program has no field guide, so its weather-shutdown, nozzle-placement and exposure-response rules ride the generic
     // procedure as a Safety section (the SOP and its text download). Keyed to the misting program on purpose: other programs that
-    // declare safety_rules without a field guide get it only when SAFETY_ON_CARD_PROGRAMS lists them (palm injection does not).
+    // declare safety_rules without a field guide get it only when SAFETY_ON_CARD_PROGRAMS lists them.
     ...(fieldGuide ? {} : mistingSafetyField(program, programKey || match?.programKey)),
     source: 'Service template',
     title: visit.visit_type || `Visit ${visit.visit}${visit.month && visit.month !== 'Any' ? ` · ${visit.month}` : ''}`,

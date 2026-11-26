@@ -2643,22 +2643,27 @@
   "palm_injection": {
     "name": "Palm Injection Protocol",
     "notes": [
-      "Palm injections are add-ons, not default Tree & Shrub inclusions.",
-      "Diagnose the target issue before injecting. Do not use injections as a substitute for full palm fertility, irrigation correction, or disease diagnosis.",
-      "Record species or palm type, size class, product, dose, port count, target issue, photos, and follow-up timing."
+      "Every hole in a palm is permanent: palms cannot seal a wound. Every injection needs a reason (owner 2026-11-25, D8).",
+      "Lethal bronzing prevention with Arbor-OTC is the main service: lethal bronzing on the property or nearby, on a susceptible palm (Sylvester, Canary Island date, pygmy date, queen, Sabal, Bismarck, Christmas, coconut). Every 3 months for at least 2 years.",
+      "Sell it as protection, never a cure and never a guarantee: no trial has tested Arbor-OTC on lethal bronzing yet (UF/IFAS PP163). A palm with symptoms or a positive test is removed, not treated.",
+      "Insects, palmetto weevil, coconut bud rot and nutrients: inject only after a diagnosis. Try a soil drench first for insects (no hole). Nutrients only after soil fertilizer fails.",
+      "First lethal bronzing visit: test before the first dose. UF Plant Diagnostic Center: $60 a palm, or $100 for a pool of up to 10 palms; the lab fee goes on the invoice. Results in about a week.",
+      "Confirm the Florida license category with FDACS before the first job (tree injection is reported to need Lawn & Ornamental).",
+      "Store Arbor-OTC in the office below 77°F, never in the truck.",
+      "Log each palm: palm ID, product, EPA number, mix, the amount the palm took (not the planned dose), hole position, plug, uptake time, next due date."
     ],
     "safety_rules": [
-      "Confirm product label and palm suitability before drilling or injecting.",
-      "Do not inject a palm with unclear diagnosis or severe irreversible decline without office review.",
-      "Disinfect equipment between palms when disease is suspected.",
-      "Document ports, dose, and follow-up date."
+      "Long sleeves, long pants, shoes and socks, chemical-resistant gloves and eyewear for every injection (IMA-jet label).",
+      "Never inject a palm whose fruit or nuts the family eats: Arbor-OTC, IMA-jet, TREE-äge and PHOSPHO-jet all bar food use.",
+      "Disinfect the bit and the needle between palms; flame the bit between palms when taking test samples.",
+      "Stay with the palm while it takes up the dose; keep people back from the palm only while you inject."
     ],
     "visits": [
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Palm Injection Assessment\nIdentify palm species/type, size class, symptoms, canopy pattern, spear condition, trunk wounds, irrigation/salt stress, and fertility history\nPhotograph canopy, spear, trunk, root zone, and affected fronds\nDetermine whether Mg, Mn/Fe, systemic pest, or diagnosed disease support injection",
-        "secondary": "Recommend soil/root-zone correction when injection is not the right tool\nEscalate severe decline, bud rot suspicion, or unclear diagnosis before treatment\nQuote injection separately from Tree & Shrub service",
+        "primary": "Palm Injection Assessment\nTag each palm: an ID, a photo, its species, clear-trunk height, trunk width and canopy width\nScreen out: no injection for lethal bronzing symptoms, a dead spear leaf, Ganoderma, Thielaviopsis, Fusarium wilt, fruit the family eats, or open flowers (IMA-jet)\nFirst lethal bronzing visit: drill a sawdust sample from each palm, flame the bit between palms, bag and label each palm separately for the UF Plant Diagnostic Center\nNo Arbor-OTC dose until the palm tests negative",
+        "secondary": "Insects: recommend a soil drench first; inject only when a drench is impractical\nNutrient pattern: correct the soil fertilizer first; inject only after it fails\nEscalate severe decline, bud rot or an unclear diagnosis before any treatment\nQuote injection separately from Tree & Shrub service",
         "material_cost": "inspection",
         "labor_cost": "inspection",
         "tiers": {
@@ -2667,35 +2672,123 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Assessment comes first. Never sell injection from a single yellow-frond observation."
+        "notes": "Assessment and testing come first. Never sell an injection from a single yellow frond. About 15 minutes a palm.",
+        "lineMeta": {
+          "Palm Injection Assessment": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Tag each palm: an ID, a photo, its species, clear-trunk height, trunk width and canopy width": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Screen out: no injection for lethal bronzing symptoms, a dead spear leaf, Ganoderma, Thielaviopsis, Fusarium wilt, fruit the family eats, or open flowers (IMA-jet)": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "First lethal bronzing visit: drill a sawdust sample from each palm, flame the bit between palms, bag and label each palm separately for the UF Plant Diagnostic Center": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "No Arbor-OTC dose until the palm tests negative": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Insects: recommend a soil drench first; inject only when a drench is impractical": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Nutrient pattern: correct the soil fertilizer first; inject only after it fails": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Escalate severe decline, bud rot or an unclear diagnosis before any treatment": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Quote injection separately from Tree & Shrub service": {
+            "scope": "plant",
+            "treatmentApplied": false
+          }
+        }
       },
       {
         "visit": 2,
         "month": "Any",
-        "primary": "Palm Injection Application\nApply selected injection product per label and diagnosis\nUse Palm-Jet Mg for diagnosed magnesium deficiency pattern where appropriate\nUse Mn-Jet Fe for diagnosed manganese/iron deficiency pattern where appropriate\nUse IMA-jet or Propizol only when pest/disease diagnosis and label fit support it",
-        "secondary": "Record product, dose, port count, palm count, and application date\nKeep injection work separate from routine foliar or granular Tree & Shrub work\nClean and disinfect injection equipment as needed",
+        "primary": "Palm Injection Application\nConfirm the palm's tag, its test or diagnosis, and the screen-out list before drilling\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 Arborplug; inject with the QUIK-jet Air\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
+        "secondary": "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp\nInsects after a diagnosis (royal palm bug, whitefly, mealybug, soft scale): IMA-jet 10, undiluted, by trunk inch. Royal palm bug under 12 in: ⅜ or ¾ tsp an inch; 12 to 23 in: ¾ or 1⅛ tsp. Not in flower; no food palm for 365 days; no repeat inside a year\nPalmetto weevil or leaf skeletonizer on a valuable palm, before crown damage: TREE-äge G4, the LOW column (10 to 12 in trunk: 5¼ to 7 tsp), may be diluted 1 to 9 with water. Carry the Florida 2(ee) bulletin\nCoconut bud rot, lab-confirmed Phytophthora only: PHOSPHO-jet, 2 tsp to 1 fl oz diluted to 1 to 2 fl oz. Never for Fusarium wilt\nNutrients, last resort after soil fertilizer fails: PALM-jet Mg, 1¼ to 6 tsp by palm size. Alone, max 3 a year, not within 2 weeks of any other injection, not above 90°F\nDiagnosed manganese or iron pattern: Mn-Jet Fe by canopy width (6 to 12 ft: 2¼ to 5 tsp; 12 to 24 ft: 5¼ to 10 tsp; 24 to 48 ft: 10¼ to 15 tsp), one hole, late summer or fall",
         "lineMeta": {
-          "Use Palm-Jet Mg for diagnosed magnesium deficiency pattern where appropriate": {
+          "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp": {
             "scope": "plant",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Palm-Jet Mg"
-            ]
+              "Arborjet Arbor OTC Fungicide 5 oz"
+            ],
+            "completionApplicationMethod": "trunk_injection"
           },
-          "Use Mn-Jet Fe for diagnosed manganese/iron deficiency pattern where appropriate": {
+          "Insects after a diagnosis (royal palm bug, whitefly, mealybug, soft scale): IMA-jet 10, undiluted, by trunk inch. Royal palm bug under 12 in: ⅜ or ¾ tsp an inch; 12 to 23 in: ¾ or 1⅛ tsp. Not in flower; no food palm for 365 days; no repeat inside a year": {
             "scope": "plant",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Mn-Jet Fe"
-            ]
+              "Arborjet Ima-Jet 10"
+            ],
+            "completionApplicationMethod": "trunk_injection"
           },
-          "Use IMA-jet or Propizol only when pest/disease diagnosis and label fit support it": {
+          "Palmetto weevil or leaf skeletonizer on a valuable palm, before crown damage: TREE-äge G4, the LOW column (10 to 12 in trunk: 5¼ to 7 tsp), may be diluted 1 to 9 with water. Carry the Florida 2(ee) bulletin": {
             "scope": "plant",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "IMA-jet",
-              "Propizol"
-            ]
+              "Arborjet Tree-Age G-4 Injectable Insecticide"
+            ],
+            "completionApplicationMethod": "trunk_injection"
+          },
+          "Coconut bud rot, lab-confirmed Phytophthora only: PHOSPHO-jet, 2 tsp to 1 fl oz diluted to 1 to 2 fl oz. Never for Fusarium wilt": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Arborjet PHOSPHO-Jet Systemic Fungicide"
+            ],
+            "completionApplicationMethod": "trunk_injection"
+          },
+          "Nutrients, last resort after soil fertilizer fails: PALM-jet Mg, 1¼ to 6 tsp by palm size. Alone, max 3 a year, not within 2 weeks of any other injection, not above 90°F": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Arborjet Palm-Jet Palm Nutrition"
+            ],
+            "completionApplicationMethod": "trunk_injection"
+          },
+          "Diagnosed manganese or iron pattern: Mn-Jet Fe by canopy width (6 to 12 ft: 2¼ to 5 tsp; 12 to 24 ft: 5¼ to 10 tsp; 24 to 48 ft: 10¼ to 15 tsp), one hole, late summer or fall": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "ArborJet Mn-Jet Fe Micros"
+            ],
+            "completionApplicationMethod": "trunk_injection"
+          },
+          "Palm Injection Application": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Confirm the palm's tag, its test or diagnosis, and the screen-out list before drilling": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 Arborplug; inject with the QUIK-jet Air": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Repeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Stay with the palm and log the uptake time; disinfect the bit and the needle before the next palm": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "A leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why": {
+            "scope": "plant",
+            "treatmentApplied": false
           }
         },
         "material_cost": "inventory",
@@ -2706,13 +2799,13 @@
           "enhanced": false,
           "premium": true
         },
-        "notes": "Injection pricing is per palm and should remain separate from recurring Tree & Shrub tier inclusions."
+        "notes": "Pick the one injection the test or diagnosis supports. Injection pricing is per palm and stays separate from recurring Tree & Shrub tier inclusions."
       },
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Palm Injection Follow-Up\nReinspect treated palms for symptom progression, spear condition, canopy response, and new stress signs\nPhotograph the same angles as the assessment\nUpdate next injection or fertility recommendation",
-        "secondary": "Do not repeat injection automatically without diagnosis and timing review\nEscalate non-response, worsening crown decline, or suspected pathogen issue\nDocument customer-facing expectations for slow visible response",
+        "primary": "Palm Injection Follow-Up\nReinspect each tagged palm: spear, canopy, the hole and plug, new stress signs\nPhotograph the same angles as the assessment\nUpdate the next due date: every 3 months on the lethal bronzing plan",
+        "secondary": "Do not repeat an injection without its diagnosis and timing review\nNew lethal bronzing symptoms: stop injecting that palm and recommend removal\nTell the customer: the palm changes slowly, over months; the small plugs stay in the trunk",
         "material_cost": "0.00",
         "labor_cost": "follow_up",
         "tiers": {
@@ -2721,7 +2814,98 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Palm recovery is slow. Follow-up should focus on trend, not instant color change."
+        "notes": "Palm recovery is slow. Follow-up should focus on trend, not instant color change.",
+        "lineMeta": {
+          "Palm Injection Follow-Up": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Reinspect each tagged palm: spear, canopy, the hole and plug, new stress signs": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Photograph the same angles as the assessment": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Update the next due date: every 3 months on the lethal bronzing plan": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Do not repeat an injection without its diagnosis and timing review": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "New lethal bronzing symptoms: stop injecting that palm and recommend removal": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Tell the customer: the palm changes slowly, over months; the small plugs stay in the trunk": {
+            "scope": "plant",
+            "treatmentApplied": false
+          }
+        }
+      },
+      {
+        "visit": 4,
+        "month": "Any",
+        "primary": "Lethal Bronzing Prevention\nConfirm the palm tested negative (first visit) or is on the 3-month plan\nScreen out: symptoms, a dead spear leaf, or fruit the family eats\nLethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 Arborplug; inject with the QUIK-jet Air\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
+        "secondary": "A palm with symptoms or a positive test: no dose; recommend removal\nTell the customer: keep the base of the palm clear; no dry time; the plugs stay in the trunk; we come back every 3 months",
+        "lineMeta": {
+          "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Arborjet Arbor OTC Fungicide 5 oz"
+            ],
+            "completionApplicationMethod": "trunk_injection"
+          },
+          "Lethal Bronzing Prevention": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Confirm the palm tested negative (first visit) or is on the 3-month plan": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Screen out: symptoms, a dead spear leaf, or fruit the family eats": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 Arborplug; inject with the QUIK-jet Air": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Repeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Stay with the palm and log the uptake time; disinfect the bit and the needle before the next palm": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "A leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "A palm with symptoms or a positive test: no dose; recommend removal": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Tell the customer: keep the base of the palm clear; no dry time; the plugs stay in the trunk; we come back every 3 months": {
+            "scope": "plant",
+            "treatmentApplied": false
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "per_palm",
+        "tiers": {
+          "bronze": false,
+          "silver": false,
+          "enhanced": false,
+          "premium": true
+        },
+        "notes": "Every 3 months for at least 2 years (owner 2026-11-25, D8). Protection, not a cure, and no guarantee."
       }
     ]
   },

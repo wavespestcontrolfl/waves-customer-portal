@@ -217,6 +217,13 @@ const MATCH_RULES = [
     reason: 'palm_followup',
     terms: ['palm injection follow', 'palm injection follow up', 'palm injection recheck', 'palm follow', 'palm recheck', 'injection follow'],
   },
+  // Lethal bronzing prevention, the main palm service (owner 2026-11-25, D8): its own Arbor-OTC card when the booking names it.
+  {
+    programKey: 'palm_injection',
+    visit: 4,
+    reason: 'palm_lethal_bronzing',
+    terms: ['lethal bronzing', 'bronzing', 'arbor otc', 'arbor-otc', 'oxytetracycline'],
+  },
   {
     programKey: 'palm_injection',
     visit: 1,
@@ -418,7 +425,10 @@ function programKeyForService(serviceType) {
     normalized.includes('magnesium injection') ||
     normalized.includes('injection follow') ||
     normalized.includes('palm follow') ||
-    normalized.includes('palm recheck')
+    normalized.includes('palm recheck') ||
+    // Lethal bronzing prevention (D8): its own palm card.
+    normalized.includes('lethal bronzing') ||
+    normalized.includes('arbor otc')
   ) return 'palm_injection';
   if (
     normalized.includes('termite') ||
