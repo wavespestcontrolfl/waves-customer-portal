@@ -342,10 +342,15 @@ function structuralFactIsRecordBacked({ record, field }) {
 
 // The trust verdict the WDO price reads for one structural field of a PROFILE (the enriched lookup profile the estimator posts back,
 // or a saved older one). false = distrusted: the profile's own verdict flag says so, or its field evidence carries fieldVerify (a
-// saved profile from before the verdict flag still has the evidence). Anything else reads as trusted.
+// saved profile from before the verdict flag still has the evidence), or it has no property record and no evidence for the field.
+// Anything else reads as trusted.
 function profileStructuralFactIsTrusted(profile, { field, flag }) {
   if (profile?.[flag] === false) return false;
-  return !profile?.fieldEvidence?.[field]?.fieldVerify && !profile?._fieldEvidence?.[field]?.fieldVerify;
+  const evidence = profile?.fieldEvidence?.[field] ?? profile?._fieldEvidence?.[field];
+  if (evidence?.fieldVerify) return false;
+  // No flag and no evidence for the field: a profile whose sources say the property record never answered (satellite only) is
+  // untrusted. A profile with no source record at all (hand-built, legacy) keeps the trusted default.
+  return !(profile?.dataSources && profile.dataSources.propertyRecord === false && !evidence);
 }
 const WDO_STRUCTURAL_FIELDS = Object.freeze({
   construction: { field: 'constructionMaterial', flag: 'constructionTrusted' },

@@ -97,27 +97,41 @@ function intInRange(value, min, max) {
 // "tile" would clear the field-verify nudge while leaving the rodent/termite
 // modifiers at baseline. Mirrors the route's normalizers, but unrecognized
 // values are DROPPED rather than stored as UNKNOWN.
+// One ordered rule list per field, most specific first: the first rule that matches wins. A rule is [value, test(text, flags)].
+// Construction. "Steel/metal frame" is metal, never wood frame, so those words are lifted out before the frame test; text naming
+// both a wood/frame wall and a masonry wall (block, concrete, stucco, brick) is MIXED, whatever order the words come in.
+const STEEL_FRAME = /(STEEL|METAL)[\s_-]*FRAM(E|ED|ING)/g;
+const CONSTRUCTION_RULES = [
+  ['MIXED', (s, f) => /MIXED/.test(s) || (f.wood && f.masonry)],
+  ['METAL', (s, f) => f.metal && !f.wood && !f.masonry],
+  ['CBS', (s) => /CONCRETE|CBS|BLOCK|MASONRY|STUCCO/.test(s)],
+  ['BRICK', (s) => /BRICK/.test(s)],
+  ['WOOD_FRAME', (s, f) => f.wood],
+];
 function normalizeVerifiedConstruction(raw) {
   const s = String(raw || '').toUpperCase();
-  // Mixed first: a tech's "mixed" entry, or text that names both a wood/frame and a block/concrete wall, is MIXED (priced as wood
-  // frame by the WDO table), never collapsed to whichever pattern matched first.
-  const block = /CONCRETE|CBS|BLOCK|MASONRY|STUCCO/.test(s);
-  const frame = /WOOD|FRAME|TIMBER/.test(s);
-  if (/MIXED/.test(s) || (block && frame)) return 'MIXED';
-  if (block) return 'CBS';
-  if (frame) return 'WOOD_FRAME';
-  if (/METAL|STEEL|PREFAB/.test(s)) return 'METAL';
-  if (/BRICK/.test(s)) return 'BRICK';
-  return undefined;
+  const withoutSteelFrame = s.replace(STEEL_FRAME, ' ');
+  const flags = {
+    wood: /WOOD|FRAME|TIMBER/.test(withoutSteelFrame),
+    masonry: /CONCRETE|CBS|BLOCK|MASONRY|STUCCO|BRICK/.test(s),
+    metal: /METAL|STEEL|PREFAB/.test(s),
+  };
+  const rule = CONSTRUCTION_RULES.find(([, test]) => test(withoutSteelFrame, flags));
+  return rule ? rule[0] : undefined;
 }
 
+// Foundation: a raised or crawl-space read is named before any "concrete" word can make it a slab (concrete piers and concrete
+// pilings are raised), and a stem wall is a raised foundation.
+const FOUNDATION_RULES = [
+  ['CRAWLSPACE', /CRAWL/],
+  ['RAISED', /RAISED|ELEVATED|PIER|PILING|PILE|STILT|STEM[\s_-]*WALL/],
+  ['BASEMENT', /BASEMENT/],
+  ['SLAB', /SLAB|MONOLITHIC|ON[\s_-]*GRADE|CONCRETE/],
+];
 function normalizeVerifiedFoundation(raw) {
   const s = String(raw || '').toUpperCase();
-  if (/SLAB|CONCRETE/.test(s)) return 'SLAB';
-  if (/CRAWL/.test(s)) return 'CRAWLSPACE';
-  if (/RAISED|PIER|PILING|STILT/.test(s)) return 'RAISED';
-  if (/BASEMENT/.test(s)) return 'BASEMENT';
-  return undefined;
+  const rule = FOUNDATION_RULES.find(([, test]) => test.test(s));
+  return rule ? rule[0] : undefined;
 }
 
 function normalizeVerifiedRoof(raw) {

@@ -440,20 +440,75 @@ describe('a saved profile with field evidence but no trust flag', () => {
   });
 });
 
-describe('a tech-verified construction reaches the WDO line', () => {
-  const normalizeVerifiedValue = require('../services/property-lookup/lookup-cache').sanitizeVerifiedValue;
-
+describe('tech-verified phrasings reach the WDO line', () => {
+  const verify = require('../services/property-lookup/lookup-cache').sanitizeVerifiedValue;
+  // [typed text, verified value, WDO price at 3,000 sq ft on block-class walls (block $175, frame $200, crawl $225), staff note]
   test.each([
-    ['mixed', 'MIXED'], ['Mixed block and wood', 'MIXED'], ['CBS first floor, wood frame second', 'MIXED'], ['block with wood frame addition', 'MIXED'],
-    ['concrete block', 'CBS'], ['stucco', 'CBS'], ['wood frame', 'WOOD_FRAME'], ['brick', 'BRICK'],
-  ])('verified %j -> %s', (text, expected) => {
-    expect(normalizeVerifiedValue('constructionMaterial', text)).toBe(expected);
+    ['CBS', 'CBS', 175, false],
+    ['block', 'CBS', 175, false],
+    ['masonry', 'CBS', 175, false],
+    ['stucco', 'CBS', 175, false],
+    ['concrete block and stucco', 'CBS', 175, false],
+    ['CBS with metal roof', 'CBS', 175, false],
+    ['brick', 'BRICK', 175, false],
+    ['wood frame', 'WOOD_FRAME', 200, false],
+    ['wood', 'WOOD_FRAME', 200, false],
+    ['timber frame', 'WOOD_FRAME', 200, false],
+    ['mixed', 'MIXED', 200, false],
+    ['frame/stucco', 'MIXED', 200, false],
+    ['stucco over wood frame', 'MIXED', 200, false],
+    ['block with wood frame addition', 'MIXED', 200, false],
+    ['brick veneer over frame', 'MIXED', 200, false],
+    ['steel frame', 'METAL', 175, true],
+    ['metal frame', 'METAL', 175, true],
+    ['metal building', 'METAL', 175, true],
+    ['prefab steel', 'METAL', 175, true],
+  ])('walls %j -> %s: $%i, note %s', (text, expected, expectedPrice, note) => {
+    expect(verify('constructionMaterial', text)).toBe(expected);
+    const line = wdoLine(estimate({ homeSqFt: 3000, constructionMaterial: verify('constructionMaterial', text) }));
+    expect(line.price).toBe(expectedPrice);
+    expect(!!staffNote(line)).toBe(note);
   });
 
-  test('a MIXED verified value prices as frame on the WDO line, not block', () => {
-    expect(price({ homeSqFt: 3000, constructionMaterial: normalizeVerifiedValue('constructionMaterial', 'mixed') })).toBe(200);
-    expect(price({ homeSqFt: 3000, constructionMaterial: normalizeVerifiedValue('constructionMaterial', 'block and wood frame') })).toBe(200);
-    expect(price({ homeSqFt: 3000, constructionMaterial: normalizeVerifiedValue('constructionMaterial', 'concrete block') })).toBe(175);
+  test('an unrecognised construction is dropped, not stored', () => {
+    expect(verify('constructionMaterial', 'vinyl siding')).toBeUndefined();
+    expect(verify('constructionMaterial', '')).toBeUndefined();
+  });
+
+  test.each([
+    ['slab', 'SLAB', 175], ['monolithic slab', 'SLAB', 175], ['slab on grade', 'SLAB', 175], ['concrete slab', 'SLAB', 175],
+    ['poured concrete', 'SLAB', 175], ['basement', 'BASEMENT', 175],
+    ['crawl space', 'CRAWLSPACE', 225], ['crawl', 'CRAWLSPACE', 225], ['vented crawlspace', 'CRAWLSPACE', 225],
+    ['concrete piers', 'RAISED', 225], ['concrete pilings', 'RAISED', 225], ['pilings', 'RAISED', 225], ['piers and beams', 'RAISED', 225],
+    ['raised', 'RAISED', 225], ['raised floor', 'RAISED', 225], ['raised slab', 'RAISED', 225], ['stem wall', 'RAISED', 225],
+    ['elevated on stilts', 'RAISED', 225],
+  ])('foundation %j -> %s: $%i on block walls', (text, expected, expectedPrice) => {
+    expect(verify('foundationType', text)).toBe(expected);
+    const line = wdoLine(estimate({ homeSqFt: 3000, constructionMaterial: 'CBS', foundationType: verify('foundationType', text) }));
+    expect(line.price).toBe(expectedPrice);
+    expect(staffNote(line)).toBeUndefined();
+  });
+});
+
+describe('a profile with no verdict flag and no evidence', () => {
+  const { structuralTrustVerdicts } = require('../services/lookup-confidence');
+
+  test('a satellite-only profile (no property record, no field evidence) is untrusted; a record-backed or source-less one is trusted', () => {
+    const satellite = { constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE', dataSources: { propertyRecord: false, satellite: true, fieldEvidence: false } };
+    expect(structuralTrustVerdicts(satellite)).toEqual({ constructionTrusted: false, foundationTrusted: false });
+    expect(structuralTrustVerdicts({ ...satellite, dataSources: { propertyRecord: true } })).toEqual({});
+    expect(structuralTrustVerdicts({ constructionMaterial: 'WOOD_FRAME' })).toEqual({});
+    // Evidence for the field (a tech verified it) keeps it trusted even with no record.
+    expect(structuralTrustVerdicts({ ...satellite, fieldEvidence: { constructionMaterial: { sourceType: 'verified', fieldVerify: false } } }))
+      .toEqual({ foundationTrusted: false });
+  });
+
+  test('through the translator: a satellite-only wood frame prices block with the note', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const input = translateV2CallToV1Input({ homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St', constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', dataSources: { propertyRecord: false, satellite: true } }, ['WDO'], { urgency: 'ROUTINE' });
+    const line = wdoLine(generateEstimate(input));
+    expect(line.price).toBe(175);
+    expect(staffNote(line)).toBeTruthy();
   });
 });
 
