@@ -1304,6 +1304,8 @@ describe('draft kinds', () => {
       'You will hear back from us soon.',
       "I'm checking with the office on that.",
       'Your quote will be ready by 9 AM tomorrow morning.',
+      'A teammate will text you tomorrow.',
+      'Someone will call you back.',
     ])('rejects %p', (reply) => {
       expect(validateNoFollowupPromise({ reply }).ok).toBe(false);
     });
@@ -1312,6 +1314,10 @@ describe('draft kinds', () => {
       'We check the traps at each visit.',
       'The tech will check the traps on the next visit.',
       'You can pay at portal.wavespestcontrol.com.',
+      // the hand-off the rules allow: a teammate texts the pay link or the free re-service booking link, no time (Codex #8543 r1)
+      'A teammate will text their free re-service booking link.',
+      'Sorry about the ants. A teammate will text you the link to book the free re-service.',
+      'A teammate will text their pay link.',
       'Got it, thank you.',
       '',
     ])('accepts %p', (reply) => {

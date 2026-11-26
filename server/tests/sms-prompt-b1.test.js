@@ -165,6 +165,8 @@ describe('system prompt: gate off vs on', () => {
     expect(p).not.toContain('a person will check');
     expect(p).not.toContain('using the EXACT wording');
     expect(p).toContain('do not write a promise to check or reply either (see DRAFT KINDS: return ABSTAIN)');
+    // the DRAFT KINDS ban keeps the link hand-off the B1 rules above it still order
+    expect(p).toContain('the one allowed hand-off is that a teammate will text the pay link or the free re-service booking link, with no time');
   });
 
   test('the system prompt stays time-invariant (no SLA phrase interpolated)', () => {

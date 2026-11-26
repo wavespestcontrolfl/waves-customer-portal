@@ -220,6 +220,8 @@ describe('verifier — follow-up promises (owner 2026-11-25)', () => {
     const on = buildVerifierSystemPrompt({ realAnswers: true });
     expect(on).toMatch(/a promise that a person, the office, a teammate or the team will check, confirm, reply, call, text or get back to the customer .* is a VIOLATION/);
     expect(on).not.toContain('offers to confirm/follow up are fine');
+    // the link hand-off the drafter rules allow is not a violation (Codex #8543 r1)
+    expect(on).toContain("The one allowed hand-off is a teammate texting the pay link or the free re-service booking link");
   });
   test('gate off keeps the old allowance', () => {
     expect(buildVerifierSystemPrompt({ realAnswers: false })).toContain('offers to confirm/follow up are fine');
