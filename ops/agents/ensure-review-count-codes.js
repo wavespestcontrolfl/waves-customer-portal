@@ -8,7 +8,8 @@
 //   Repeat the flag for several: --tech adam --tech maria. A slug is lowercase, ^[a-z][a-z0-9-]{1,30}$.
 // - Inserts ONLY missing rows (kind 'review', click_count 0). It never updates or deletes a row, so a row that
 //   already holds clicks is untouched. The target_url column is informational: the route never reads it (the
-//   redirect always comes from config/locations.js). Offices store their Google review URL, a tech the badge URL.
+//   redirect always comes from config/locations.js). Offices store their Google review URL; a tech row stores
+//   the fallback office's Google review URL (never /rv/<slug>, so the /l/<code> alias cannot count a scan twice).
 // - Prints codes and counts only. No customer data, no customer comms, no paid calls.
 //
 // Run from the repo root:
@@ -19,11 +20,14 @@
 const path = require('path');
 
 const server = (p) => path.join(__dirname, '..', '..', 'server', p);
-const PORTAL_BASE = 'https://portal.wavespestcontrol.com';
 
 // Pure: the rows this run wants, from the offices and the --tech values. Throws on a bad slug.
-function planRows({ offices, techs, techSlugRe }) {
+function planRows({ offices, techs, techSlugRe, fallbackOfficeId }) {
   const wanted = [];
+  // A tech row points at a Google review form, never at /rv/<slug>: the public /l/<code> alias would otherwise
+  // count a scan on /l, then redirect into /rv/<slug> and count the same tech again.
+  const fallback = offices.find((o) => o.id === fallbackOfficeId) || offices[0];
+  const fallbackReviewUrl = fallback.googleReviewUrl;
   for (const office of offices) {
     wanted.push({ code: `review-${office.id}`, target_url: office.googleReviewUrl });
   }
@@ -35,7 +39,7 @@ function planRows({ offices, techs, techSlugRe }) {
     }
     if (seen.has(slug)) continue;
     seen.add(slug);
-    wanted.push({ code: `review-tech-${slug}`, target_url: `${PORTAL_BASE}/rv/${slug}` });
+    wanted.push({ code: `review-tech-${slug}`, target_url: fallbackReviewUrl });
   }
   return wanted;
 }
@@ -69,8 +73,8 @@ async function main() {
   }
 
   const { WAVES_LOCATIONS } = require(server('config/locations'));
-  const { TECH_SLUG_RE } = require(server('routes/review-geo-link'));
-  const wanted = planRows({ offices: WAVES_LOCATIONS, techs: parseTechArgs(argv), techSlugRe: TECH_SLUG_RE });
+  const { TECH_SLUG_RE, REVIEW_GEO_FALLBACK_OFFICE_ID } = require(server('routes/review-geo-link'));
+  const wanted = planRows({ offices: WAVES_LOCATIONS, techs: parseTechArgs(argv), techSlugRe: TECH_SLUG_RE, fallbackOfficeId: REVIEW_GEO_FALLBACK_OFFICE_ID });
 
   const db = require(server('models/db'));
   try {

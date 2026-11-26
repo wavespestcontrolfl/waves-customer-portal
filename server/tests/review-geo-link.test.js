@@ -76,6 +76,13 @@ describe('reviewShortCodeForOffice', () => {
   });
 });
 
+describe('pathUnderMount', () => {
+  test.each([
+    ['/rv', ''], ['/rv/', '/'], ['/rv/adam', '/adam'], ['/RV/Adam?x=1', '/Adam'], ['/rv//adam', '//adam'],
+    ['/rv/adam#top', '/adam'], ['/rvx/adam', null], ['/l/adam', null], [undefined, null],
+  ])('%s gives %j', (url, out) => { expect(router.pathUnderMount(url)).toBe(out); });
+});
+
 describe('techSlugFromPath', () => {
   test.each([
     ['/adam', 'adam'], ['/adam/', 'adam'], ['/ADAM', 'adam'], ['/Ad-am', 'ad-am'], ['/jo2', 'jo2'],
@@ -252,11 +259,19 @@ describe('GET /rv/<tech>', () => {
     expect(codes()).toEqual(['review-parrish', 'review-tech-adam']);
   });
 
-  test('an empty first segment collapses to the tech (Express mount strips the extra slash)', async () => {
+  test('an empty first segment counts no tech (the original path is read, not the collapsed one)', async () => {
     const res = await hit('/rv//adam', PARRISH);
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe(reviewUrl('parrish'));
-    expect(codes()).toEqual(['review-parrish', 'review-tech-adam']);
+    expect(codes()).toEqual(['review-parrish']);
+  });
+
+  test.each([['GET'], ['HEAD']])('a malformed escape still answers the /rv redirect (%s)', async (method) => {
+    const res = await hit('/rv/%E0%A4%A', PARRISH, method);
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(reviewUrl('parrish'));
+    expect(res.headers.get('cache-control')).toBe('private, no-store');
+    expect(codes()).toEqual(method === 'GET' ? ['review-parrish'] : []);
   });
 
   test('a query string is ignored', async () => {

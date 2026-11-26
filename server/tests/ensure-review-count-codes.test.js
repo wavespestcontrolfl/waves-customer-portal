@@ -8,9 +8,13 @@ jest.mock('../services/short-url', () => ({ resolveShortCode: jest.fn() }));
 
 const { planRows, parseTechArgs } = require('../../ops/agents/ensure-review-count-codes');
 const { WAVES_LOCATIONS } = require('../config/locations');
-const { TECH_SLUG_RE, reviewShortCodeForOffice, reviewShortCodeForTech } = require('../routes/review-geo-link');
+const {
+  TECH_SLUG_RE, REVIEW_GEO_FALLBACK_OFFICE_ID, reviewShortCodeForOffice, reviewShortCodeForTech,
+} = require('../routes/review-geo-link');
 
-const plan = (techs = []) => planRows({ offices: WAVES_LOCATIONS, techs, techSlugRe: TECH_SLUG_RE });
+const plan = (techs = []) => planRows({
+  offices: WAVES_LOCATIONS, techs, techSlugRe: TECH_SLUG_RE, fallbackOfficeId: REVIEW_GEO_FALLBACK_OFFICE_ID,
+});
 
 describe('planRows', () => {
   test('wants one code per office, the same codes the route counts on', () => {
@@ -23,7 +27,12 @@ describe('planRows', () => {
     const rows = plan(['Adam', 'adam', ' maria ']);
     const techRows = rows.slice(WAVES_LOCATIONS.length);
     expect(techRows.map((r) => r.code)).toEqual([reviewShortCodeForTech('adam'), reviewShortCodeForTech('maria')]);
-    expect(techRows[0].target_url).toBe('https://portal.wavespestcontrol.com/rv/adam');
+    // A Google review form, never /rv/<slug>: the /l/<code> alias must not loop into /rv and count twice.
+    const fallbackUrl = WAVES_LOCATIONS.find((l) => l.id === REVIEW_GEO_FALLBACK_OFFICE_ID).googleReviewUrl;
+    for (const row of techRows) {
+      expect(row.target_url).toBe(fallbackUrl);
+      expect(row.target_url).not.toMatch(/\/rv\b/);
+    }
   });
 
   test.each([['a'], ['1adam'], ['ad_am'], ['ad am'], ['adam/x'], ['']])('a bad slug %j is refused', (bad) => {

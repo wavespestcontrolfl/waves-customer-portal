@@ -6743,14 +6743,17 @@ user agents are filtered in the route and not counted; a missing row is a silent
 the SAME 302, headers, limiter, office pick and target as `/rv`, plus one more
 fire-and-forget count on the reserved code `review-tech-<slug>`, under the same bot
 filter, with no ip and no user agent. The slug is a staff first name (not customer
-data), read from the RAW path segment and lowercased; it must match
+data), read from the RAW original URL path (not the mount-stripped one, so `/rv//adam` counts no
+technician) and lowercased; it must match
 `^[a-z][a-z0-9-]{1,30}$`. A bad shape, an encoded character (`/rv/ad%61m`), trailing
 junk or a nested path (`/rv/adam/x`) still 302s exactly like `/rv` and counts no
 technician: a printed badge never lands on an error page, so every GET/HEAD under
 `/rv` redirects. `/rv/adam/` is `adam`. HEAD redirects and never counts. Nothing from
 the slug reaches the redirect target. Rows are created by
 `ops/agents/ensure-review-count-codes.js` (dry-run default; insert-only); a missing
-row is a silent no-op. No
+row is a silent no-op. A malformed escape (`/rv/%E0%A4%A`) also 302s: the route is a
+capture-free pattern, so Express never decodes the path. A tech row stores a Google review
+URL, never `/rv/<slug>`, so the `/l/<code>` alias cannot redirect into `/rv` and count twice. No
 `GATE_*`: it sends nothing, charges nothing and deletes nothing. Excluded from
 the iOS universal-link claim (`BROWSER_ONLY_PATH_ROOTS`, which also keeps every
 `/rv/*` sub-path out of the AASA list) so a scan never opens the app.)

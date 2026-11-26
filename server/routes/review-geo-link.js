@@ -23,7 +23,7 @@
  * redirect, same headers. It only adds a second fire-and-forget count on the
  * reserved `review-tech-<slug>` short code (a staff first name, not customer
  * data), under the same bot filter and with the same no-IP, no-user-agent
- * rule. The slug is read from the RAW path segment, lowercased, and must match
+ * rule. The slug is read from the RAW original path segment, lowercased, and must match
  * ^[a-z][a-z0-9-]{1,30}$: a bad shape, an encoded character or a nested path
  * (/rv/adam/x) still redirects exactly like /rv and counts no technician. A
  * printed badge must never land on an error page, so every GET/HEAD under /rv
@@ -162,8 +162,19 @@ function countScan(code, label, req) {
     .catch((err) => logger.warn(`[review-geo-link] ${label} count failed: ${err.message}`));
 }
 
-// `*` so /rv, /rv/, /rv/<tech>, /rv/<tech>/ and any longer path all redirect.
-router.get('*', (req, res) => {
+// The path under the /rv mount, read from the ORIGINAL url. req.path cannot be
+// used: Express collapses the extra slash in /rv//adam when it strips the mount,
+// which would credit a technician for a malformed path.
+function pathUnderMount(originalUrl) {
+  const match = /^\/rv(\/[^?#]*)?(?:[?#]|$)/i.exec(typeof originalUrl === 'string' ? originalUrl : '');
+  return match ? (match[1] || '') : null;
+}
+
+// A capture-free pattern so /rv, /rv/, /rv/<tech>, /rv/<tech>/ and any longer
+// path all redirect. A string '*' would capture a param that Express
+// decodes, and a malformed escape (/rv/%E0%A4%A) would then error before the
+// handler instead of redirecting.
+router.get(/.*/, (req, res) => {
   let officeId = REVIEW_GEO_FALLBACK_OFFICE_ID;
   try {
     officeId = pickReviewOfficeId({
@@ -178,7 +189,7 @@ router.get('*', (req, res) => {
     // change the redirect.
     if (req.method === 'GET' && !isBotUserAgent(req.headers['user-agent'])) {
       countScan(reviewShortCodeForOffice(officeId), 'office', req);
-      const techSlug = techSlugFromPath(req.path);
+      const techSlug = techSlugFromPath(pathUnderMount(req.originalUrl));
       if (techSlug) countScan(reviewShortCodeForTech(techSlug), 'tech', req);
     }
   } catch (err) {
@@ -193,6 +204,7 @@ module.exports.pickReviewOfficeId = pickReviewOfficeId;
 module.exports.reviewShortCodeForOffice = reviewShortCodeForOffice;
 module.exports.reviewShortCodeForTech = reviewShortCodeForTech;
 module.exports.techSlugFromPath = techSlugFromPath;
+module.exports.pathUnderMount = pathUnderMount;
 module.exports.TECH_SLUG_RE = TECH_SLUG_RE;
 module.exports.REVIEW_GEO_MAX_MILES = REVIEW_GEO_MAX_MILES;
 module.exports.REVIEW_GEO_FALLBACK_OFFICE_ID = REVIEW_GEO_FALLBACK_OFFICE_ID;
