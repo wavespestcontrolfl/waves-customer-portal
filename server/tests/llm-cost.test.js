@@ -212,6 +212,15 @@ describe('foldLaneCosts', () => {
     expect(out.get('sms_draft').unpricedCalls).toBe(3);
     expect(out.get('call_extraction')).toEqual({ usd: 0, unpricedCalls: 3 });
   });
+
+  test('a lane that sends audio prices every input token at the dearer audio rate; other lanes keep the text rate', () => {
+    const prices = new Map([['gemini-3-5-flash', { input: 1.5, output: 10, cacheRead: 0.15, audioInput: 3 }]]);
+    const row = (laneId) => ({ lane_id: laneId, provider: 'gemini', model: 'gemini-3.5-flash', calls: 1, usage_unknown: 0, input_tokens: 1_000_000, cached_input_tokens: 500_000, output_tokens: 0, reasoning_tokens: 0 });
+    const out = llmCost.foldLaneCosts([row('call_sound_check'), row('report')], prices);
+    expect(llmCost.AUDIO_INPUT_LANES.has('call_sound_check')).toBe(true);
+    expect(out.get('call_sound_check').usd).toBeCloseTo(3, 9);
+    expect(out.get('report').usd).toBeCloseTo(0.75 + 0.075, 9);
+  });
 });
 
 describe('failed calls and unknown usage', () => {

@@ -143,7 +143,8 @@ Currently live:
   through `llm/call.js` (payload `audio: [{ mimeType, data }]`, base64). Only
   the Gemini leg takes it; every other provider fails the leg with
   `unsupported_audio_provider`. Single leg (`hear` in
-  `services/call-sound-check.js`); no caller yet.
+  `services/call-sound-check.js`), dark behind `GATE_CALL_SOUND_CHECK`; the job
+  in the same file holds its own daily spend cap.
 - **Gemini 3.8 Flash** (`MODEL_GEMINI_VISION`; per-service override
   `GEMINI_VISION_MODEL`): every Gemini image-analysis leg — the photo lanes
   (`lawn-assessment.js`, `pest-identification.js`, `tree-shrub-assessment.js`,

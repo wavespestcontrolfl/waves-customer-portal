@@ -1,10 +1,13 @@
 // The call sound check's model call (services/call-sound-check.js `hear`) and the note kept from its answer: what is
 // sent to the model, what comes back to the caller, and what is fit to store. llm/call.js is mocked: no network, no spend.
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatch: jest.fn(), rejectCall: jest.fn() }));
 
 const MODELS = require('../config/models');
 const llm = require('../services/llm/call');
-const { hear, normalizeNote } = require('../services/call-sound-check');
+const { hear, normalizeNote, worstCaseUsd } = require('../services/call-sound-check');
+const { audioInputRates: audioCallRates } = require('../services/llm-cost');
 
 const AUDIO = Buffer.from('fixture bytes, not a real recording');
 const ANSWER = {
@@ -88,5 +91,29 @@ describe('the stored note', () => {
     ['a flagged claim with blank text', { ...ANSWER, risky_claim: { flag: true, what: '   ' } }],
   ])('an answer that is %s gives no note', (_label, json) => {
     expect(normalizeNote(json)).toBeNull();
+  });
+});
+
+describe('the cap prices audio at the audio input rate', () => {
+  const TEXT_ONLY = { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: null, reasoning: 2.5, audioInput: null, tiers: [] };
+  const DEARER_AUDIO = { ...TEXT_ONLY, audioInput: 1 };
+
+  test('every input token bills at the dearer of the text and the audio rate; a cache read bills as plain input', () => {
+    expect(audioCallRates(DEARER_AUDIO)).toEqual(expect.objectContaining({ input: 1, cacheRead: 1, output: 2.5 }));
+    expect(audioCallRates({ ...TEXT_ONLY, audioInput: 0.1 })).toEqual(expect.objectContaining({ input: 0.3, cacheRead: 0.3 }));
+  });
+
+  test('a feed with no audio rate bills audio at the text rate', () => {
+    expect(audioCallRates(TEXT_ONLY)).toEqual(expect.objectContaining({ input: 0.3, cacheRead: 0.3 }));
+  });
+
+  test('an unpriced model stays unpriced', () => {
+    expect(audioCallRates({ ...TEXT_ONLY, input: null })).toEqual(expect.objectContaining({ input: null }));
+    expect(worstCaseUsd({ ...TEXT_ONLY, input: null }, 60)).toBe(Infinity);
+  });
+
+  test('the reserve for one call uses the audio rate', () => {
+    const input = 120 * 32 + 1500;
+    expect(worstCaseUsd(DEARER_AUDIO, 120)).toBeCloseTo((input * 1 + 4096 * 2.5) / 1e6, 9);
   });
 });

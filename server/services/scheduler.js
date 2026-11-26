@@ -3415,6 +3415,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Call sound check (GATE_CALL_SOUND_CHECK, dark): a model listens to each newly
+  // processed call recording and saves notes on the call. Every listen is a
+  // paid Gemini call; services/call-sound-check.js holds the daily cap. Its own
+  // tick and lock, apart from the 5-minute recordings tick, so a slow model
+  // call never delays transcription. Gate off = the tick returns before any
+  // lock or query.
+  cron.schedule('30 3,8,13,18,23,28,33,38,43,48,53,58 * * * *', async () => {
+    if (!require('../config/feature-gates').callSoundCheckLive()) return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('call-sound-check', () => require('./call-sound-check').runCallSoundCheck());
+    } catch (err) {
+      logger.error(`[call-sound-check] tick failed: ${String(err.message).slice(0, 200)}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // While the follow-up pager is live, the overdue watchdog takes each
   // promise over once it ages off the pager's 24-hour list. With callback
   // cards on it already runs every 5 minutes; with cards off its cadence is
