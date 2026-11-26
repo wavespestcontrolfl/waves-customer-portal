@@ -99,12 +99,12 @@ function isRecurring(stop, name) {
 // Sized jobs (owner 2026-11-26: "big jobs use the minutes written on the
 // job"): the table names none of them, so they keep the legacy
 // window/estimate rule, and a stored estimate above the hour is always kept.
-const SIZED_JOB = /exclusion|sanitation|wire mesh|roof[- ]entry|bird box|wildlife|bed ?bug|fumigat|trench|liquid|bora[- ]?care|pre[- ]?treat|installation|install\b|setup|set-up|dethatch|plugging|top dressing|misting|guarantee|membership/;
+const SIZED_JOB = /exclusion|sanitation|wire mesh|roof[- ]entry|bird box|wildlife|bed ?bug|fumigat|trench|liquid|bora[- ]?care|pre[- ]?treat|installation|install\b|setup|set-up|dethatch|aerat|plugging|top dressing|sod\b|misting|guarantee|membership/;
 const LAWN_SPOT = /fire ant|insect spot|spot treatment|weed|soil test|pre-?emergent/;
 
 function pestMinutes(stop, name) {
-  if (/german roach/.test(name)) return PLANNING_MINUTES.germanRoach;
-  if (/vehicle roach|web sweep/.test(name)) return PLANNING_MINUTES.smallPestJob;
+  if (/vehicle|web sweep/.test(name)) return PLANNING_MINUTES.smallPestJob;
+  if (/german (cock)?roach/.test(name)) return PLANNING_MINUTES.germanRoach;
   if (/roach/.test(name)) return PLANNING_MINUTES.cockroach;
   if (!isRecurring(stop, name)) return PLANNING_MINUTES.oneTimePest;
   if (/bi-?monthly/.test(name)) return PLANNING_MINUTES.biMonthlyPest;
@@ -144,7 +144,10 @@ function tableMinutes(stop) {
   if (/assessment|inspection/.test(name)) return PLANNING_MINUTES.assessment;
   const pest = /pest/.test(name);
   const lawn = /lawn|turf/.test(name);
-  if (pest && lawn) return null;
+  // A label that names two programs (pest + lawn, lawn + tree & shrub,
+  // pest + mosquito) is a combined visit: no single row fits it.
+  const programs = [pest, lawn, /tree|shrub|palm/.test(name), /mosquito/.test(name)].filter(Boolean).length;
+  if (programs > 1) return null;
   if (LAWN_SPOT.test(name)) return PLANNING_MINUTES.lawnSpot;
   if (lawn) return isRecurring(stop, name) ? PLANNING_MINUTES.recurringLawn : PLANNING_MINUTES.lawnRound;
   const special = specialtyMinutes(stop, name);
