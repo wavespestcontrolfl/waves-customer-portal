@@ -37,6 +37,12 @@ function fakeCallLog(metadata = {}, { exists = true, status = 'in-progress' } = 
     if (m) return (at(row.metadata, m[1].split(',')) != null) === Boolean(m[2]);
     m = sql.match(/^\(status IS NULL OR status NOT IN \((.*)\)\)$/);
     if (m) return row.status == null || !m[1].split(', ').map((s) => s.replace(/'/g, '')).includes(row.status);
+    // The ring sweep's deadline: started_at + ring_timeout_sec + the bound extra seconds, before now.
+    if (sql.startsWith("((metadata #>> '{conference_path,started_at}')::timestamptz")) {
+      const cp0 = row.metadata?.conference_path || {};
+      const at = Date.parse(cp0.started_at || '');
+      return Number.isFinite(at) && Number.isInteger(cp0.ring_timeout_sec) && at + (cp0.ring_timeout_sec + 60) * 1000 < Date.now();
+    }
     throw new Error(`unknown condition: ${sql}`);
   };
   const apply = ({ sql, bindings }) => {
@@ -170,13 +176,12 @@ describe('claimStart + placeStaffLegs', () => {
       to: '+19415550001', from: '+19415550100', callToken: 'tok', timeout: 25, method: 'POST',
       url: `https://portal.wavespestcontrol.com/api/webhooks/twilio/conference-staff-screen?parent=${SID}`,
       statusCallback: `https://portal.wavespestcontrol.com/api/webhooks/twilio/conference-staff-status?parent=${SID}&leg=0`,
-      statusCallbackEvent: ['initiated', 'completed'],
+      statusCallbackEvent: ['completed'],
     });
     expect(b).toMatchObject({ to: '+19415550002', from: '+19415550100', callToken: 'tok' });
     expect(c).toMatchObject({ to: '+19415550002', from: '+19415550000' });
     expect(c.callToken).toBeUndefined();
-    // The first SID seen owns each slot (a claim also clears a failed stamp).
-    expect(row.metadata.conference_path.legs).toEqual({ 0: { sid: LEG0, status: null }, 1: { sid: LEG1, status: null } });
+    expect(row.metadata.conference_path.legs).toEqual({ 0: { sid: LEG0 }, 1: { sid: LEG1 } });
     expect(log.updates).toEqual([]);
   });
 
@@ -194,116 +199,18 @@ describe('claimStart + placeStaffLegs', () => {
     }
   });
 
-  const legArgs = (extra = {}) => ({ callSid: SID, numbers: ['+19415550001'], ringTimeoutSec: 30, callerFrom: null, wavesLine: '+19415550000', callToken: null, ...extra });
-  const reset = Object.assign(new Error('socket hang up calling +19415550001'), { code: 'ECONNRESET' });
-
-  test('a create with no answer whose own callback names the call: that call is the leg, and nothing rings twice', async () => {
-    jest.useFakeTimers();
+  test('a network error never rings twice; the leg is stamped failed', async () => {
     const row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: {} } } });
     fakeTwilio();
-    mockTw.api.calls.create.mockImplementationOnce(async () => {
-      // Twilio placed it; its 'initiated' callback lands while the answer is lost.
-      setTimeout(() => { cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'initiated' }); }, 300);
-      throw reset;
-    });
-    const pending = cp.placeStaffLegs(legArgs({ callerFrom: '+19415550100', callToken: 'tok' }));
-    await jest.advanceTimersByTimeAsync(3000);
-    expect(await pending).toEqual([LEG0]);
+    mockTw.api.calls.create.mockRejectedValueOnce(Object.assign(new Error('socket hang up calling +19415550001'), { code: 'ECONNRESET' }));
+    const placed = await cp.placeStaffLegs({ callSid: SID, numbers: ['+19415550001'], ringTimeoutSec: 30, callerFrom: '+19415550100', wavesLine: '+19415550000', callToken: 'tok' });
+    expect(placed).toEqual([]);
     expect(mockTw.api.calls.create).toHaveBeenCalledTimes(1);
-    expect(row.metadata.conference_path.legs[0]).toEqual({ sid: LEG0, status: null });
+    expect(row.metadata.conference_path.legs[0]).toEqual({ status: 'failed' });
     // The provider's message can carry the phone number: only its code is logged.
     const logged = [...logger.error.mock.calls, ...logger.warn.mock.calls].flat().join(' ');
     expect(logged).toContain('ECONNRESET');
     expect(logged).not.toContain('5550001');
-  });
-
-  test('a 5xx with no callback: one more try on the Waves line rings the phone', async () => {
-    jest.useFakeTimers();
-    const row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: {} } } });
-    const log = fakeTwilio();
-    mockTw.api.calls.create
-      .mockImplementationOnce(async (p) => { log.created.push(p); throw Object.assign(new Error('x'), { status: 503 }); })
-      .mockImplementationOnce(async (p) => { log.created.push(p); return { sid: LEG0 }; });
-    const pending = cp.placeStaffLegs(legArgs());
-    await jest.advanceTimersByTimeAsync(3000);
-    expect(await pending).toEqual([LEG0]);
-    expect(log.created.map((c) => c.from)).toEqual(['+19415550000', '+19415550000']);
-    expect(row.metadata.conference_path.legs[0].sid).toBe(LEG0);
-  });
-
-  test('the caller-ID ring with no answer and no callback: the Waves line rings the phone', async () => {
-    jest.useFakeTimers();
-    fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: {} } } });
-    const log = fakeTwilio();
-    mockTw.api.calls.create
-      .mockImplementationOnce(async (p) => { log.created.push(p); throw Object.assign(new Error('x'), { status: 502 }); })
-      .mockImplementationOnce(async (p) => { log.created.push(p); return { sid: LEG0 }; });
-    const pending = cp.placeStaffLegs(legArgs({ callerFrom: '+19415550100', callToken: 'tok' }));
-    await jest.advanceTimersByTimeAsync(3000);
-    expect(await pending).toEqual([LEG0]);
-    expect(log.created.map((c) => c.from)).toEqual(['+19415550100', '+19415550000']);
-  });
-
-  test('a refusal on the Waves line is not tried again; every try failing stamps the leg failed', async () => {
-    jest.useFakeTimers();
-    let row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: {} } } });
-    fakeTwilio();
-    mockTw.api.calls.create.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 400 }));
-    expect(await cp.placeStaffLegs(legArgs())).toEqual([]);
-    expect(mockTw.api.calls.create).toHaveBeenCalledTimes(1);
-    expect(row.metadata.conference_path.legs[0]).toEqual({ status: 'failed' });
-    row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: {} } } });
-    fakeTwilio();
-    mockTw.api.calls.create.mockRejectedValue(Object.assign(new Error('x'), { code: 'ETIMEDOUT' }));
-    const pending = cp.placeStaffLegs(legArgs());
-    await jest.advanceTimersByTimeAsync(6000);
-    expect(await pending).toEqual([]);
-    expect(mockTw.api.calls.create).toHaveBeenCalledTimes(2);
-    expect(row.metadata.conference_path.legs[0]).toEqual({ status: 'failed' });
-  });
-
-  test('a second call for an owned slot is hung up, and its end is not the slot\'s end', async () => {
-    const row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: { sid: LEG0 } } } });
-    const log = fakeTwilio();
-    // The duplicate ends; the slot's owner still rings.
-    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG1, status: 'initiated' })).toBe('placed');
-    expect(log.updates).toEqual([{ sid: LEG1, status: 'completed' }]);
-    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG1, status: 'completed' })).toBe('duplicate');
-    expect(row.metadata.conference_path.legs[0]).toEqual({ sid: LEG0 });
-    // The owner's own initiated callback changes nothing; an index past the ring is ignored.
-    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'initiated' })).toBe('placed');
-    expect(await cp.onStaffLegStatus({ callSid: SID, index: 3, legSid: LEG1, status: 'initiated' })).toBe('no_state');
-  });
-
-  test('the first create rang after all and its callback lands during the retry: the retry ends, the first call is the leg', async () => {
-    jest.useFakeTimers();
-    const row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: {} } } });
-    const log = fakeTwilio();
-    mockTw.api.calls.create
-      .mockImplementationOnce(async () => { throw reset; })
-      .mockImplementationOnce(async () => {
-        await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'initiated' }); // late, past the wait
-        return { sid: LEG1 };
-      });
-    const pending = cp.placeStaffLegs(legArgs());
-    await jest.advanceTimersByTimeAsync(3000);
-    expect(await pending).toEqual([LEG0]);
-    expect(log.updates).toEqual([{ sid: LEG1, status: 'completed' }]);
-    expect(row.metadata.conference_path.legs[0].sid).toBe(LEG0);
-  });
-
-  test('a call whose callback lands after its leg was stamped failed owns the slot; after voicemail it is hung up', async () => {
-    let row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: { status: 'failed' } } } });
-    let log = fakeTwilio();
-    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'initiated' })).toBe('placed');
-    expect(row.metadata.conference_path.legs[0]).toEqual({ sid: LEG0, status: null });
-    expect(log.updates).toEqual([]);
-    for (const settled of [{ voicemail_at: 'x' }, { fallback: 'classic_ring' }]) {
-      row = fakeCallLog({ conference_path: { leg_count: 1, legs: { 0: { status: 'failed' } }, ...settled } });
-      log = fakeTwilio();
-      expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'initiated' })).toBe('ended');
-      expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }]);
-    }
   });
 });
 
@@ -378,12 +285,10 @@ describe('staff leg status', () => {
     expect(down).toHaveBeenCalledTimes(3);
   });
 
-  test('every leg busy or failed reports busy; a non-terminal status only confirms the leg', async () => {
+  test('every leg busy or failed reports busy; a non-terminal status is ignored', async () => {
     fakeCallLog(ringing());
     const log = fakeTwilio();
-    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'initiated' })).toBe('placed');
-    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: null, status: 'initiated' })).toBe('ignored');
-    expect(log.updates).toEqual([]);
+    expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'ringing' })).toBe('ignored');
     await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'failed' });
     await cp.onStaffLegStatus({ callSid: SID, index: 1, legSid: LEG1, status: 'busy' });
     expect(log.updates[0].url).toContain('conf_status=busy');
@@ -508,7 +413,6 @@ describe('a staff leg end the database cannot stamp', () => {
     const row = fakeCallLog({ conference_path: { ...ringing().conference_path, accepted_leg_sid: LEG0 } });
     callHold.staffLeft.mockReset().mockResolvedValue('ordinary');
     const normal = db.getMockImplementation();
-    db.mockImplementationOnce(normal); // the slot-owner read
     db.mockImplementationOnce(() => ({ ...normal(), where: jest.fn(function where() { return this; }), whereRaw: jest.fn(function whereRaw() { return this; }), update: jest.fn(async () => { throw Object.assign(new Error('reset'), { code: 'ECONNRESET' }); }) }));
     const log = fakeTwilio({ rooms: [{ sid: 'CF1', status: 'in-progress' }] });
     expect(await cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'completed' })).toBe('retry');
@@ -598,22 +502,31 @@ describe('the minute ring sweep (recoverUnansweredRings): a backstop a restart l
   const rangAt = (secAgo, extra = {}) => ({
     conference_path: { ...ringing().conference_path, ring_timeout_sec: 30, started_at: new Date(Date.now() - secAgo * 1000).toISOString(), ...extra },
   });
+  const room = [{ sid: 'CF1', status: 'init' }];
 
-  test('past ring + backstop + grace with the caller still on: the caller goes to voicemail and the legs end', async () => {
+  test('the deadline is in the query, bound to ring + backstop + grace, and the oldest overdue call goes first', async () => {
+    fakeCallLog(rangAt(300));
+    fakeTwilio({ callStatus: 'in-progress', rooms: [] });
+    await cp.recoverUnansweredRings();
+    const chain = db.mock.results[0].value;
+    expect(chain.whereRaw).toHaveBeenCalledWith(expect.stringContaining('make_interval(secs =>'), [60]);
+    expect(chain.orderBy).toHaveBeenCalledWith('created_at', 'asc');
+  });
+
+  test('past the deadline with the caller waiting in the room: the caller goes to voicemail and the legs end', async () => {
     const row = fakeCallLog(rangAt(91));
-    const log = fakeTwilio({ callStatus: (sid) => (sid === SID ? 'in-progress' : 'completed'), rooms: [{ sid: 'CF1', status: 'init' }] });
+    const log = fakeTwilio({ callStatus: (sid) => (sid === SID ? 'in-progress' : 'completed'), rooms: room });
     expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 1, voicemail: 1, closed: 0 });
     expect(log.updates.map((u) => u.sid)).toEqual([LEG0, LEG1, SID]);
     expect(log.updates[2].url).toContain('/call-complete?conf=1&conf_status=no-answer');
     expect(row.metadata.conference_path.voicemail_at).toEqual(expect.any(String));
   });
 
-  test('still inside the deadline: nothing, so the in-memory backstop goes first', async () => {
+  test('still inside the deadline: not read, so the in-memory backstop goes first', async () => {
     fakeCallLog(rangAt(89));
-    const log = fakeTwilio();
-    expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 1, voicemail: 0, closed: 0 });
+    fakeTwilio({ rooms: room });
+    expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 0, voicemail: 0, closed: 0 });
     expect(mockTw.api.calls).not.toHaveBeenCalled();
-    expect(log.updates).toEqual([]);
   });
 
   test('no open room (the classic ring took the caller): nothing, so a talking caller is never redirected', async () => {
@@ -626,7 +539,7 @@ describe('the minute ring sweep (recoverUnansweredRings): a backstop a restart l
 
   test('Twilio says the caller is gone: the call is closed, and no voicemail redirect is sent', async () => {
     const row = fakeCallLog(rangAt(300));
-    const log = fakeTwilio({ callStatus: 'completed' });
+    const log = fakeTwilio({ callStatus: 'completed', rooms: room });
     expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 1, voicemail: 0, closed: 1 });
     expect(row.metadata.conference_path.closed_at).toEqual(expect.any(String));
     expect(log.updates.some((u) => u.url)).toBe(false);
@@ -641,7 +554,7 @@ describe('the minute ring sweep (recoverUnansweredRings): a backstop a restart l
       [rangAt(300), { status: 'completed' }],
     ]) {
       fakeCallLog(metadata, opts);
-      fakeTwilio();
+      fakeTwilio({ rooms: room });
       expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 0, voicemail: 0, closed: 0 });
       expect(mockTw.api.calls).not.toHaveBeenCalled();
     }
