@@ -1565,8 +1565,12 @@ router.get('/scheduled-service/:id/application-prefill', async (req, res, next) 
       }));
     });
     const productNames = [...new Set(planned.map((row) => row.productName))];
+    // Active catalog rows only, as the job card and the completion defaults read them: a retired row can share a live row's
+    // name (two "Tekko Pro IGR" rows, the inactive one another EPA registration), and the record would carry its EPA number.
     const productRows = productNames.length
-      ? await db('products_catalog').whereIn('name', productNames).select('*').catch(() => [])
+      ? await db('products_catalog').whereIn('name', productNames)
+        .where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); })
+        .select('*').catch(() => [])
       : [];
     const productByName = new Map(productRows.map((row) => [String(row.name || '').toLowerCase(), row]));
     const applications = planned.map((row) => {
