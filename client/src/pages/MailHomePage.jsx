@@ -26,10 +26,15 @@ import { DOC, DOC_EYEBROW, FS, FW, LH, SP, docHeading } from '../theme-doc';
 // separate API origin (VITE_API_URL) would be refused by the browser.
 const API_BASE = '/api';
 
-// The booked annual price when it is lower than the one the page showed, else null.
-function lowerAnnualOf(bookedPrice, shownPrice) {
-  const annual = Number(bookedPrice && bookedPrice.annual);
-  return annual > 0 && annual < Number(shownPrice.annual) ? annual : null;
+// What the booking answer made lower than the page showed: { annual } and/or { setupFee } (dollars), or null.
+function lowerTermsOf(bookedPrice, shownPrice) {
+  if (!bookedPrice) return null;
+  const annual = Number(bookedPrice.annual);
+  const fee = Number(bookedPrice.setupFee);
+  const lower = {};
+  if (annual > 0 && annual < Number(shownPrice.annual)) lower.annual = annual;
+  if (Number.isFinite(fee) && fee >= 0 && fee < (Number(shownPrice.setupFee) || 0)) lower.setupFee = fee;
+  return Object.keys(lower).length ? lower : null;
 }
 
 // Cents only when the amount is not whole: $37 a month, $37.50 a month.
@@ -174,6 +179,25 @@ function CheckMark() {
   );
 }
 
+// The lines of the booked screen that say what the booking made lower than the page showed (lowerTermsOf).
+function BookedTerms({ lower }) {
+  if (!lower) return null;
+  return (
+    <>
+      {lower.annual ? (
+        <p data-testid="booked-price" style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
+          Your price is now {formatMoney(perApplication(lower.annual))} per application.
+        </p>
+      ) : null}
+      {lower.setupFee != null ? (
+        <p data-testid="booked-setup" style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
+          {lower.setupFee > 0 ? `Your one-time setup is now ${formatMoney(lower.setupFee)}.` : 'No setup fee.'}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 // Shown for a home that has a price. onNeedCall(true) tells the page this card carries the call button, so the page
 // does not show a second one.
 function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged }) {
@@ -262,7 +286,7 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged })
       if (r.ok && body.booked) {
         // The price the booking was made on, kept only when it is lower than the one this page showed (the card's price
         // is held 60 days and never goes up; when ours went down the booking takes the lower one).
-        setBooked({ date: body.date || picked.date, window: body.window || {}, lowerAnnual: lowerAnnualOf(body.price, price) });
+        setBooked({ date: body.date || picked.date, window: body.window || {}, lower: lowerTermsOf(body.price, price) });
       } else if (body.error === 'slot_taken' || body.error === 'invalid_offer') {
         setPicked(null);
         setNotice('That time was just taken. Pick another time.');
@@ -305,11 +329,7 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged })
             {city}
           </p>
         ) : null}
-        {booked.lowerAnnual ? (
-          <p data-testid="booked-price" style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
-            Your price is now {formatMoney(perApplication(booked.lowerAnnual))} per application.
-          </p>
-        ) : null}
+        <BookedTerms lower={booked.lower} />
         <p style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
           Your confirmation is on its way.
         </p>

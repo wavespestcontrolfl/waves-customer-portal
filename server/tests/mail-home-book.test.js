@@ -804,10 +804,10 @@ describe('the printed price is held for a mailed home', () => {
   test('termsFor: the lower of the printed and the live amount for each of the annual price and the setup fee', () => {
     const shown = { annualCents: 62700, setupCents: 9900 };
     const on = { held: true };
-    expect(termsFor(on, shown, { annualCents: 62700, setupCents: 9900 })).toEqual({ annualCents: 62700, setupCents: 9900, discountCents: 0, liveSetupCents: 9900 });
-    expect(termsFor(on, shown, { annualCents: 66000, setupCents: 9900 })).toEqual({ annualCents: 62700, setupCents: 9900, discountCents: 3300, liveSetupCents: 9900 });
-    expect(termsFor(on, shown, { annualCents: 60000, setupCents: 12900 })).toEqual({ annualCents: 60000, setupCents: 9900, discountCents: 0, liveSetupCents: 12900 });
-    expect(termsFor(on, shown, { annualCents: 66000, setupCents: 0 })).toEqual({ annualCents: 62700, setupCents: 0, discountCents: 3300, liveSetupCents: 0 });
+    expect(termsFor(on, shown, { annualCents: 62700, setupCents: 9900 })).toEqual({ annualCents: 62700, setupCents: 9900, discountCents: 0, liveSetupCents: 9900, held: false });
+    expect(termsFor(on, shown, { annualCents: 66000, setupCents: 9900 })).toEqual({ annualCents: 62700, setupCents: 9900, discountCents: 3300, liveSetupCents: 9900, held: true });
+    expect(termsFor(on, shown, { annualCents: 60000, setupCents: 12900 })).toEqual({ annualCents: 60000, setupCents: 9900, discountCents: 0, liveSetupCents: 12900, held: true });
+    expect(termsFor(on, shown, { annualCents: 66000, setupCents: 0 })).toEqual({ annualCents: 62700, setupCents: 0, discountCents: 3300, liveSetupCents: 0, held: true });
     // No hold: only the exact shown price books.
     expect(termsFor({ held: false }, shown, { annualCents: 66000, setupCents: 9900 })).toBeNull();
     expect(termsFor({ held: false }, shown, { annualCents: 62700, setupCents: 9900 })).toMatchObject({ discountCents: 0 });
@@ -859,6 +859,20 @@ describe('the printed price is held for a mailed home', () => {
     const res = await bookHome(TOKEN, { ...INPUT(), price: { annual: 627, setupFee: 49 } }, deps);
     expect(res).toMatchObject({ status: 200, body: { price: { annual: 627, setupFee: 49 } } });
     expect(JSON.parse(updates[0].estimate_data.bindings[0])).toMatchObject({ setupFeeQuote: { amount: 49, kind: 'waveguard_membership' } });
+    // The engine's fee is part of the draft key: a draft saved before the fee moved again is not reused.
+    const contact = validContact(INPUT());
+    const capped = { annualCents: 62700, setupCents: 4900, discountCents: 0 };
+    expect(saveEstimate.mock.calls[0][0].clientDraftId).toBe(draftIdFor('prospect-1', contact, { ...capped, liveSetupCents: 9900 }));
+    expect(draftIdFor('prospect-1', contact, { ...capped, liveSetupCents: 9900 })).not.toBe(draftIdFor('prospect-1', contact, { ...capped, liveSetupCents: 12900 }));
+    // With no cap the key is the plain one.
+    expect(draftIdFor('prospect-1', contact, { ...capped, liveSetupCents: 4900 })).toBe(draftIdFor('prospect-1', contact, { annualCents: 62700, setupCents: 4900 }));
+  });
+
+  test('a concurrent submission that createSelfBooking answers as a replay carries no price', async () => {
+    booking.createSelfBooking.mockResolvedValue({ ok: true, body: { replayed: true, booking: { id: 'b1' } } });
+    const res = await bookHome(TOKEN, INPUT(), deps);
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('price');
   });
 
   test('after the 60 days, and for a home never mailed, a moved price is still price_changed', async () => {
@@ -878,7 +892,7 @@ describe('the printed price is held for a mailed home', () => {
 
   test('the commit guard checks the draft at the terms, and refuses held terms once the hold has ended', async () => {
     const shown = { annualCents: 62700, setupCents: 0 };
-    const terms = { annualCents: 60000, setupCents: 0, discountCents: 0, liveSetupCents: 0 };
+    const terms = { annualCents: 60000, setupCents: 0, discountCents: 0, liveSetupCents: 0, held: true };
     const trxFor = (draft) => {
       const prospect = {}; prospect.where = jest.fn(() => prospect); prospect.forShare = jest.fn(() => prospect);
       prospect.first = jest.fn(async () => ({ price_annual: '627.00', price_setup_fee: '0.00' }));
@@ -897,6 +911,10 @@ describe('the printed price is held for a mailed home', () => {
     expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, terms)(trxFor(draftAt('627.00')))).toBe(false);
     // The hold ended between the price check and the commit.
     expect(await commitGuardFor(home(daysAgo(62)), shown, 'est-1', deps, terms)(trxFor(draftAt('600.00')))).toBe(false);
+    // A discount that brings the price back to the shown one still relies on the hold (the amounts are equal).
+    const discounted = { annualCents: 62700, setupCents: 0, discountCents: 3300, liveSetupCents: 0, held: true };
+    expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, discounted)(trxFor(draftAt('627.00')))).toBe(true);
+    expect(await commitGuardFor(home(daysAgo(62)), shown, 'est-1', deps, discounted)(trxFor(draftAt('627.00')))).toBe(false);
     // Terms equal to the shown price need no hold.
     expect(await commitGuardFor(home(null), shown, 'est-1', deps)(trxFor(draftAt('627.00')))).toBe(true);
   });

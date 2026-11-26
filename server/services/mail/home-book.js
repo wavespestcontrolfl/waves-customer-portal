@@ -242,12 +242,19 @@ function validShownPrice(price) {
 // good).
 function draftIdFor(prospectId, contact, shown) {
   const hex = crypto.createHash('sha256')
-    // A held price's discount is part of the key (only when there is one, so every other id is unchanged): a draft saved
-    // with one discount is never reused after the live price moved again.
-    .update(`mail-home-book:${prospectId}:${contact.phone10}:${contact.email}:${contact.name.toLowerCase()}:${shown.annualCents}:${shown.setupCents}${shown.discountCents > 0 ? `:held-${shown.discountCents}` : ''}`)
+    // A held price's discount and capped setup fee are part of the key (only when there is one, so every other id is
+    // unchanged): a draft saved against one live price is never reused after the live price moved again.
+    .update(`mail-home-book:${prospectId}:${contact.phone10}:${contact.email}:${contact.name.toLowerCase()}:${shown.annualCents}:${shown.setupCents}${heldKeyOf(shown)}`)
     .digest('hex');
   const variant = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+// The part of the draft key a held price adds: its discount, and the engine's setup fee when the card caps it.
+function heldKeyOf(terms) {
+  const discount = terms.discountCents > 0 ? `:held-${terms.discountCents}` : '';
+  const fee = Number.isFinite(terms.liveSetupCents) && terms.liveSetupCents !== terms.setupCents ? `:fee-${terms.liveSetupCents}` : '';
+  return `${discount}${fee}`;
 }
 
 const httpStatus = (err) => Number(err && (err.statusCode || err.status)) || 0;
@@ -279,7 +286,8 @@ async function checkLivePrice(home, shown, deps) {
  *   - it differs and the home's printed price is held: each of the annual price and the setup fee is the LOWER of the
  *     printed and the live amount. A live annual above the printed one is brought down by a fixed discount on the
  *     estimate (discountCents); a lower live price is simply the price.
- * liveSetupCents is the engine's own setup fee, the one the saved estimate must still carry.
+ * liveSetupCents is the engine's own setup fee, the one the saved estimate must still carry. held says the terms rely on
+ * the hold (the commit guard checks the hold again inside the booking transaction).
  */
 function termsFor(home, shown, live) {
   if (![live.annualCents, live.setupCents].every(Number.isFinite) || live.annualCents <= 0 || live.setupCents < 0) return null;
@@ -291,6 +299,8 @@ function termsFor(home, shown, live) {
     setupCents: Math.min(shown.setupCents, live.setupCents),
     discountCents: live.annualCents - annualCents,
     liveSetupCents: live.setupCents,
+    // These terms stand only while the printed price is held (the live price is not the one shown).
+    held: !same,
   };
 }
 
@@ -591,7 +601,7 @@ function commitGuardFor(home, shown, estimateId, deps, terms = shown) {
       .first('price_annual', 'price_setup_fee');
     if (!row || toCents(row.price_annual) !== shown.annualCents || toCents(row.price_setup_fee || 0) !== shown.setupCents) return false;
     // A held price ends at the end of its last Eastern day, also for a booking that started before it.
-    if ((terms.annualCents !== shown.annualCents || terms.setupCents !== shown.setupCents) && !priceIsHeld(home.row.mailed_at)) return false;
+    if (terms.held && !priceIsHeld(home.row.mailed_at)) return false;
     const draft = await draftHoldingShownPrice(trx, estimateId, terms);
     if (!draft) return false;
     if (!(await noMemberAtHome(trx, home, deps))) return false;
@@ -748,8 +758,8 @@ async function answerOf(result, offer, pin, booking, terms) {
   // The row the booking wrote has no column for the mail list (mail_prospects has none that fits): nothing is recorded there.
   const body = { booked: true, date: offer.date, window: { start: from, end: to || null } };
   // The price this booking was made on (the lower of the card's and today's while the card's price is held), so the page
-  // can show it. Absent on the replay of an earlier booking.
-  if (terms) body.price = { annual: terms.annualCents / 100, monthly: Math.round(terms.annualCents / 12) / 100, setupFee: terms.setupCents / 100 };
+  // can show it. Absent on the replay of an earlier booking (also a concurrent one createSelfBooking answered as a replay).
+  if (terms && !(result.body && result.body.replayed)) body.price = { annual: terms.annualCents / 100, monthly: Math.round(terms.annualCents / 12) / 100, setupFee: terms.setupCents / 100 };
   return { status: 200, body };
 }
 

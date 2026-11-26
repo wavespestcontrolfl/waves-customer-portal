@@ -265,12 +265,28 @@ it('shows the lower price when the booking was made below the price on the page,
   expect(await screen.findByTestId('booked-price')).toHaveTextContent('Your price is now $100 per application.');
 });
 
+it('shows the lower setup fee when only the fee dropped', async () => {
+  renderPage(pageFetch({ book: response(200, { booked: true, date: '2026-11-30', window: { start: '09:00', end: '11:00' }, price: { annual: 444, monthly: 37, setupFee: 49 } }) }));
+  await pickFirstTime();
+  fillAndSubmit();
+  expect(await screen.findByTestId('booked-setup')).toHaveTextContent('Your one-time setup is now $49.');
+  expect(screen.queryByTestId('booked-price')).not.toBeInTheDocument();
+});
+
+it('says there is no setup fee when the booked fee is zero', async () => {
+  renderPage(pageFetch({ book: response(200, { booked: true, date: '2026-11-30', window: { start: '09:00', end: '11:00' }, price: { annual: 444, monthly: 37, setupFee: 0 } }) }));
+  await pickFirstTime();
+  fillAndSubmit();
+  expect(await screen.findByTestId('booked-setup')).toHaveTextContent('No setup fee.');
+});
+
 it('a booking at the price on the page shows no price line', async () => {
   renderPage(pageFetch({ book: response(200, { booked: true, date: '2026-11-30', window: { start: '09:00', end: '11:00' }, price: { annual: 444, monthly: 37, setupFee: 99 } }) }));
   await pickFirstTime();
   fillAndSubmit();
   await screen.findByTestId('booked');
   expect(screen.queryByTestId('booked-price')).not.toBeInTheDocument();
+  expect(screen.queryByTestId('booked-setup')).not.toBeInTheDocument();
 });
 
 it('sends a missing setup fee as 0, a JSON number', async () => {
