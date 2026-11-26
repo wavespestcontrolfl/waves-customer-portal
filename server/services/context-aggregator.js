@@ -254,15 +254,16 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
 
 // Texting AI facts (owner 2026-11-25): the prepaid visits left and the prep guide of the BOOKED visit's service (sms-staff-facts). Counts
 // and published template text only (never technician or visit notes); each read fails soft to null. OPT IN (`includeSmsStaffFacts`):
-// only the texting AI's draft, its send-time rechecks and the unanswered-text fingerprint ask for them, every other caller skips the
-// reads and the keys. Only for GATE_SMS_REAL_ANSWERS drafts, and never in a frozen replay (asOf): these read today's rows, never an
+// only the texting AI's draft, the unanswered-text fingerprint (true: all of them) and the send-time payment recheck (an object naming just the
+// facts a copied sentence needs) ask for them, every other caller skips the reads and the keys. Only for GATE_SMS_REAL_ANSWERS drafts, and never in a frozen replay (asOf): these read today's rows, never an
 // earlier day's.
 async function loadSmsStaffFacts({ customer, asOfDate, optedIn }) {
-  if (optedIn !== true || asOfDate || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { prepaidPlans: null, prepGuide: null };
+  if (!optedIn || asOfDate || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { prepaidPlans: null, prepGuide: null };
+  const want = optedIn === true ? { prepaid: true, guide: true } : optedIn; // true = all of them; an object names the ones a caller needs
   const staffFacts = require('./sms-staff-facts');
   const [prepaidPlans, prepGuide] = await Promise.all([
-    staffFacts.loadPrepaidPlanFacts(customer.id, { db }),
-    staffFacts.loadPrepGuideFacts(customer.id, { db }),
+    want.prepaid ? staffFacts.loadPrepaidPlanFacts(customer.id, { db }) : null,
+    want.guide ? staffFacts.loadPrepGuideFacts(customer.id, { db }) : null,
   ]);
   return { prepaidPlans, prepGuide };
 }
@@ -1335,8 +1336,8 @@ class ContextAggregator {
   // inbound SMS webhook resolve a single active customer with deleted_at and
   // shared-number protection — re-looking up by phone here could silently
   // pick a different (or deleted) account that shares the number.
-  // `includeSmsStaffFacts` (owner 2026-11-25): the prepaid visits left and the booked visit's prep guide, for the texting AI's draft,
-  // its send-time recheck and the unanswered-text fingerprint only (loadSmsStaffFacts).
+  // `includeSmsStaffFacts` (owner 2026-11-25): the prepaid visits left and the booked visit's prep guide, for the texting AI's draft, its
+  // send-time recheck and the unanswered-text fingerprint only (loadSmsStaffFacts: true = all, or { prepaid, guide }).
   // `includeLiveEta` (Codex round-2 P2, PR #5334 — inverted from the
   // earlier opt-OUT `skipLiveEta`): LIVE ETA resolution is an external GPS +
   // Distance Matrix call, so it defaults OFF and every caller that discards

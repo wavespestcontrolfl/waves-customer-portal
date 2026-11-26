@@ -137,6 +137,13 @@ describe('getContextForCustomer texting AI staff facts', () => {
     expect(staffFacts.loadPrepGuideFacts).toHaveBeenCalledWith(customer.id, { db });
   });
 
+  test('an object names just the facts a caller needs (the send-time recheck asks for the prepaid plans only)', async () => {
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: { prepaid: true } });
+    expect(context.prepaidPlans).toHaveLength(1);
+    expect(context.prepGuide).toBeNull();
+    expect(staffFacts.loadPrepGuideFacts).not.toHaveBeenCalled();
+  });
+
   test('every other caller (no opt-in), a frozen replay and a gate-off context read none of it', async () => {
     const plain = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
     expect(plain.prepaidPlans).toBeNull();

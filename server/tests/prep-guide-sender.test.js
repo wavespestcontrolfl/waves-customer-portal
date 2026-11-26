@@ -1011,9 +1011,11 @@ describe('sendPrepToCustomer', () => {
       db.mockImplementation((table) => {
         if (table !== 'scheduled_services') return customersQuery();
         let keywords = [];
-        const q = { limit: jest.fn(() => q), offset: jest.fn(() => q), where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q), orderBy: jest.fn(() => q),
+        let assigned = null; // the assigned-guide filter runs in SQL, before the page limit
+        const q = { limit: jest.fn(() => q), offset: jest.fn(() => q), where: jest.fn(() => q), whereNotIn: jest.fn(() => q), orderBy: jest.fn(() => q),
+          whereIn: jest.fn((column, values) => { if (column === 'prep_template_key') assigned = values; return q; }),
           whereRaw: jest.fn((sql, params) => { if (!keywords.length && /LOWER\(service_type\) LIKE/.test(sql)) keywords = params.map((p) => p.replace(/%/g, '')); return q; }),
-          select: jest.fn(async () => { if (visitLookupError) throw visitLookupError; return rows.filter((r) => keywords.some((kw) => r.service_type.toLowerCase().includes(kw))); }) };
+          select: jest.fn(async () => { if (visitLookupError) throw visitLookupError; return rows.filter((r) => keywords.some((kw) => r.service_type.toLowerCase().includes(kw)) && (!assigned || assigned.includes(r.prep_template_key))); }) };
         return q;
       });
     };
@@ -1027,6 +1029,9 @@ describe('sendPrepToCustomer', () => {
         liveVisit({ id: 'svc-lawn', service_type: 'Lawn Care', scheduled_date: day(5), prep_template_key: 'prep.lawn' }),
         // sooner than all of them, but no guide chosen for it (an exterior-only plan is also named "Pest Control")
         liveVisit({ id: 'svc-bare', service_type: 'Pest Control', scheduled_date: day(1), prep_template_key: null }),
+        liveVisit({ id: 'svc-bare-2', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: null }),
+        liveVisit({ id: 'svc-bare-3', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: null }),
+        liveVisit({ id: 'svc-bare-4', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: null }),
       ]);
       expect(await nextGuideVisit('cust-1')).toMatchObject({ key: 'flea', visit: { id: 'svc-flea' } });
       visitsFor([liveVisit({ id: 'svc-bare', service_type: 'Quarterly Pest Control', scheduled_date: day(1) })]);

@@ -720,7 +720,8 @@ describe('paymentStatusSendBlockReason - the prepaid visits left sentence', () =
   test('the copy goes out while the plan still reads 3 of 4, read with the staff facts; a changed count is payment_status_changed', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]));
     await expect(run(LEFT)).resolves.toBeNull();
-    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith({ id: 'c1' }, { includeSmsStaffFacts: true });
+    // only the fact the copied sentence needs is read: a payment recheck never scans prep guides
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith({ id: 'c1' }, { includeSmsStaffFacts: { prepaid: true } });
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ label: 'Quarterly Pest Control', remaining: 2, paid: 4 }]));
     await expect(run(LEFT)).resolves.toBe('payment_status_changed');
     // a plan lookup that succeeded and no longer finds the plan is a change; one that FAILED (null) is an outage, retryable
@@ -736,7 +737,7 @@ describe('paymentStatusSendBlockReason - the prepaid visits left sentence', () =
     }
     await expect(run('You have 3 visits left.', { snapshot: null })).resolves.toBe('payment_status_unauthorized');
     // a bare number answers the count question only when the customer asked it
-    await expect(run('Three more.', { inboundMessage: 'How many visits do I have left?' })).resolves.toBe('payment_status_unauthorized');
+    for (const bare of ['Three more.', 'Three.', '3.']) await expect(run(bare, { inboundMessage: 'How many visits do I have left?' })).resolves.toBe('payment_status_unauthorized');
     await expect(run('Three more.', { inboundMessage: 'Can you come at 3?' })).resolves.toBeNull();
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   });

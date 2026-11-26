@@ -57,13 +57,10 @@ async function loadPrepGuideFacts(customerId, { db } = {}) {
     key = booked?.key || null;
     const config = key ? sender.PREP_CONFIG[key] : null;
     if (!config) return null;
-    const row = await db('email_templates as t')
-      .join('email_template_versions as v', 'v.template_id', 't.id')
-      .where({ 't.template_key': config.emailTemplateKey, 'v.status': 'active' })
-      .orderBy('v.version_number', 'desc')
-      .first('v.blocks');
-    if (!row) return null;
-    const blocks = typeof row.blocks === 'string' ? JSON.parse(row.blocks) : row.blocks;
+    // the published version the guide page and the senders serve (the template's active_version_id), not any version marked active
+    const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
+    if (!loaded?.activeVersion) return null;
+    const blocks = typeof loaded.activeVersion.blocks === 'string' ? JSON.parse(loaded.activeVersion.blocks) : loaded.activeVersion.blocks;
     const sentences = [];
     for (const part of proseOfBlocks(blocks)) {
       for (const raw of String(part).replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/)) {

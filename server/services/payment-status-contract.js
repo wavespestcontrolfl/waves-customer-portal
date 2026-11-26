@@ -682,10 +682,10 @@ const ZELLE_WORD_RE = /\bzelle\b/i;
 // prepaid sentence may state it. Broad on purpose; a false hold goes to staff, a missed count would state a plan status unchecked.
 const COUNT_NUM = '(?:\\d{1,3}|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|couple|few|several|once|twice)';
 const PREPAID_COUNT_RE = new RegExp(`\\b(?:visits?|applications?|treatments?)\\s+(?:are\\s+|is\\s+)?(?:still\\s+)?(?:left|remaining|remain)\\b|\\b(?:left|remaining)\\s+(?:prepaid\\s+)?(?:visits?|applications?|treatments?)\\b|\\bprepaid\\s+(?:\\w+\\s+)?(?:visits?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+more\\s+(?:visits?|applications?|treatments?)\\b`, 'i');
-// ...and a short answer to a question that ASKS for the count ("Three more.", "You have three more visits.", "None left.") carries no
+// ...and a short answer to a question that ASKS for the count ("Three more.", "Three.", "3.", "None left.") carries no
 // count word in its own words either. The question decides: an unknown customer message counts as asking (unknown is scoped).
 const COUNT_ASK_RE = /\b(?:how many|number of)\b[^.?!]{0,40}\b(?:visits?|applications?|treatments?|services?|times)\b|\b(?:visits?|applications?|treatments?)\b[^.?!]{0,30}\b(?:left|remaining|remain|prepaid|paid for|covered)\b|\b(?:left|remaining)\b[^.?!]{0,20}\b(?:visits?|applications?|treatments?)\b/i;
-const COUNT_ANSWER_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:more|left|remaining|total|(?:\\w+\\s+)?(?:visits?|applications?|treatments?|services?|times))\\b|\\b(?:no|none|nothing)\\s+(?:more|left|remaining)\\b`, 'i');
+const COUNT_ANSWER_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:more|left|remaining|total|(?:\\w+\\s+)?(?:visits?|applications?|treatments?|services?|times))\\b|\\b(?:no|none|nothing)\\s+(?:more|left|remaining)\\b|(?:^|[.!?]\\s+)(?:(?:about|just|only)\\s+)?${COUNT_NUM}\\s*(?:[.!?]|$)`, 'i');
 const claimsPrepaidCount = (text, inboundText = null) => {
   const body = String(text ?? '');
   return PREPAID_COUNT_RE.test(body) || ((inboundText == null || COUNT_ASK_RE.test(String(inboundText))) && COUNT_ANSWER_RE.test(body));

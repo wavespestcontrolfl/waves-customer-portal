@@ -50,7 +50,7 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(check('Your prepaid Quarterly Pest Control plan has 2 of 4 prepaid visits left.')).toBe(false);
     for (const own of ['You have 3 visits left.', 'Three treatments remain on your plan.', 'You have two prepaid visits.', 'There are 3 left visits.',
       // short answers to the count question: no count word in the model's own words
-      'You have three more visits.', 'Three more.', 'None left.', 'A couple more.']) expect(check(own)).toBe(false);
+      'You have three more visits.', 'Three more.', 'None left.', 'A couple more.', 'Three.', '3.', 'Just two!', 'Happy to help. Four']) expect(check(own)).toBe(false);
     expect(check('We will see you on Tuesday.')).toBe(true);
     // the question decides: a short number to another question is not a plan count, an unknown question is judged as asking
     const other = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences, inboundText }).ok;
@@ -122,23 +122,25 @@ describe('sms-staff-facts loaders', () => {
     { type: 'list', items: ['Wash all pet bedding on the hottest cycle the fabric allows.', 'Call (941) 555-0100 or mail someone@example.com.'] },
     { type: 'signature', content: 'The team signs here with a sentence.' },
   ];
-  const dbReturning = (row) => {
-    const chain = { join: () => chain, where: () => chain, orderBy: () => chain, first: async () => row };
-    return () => chain;
-  };
-  const loadWith = async (booked, db, customerId = 'c1') => {
+  // the published version the guide page serves: { activeVersion: { blocks } } from the template library, or null (no template / no published version)
+  const published = { activeVersion: { blocks: JSON.stringify(blocks) } };
+  const loadWith = async (booked, loaded, customerId = 'c1') => {
     jest.resetModules();
     jest.doMock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
     jest.doMock('../services/prep-guide-sender', () => ({
       PREP_CONFIG: { flea: { label: 'Flea Treatment', emailTemplateKey: 'prep.flea' } },
       nextGuideVisit: jest.fn(async () => { if (booked instanceof Error) throw booked; return booked; }),
     }));
-    return require('../services/sms-staff-facts').loadPrepGuideFacts(customerId, { db });
+    const loadTemplateByKey = jest.fn(async () => { if (loaded instanceof Error) throw loaded; return loaded; });
+    jest.doMock('../services/email-template-library', () => ({ loadTemplateByKey }));
+    const guide = await require('../services/sms-staff-facts').loadPrepGuideFacts(customerId, { db: 'db' });
+    return { guide, loadTemplateByKey };
   };
-  afterEach(() => { jest.dontMock('../services/prep-guide-sender'); jest.dontMock('../services/prepaid-series'); jest.resetModules(); });
+  afterEach(() => { jest.dontMock('../services/email-template-library'); jest.dontMock('../services/prep-guide-sender'); jest.dontMock('../services/prepaid-series'); jest.resetModules(); });
 
   test('the booked visit\'s guide: the active template, prose sentences kept, links, merge tags and email wording dropped', async () => {
-    const guide = await loadWith({ key: 'flea', visit: { id: 'v1' } }, dbReturning({ blocks: JSON.stringify(blocks) }));
+    const { guide, loadTemplateByKey } = await loadWith({ key: 'flea', visit: { id: 'v1' } }, published);
+    expect(loadTemplateByKey).toHaveBeenCalledWith('prep.flea', 'db');
     expect(guide).toMatchObject({ key: 'flea', label: 'Flea Treatment' });
     expect(guide.sentences).toEqual([
       'Vacuum every carpet before we arrive.',
@@ -147,11 +149,13 @@ describe('sms-staff-facts loaders', () => {
   });
 
   test('no booked visit with a guide, no active template, a failed lookup or no customer: no guide, never a throw', async () => {
-    expect(await loadWith(null, dbReturning({ blocks: JSON.stringify(blocks) }))).toBeNull();
-    expect(await loadWith({ key: 'flea', visit: {} }, dbReturning(null))).toBeNull();
-    expect(await loadWith(new Error('boom'), dbReturning({ blocks: '[]' }))).toBeNull();
-    expect(await loadWith({ key: 'flea', visit: {} }, () => { throw new Error('boom'); })).toBeNull();
-    expect(await loadWith({ key: 'flea', visit: {} }, dbReturning({ blocks: JSON.stringify(blocks) }), null)).toBeNull();
+    const none = async (booked, loaded, customerId) => (await loadWith(booked, loaded, customerId)).guide;
+    expect(await none(null, published)).toBeNull();
+    expect(await none({ key: 'flea', visit: {} }, null)).toBeNull(); // no template
+    expect(await none({ key: 'flea', visit: {} }, { activeVersion: null })).toBeNull(); // no published version
+    expect(await none(new Error('boom'), published)).toBeNull();
+    expect(await none({ key: 'flea', visit: {} }, new Error('boom'))).toBeNull();
+    expect(await none({ key: 'flea', visit: {} }, published, null)).toBeNull();
   });
 
   test('loadPrepaidPlanFacts maps the plan rollup and fails soft', async () => {

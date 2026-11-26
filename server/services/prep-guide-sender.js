@@ -283,7 +283,7 @@ function isSupportedChannel(channel) {
 // any number of taken ones is still found (GH Codex #3856 r27 P2). Empty
 // when nothing matches; THROWS on a lookup error.
 const VISIT_PAGE = 10;
-async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywords = [] }, max) {
+async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywords = [] }, max, { assignedGuideKeys = null } = {}) {
   const ids = [].concat(customerIds).filter(Boolean);
   const { pageStateForVisit } = require('../routes/appointment-public');
   const found = [];
@@ -302,6 +302,8 @@ async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywo
       const unless = [].concat(ex.unless);
       q.whereRaw(`(LOWER(service_type) NOT LIKE ? OR ${unless.map(() => 'LOWER(service_type) LIKE ?').join(' OR ')})`, [`%${ex.keyword}%`, ...unless.map((u) => `%${u}%`)]);
     }
+    // (optional) only visits whose guide is already assigned, filtered BEFORE the page limit so unassigned rows cannot crowd one out
+    if (assignedGuideKeys) q.whereIn('prep_template_key', assignedGuideKeys);
     const rows = await q
       .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
       // The same null-safe dispatch-owned predicate /api/schedule uses.
@@ -351,20 +353,18 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
 
 // The soonest booked visit whose prep guide the system has ASSIGNED, with that guide's key: { key, visit } or null. Eligibility is the
 // senders' own (upcomingFamilyVisits: the family keywords and exclusions, the 'upcoming' page state, the ET date), asked once per guide
-// family over the next few visits and merged soonest first (date, window, id), so the texting AI's PREP GUIDE (sms-staff-facts) never
-// reads a visit the senders would not prep. A service-name match alone is not enough ("Quarterly Pest Control" is also an exterior-only
-// plan): only a visit whose prep_template_key already names a live visit guide counts, the guide the prep lane chose for it. A how-to
-// guide never matches. THROWS on a lookup error.
-const GUIDE_VISITS_PER_FAMILY = 3;
+// family and merged soonest first (date, window, id), so the texting AI's PREP GUIDE (sms-staff-facts) never reads a visit the senders
+// would not prep. A service-name match alone is not enough ("Quarterly Pest Control" is also an exterior-only plan): only a visit whose
+// prep_template_key already names a live visit guide counts, the guide the prep lane chose for it. A how-to guide never matches.
+// THROWS on a lookup error.
 const sortKey = (visit) => [dateOnlyString(visit.scheduled_date), String(visit.window_start || ''), String(visit.id).padStart(12, '0')].join('|');
 async function nextGuideVisit(customerId) {
   const visitGuides = Object.entries(PREP_CONFIG).filter(([, config]) => !config.guide && config.serviceKeywords?.length);
+  const assignedGuideKeys = visitGuides.map(([, config]) => config.emailTemplateKey);
   let best = null;
   for (const [, config] of visitGuides) {
-    for (const visit of await upcomingFamilyVisits([customerId], config, GUIDE_VISITS_PER_FAMILY)) {
-      const assigned = visitGuides.find(([, c]) => c.emailTemplateKey === visit.prep_template_key);
-      if (assigned && (!best || sortKey(visit) < sortKey(best.visit))) best = { key: assigned[0], visit };
-    }
+    const [visit] = await upcomingFamilyVisits([customerId], config, 1, { assignedGuideKeys });
+    if (visit && (!best || sortKey(visit) < sortKey(best.visit))) best = { key: visitGuides.find(([, c]) => c.emailTemplateKey === visit.prep_template_key)[0], visit };
   }
   return best;
 }
