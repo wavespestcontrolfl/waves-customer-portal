@@ -137,12 +137,15 @@ async function jobRevenueForWindow(db, startDate, endDate) {
     .select(
       db.raw('COALESCE(SUM(revenue), 0)::text as revenue'),
       db.raw('100.0 * SUM(gross_profit) / NULLIF(SUM(revenue), 0) as weighted_margin'),
+      db.raw('COALESCE(SUM(gross_profit), 0)::text as gross_profit'),
     )
     .first();
   const margin = row && row.weighted_margin != null ? Number(row.weighted_margin) : null;
   return {
     revenue: round2(row && row.revenue),
     grossMarginPct: Number.isFinite(margin) ? round2(margin) : null,
+    // The dollars behind the percent, kept in a month with no revenue (a callback-only month is a loss).
+    grossProfit: round2(row && row.gross_profit),
   };
 }
 
@@ -177,6 +180,7 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
     completed_job_revenue: jobs.revenue,
     cash_revenue: cashRevenue,
     gross_margin_pct: jobs.grossMarginPct,
+    job_gross_profit: jobs.grossProfit,
     office_cost: officeCost,
     owner_allowance: allowance,
     paid_stops: stops,

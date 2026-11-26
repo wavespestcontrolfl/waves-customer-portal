@@ -11,7 +11,7 @@ const view = require('../services/buyer-view');
 // A stored row; months are 'YYYY-MM-01'. Month 1 = 2025-01 ... month 24 = 2026-12 for compactness.
 const monthKey = (n) => `${2025 + Math.floor((n - 1) / 12)}-${String(((n - 1) % 12) + 1).padStart(2, '0')}-01`;
 const row = (n, fields = {}) => ({
-  month: monthKey(n), cash_revenue: 1000, completed_job_revenue: 1200, gross_margin_pct: 50, book_gross_margin_pct: 40, book_gross_profit: 400, eligible_job_revenue: 1200,
+  month: monthKey(n), cash_revenue: 1000, completed_job_revenue: 1200, gross_margin_pct: 50, job_gross_profit: 600, book_gross_margin_pct: 40, book_gross_profit: 400, eligible_job_revenue: 1200,
   office_cost: 100, paid_stops: 10, owner_allowance: 0, owner_field_allowance: 0, owner_paid_profit: 200, sde: 300,
   recurring_revenue: 600, recurring_mature_revenue: 300, ...fields,
 });
@@ -72,7 +72,7 @@ describe('the other tiles', () => {
   });
 
   test('gross margin: book margin is total book profit over total revenue; per-job margin is weighted by completed-visit revenue', () => {
-    const rows = run(1, 12, (n) => (n === 1 ? { cash_revenue: 3000, book_gross_profit: 600, completed_job_revenue: 2000, gross_margin_pct: 60 } : {}));
+    const rows = run(1, 12, (n) => (n === 1 ? { cash_revenue: 3000, book_gross_profit: 600, completed_job_revenue: 2000, job_gross_profit: 1200 } : {}));
     // book: (600 + 11 x 400) / (3000 + 11 x 1000) = 35.7 ; per job: (1200 + 11 x 600) / 15200 = 51.3
     expect(view.grossMarginMetric(view.splitWindows(rows))).toMatchObject({ bookPct: 35.7, bookGrossProfit: 5000, perJobAtStandardPct: 51.3, bookMonthsCounted: 12 });
   });
@@ -85,6 +85,20 @@ describe('the other tiles', () => {
     });
     // (-300 - 50 + 10 x 400) / (0 - 50 + 10 x 1000) = 36.7 ; dropping the two months would read 40
     expect(view.grossMarginMetric(view.splitWindows(rows))).toMatchObject({ bookPct: 36.7, bookGrossProfit: 3650, bookMonthsCounted: 12 });
+  });
+
+  test('per-job margin is total job profit over total job revenue: $1,000 revenue at $200 cost plus a callback-only $100-loss month is 70%', () => {
+    const rows = run(1, 12, (n) => {
+      if (n === 1) return { completed_job_revenue: 1000, job_gross_profit: 800, gross_margin_pct: 80 };
+      if (n === 2) return { completed_job_revenue: 0, job_gross_profit: -100, gross_margin_pct: null }; // callback only: cost, no revenue
+      return { completed_job_revenue: 0, job_gross_profit: 0, gross_margin_pct: null };
+    });
+    expect(view.grossMarginMetric(view.splitWindows(rows))).toMatchObject({ perJobAtStandardPct: 70, perJobMonthsCounted: 12 }); // dropping the loss month would read 80
+  });
+
+  test('a month stored before job profit existed is left out of both sums and counted', () => {
+    const rows = run(1, 12, (n) => (n <= 5 ? { job_gross_profit: null } : {}));
+    expect(view.grossMarginMetric(view.splitWindows(rows))).toMatchObject({ perJobAtStandardPct: 50, perJobMonthsCounted: 7 });
   });
 
   test('a month stored before book profit existed is left out and counted', () => {
@@ -149,19 +163,50 @@ describe('getBuyerView', () => {
     expect(payload.prepaidOwed).toBeNull();
   });
 
-  test('the owner-time metrics say the hourly rate is a placeholder, worded from the stored rate, not a fixed number', async () => {
-    const stored = await view.getBuyerView({ db: dbWith(run(1, 24), { owner_office_hourly_rate: '31.50', owner_field_hourly_rate: '28.00' }), now: new Date('2026-11-26T15:00:00Z'), logger });
-    expect(stored.ownerProfit.basis).toContain('The owner office rate is $31.5 an hour, a placeholder, not a final rate');
-    expect(stored.ownerProfit.basis).toContain('The owner field wage is $28 an hour, a placeholder, not a final rate');
-    expect(stored.grossMargin.basis).toContain('The owner field wage is $28 an hour, a placeholder, not a final rate');
-    expect(stored.officeCost.basis).toContain('The owner office rate is $31.5 an hour, a placeholder, not a final rate');
-    expect(stored.ownerRates).toEqual({ officeHourly: '31.50', fieldHourly: '28.00' });
+  test('the owner-time basis states what the stored months counted, and the current Settings rate on its own line, worded from the stored rate', async () => {
+    const rows = run(1, 24, { owner_allowance: 100, owner_field_allowance: 50 });
+    const stored = await view.getBuyerView({ db: dbWith(rows, { owner_office_hourly_rate: '31.50', owner_field_hourly_rate: '28.00' }), now: new Date('2026-11-26T15:00:00Z'), logger });
+    expect(stored.ownerProfit.basis).toContain('Owner office time was counted in 12 of 12 stored months.');
+    expect(stored.ownerProfit.basis).toContain('Owner field time was counted in 12 of 12 stored months.');
+    expect(stored.ownerProfit.basis).toContain('Current owner office rate: $31.5 an hour, a placeholder, not a final rate.');
+    expect(stored.ownerProfit.basis).toContain('Current owner field wage: $28 an hour, a placeholder, not a final rate.');
+    expect(stored.grossMargin.basis).toContain('Current owner field wage: $28 an hour, a placeholder, not a final rate.');
+    expect(stored.officeCost.basis).toContain('Current owner office rate: $31.5 an hour, a placeholder, not a final rate.');
+    expect(stored.ownerRates).toEqual({ available: true, officeHourly: '31.50', fieldHourly: '28.00' });
     expect(JSON.stringify(stored)).not.toContain('$25 an hour');
-    // No rate stored: it says that time is not counted, and never invents a placeholder figure.
-    const none = await view.getBuyerView({ db: dbWith(run(1, 24), { owner_office_hourly_rate: null, owner_field_hourly_rate: '0.00' }), now: new Date('2026-11-26T15:00:00Z'), logger });
-    expect(none.ownerProfit.basis).toContain('No owner office rate is set, so that owner time is not counted.');
-    expect(none.grossMargin.basis).toContain('No owner field wage is set');
+  });
+
+  test('rates cleared today do not rewrite history: 12 months with allowances still say they were counted, and now says none set', async () => {
+    const rows = run(1, 24, { owner_allowance: 100, owner_field_allowance: 50 });
+    const none = await view.getBuyerView({ db: dbWith(rows, { owner_office_hourly_rate: null, owner_field_hourly_rate: '0.00' }), now: new Date('2026-11-26T15:00:00Z'), logger });
+    expect(none.ownerProfit.basis).toContain('Owner office time was counted in 12 of 12 stored months.');
+    expect(none.ownerProfit.basis).toContain('Current owner office rate: none set now.');
+    expect(none.grossMargin.basis).toContain('Owner field time was counted in 12 of 12 stored months.');
+    expect(none.grossMargin.basis).toContain('Current owner field wage: none set now.');
     expect(none.officeCost.basis).not.toContain('placeholder');
+    expect(JSON.stringify(none)).not.toContain('not counted');
+  });
+
+  test('months that did not count owner time say so from the stored allowances', async () => {
+    const rows = run(1, 24, (n) => (n > 20 ? { owner_allowance: 100, owner_field_allowance: 0 } : { owner_allowance: 0, owner_field_allowance: 0 }));
+    const payload = await view.getBuyerView({ db: dbWith(rows), now: new Date('2026-11-26T15:00:00Z'), logger });
+    expect(payload.ownerProfit.basis).toContain('Owner office time was counted in 4 of 12 stored months.');
+    expect(payload.ownerProfit.basis).toContain('Owner field time was counted in 0 of 12 stored months.');
+  });
+
+  test('a failed settings read says the current rate is unavailable, never that owner time was excluded', async () => {
+    const rows = run(1, 24, { owner_allowance: 100, owner_field_allowance: 50 });
+    const db = dbWith(rows);
+    const failing = (table) => {
+      if (table === 'company_financials') return { orderBy: () => ({ first: async () => { throw new Error('settings read failed'); } }) };
+      return db(table);
+    };
+    const payload = await view.getBuyerView({ db: failing, now: new Date('2026-11-26T15:00:00Z'), logger });
+    expect(payload.ownerProfit.basis).toContain('Current owner office rate: unavailable.');
+    expect(payload.ownerProfit.basis).toContain('Owner office time was counted in 12 of 12 stored months.');
+    expect(payload.officeCost.basis).toContain('Current owner office rate: unavailable.');
+    expect(payload.ownerRates.available).toBe(false);
+    expect(JSON.stringify(payload)).not.toMatch(/not counted|none set now/);
   });
 
   test('every metric carries its basis in words', async () => {

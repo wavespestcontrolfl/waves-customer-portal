@@ -192,7 +192,7 @@ describe('computeMonthSnapshot', () => {
   // Four reads hit different tables here, so one fake serves all of them.
   const dbFor = ({ ledger, stops, rev, margin, fin }) => makeDb({
     expenses: { first: { total: String(ledger) } },
-    service_records: { first: { n: String(stops), revenue: String(rev), weighted_margin: margin } },
+    service_records: { first: { n: String(stops), revenue: String(rev), weighted_margin: margin, gross_profit: '5245.60' } },
     company_financials: { first: fin },
   });
 
@@ -204,6 +204,7 @@ describe('computeMonthSnapshot', () => {
       completed_job_revenue: 10000,
       cash_revenue: 9000,
       gross_margin_pct: 52.46,
+      job_gross_profit: 5245.6,
       office_cost: 1500,
       owner_allowance: 500,
       paid_stops: 100,

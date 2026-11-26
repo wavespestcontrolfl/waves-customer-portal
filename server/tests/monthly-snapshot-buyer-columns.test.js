@@ -156,6 +156,29 @@ describe('the plan-visit rule text', () => {
   });
 });
 
+describe('migration 20261126150000', () => {
+  const jobProfitMigration = require('../models/migrations/20261126150000_snapshot_job_gross_profit');
+  test('adds job_gross_profit numeric(12,2) once, and down drops it', async () => {
+    const added = [];
+    const dropped = [];
+    let has = false;
+    const knex = {
+      schema: {
+        hasColumn: async () => has,
+        alterTable: async (_t, cb) => cb({
+          decimal: (name, p, s) => { added.push(`${name} ${p},${s}`); has = true; return { nullable: () => {} }; },
+          dropColumn: (name) => { dropped.push(name); has = false; },
+        }),
+      },
+    };
+    await jobProfitMigration.up(knex);
+    await jobProfitMigration.up(knex);
+    expect(added).toEqual(['job_gross_profit 12,2']);
+    await jobProfitMigration.down(knex);
+    expect(dropped).toEqual(['job_gross_profit']);
+  });
+});
+
 describe('migration 20261126140000', () => {
   const eligibleMigration = require('../models/migrations/20261126140000_snapshot_eligible_revenue');
   const makeKnex = (present) => {

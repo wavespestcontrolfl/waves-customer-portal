@@ -335,6 +335,21 @@ postgres('buyer view (live Postgres)', () => {
     });
   });
 
+  describe('per-job margin from stored job profit', () => {
+    it('a $1,000 month at $200 cost and a callback-only month that lost $100 give 70% over the two months, not 80%', async () => {
+      const other = await technician({ role: 'technician' });
+      const home = await customer();
+      await visit(home, '2026-09-10', { revenue: 1000, gross_profit: 800, technician_id: other });
+      await visit(home, '2026-10-10', { revenue: 0, gross_profit: -100, technician_id: other, is_callback: true }); // a free return: cost, no revenue
+      const september = await snapshot.upsertMonthSnapshot('2026-09', trx);
+      const october = await snapshot.upsertMonthSnapshot('2026-10', trx);
+      expect(september).toMatchObject({ completed_job_revenue: 1000, job_gross_profit: 800, gross_margin_pct: 80 });
+      expect(october).toMatchObject({ completed_job_revenue: 0, job_gross_profit: -100, gross_margin_pct: null });
+      const payload = await view.getBuyerView({ db: trx, now: NOW });
+      expect(payload.grossMargin).toMatchObject({ perJobAtStandardPct: 70, perJobMonthsCounted: 2 });
+    });
+  });
+
   describe('the recurring share denominator', () => {
     it('is stored in the same snapshot: the revenue of every customer except the internal test accounts', async () => {
       const plan = await customer({ waveguard_tier: 'Gold', member_since: '2024-01-01' });
@@ -517,10 +532,10 @@ postgres('buyer view (live Postgres)', () => {
         .whereIn('table_name', ['monthly_financial_snapshots', 'company_financials'])
         .whereIn('column_name', [
           'book_gross_profit', 'book_gross_margin_pct', 'owner_field_hours', 'owner_field_allowance', 'owner_paid_profit', 'sde', 'recurring_revenue',
-          'recurring_mature_revenue', 'prepaid_owed', 'autopay_renewing_share', 'owner_field_hourly_rate', 'eligible_job_revenue',
+          'recurring_mature_revenue', 'prepaid_owed', 'autopay_renewing_share', 'owner_field_hourly_rate', 'eligible_job_revenue', 'job_gross_profit',
         ])
         .select('column_name', 'data_type', 'numeric_precision', 'numeric_scale', 'is_nullable');
-      expect(rows).toHaveLength(12);
+      expect(rows).toHaveLength(13);
       expect(rows.every((r) => r.data_type === 'numeric' && r.is_nullable === 'YES')).toBe(true);
       const byName = Object.fromEntries(rows.map((r) => [r.column_name, [r.numeric_precision, r.numeric_scale]]));
       expect(byName.owner_field_hourly_rate).toEqual([8, 2]);

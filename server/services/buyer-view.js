@@ -42,20 +42,6 @@ function sumColumn(rows, column) {
   return { total, months };
 }
 
-/** A stored percent averaged over the months that have it, weighted by that month's dollar column (sum of pct x dollars / sum of dollars). */
-function weightedPercent(rows, pctColumn, weightColumn) {
-  let weighted = 0;
-  let weight = 0;
-  let months = 0;
-  for (const row of rows) {
-    if (row[pctColumn] == null) continue;
-    weighted += (num(row[pctColumn]) * num(row[weightColumn])) / 100;
-    weight += num(row[weightColumn]);
-    months += 1;
-  }
-  return { pct: pctOf(weighted, weight), months };
-}
-
 /** The newest 12 stored months (the window) and the 12 before them (prior), oldest first, picked by month number. */
 function splitWindows(rows) {
   if (!rows.length) return { window: [], prior: [] };
@@ -68,14 +54,21 @@ function splitWindows(rows) {
   };
 }
 
+/** How many stored months counted an owner time allowance (the column > 0): the historical fact, from the stored rows. */
+function timeCounted(what, window, allowanceColumn) {
+  const counted = window.filter((r) => num(r[allowanceColumn]) > 0).length;
+  return `Owner ${what} was counted in ${counted} of ${window.length} stored months.`;
+}
+
 /**
- * The sentence about one owner rate, worded from the stored value: the rate is a placeholder until the owner sets a final one.
- * `what` names the time it pays for ("owner field wage", "owner office rate").
+ * The rate in Settings now, a separate line from what the months counted: a placeholder until the owner sets a final one, worded
+ * from the stored value. `rates.available` false = the settings read failed, which says nothing about the stored months.
  */
-function rateNote(what, hourlyRate) {
-  const rate = Number(hourlyRate);
-  if (!(rate > 0)) return `No ${what} is set, so that owner time is not counted.`;
-  return `The ${what} is $${rate} an hour, a placeholder, not a final rate; the figure changes when it is set.`;
+function currentRateNote(what, rates, key) {
+  if (!rates || rates.available === false) return `Current ${what}: unavailable.`;
+  const rate = Number(rates[key]);
+  if (!(rate > 0)) return `Current ${what}: none set now.`;
+  return `Current ${what}: $${rate} an hour, a placeholder, not a final rate.`;
 }
 
 function revenueMetric({ window, prior }) {
@@ -121,18 +114,20 @@ function grossMarginMetric({ window }, rates = {}) {
   // negative revenue still carries its profit or loss and never drops out of the year.
   const profit = sumColumn(window, 'book_gross_profit');
   const revenue = sumColumn(window.filter((r) => r.book_gross_profit != null), 'cash_revenue');
-  const perJob = weightedPercent(window, 'gross_margin_pct', 'completed_job_revenue');
+  // Per-job margin is the same shape: total job profit over total completed-visit revenue, over months that stored the profit.
+  const jobProfit = sumColumn(window, 'job_gross_profit');
+  const jobRevenue = sumColumn(window.filter((r) => r.job_gross_profit != null), 'completed_job_revenue');
   return {
     bookPct: pctOf(profit.total, revenue.total),
     bookGrossProfit: round2(profit.total),
     bookMonthsCounted: profit.months,
-    perJobAtStandardPct: perJob.pct,
-    perJobMonthsCounted: perJob.months,
+    perJobAtStandardPct: pctOf(jobProfit.total, jobRevenue.total),
+    perJobMonthsCounted: jobProfit.months,
     basis: 'From the books: cash revenue less cost-of-goods expenses (supplies, materials, chemicals), less pay-run wages when the '
       + 'P&L counts them, less the owner\'s field wage; total over the months, divided by their total revenue. Per job, at standard '
       + 'minutes: completed-visit revenue less job costs where on-site time is the standard 25 minutes for pest and 20 for lawn '
-      + 'plus drive (the dashboard tile\'s formula, unchanged: stored month by month and weighted by each month\'s revenue). '
-      + rateNote('owner field wage', rates.fieldHourly),
+      + 'plus drive (the dashboard tile\'s formula: total job profit over total job revenue of the months, a month with no revenue still counting its loss). '
+      + `${timeCounted('field time', window, 'owner_field_allowance')} ${currentRateNote('owner field wage', rates, 'fieldHourly')}`,
   };
 }
 
@@ -151,7 +146,8 @@ function ownerProfitMetric({ window }, rates = {}) {
     ownerPay: { officeMonths, fieldMonths, months: window.length },
     basis: 'EBITDA (P&L net income with depreciation and interest added back) less the owner\'s own time: office hours x office rate '
       + 'and field hours x field wage. The books hold no pay for the owner. SDE is the same EBITDA before any owner pay. '
-      + `${rateNote('owner office rate', rates.officeHourly)} ${rateNote('owner field wage', rates.fieldHourly)}`,
+      + `${timeCounted('office time', window, 'owner_allowance')} ${timeCounted('field time', window, 'owner_field_allowance')} `
+      + `${currentRateNote('owner office rate', rates, 'officeHourly')} ${currentRateNote('owner field wage', rates, 'fieldHourly')}`,
   };
 }
 
@@ -167,7 +163,7 @@ function officeCostMetric({ window }, rates = {}) {
     monthsCounted: cost.months,
     basis: 'Office cost (ledger office categories plus the owner\'s office time) summed over the 12 months, over paid stops '
       + '(sum over sum, not an average of months), and over cash revenue. '
-      + rateNote('owner office rate', rates.officeHourly),
+      + `${timeCounted('office time', window, 'owner_allowance')} ${currentRateNote('owner office rate', rates, 'officeHourly')}`,
   };
 }
 
@@ -251,6 +247,7 @@ async function getBuyerView({ db = require('../models/db'), now = new Date(), lo
   const financials = await settled('owner rates', logger, () => db('company_financials')
     .orderBy('effective_date', 'desc').first('owner_office_hourly_rate', 'owner_field_hourly_rate'));
   const rates = {
+    available: !(financials && financials.error),
     officeHourly: financials && !financials.error ? financials.owner_office_hourly_rate : null,
     fieldHourly: financials && !financials.error ? financials.owner_field_hourly_rate : null,
   };
@@ -287,12 +284,12 @@ module.exports = {
   ownerHoursPerWeek,
   splitWindows,
   sumColumn,
-  weightedPercent,
   revenueMetric,
   recurringMetric,
   grossMarginMetric,
   ownerProfitMetric,
   officeCostMetric,
-  rateNote,
+  timeCounted,
+  currentRateNote,
   keptWindows,
 };
