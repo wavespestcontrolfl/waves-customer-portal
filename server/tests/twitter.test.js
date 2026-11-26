@@ -1,7 +1,7 @@
 // X (Twitter) posting service — publishes through Zernio (the daily-content
 // backend) since X's Feb-2026 pay-per-use credits closed the free direct
 // write path. Blog shares tweet text + article URL (X wraps URLs to a fixed
-// 23-char t.co link and renders the card from the page og:image).
+// 23-char t.co link) plus the post's picture as a media item when there is one.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config', () => ({ s3: {} }));
@@ -11,6 +11,7 @@ const { ZERNIO_API, TCO_URL_LENGTH, TWEET_LIMIT, weightedTweetLength } = twitter
 
 const LINK = 'https://www.wavespestcontrol.com/pest-control/lizard-droppings/';
 const ACCOUNT_ID = '6a500d943ecd8aa344819c49';
+const PIC = 'https://cdn.example/social-media/blog-hero-lizard-droppings-1.jpg';
 
 function setCreds() {
   process.env.ZERNIO_API_KEY = 'zk';
@@ -275,6 +276,58 @@ describe('twitter service', () => {
       await expect(twitter.createPost({ text: 'T', link: LINK })).rejects.toThrow(/Zernio X publish failed: duplicate content/);
     }, 15000);
 
+    test('a picture URL rides on the tweet as a Zernio media item', async () => {
+      setCreds();
+      global.fetch = mockZernio();
+      const res = await twitter.createPost({ text: 'T', link: LINK, imageUrl: PIC });
+      expect(res).toEqual({ platform: 'twitter', postId: '1234567890', success: true, imageUrl: PIC });
+      const creates = global.fetch.mock.calls.filter(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+      expect(creates).toHaveLength(1);
+      expect(JSON.parse(creates[0][1].body).mediaItems).toEqual([{ type: 'image', url: PIC }]);
+    }, 15000);
+
+    test('a non-https picture is never sent', async () => {
+      setCreds();
+      global.fetch = mockZernio();
+      const res = await twitter.createPost({ text: 'T', link: LINK, imageUrl: 'http://cdn.example/x.jpg' });
+      expect(res.imageUrl).toBeUndefined();
+      const create = global.fetch.mock.calls.find(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+      expect(JSON.parse(create[1].body).mediaItems).toBeUndefined();
+    }, 15000);
+
+    test('a picture Zernio refuses at create posts text + link once, without the picture', async () => {
+      setCreds();
+      const base = mockZernio();
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        if (url === `${ZERNIO_API}/posts` && opts.method === 'POST' && JSON.parse(opts.body).mediaItems) {
+          return { ok: false, status: 400, text: async () => 'media fetch failed' };
+        }
+        return base(url, opts);
+      });
+      const res = await twitter.createPost({ text: 'T', link: LINK, imageUrl: PIC });
+      expect(res).toEqual({ platform: 'twitter', postId: '1234567890', success: true });
+      const creates = global.fetch.mock.calls.filter(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+      expect(creates).toHaveLength(2);
+      expect(JSON.parse(creates[1][1].body).mediaItems).toBeUndefined();
+      expect(JSON.parse(creates[1][1].body).content).toBe(`T\n\n${LINK}`);
+    }, 15000);
+
+    test('a 5xx on a create with a picture is NOT retried (the tweet may exist)', async () => {
+      setCreds();
+      global.fetch = mockZernio({ createStatus: 503 });
+      await expect(twitter.createPost({ text: 'T', link: LINK, imageUrl: PIC })).rejects.toThrow(/503/);
+      const creates = global.fetch.mock.calls.filter(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+      expect(creates).toHaveLength(1);
+    });
+
+    test('a refused create with no picture is not retried', async () => {
+      setCreds();
+      global.fetch = mockZernio({ createStatus: 400 });
+      await expect(twitter.createPost({ text: 'T', link: LINK })).rejects.toThrow(/400/);
+      const creates = global.fetch.mock.calls.filter(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+      expect(creates).toHaveLength(1);
+    });
+
     test('empty text (and no link) is rejected before hitting the API', async () => {
       setCreds();
       global.fetch = jest.fn();
@@ -312,6 +365,21 @@ describe('publishToAll twitter integration', () => {
     expect(res.platforms).toEqual([expect.objectContaining({ platform: 'twitter', postId: '99', success: true })]);
     const createCall = global.fetch.mock.calls.find(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
     expect(JSON.parse(createCall[1].body).content).toBe(`X caption\n\n${LINK}`);
+  }, 15000);
+
+  test('blog share with the hero picture sends it to X too', async () => {
+    process.env.SOCIAL_TWITTER_ENABLED = 'true';
+    setCreds();
+    global.fetch = mockZernio({ platformPostId: '99' });
+
+    const res = await social.publishToAll({
+      title: 'T', description: 'D', link: LINK, source: 'autonomous_blog', imageUrl: PIC,
+      channels: ['twitter'], customContent: { twitter: 'X caption' }, noAiImage: true,
+    });
+
+    expect(res.platforms).toEqual([expect.objectContaining({ platform: 'twitter', postId: '99', success: true, imageUrl: PIC })]);
+    const createCall = global.fetch.mock.calls.find(([u, o]) => u === `${ZERNIO_API}/posts` && o?.method === 'POST');
+    expect(JSON.parse(createCall[1].body).mediaItems).toEqual([{ type: 'image', url: PIC }]);
   }, 15000);
 
   test('flag off (or key missing) → skipped, never a failure', async () => {
