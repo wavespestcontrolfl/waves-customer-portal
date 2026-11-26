@@ -43,7 +43,7 @@ const {
   loadSharedYearPool,
 } = require('./newsletter-event-selection');
 const {
-  selectPortfolio, rankAlternates, effectiveScore, unmetConstraints,
+  selectPortfolio, rankAlternates, effectiveScore, unmetConstraints, capsAllow,
   MAX_COUNT: MAX_PORTFOLIO,
 } = require('./newsletter-portfolio');
 const { featureScoreFloor } = require('./event-scoring');
@@ -340,6 +340,26 @@ function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
  *
  * @returns {{ skipped: boolean, reason?: string, sendId?: number, eventCount?: number }}
  */
+/**
+ * Refill a thinned lineup from the ranked alternates. Each refill must respect
+ * the portfolio caps against the SURVIVING lineup (the local-first away cap
+ * included): an alternate ranked as a replacement for one pick can otherwise
+ * land beside both away picks.
+ */
+function refillWithinCaps({ safeEventIds, refillCandidates, refillExisting, lineupEvents, lineupAlternates }) {
+  const ids = [...safeEventIds];
+  const altById = new Map(lineupAlternates.map((ev) => [String(ev.id), ev]));
+  const survivors = lineupEvents.filter((ev) => ids.includes(String(ev.id)));
+  for (const id of refillCandidates) {
+    if (ids.length >= MAX_PORTFOLIO) break;
+    const alt = altById.get(id);
+    if (!refillExisting.has(id) || !alt || !capsAllow(survivors, alt)) continue;
+    ids.push(id);
+    survivors.push(alt);
+  }
+  return ids;
+}
+
 async function autoDraftFlagship() {
   logger.info('[newsletter-autopilot] Starting weekly auto-draft');
 
@@ -582,10 +602,9 @@ async function autoDraftFlagship() {
       const refillExisting = new Set(
         (await db('events_raw').whereIn('id', refillCandidates).pluck('id')).map(String),
       );
-      for (const id of refillCandidates) {
-        if (safeEventIds.length >= MAX_PORTFOLIO) break;
-        if (refillExisting.has(id)) safeEventIds.push(id);
-      }
+      safeEventIds = refillWithinCaps({
+        safeEventIds, refillCandidates, refillExisting, lineupEvents, lineupAlternates,
+      });
       logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from ranked alternates`);
     }
   }
@@ -866,6 +885,7 @@ async function autoDraftFlagship() {
 }
 
 module.exports = {
+  refillWithinCaps,
   autoDraftFlagship,
   buildDigestPlan,
   preflightDigest,
