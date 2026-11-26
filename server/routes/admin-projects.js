@@ -76,10 +76,14 @@ const { getInvoiceEmailRecipients, withAccountPrimaryContactStrict } = require('
 // account primary leaves the role unknown, which withholds.
 // strict (the unattended hold release): a failed account-holder lookup throws instead of falling back to the property
 // row, which would lose the manager role that keeps reports from on-site occupants. The release stays held and retries.
-async function loadProjectCustomer(customerId, { strict = false } = {}) {
-  const row = await db('customers').where({ id: customerId }).first();
+// database + forShare (the report email's handoff): the property and the account holder rows are read on that
+// transaction, the holder's row held FOR SHARE until it commits, so neither can change before the provider request.
+async function loadProjectCustomer(customerId, { strict = false, database = db, forShare = false } = {}) {
+  const query = database('customers').where({ id: customerId });
+  const row = await (forShare ? query.forShare() : query).first();
   if (!row) return row;
-  const full = await withAccountPrimaryContactStrict(row).catch((err) => { if (strict) throw err; return null; });
+  const full = await withAccountPrimaryContactStrict(row, { db: database, forShare })
+    .catch((err) => { if (strict) throw err; return null; });
   if (!full || full === row) return row;
   return { ...row, email: full.email, first_name: full.first_name, account_contact_role: full.account_contact_role };
 }
@@ -3731,7 +3735,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const updatedProject = await db('projects').where({ id: req.params.id }).first();
     const reportPath = await projectReportPathForProject(db, updatedProject, customer || {});
     const reportUrl = `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`;
-    await restoreHeldVisitReportLink(updatedProject, reportPath);
+    await restoreHeldVisitReportLink(updatedProject, reportPath, portalAttachment.portalAttached);
     const typeCfg = getProjectType(project.project_type);
     const typeLabel = typeCfg?.label || 'Service';
     const firstName = customer?.first_name || 'there';
@@ -3788,7 +3792,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     if (heldRelease) {
       // The release's email, requestor copies and text (its once-only marker), so a takeover never repeats a text.
       const sent = await sendHeldReport({
-        link: { refreshed: updatedProject, reportUrl }, customer, invoice: heldRelease.invoice, wdoPdf, wdoFiling, ownClaim: heldRelease.ownClaim,
+        link: { refreshed: updatedProject, reportUrl }, customer, invoice: heldRelease.invoice, wdoPdf, wdoFiling, ownClaim: heldRelease.ownClaim, staffSend: true,
       });
       Object.assign(channels, sent.channels);
     } else if (emailRecipient.email) {
@@ -4337,7 +4341,7 @@ async function stampHeldReportLink({ project, projectCols, ownClaim, customer, i
   if (published !== 'ok') return null;
   const refreshed = await db('projects').where({ id: project.id }).first();
   const reportPath = await projectReportPathForProject(db, refreshed, customer);
-  await restoreHeldVisitReportLink(refreshed, reportPath);
+  await restoreHeldVisitReportLink(refreshed, reportPath, portalAttachment.portalAttached);
   return { token, refreshed, reportUrl: `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}` };
 }
 
@@ -4385,17 +4389,18 @@ async function buildAndArchiveHeldReportPdf({ project, customer, invoice, source
 
 // A held report closed out with no link: the visit's record says so (structured_notes.projectReport, read by the
 // customer's service history). When the report is published (the release or a manual Send report), the record gets
-// the link the closeout would have written: the URL only for a visit the closeout attached to the portal, else the
-// token alone. Best effort: a failed write leaves the visit without its history link, never stops the delivery.
-async function restoreHeldVisitReportLink(project, reportPath) {
+// the link the closeout would have written, on the portal decision made NOW (the closeout's own said "not attached",
+// since the report was unsent): the URL for a portal-attached report, else the token alone. Best effort: a failed
+// write leaves the visit without its history link, never stops the delivery.
+async function restoreHeldVisitReportLink(project, reportPath, portalAttached) {
   if (!isReportHeld(project) || !project.service_record_id || !project.report_token) return;
   await db('service_records')
     .where({ id: project.service_record_id })
     .whereRaw("structured_notes->>'projectId' = ?", [String(project.id)])
     .update({
       structured_notes: db.raw(
-        "jsonb_set(structured_notes, '{projectReport}', jsonb_build_object('token', ?::text, 'url', CASE WHEN coalesce((structured_notes->>'portalAttached')::boolean, false) THEN ?::text END, 'tokenOnly', NOT coalesce((structured_notes->>'portalAttached')::boolean, false)))",
-        [project.report_token, reportPath || null],
+        "coalesce(structured_notes, '{}'::jsonb) || jsonb_build_object('portalAttached', ?::boolean, 'projectReport', jsonb_build_object('token', ?::text, 'url', ?::text, 'tokenOnly', ?::boolean))",
+        [Boolean(portalAttached), project.report_token, portalAttached ? (reportPath || null) : null, !portalAttached],
       ),
     })
     .catch((err) => logger.warn(`[projects] visit report link not restored for ${project.id}: ${err.message}`));
@@ -4440,8 +4445,8 @@ async function buildManualSendFiling({ heldRelease, updatedProject, customer, te
 }
 
 // The customer email, the realtor copies (after the email) and the courtesy text.
-async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim }) {
-  const { channels } = await sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim });
+async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim, staffSend = false }) {
+  const { channels } = await sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim, staffSend });
   // The FDACS PDF rides on the email only: no text without it.
   if (!channels.email.ok) return { channels: { ...channels, sms: { ok: false, error: 'Skipped — email delivery did not succeed' } } };
   channels.sms = await sendHeldReportTextOnce({ project: link.refreshed, customer, invoice, reportUrl: link.reportUrl, wdoFiling, ownClaim });
@@ -4455,7 +4460,7 @@ function heldReportRecipientHandoff({ customerId, expectedEmail, state }) {
   const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
   const norm = (email) => String(email || '').trim().toLowerCase();
   return (dispatch) => withCustomerCommsLock(db, customerId, async (trx) => {
-    const fresh = await loadProjectCustomer(customerId, { strict: true }).catch(() => null);
+    const fresh = await loadProjectCustomer(customerId, { strict: true, database: trx, forShare: true }).catch(() => null);
     const now = fresh ? await ProjectEmail.resolveProjectEmailRecipientForSend(fresh, { applyReportRule: true }).catch(() => null) : null;
     if (!now?.email || norm(now.email) !== norm(expectedEmail)) {
       state.boundaryBlock = { code: 'REPORT_RECIPIENT_CHANGED' };
@@ -4466,9 +4471,20 @@ function heldReportRecipientHandoff({ customerId, expectedEmail, state }) {
   });
 }
 
+// What staff read when an earlier report email's outcome is unknown.
+function heldUnknownOutcomeMessage(staffSend) {
+  return staffSend
+    ? 'The last report email may or may not have arrived. Check with the customer. A new copy is now approved: press Send report again to send it.'
+    : 'The last report email may or may not have arrived. Check with the customer, then press Send report to send a new copy.';
+}
+
 // A held report's email and requestor copies, the same for the automatic release and a manual Send report: one
 // send-time recipient, one key per invoice + filing + recipient, and only that recipient left out of the copies.
-async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim }) {
+//
+// staffSend (a manual Send report): an earlier report email whose outcome stayed unknown holds its key for good (the
+// library refuses to guess). Staff pressing Send report is the approval for a fresh copy: the key moves on, as after a
+// block, and the next attempt (this button again, or the sweep) sends a new one. The sweep alone never does.
+async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim, staffSend = false }) {
   const { refreshed, reportUrl } = link;
   const channels = {};
   // ONE send-time recipient (the service contact falls back to the account holder when it declines email): it
@@ -4497,14 +4513,15 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
       attachments: wdoPdf ? [wdoPdf.attachment] : [],
       idempotencyKey: `project.report_ready:${refreshed.id}:hold_release:${String(invoice.id).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40)}:${filingKeyPart(wdoFiling)}:${recipientHash}${blocks ? `:b${blocks}` : ''}`,
     });
-    if (!result.ok && result.blocked) {
+    const unknownOutcomeHeld = !result.ok && /email send held by provider_retry_(ambiguous|exhausted)/.test(String(result.error || ''));
+    if (!result.ok && (result.blocked || (staffSend && unknownOutcomeHeld))) {
       await db('projects').where(ownClaim).update({
         delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || jsonb_build_object('release_email_blocks', coalesce((delivery_channels->>'release_email_blocks')::int, 0) + 1)"),
       }).catch((err) => logger.warn(`[projects] release email block not counted for ${refreshed.id}: ${err.message}`));
     }
     channels.email = result.ok
       ? { ok: true, messageId: result.messageId || null }
-      : { ok: false, error: projectEmailFailureMessage(result) };
+      : { ok: false, error: unknownOutcomeHeld ? heldUnknownOutcomeMessage(staffSend) : projectEmailFailureMessage(result) };
   } catch (err) {
     channels.email = { ok: false, error: err.message };
   }

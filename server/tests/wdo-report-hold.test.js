@@ -217,6 +217,7 @@ function chain(overrides = {}) {
     orderBy: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
     forUpdate: jest.fn().mockReturnThis(),
+    forShare: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(null),
     update: jest.fn().mockResolvedValue(1),
     insert: jest.fn().mockResolvedValue([1]),
@@ -1857,8 +1858,12 @@ describe('audit fixes', () => {
       const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
       expect(result.released).toBe(true);
       expect(srWrites).toHaveLength(1);
-      expect(srWrites[0].structured_notes.sql).toMatch(/jsonb_set\(structured_notes, '\{projectReport\}'/);
-      expect(srWrites[0].structured_notes.bindings[0]).toBe('tok-1');
+      // the release-time portal decision, not the closeout's "not attached" (the report was unsent then)
+      expect(srWrites[0].structured_notes.sql).toMatch(/'portalAttached', \?::boolean, 'projectReport', jsonb_build_object/);
+      const [attached, token, url, tokenOnly] = srWrites[0].structured_notes.bindings;
+      expect(token).toBe('tok-1');
+      expect(tokenOnly).toBe(!attached);
+      expect(url === null).toBe(!attached);
     });
   });
 
@@ -1869,14 +1874,39 @@ describe('audit fixes', () => {
       const args = ProjectEmail.sendProjectReportReady.mock.calls[0][0];
       expect(typeof args.withProviderHandoff).toBe('function');
       const dispatch = jest.fn();
-      // unchanged: it dispatches
+      const base = db.getMockImplementation();
+      const shared = [];
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'customers') c.forShare = jest.fn(() => { shared.push(table); return c; });
+        return c;
+      });
+      // unchanged: it dispatches, with the customer row held FOR SHARE through the dispatch
       expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: true });
       expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(shared.length).toBeGreaterThan(0);
       // staff corrected the email during the PDF work: refused, nothing dispatched
       ProjectEmail.resolveProjectEmailRecipientForSend.mockResolvedValueOnce({ email: 'corrected@example.com', name: '', role: 'primary' });
       expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
       expect(dispatch).toHaveBeenCalledTimes(1);
       expect(args.handoffState.boundaryBlock).toEqual({ code: 'REPORT_RECIPIENT_CHANGED' });
+    });
+
+    test('an earlier report email of unknown outcome: the sweep keeps its key, a staff Send report approves a fresh copy', async () => {
+      const held = 'email send held by provider_retry_ambiguous';
+      // the sweep: no counter move, the key stays held
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: held });
+      const sweep = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const counted = (u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks');
+      expect((sweep.updates.projects || []).some(counted)).toBe(false);
+      // a staff Send report: the counter moves (the next attempt mints a new key) and staff are told
+      ProjectEmail.sendProjectReportReady.mockClear();
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: held });
+      const manual = mockTables({ project: { ...wdoProject({ report_hold_status: 'held' }), invoice_id: 'inv-1' }, invoice: invoiceRow() });
+      const body = await withServer(async (baseUrl) => (await post(baseUrl, '/admin/projects/project-1/send')).json());
+      expect((manual.updates.projects || []).some(counted)).toBe(true);
+      expect(body.channels.email.error).toMatch(/press Send report again/);
     });
 
     test('the confirmed fingerprint covers the notes the invoice PDF prints', () => {
