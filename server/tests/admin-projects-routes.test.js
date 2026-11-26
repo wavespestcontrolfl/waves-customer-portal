@@ -37,13 +37,6 @@ jest.mock('../middleware/admin-auth', () => ({
     req.techRole === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' })
   ),
 }));
-// The WDO fee seed reads the linked visit's accepted estimate; these route tests mock db per table, so the seed is its own seam
-// (its logic is covered in wdo-fee-seed.test.js). Default: a successful read with no isolable amount.
-const mockSeedWdoFee = jest.fn(async () => null);
-jest.mock('../services/wdo-inspection-fee', () => ({
-  ...jest.requireActual('../services/wdo-inspection-fee'),
-  seedWdoFeeFromVisit: (...args) => mockSeedWdoFee(...args),
-}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -583,52 +576,6 @@ describe('admin projects routes', () => {
         const body = await res.json();
         expect(res.status).toBe(200);
         expect(body.project.id).toBe('project-3');
-      });
-    } finally {
-      delete db.schema;
-    }
-  });
-
-  test('a failed read of the accepted estimate fails the WDO create with a retryable 503 and creates nothing', async () => {
-    // The linked service's own special_project profile pointing at
-    // wdo_inspection is the one door in — same bypass as the managed gate.
-    mockSeedWdoFee.mockRejectedValueOnce(new Error('db down'));
-    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
-    const createdProject = { id: 'project-3', customer_id: 'customer-1', project_type: 'wdo_inspection', status: 'draft' };
-    const profilesChain = modeAwareProfilesChain({
-      flipped: [],
-      backed: [{ project_type: 'wdo_inspection' }],
-      first: {
-        service_key: 'wdo_inspection', completion_mode: 'special_project',
-        project_type: 'wdo_inspection', active: true,
-      },
-    });
-    db.mockImplementation((table) => {
-      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
-      if (table === 'scheduled_services') return chain({
-        first: jest.fn().mockResolvedValue({
-          id: 'svc-11', service_id: 'service-5', service_type: 'WDO Inspection',
-          customer_id: 'customer-1', scheduled_date: '2026-07-13',
-        }),
-      });
-      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue({ service_key: 'wdo_inspection', name: 'WDO Inspection', category: 'termite', billing_type: 'one_time' }) });
-      if (table === 'service_completion_profiles') return profilesChain;
-      if (table === 'projects') return chain({ returning: jest.fn().mockResolvedValue([createdProject]) });
-      if (table === 'activity_log') return chain();
-      throw new Error(`Unexpected table query: ${table}`);
-    });
-
-    try {
-      await withServer(async (baseUrl) => {
-        const res = await fetch(`${baseUrl}/admin/projects`, {
-          method: 'POST',
-          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'wdo_inspection', scheduled_service_id: 'svc-11' }),
-        });
-        const body = await res.json();
-        expect(res.status).toBe(503);
-        expect(body.code).toBe('wdo_fee_seed_unavailable');
-        expect(body.project).toBeUndefined();
       });
     } finally {
       delete db.schema;

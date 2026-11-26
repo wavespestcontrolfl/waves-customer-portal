@@ -1035,7 +1035,6 @@ module.exports = {
   stateDiffEffects,
   conversionEffect,
   oneTimeLineEffects,
-  lineAmount,
   setupFeeApplies,
   oneTimeAggregateTotal,
   oneTimeAggregateConflict,
