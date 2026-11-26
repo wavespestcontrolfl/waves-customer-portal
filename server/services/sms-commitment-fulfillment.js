@@ -18,8 +18,6 @@ const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = requir
 const { gateEnvValue, gateEnvTimestamp, promiseRecordEvidenceMode } = require('../config/feature-gates');
 
 const LIMIT = 50;
-// No call runs a day: the lower bound for a call row that began before the text.
-const DAY_MS = 24 * 60 * 60 * 1000;
 // email_reply reads this many raw candidates before resolving them to the
 // customer, then applies LIMIT to what survives.
 const EMAIL_REPLY_RAW_LIMIT = LIMIT * 4;
@@ -204,8 +202,8 @@ const textCallbackAsk = (commitment) => commitment.kind === 'callback' && commit
   && commitment.sms_context?.channel !== 'email';
 // A call in that a person answered, as the Messages reader reads it
 // (sms-pending-conversations.js, PR #5860). The loader admits such a row only
-// for a text call-back ask and only when the call ENDED after the text
-// (callEndedAtSql); every other call row it returns is outbound.
+// for a text call-back ask and only when the call began after the text;
+// every other call row it returns is outbound.
 const personAnsweredCallIn = (record) => record.direction === 'inbound' && record.status === 'completed' && record.answered_by === 'human';
 // The keys a payments row names its invoice by, as the Stripe webhook's
 // findInvoiceForPayment reads them: a dispute stamps dispute_invoice_id
@@ -376,49 +374,36 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
       // (textCallbackAsk). Every other ask reads outbound calls only, with
       // exactly the fields it read before, so its evidence hash is unchanged.
       const callIn = textCallbackAsk(commitment);
-      const { callEndedAtSql } = require('./sms-pending-conversations');
-      // When a person was last on the call: its end (callEndedAtSql), or,
-      // when it ended on hold or in voicemail (call-hold.js), the moment the
-      // latest hold began, since the staff left then. Each bound can only be
-      // early, never late, so a doubt keeps the ask open.
-      const spokeUntil = (table) => `CASE WHEN ${table}.metadata #>> '{conference_path,hold,phase}' IN ('held', 'voicemail')
-        THEN CASE WHEN ${table}.metadata #>> '{conference_path,hold,open_at}' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
-          THEN CAST(${table}.metadata #>> '{conference_path,hold,open_at}' AS timestamptz) END
-        ELSE ${callEndedAtSql(table)} END`;
+      const { callEndedAtSql, postCallRowSql } = require('./sms-pending-conversations');
       const rows = await conn('call_log').where({ customer_id: customerId })
-        // A call in counts when a person was still on it after the text
-        // (spokeUntil), so a text sent while the phone rang is answered by
-        // it: a row is inserted when the call starts, and no call runs a day.
-        // A row inserted after the call was over, with no end stamp from
-        // Twilio, has no end and counts for nothing (callEndedAtSql, the
-        // Messages reader's definition).
-        // A staff call back already ringing when the text came is read the
-        // same way.
         .where((q) => (callIn
-          ? q.where((o) => o.where('direction', 'outbound').where((t) => t.where('created_at', '>', after)
-            .orWhere((e) => e.where('created_at', '>', new Date(after.getTime() - DAY_MS))
-              .whereRaw(`${spokeUntil('call_log')} > ?`, [after]).whereRaw(`${spokeUntil('call_log')} <= ?`, [now]))))
+          ? q.where('direction', 'outbound')
+            // A call in counts only when it BEGAN after the text: its row is
+            // inserted when the call starts. Whatever happened on an earlier
+            // call after the text (a hold, voicemail, a dropped leg) is not
+            // on the row, and the customer may have texted because of it, so
+            // that call never answers the ask: the alert rings and a person
+            // can mark it done. A row inserted after the call was over
+            // (postCallRowSql) does not say when it began, so it never
+            // counts either; nor does a row whose end stamp is before the
+            // text (callEndedAtSql, the Messages reader's definition).
             .orWhere((w) => w.where({ direction: 'inbound', status: 'completed', answered_by: 'human' })
-              .where('created_at', '>', new Date(after.getTime() - DAY_MS))
-              .whereRaw(`${spokeUntil('call_log')} > ?`, [after]).whereRaw(`${spokeUntil('call_log')} <= ?`, [now]))
-          : q.where('direction', 'outbound').where('created_at', '>', after)))
+              .whereRaw(`${postCallRowSql('call_log')} IS NOT TRUE`).whereRaw(`${callEndedAtSql('call_log')} > ?`, [after]))
+          : q.where('direction', 'outbound')))
         // A call back reaches the customer on ANY of their phones (primary,
         // alternate, service contact), and a call in may come from any of
         // them. The query is already scoped to the customer's own call rows,
         // so the texting number is not required.
-        .where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
+        .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
         // Who placed the call and whether it reached the customer (personCallBack).
         .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', ...callContactSelects(conn),
-          ...(callIn ? ['direction', 'answered_by', conn.raw(`${spokeUntil('call_log')} as ended_at`)] : []))
+          ...(callIn ? ['direction', 'answered_by'] : []))
         // Last in the chain, after every call_log reference: the sandbox
         // census (voice-relay-sandbox-dry-run.test.js) reads each one forward.
         .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b));
-      // Only a call in carries its direction and who answered, and only a
-      // call that began before the text carries its end (witnessTime): an
-      // outbound row that began after it keeps exactly its old fields.
-      return callIn ? rows.map(({ direction, answered_by: answeredBy, ended_at: endedAt, ...row }) => ({ ...row,
-        ...(direction === 'inbound' ? { direction, answered_by: answeredBy } : {}),
-        ...(direction === 'inbound' || new Date(row.created_at) <= after ? { ended_at: endedAt } : {}) })) : rows;
+      // Only a call in carries its direction and who answered.
+      return callIn ? rows.map(({ direction, answered_by: answeredBy, ...row }) => (direction === 'inbound'
+        ? { ...row, direction, answered_by: answeredBy } : row)) : rows;
     })(),
     email: conn('emails').where({ customer_id: customerId }).where('received_at', '>', after)
       .where('received_at', '<=', now).orderBy('received_at', 'desc').limit(LIMIT + 1)
@@ -1119,10 +1104,6 @@ function witnessTime(witness, commitment) {
   // handler time, so a delayed delivery would move the payment to a later
   // day (Codex round 1 P1).
   if (witness.type === 'payment') return ORDERING_TIME.payment(witness);
-  // A text call-back ask is answered by a call when it ended: a call in, or
-  // a call that began before the text (the loader stamps ended_at on those
-  // only). Every other call keeps its start, as before.
-  if (witness.type === 'call' && textCallbackAsk(commitment) && witness.ended_at) return witness.ended_at;
   return witness.delivered_at || witness.sent_at || witness.received_at || witness.created_at;
 }
 
