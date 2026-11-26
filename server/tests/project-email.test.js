@@ -114,22 +114,28 @@ describe('project email service', () => {
     const send = (extra = {}) => ProjectEmail.sendProjectInvoiceBeforeReport({
       project: project(), customer: customer(), payUrl: 'https://x/pay', invoice: { id: 'inv-1', invoice_number: 'WPC-1', total: 175 }, ...extra,
     });
-    const libraryAsksOnQueued = () => EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
-      if (opts.onQueued && (await opts.onQueued()) === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+    // The library runs the caller's withProviderHandoff around the provider request; a verdict that is not ok aborts it.
+    const libraryRunsHandoff = () => EmailTemplates.sendTemplate.mockImplementationOnce(async (opts) => {
+      if (opts.withProviderHandoff) {
+        let dispatched = false;
+        const verdict = await opts.withProviderHandoff(async () => { dispatched = true; });
+        if (verdict?.ok !== true || !dispatched) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+      }
       return { sent: true, message: { provider_message_id: 'sg-ok' } };
     });
 
-    test.each([
-      ['refuses', async () => false],
-      ['throws', async () => { throw new Error('hold read failed'); }],
-    ])('a gate that %s stops the email before the provider (blocked, never handed over)', async (_label, gate) => {
-      libraryAsksOnQueued();
-      expect(await send({ beforeHandoff: gate })).toEqual({ ok: false, blocked: true, deduped: false, reason: 'handoff_refused', messageId: null });
+    test('a handoff that refuses stops the email before the provider (blocked, never handed over)', async () => {
+      libraryRunsHandoff();
+      const handoffState = { boundaryBlock: null };
+      const withProviderHandoff = async () => { handoffState.boundaryBlock = { code: 'HELD_INVOICE_CHANGED' }; return { ok: false }; };
+      expect(await send({ withProviderHandoff, handoffState })).toEqual({ ok: false, blocked: true, deduped: false, reason: 'handoff_refused', messageId: null });
     });
 
-    test('a gate that answers true sends as before', async () => {
-      libraryAsksOnQueued();
-      expect(await send({ beforeHandoff: async () => true })).toMatchObject({ ok: true, messageId: 'sg-ok' });
+    test('a handoff that dispatches sends as before, and the handoff reaches the library', async () => {
+      libraryRunsHandoff();
+      const withProviderHandoff = jest.fn(async (dispatch) => { await dispatch(); return { ok: true }; });
+      expect(await send({ withProviderHandoff, handoffState: { boundaryBlock: null } })).toMatchObject({ ok: true, messageId: 'sg-ok' });
+      expect(withProviderHandoff).toHaveBeenCalledTimes(1);
     });
 
     test('a failure the library marks as after the provider handoff is uncertain; an earlier failure is not', async () => {

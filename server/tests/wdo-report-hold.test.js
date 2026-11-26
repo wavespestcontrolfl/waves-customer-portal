@@ -108,6 +108,10 @@ jest.mock('../services/customer-credit', () => ({
   runPostFullCoverageSideEffects: jest.fn(async () => {}),
   round2: (n) => Math.round(Number(n || 0) * 100) / 100,
 }));
+jest.mock('../services/billing-channel-email-authority', () => ({
+  ...jest.requireActual('../services/billing-channel-email-authority'),
+  dispatchUnderBillingEmailAuthority: jest.fn(async () => ({ ok: true })),
+}));
 jest.mock('../services/collections/collection-hold', () => ({
   messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
   holdExemptionApplies: jest.fn((exempt) => exempt === 'operator' || exempt === 'customer'),
@@ -1544,41 +1548,59 @@ describe('audit fixes', () => {
   });
 
   describe('round 13: one invoice handoff path, definite vs uncertain, confirmed amount, bell retry', () => {
-    const gateOf = async () => {
-      mockTables();
+    // The held invoice email's provider handoff: the billing email authority's options, and the claim token the send took.
+    const handoffOf = async () => {
+      const { updates } = mockTables();
       await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
       const args = ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0];
-      expect(typeof args.beforeHandoff).toBe('function');
-      return args.beforeHandoff;
+      expect(typeof args.withProviderHandoff).toBe('function');
+      const authority = require('../services/billing-channel-email-authority');
+      const dispatch = jest.fn();
+      await args.withProviderHandoff(dispatch);
+      const opts = authority.dispatchUnderBillingEmailAuthority.mock.calls.at(-1)[0];
+      expect(opts.dispatch).toBe(dispatch);
+      const token = (updates.projects || []).find((u) => u.delivery_claim_token)?.delivery_claim_token;
+      expect(token).toBeTruthy();
+      return { opts, token, args };
+    };
+    // The pre-send check on the world as the locked handle reads it at the handoff.
+    const checkOn = (opts, token, { project = {}, invoice = {} } = {}) => {
+      mockTables({
+        project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token, report_token: null, ...project }),
+        invoice: invoiceRow({ status: 'sending', ...invoice }),
+      });
+      return opts.preSendCheck({ database: db });
     };
 
-    test('the held invoice email carries the provider-boundary gate: it passes when nothing applies', async () => {
-      expect(await (await gateOf())()).toBe(true);
+    test('the held invoice email goes through the billing email authority, and its fence passes when nothing changed', async () => {
+      const { opts, token, args } = await handoffOf();
+      expect(opts).toMatchObject({
+        input: { customerId: 'customer-1', invoiceId: expect.anything(), channel: 'email', metadata: { billingDeliveryCategory: 'invoice' } },
+        templateKey: 'project.invoice_before_report',
+        holdExempt: 'operator',
+        state: args.handoffState,
+      });
+      expect(opts.recipientEmail).toBe(args.recipient.email);
+      expect(await checkOn(opts, token)).toEqual({ ok: true });
     });
 
-    test('a wrong-party or wrong-number fallback hold refuses the handoff, and an operator send exempts a plain dispute hold only', async () => {
-      const collectionHold = require('../services/collections/collection-hold');
-      const gate = await gateOf();
-      collectionHold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'hold' });
-      expect(await gate()).toBe(false);
-      collectionHold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false });
-      await gate();
-      // the operator exemption is asked for, so a plain dispute hold is skipped and a fallback hold is not
-      expect(collectionHold.messagingHeldByCollectionHold).toHaveBeenLastCalledWith('customer-1', expect.anything(), { ignoreDisputeHold: true });
-      // an unreadable hold fails closed (the shared read answers held)
-      collectionHold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'lookup_failed' });
-      expect(await gate()).toBe(false);
+    test.each([
+      ['the invoice was paid', { invoice: { status: 'paid' } }, 'HELD_INVOICE_NOT_SENDABLE'],
+      ['the invoice was voided', { invoice: { status: 'void' } }, 'HELD_INVOICE_NOT_SENDABLE'],
+      ['a part payment landed', { invoice: { amount_paid: 50 } }, 'HELD_INVOICE_CHANGED'],
+      ['the amount changed', { invoice: { total: 250 } }, 'HELD_INVOICE_CHANGED'],
+      ['it became a payer bill', { invoice: { payer_id: 'payer-1' } }, 'INVOICE_PAYER_BILLED'],
+      ['the invoice moved to another customer (a merge)', { invoice: { customer_id: 'customer-2' } }, 'INVOICE_CUSTOMER_MISMATCH'],
+      ['the project moved to another customer', { project: { customer_id: 'customer-2' } }, 'INVOICE_CUSTOMER_MISMATCH'],
+      ['another request took the delivery claim', { project: { delivery_claim_token: 'someone-else' } }, 'HELD_SEND_SUPERSEDED'],
+      ['the report link was minted', { project: { report_token: 'tok' } }, 'HELD_SEND_SUPERSEDED'],
+      ['the hold was taken back', { project: { report_hold_status: null } }, 'HELD_SEND_SUPERSEDED'],
+    ])('the fence refuses when %s', async (_label, world, code) => {
+      const { opts, token } = await handoffOf();
+      expect(await checkOn(opts, token, world)).toMatchObject({ ok: false, code });
     });
 
-    test('the gate refuses when the invoice changed or became a payer bill after the send read it', async () => {
-      const gate = await gateOf();
-      mockTables({ invoice: invoiceRow({ total: 250 }) });
-      expect(await gate()).toBe(false);
-      mockTables({ invoice: invoiceRow({ payer_id: 'payer-1' }) });
-      expect(await gate()).toBe(false);
-    });
-
-    test('the billing-contact copy carries the same gate', async () => {
+    test('a held send emails the invoice once, to the billing recipient: no second billing-contact copy', async () => {
       mockTables();
       const base = db.getMockImplementation();
       db.mockImplementation((table) => (table === 'notification_prefs'
@@ -1586,8 +1608,9 @@ describe('audit fixes', () => {
         : base(table)));
       await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor()); });
       const calls = ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls.map(([a]) => a);
-      expect(calls.length).toBe(2);
-      calls.forEach((a) => expect(typeof a.beforeHandoff).toBe('function'));
+      expect(calls.length).toBe(1);
+      expect(calls[0].recipient.email).toBe('billing@example.com');
+      expect(typeof calls[0].withProviderHandoff).toBe('function');
     });
 
     test('a handoff refused at the boundary (blocked) is a definite failure: the hold is taken back, no bell', async () => {
@@ -1686,27 +1709,6 @@ describe('audit fixes', () => {
       expect(out.prepared).toBe(true);
       expect(out.invoice.billing_fingerprint).toMatch(/^[0-9a-f]{16}$/);
       expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
-    });
-
-    test.each([
-      ['the invoice moved to another customer (a merge)', { liveInvoice: { customer_id: 'customer-2' } }],
-      ['the project moved to another customer', { liveProject: { customer_id: 'customer-2' } }],
-    ])('the handoff gate refuses when %s after arming', async (_label, { liveInvoice, liveProject }) => {
-      mockTables();
-      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
-      const gate = ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0].beforeHandoff;
-      mockTables({ project: wdoProject({ ...(liveProject || {}) }), invoice: invoiceRow({ ...(liveInvoice || {}) }) });
-      expect(await gate()).toBe(false);
-    });
-
-    test('the handoff gate refuses a recipient that is no longer one of the customer\'s addresses', async () => {
-      mockTables();
-      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
-      const gate = ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0].beforeHandoff;
-      expect(await gate()).toBe(true);
-      // the account's address changed since the email was prepared (the old recipient is a former contact's)
-      mockTables({ customer: { ...CUSTOMER, email: 'new-owner@example.com' } });
-      expect(await gate()).toBe(false);
     });
 
     test('a failure alert is not raised when a manual release finished meanwhile (the hold is no longer held)', async () => {
@@ -1928,6 +1930,30 @@ describe('audit fixes, round 2', () => {
       expect(persisted.report_hold_locked_at).toBe('NOW');
       expect(JSON.parse(persisted.delivery_channels.bindings[0]).release_filing.invoice_id).toBe('inv-1');
       expect((updates.projects || []).indexOf(persisted)).toBeLessThan((updates.projects || []).findIndex((u) => u.report_hold_status === 'released'));
+    });
+
+    test('a manual Send report takes over an interrupted release: the stored filing and the release email key, no second email', async () => {
+      const base = wdoProject({ report_hold_status: 'releasing', delivery_status: 'sending', updated_at: '2026-11-24T09:00:00Z' });
+      mockTables({ project: { ...base, invoice_id: 'inv-1', delivery_channels: { release_filing: archived(base) } }, invoice: invoiceRow({ status: 'paid' }) });
+      mockS3Send.mockResolvedValueOnce({ Body: Readable.from([Buffer.from('archived-bytes')]) });
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, '/admin/projects/project-1/send')).status).toBe(200); });
+      expect(buildWdoReportPDFBuffer).not.toHaveBeenCalled();
+      const email = ProjectEmail.sendProjectReportReady.mock.calls[0][0];
+      expect(Buffer.from(email.attachments[0].content, 'base64').toString()).toBe('archived-bytes');
+      // the sweep's own key for this invoice, filing and recipient: the provider dedupes the sweep's earlier email
+      expect(email.idempotencyKey).toMatch(/^project\.report_ready:project-1:hold_release:inv-1:[0-9a-f]{8}:[0-9a-f]{12}$/);
+    });
+
+    test('a manual Send report of a held report sends the named billing contact its copy (only the recipient is left out)', async () => {
+      const findings = { ...FINDINGS, report_sent_to: 'Billing Desk <billing@example.com>, ABC Title <closing@abctitle.com>' };
+      mockTables({ project: { ...wdoProject({ report_hold_status: 'held', findings }), invoice_id: 'inv-1' }, invoice: invoiceRow() });
+      const baseImpl = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'notification_prefs'
+        ? chain({ first: jest.fn(async () => ({ billing_email: 'billing@example.com' })) })
+        : baseImpl(table)));
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, '/admin/projects/project-1/send')).status).toBe(200); });
+      const recipients = ProjectEmail.sendProjectReportReady.mock.calls.map(([args]) => args.recipient?.email);
+      expect(recipients).toEqual(expect.arrayContaining([CUSTOMER.email, 'billing@example.com', 'closing@abctitle.com']));
     });
 
     test('a retry reuses the stored filing: same bytes emailed, nothing rebuilt or re-archived, that filing recorded', async () => {

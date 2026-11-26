@@ -3745,33 +3745,17 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // Build the FDACS report PDF up-front. For a WDO report this PDF *is* the
     // deliverable (and is gated as signed), so a build/stamp failure must abort
     // before any channel send rather than deliver a report-less message.
-    let wdoPdf = null;
-    try {
-      wdoPdf = await buildWdoPdfAttachment(updatedProject, customer);
-    } catch (e) {
+    // A held report sent by hand delivers through the release's own steps (the stored release filing, resumed or
+    // archived against the held invoice, and the release's email + requestor copies with its keys), so a manual send
+    // and the sweep can each take over the other's interrupted delivery without a second email.
+    const heldRelease = manualHeldRelease({ isWdo, updatedProject, project, sendClaimToken });
+    const built = await buildManualSendFiling({ heldRelease, updatedProject, customer, technicianId: req.technicianId });
+    if (built.error) {
       await revertSendClaim();
-      logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
-      return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
+      logger.error(`[projects] WDO PDF build/archive failed for ${updatedProject.id}: ${built.logMessage}`);
+      return res.status(500).json({ error: built.error });
     }
-
-    // Archive the exact PDF being emailed BEFORE any channel send (fail-closed):
-    // sends regenerate the PDF from live data, so without this there would be
-    // no record of what was actually delivered as the legal filing.
-    let wdoFiling = null;
-    if (wdoPdf) {
-      try {
-        wdoFiling = await archiveWdoFiling({
-          project: updatedProject,
-          buffer: wdoPdf.buffer,
-          source: 'send',
-          sentByTechId: req.technicianId || null,
-        });
-      } catch (e) {
-        await revertSendClaim();
-        logger.error(`[projects] WDO filing archive failed for ${updatedProject.id}: ${e.message}`);
-        return res.status(500).json({ error: 'Could not archive the FDACS filing; nothing was sent.' });
-      }
-    }
+    const { wdoPdf, wdoFiling } = built;
 
     const channels = {};
 
@@ -3782,9 +3766,10 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // Re-stamping updated_at here restarts the 10-minute takeover window at
     // the moment delivery begins, so the build phase (PDF render, archive)
     // can no longer eat the lease out from under the provider calls.
+    // A held report's filing reference is written in the same fenced update, before the email (as the release does).
     const stillOwned = await db('projects')
       .where({ id: project.id, delivery_claim_token: sendClaimToken })
-      .update({ updated_at: db.fn.now() });
+      .update({ updated_at: db.fn.now(), ...(heldRelease ? releaseFilingFields(wdoFiling) : {}) });
     if (!stillOwned) {
       logger.error(`[projects] send superseded before delivery for ${project.id} — claim taken over; nothing emailed by this request`);
       return res.status(409).json({
@@ -3797,7 +3782,12 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // the FDACS PDF, so the SMS link is only sent after the email succeeds.
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {}, { applyReportRule: true });
     const isResendSend = Boolean(project.sent_at || project.status === 'sent');
-    if (emailRecipient.email) {
+    if (heldRelease) {
+      const sent = await sendHeldReportEmailAndCopies({
+        link: { refreshed: updatedProject, reportUrl }, customer, invoice: heldRelease.invoice, wdoPdf, wdoFiling, ownClaim: heldRelease.ownClaim,
+      });
+      Object.assign(channels, sent.channels);
+    } else if (emailRecipient.email) {
       try {
         // Recipient-hashed idempotency key: the claim stops concurrent duplicates, this stops crash-retry
         // duplicates at the provider layer. A resend keys on the claim token —
@@ -3831,7 +3821,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // mirror the combined route: the resolved recipient, the primary email
     // (distinct when a service contact is configured), and the billing
     // contact, so no customer-side address gets an unintended duplicate.
-    if (isWdo && channels.email?.ok) {
+    if (isWdo && channels.email?.ok && !heldRelease) {
       const copyPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
       const [copyBilling] = getInvoiceEmailRecipients(customer, copyPrefs || {});
       const copies = await sendWdoReportCopies({
@@ -4373,8 +4363,46 @@ async function buildAndArchiveHeldReportPdf({ project, customer, invoice, source
   }
 }
 
+// A manual Send report of a held (or releasing) WDO report: the held invoice and this send's claim, or null.
+function manualHeldRelease({ isWdo, updatedProject, project, sendClaimToken }) {
+  if (!isWdo || !isReportHeld(updatedProject) || !updatedProject.invoice_id) return null;
+  return { invoice: { id: updatedProject.invoice_id }, ownClaim: { id: project.id, delivery_claim_token: sendClaimToken } };
+}
+
+// The manual send's FDACS PDF, built and archived BEFORE any channel send (fail closed): the PDF *is* the WDO
+// deliverable, and the archive is the record of the legal filing actually emailed. A held report resumes (or archives)
+// the release filing. Returns { wdoPdf, wdoFiling }, or { error, logMessage } when nothing may be sent.
+async function buildManualSendFiling({ heldRelease, updatedProject, customer, technicianId }) {
+  if (heldRelease) {
+    const pdf = await buildAndArchiveHeldReportPdf({ project: updatedProject, customer, invoice: heldRelease.invoice, source: 'manual_send' });
+    return pdf.error ? { error: 'Could not generate the FDACS report; nothing was sent.', logMessage: pdf.error } : pdf;
+  }
+  let wdoPdf;
+  try {
+    wdoPdf = await buildWdoPdfAttachment(updatedProject, customer);
+  } catch (e) {
+    return { error: 'Could not generate the FDACS report; nothing was sent.', logMessage: e.message };
+  }
+  if (!wdoPdf) return { wdoPdf: null, wdoFiling: null };
+  try {
+    const wdoFiling = await archiveWdoFiling({ project: updatedProject, buffer: wdoPdf.buffer, source: 'send', sentByTechId: technicianId || null });
+    return { wdoPdf, wdoFiling };
+  } catch (e) {
+    return { error: 'Could not archive the FDACS filing; nothing was sent.', logMessage: e.message };
+  }
+}
+
 // The customer email, the realtor copies (after the email) and the courtesy text.
 async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim }) {
+  const { channels } = await sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim });
+  if (!channels.email.ok) return { channels };
+  channels.sms = await sendHeldReportTextOnce({ project: link.refreshed, customer, invoice, reportUrl: link.reportUrl, wdoFiling, ownClaim });
+  return { channels };
+}
+
+// A held report's email and requestor copies, the same for the automatic release and a manual Send report: one
+// send-time recipient, one key per invoice + filing + recipient, and only that recipient left out of the copies.
+async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim }) {
   const { refreshed, reportUrl } = link;
   const channels = {};
   // ONE send-time recipient (the service contact falls back to the account holder when it declines email): it
@@ -4427,7 +4455,6 @@ async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownC
     keyPart: `release:${filingKeyPart(wdoFiling)}`,
   });
   if (copies) channels.report_copies = copies;
-  channels.sms = await sendHeldReportTextOnce({ project: refreshed, customer, invoice, reportUrl, wdoFiling, ownClaim });
   return { channels };
 }
 
@@ -4979,9 +5006,13 @@ function buildSendReportPdf(hold, refreshed, customer) {
 }
 
 // The customer email: invoice-first for a hold, report-only for a payer-billed invoice, else combined.
-function sendInvoiceEmail({ hold, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient }) {
+function sendInvoiceEmail({ hold, deliveryClaimToken, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient }) {
   if (hold.active) {
-    return ProjectEmail.sendProjectInvoiceBeforeReport({ project: refreshed, customer, payUrl, invoice, attachments, recipient, beforeHandoff: heldInvoiceHandoffGate({ invoice, project, customerId: project.customer_id, recipientEmail: recipient?.email }) });
+    const handoffState = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    return ProjectEmail.sendProjectInvoiceBeforeReport({
+      project: refreshed, customer, payUrl, invoice, attachments, recipient, handoffState,
+      withProviderHandoff: heldInvoiceProviderHandoff({ invoice, project, deliveryClaimToken, recipientEmail: recipient?.email, state: handoffState }),
+    });
   }
   if (isPayerInvoice) {
     // Payer-billed: homeowner gets the report only (FDACS PDF for WDO + report link), never the invoice PDF or pay link.
@@ -5000,15 +5031,9 @@ function sendInvoiceEmail({ hold, isPayerInvoice, isWdoProject, project, refresh
 }
 
 // The billing-contact copy of the same email.
-function sendBillingCopyEmail({ hold, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, billing }) {
+function sendBillingCopyEmail({ isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, billing }) {
   const recipient = { email: billing.email, name: billing.name || '', role: billing.role || 'billing' };
   const stamp = new Date().toISOString();
-  if (hold.active) {
-    return ProjectEmail.sendProjectInvoiceBeforeReport({
-      project: refreshed, customer, payUrl, invoice, attachments, recipient, beforeHandoff: heldInvoiceHandoffGate({ invoice, project, customerId: project.customer_id, recipientEmail: billing.email }),
-      idempotencyKey: `project.invoice_before_report:${project.id}:${invoice.id}:billing:${stamp}`,
-    });
-  }
   return ProjectEmail.sendProjectReportWithInvoice({
     project: refreshed, customer, reportUrl, payUrl, invoice, attachments,
     reportAttached: isWdoProject,
@@ -5047,33 +5072,58 @@ function invoiceEmailUncertain(result) {
   return !result.ok && !result.blocked && !result.skipped && result.deliveryOutcome === 'uncertain';
 }
 
-// The invoice handoff gate a held invoice email runs at the provider boundary, the checks the canonical invoice email
-// (invoice-email.js) runs there, plus who it goes to: the invoice and the project still belong to the customer the hold
-// was armed for (an account merge in between moves them), the invoice still bills what this send read, it is still the
-// homeowner's own bill, the recipient is still one of THAT customer's addresses (the contact's current email choices), and
-// no collections hold applies (a deliberate operator send passes a plain dispute hold; a wrong-number or wrong-party
-// fallback hold still stops the pay link). Fails closed: anything unreadable refuses.
-function heldInvoiceHandoffGate({ invoice, project, customerId, recipientEmail }) {
-  return async () => {
+// The held invoice email's provider handoff: the canonical billing email authority (the customer's comms lock, the
+// recipient re-resolved under it, the invoice's deposit-settlement lock, collection holds, suppression), held from the
+// last check through the provider request. Its pre-send check, run on the LOCKED handle before dispatch and again at the
+// provider boundary, is this send's own fence: the project and the invoice still belong to the customer the hold was armed
+// for, this request still owns the delivery claim, the report is still held and unshared, the invoice is still this
+// send's claim ('sending', so a payment or a void in between refuses), it still bills what the email shows (amount and
+// lines) with the same amount due, and it is still the homeowner's own bill. Fails closed: anything unreadable refuses.
+function heldInvoiceProviderHandoff({ invoice, project, deliveryClaimToken, recipientEmail, state }) {
+  const customerId = project.customer_id;
+  const expectedDue = require('../services/invoice-helpers').invoiceAmountDue(invoice);
+  const refuse = (code, reason) => ({ ok: false, code, reason, retryable: false });
+  const preSendCheck = async ({ database }) => {
     const [live, liveProject] = await Promise.all([
-      db('invoices').where({ id: invoice.id }).first(),
-      db('projects').where({ id: project.id }).first('customer_id'),
+      database('invoices').where({ id: invoice.id }).first(),
+      database('projects').where({ id: project.id }).first('customer_id', 'delivery_claim_token', 'report_hold_status', 'report_token'),
     ]);
-    if (!live || !liveProject || [live.customer_id, liveProject.customer_id].some((id) => String(id) !== String(customerId))) return false;
-    if (billingFingerprint(live) !== billingFingerprint(invoice)) return false;
-    const ownership = await require('../services/invoice-helpers').selfPayAtDispatch(invoice.id, db)();
-    if (ownership.ok !== true) return false;
-    const owner = await loadProjectCustomer(customerId);
-    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
-    const allowed = [
-      (await ProjectEmail.resolveProjectEmailRecipientForSend(owner || {}, { applyReportRule: true }))?.email,
-      getInvoiceEmailRecipients(owner || {}, prefs || {})[0]?.email,
-    ].map((email) => String(email || '').trim().toLowerCase());
-    if (!allowed.includes(String(recipientEmail || '').trim().toLowerCase())) return false;
-    const collectionHold = require('../services/collections/collection-hold');
-    const held = await collectionHold.messagingHeldByCollectionHold(live.customer_id, db, { ignoreDisputeHold: collectionHold.holdExemptionApplies('operator') });
-    return !held.held;
+    if (!live || !liveProject) return refuse('HELD_INVOICE_UNREADABLE', 'The invoice or project could not be re-read');
+    if ([live.customer_id, liveProject.customer_id].some((id) => String(id) !== String(customerId))) {
+      return refuse('INVOICE_CUSTOMER_MISMATCH', 'The invoice or project moved to another customer');
+    }
+    if (String(liveProject.delivery_claim_token || '') !== String(deliveryClaimToken)
+      || liveProject.report_hold_status !== 'held' || liveProject.report_token) {
+      return refuse('HELD_SEND_SUPERSEDED', 'This send no longer owns a held, unshared report');
+    }
+    if (String(live.status || '') !== 'sending') return refuse('HELD_INVOICE_NOT_SENDABLE', 'The invoice was paid, voided or changed state');
+    const due = require('../services/invoice-helpers').invoiceAmountDue(live);
+    if (billingFingerprint(live) !== billingFingerprint(invoice) || due !== expectedDue || !(due > 0)) {
+      return refuse('HELD_INVOICE_CHANGED', 'The invoice amount changed before delivery');
+    }
+    return require('../services/invoice-helpers').selfPayAtDispatch(invoice.id, database)();
   };
+  return (dispatch) => require('../services/billing-channel-email-authority').dispatchUnderBillingEmailAuthority({
+    input: { customerId, invoiceId: invoice.id, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' } },
+    recipientEmail,
+    templateKey: 'project.invoice_before_report',
+    holdExempt: 'operator',
+    preSendCheck,
+    dispatch,
+    state,
+  });
+}
+
+// Who a held invoice email goes to: the billing email authority's recipient (the customer's billing contact and email
+// choices, the address every invoice email uses), the same one its provider handoff re-resolves under the locks. A
+// refusal (no address, email off) is an empty recipient: nothing is sent and the send reports it.
+async function heldInvoiceEmailRecipient(customer, invoice) {
+  const { billingEmailRecipient } = require('../services/billing-email-sender');
+  const resolved = await billingEmailRecipient({
+    customerId: customer.id, invoiceId: invoice.id, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' },
+  }, 'projects');
+  if (resolved.refusal) return { email: null, refusal: resolved.refusal };
+  return { email: resolved.to, name: resolved.recipient?.name || '', role: resolved.recipient?.role || 'billing' };
 }
 
 // The one bell for an invoice email of unknown outcome: the hold stays, and staff check whether it arrived.
@@ -5645,7 +5695,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // service contact falls back to the account holder), and that one address receives the email and is the one the
     // billing copy is compared with. (Resolved before anything is dispatched.)
     const emailRecipient = hold.active
-      ? await ProjectEmail.resolveProjectEmailRecipientForSend(customer, { applyReportRule: true })
+      ? await heldInvoiceEmailRecipient(customer, invoice)
       : ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
     // ONE email FIRST — it carries the report attachments (the FDACS PDF for WDO)
     // + the invoice PDF. For WDO it's the required channel: the pay-link SMS is
@@ -5657,7 +5707,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (emailRecipient.email) {
       try {
         const result = await sendInvoiceEmail({
-          hold, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient: emailRecipient,
+          hold, deliveryClaimToken, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient: emailRecipient,
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
@@ -5743,11 +5793,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
       const [billing] = getInvoiceEmailRecipients(customer, prefs || {});
       const billingEmail = String(billing?.email || '').trim().toLowerCase();
-      if (billingEmail && billingEmail !== String(emailRecipient.email || '').trim().toLowerCase()) {
+      // A held send's one invoice email already went to the billing recipient (the billing email authority's own).
+      if (!hold.active && billingEmail && billingEmail !== String(emailRecipient.email || '').trim().toLowerCase()) {
         billingCopyEmail = billingEmail;
         try {
           const result = await sendBillingCopyEmail({
-            hold, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, billing,
+            isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, billing,
           });
           channels.billing_email = result.ok
             ? { ok: true, recipient: billingEmail }
