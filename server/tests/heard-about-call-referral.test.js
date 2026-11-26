@@ -24,7 +24,11 @@ describe('heardAboutFromCallReferral', () => {
     ['my next door neighbour uses you', 'friend_neighbor'],
     ['nextdoor', 'nextdoor'],
     ['saw a post on next door', 'nextdoor'],
-    ['facebook group', 'facebook_instagram'],
+    ['facebook group', 'facebook_group'],
+    ['saw you recommended in the Parrish FB group', 'facebook_group'],
+    ['a post in a group on facebook', 'facebook_group'],
+    ['facebook', 'facebook_instagram'],
+    ['saw your facebook page', 'facebook_instagram'],
     ['yelp', 'yelp'],
     ['saw your truck', 'truck_yard_sign'],
     ['highly recommended', 'friend_neighbor'],
@@ -48,7 +52,7 @@ describe('heardAboutFromCallReferral', () => {
   });
 
   test('every mapped value is on the allowlist', () => {
-    for (const text of ['chatgpt', 'ai', 'google', 'google maps', 'nextdoor', 'facebook', 'yelp', 'truck', 'friend']) {
+    for (const text of ['chatgpt', 'ai', 'google', 'google maps', 'nextdoor', 'facebook', 'facebook group', 'yelp', 'truck', 'friend']) {
       expect(HEARD_ABOUT_OPTIONS.has(heardAboutFromCallReferral(text))).toBe(true);
     }
   });

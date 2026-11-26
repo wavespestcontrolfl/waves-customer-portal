@@ -13,7 +13,7 @@
 
 const HEARD_ABOUT_OPTIONS = new Set([
   'google_search', 'google_maps', 'chatgpt', 'other_ai',
-  'facebook_instagram', 'nextdoor', 'yelp', 'friend_neighbor',
+  'facebook_instagram', 'facebook_group', 'nextdoor', 'yelp', 'friend_neighbor',
   'truck_yard_sign', 'other',
 ]);
 
@@ -82,6 +82,9 @@ const CALL_REFERRAL_RULES = [
   ['nextdoor', /\bnext[\s-]?door\b/],
   ['google_maps', /\bgoogle maps?\b/],
   ['google_search', /\bgoogl(e|ed|ing)\b|\b(online|internet|web) search\b|\bsearch(ed|ing)? (online|the internet|the web)\b/],
+  // A local Facebook group (owner 2026-11-25, groups test) before plain
+  // Facebook, so "saw you in a facebook group" counts for the test.
+  ['facebook_group', /\b(facebook|fb)\s+groups?\b|\bgroups? on (facebook|fb)\b/],
   ['facebook_instagram', /\bfacebook\b|\binstagram\b|\bfb\b/],
   ['yelp', /\byelp\b/],
   ['truck_yard_sign', /\b(trucks?|vans?|yard signs?)\b/],
