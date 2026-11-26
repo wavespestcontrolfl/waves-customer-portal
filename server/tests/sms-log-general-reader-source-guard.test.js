@@ -547,18 +547,6 @@ const ALLOWLIST = [
     reason: 'closeSmsCommitmentAlerts: single-row lookup by id of the source text the alert is about (its owner only) — not a list read.',
   },
   {
-    file: 'services/sms-shadow-backfill.js',
-    snippet: 'return db(\'sms_log as i\')',
-    nth: 1,
-    reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
-  },
-  {
-    file: 'services/sms-shadow-backfill.js',
-    snippet: 'return db(\'sms_log as i\')',
-    nth: 2,
-    reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
-  },
-  {
     file: 'services/sms-shadow-judge.js',
     snippet: 'const outbounds = await db(\'sms_log\')',
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',

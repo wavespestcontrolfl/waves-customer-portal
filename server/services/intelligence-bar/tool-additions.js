@@ -25,8 +25,8 @@
  * sends tool_choice none, so no tool can run there.
  *
  * Two readers cannot take the message and get the definitions folded back
- * into `tools` instead: the OpenAI backup (ib-openai-backup.js) and a resumed
- * request on a model that does not take mid-conversation tool changes.
+ * into `tools` instead: a resumed request on a model that does not take
+ * mid-conversation tool changes.
  */
 const MODELS = require('../../config/models');
 
@@ -111,9 +111,8 @@ function forModel({ tools, messages, model }) {
  *   beforeCall(h, final)  the messages for the next model call: the waiting
  *                         definitions appended as one addition message when
  *                         the history lets one follow
- *   pending()             the waiting definitions (the OpenAI backup folds them)
- *   stop()                after a switch to the OpenAI backup: later finds
- *                         merge into `tools`, nothing waits
+ *   pending()             the waiting definitions
+ *   stop()                later finds merge into `tools`, nothing waits
  */
 function createRequestState({ enabled, messages }) {
   let on = enabled === true;

@@ -189,7 +189,6 @@
       "tests/customer-search-fuzzy-postgres.test.js": 75.8,
       "tests/customer-turf-profiles.test.js": 0.1,
       "tests/dashboard-report-engagement-postgres.test.js": 0.4,
-      "tests/day-agreement-shadow-postgres.test.js": 1.6,
       "tests/day-replan-apply-postgres.test.js": 1.8,
       "tests/dbpr-restaurants-postgres.test.js": 0.1,
       "tests/dead-number-alert-db.test.js": 0.5,

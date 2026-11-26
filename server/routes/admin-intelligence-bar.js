@@ -25,10 +25,9 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibSendEstimateLive, ibOpenaiBackupLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibSendEstimateLive } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const { dictatedAmountsNote } = require('../utils/spoken-money');
-const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
 const HISTORY_TOOL_NAMES = new Set(HISTORY_TOOLS.map(t => t.name));
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
@@ -3773,7 +3772,7 @@ async function runQuery(req, res, next) {
     const actionScope = { role: req.techRole, context, fullAccess: ibFullAccess(req) };
     // GATE_IB_TOOL_SEARCH: a full-access login reaches its non-page tools through
     // the API's tool search instead of discover_capabilities (tool-search.js).
-    let toolSearch = ToolSearch.toolSearchWanted(req, platformEnabled, actionScope, MODEL); // off for the rest of a request that switched to the OpenAI backup
+    const toolSearch = ToolSearch.toolSearchWanted(req, platformEnabled, actionScope, MODEL);
     // Owner-direct (owner ruling 2026-10-01, GATE_IB_OWNER_DIRECT): the owner
     // login gets no target refusals, no card on internal edits and short
     // replies. Read from the live request on every run; the isolated tech
@@ -3840,11 +3839,7 @@ async function runQuery(req, res, next) {
       await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, target: taskContext });
     }
 
-    // A saved task already on the OpenAI backup resumes without Claude
-    // credentials (every round goes to the backup) while that gate is on (Codex r7).
-    const resumesOnBackup = Boolean(activeTask) && activeTask.request?.model_provider === 'openai_backup'
-      && ibOpenaiBackupLive() && Boolean(process.env.OPENAI_API_KEY);
-    if (!Anthropic || (!process.env.ANTHROPIC_API_KEY && !resumesOnBackup)) {
+    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       // A resumed task keeps its delivered reply (history, thread cursor) so
       // a later continuation still builds on it; only the answer text changes.
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'failed',
@@ -3855,7 +3850,7 @@ async function runQuery(req, res, next) {
       });
     }
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'unset-backup-task' });
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     // Build context-aware system prompt
     let systemPrompt = context === 'tech' ? TECH_SYSTEM_PROMPT : SYSTEM_PROMPT;
@@ -4054,16 +4049,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // clears them: the answer then no longer is the question they belong to.
     let offeredChoices = null;
 
-    // GATE_IB_OPENAI_BACKUP (read at call time): a provider error from the Anthropic
-    // call finishes this request on OpenAI (ib-openai-backup.js owns the switch).
-    const modelCaller = IbOpenaiBackup.createModelCaller({
-      context, actionScope, task: req.ibResumedTask, finalMessages: finalRoundMessages,
-      read: () => ({ tools, messages: currentMessages, systemPrompt, pendingTools: toolAdditions.pending() }),
-      apply: next => { tools = next.tools; currentMessages = next.messages; toolSearch = next.toolSearch; systemPrompt = next.systemPrompt; toolAdditions.stop(); },
-      markTask: async () => activeTask && IbTasks.markModelProvider(activeTask.id, getAdminActorId(req), activeTask.runner_token, IbOpenaiBackup.BACKUP_PROVIDER),
-    });
-    await modelCaller.startFromTask();
-
     // Tool-use loop
     let lastToolResponse = null;
     let stepLimitReached = false; // the final, tool-less round ran: the request used every step
@@ -4072,7 +4057,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       stepLimitReached = finalRound;
       currentMessages = toolAdditions.beforeCall(currentMessages, finalRound);
       const requestMessages = withCacheBreakpoint(finalRound ? finalRoundMessages(currentMessages) : currentMessages);
-      const response = await modelCaller.call({ finalRound, ask: () => ledgerCall('anthropic', model, () => createIbMessage(anthropic, {
+      const response = await ledgerCall('anthropic', model, () => createIbMessage(anthropic, {
         model: model,
         // INTELLIGENCE_BAR_EFFORT (IB only) wins over the global pin; unset or invalid = the pin.
         ...anthropicEffortConfig(model, ibRequestedEffort()),
@@ -4088,10 +4073,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         ...(finalRound ? { tool_choice: { type: 'none' } } : {}),
         messages: requestMessages,
       }, ToolAdditions.requestOptions(requestMessages)), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' })
-        // Tagged here so the catch below can tell a failed MODEL call from any other
-        // error. The tag rides the error object: when the OpenAI backup answers, the
-        // error is swallowed; when the backup fails too, this same error comes back.
-        .catch(err => { throw ModelFailure.tagModelCallError(err); }) });
+        // Tagged here so the catch below can tell a failed MODEL call from any other error.
+        .catch(err => { throw ModelFailure.tagModelCallError(err); });
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
       // is the prod verification signal; all-zero across repeats means a
       // silent invalidator crept back into the prefix.
@@ -4416,7 +4399,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const cardNotice = cardClaimNotice(finalResponse, pendingProposals.length);
       if (cardNotice) finalResponse += `\n\n${cardNotice}`;
     }
-    finalResponse += modelCaller.answerSuffix();
 
     // Log the query for analytics. tool_calls stores names + field keys only;
     // prompt/response are additionally redacted when a PII-bearing tool ran

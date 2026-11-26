@@ -4,8 +4,8 @@
 // These tests pin the two safety-critical invariants:
 //   1. The decision NEVER gates a known customer, and NEVER gates on
 //      attestation A/C/missing alone — absence of attestation is where most
-//      real leads arrive and is NOT suspicion. Only the exchange trigger
-//      (GATE_CALL_SCREEN_EXCHANGE_HISTORY, owner 2026-11-16) gates an A caller,
+//      real leads arrive and is NOT suspicion. Only the all-unknown trial
+//      (GATE_CALL_SCREEN_ALL_UNKNOWN, owner 2026-11-24) gates an A caller,
 //      and its read fails open.
 //   2. The challenge TwiML never rings staff (<Dial>) and never hangs up —
 //      the no-input path redirects back into /voice as a screen failure,
@@ -22,10 +22,9 @@ jest.mock('../services/conversations', () => ({
 jest.mock('../models/db', () => jest.fn());
 
 const voiceRouter = require('../routes/twilio-voice-webhook');
-const { preconnectScreenDecision, preconnectScreenStamps, exchangeTriggerHit, screenCandidate, buildPreconnectChallengeTwiML, preconnectOpening, knownCallerPhoneExists } = voiceRouter._test;
+const { preconnectScreenDecision, preconnectScreenStamps, screenCandidate, buildPreconnectChallengeTwiML, preconnectOpening, knownCallerPhoneExists } = voiceRouter._test;
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const db = require('../models/db');
-const missedCallBell = require('../services/missed-call-bell');
 const logger = require('../services/logger');
 
 function makeDbLike(rows) {
@@ -70,60 +69,27 @@ describe('preconnectScreenDecision', () => {
     expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: 'B', gateOn: true })).toBe('none');
   });
 
-  test('the exchange trigger gates an unknown caller on attestation A, or shadow-stamps with the screen gate off', () => {
-    const A = 'TN-Validation-Passed-A';
-    expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: A, gateOn: true, exchangeHit: true })).toBe('gate');
-    expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: null, gateOn: false, exchangeHit: true })).toBe('would_gate');
-  });
-
   test('the all-unknown trial gates an unknown caller on any attestation, and never a known one', () => {
     for (const stir of ['TN-Validation-Passed-A', 'TN-Validation-Passed-C', null]) {
       expect(preconnectScreenDecision({ knownCaller: false, stirVerstat: stir, gateOn: true, allUnknownHit: true })).toBe('gate');
     }
     expect(preconnectScreenDecision({ knownCaller: true, stirVerstat: null, gateOn: true, allUnknownHit: true })).toBe('none');
   });
-
-  test('the exchange trigger never gates a known caller', () => {
-    expect(preconnectScreenDecision({ knownCaller: true, stirVerstat: 'TN-Validation-Passed-A', gateOn: true, exchangeHit: true })).toBe('none');
-  });
 });
 
-describe('preconnectScreenStamps (what the trial watch and the exchange shadow read)', () => {
-  test('a trial challenge on an exchange hit whose gate is off: trial gated, exchange shadow', () => {
-    expect(preconnectScreenStamps({ screenDecision: 'gate', exchangeTrigger: true, allUnknownTrigger: true, exchangeGateOn: false }))
-      .toEqual({ preconnect_screen: 'gated', preconnect_screen_exchange: 'shadow', preconnect_screen_all_unknown: 'gated' });
-  });
-
-  test('the exchange rule itself challenged: exchange gated, no trial stamp', () => {
-    expect(preconnectScreenStamps({ screenDecision: 'gate', exchangeTrigger: true, allUnknownTrigger: false, exchangeGateOn: true }))
-      .toEqual({ preconnect_screen: 'gated', preconnect_screen_exchange: 'gated' });
-  });
-
-  test('a trial challenge with no exchange hit', () => {
-    expect(preconnectScreenStamps({ screenDecision: 'gate', exchangeTrigger: false, allUnknownTrigger: true, exchangeGateOn: false }))
+describe('preconnectScreenStamps (what the trial watch reads)', () => {
+  test('a trial challenge', () => {
+    expect(preconnectScreenStamps({ screenDecision: 'gate', allUnknownTrigger: true }))
       .toEqual({ preconnect_screen: 'gated', preconnect_screen_all_unknown: 'gated' });
   });
 
+  test('an attestation B challenge carries no trial stamp', () => {
+    expect(preconnectScreenStamps({ screenDecision: 'gate', allUnknownTrigger: false })).toEqual({ preconnect_screen: 'gated' });
+  });
+
   test('shadow (screen gate off) and nothing triggered', () => {
-    expect(preconnectScreenStamps({ screenDecision: 'would_gate', exchangeTrigger: true, allUnknownTrigger: false, exchangeGateOn: true }))
-      .toEqual({ preconnect_screen: 'would_gate', preconnect_screen_exchange: 'shadow' });
-    expect(preconnectScreenStamps({ screenDecision: 'none', exchangeTrigger: false, allUnknownTrigger: false, exchangeGateOn: false })).toEqual({});
-  });
-});
-
-describe('exchangeTriggerHit (ring-path read)', () => {
-  afterEach(() => jest.restoreAllMocks());
-
-  test('returns the exchange classifier verdict', async () => {
-    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(true);
-    await expect(exchangeTriggerHit('+19412360101')).resolves.toBe(true);
-    expect(missedCallBell.exchangeHangupScreenHit).toHaveBeenCalledWith('+19412360101');
-  });
-
-  test('fails open: a query error or timeout never challenges the caller (null = failed read)', async () => {
-    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockRejectedValue(new Error('canceling statement due to statement timeout'));
-    await expect(exchangeTriggerHit('+19412360101')).resolves.toBeNull();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('failing open'));
+    expect(preconnectScreenStamps({ screenDecision: 'would_gate', allUnknownTrigger: false })).toEqual({ preconnect_screen: 'would_gate' });
+    expect(preconnectScreenStamps({ screenDecision: 'none', allUnknownTrigger: false })).toEqual({});
   });
 });
 
@@ -133,29 +99,19 @@ describe('screenCandidate (who the screen may challenge)', () => {
   const slotRows = (rows) => db.mockImplementation(makeDbLike(rows));
   afterEach(() => { jest.restoreAllMocks(); db.mockReset(); });
 
-  test('attestation A with no exchange hit: no candidate, and no customer-slot query', async () => {
-    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
-    await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+  test('attestation A with the trial off: no candidate, and no customer-slot query', async () => {
+    await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, allUnknownTrigger: false });
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('an exchange hit on an unknown number is a candidate', async () => {
-    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(true);
-    slotRows([]);
-    await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: true, allUnknownTrigger: false });
-  });
-
-  test('an exchange hit on a spouse or tenant slot phone is a known caller, never challenged', async () => {
-    jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(true);
+  test('attestation B on a spouse or tenant slot phone is a known caller, never challenged', async () => {
     slotRows([{ id: 'c1' }]);
-    await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: true, exchangeTrigger: false, allUnknownTrigger: false });
+    await expect(screenCandidate('+19412360303', B)).resolves.toEqual({ knownCaller: true, allUnknownTrigger: false });
   });
 
-  test('attestation B skips the exchange read; a slot-check failure fails open', async () => {
-    const spy = jest.spyOn(missedCallBell, 'exchangeHangupScreenHit');
+  test('attestation B: a slot-check failure fails open', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
-    await expect(screenCandidate('+19412360303', B)).resolves.toEqual({ knownCaller: true, exchangeTrigger: false, allUnknownTrigger: false });
-    expect(spy).not.toHaveBeenCalled();
+    await expect(screenCandidate('+19412360303', B)).resolves.toEqual({ knownCaller: true, allUnknownTrigger: false });
   });
 
   describe('all-unknown trial (GATE_CALL_SCREEN_ALL_UNKNOWN)', () => {
@@ -179,7 +135,6 @@ describe('screenCandidate (who the screen may challenge)', () => {
 
     test('with the trial on, the customer read goes through the bounded read', async () => {
       gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
-      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
       jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(false);
       slotRows([]);
       await screenCandidate('+19412360303', A);
@@ -188,10 +143,9 @@ describe('screenCandidate (who the screen may challenge)', () => {
 
     test('a redelivery never runs the trial read (the handler replays a stored challenge)', async () => {
       gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
-      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
       const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
       slotRows([]);
-      await expect(screenCandidate('+19412360303', A, { redelivery: true })).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+      await expect(screenCandidate('+19412360303', A, { redelivery: true })).resolves.toEqual({ knownCaller: false, allUnknownTrigger: false });
       expect(hit).not.toHaveBeenCalled();
       expect(allUnknown.knownCallerWithinLimit).not.toHaveBeenCalled();
       expect(db).not.toHaveBeenCalled();
@@ -212,9 +166,8 @@ describe('screenCandidate (who the screen may challenge)', () => {
 
     test('a failed customer-slot lookup logs no phone number', async () => {
       gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
-      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
       db.mockImplementation(() => { throw Object.assign(new Error('bad +19412360303'), { code: '57014' }); });
-      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: true, exchangeTrigger: false, allUnknownTrigger: false });
+      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: true, allUnknownTrigger: false });
       const line = logger.warn.mock.calls.map((c) => c[0]).join(' ');
       expect(line).toContain('57014');
       expect(line).not.toMatch(/2360303/);
@@ -222,45 +175,24 @@ describe('screenCandidate (who the screen may challenge)', () => {
 
     test('with both gates on, an unknown A caller the trial check flags is a candidate', async () => {
       gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
-      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
       const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
       slotRows([]);
-      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: true });
+      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, allUnknownTrigger: true });
       expect(hit).toHaveBeenCalledWith('+19412360303');
     });
 
     test('a customer-slot phone is never a trial candidate, and the trial reads never run', async () => {
       gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
-      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
       const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
       slotRows([{ id: 'c1' }]);
-      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: true, exchangeTrigger: false, allUnknownTrigger: false });
+      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: true, allUnknownTrigger: false });
       expect(hit).not.toHaveBeenCalled();
     });
 
     test('trial gate on but the screen gate off: no candidate and no reads', async () => {
       gatesOn(['callScreenAllUnknown']);
-      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(false);
       const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit');
-      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
-      expect(hit).not.toHaveBeenCalled();
-      expect(db).not.toHaveBeenCalled();
-    });
-
-    test('an exchange hit with the exchange gate off is only a shadow, so the trial still screens it', async () => {
-      gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
-      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockResolvedValue(true);
-      jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
-      slotRows([]);
-      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: true, allUnknownTrigger: true });
-    });
-
-    test('a failed exchange read makes the trial stand down (fail open)', async () => {
-      gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
-      jest.spyOn(missedCallBell, 'exchangeHangupScreenHit').mockRejectedValue(new Error('timeout'));
-      const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
-      slotRows([]);
-      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+      await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, allUnknownTrigger: false });
       expect(hit).not.toHaveBeenCalled();
       expect(db).not.toHaveBeenCalled();
     });
@@ -269,7 +201,7 @@ describe('screenCandidate (who the screen may challenge)', () => {
       gatesOn(['callPreconnectScreen', 'callScreenAllUnknown']);
       const hit = jest.spyOn(allUnknown, 'screenAllUnknownHit').mockResolvedValue(true);
       slotRows([]);
-      await expect(screenCandidate('+19412360303', B)).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+      await expect(screenCandidate('+19412360303', B)).resolves.toEqual({ knownCaller: false, allUnknownTrigger: false });
       expect(hit).not.toHaveBeenCalled();
     });
   });

@@ -208,7 +208,6 @@
     "services/content/intercept-brief-seeder.js": 1,
     "services/content/spoke-seed-seeder.js": 1,
     "services/customer-moves.js": 2,
-    "services/day-agreement-rules.js": 1,
     "services/email/email-reply-context.js": 1,
     "services/estimate-stuck-alert.js": 1,
     "services/estimator-engine/booking-predraft.js": 1,

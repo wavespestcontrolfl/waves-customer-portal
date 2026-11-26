@@ -840,61 +840,37 @@ const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
 // before any caller ever hears the prompt. Lifecycle stamps: 'gated' at the
 // challenge, then 'passed' (key pressed) or 'failed' (fell to voicemail).
 //
-// Exchange trigger (GATE_CALL_SCREEN_EXCHANGE_HISTORY, owner 2026-11-16
-// "build"): robodialers moved to attestation A, so an unknown caller on any
-// attestation is also challenged when 2+ other unknown numbers from its
-// 6-digit exchange hung up on us in 14 days (missed-call-bell.js
-// exchangeHangupScreenHit). `exchangeHit` is true only with that gate on; off,
-// the webhook stamps metadata.preconnect_screen_exchange='shadow' instead.
-//
 // All-unknown trial (GATE_CALL_SCREEN_ALL_UNKNOWN, owner 2026-11-24 "trial"):
 // every unknown caller on any attestation is challenged, except a staff phone,
 // a number on a live lead, and a remembered caller
 // (services/press1-screen-all-unknown.js). `allUnknownHit` is true only with
 // that gate on.
-function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn, exchangeHit = false, allUnknownHit = false }) {
+function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn, allUnknownHit = false }) {
   if (knownCaller) return 'none';
-  if (!/-B$/.test(String(stirVerstat || '')) && !exchangeHit && !allUnknownHit) return 'none';
+  if (!/-B$/.test(String(stirVerstat || '')) && !allUnknownHit) return 'none';
   return gateOn ? 'gate' : 'would_gate';
 }
 
 // The call_log.metadata stamps of one first delivery's screen decision.
 //  - preconnect_screen: 'would_gate' (shadow, gate off) or 'gated' (challenge
 //    issued), later 'passed'/'failed'. Absent when nothing triggered.
-//  - preconnect_screen_exchange: 'gated' only when the exchange rule itself
-//    challenged (its gate on); 'shadow' when it only would have, including a
-//    call the all-unknown trial challenged. The shadow week reads these rows.
 //  - preconnect_screen_all_unknown: 'gated' when the trial challenged the call
-//    (not B, not the exchange rule). The 14-day watch reads these rows.
-function preconnectScreenStamps({ screenDecision, exchangeTrigger, allUnknownTrigger, exchangeGateOn }) {
+//    (not attestation B). The 14-day watch reads these rows.
+function preconnectScreenStamps({ screenDecision, allUnknownTrigger }) {
   const stamps = {};
   if (screenDecision !== 'none') stamps.preconnect_screen = screenDecision === 'gate' ? 'gated' : 'would_gate';
-  if (exchangeTrigger) stamps.preconnect_screen_exchange = screenDecision === 'gate' && exchangeGateOn ? 'gated' : 'shadow';
   if (allUnknownTrigger && screenDecision === 'gate') stamps.preconnect_screen_all_unknown = 'gated';
   return stamps;
 }
 
-// The exchange trigger's read, on the ring path before any TwiML. Fails OPEN:
-// a slow or broken query never challenges a caller.
-// A failed read answers null (falsy, so the exchange rule never challenges),
-// which also tells the all-unknown trial to stand down for this call.
-async function exchangeTriggerHit(from) {
-  try {
-    return await require('../services/missed-call-bell').exchangeHangupScreenHit(from);
-  } catch (err) {
-    logger.warn(`[preconnect-screen] exchange check failed (failing open, no challenge): ${err?.code || err?.name || 'error'}`);
-    return null;
-  }
-}
-
 // Who the screen may challenge, for a caller with no primary-phone customer
-// match on a first (non-re-entry) delivery: attestation B, or the exchange
-// trigger where B does not already screen. Service-contact slot phones
+// match on a first (non-re-entry) delivery: attestation B, or the all-unknown
+// trial where B does not already screen. Service-contact slot phones
 // (spouse/tenant — the canonical inbound identity set) also bypass the
 // screen; checked only when it could change the outcome, so the extra query
 // never runs on ordinary calls. A check failure fails OPEN — never challenge
 // a caller because Postgres hiccupped.
-const NO_SCREEN = Object.freeze({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+const NO_SCREEN = Object.freeze({ knownCaller: false, allUnknownTrigger: false });
 
 // The customer-slot check. With the all-unknown trial on it sits in front of
 // most unknown calls, so it gets the trial's bounded read (a timeout counts as
@@ -917,20 +893,15 @@ async function screenCandidate(from, stirVerstat, { redelivery = false } = {}) {
   // A redelivery's stored trial challenge is replayed by the handler, before
   // the customer match; here a redelivery never runs the trial read.
   const attestationB = /-B$/.test(String(stirVerstat || ''));
-  const exchangeHit = !attestationB && await exchangeTriggerHit(from);
-  // Nothing to screen, or a failed exchange read (null) on a non-B caller:
-  // route normally without another read.
   // A redelivery never runs the trial read, so the trial alone is no reason
-  // to read on.
-  if ((!attestationB && !exchangeHit && !(trialOn && !redelivery)) || exchangeHit === null) return NO_SCREEN;
+  // to read on. Nothing to screen: route normally without another read.
+  if (!attestationB && !(trialOn && !redelivery)) return NO_SCREEN;
   if (await screenKnownCaller(from, trialOn)) return { ...NO_SCREEN, knownCaller: true };
-  // The trial's own read runs only on a first delivery, for a caller B and the
-  // exchange rule do not already challenge (an exchange hit with its gate off
-  // is only a shadow, so the trial still screens it). It fails open inside.
-  const exchangeGates = exchangeHit && gates.isEnabled('callScreenExchangeHistory');
-  const allUnknownTrigger = trialOn && !redelivery && !attestationB && !exchangeGates
+  // The trial's own read runs only on a first delivery, for a caller B does not
+  // already challenge. It fails open inside.
+  const allUnknownTrigger = trialOn && !redelivery && !attestationB
     && await press1ScreenAllUnknown.screenAllUnknownHit(from);
-  return { knownCaller: false, exchangeTrigger: Boolean(exchangeHit), allUnknownTrigger: Boolean(allUnknownTrigger) };
+  return { knownCaller: false, allUnknownTrigger: Boolean(allUnknownTrigger) };
 }
 
 // Press-1 prompt words. The end of the first prompt lives in ONE constant so
@@ -1505,16 +1476,14 @@ router.post('/voice', async (req, res) => {
 
     // Pre-connect screen decision (see helpers above).
     let knownCaller = customerPhoneMatches.length > 0;
-    let exchangeTrigger = false;
     let allUnknownTrigger = Boolean(replayedTrialChallenge);
     if (!knownCaller && !allUnknownTrigger && !screenReentry && !langReentry) {
-      ({ knownCaller, exchangeTrigger, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat, { redelivery: !voiceClaim.owned }));
+      ({ knownCaller, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat, { redelivery: !voiceClaim.owned }));
     }
     const screenDecision = (screenReentry || langReentry) ? 'none' : preconnectScreenDecision({
       knownCaller,
       stirVerstat: req.body.StirVerstat,
       gateOn: isEnabled('callPreconnectScreen'),
-      exchangeHit: exchangeTrigger && isEnabled('callScreenExchangeHistory'),
       allUnknownHit: allUnknownTrigger,
     });
 
@@ -1551,9 +1520,7 @@ router.post('/voice', async (req, res) => {
         addons: parseAddOnsForAudit(req.body.AddOns),
         ...preconnectScreenStamps({
           screenDecision,
-          exchangeTrigger,
           allUnknownTrigger,
-          exchangeGateOn: isEnabled('callScreenExchangeHistory'),
         }),
         ...promiseChaserEligibilityStamp(),
       });
@@ -1652,7 +1619,6 @@ router.post('/voice', async (req, res) => {
       await stampPreconnectScreen(CallSid, 'passed');
       logger.info(`[preconnect-screen] caller ${maskPhone(From)} passed (${maskSid(CallSid)}) — continuing normal routing`);
     } else if (screenDecision === 'gate') {
-      // The trigger (B or exchange) is on the row: metadata.preconnect_screen_exchange.
       logger.info(`[preconnect-screen] challenging unknown caller ${maskPhone(From)} (${maskSid(CallSid)})`);
       return res.type('text/xml').send(buildPreconnectChallengeTwiML(numberConfig));
     }
@@ -4636,7 +4602,7 @@ function staffVoicemailGoodbye(twiml) {
 }
 
 // POST /conference-staff-left — the staff pressed star, the Live call panel's Hold button moved them out of the room
-// (call-hold.js requestHold, `by=button`), the staff said "please hold" (GATE_CALL_HOLD_VOICE, `by=voice`), or the room
+// (call-hold.js requestHold, `by=button`; `by=voice` is the retired spoken hold, still accepted), or the room
 // ended under them. Gate off (flipped mid-call) or a hold that
 // did not start puts them back in the room; a caller who left ends the call. A duplicate or redelivered star while a
 // hold (or a press 1 return) is open answers like the first: it replaces nothing.
@@ -4649,7 +4615,7 @@ router.post('/conference-staff-left', async (req, res) => {
     } else if (!callHold.isEnabled()) {
       await rejoinOrHangup(twiml, parentSid);
     } else {
-      // `by=button` marks the Hold button's move and `by=voice` the spoken "please hold"; anything else is a star.
+      // `by=button` marks the Hold button's move and `by=voice` the retired spoken "please hold"; anything else is a star.
       // Twilio signs the whole URL.
       const by = req.query.by === 'button' || req.query.by === 'voice' ? req.query.by : 'star';
       const held = await callHold.startHold(parentSid, { by, legSid: req.body?.CallSid || null });
@@ -4996,7 +4962,6 @@ router._test = {
   knownCallerPhoneExists,
   preconnectScreenDecision,
   preconnectScreenStamps,
-  exchangeTriggerHit,
   screenCandidate,
   connectingAnnouncement,
   appendStaffRingDial,

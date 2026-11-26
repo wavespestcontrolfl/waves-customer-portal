@@ -4698,26 +4698,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY :15 — Shadow backfill (brand-voice loop accelerator). Drafts
-  // house-voice replies for HISTORICAL inbounds that already have a human
-  // reply and judges them in the same pass — compresses months of
-  // per-intent score accumulation into days. Self-terminating: once
-  // history is exhausted every run is a single cheap no-op query. Batch
-  // sizes env-tunable (SHADOW_BACKFILL_BATCH / _SINCE_DAYS / _JUDGE_BATCH).
-  // =========================================================================
-  cron.schedule('15 * * * *', async () => {
-    if (!isEnabled('shadowBackfill')) return;
-    logger.info('Running: Shadow backfill batch');
-    try {
-      const { runExclusive } = require('../utils/cron-lock');
-      const { runShadowBackfill } = require('./sms-shadow-backfill');
-      await runExclusive('shadow-backfill', () => runShadowBackfill());
-    } catch (err) {
-      logger.error(`Shadow backfill failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // DAILY 4:20AM ET — Pathology classifier (brand-voice loop diagnostics).
   // Runs after the 3:55am judge: every new draft_unsafe judgment is
   // classified into a fixed (harness surface × failure mode) cell so the
@@ -5408,37 +5388,6 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`New-recurring welcome queue failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // EVERY 10 MIN — Day-only agreement shadow (owner 2026-10-20, PR 1 of 2).
-  // Reads recent two-party calls and quiet text threads where only a DAY was
-  // agreed for a visit (or a move), asks the model what the office should do,
-  // and records what the agent WOULD do in day_agreement_decisions. SHADOW
-  // ONLY: books nothing, moves nothing, texts no one. Dark behind
-  // GATE_DAY_AGREEMENT_SHADOW, checked before the lock so an off gate leaves
-  // no job_health row. runExclusive: overlapping deploy instances would judge
-  // the same source twice (the unique source_key would drop the second row
-  // after a second model call was already paid for).
-  // =========================================================================
-  cron.schedule('*/10 * * * *', async () => {
-    if (!isEnabled('dayAgreementShadow')) return;
-    try {
-      await runExclusive('day-agreement-shadow', async () => {
-        const result = await require('./day-agreement-shadow').runDayAgreementShadow();
-        if (result?.judged || result?.errors || result?.transient) {
-          logger.info(`[day-agreement] sweep: ${JSON.stringify(result)}`);
-        }
-        // An incomplete sweep (a model outage, a source that failed) is a failed run in
-        // job health, not a quiet success. The lock is released and the failure recorded
-        // by runExclusive; counts only, no message text.
-        if (result?.transient > 0 || result?.errors > 0) {
-          throw Object.assign(new Error(`day-agreement sweep incomplete: ${result.errors || 0} error(s), ${result.transient || 0} transient`), { code: 'SWEEP_INCOMPLETE' });
-        }
-      });
-    } catch (err) {
-      logger.error(`[day-agreement] sweep tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
