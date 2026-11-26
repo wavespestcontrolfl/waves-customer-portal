@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 //
-// Auto lunch (GATE_AUTO_LUNCH) on the admin time pages: totals and labor cost
-// use paid minutes, each day shows the lunch taken off and a "no lunch"
-// marker, and an admin can set or clear No lunch on an unapproved day with a
-// required reason. With no lunch on the rows (gate off) every figure is the
-// shift figure, as before.
+// No unpaid lunch (owner 2026-11-22: every clocked minute is paid) on the admin
+// time pages. The pages still read a stored unpaid meal off older rows: totals
+// and labor cost use paid minutes, and each day shows the lunch taken off and a
+// "no lunch" marker. With no lunch on the rows every figure is the shift
+// figure, and the timesheet has no control to set or clear No lunch.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApprovalsTab, DashboardTab, TimesheetTab } from "./TimeTrackingPage";
 
@@ -81,15 +81,14 @@ describe("dashboard totals use paid minutes", () => {
 });
 
 describe("timesheet tab", () => {
-  function stubTimesheet({ autoLunch, rows, putStatus = 200, entries = [] }) {
+  function stubTimesheet({ rows, entries = [] }) {
     const calls = [];
     vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
       calls.push([String(url), options]);
       const u = String(url);
-      if (u.includes("/no-lunch")) return json(putStatus === 200 ? { noLunch: true } : { error: "approved" }, putStatus);
       if (u.includes("/admin/timetracking/daily")) return json(rows);
       if (u.includes("/admin/timetracking/entries")) return json({ entries });
-      return json({ allTechs: [TECH], autoLunch });
+      return json({ allTechs: [TECH] });
     }));
     return calls;
   }
@@ -98,9 +97,8 @@ describe("timesheet tab", () => {
     await waitFor(() => expect(screen.getByText("Field Tech")).toBeInTheDocument());
   };
 
-  it("shows paid hours, the lunch deducted, and a no lunch marker", async () => {
+  it("shows the paid hours of a stored lunch, and a no lunch marker", async () => {
     stubTimesheet({
-      autoLunch: true,
       rows: [
         day({ unpaid_meal_minutes: "30.00" }),
         day({ id: 2, work_date: "2026-10-27", unpaid_meal_minutes: "0.00", no_lunch: true }),
@@ -110,13 +108,13 @@ describe("timesheet tab", () => {
     expect(screen.getByText("10.0")).toBeInTheDocument();
     expect(screen.getByText("lunch -0.5")).toBeInTheDocument();
     expect(screen.getByText("no lunch")).toBeInTheDocument();
-    expect(screen.getByText("Paid")).toBeInTheDocument();
+    expect(screen.getByText("Total")).toBeInTheDocument();
     // week total = 10.0 paid + 10.5 no-lunch day
     expect(screen.getByText("20.5")).toBeInTheDocument();
   });
 
-  it("is exactly today's grid when the gate is off", async () => {
-    stubTimesheet({ autoLunch: false, rows: [day()] });
+  it("is exactly the shift hours when no lunch is on the row, with no lunch controls", async () => {
+    stubTimesheet({ rows: [day()] });
     await mount();
     expect(screen.getAllByText("10.5").length).toBeGreaterThan(0);
     expect(screen.getByText("Total")).toBeInTheDocument();
@@ -127,7 +125,7 @@ describe("timesheet tab", () => {
   });
 
   it("opens and closes a day from a named button, so the keyboard reaches it", async () => {
-    stubTimesheet({ autoLunch: true, rows: [day({ unpaid_meal_minutes: "30.00" })] });
+    stubTimesheet({ rows: [day({ unpaid_meal_minutes: "30.00" })] });
     await mount();
     const button = screen.getByRole("button", {
       name: "Field Tech, Mon 2026-10-26: 10.0 hours, lunch -0.5",
@@ -145,60 +143,17 @@ describe("timesheet tab", () => {
     expect(button).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("sets No lunch with a required reason and reloads", async () => {
-    const calls = stubTimesheet({ autoLunch: true, rows: [day({ unpaid_meal_minutes: "30.00" })] });
-    await mount();
-    fireEvent.click(screen.getAllByText("10.0")[0]);
-    const panel = await screen.findByTestId("day-lunch-panel");
-    expect(within(panel).getByText("Unpaid lunch: 30 min taken off.")).toBeInTheDocument();
-
-    const button = within(panel).getByRole("button", { name: "Mark no lunch" });
-    expect(button).toBeDisabled();
-    fireEvent.change(within(panel).getByLabelText("Reason for the lunch change"), { target: { value: "worked through" } });
-    expect(button).toBeEnabled();
-    fireEvent.click(button);
-
-    await waitFor(() => expect(calls.some(([u]) => u.includes("/no-lunch"))).toBe(true));
-    const [url, options] = calls.find(([u]) => u.includes("/no-lunch"));
-    expect(url).toContain("/admin/timetracking/daily/tech-1/2026-10-26/no-lunch");
-    expect(options.method).toBe("PUT");
-    expect(JSON.parse(options.body)).toEqual({ noLunch: true, edit_reason: "worked through" });
-  });
-
-  it("says a recorded lunch of 30+ minutes stays unpaid even on a No lunch day", async () => {
-    stubTimesheet({
-      autoLunch: true,
-      rows: [day({ no_lunch: true, unpaid_meal_minutes: "45.00" })],
+  it("opens a day with a stored lunch and shows its entries, with no way to set No lunch", async () => {
+    const calls = stubTimesheet({
+      rows: [day({ unpaid_meal_minutes: "30.00" })],
       entries: [{ id: "b1", entry_type: "break", status: "completed", duration_minutes: "45.00" }],
     });
     await mount();
-    // Paid 9.8 h (630 - 45 = 585 min); the marker shows the deduction, not "no lunch".
-    expect(screen.getAllByText("9.8").length).toBeGreaterThan(0);
-    expect(screen.getByText("lunch -0.8")).toBeInTheDocument();
-    fireEvent.click(screen.getAllByText("9.8")[0]);
-    const panel = await screen.findByTestId("day-lunch-panel");
-    await waitFor(() => expect(within(panel).getByText(
-      "No lunch waives only the automatic 30 minutes. Recorded lunch 45 min stays unpaid.",
-    )).toBeInTheDocument());
-    expect(within(panel).queryByText(/full day is paid/)).not.toBeInTheDocument();
-  });
-
-  it("clears a no lunch day, and shows an approved day as locked", async () => {
-    stubTimesheet({ autoLunch: true, rows: [day({ no_lunch: true })] });
-    await mount();
-    fireEvent.click(screen.getAllByText("10.5")[0]);
-    const panel = await screen.findByTestId("day-lunch-panel");
-    expect(within(panel).getByText("No lunch: the automatic 30-minute deduction is waived.")).toBeInTheDocument();
-    expect(within(panel).queryByText(/full day is paid/)).not.toBeInTheDocument();
-    expect(within(panel).getByRole("button", { name: "Clear no lunch" })).toBeInTheDocument();
-    cleanup();
-
-    stubTimesheet({ autoLunch: true, rows: [day({ status: "approved", unpaid_meal_minutes: "30.00" })] });
-    await mount();
     fireEvent.click(screen.getAllByText("10.0")[0]);
-    const locked = await screen.findByTestId("day-lunch-panel");
-    expect(within(locked).getByText(/This day is approved/)).toBeInTheDocument();
-    expect(within(locked).queryByRole("button")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Entries for 2026-10-26")).toBeInTheDocument());
+    expect(screen.queryByTestId("day-lunch-panel")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /no lunch/i })).not.toBeInTheDocument();
+    expect(calls.some(([u]) => u.includes("/no-lunch"))).toBe(false);
   });
 });
 

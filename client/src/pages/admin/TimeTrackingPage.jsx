@@ -6,8 +6,6 @@ import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import StaffDocumentLibrary from "../../components/staffDocuments/Library";
 import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
-import PayGrowth from "../../components/payGrowth/PayGrowth";
-import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import PayrollSettings from "../../components/payroll/PayrollSettings";
 import ProtocolAudit from "../../components/techRewards/ProtocolAudit";
 import Scoreboard, { ScoreboardPreview } from "../../components/techRewards/Scoreboard";
@@ -69,9 +67,10 @@ const D = {
 const MONO = "'JetBrains Mono', monospace";
 const LABOR_RATE = 35;
 
-// Unpaid lunch (GATE_AUTO_LUNCH): paid minutes are shift minutes less the
-// day's unpaid meal. A row without the field (restricted viewer projection,
-// gate off) has none, so every figure equals the shift figure as before.
+// Paid minutes are shift minutes less the day's stored unpaid meal. Waves takes
+// no unpaid lunch (owner 2026-11-22), so the stored meal is 0 and every figure
+// equals the shift figure; a row without the field (restricted viewer
+// projection) has none either.
 const unpaidMinutesOf = (d) =>
   Math.min(
     parseFloat(d.total_shift_minutes || 0),
@@ -195,7 +194,6 @@ const STAFF_SECTIONS = [
   { key: "analytics", label: "Analytics", Icon: BarChart3 },
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
-  { key: "pay-growth", label: "Growth", Icon: BarChart3 },
   { key: "protocol-audit", label: "Protocol audit", Icon: CheckCircle2 },
   { key: "payroll", label: "Payroll", Icon: Wallet },
   { key: "pay-stubs", label: "Pay stubs", Icon: Receipt },
@@ -218,7 +216,7 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents", "pay-growth", "protocol-audit", "scoreboard-preview", "payroll"],
+    tabs: ["team", "documents", "protocol-audit", "scoreboard-preview", "payroll"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -233,17 +231,11 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "analytics", "documents", "protocol-audit", "scoreboard-preview"]);
 
 // Resolve the LEAF the page will actually render for a ?tab= deep link.
-// Gate-off or non-admin deep links to pay-growth fall back to the group's
-// default tab entirely (content + beacon + active-tab highlight), same as any
-// other invalid/role-gated deep link. While an admin's availability request
-// is still pending (null) the tab is unresolved: rendering Team meanwhile
-// would flash the wrong view and could flush a false Team usage beacon.
-//
 // The payroll tab (GATE_PAYROLL) follows the same rule from its own status probe.
 // The Pay stubs tab (GATE_TECH_PAY_STUBS) is open to every staff role; it falls back to
 // Timesheet (Dashboard for a technician) when off and waits (null) while its one
 // request is pending. A technician's link to an office-only leaf opens Dashboard.
-export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailable = false, payStubsStatus = "off", scoreboardStatus = "off") {
+export function resolveStaffTab(rawTab, role, payrollAvailable = false, payStubsStatus = "off", scoreboardStatus = "off") {
   if (role !== "admin" && OFFICE_ONLY_STAFF_TABS.has(rawTab)) return "dashboard";
   const gatedStatus = new Map([["pay-stubs", payStubsStatus], ["scoreboard", scoreboardStatus]]).get(rawTab);
   if (gatedStatus !== undefined) {
@@ -255,9 +247,7 @@ export function resolveStaffTab(rawTab, payGrowthAvailable, role, payrollAvailab
     if (role !== "admin" || payrollAvailable === false) return "team";
     return payrollAvailable === true ? "payroll" : null;
   }
-  if (rawTab !== "pay-growth") return rawTab;
-  if (role !== "admin" || payGrowthAvailable === false) return "team";
-  return payGrowthAvailable === true ? "pay-growth" : null;
+  return rawTab;
 }
 
 // The leaves of a section this viewer can open: a gated leaf needs its gate answer, an office-only one an admin login.
@@ -273,20 +263,17 @@ const AVAILABILITY_WORDS = {
 
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
-  const payGrowthAvailable = usePayGrowthAvailable();
   const payrollAvailable = usePayrollAvailable(readStaffRole() === "admin");
   const payStubs = useTechPayStubs();
   const scoreboard = useTechScoreboardAvailability();
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
-  const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
-  // null = pay-growth requested by an admin while availability is still
+  // null = payroll requested by an admin while availability is still
   // unknown: no leaf renders and no beacon fires until it resolves.
   const payrollGateOpen = payrollAvailable === true && readStaffRole() === "admin";
-  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole(), payrollAvailable, payStubs.status, scoreboard.status);
+  const tab = resolveStaffTab(rawTab, readStaffRole(), payrollAvailable, payStubs.status, scoreboard.status);
   // The leaves this viewer can open in a section; a section with none is not shown.
   const leafOpen = {
-    "pay-growth": payGrowthGateOpen,
     payroll: payrollGateOpen,
     "pay-stubs": payStubs.status === "ready",
     scoreboard: scoreboard.status === "ready",
@@ -363,13 +350,12 @@ export default function TimeTrackingPage() {
           <DocumentsTab showToast={showToast} />
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
-      {tab === "pay-growth" && <PayGrowth manage />}
       {tab === "protocol-audit" && <ProtocolAudit />}
       {tab === "scoreboard-preview" && <ScoreboardPreview />}
       {tab === "payroll" && <PayrollSettings />}
       {tab === "pay-stubs" && <TechPayStubs stubs={payStubs} />}
       {tab === "scoreboard" && <Scoreboard />}
-      {tab === null && <p role="status" style={{ color: "#71717A" }}>{AVAILABILITY_WORDS[rawTab] || "Checking pay and growth availability…"}</p>}
+      {tab === null && <p role="status" style={{ color: "#71717A" }}>{AVAILABILITY_WORDS[rawTab] || "Checking availability…"}</p>}
       <div
         style={{
           position: "fixed",
@@ -936,11 +922,6 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
   // A failed week read shows a notice instead of a grid of "--" days.
   const [loadFailed, setLoadFailed] = useState(false);
   const loadRequestRef = useRef(0);
-  // Unpaid lunch controls show only while GATE_AUTO_LUNCH is on (the
-  // dashboard read says so).
-  const [autoLunch, setAutoLunch] = useState(false);
-  const [lunchReason, setLunchReason] = useState("");
-  const [lunchBusy, setLunchBusy] = useState(false);
 
   const weekEnd = useMemo(() => addDays(weekStart, 6), [weekStart]);
 
@@ -958,7 +939,6 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
       if (request !== loadRequestRef.current) return;
       setDailies(dailyRes);
       setTechs(dashRes.allTechs || []);
-      setAutoLunch(dashRes.autoLunch === true);
     } catch (e) {
       if (request !== loadRequestRef.current) return;
       // The rows on hand may belong to another week; drop them, and the
@@ -1005,39 +985,9 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
         return;
       }
       setExpanded({ techId, date });
-      setLunchReason("");
       loadCellEntries(techId, date);
     },
     [expanded, loadCellEntries],
-  );
-
-  // Admin set/clear of a day's "No lunch" flag. The reason is required and is
-  // recorded on the day; an approved day or week is refused by the server.
-  const setDayNoLunch = useCallback(
-    async (techId, date, noLunch) => {
-      if (!lunchReason.trim()) return;
-      setLunchBusy(true);
-      try {
-        await adminFetch(
-          `/admin/timetracking/daily/${techId}/${date}/no-lunch`,
-          {
-            method: "PUT",
-            body: { noLunch, edit_reason: lunchReason.trim() },
-          },
-        );
-        showToast(noLunch ? "No lunch recorded" : "Lunch restored");
-        setLunchReason("");
-        await load();
-      } catch (e) {
-        showToast(
-          e.message === "HTTP 409"
-            ? "That day or week is approved. Unlock it first."
-            : `Lunch change failed: ${e.message}`,
-        );
-      }
-      setLunchBusy(false);
-    },
-    [lunchReason, load, showToast],
   );
 
   const exportCSV = useCallback(() => {
@@ -1158,7 +1108,7 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
                   </span>
                 </th>
               ))}
-              <th style={thStyle}>{autoLunch ? "Paid" : "Total"}</th>{" "}
+              <th style={thStyle}>Total</th>{" "}
               <th style={thStyle}>OT</th>{" "}
               <th style={thStyle}>Status</th>{" "}
             </tr>{" "}
@@ -1306,86 +1256,6 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
           >
             Entries for {expanded.date}
           </div>
-          {/* The lunch wording reads the day's recorded breaks, so it waits
-              for this day's entries instead of describing another day's. */}
-          {autoLunch &&
-            cellEntries &&
-            (() => {
-              const day = byTech.find((t) => t.tech.id === expanded.techId)
-                ?.days[expanded.date];
-              if (!day) return null;
-              const lunchMin = unpaidMinutesOf(day);
-              const approved = day.status === "approved";
-              // Recorded meal breaks (30 min or more) stay unpaid whatever
-              // the No lunch flag says; No lunch waives only the automatic 30.
-              const recordedMeal = cellEntries
-                .filter(
-                  (e) =>
-                    e.entry_type === "break" &&
-                    e.status !== "active" &&
-                    parseFloat(e.duration_minutes || 0) >= 30,
-                )
-                .reduce((sum, e) => sum + parseFloat(e.duration_minutes), 0);
-              return (
-                <div
-                  data-testid="day-lunch-panel"
-                  style={{
-                    padding: "8px 0 12px",
-                    marginBottom: 8,
-                    borderBottom: `1px solid ${D.border}`,
-                  }}
-                >
-                  <div style={{ fontSize: 14, color: D.text, marginBottom: 8 }}>
-                    {day.no_lunch
-                      ? recordedMeal > 0
-                        ? `No lunch waives only the automatic 30 minutes. Recorded lunch ${Math.round(recordedMeal)} min stays unpaid.`
-                        : "No lunch: the automatic 30-minute deduction is waived."
-                      : lunchMin > 0
-                        ? `Unpaid lunch: ${Math.round(lunchMin)} min taken off${recordedMeal > 0 ? " (recorded lunch)" : ""}.`
-                        : "No unpaid lunch on this day."}
-                  </div>
-                  {approved ? (
-                    <div style={{ fontSize: 14, color: D.muted }}>
-                      This day is approved. Unlock the week to change lunch.
-                    </div>
-                  ) : (
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: 8,
-                        flexWrap: "wrap",
-                        alignItems: "center",
-                      }}
-                    >
-                      <input
-                        aria-label="Reason for the lunch change"
-                        placeholder="Reason (required)"
-                        value={lunchReason}
-                        onChange={(e) => setLunchReason(e.target.value)}
-                        style={{ ...sInput, flex: 1, minWidth: 200, width: "auto" }}
-                      />
-                      <button
-                        type="button"
-                        disabled={lunchBusy || !lunchReason.trim()}
-                        onClick={() =>
-                          setDayNoLunch(
-                            expanded.techId,
-                            expanded.date,
-                            !day.no_lunch,
-                          )
-                        }
-                        style={{
-                          ...sBtn(D.card, D.teal),
-                          opacity: lunchBusy || !lunchReason.trim() ? 0.5 : 1,
-                        }}
-                      >
-                        {day.no_lunch ? "Clear no lunch" : "Mark no lunch"}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
           {cellLoadFailed ? (
             <div role="alert" style={{ color: D.red, fontSize: 14 }}>
               Could not load this day's entries.{" "}
@@ -3363,14 +3233,12 @@ export function TeamTab({ showToast }) {
   const [deactivateError, setDeactivateError] = useState("");
   const [deactivating, setDeactivating] = useState(false);
   const deactivateInFlightRef = useRef(false);
-  // GATE_HIRED_PACKET: the server sets t.hire_action ("hire" | "resend") on a
-  // row only for an admin while the gate is on; no hire_action = no Hired /
-  // Resend link UI.
+  // The server sets t.hire_action ("hire") on a prospective row only for an
+  // admin whose linked Google address can sign in; no hire_action = no Hired UI.
   const [hireTech, setHireTech] = useState(null);
   const [hireError, setHireError] = useState("");
   const [hiring, setHiring] = useState(false);
   const hireInFlightRef = useRef(false);
-  const [resendingId, setResendingId] = useState(null);
   // The add, edit, earnings, capabilities and activate routes are admin-only;
   // the roster itself is readable by technicians, so those actions are hidden
   // for them rather than 403ing. A technician changes only its own photo.
@@ -3569,37 +3437,17 @@ export function TeamTab({ showToast }) {
     }
   };
 
-  // Toast for the welcome email result of Hired / Resend link.
-  const welcomeToast = (emailed, email) => {
-    if (emailed === true) return `Welcome email sent to ${email}.`;
-    if (emailed === "uncertain") {
-      return "Hired. The email may not have gone out. Use Resend link if it does not arrive.";
-    }
-    return "Hired, but the email failed. Use Resend link.";
-  };
-
   const handleHire = async (tech, fields) => {
     if (hireInFlightRef.current) return;
     hireInFlightRef.current = true;
     setHiring(true);
     setHireError("");
     try {
-      // The Google press has its own endpoint: a server that does not know it answers 404, and never reads it as
-      // the emailed-link press. (Two literal calls: the Intelligence Bar coverage record keys on each call's text.)
-      const res = fields.googleEmail
-        ? await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire/google`, {
-          method: "POST",
-          body: JSON.stringify(fields),
-        })
-        : await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire`, {
-          method: "POST",
-          body: JSON.stringify(fields),
-        });
-      showToast(
-        res && res.login === "google"
-          ? `Hired. ${fields.name} signs in with Google. No email was sent.`
-          : welcomeToast(res && res.emailed, fields.email.trim()),
-      );
+      await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire/google`, {
+        method: "POST",
+        body: JSON.stringify(fields),
+      });
+      showToast(`Hired. ${fields.name} signs in with Google. No email was sent.`);
       setHireTech(null);
       load();
     } catch (e) {
@@ -3609,30 +3457,6 @@ export function TeamTab({ showToast }) {
     } finally {
       hireInFlightRef.current = false;
       setHiring(false);
-    }
-  };
-
-  const handleResendLink = async (tech) => {
-    if (resendingId !== null) return;
-    setResendingId(tech.id);
-    try {
-      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}/hire/resend`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      const emailed = res && res.emailed;
-      showToast(
-        emailed === true
-          ? `Welcome email sent to ${tech.email}.`
-          : emailed === "uncertain"
-            ? "The email may not have gone out. Use Resend link again if it does not arrive."
-            : "The email failed. Use Resend link to try again.",
-      );
-      load();
-    } catch (e) {
-      showToast("Failed: " + ((e && e.data && e.data.error) || (e && e.message) || "Unknown error"));
-    } finally {
-      setResendingId(null);
     }
   };
 
@@ -4612,11 +4436,6 @@ export function TeamTab({ showToast }) {
                       Field dispatchable
                     </div>
                   )}
-                  {t.hire_action === "resend" && (
-                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
-                      {t.hire_link_pending ? "Waiting for first password" : "Link expired or not sent"}
-                    </div>
-                  )}
                   {t.hire_google_only && (
                     <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                       {GOOGLE_ONLY_LABELS[t.hire_google_only] || GOOGLE_ONLY_LABELS.off}
@@ -4729,23 +4548,6 @@ export function TeamTab({ showToast }) {
                         Hired
                       </button>
                     )}{" "}
-                    {t.hire_action === "resend" && (
-                      <button
-                        onClick={() => handleResendLink(t)}
-                        disabled={resendingId !== null}
-                        style={{
-                          padding: "4px 10px",
-                          background: "transparent",
-                          border: `1px solid ${D.border}`,
-                          borderRadius: 6,
-                          color: D.teal,
-                          fontSize: 14,
-                          cursor: "pointer",
-                        }}
-                      >
-                        {resendingId === t.id ? "Sending…" : "Resend link"}
-                      </button>
-                    )}{" "}
                     {isAdmin && (
                       <button
                         onClick={(event) => {
@@ -4844,13 +4646,10 @@ const GOOGLE_ONLY_LABELS = {
   returning: "Google-only account. Turn it on from the edit form, or clear its Google sign-in first.",
 };
 
-// GATE_HIRED_PACKET: one click turns a prospective placeholder into an active
-// staff account. The server says which sign-in the press turns on
-// (tech.hire_login): "google" = the linked company Google address and nothing
-// else, no password and no email; otherwise the hire is emailed a set-password
-// link. Email and first day are required; the rest is prefilled from the row.
+// One click turns a prospective placeholder into an active staff account that
+// signs in with its linked company Google address and nothing else: no password
+// and no email. Email and first day are required; the rest is prefilled from the row.
 function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
-  const googleLogin = tech.hire_login === "google";
   const dialogRef = useModalFocus(true, () => {
     if (!submitting) onCancel();
   });
@@ -4883,9 +4682,9 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
       payRate: form.payRate.trim(),
       jobTitle: form.jobTitle.trim(),
       employmentType: form.employmentType,
-      // The Google address this form showed as the sign-in (none = the emailed link). The server refuses the
-      // press when the row no longer holds exactly that.
-      ...(googleLogin ? { googleEmail: tech.google_email } : {}),
+      // The Google address this form showed as the sign-in. The server refuses the press when the row no
+      // longer holds exactly that.
+      googleEmail: tech.google_email,
     });
   };
   const field = (id, label, input, required) => (
@@ -4939,9 +4738,7 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
           Hire {tech.name}
         </div>
         <p style={{ fontSize: 14, lineHeight: 1.55, color: D.text, margin: "12px 0 16px" }}>
-          {googleLogin
-            ? `This makes them an active staff member. They sign in with Google as ${tech.google_email}. They get no password and no email is sent.`
-            : "This makes them an active staff member and emails them a link to set their password. The link works for 7 days."}
+          {`This makes them an active staff member. They sign in with Google as ${tech.google_email}. They get no password and no email is sent.`}
         </p>
         {field("name", "Name", <input id={`${titleId}-name`} value={form.name} onChange={set("name")} style={sInput} />, true)}
         {field("email", "Email", <input id={`${titleId}-email`} type="email" value={form.email} onChange={set("email")} placeholder="name@example.com" style={sInput} />, true)}
@@ -4979,7 +4776,7 @@ function HireStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
             aria-busy={submitting || undefined}
             style={{ ...sBtn(D.teal, D.white), cursor: submitting ? "wait" : "pointer", opacity: submitting ? 0.6 : 1 }}
           >
-            {submitting ? "Hiring…" : googleLogin ? "Hire with Google sign-in" : "Hire and send link"}
+            {submitting ? "Hiring…" : "Hire with Google sign-in"}
           </button>
         </div>
       </div>

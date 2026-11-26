@@ -133,82 +133,65 @@ describe('TimeTrackingPage team account actions', () => {
   });
 });
 
-describe('TimeTrackingPage pay-growth deep-link resolution', () => {
-  it('withholds the tab while an admin availability probe is pending, then resolves it', () => {
-    expect(resolveStaffTab('pay-growth', null, 'admin')).toBeNull();
-    expect(resolveStaffTab('pay-growth', true, 'admin')).toBe('pay-growth');
-    expect(resolveStaffTab('pay-growth', false, 'admin')).toBe('team');
-  });
-
-  it('falls back to Team immediately for non-admins and leaves other tabs alone', () => {
-    expect(resolveStaffTab('pay-growth', null, 'technician')).toBe('team');
-    expect(resolveStaffTab('pay-growth', true, 'technician')).toBe('team');
-    expect(resolveStaffTab('pay-growth', true, null)).toBe('team');
-    expect(resolveStaffTab('documents', null, 'admin')).toBe('documents');
-    expect(resolveStaffTab('dashboard', false, 'technician')).toBe('dashboard');
-  });
-});
-
 describe('TimeTrackingPage protocol-audit deep-link resolution', () => {
   it('opens for an admin and sends a technician (or no role) to Dashboard: it is an office-only tab', () => {
-    expect(resolveStaffTab('protocol-audit', null, 'admin')).toBe('protocol-audit');
-    expect(resolveStaffTab('protocol-audit', true, 'technician')).toBe('dashboard');
-    expect(resolveStaffTab('protocol-audit', true, null)).toBe('dashboard');
+    expect(resolveStaffTab('protocol-audit', 'admin')).toBe('protocol-audit');
+    expect(resolveStaffTab('protocol-audit', 'technician')).toBe('dashboard');
+    expect(resolveStaffTab('protocol-audit')).toBe('dashboard');
   });
 });
 
 describe('TimeTrackingPage scoreboard deep-link resolution (GATE_TECH_REWARDS_SCOREBOARD)', () => {
   it('opens only while the gate answers, waits while it is pending, and falls back when off', () => {
-    expect(resolveStaffTab('scoreboard', false, 'technician', false, 'off', 'ready')).toBe('scoreboard');
-    expect(resolveStaffTab('scoreboard', false, 'technician', false, 'off', 'loading')).toBeNull();
-    expect(resolveStaffTab('scoreboard', false, 'technician', false, 'off', 'off')).toBe('dashboard');
-    expect(resolveStaffTab('scoreboard', false, 'technician', false, 'off', 'error')).toBe('dashboard');
-    expect(resolveStaffTab('scoreboard', false, 'admin', false, 'off', 'off')).toBe('timesheet');
-    expect(resolveStaffTab('scoreboard', false, 'technician')).toBe('dashboard');
+    expect(resolveStaffTab('scoreboard', 'technician', false, 'off', 'ready')).toBe('scoreboard');
+    expect(resolveStaffTab('scoreboard', 'technician', false, 'off', 'loading')).toBeNull();
+    expect(resolveStaffTab('scoreboard', 'technician', false, 'off', 'off')).toBe('dashboard');
+    expect(resolveStaffTab('scoreboard', 'technician', false, 'off', 'error')).toBe('dashboard');
+    expect(resolveStaffTab('scoreboard', 'admin', false, 'off', 'off')).toBe('timesheet');
+    expect(resolveStaffTab('scoreboard', 'technician')).toBe('dashboard');
   });
 
   it('the admin preview is an office-only tab that does not depend on the gate', () => {
-    expect(resolveStaffTab('scoreboard-preview', null, 'admin', false, 'off', 'off')).toBe('scoreboard-preview');
-    expect(resolveStaffTab('scoreboard-preview', true, 'technician', false, 'off', 'ready')).toBe('dashboard');
+    expect(resolveStaffTab('scoreboard-preview', 'admin', false, 'off', 'off')).toBe('scoreboard-preview');
+    expect(resolveStaffTab('scoreboard-preview', 'technician', false, 'off', 'ready')).toBe('dashboard');
   });
 });
 
 describe('TimeTrackingPage payroll deep-link resolution', () => {
   it('withholds the payroll tab while the admin status probe is pending, then resolves it', () => {
-    expect(resolveStaffTab('payroll', false, 'admin', null)).toBeNull();
-    expect(resolveStaffTab('payroll', false, 'admin', true)).toBe('payroll');
-    expect(resolveStaffTab('payroll', false, 'admin', false)).toBe('team');
+    expect(resolveStaffTab('payroll', 'admin', null)).toBeNull();
+    expect(resolveStaffTab('payroll', 'admin', true)).toBe('payroll');
+    expect(resolveStaffTab('payroll', 'admin', false)).toBe('team');
   });
 
   it('falls back to Team for non-admins and when the status is unknown to the caller', () => {
-    expect(resolveStaffTab('payroll', true, 'technician', true)).toBe('team');
-    expect(resolveStaffTab('payroll', true, null, true)).toBe('team');
-    expect(resolveStaffTab('payroll', true, 'admin')).toBe('team');
-    expect(resolveStaffTab('pay-growth', true, 'admin', false)).toBe('pay-growth');
+    expect(resolveStaffTab('payroll', 'technician', true)).toBe('team');
+    expect(resolveStaffTab('payroll', null, true)).toBe('team');
+    expect(resolveStaffTab('payroll', 'admin')).toBe('team');
   });
 });
 
 describe('TimeTrackingPage pay stubs deep-link resolution (GATE_TECH_PAY_STUBS)', () => {
   it('opens for any role once its request says ready, waits while pending, and falls back when off (Timesheet for an admin, Dashboard for a technician)', () => {
-    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'ready')).toBe('pay-stubs');
-    expect(resolveStaffTab('pay-stubs', false, 'admin', false, 'ready')).toBe('pay-stubs');
-    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'loading')).toBeNull();
-    expect(resolveStaffTab('pay-stubs', false, 'admin', false, 'off')).toBe('timesheet');
-    expect(resolveStaffTab('pay-stubs', false, 'admin', false, 'error')).toBe('timesheet');
-    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'off')).toBe('dashboard');
-    expect(resolveStaffTab('pay-stubs', false, 'technician', false, 'error')).toBe('dashboard');
-    expect(resolveStaffTab('pay-stubs', false, 'technician')).toBe('dashboard');
+    expect(resolveStaffTab('pay-stubs', 'technician', false, 'ready')).toBe('pay-stubs');
+    expect(resolveStaffTab('pay-stubs', 'admin', false, 'ready')).toBe('pay-stubs');
+    expect(resolveStaffTab('pay-stubs', 'technician', false, 'loading')).toBeNull();
+    expect(resolveStaffTab('pay-stubs', 'admin', false, 'off')).toBe('timesheet');
+    expect(resolveStaffTab('pay-stubs', 'admin', false, 'error')).toBe('timesheet');
+    expect(resolveStaffTab('pay-stubs', 'technician', false, 'off')).toBe('dashboard');
+    expect(resolveStaffTab('pay-stubs', 'technician', false, 'error')).toBe('dashboard');
+    expect(resolveStaffTab('pay-stubs', 'technician')).toBe('dashboard');
   });
 });
 
 describe('TimeTrackingPage office-only leaves', () => {
   it('opens Dashboard for a technician link to Timesheet, Entries, Approvals, Analytics or Documents and leaves an admin where it asked', () => {
     for (const leaf of ['timesheet', 'entries', 'approvals', 'analytics', 'documents']) {
-      expect(resolveStaffTab(leaf, false, 'technician')).toBe('dashboard');
-      expect(resolveStaffTab(leaf, false, null)).toBe('dashboard');
-      expect(resolveStaffTab(leaf, false, 'admin')).toBe(leaf);
+      expect(resolveStaffTab(leaf, 'technician')).toBe('dashboard');
+      expect(resolveStaffTab(leaf)).toBe('dashboard');
+      expect(resolveStaffTab(leaf, 'admin')).toBe(leaf);
     }
-    expect(resolveStaffTab('team', false, 'technician')).toBe('team');
+    expect(resolveStaffTab('team', 'technician')).toBe('team');
   });
 });
 

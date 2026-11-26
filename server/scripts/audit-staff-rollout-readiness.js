@@ -62,8 +62,8 @@ function rowsFrom(result) {
   return Array.isArray(result) ? result : (result?.rows || []);
 }
 
-// Inputs are PAID minutes (shift less the unpaid meal, GATE_AUTO_LUNCH); with
-// the gate off the unpaid meal is 0 and they are the shift minutes.
+// Inputs are PAID minutes (shift less the stored unpaid meal); the unpaid meal
+// is 0 (every clocked minute is paid) so they are the shift minutes.
 function expectedDailyOvertimeMinutes(priorWeekShiftMinutes, dayShiftMinutes) {
   const prior = Number(priorWeekShiftMinutes) || 0;
   const day = Number(dayShiftMinutes) || 0;

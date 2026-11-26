@@ -3,7 +3,6 @@ import TechFieldShell from '../../components/tech/TechFieldShell';
 import { TechBasePathContext } from '../../components/tech/techBasePath';
 import { FieldPortalClassContext } from '../../components/tech/fieldPortal';
 import useStaffDocumentsAvailable from '../../hooks/useStaffDocumentsAvailable';
-import usePayGrowthAvailable from '../../hooks/usePayGrowthAvailable';
 
 // Layout route for /admin/today. The technician field workspace lives inside
 // Waves Admin; AdminLayout has already verified the staff profile and hands it
@@ -17,7 +16,6 @@ import usePayGrowthAvailable from '../../hooks/usePayGrowthAvailable';
 export default function TodayShell() {
   const { user } = useOutletContext() || {};
   const documentsAvailable = useStaffDocumentsAvailable(true);
-  const payGrowthAvailable = usePayGrowthAvailable(true);
   return (
     <TechBasePathContext.Provider value="/admin/today">
       <FieldPortalClassContext.Provider value="tech-field-portal">
@@ -25,7 +23,6 @@ export default function TodayShell() {
         techRole={user?.role}
         staffProfile={user || null}
         documentsAvailable={documentsAvailable}
-        payGrowthAvailable={payGrowthAvailable}
       />
       </FieldPortalClassContext.Provider>
     </TechBasePathContext.Provider>

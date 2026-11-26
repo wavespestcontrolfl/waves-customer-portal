@@ -51,7 +51,6 @@ postgres('payroll pay runs', () => {
   let server;
   let baseUrl;
   const OLD_GATE = process.env.GATE_PAYROLL;
-  const OLD_LUNCH = process.env.GATE_AUTO_LUNCH;
   const OLD_SHIFT_CLOSE = process.env.GATE_SHIFT_CLOSE_REVIEW;
   const ADMIN_ID = randomUUID();
 
@@ -141,7 +140,6 @@ postgres('payroll pay runs', () => {
   afterEach(async () => {
     await trx.rollback();
     if (OLD_GATE === undefined) delete process.env.GATE_PAYROLL; else process.env.GATE_PAYROLL = OLD_GATE;
-    if (OLD_LUNCH === undefined) delete process.env.GATE_AUTO_LUNCH; else process.env.GATE_AUTO_LUNCH = OLD_LUNCH;
     if (OLD_SHIFT_CLOSE === undefined) delete process.env.GATE_SHIFT_CLOSE_REVIEW; else process.env.GATE_SHIFT_CLOSE_REVIEW = OLD_SHIFT_CLOSE;
   });
   afterAll(async () => {
@@ -152,10 +150,9 @@ postgres('payroll pay runs', () => {
   });
 
   describe('drafting a run', () => {
-    it('reads the 4x10 week with auto lunch as 40 regular hours and pays it', async () => {
-      process.env.GATE_AUTO_LUNCH = 'true';
+    it('reads the 4x10.5 week with no unpaid lunch as 40 regular and 2 overtime hours and pays it', async () => {
       const id = await readyTech('Sample Alpha');
-      // Mon..Thu, 07:30 to 18:00 ET: 10.5 hours on the clock, 30 minutes of it unpaid lunch.
+      // Mon..Thu, 07:30 to 18:00 ET: 10.5 hours on the clock, every minute of it paid.
       for (let i = 0; i < 4; i += 1) {
         const day = addDays(W1, i);
         await trx('time_entries').insert({
@@ -170,7 +167,9 @@ postgres('payroll pay runs', () => {
       const created = await draft(W1);
       expect(created.status).toBe(201);
       const check = byName(created.body.run, 'Sample Alpha');
-      expect(check).toMatchObject({ regularHours: '40.00', overtimeHours: '0.00', grossCents: 88000, status: 'draft' });
+      expect(check).toMatchObject({
+        regularHours: '40.00', overtimeHours: '2.00', regularPayCents: 88000, overtimePayCents: 6600, grossCents: 94600, status: 'draft',
+      });
       expect(created.body.run.payDate).toBe('2026-09-25');
     });
 

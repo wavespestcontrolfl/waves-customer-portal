@@ -104,7 +104,6 @@
  *   GATE_ONETIME_PLAN_OFFER=shadow|live (owner 2026-11-19 "build" and 2026-11-20 "i want auto": after a one-time pest or roach job, offer the Quarterly Pest Control Service plan with no setup fee. Each morning at 10:13 AM ET a job reads every one-time general pest or cockroach job whose service was done 3 to 14 days ago (by its service record; a visit closed without the service is skipped), for a customer with an email who has no plan and has not opted out. A job is held unless the account passes the send rules (no other visit booked or done since, the job's own invoice paid and nothing else owed, the customer pays after each visit (not billed to a payer, Auto Pay not paused or off), no review ask on its way, no complaint or open request, no other open estimate, no offer to this customer in the last 12 months, the email division says yes), and the app can price the home. A cockroach job's included follow-up, once done, moves the day count to the follow-up's day. shadow = emails ONE sample of the offer email and of its reminder to the office inbox for each job that passes, so a sample means that the customer would get the offer today; it saves no estimate and no customer gets a message. live = no office sample: for each job that passes, the job makes the customer's estimate for the plan (setup fee $0, good 30 days) and emails the customer the offer with a link to it, through the email division, once per job; it sends nothing until the offer email template is published in the template editor (the publish is the approval of the words), and it never replaces another estimate the customer holds. On day 21 after the job, live emails one reminder for each offer that went out while its estimate is still open (sent only once the reminder template is published too). A home the app cannot price gets one office notification to quote it by hand (live only). live sends customer email: the flip is the owner's. If the pest price settings stop every price on a morning, it raises one admin notification. Every other value, 'true' included, is off. services/onetime-plan-offer.js. Kill = unset.)
  *   GATE_SETUP_FEE_APPLICATION_SETTLED=true (owner 2026-10-28, the three false setup-fee alerts of #6830: the setup-fee alert reconcile, which also runs right after a completion parks a new alert, counts a parked visit's application as billed when a prepay year whose bill is live (paid, or awaiting payment on a live prepay invoice) bought that visit, or when the visit's own invoices bill its base line plus its own add-on lines for the frozen visit charge. Billed = the alert closes, or shrinks to the charge still owed, instead of telling staff to bill the visit by hand. Read at call time via setupFeeApplicationSettledLive(), strict 'true', dark by default; off = exactly today's behavior. Sends nothing to a customer and creates no invoice.)
  *   GATE_SETUP_FEE_OPEN_INVOICE_NOTICE=true (owner 2026-10-31 "do these", the setup fee on an unpaid visit invoice: when the setup-fee alert's fee is not paid yet but the customer's open invoices (scheduled, sent, viewed, overdue or partly paid) carry fee lines that the setup-fee settled rule counts once they are paid, the alert stays open but says the fee is already on that invoice and must not be billed again, and the morning digest stops listing it as a fee to bill. The fee still counts as covered only once paid: paying the invoice resolves the alert, voiding it brings the fee instruction back. Read at call time via setupFeeOpenInvoiceNoticeLive(), strict 'true', dark by default; off = today's alert text, and a standing notice is rewritten back on the next reconcile. Sends nothing to a customer and creates no invoice.)
- *   GATE_HIRED_PACKET=true (owner ruling 2026-10-25, D7: the "Hired" button on the Staff page. On a prospective placeholder row an admin enters the hire's name, email, first day and pay, and one click makes the row an active staff account and emails the hire a set-password link (works 7 days) with a pointer to the Onboarding card. A "Resend link" action appears while the hire has not set a password yet. It never changes a customer; it sends ONE staff email per click. Strict opt-in: exactly 'true' in every environment, read at call time via hiredPacketLive(). Ships DARK; off = no emailed-link Hired button and no Resend link, both of those endpoints answer 404 before any database work and the Staff list carries no link fields. One Hired press stays with this gate off: on a row with a linked company Google address it makes a Google-only login and mails nothing; that press belongs to GATE_STAFF_GOOGLE_SIGNIN. The manual steps (rename, email, Active, Forgot password) still work.)
  *   GATE_STAFF_DOC_PREFILL=true (owner ruling 2026-10-25: a NEW staff form record opens with fields filled from the staff record, for the Vehicle Use & Commuting Agreement: assigned vehicle, home address and start date from the technicians row. The signer checks each value and saves; a typed value always wins. Never a checkbox, never a typed signature. Needs GATE_CONTROLLED_STAFF_DOCUMENTS. Strict opt-in: exactly 'true' in every environment, read at call time via staffDocPrefillLive(). Ships DARK; off = GET /versions/:id/prefill answers 404 { enabled: false } before any query and the form opens empty. Reads only; sends nothing to anyone.)
  *   GATE_REVIEW_BONUS_ASK_FIRST=true (census M8, second technician, 2026-10-25: a Google review bonus goes to the technician on the review ask that reached the customer, the latest ask delivered by email or text in the 45 days before the review (a click on the link is not used: nothing proves the customer made it); then today's order (latest service record, latest completed visit, latest ask). Changes who a NEW bonus row names; existing payout rows are never re-attributed. Read at call time via reviewBonusAskFirstLive(), strict 'true', dark by default; off = today's order byte for byte; rollback = unset. Bonus pay, so the owner flips it. Sends nothing.)
  *   GATE_CALLBACK_SOURCE_TECH=true (census M9, second technician, 2026-10-25: on the admin dashboard leaderboard a callback counts against the technician whose visit it corrects, not the one who did the callback. Source = the latest earlier regular record of the same customer and service category with a technician, within 60 days (services/callback-credit.js); none found = the callback's own technician, as today. Jobs, revenue and margins do not move. Reads only, owner-only screen. Read at call time via callbackSourceTechLive(), strict 'true', dark by default; off = no extra query and the same leaderboard; rollback = unset. Sends nothing.)
@@ -464,7 +463,7 @@
  *   GATE_PLAN_RATE_LEDGER_RECONCILE=true (nightly plan-rate ledger invariant reconcile, 6:47 AM ET, services/plan-rate-ledger-reconcile.js: every live customer whose customer_plan_rates lines no longer add up to customers.monthly_rate is re-checked under the customer-comms lock and the customers row lock; a shortfall is parked in the 'unattributed' line (source invariant_repair), an overshoot is never deleted, and each distinct gap raises one Billing alert (at most 5 new a run). Never changes the billed rate, never charges, never messages a customer. Strict opt-in, read at call time via planRateLedgerReconcileLive(), which ALSO needs GATE_PLAN_RATE_LEDGER. Ships DARK; off = the tick returns before the cron lock: no query, no write, no alert.)
  *   GATE_ADMIN_MFA=true (staff two-step sign-in: a staff member who has set up an authenticator app must enter its 6-digit code (or a single-use recovery code) after the password before a session is issued, and a session minted without that step is refused; the enrollment page /admin/two-step and its /api/admin/auth/mfa routes answer only while on. Read at call time via adminMfaLive() in server/services/staff-mfa.js; off = login, /me and every staff session are exactly as before, whatever was enrolled, so unset is the kill switch.)
  *   GATE_ADMIN_MFA_ENFORCE=true (needs GATE_ADMIN_MFA: an ADMIN with no authenticator set up is held on the two-step enrollment page — every other staff route answers 403 MFA_ENROLLMENT_REQUIRED — until they finish it. Read at call time via adminMfaEnforceLive(); unset = enrollment stays optional.)
- *   GATE_STAFF_GOOGLE_SIGNIN=true (owner 2026-11-02: staff can sign in with a company Google account. The sign-in page shows Sign in with Google; the server runs Google's code flow (state, nonce, PKCE), checks Google's signed ID token (company domain from GOOGLE_STAFF_SIGNIN_DOMAINS, verified address) and accepts only the Google account the owner linked to an active staff member on the Team tab, pinned to Google's account id at the first sign-in. The session then follows the password path: an enrolled staff member still enters the authenticator code. Needs GOOGLE_STAFF_SIGNIN_CLIENT_ID and GOOGLE_STAFF_SIGNIN_CLIENT_SECRET. Read at call time via staffGoogleSigninLive(), strict 'true', dark by default; off = the button and the Team tab field are hidden and every /api/admin/auth/google route answers 404. Owner 2026-11-22 "press": while on, the Team tab's Hired button also shows on a prospective technician row that has a linked company Google address and never held a sign-in, and one press makes that row an active account that signs in with that address only (no password, no link, no email; needs no GATE_HIRED_PACKET). Sends nothing to anyone.)
+ *   GATE_STAFF_GOOGLE_SIGNIN=true (owner 2026-11-02: staff can sign in with a company Google account. The sign-in page shows Sign in with Google; the server runs Google's code flow (state, nonce, PKCE), checks Google's signed ID token (company domain from GOOGLE_STAFF_SIGNIN_DOMAINS, verified address) and accepts only the Google account the owner linked to an active staff member on the Team tab, pinned to Google's account id at the first sign-in. The session then follows the password path: an enrolled staff member still enters the authenticator code. Needs GOOGLE_STAFF_SIGNIN_CLIENT_ID and GOOGLE_STAFF_SIGNIN_CLIENT_SECRET. Read at call time via staffGoogleSigninLive(), strict 'true', dark by default; off = the button and the Team tab field are hidden and every /api/admin/auth/google route answers 404. Owner 2026-11-22 "press": while on, the Team tab's Hired button also shows on a prospective technician row that has a linked company Google address and never held a sign-in, and one press makes that row an active account that signs in with that address only (no password, no link, no email). Sends nothing to anyone.)
  *   GATE_STAFF_DEFAULT_DENY=true (owner 2026-10-02: a technician-role staff login reaches ONLY the routes on server/middleware/technician-scope.js — own schedule/visits, own timesheet, texts with own-visit customers, promises, protocols, documents, pay-growth, knowledge READ, equipment/inventory READ; every other staff route is a 403 before it runs. Off = today's behavior plus a once-per-route "[staff-scope] would-deny" log line so the production log shows real technician use before the flip. Admins are never affected. docs/technician-reachable-routes.md is the rendered list.)
  *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
  *   GATE_DICTATION_EVERY_BOX=true (owner 2026-11-06, "ok go, do all": one Waves mic on every staff multi-line text box that has no mic of its own. The mic shows inside the bottom-right corner of the box that has focus, records a clip and puts the words at the caret through the same /api/tech/dictation route and word list. Needs GATE_SERVER_DICTATION on and its transcriber key set. Named risk: an overlay on every staff text box could get in the way of typing; this gate is the instant off switch. Strict opt-in: exactly 'true' in every environment, read at call time via dictationEveryBoxLive(). Ships DARK; off = GET /api/tech/dictation/availability answers everyBox:false and the client draws nothing. Sends nothing to a customer.)
@@ -4387,10 +4386,6 @@ const gates = {
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
   // Staff source/version UI and APIs. Default off; every request rechecks.
   controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
-  // Staff page "Hired" button + Resend link (owner 2026-10-25, D7). Default off;
-  // reads at call time via hiredPacketLive(). Emails one staff member a
-  // set-password link per click. Kill switch: unset.
-  hiredPacket: process.env.GATE_HIRED_PACKET === 'true',
   // Staff form prefill from the staff record (owner 2026-10-25). Default off; reads at
   // call time via staffDocPrefillLive(). Reads only; sends nothing.
   staffDocPrefill: process.env.GATE_STAFF_DOC_PREFILL === 'true',
@@ -4403,13 +4398,6 @@ const gates = {
   // A customer's text during their visit also reaches the visit's technician
   // (census M3). Default off; reads at call time via customerTextToVisitTechLive().
   customerTextToVisitTech: process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH === 'true',
-  // Field Team Program rev 2b: evidence and simulation only; never payroll.
-  fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
-  // Auto lunch (owner 2026-10-25): paid hours drop the unpaid meal. A completed
-  // break of 30+ minutes, or 30 minutes on a day over 6 hours unless the tech
-  // taps "No lunch today". This entry is for logGateStatus; the services read
-  // autoLunchLive() at CALL time. Ships DARK: exactly 'true' only. Sends nothing.
-  autoLunch: process.env.GATE_AUTO_LUNCH === 'true',
   // Shift close review (census H8 + M7, owner 2026-10-25): a forced clock-out ends at the
   // last real activity and is flagged for an admin; the clock-out texts follow the 7 PM
   // nudge routing. This entry is for logGateStatus; the services read shiftCloseReviewLive()
@@ -5789,14 +5777,6 @@ function ibStaffAutopayOffLive() {
 // unsetting it is the kill switch. Off = every job matches only its exact day.
 function moneyNoticeCatchupLive() {
   return process.env.GATE_MONEY_NOTICE_CATCHUP === 'true';
-}
-
-// The Staff page "Hired" button (routes/admin-timetracking.js POST
-// /technicians/:id/hire and /hire/resend), read at CALL time. Strict
-// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
-// Each click emails ONE staff member a set-password link, never a customer.
-function hiredPacketLive() {
-  return process.env.GATE_HIRED_PACKET === 'true';
 }
 
 // Staff form prefill (routes/tech-staff-documents.js GET /versions/:id/prefill), read at
@@ -7497,12 +7477,6 @@ function pinParkedCheckLive() {
   return process.env.GATE_PIN_PARKED_CHECK === 'true';
 }
 
-// Auto lunch (services/time-tracking.js), read at CALL time. Strict
-// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
-function autoLunchLive() {
-  return process.env.GATE_AUTO_LUNCH === 'true';
-}
-
 // Shift close review (services/time-tracking.js, time-tracking-crons.js,
 // payroll-runs.js), read at CALL time. Strict `=== 'true'`, dark in every
 // environment; unsetting it is the kill switch.
@@ -8591,8 +8565,6 @@ module.exports.contactLoginHolderOnlyLive = contactLoginHolderOnlyLive;
 module.exports.ibStaffAutopayOffLive = ibStaffAutopayOffLive;
 // GATE_MONEY_NOTICE_CATCHUP reader, on its own line.
 module.exports.moneyNoticeCatchupLive = moneyNoticeCatchupLive;
-// GATE_HIRED_PACKET reader, on its own line.
-module.exports.hiredPacketLive = hiredPacketLive;
 // GATE_STAFF_DOC_PREFILL reader, on its own line.
 module.exports.staffDocPrefillLive = staffDocPrefillLive;
 // GATE_IB_ACCEPT_ESTIMATE reader, on its own line.
@@ -8777,8 +8749,6 @@ module.exports.truckClockInMode = truckClockInMode;
 module.exports.callLastNameLookupLive = callLastNameLookupLive;
 // GATE_PIN_PARKED_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.pinParkedCheckLive = pinParkedCheckLive;
-// GATE_AUTO_LUNCH reader, on its own line so gate PRs never conflict.
-module.exports.autoLunchLive = autoLunchLive;
 // GATE_LAWN_REPORT_CLARITY reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportClarityLive = lawnReportClarityLive;
 // GATE_FAST_COMPLETE_INVOICED_VISITS reader, on its own line so gate PRs never conflict.

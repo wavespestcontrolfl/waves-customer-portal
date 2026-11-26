@@ -20,16 +20,13 @@ const PROSPECTIVE = {
   job_title: 'Technician',
   hire_date: '2027-01-04T00:00:00.000Z',
 };
-const WAITING = {
-  id: 'tech-w',
-  name: 'Waiting Hire',
-  email: 'waiting@example.test',
-  role: 'technician',
-  active: true,
-  employment_status: 'active',
-  hire_password_unset: true,
-  hire_link_pending: false,
-  hire_link_expires_at: null,
+// A prospective row the server offers the Google press on: a linked company address that can sign in.
+const LINKED = {
+  ...PROSPECTIVE,
+  email: 'applicant@example.test',
+  google_email: 'new.hire@company.test',
+  hire_action: 'hire',
+  hire_login: 'google',
 };
 const SETTLED = {
   id: 'tech-s',
@@ -38,29 +35,19 @@ const SETTLED = {
   role: 'technician',
   active: true,
   employment_status: 'active',
-  hire_password_unset: false,
-  hire_link_pending: false,
-  hire_link_expires_at: null,
 };
 
-function stubApi({ live = true, technicians = [PROSPECTIVE, WAITING, SETTLED], onPost } = {}) {
+function stubApi({ technicians = [LINKED, SETTLED], onPost } = {}) {
   const fetchMock = vi.fn(async (url, options = {}) => {
     if (options.method === 'POST') return onPost ? onPost(url, options) : json({});
-    // The server adds hire_action (and the link state) only while the gate is on.
-    const rows = live
-      ? technicians.map((t) => ({
-        hire_action: t.employment_status === 'prospective' ? 'hire' : (t.hire_password_unset ? 'resend' : null),
-        ...t, // a fixture that names its own hire_action keeps it
-      }))
-      : technicians.map(({ hire_password_unset, hire_link_pending, hire_link_expires_at, ...rest }) => rest);
-    return json({ technicians: rows });
+    return json({ technicians });
   });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
 }
 const posts = (fetchMock) => fetchMock.mock.calls.filter(([, options = {}]) => options.method === 'POST');
 
-describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
+describe('TeamTab Hired button (Google press)', () => {
   beforeEach(() => {
     localStorage.clear();
     localStorage.setItem('waves_admin_token', 'admin-token');
@@ -73,82 +60,34 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
     vi.unstubAllGlobals();
   });
 
-  it('gate off: no Hired button and no Resend link, whatever the rows say', async () => {
-    stubApi({ live: false });
+  it('a row with no hire_action (no usable Google address): no Hired button', async () => {
+    stubApi({ technicians: [PROSPECTIVE, SETTLED] });
     render(<TeamTab showToast={vi.fn()} />);
     expect(await screen.findByText('Placeholder One')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Hired' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Resend link' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Waiting for first password')).not.toBeInTheDocument();
   });
 
   it('a non-admin sees no buttons: the server sends hire_action to admins only', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
     // What GET /technicians returns to a technician caller: no hire fields
     // (staff-hire-packet-postgres asserts the server side).
-    stubApi({ live: false });
+    stubApi({ technicians: [PROSPECTIVE, SETTLED] });
     render(<TeamTab showToast={vi.fn()} />);
     expect(await screen.findByText('Placeholder One')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Hired' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Resend link' })).not.toBeInTheDocument();
   });
 
-  it('shows Hired only on a prospective row and Resend link only where no password is set', async () => {
+  it('shows Hired only on the row the server offered it on', async () => {
     stubApi();
     render(<TeamTab showToast={vi.fn()} />);
     await screen.findByText('Placeholder One');
     expect(screen.getAllByRole('button', { name: 'Hired' })).toHaveLength(1);
-    expect(screen.getAllByRole('button', { name: 'Resend link' })).toHaveLength(1);
-    expect(screen.getByText('Link expired or not sent')).toBeInTheDocument();
   });
 
-  it('opens a prefilled dialog, requires email and first day, then hires and refreshes', async () => {
+  it('opens a prefilled dialog that names the Google address, requires email and first day, then hires and refreshes', async () => {
     const showToast = vi.fn();
-    const fetchMock = stubApi({ onPost: async () => json({ hired: true, emailed: true }) });
-    render(<TeamTab showToast={showToast} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Hired' }));
-
-    const dialog = await screen.findByRole('dialog', { name: 'Hire Placeholder One' });
-    expect(within(dialog).getByLabelText(/^Name/)).toHaveValue('Placeholder One');
-    expect(within(dialog).getByLabelText(/^Mobile phone/)).toHaveValue('+19415550100');
-    expect(within(dialog).getByLabelText(/^First day/)).toHaveValue('2027-01-04');
-    expect(within(dialog).getByLabelText(/^Pay rate/)).toHaveValue(20);
-    expect(within(dialog).getByLabelText(/^Job title/)).toHaveValue('Technician');
-    expect(within(dialog).getByLabelText(/^Email/)).toHaveValue('');
-
-    // Email is empty: nothing is sent, and the dialog says why.
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Hire and send link' }));
-    expect(posts(fetchMock)).toHaveLength(0);
-    expect(within(dialog).getByRole('alert')).toHaveTextContent('Name, email and first day are required.');
-
-    fireEvent.change(within(dialog).getByLabelText(/^Email/), { target: { value: ' new.hire@example.test ' } });
-    fireEvent.change(within(dialog).getByLabelText(/^Employment type/), { target: { value: 'w2' } });
-    const listCallsBefore = fetchMock.mock.calls.filter(([, o = {}]) => !o.method).length;
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Hire and send link' }));
-
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith('Welcome email sent to new.hire@example.test.'));
-    const [[url, options]] = posts(fetchMock);
-    expect(url).toBe('/api/admin/timetracking/technicians/tech-p/hire');
-    expect(JSON.parse(options.body)).toEqual({
-      name: 'Placeholder One',
-      email: 'new.hire@example.test',
-      phone: '+19415550100',
-      hireDate: '2027-01-04',
-      payRate: '20.00',
-      jobTitle: 'Technician',
-      employmentType: 'w2',
-    });
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    await waitFor(() => expect(fetchMock.mock.calls.filter(([, o = {}]) => !o.method).length).toBeGreaterThan(listCallsBefore));
-  });
-
-  it('a row with a linked Google address: the dialog names the address, sends it back and promises no email', async () => {
-    const showToast = vi.fn();
-    const linked = {
-      ...PROSPECTIVE, email: 'applicant@example.test', hire_login: 'google', google_email: 'new.hire@company.test',
-    };
     const fetchMock = stubApi({
-      technicians: [linked],
+      technicians: [{ ...LINKED, email: null }],
       onPost: async () => json({ hired: true, emailed: null, login: 'google' }),
     });
     render(<TeamTab showToast={showToast} />);
@@ -157,18 +96,42 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Hire Placeholder One' });
     expect(dialog).toHaveTextContent('They sign in with Google as new.hire@company.test.');
     expect(dialog).toHaveTextContent('They get no password and no email is sent.');
-    expect(dialog).not.toHaveTextContent('emails them a link');
-    expect(within(dialog).queryByRole('button', { name: 'Hire and send link' })).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/^Name/)).toHaveValue('Placeholder One');
+    expect(within(dialog).getByLabelText(/^Mobile phone/)).toHaveValue('+19415550100');
+    expect(within(dialog).getByLabelText(/^First day/)).toHaveValue('2027-01-04');
+    expect(within(dialog).getByLabelText(/^Pay rate/)).toHaveValue(20);
+    expect(within(dialog).getByLabelText(/^Job title/)).toHaveValue('Technician');
+    expect(within(dialog).getByLabelText(/^Email/)).toHaveValue('');
+
+    // Email is empty: nothing is sent, and the dialog says why.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Hire with Google sign-in' }));
+    expect(posts(fetchMock)).toHaveLength(0);
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Name, email and first day are required.');
+
+    fireEvent.change(within(dialog).getByLabelText(/^Email/), { target: { value: ' new.hire@example.test ' } });
+    fireEvent.change(within(dialog).getByLabelText(/^Employment type/), { target: { value: 'w2' } });
+    const listCallsBefore = fetchMock.mock.calls.filter(([, o = {}]) => !o.method).length;
     fireEvent.click(within(dialog).getByRole('button', { name: 'Hire with Google sign-in' }));
 
     await waitFor(() => expect(showToast)
       .toHaveBeenCalledWith('Hired. Placeholder One signs in with Google. No email was sent.'));
     const [[url, options]] = posts(fetchMock);
     expect(url).toBe('/api/admin/timetracking/technicians/tech-p/hire/google');
-    expect(JSON.parse(options.body)).toMatchObject({ email: 'applicant@example.test', googleEmail: 'new.hire@company.test' });
+    expect(JSON.parse(options.body)).toEqual({
+      name: 'Placeholder One',
+      email: 'new.hire@example.test',
+      phone: '+19415550100',
+      hireDate: '2027-01-04',
+      payRate: '20.00',
+      jobTitle: 'Technician',
+      employmentType: 'w2',
+      googleEmail: 'new.hire@company.test',
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, o = {}]) => !o.method).length).toBeGreaterThan(listCallsBefore));
   });
 
-  it('a Google-only account shows how the person stands today and offers no Resend link', async () => {
+  it('a Google-only account shows how the person stands today and offers no Hired button', async () => {
     // The state comes from the server: with the Google gate off the row carries no google_email at all.
     const row = (id, name, state) => ({ ...SETTLED, id, name, hire_google_only: state });
     stubApi({
@@ -177,7 +140,7 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
         row('tech-u', 'Unlinked Hire', 'unlinked'),
         { ...row('tech-b', 'Outside Hire', 'bad_address'), google_email: 'b.hire@elsewhere.test' },
         row('tech-o', 'Off Hire', 'off'),
-        // A prospective row past both presses: the server sends no hire_action for it.
+        // A prospective row past the press: the server sends no hire_action for it.
         { ...row('tech-r', 'Returning Hire', 'returning'), employment_status: 'prospective', active: false, hire_action: null },
       ],
     });
@@ -189,22 +152,6 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
     expect(screen.getByText('No sign-in. Staff Google sign-in is off or not set up.')).toBeInTheDocument();
     expect(screen.getByText('Google-only account. Turn it on from the edit form, or clear its Google sign-in first.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Hired' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Resend link' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Link expired or not sent')).not.toBeInTheDocument();
-  });
-
-  it.each([
-    ['uncertain', 'Hired. The email may not have gone out. Use Resend link if it does not arrive.'],
-    [false, 'Hired, but the email failed. Use Resend link.'],
-  ])('toast when emailed is %s', async (emailed, message) => {
-    const showToast = vi.fn();
-    stubApi({ onPost: async () => json({ hired: true, emailed }) });
-    render(<TeamTab showToast={showToast} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Hired' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Hire Placeholder One' });
-    fireEvent.change(within(dialog).getByLabelText(/^Email/), { target: { value: 'new.hire@example.test' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Hire and send link' }));
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith(message));
   });
 
   it('keeps the dialog open and shows the server reason when the hire is refused', async () => {
@@ -214,7 +161,7 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Hired' }));
     const dialog = await screen.findByRole('dialog', { name: 'Hire Placeholder One' });
     fireEvent.change(within(dialog).getByLabelText(/^Email/), { target: { value: 'taken@example.test' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Hire and send link' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Hire with Google sign-in' }));
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Email already in use');
     expect(showToast).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
@@ -229,23 +176,5 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(posts(fetchMock)).toHaveLength(0);
-  });
-
-  it('Resend link posts to the resend endpoint and toasts the result', async () => {
-    const showToast = vi.fn();
-    const fetchMock = stubApi({ onPost: async () => json({ resent: true, emailed: true }) });
-    render(<TeamTab showToast={showToast} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Resend link' }));
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith('Welcome email sent to waiting@example.test.'));
-    expect(posts(fetchMock)).toHaveLength(1);
-    expect(posts(fetchMock)[0][0]).toBe('/api/admin/timetracking/technicians/tech-w/hire/resend');
-  });
-
-  it('Resend link shows the server reason when it is refused', async () => {
-    const showToast = vi.fn();
-    stubApi({ onPost: async () => json({ error: 'A link was just sent. Try again in a minute.' }, false, 409) });
-    render(<TeamTab showToast={showToast} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Resend link' }));
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith('Failed: A link was just sent. Try again in a minute.'));
   });
 });

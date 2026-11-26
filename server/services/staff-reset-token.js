@@ -1,14 +1,14 @@
 /**
- * The one-time token behind a staff set-password link. Shared by the
- * password-reset request (routes/admin-auth.js issuePasswordReset) and the
- * Staff page "Hired" button (routes/admin-timetracking.js), so a token minted
- * by either one is redeemed by the same POST /reset-password lookup. Only the
- * hash is stored; the token itself exists in the emailed link alone.
+ * The one-time token behind a staff set-password link, minted by the
+ * password-reset request (routes/admin-auth.js issuePasswordReset) and redeemed
+ * by the POST /reset-password lookup. Only the hash is stored; the token itself
+ * exists in the emailed link alone.
  */
 const crypto = require('crypto');
-const { HIRE_LINK_TTL_MS } = require('./staff-welcome-email');
 
 const RESET_TOKEN_BYTES = 32;
+// A link an admin sends lives exactly this long (7 days); a reset request's own is shorter.
+const HIRE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function hashResetToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -26,16 +26,14 @@ function mintResetToken() {
 // its edit form).
 // - The request (admin-auth issuePasswordReset) issues no link for such a row.
 // - The redeem (admin-auth resetPassword) lets only a link an admin sent set
-//   that first password: the Team tab's Hired press or Resend link. The stored
-//   link itself says which it is. Every issuer writes the link's request time
-//   and expiry in the UPDATE that stores its hash, from one clock read: both
-//   admin issuers store exactly HIRE_LINK_TTL_MS, a reset request stores its
-//   own shorter time. So the rule also holds for a link stored before this
-//   rule shipped or by an older build, and a reset request that replaced an
-//   admin's link replaced its lifetime with it. Any other lifetime, and a
-//   link with no request time, reads as a reset request's.
-// - The Team tab (admin-timetracking hireLinkState) does not call a link the
-//   redeem refuses "pending".
+//   that first password. The stored link itself says which it is. Every
+//   issuer writes the link's request time and expiry in the UPDATE that stores
+//   its hash, from one clock read: an admin-sent link stores exactly
+//   HIRE_LINK_TTL_MS (the Team tab no longer sends one; the rule still covers a
+//   link stored by an older build), a reset request stores its own shorter
+//   time. A reset request that replaced an admin's link replaced its lifetime
+//   with it. Any other lifetime, and a link with no request time, reads as a
+//   reset request's.
 // "No password" is NULL or an empty value, as the Team tab reads it.
 const resetClosed = (row) => row.google_email != null && !row.password_hash;
 const adminSentLink = (row) => Boolean(row.password_reset_requested_at && row.password_reset_expires_at)
@@ -47,5 +45,5 @@ const REDEEM_CLOSED_SQL = `(google_email IS NOT NULL AND COALESCE(password_hash,
 const REDEEM_CLOSED_BINDINGS = [HIRE_LINK_TTL_MS / 1000];
 
 module.exports = {
-  RESET_TOKEN_BYTES, hashResetToken, mintResetToken, resetClosed, redeemClosed, REDEEM_CLOSED_SQL, REDEEM_CLOSED_BINDINGS,
+  RESET_TOKEN_BYTES, HIRE_LINK_TTL_MS, hashResetToken, mintResetToken, resetClosed, redeemClosed, REDEEM_CLOSED_SQL, REDEEM_CLOSED_BINDINGS,
 };

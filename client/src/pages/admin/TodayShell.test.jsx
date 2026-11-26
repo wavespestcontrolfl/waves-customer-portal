@@ -15,7 +15,6 @@ const docs = vi.hoisted(() => ({ available: true }));
 const viewport = vi.hoisted(() => ({ mobile: true }));
 vi.mock('../../hooks/useIsMobile', () => ({ default: () => viewport.mobile }));
 vi.mock('../../hooks/useStaffDocumentsAvailable', () => ({ default: () => docs.available }));
-vi.mock('../../hooks/usePayGrowthAvailable', () => ({ default: () => true }));
 vi.mock('../../components/tech/AddToHomeScreenHint', () => ({ default: () => null }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
 vi.mock('../../components/tech/TechNoticeFeed', () => ({ default: () => null }));

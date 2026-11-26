@@ -7,7 +7,7 @@
 // next page that lists it without it, and raise no error. So would a page
 // whose import started while the stylesheet was still loading, as after a
 // second quick move. Several pages and parts can list one stylesheet:
-// Communications, Customers, Dispatch and Schedule all list the pay-growth
+// Communications, Customers, Dispatch and Schedule can all list the same
 // one. With this plugin, an import that lists a stylesheet still loading
 // waits for that load, and fails with it. A stylesheet that failed leaves the
 // helper's record, and its link stays where it was, marked as failed. The
