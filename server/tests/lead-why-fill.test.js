@@ -106,6 +106,11 @@ describe('not_booked_reason labels', () => {
     expect(planLeadWhy(lost(), [chunk('objection', topics)]).not_booked_reason).toBe(expected);
   });
 
+  test('labels with spaces match like hyphenated ones', () => {
+    expect(planLeadWhy(lost(), [chunk('objection', ['one time treatment'])]).not_booked_reason).toBe('one_visit');
+    expect(planLeadWhy(lost(), [chunk('objection', ['in person inspection'])]).not_booked_reason).toBe('wants_a_look');
+  });
+
   test('list matches the rules plus no_response', () => {
     expect(NOT_BOOKED_REASONS).toEqual([...NOT_BOOKED_RULES.map(([r]) => r), 'no_response']);
   });

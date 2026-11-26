@@ -92,18 +92,18 @@ const OLD_PROVIDER_TOPIC = /^(current|previous|prior|existing|former|old) (pest 
 const SWITCH_RULES = [
   ['moved', /\bmov(e|ed|ing)\b|new (home|house)|home (purchase|sale)/],
   ['pests_came_back', /treatment (effectiveness|failure)|failed treatment|ineffective treatment|service (effectiveness|failure|quality)|recurring (infestation|pests?)|re-?infestation/],
-  ['no_show', /service gap|missed (service|appointment|visit)|no[- ]show|service delays?|skipped service/],
+  ['no_show', /service gap|missed (service|appointment|visit)|no[- ]?show|service delays?|skipped service/],
   ['no_callback', /call ?back|responsiveness|unresponsive|communication|no response/],
-  ['contract', /contract|commitment|cancellation fee|lock-?in/],
+  ['contract', /contract|commitment|cancellation fee|lock[- ]?in/],
   ['bundle', /bundl|consolidat/],
   ['price_creep', /price|pricing|cost|rate increase|monthly price|fee/],
 ];
 
 const NOT_BOOKED_RULES = [
   ['spouse', /spouse|partner|husband|wife|decision maker|family decision/],
-  ['one_visit', /one-?time (treatment|service|visit)|single (treatment|service|visit)/],
+  ['one_visit', /one[- ]?time (treatment|service|visit)|single (treatment|service|visit)/],
   ['no_plan', /commitment|recurring service|contract|annual prepay(ment)?|prepay|service frequency|quarterly service|membership|subscription/],
-  ['wants_a_look', /inspection request|in-?person (visit|inspection|assessment)|site visit|see (it )?first/],
+  ['wants_a_look', /inspection request|in[- ]?person (visit|inspection|assessment)|site visit|see (it )?first/],
   ['price', /price|pricing|afford|budget|cost|fee|expensive/],
   ['timing', /timing|appointment time|schedul|availability|later|seasonal/],
 ];
@@ -272,24 +272,29 @@ async function assignCalls(conn, leads, calls) {
     return delta >= -CALL_WINDOW_BEFORE_DAYS && delta <= CALL_WINDOW_AFTER_DAYS;
   };
   const owner = new Map(); // call id -> lead id
+  const unsettled = new Set(); // lead ids with a call still being (re)processed
   for (const c of calls) {
     const stamp = stampState(c);
     if (stamp === 'settled') { owner.set(c.id, c.stamp_lead_id); continue; }
-    if (stamp === 'provisional') continue;
+    if (stamp === 'provisional') {
+      unsettled.add(c.stamp_lead_id);
+      for (const id of bySid.get(c.id) || []) unsettled.add(id);
+      continue;
+    }
     const sid = bySid.get(c.id);
     if (sid) { if (sid.size === 1) owner.set(c.id, [...sid][0]); continue; }
     if (!c.customer_id) continue;
     const fits = custLeads.filter((l) => l.customer_id === c.customer_id && inWindow(c, l));
     if (fits.length === 1) owner.set(c.id, fits[0].id);
   }
-  return owner;
+  return { owner, unsettled };
 }
 
 async function loadChunksByLead(conn, leads, now) {
   const byLead = new Map(leads.map((l) => [l.id, new Set()]));
   const calls = new Map(); // call_log id -> row
   const candidates = await candidateCalls(conn, leads);
-  const owner = await assignCalls(conn, leads, candidates);
+  const { owner, unsettled } = await assignCalls(conn, leads, candidates);
   for (const c of candidates) {
     const leadId = owner.get(c.id);
     if (byLead.has(leadId)) { calls.set(c.id, c); byLead.get(leadId).add(c.id); }
@@ -318,6 +323,7 @@ async function loadChunksByLead(conn, leads, now) {
     out.set(leadId, {
       chunks: ids.flatMap((cid) => chunksByCall.get(cid) || []),
       miningPending: ids.some((cid) => pending.has(cid)),
+      unsettled: unsettled.has(leadId),
     });
   }
   return out;
@@ -407,7 +413,10 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
     const booked = await bookedLeadIds(conn, candidates);
 
     for (const lead of leads) {
-      const ev = evidence.get(lead.id) || { chunks: [], miningPending: false };
+      const ev = evidence.get(lead.id) || { chunks: [], miningPending: false, unsettled: false };
+      // A call of this lead is still being (re)processed: keep its values until
+      // ownership settles, so a lead past the window is never cleared and lost.
+      if (ev.unsettled) continue;
       const patch = ineligible(lead)
         ? clearPatch(lead)
         : planLeadWhy(lead, ev.chunks, { booked: booked.has(lead.id), miningPending: ev.miningPending });
