@@ -7320,9 +7320,10 @@ even while it carries its old hold timestamp: it stays offered and adoptable
 after the timestamp lapses, and it is never committed as a hold. A body that
 adopts it sends `existingAppointmentWasHold` (boolean: whether this page showed
 a hold). `true`, or no boolean when the visit was made from this estimate and
-has a customer, answers 409 `SLOT_UNAVAILABLE` (with `reloadRequired: true`
-when the boolean was missing) so the page re-reads instead of rewriting a visit
-the customer never saw. A body with a `slotId` whose slot is now a visit staff
+has a customer, answers 409 `SLOT_UNAVAILABLE` so the page re-reads instead of
+rewriting a visit the customer never saw. When the boolean was missing the 409
+has no `code`, a message asking for a page reload, and `reloadRequired: true`
+(a page loaded before the field cannot send it on a retry). A body with a `slotId` whose slot is now a visit staff
 booked for this estimate's own customer adopts that one visit when it is
 unambiguous (no second booking, no live unclaimed hold beside it, proven again
 under the date lock) and the locked visit is still at the picked slot, from

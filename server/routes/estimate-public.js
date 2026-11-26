@@ -1816,14 +1816,20 @@ function adoptableAppointmentStatuses() {
 }
 
 // This estimate's rows at a slot the customer submitted (a parsed slotId).
-function estimateRowsAtSlot(conn, estimate, slot) {
+// `includeUnassigned` widens a technician slot to the unassigned rows too: a
+// booking or hold with no technician still occupies that start.
+function estimateRowsAtSlot(conn, estimate, slot, { includeUnassigned = false } = {}) {
   return conn('scheduled_services')
     .where({
       source_estimate_id: estimate.id,
       scheduled_date: slot.date,
       window_start: slot.windowStart,
     })
-    .modify((q) => { if (slot.techId) q.where('technician_id', slot.techId); });
+    .modify((q) => {
+      if (!slot.techId) return;
+      if (includeUnassigned) q.where((b) => { b.where('technician_id', slot.techId).orWhereNull('technician_id'); });
+      else q.where('technician_id', slot.techId);
+    });
 }
 
 // A staff booking at a submitted slot is recoverable only when it stands alone:
@@ -1831,13 +1837,15 @@ function estimateRowsAtSlot(conn, estimate, slot) {
 // grace) beside it. Run before the accept transaction and again under the
 // date lock, since either can appear in between.
 async function recoveredSlotIsAmbiguous(conn, estimate, slot, bookedId, holdGraceMinutes) {
-  const secondBooking = await estimateRowsAtSlot(conn, estimate, slot)
+  // Any booking that still occupies the slot counts, whether or not the accept
+  // could adopt it (the in-progress statuses are adoptable only behind a gate).
+  const secondBooking = await estimateRowsAtSlot(conn, estimate, slot, { includeUnassigned: true })
     .whereNotNull('customer_id')
-    .whereIn('status', adoptableAppointmentStatuses())
+    .whereNotIn('status', require('../services/stops-ahead').NOT_A_ROUTE_STOP_STATUSES)
     .whereNot({ id: bookedId })
     .first();
   if (secondBooking) return true;
-  const openHold = await estimateRowsAtSlot(conn, estimate, slot)
+  const openHold = await estimateRowsAtSlot(conn, estimate, slot, { includeUnassigned: true })
     .whereNull('customer_id')
     .whereNotNull('reservation_expires_at')
     .whereRaw('reservation_expires_at >= NOW() - make_interval(mins => ?)', [holdGraceMinutes])
@@ -10945,6 +10953,13 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         holdGraceMinutes,
       })
       : null;
+    // The recovered visit must still be this customer's booking on the second
+    // read: if staff cleared its owner, the row now reads as a hold and the
+    // hold-commit branch would book whatever slot it moved to.
+    if (recoveredSlot && (!existingAppointmentRow
+      || String(existingAppointmentRow.customer_id || '') !== String(estimate.customer_id || ''))) {
+      return res.status(409).json(HOLD_EXPIRED_409);
+    }
     if (existingAppointmentId && !existingAppointmentRow) {
       // A staff booking recovered from the submitted slot that no longer
       // qualifies (status, service family, callback): the customer re-picks.
@@ -11005,13 +11020,17 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         || (typeof shownAsHold !== 'boolean' && existingAppointmentRow.customer_id != null
           && existingAppointmentRow.source_estimate_id != null
           && String(existingAppointmentRow.source_estimate_id) === String(estimate.id)))) {
-      // A tab that predates the field cannot send the boolean on a retry: the
-      // message tells that customer to reload the page (a new bundle sends it).
-      return res.status(409).json({
-        code: 'SLOT_UNAVAILABLE',
-        error: 'slot no longer available — reload this page to see your booked visit',
-        reloadRequired: typeof shownAsHold !== 'boolean',
-      });
+      // A tab that predates the field cannot send the boolean on a retry. It
+      // gets a body with no code and none of the words its 409 handler keys on
+      // ("expired", "slot no longer available"), so that handler shows this
+      // message as the banner; a reload loads the new bundle, which sends it.
+      if (typeof shownAsHold !== 'boolean') {
+        return res.status(409).json({
+          error: 'This page is out of date. Please reload it to see your updated booking.',
+          reloadRequired: true,
+        });
+      }
+      return res.status(409).json({ code: 'SLOT_UNAVAILABLE', error: 'slot no longer available — re-pick a slot' });
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
     const pricingBundle = await buildPricingBundle(estimateForPricing);
