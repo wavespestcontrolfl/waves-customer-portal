@@ -105,6 +105,18 @@ const COMPANY_FACTS = Object.freeze([
   'Yes, we offer emergency service day or night.',
   'The ant products we use inside are labeled for indoor ant treatment, including kitchens and pantries.',
   'We don\'t service in-wall tube systems, and that\'s on purpose. They push spray into the walls inside your home. We\'d rather treat the outside of the house thoroughly and fix the moisture problems that draw pests in, without spraying inside your walls.',
+  // Owner rulings 2026-11-25 (texting AI fix, step 2: feed the facts staff know), appended in this order. Each line follows the company
+  // facts bank's own text rules (company-facts-bank checkFactText: at most three sentences, no digit or number word, no product name, no
+  // "safe" claim), which sms-company-facts.test.js runs over these lines. The width of the perimeter band is left out on purpose: a
+  // number word is banned, so the line says "a band around the home" and no other line carries the width. NOT here: a return-visit offer
+  // (a pest report before a visit moves that visit; the FREE RE-SERVICE fact owns return visits, so no line uses its words).
+  'The perimeter treatment is applied as a band around the home.',
+  'Lawn insect control is part of the lawn care plan, not the pest plan. The pest plan still treats the shrubs, ornamentals and bed areas around the home.',
+  'When a customer on a recurring plan reports pests before their next scheduled visit, we can move that visit earlier, and the later visits in the plan move up with it.',
+  'When rain forces a move and the customer is notified, we send our standard moved-visit text with the new day or a link to choose a day.',
+  'New sod and plugs get the same watering instructions as any other lawn: follow the water district\'s watering days and times.',
+  'For a wasp nest, we can explain how the nest is removed, and we suggest turning the outdoor lights off.',
+  'We never tell a customer that ants may stay. The ant products we use are non-repellents: ants carry them back to the colony, so results build over time.',
 ]);
 
 // The fixed money policy lines (paying, prepay refund): the payment-status contract treats a verbatim copy of one of their
@@ -167,6 +179,10 @@ function renderCompanyFactsLines(count, { retired = false, olderRetired = [] } =
 // (hasExactCompanyFacts): an old item must never grade the new identity. Any change to the
 // render also moves both prompt version numbers in sms-shadow-drafter.
 const PRIOR_COMPANY_FACTS_RENDERS = Object.freeze([
+  // 2026-11-25 owner rulings (texting AI fix, step 2): seven lines APPENDED (perimeter band, lawn insect control, pest report before a
+  // visit, rain moves, new sod, wasp nests, ants). The 29-line render live 2026-11-25 (prompts 45 to 52) has today's wording for every
+  // one of its lines, so it is the first 29 lines of today's list and needs no `retired` entry. No line was reworded.
+  { lines: 29, sha256: 'f22377899d74db87a65fcd13745316b89ff3e6b672216d88dd236774aaa5baa2' },
   // 2026-11-25 standing answers (owner 2026-11-23 / 2026-11-25 "all rec"): three lines APPENDED (emergency service, ants near a
   // pantry, in-wall tube systems). The 26-line render live 2026-11-24 to
   // 2026-11-25 (prompts 41 to 44) has today's wording for every one of its lines, so it is the first 26 lines of today's list and

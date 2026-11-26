@@ -226,7 +226,10 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // short fixed acknowledgement of a text that asks for nothing) or ABSTAIN (no reply text; staff handle it as today). The prompt text and the
 // instruction lines inside the facts (VISIT STATUS, BILLING, payment status) change; no fact section is added or removed, so the fact key stays
 // 'n'. Both bases move past the 45-48 renders: "49" / "50" here and "51" / "52" for B1.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}49_n`;
+// STAFF FACTS (owner 2026-11-25, texting AI fix step 2): seven lines are appended to COMPANY FACTS (perimeter band, lawn insect control, a pest
+// report before a visit, rain moves, new sod, wasp nests, ants). The exact render changed, so the numbers move to "53" / "54" (here) and
+// "55" / "56" (B1). The 49-52 render is a known earlier render (sms-company-facts.js) with no retired line.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}53_n`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
 // scheduling text from a customer whose upcoming visits are ONE recurring series gets
 // OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
@@ -236,16 +239,16 @@ const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}49_n`;
 // stamps REAL_ANSWERS_PROMPT_VERSION. The two differ ONLY by that rule, and the two
 // behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
 // gate moves. A prompt or facts revision moves BOTH numbers.
-const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}50_n`;
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}54_n`;
 // PROMPT B1 (owner 2026-10-24 "go b1" / "yes all", GATE_SMS_PROMPT_B1): the drafter stops stalling (a missed visit and a covered pest
 // re-service text get real times to offer) and stops false promises (no claimed sends, no promised office actions, the follow-up
 // wording promises only a reply, no name greeting mid-thread), and the latest finished visit's customer-safe notes and findings
 // reach the facts. A prompt AND facts revision, so both bases move once more: "27" (scheduler gate off) / "28" (on). Same
-// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers52_n'
+// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers56_n'
 // is 32 chars, 39 with the six tags b c e l m v (+ separator), under PROMPT_VERSION_COLUMN_MAX (40) - pinned by a test. The
 // effective version follows the gate (realAnswersBaseVersion), so B1 drafts never pool with the 25/26 cohorts.
-const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}51_n`;
-const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}52_n`;
+const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}55_n`;
+const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}56_n`;
 const SHADOW_STATUS = 'shadow';
 
 // ── DRAFT KINDS (owner 2026-11-25) ──
