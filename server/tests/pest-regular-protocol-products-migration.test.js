@@ -553,7 +553,7 @@ describe('pest regular protocol products: the protocol hints', () => {
     expect(hintsByVisit).toEqual([
       [['Advion Ant Gel'], ['Atticus Antapex WSG'], null],
       [],
-      [['Contrac Blox']],
+      [null, ['Tomcat Bait Chunx with Bromethalin'], ['Contrac Blox'], null, null, null, null, null, null] /* home and commercial bait as their own lines (owner 2026-11-25 D15b); the rest record no treatment */,
       [],
     ]);
   });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { COLORS as B, FONTS } from '../theme-brand';
@@ -35,6 +35,110 @@ function normalizeAuthError(error) {
   return error;
 }
 
+
+// One phone normalizer for the sign-in form. An iOS autofill of
+// "+1 (941) 555-0147" arrives as 11 digits; US area codes never start with 1,
+// so a leading 1 is the country code. Drop it before the 10-digit cut, or the
+// last digit of the real number is lost (same rule as PublicBookingPage).
+function phoneDigits(raw) {
+  const all = String(raw || '').replace(/\D/g, '');
+  const national = all.startsWith('1') ? all.slice(1) : all;
+  return national.slice(0, 10);
+}
+
+function LoginCardHeader({ step, phone }) {
+  return (
+    <div className="portal-login-card-header">
+      <span className="portal-login-icon">
+        <Icon name={step === 'phone' ? 'smartphone' : 'key'} size={20} strokeWidth={2.1} />
+      </span>
+      <div>
+        <h2 className="portal-login-title">
+          {step === 'phone' ? 'Sign in' : 'Enter your code'}
+        </h2>
+        <p className="portal-login-subtitle">
+          {step === 'phone'
+            ? 'We will text a verification code to your account phone.'
+            : `If you receive a code at ${phone}, enter it below.`}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// Store badges — hidden inside the native apps (isNativeApp),
+// where the customer already has the app.
+function StoreBadges() {
+  if (isNativeApp()) return null;
+  return (
+    <section data-glass="card" aria-label="Get the Waves app" style={{
+      position: 'relative',
+      marginTop: 14,
+      padding: 24,
+      borderRadius: 16,
+      background: '#FFFFFF',
+      border: '1px solid #E7E2D7',
+      textAlign: 'center',
+    }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: CUSTOMER_SURFACE.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
+        The Waves App
+      </div>
+      <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
+        Your home team, one tap away.
+      </div>
+      <div style={{ marginTop: 6, fontSize: 16, color: '#3F4A65', lineHeight: 1.5, maxWidth: 420, marginLeft: 'auto', marginRight: 'auto' }}>
+        See when we're coming, read every report the moment it's ready, and pay in seconds.
+      </div>
+      <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center' }}>
+        <a href="https://apps.apple.com/us/app/waves-pest-control/id6782775654" target="_blank" rel="noopener noreferrer" aria-label="Download the Waves app on the App Store">
+          <img src="/app-email/apple-app-store-badge.png" alt="Download on the App Store" style={{ height: 44, display: 'block' }} />
+        </a>
+        <a href="https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal" target="_blank" rel="noopener noreferrer" aria-label="Get the Waves app on Google Play">
+          <img src="/app-email/google-play-badge-tight.png" alt="Get it on Google Play" style={{ height: 44, display: 'block' }} />
+        </a>
+      </div>
+    </section>
+  );
+}
+
+function ResendButton({ sending, onResend }) {
+  return (
+    <button
+      type="button"
+      className="portal-login-secondary"
+      onClick={onResend}
+      disabled={sending}
+    >
+      <Icon name="refresh" size={15} strokeWidth={2} />
+      Resend code
+    </button>
+  );
+}
+
+function ResendNotice() {
+  return (
+    <div className="portal-login-note" role="status">
+      <Icon name="info" size={16} strokeWidth={2} style={{ marginTop: 1 }} />
+      <span>Resend requested. If a new code arrives, enter the newest one.</span>
+    </div>
+  );
+}
+
+
+// A full 6-digit code (typed, or filled by the iOS one-time-code suggestion)
+// signs in by itself, once. A code that just failed is not sent again: the
+// customer edits it, or taps Sign in.
+function useAutoVerify({ code, active, lastSubmittedRef, verifyingRef, verify }) {
+  useEffect(() => {
+    if (code.length < 6) {
+      lastSubmittedRef.current = '';
+      return;
+    }
+    if (!active || verifyingRef.current || lastSubmittedRef.current === code) return;
+    verify(code);
+  }, [code, active, lastSubmittedRef, verifyingRef, verify]);
+}
+
 export default function LoginPage() {
   const { sendCode, verifyCode, clearError, error, isAuthenticated, loading } = useAuth();
   const navigate = useNavigate();
@@ -44,6 +148,9 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [step, setStep] = useState('phone');
   const [sending, setSending] = useState(false);
+  const [resendNotice, setResendNotice] = useState(false);
+  const verifyingRef = useRef(false);
+  const lastSubmittedCodeRef = useRef('');
   useGlassSurface(true);
 
   useEffect(() => {
@@ -51,43 +158,60 @@ export default function LoginPage() {
   }, [isAuthenticated, navigate, nextPath]);
 
   const formatPhone = (value) => {
-    const digits = value.replace(/\D/g, '').slice(0, 10);
+    const digits = phoneDigits(value);
     if (digits.length <= 3) return digits;
     if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
     return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
   };
 
-  const handleSendCode = async () => {
-    const digits = phone.replace(/\D/g, '');
+  const handleSendCode = async (resend = false) => {
+    const digits = phoneDigits(phone);
     if (digits.length !== 10 || sending) return;
     setSending(true);
+    setResendNotice(false);
     const success = await sendCode(`+1${digits}`);
     setSending(false);
     if (success) {
       setCode('');
+      lastSubmittedCodeRef.current = '';
       setStep('code');
+      if (resend) setResendNotice(true);
     }
   };
 
-  const handleVerify = async () => {
-    if (code.length !== 6 || sending) return;
-    const digits = phone.replace(/\D/g, '');
+  const handleVerify = useCallback(async (codeValue = code) => {
+    if (codeValue.length !== 6 || verifyingRef.current) return;
+    verifyingRef.current = true;
+    lastSubmittedCodeRef.current = codeValue;
     setSending(true);
-    const success = await verifyCode(`+1${digits}`, code);
-    if (success) {
-      navigate(nextPath, { replace: true });
-    } else {
-      setSending(false);
+    setResendNotice(false);
+    try {
+      const success = await verifyCode(`+1${phoneDigits(phone)}`, codeValue);
+      if (success) {
+        navigate(nextPath, { replace: true });
+      } else {
+        setSending(false);
+      }
+    } finally {
+      verifyingRef.current = false;
     }
-  };
+  }, [code, phone, verifyCode, navigate, nextPath]);
+
+  useAutoVerify({
+    code,
+    active: step === 'code' && !sending,
+    lastSubmittedRef: lastSubmittedCodeRef,
+    verifyingRef,
+    verify: handleVerify,
+  });
 
   const onSubmit = (e) => {
     e.preventDefault();
     if (step === 'phone') handleSendCode();
-    else handleVerify();
+    else handleVerify(code);
   };
 
-  const phoneReady = phone.replace(/\D/g, '').length === 10;
+  const phoneReady = phoneDigits(phone).length === 10;
   const codeReady = code.length === 6;
   const submitDisabled = step === 'phone' ? !phoneReady || sending : !codeReady || sending;
   const friendlyError = normalizeAuthError(error);
@@ -492,21 +616,7 @@ export default function LoginPage() {
 
         <section className="portal-login-panel" aria-label="Sign in">
           <div className="portal-login-card" data-glass="card" style={{ position: 'relative' }}>
-            <div className="portal-login-card-header">
-              <span className="portal-login-icon">
-                <Icon name={step === 'phone' ? 'smartphone' : 'key'} size={20} strokeWidth={2.1} />
-              </span>
-              <div>
-                <h2 className="portal-login-title">
-                  {step === 'phone' ? 'Sign in' : 'Enter your code'}
-                </h2>
-                <p className="portal-login-subtitle">
-                  {step === 'phone'
-                    ? 'We will text a verification code to your account phone.'
-                    : `If you receive a code at ${phone}, enter it below.`}
-                </p>
-              </div>
-            </div>
+            <LoginCardHeader step={step} phone={phone} />
 
             <div className="portal-login-step" aria-label="Sign in progress">
               <span className={`portal-login-step-item ${step === 'phone' ? 'active' : ''}`}>
@@ -584,19 +694,12 @@ export default function LoginPage() {
 
               {step === 'code' && (
                 <>
+                  <ResendButton sending={sending} onResend={() => handleSendCode(true)} />
                   <button
                     type="button"
                     className="portal-login-secondary"
-                    onClick={handleSendCode}
                     disabled={sending}
-                  >
-                    <Icon name="refresh" size={15} strokeWidth={2} />
-                    Resend code
-                  </button>
-                  <button
-                    type="button"
-                    className="portal-login-secondary"
-                    onClick={() => { clearError(); setStep('phone'); setCode(''); }}
+                    onClick={() => { clearError(); setStep('phone'); setCode(''); setResendNotice(false); }}
                   >
                     Use a different number
                   </button>
@@ -604,6 +707,8 @@ export default function LoginPage() {
               )}
             </form>
             )}
+
+            {resendNotice && <ResendNotice />}
 
             {friendlyError && (
               <div className="portal-login-error" role="alert">
@@ -635,37 +740,7 @@ export default function LoginPage() {
             ))}
           </div>
 
-          {/* Store badges — hidden inside the native apps (isNativeApp),
-              where the customer already has the app. */}
-          {!isNativeApp() && (
-            <section data-glass="card" aria-label="Get the Waves app" style={{
-              position: 'relative',
-              marginTop: 14,
-              padding: 24,
-              borderRadius: 16,
-              background: '#FFFFFF',
-              border: '1px solid #E7E2D7',
-              textAlign: 'center',
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: CUSTOMER_SURFACE.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
-                The Waves App
-              </div>
-              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
-                Your home team, one tap away.
-              </div>
-              <div style={{ marginTop: 6, fontSize: 16, color: '#3F4A65', lineHeight: 1.5, maxWidth: 420, marginLeft: 'auto', marginRight: 'auto' }}>
-                See when we're coming, read every report the moment it's ready, and pay in seconds.
-              </div>
-              <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center' }}>
-                <a href="https://apps.apple.com/us/app/waves-pest-control/id6782775654" target="_blank" rel="noopener noreferrer" aria-label="Download the Waves app on the App Store">
-                  <img src="/app-email/apple-app-store-badge.png" alt="Download on the App Store" style={{ height: 44, display: 'block' }} />
-                </a>
-                <a href="https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal" target="_blank" rel="noopener noreferrer" aria-label="Get the Waves app on Google Play">
-                  <img src="/app-email/google-play-badge-tight.png" alt="Get it on Google Play" style={{ height: 44, display: 'block' }} />
-                </a>
-              </div>
-            </section>
-          )}
+          <StoreBadges />
         </section>
       </div>
     </div>

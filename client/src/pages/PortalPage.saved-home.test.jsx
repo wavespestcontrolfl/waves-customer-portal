@@ -93,6 +93,13 @@ describe('saved home screen in the portal', () => {
     expect(screen.queryByTestId('portal-updating')).not.toBeInTheDocument();
   });
 
+  it('offers Call and Text links to the office on the Updating screen', async () => {
+    view();
+    await screen.findByText(/hello pat/i);
+    expect(screen.getByRole('link', { name: 'Call Waves' })).toHaveAttribute('href', 'tel:+19412975749');
+    expect(screen.getByRole('link', { name: 'Text Waves' })).toHaveAttribute('href', 'sms:+19412975749');
+  });
+
   it('mounts no portal while saved: no request, no tab, no pay or request action, no chat pill, no recommendations', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: false, json: async () => ({}) });
     api.getPropertyRecommendations.mockResolvedValue({ available: true, oneTap: true, cards: [{ id: 'lawn_offer', kind: 'offer', title: 'Lawn Care', serviceKey: 'lawn_care', mode: 'one_tap', ctaLabel: 'Buy now' }] });
