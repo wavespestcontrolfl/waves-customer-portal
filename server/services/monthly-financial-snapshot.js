@@ -7,7 +7,8 @@
  *   office_cost_per_stop = office_cost / paid_stops (null when there are no paid stops)
  *
  * The buyer-view columns (owner field time, book gross margin, SDE, owner-paid profit, recurring and prepaid money) come
- * from monthly-snapshot-buyer-columns.js.
+ * from monthly-snapshot-buyer-columns.js. The cross-sell columns (recurring customers, customers with two or more kinds of
+ * recurring service, and how the added service came in) come from cross-sell-rate.js.
  *
  * Reads reuse pnl-report.js (the P&L report for the cash-basis revenue and net income, the
  * pay-run category exclusion) and the dashboard gross-margin tile's formula
@@ -21,6 +22,7 @@ const { pnlPayRunWagesLive } = require('../config/feature-gates');
 const { buildPnlReport } = require('./pnl-report');
 const { leaveOutPayRunCategory } = require('./pay-run-books');
 const { timeAllowance, buyerColumns } = require('./monthly-snapshot-buyer-columns');
+const { crossSellColumns } = require('./cross-sell-rate');
 const logger = require('./logger');
 
 // Office categories, by expense_categories.name. Insurance, vehicle, ads, card fees,
@@ -165,7 +167,7 @@ async function financialsEffectiveOn(db, onDate) {
 }
 
 /** Everything one month's snapshot row holds. Pure reads; writes nothing. */
-async function computeMonthSnapshot(month, db = require('../models/db')) {
+async function computeMonthSnapshot(month, db = require('../models/db'), asOfNow = new Date()) {
   const { month: monthStart, startDate, endDate } = monthWindow(month);
   const [ledger, stops, jobs, financials, pnl] = await Promise.all([
     officeLedgerCost(db, startDate, endDate),
@@ -178,6 +180,8 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
   const officeCost = round2(ledger + allowance);
   const cashRevenue = round2(pnl.revenue.total);
   const buyer = await buyerColumns(db, { startDate, endDate, financials, pnl, officeAllowance: allowance, cashRevenue });
+  // The run's own clock decides which month the cross-sell reading belongs to (see crossSellColumns).
+  const crossSell = await crossSellColumns(db, endDate, etDateString(asOfNow));
   return {
     month: monthStart,
     completed_job_revenue: jobs.revenue,
@@ -194,6 +198,7 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
     // card fees inside cash revenue and net income are final.
     pnl_complete: !!(pnl.coverage && pnl.coverage.complete),
     ...buyer,
+    ...crossSell,
   };
 }
 
@@ -204,7 +209,7 @@ const SNAPSHOT_ISOLATION = { isolationLevel: 'repeatable read' };
 
 /** Compute and store one month on `trx` (already a snapshot transaction): one row per month, a re-run replaces it. */
 async function writeMonthSnapshot(month, trx, computedAt) {
-  const snapshot = await computeMonthSnapshot(month, trx);
+  const snapshot = await computeMonthSnapshot(month, trx, computedAt);
   await trx('monthly_financial_snapshots')
     .insert({ ...snapshot, computed_at: computedAt })
     .onConflict('month')

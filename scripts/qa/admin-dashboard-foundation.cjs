@@ -46,6 +46,7 @@ function dashboardFixture(api, method = 'GET') {
   if (api === '/admin/kpi-targets') return { targets: [] };
   if (api === '/admin/dashboard/ebitda-bridge') return { rows: [], revenue: 0 };
   if (api === '/admin/dashboard/office-cost-per-stop') return { months: [], trailing: {} };
+  if (api === '/admin/dashboard/cross-sell') return { series: [], now: { asOf: '2026-09-11', recurringCustomers: 0, multiServiceCustomers: 0, share: null }, sources: {}, pestOnly: [] };
   if (api === '/admin/dashboard/ops-buyer-metrics') return { errors: {}, ownerReliance: null, revenuePerRouteDay: null, routeFill: null, returnVisitRate: null };
   if (api === '/admin/dashboard/buyer-view') return { months: { count: 0 }, revenue: {}, recurring: {}, planRevenueKept: {}, grossMargin: {}, ownerProfit: {}, officeCost: {} };
   if (api === '/admin/dashboard/mrr-bridge') return { months: [] };
