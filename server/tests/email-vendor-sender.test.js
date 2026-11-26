@@ -36,6 +36,7 @@ describe('registrableSenderDomain', () => {
     ['news@mail.anthropic.com', 'anthropic.com'],
     ['Claude <hello@email.claude.com>', 'claude.com'],
     ['Shop@Deals.Example.CO.UK', 'example.co.uk'],
+    ['"billing@trusted.example" <promo@other.example>', 'other.example'],
     ['nobody', null],
     ['x@localhost', null],
   ])('%s -> %s', (from, expected) => {
@@ -90,16 +91,32 @@ describe('isVendorWeUse', () => {
     expect(calls.emails[0]).toEqual(['whereRaw', '(lower(from_address) = ? OR lower(from_address) LIKE ?)', ['seller@gmail.com', '%<seller@gmail.com>']]);
   });
 
-  test('strict mode (spam block) counts only a booked expense, never a label or a rejected invoice', async () => {
+  test('strict mode (spam block) needs a booked expense from the same mailbox, never the whole domain', async () => {
     const calls = mockTables({ priorEmail: { id: 'e0' } });
-    expect(await isVendorWeUse({ id: 'e9', from_address: 'promo@news.supplier.example' }, { strict: true })).toBe(true);
+    expect(await isVendorWeUse({ id: 'e9', from_address: 'merchant-a@billing.example' }, { strict: true })).toBe(true);
+    expect(calls.emails[0]).toEqual(['whereRaw', '(lower(from_address) = ? OR lower(from_address) LIKE ?)', ['merchant-a@billing.example', '%<merchant-a@billing.example>']]);
     expect(calls.emails).toContainEqual(['where', 'auto_action', 'like', 'expense\\_%']);
     expect(calls.emails.some((c) => c[0] === 'whereIn' || c[0] === 'orWhere')).toBe(false);
   });
 
+  test('LIKE wildcards in a mailbox match literally', async () => {
+    const calls = mockTables({ priorEmail: null });
+    await isVendorWeUse({ id: 1, from_address: 'a_b%c@gmail.com' });
+    expect(calls.emails[0][2]).toEqual(['a_b%c@gmail.com', '%<a\\_b\\%c@gmail.com>']);
+  });
+
+  test('a display name holding an address never replaces the bracketed mailbox', async () => {
+    const calls = mockTables({ vendorDomain: null, priorEmail: null });
+    await isVendorWeUse({ id: 1, from_address: '"seller@gmail.com" <spam@junk.example>' });
+    expect(calls.vendor_email_domains[1][2]).toEqual(['spam@junk.example', 'junk.example']);
+  });
+
   test('strict mode rethrows a failed lookup so the deferred block retries', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
-    await expect(isVendorWeUse({ id: 1, from_address: 'deals@retailer.example.com' }, { strict: true })).rejects.toThrow('db down');
+    db.mockImplementation(() => { const e = new Error('select … where domain in (deals@retailer.example.com)'); e.code = '57014'; throw e; });
+    const err = await isVendorWeUse({ id: 7, from_address: 'deals@retailer.example.com' }, { strict: true }).catch((e) => e);
+    expect(err.message).toBe('vendor lookup failed (email 7, code 57014)');
+    expect(err.message).not.toContain('@');
   });
 
   test('a sender with no vendor history is not a vendor', async () => {

@@ -13,10 +13,20 @@ const KEEP_PROMO_DOMAINS = ['anthropic.com', 'claude.com', 'openai.com', 'siteon
 
 const VENDOR_CLASSIFICATIONS = ['vendor_invoice', 'vendor_communication'];
 
-// The bare lowercase mailbox ("Name <a@x.com>" -> "a@x.com"), or ''.
+// The bare lowercase mailbox, or ''. A display form ("Name <a@x.com>") uses
+// the address inside the LAST angle brackets, never an address-like display
+// name.
 function senderMailbox(address) {
-  const m = String(address || '').toLowerCase().match(/([^\s<>"]+@[^\s<>"]+)/);
+  const raw = String(address || '').toLowerCase();
+  const bracketed = [...raw.matchAll(/<([^<>\s"]+@[^<>\s"]+)>/g)].pop();
+  const m = bracketed || raw.match(/([^\s<>"]+@[^\s<>"]+)/);
   return m ? m[1].replace(/\.$/, '') : '';
+}
+
+// LIKE metacharacters in a bound value match literally (knex/pg default
+// escape character is backslash).
+function escapeLike(value) {
+  return String(value).replace(/[\\%_]/g, (c) => `\\${c}`);
 }
 
 // Registrable domain of the sender ("Name <a@mail.x.com>" -> "x.com"), or null.
@@ -45,15 +55,18 @@ async function registryHasSender(mailbox, reg, shared) {
   return !!row;
 }
 
-// Earlier vendor mail from this sender. On a shared provider only the same
-// mailbox counts; otherwise any mailbox on the registrable domain.
-// strict (spam-block path): only a booked expense (expense_created /
-// expense_duplicate) is evidence; a classifier label or a rejected invoice
-// (invoice_detected:unauthenticated, …) is not.
+// Earlier vendor mail from this sender.
+// Unsubscribe path: any mailbox on a vendor-owned registrable domain counts
+// (receipts and promos come from different mailboxes); on a shared provider
+// only the same mailbox.
+// strict (spam-block path): only the SAME mailbox, and only a booked expense
+// (expense_created / expense_duplicate). A classifier label, a rejected
+// invoice, or another merchant on the same billing platform never exempts a
+// sender from the block list.
 async function historyHasSender(email, mailbox, reg, shared, strict) {
   const q = db('emails');
-  if (shared) {
-    q.whereRaw('(lower(from_address) = ? OR lower(from_address) LIKE ?)', [mailbox, `%<${mailbox}>`]);
+  if (shared || strict) {
+    q.whereRaw('(lower(from_address) = ? OR lower(from_address) LIKE ?)', [mailbox, `%<${escapeLike(mailbox)}>`]);
   } else {
     q.whereRaw(
       '(lower(from_address) LIKE ? OR lower(from_address) LIKE ? OR lower(from_address) LIKE ? OR lower(from_address) LIKE ?)',
@@ -79,7 +92,8 @@ async function historyHasSender(email, mailbox, reg, shared, strict) {
  *
  * Unsubscribe path (default): a failed lookup answers true — keeping a promo
  * subscription is the safe side.
- * Spam-block path ({ strict: true }): history needs a booked expense, and a
+ * Spam-block path ({ strict: true }): history needs a booked expense from the
+ * same mailbox, and a
  * failed lookup THROWS, so settleDeferredBlock keeps the row pending and
  * retries instead of marking the block done.
  */
@@ -93,8 +107,15 @@ async function isVendorWeUse(email, { strict = false } = {}) {
     if (await registryHasSender(mailbox, reg, shared)) return true;
     return await historyHasSender(email, mailbox, reg, shared, strict);
   } catch (err) {
-    if (strict) throw err;
-    logger.warn(`[vendor-sender] lookup failed, keeping the sender: ${err.message}`);
+    // Never log or rethrow err.message: a knex error can carry the bound
+    // mailbox. Keep only the row id and the driver's error code.
+    const code = err && err.code ? String(err.code) : 'unknown';
+    if (strict) {
+      const safe = new Error(`vendor lookup failed (email ${email && email.id}, code ${code})`);
+      safe.code = code;
+      throw safe;
+    }
+    logger.warn(`[vendor-sender] lookup failed, keeping the sender (email ${email && email.id}, code ${code})`);
     return true;
   }
 }
