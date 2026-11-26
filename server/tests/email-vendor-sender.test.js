@@ -58,11 +58,18 @@ describe('isVendorWeUse', () => {
     }
   });
 
-  test('a vendor_email_domains row matches the exact domain or a subdomain of the registrable domain', async () => {
+  test('the vendor registry matches the exact mailbox, the domain and its parents, or a listed subdomain', async () => {
     const calls = mockTables({ vendorDomain: { id: 'v1' } });
-    expect(await isVendorWeUse({ id: 1, from_address: 'promo@news.supplier.example' })).toBe(true);
-    expect(calls.vendor_email_domains[0]).toEqual(['whereRaw', '(domain = ? OR domain LIKE ?)', ['supplier.example', '%.supplier.example']]);
+    expect(await isVendorWeUse({ id: 1, from_address: 'Promo <promo@news.supplier.example>' })).toBe(true);
+    expect(calls.vendor_email_domains).toContainEqual(['whereIn', 'domain', ['promo@news.supplier.example', 'news.supplier.example', 'supplier.example']]);
+    expect(calls.vendor_email_domains).toContainEqual(['orWhere', 'domain', 'like', '%.supplier.example']);
     expect(calls.emails).toHaveLength(0);
+  });
+
+  test('a per-company billing mailbox in the registry counts (siteoneus@billtrust.com shape)', async () => {
+    const calls = mockTables({ vendorDomain: { id: 'v2' } });
+    expect(await isVendorWeUse({ id: 1, from_address: 'billing-co@billing.example' })).toBe(true);
+    expect(calls.vendor_email_domains[1][2]).toContain('billing-co@billing.example');
   });
 
   test('an earlier vendor row in emails matches, and the email itself is left out', async () => {
@@ -75,11 +82,24 @@ describe('isVendorWeUse', () => {
     expect(calls.emails).toContainEqual(['whereNot', 'id', 'e9']);
   });
 
-  test('strict mode (spam block) counts only money evidence, not a vendor_communication label', async () => {
+  test('on a shared provider only the same mailbox counts, in the registry and in history', async () => {
+    const calls = mockTables({ priorEmail: { id: 'e0' } });
+    expect(await isVendorWeUse({ id: 'e9', from_address: 'Seller <seller@gmail.com>' })).toBe(true);
+    expect(calls.vendor_email_domains).toContainEqual(['whereIn', 'domain', ['seller@gmail.com']]);
+    expect(calls.vendor_email_domains.some((c) => c[0] === 'orWhere')).toBe(false);
+    expect(calls.emails[0]).toEqual(['whereRaw', '(lower(from_address) = ? OR lower(from_address) LIKE ?)', ['seller@gmail.com', '%<seller@gmail.com>']]);
+  });
+
+  test('strict mode (spam block) counts only a booked expense, never a label or a rejected invoice', async () => {
     const calls = mockTables({ priorEmail: { id: 'e0' } });
     expect(await isVendorWeUse({ id: 'e9', from_address: 'promo@news.supplier.example' }, { strict: true })).toBe(true);
-    expect(calls.emails).toContainEqual(['whereIn', 'classification', ['vendor_invoice']]);
-    expect(calls.emails).toContainEqual(['orWhere', 'auto_action', 'like', 'expense\\_%']);
+    expect(calls.emails).toContainEqual(['where', 'auto_action', 'like', 'expense\\_%']);
+    expect(calls.emails.some((c) => c[0] === 'whereIn' || c[0] === 'orWhere')).toBe(false);
+  });
+
+  test('strict mode rethrows a failed lookup so the deferred block retries', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(isVendorWeUse({ id: 1, from_address: 'deals@retailer.example.com' }, { strict: true })).rejects.toThrow('db down');
   });
 
   test('a sender with no vendor history is not a vendor', async () => {
