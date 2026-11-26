@@ -234,12 +234,13 @@ function groundedPromises(promises, staffLines) {
   for (const p of promises) {
     const quote = normalized(p);
     // A short quote ("I will.") counts only as a whole staff reply; a longer one may sit inside a line.
-    const line = quote && agentLines.find((l) => (quote.length >= 8 ? ` ${normalized(l)} `.includes(` ${quote} `) : normalized(l) === quote));
+    const exact = quote && agentLines.find((l) => normalized(l) === quote);
+    const line = exact || (quote.length >= 8 && agentLines.find((l) => ` ${normalized(l)} `.includes(` ${quote} `)));
     // A staff line too long to show whole is left out (a cut could hide the promise or its condition), and so is one
-    // that also holds an access code (gate, door, alarm) or a run of 5+ digits (an account number): the model may have
-    // quoted around it.
+    // that also holds an access code (gate, door, alarm) or a run of 3+ digits (a code in any language, an account
+    // number, a price): the model may have quoted around it.
     const shown = line ? cleanText(line, 10000) : null;
-    if (shown && (shown.length > MAX_PROMISE_CHARS || /\d(?:[\s.-]?\d){4,}/.test(shown)
+    if (shown && (shown.length > MAX_PROMISE_CHARS || /\d(?:[\s.-]?\d){2,}/.test(shown)
       || require('./context-aggregator').redactAccessCodes(shown) !== shown)) continue;
     if (shown && !kept.includes(shown)) kept.push(shown);
   }
