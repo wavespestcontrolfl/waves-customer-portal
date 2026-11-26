@@ -98,7 +98,7 @@ const COUNTED_VISITS_SQL = `
            ${familySql('a', 'service_name')} AS fam
     FROM scheduled_service_addons a
     JOIN plan_visits pv ON pv.id = a.scheduled_service_id
-    WHERE a.recurring_pattern IS NOT NULL
+    WHERE a.recurring_pattern IS NOT NULL AND a.recurring_pattern <> 'one_time'
   ),
   held AS (
     SELECT v.customer_id, v.fam

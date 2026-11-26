@@ -217,7 +217,10 @@ postgres('cross-sell rate (live Postgres)', () => {
       const plain = await customer('AddOnNoFamily');
       const v2 = await visit(plain, { ...PEST });
       await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v2, service_name: 'WaveGuard Membership', service_key_snapshot: 'waveguard_membership', created_at: '2026-02-01T12:00:00Z' });
-      expect(await counts()).toEqual({ recurringCustomers: 3, multiServiceCustomers: 1 });
+      const marked = await customer('AddOnMarkedOnce');
+      const v4 = await visit(marked, { ...PEST });
+      await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v4, service_name: 'Mosquito Event', service_key_snapshot: 'mosquito_seasonal', recurring_pattern: 'one_time', created_at: '2026-02-01T12:00:00Z' });
+      expect(await counts()).toEqual({ recurringCustomers: 4, multiServiceCustomers: 1 });
     });
 
     test('a visit cancelled after the day still counts for that day; one cancelled before it, or with no time, does not', async () => {
