@@ -200,6 +200,14 @@ describe('cut-off blog share resumes without posting twice', () => {
     expect(xSpy).toHaveBeenCalledTimes(1);
   });
 
+  test('a failed row with an in-flight mark wins over a newer dry-run row', async () => {
+    mockRows.push({ id: 'row-failed', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'failed', created_at: new Date(1),
+      platforms_posted: JSON.stringify([{ platform: 'facebook', inFlight: true }, { platform: 'twitter', success: false, error: 'x down' }]) });
+    mockRows.push({ id: 'row-dry', source_url: social.normalizeUrl(LINK), source_type: 'blog', status: 'dry_run', created_at: new Date(2), platforms_posted: '[]' });
+    await share();
+    expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
+  });
+
   test('a cut-off live row wins over a newer dry-run row', async () => {
     mockRows.push({ id: 'row-live', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'publishing', created_at: new Date(1),
       platforms_posted: JSON.stringify([{ platform: 'facebook', postId: 'fb-early', success: true }]) });

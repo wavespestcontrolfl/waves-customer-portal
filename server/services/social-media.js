@@ -177,11 +177,12 @@ async function findShareProgressRow(column, value, statuses) {
 async function openShareProgress({ title, description, normalizedLink, guid, source }) {
   try {
     // By URL, then by feed GUID (the RSS dedupe knows a post by either).
-    // A cut-off live row first (by URL, then GUID), before any reusable
-    // failed or dry-run row, so a newer dry run never hides a live attempt.
+    // A cut-off live row first (by URL, then GUID), then a failed row, then a
+    // dry-run row, so a newer dry run never hides a live attempt.
     const byGuid = !!guid;
     let earlier = null;
-    for (const statuses of [[SHARE_PROGRESS_STATUS], ['failed', 'dry_run']]) {
+    // Failed rows before dry runs too: a failed row can hold an in-flight mark.
+    for (const statuses of [[SHARE_PROGRESS_STATUS], ['failed'], ['dry_run']]) {
       earlier = (await findShareProgressRow('source_url', normalizedLink, statuses))
         || (byGuid ? await findShareProgressRow('source_guid', guid, statuses) : null);
       if (earlier) break;
