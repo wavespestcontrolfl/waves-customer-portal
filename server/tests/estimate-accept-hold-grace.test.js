@@ -169,6 +169,14 @@ describe('findLinkedUpcomingAppointment hold grace', () => {
 });
 
 describe('accept-path wiring (source pins)', () => {
+  test('a slotId that names a visit staff booked is refused before any lane (sign-before-pay included) reads it as the pick', () => {
+    const at = src.indexOf('if (reservationRow._beyond_grace) {');
+    expect(at).toBeGreaterThan(0);
+    const guard = src.slice(at, src.indexOf('// Parse estimate data + detect one-time-only', at));
+    expect(guard).toContain('if (reservationRow.customer_id != null) {');
+    expect(guard).toContain("code: 'SLOT_UNAVAILABLE'");
+  });
+
   test('the accept preflight reads the commit grace from the reservation service and threads it into the adoption lookup', () => {
     expect(src).toMatch(/const holdGraceMinutes = typeof slotReservation\.commitGraceMinutes === 'function'/);
     expect(src).toMatch(/adoptableStatuses: acceptAdoptableStatuses,\s*\n\s*holdGraceMinutes,\s*\n\s*\}\)/);

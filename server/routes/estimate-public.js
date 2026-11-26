@@ -10812,6 +10812,12 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       if (reservationRow._beyond_grace) {
         return res.status(409).json(HOLD_EXPIRED_409);
       }
+      // A row with a customer is a visit staff booked, not this estimate's hold.
+      // Refuse it here, before any lane (the sign-before-pay preference included)
+      // reads it as the customer's pick; a reload then offers the booked visit.
+      if (reservationRow.customer_id != null) {
+        return res.status(409).json({ code: 'SLOT_UNAVAILABLE', error: 'slot no longer available — re-pick a slot' });
+      }
     }
 
     // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)

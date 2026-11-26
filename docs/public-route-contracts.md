@@ -7328,8 +7328,9 @@ with the stale-page code `LAWN_LIMITS_STALE` (both deployed pages already answer
 it: the server-rendered page reloads itself), a message asking for a page reload,
 and, for a missing boolean, `reloadRequired: true`. A body with a `slotId` whose
 slot is a visit staff booked is not adopted: it answers 409 `SLOT_UNAVAILABLE`
-(timestamp still live) or `RESERVATION_EXPIRED` (lapsed or cleared), and the
-page re-reads and offers the booked visit. `commitReservation` (accept and
+(timestamp still live) or `RESERVATION_EXPIRED` (lapsed or cleared), before any
+lane (the termite sign-before-pay preference included) reads it as the customer's
+pick. The customer picks again; a page reload offers the booked visit. `commitReservation` (accept and
 one-tap) never graduates or replays a visit that already has a customer:
 another customer's visit reads as a missing hold, the same customer's visit
 answers 409 `SLOT_UNAVAILABLE`, and a row with no customer and no timestamp
