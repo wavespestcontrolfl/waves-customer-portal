@@ -863,7 +863,7 @@ describe('syncRestaurantProspects', () => {
     store = makeStore([pendingRow('id0', '9000'), pendingRow('id1', '9001'), pendingRow('id2', '9002')]);
     fetchText = fetchWith(visitsFile(['9000', '9001', '9002']), { 9000: PEST_PAGE, 9001: DOOR_PAGE, 9002: PEST_PAGE });
     const result = await sync({ fetchText, store });
-    expect(store.pendingInspections).toHaveBeenCalledWith({ cutoff: '2026-10-05', limit: 100, keys: ['9000', '9001', '9002'] });
+    expect(store.pendingInspections).toHaveBeenCalledWith({ cutoff: '2026-10-05', limit: 3, keys: ['9000', '9001', '9002'] });
     expect(sleep.mock.calls).toEqual([[1000], [1000]]);
     expect(store.saveReport.mock.calls.map(([read, report]) => [read.id, report.pestEvidence])).toEqual([['id0', true], ['id1', false], ['id2', true]]);
     // The store gets the pending row as it gave it, and the parser's answer as it is.
@@ -913,6 +913,16 @@ describe('syncRestaurantProspects', () => {
     expect(reportCalls().map(([url]) => new URL(url).searchParams.get('InspVisitID'))).toEqual(['9002']);
     expect(store.bumpAttempts).not.toHaveBeenCalled();
     expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 0, reportsSkipped: 2, pestFound: 1 });
+  });
+
+  test('a run requests at most 100 pages; a corrected row it skips takes none of them', async () => {
+    const ids = Array.from({ length: 102 }, (_, i) => String(9000 + i));
+    // The first two rows were corrected by the file (another license id): skipped, so 100 of the other 100 read.
+    store = makeStore(ids.map((id, i) => pendingRow(`r${i}`, id, i < 2 ? { license_id: '4999' } : {})));
+    fetchText = fetchWith(visitsFile(ids), Object.fromEntries(ids.map((id) => [id, DOOR_PAGE])));
+    const result = await sync({ fetchText, store });
+    expect(reportCalls()).toHaveLength(100);
+    expect(result).toMatchObject({ failures: 0, reportsRead: 100, reportsSkipped: 2 });
   });
 
   test('a failed read beside a page whose save was skipped is not a failed run: a page did read', async () => {
@@ -994,7 +1004,7 @@ describe('syncRestaurantProspects', () => {
       callback(inspRow({ visit: '9004' })), // a cited callback
     ]) }, {});
     expect((await sync({ fetchText, store })).failures).toBe(0);
-    expect(store.pendingInspections).toHaveBeenCalledWith({ cutoff: '2026-10-05', limit: 100, keys: ['9000', '9002'] });
+    expect(store.pendingInspections).toHaveBeenCalledWith({ cutoff: '2026-10-05', limit: 2, keys: ['9000', '9002'] });
   });
 
 

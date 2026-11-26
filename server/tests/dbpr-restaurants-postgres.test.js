@@ -343,12 +343,12 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
       const result = await svc.syncRestaurantProspects({ fetchText, sleep: async () => {}, now: new Date('2026-11-19T15:36:00Z') });
       expect(result.files).toMatchObject({ inspection: { kept: 2, upserted: 2 }, new_license: { failed: true }, owner_change: { failed: true } });
       expect(result).toMatchObject({ failures: 2, reportsRead: 1, reportsFailed: 1, reportsLeft: 0, pestFound: 1 });
-      const saved = await db('restaurant_prospects').whereIn('source_key', visits).orderBy('source_key')
+      const saved = await db('restaurant_prospects').where({ kind: 'inspection' }).whereIn('source_key', visits).orderBy('source_key')
         .select('pest_evidence', 'detail_attempts', db.raw("detail->'findings' AS findings"));
       expect(saved.map((row) => [row.pest_evidence, row.detail_attempts])).toEqual([[true, 0], [null, 1]]);
       expect(saved[0].findings.map((finding) => finding.code)).toEqual(['35A-02-8', '35A-01-8']);
     } finally {
-      await db('restaurant_prospects').whereIn('source_key', visits).del();
+      await db('restaurant_prospects').where({ kind: 'inspection' }).whereIn('source_key', visits).del();
       await db('system_settings').where({ key: settingKey }).del();
       if (before) await db('system_settings').insert(before);
     }

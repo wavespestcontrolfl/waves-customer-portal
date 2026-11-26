@@ -961,14 +961,18 @@ async function readOneReport(row, deps) {
 // answer the store does not save (the row changed after it was picked) is left for a later run, at no attempt. A
 // database failure is not a failed read: it stops the reads (the caller counts it) and costs the row no attempt.
 async function readReports(deps, result, keys, visits = new Map()) {
-  const pending = await deps.store.pendingInspections({ cutoff: reportCutoff(deps.now), limit: REPORT_MAX_PER_RUN, keys });
-  for (let i = 0; i < pending.length; i += 1) {
-    if (i > 0) await deps.sleep(REPORT_GAP_MS);
+  // Every pending row of the run's keys (one per key at most, so the batch is bounded by the file): a row the loop
+  // skips (corrected) never takes a request, and at most REPORT_MAX_PER_RUN pages are requested.
+  const pending = await deps.store.pendingInspections({ cutoff: reportCutoff(deps.now), limit: keys.length, keys });
+  let requests = 0;
+  for (let i = 0; i < pending.length && requests < REPORT_MAX_PER_RUN; i += 1) {
     const current = visits.get(pending[i].source_key);
     if (current && (current.license_id !== pending[i].license_id || current.visitDate !== pending[i].visitDate)) {
       result.reportsSkipped += 1;
       continue;
     }
+    if (requests > 0) await deps.sleep(REPORT_GAP_MS);
+    requests += 1;
     const report = await readOneReport(pending[i], deps);
     if (!report) {
       result.reportsFailed += 1;
