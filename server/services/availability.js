@@ -159,6 +159,9 @@ class AvailabilityEngine {
       }
     }
 
+    // GATE_TECH_SHIFT_HOURS (D4): this engine books a visit with no technician on it, so an hour is offered only
+    // when some technician's shift holds it (technician-eligibility.js loadAnyShiftHolds). Gate off: every hour, no read.
+    const shiftHolds = await require('./technician-eligibility').loadAnyShiftHolds(db);
     for (let i = config.advance_days_min; i <= config.advance_days_max; i++) {
       // ET calendar math — toISOString() reads the UTC date (already tomorrow
       // between 8 PM and midnight ET) and getDay() reads the UTC weekday, so
@@ -319,6 +322,7 @@ class AvailabilityEngine {
         if (violatesSelfServeNotice({ date: dateStr, startTime: this.minToTime24(g.start) }, today)) return false;
         // Last customer start 16:00 (GATE_CUSTOMER_LAST_START_16). No-op while unset.
         if (pastCustomerLastStart(g.start)) return false;
+        if (!shiftHolds(dateStr, g.start, g.end)) return false;
         if (travelMirror && violatesTravelGap(
           {
             startMin: g.start, endMin: g.end, ...travelMirror.pin,
@@ -655,6 +659,11 @@ class AvailabilityEngine {
     // option the assistant quoted before the gate flipped on must not
     // commit. No-op while unset.
     if (pastCustomerLastStart(startMin)) {
+      throw bookingError('That time is no longer offered — please pick another slot', 'SLOT_TAKEN');
+    }
+    // GATE_TECH_SHIFT_HOURS (D4): the commit-side mirror of getAvailableSlots' accept(). No technician's shift holds
+    // the hour (the hours changed after the offer): refuse. Gate off: nothing is read.
+    if (!(await require('./technician-eligibility').loadAnyShiftHolds(db))(dateStr, startMin, endMin)) {
       throw bookingError('That time is no longer offered — please pick another slot', 'SLOT_TAKEN');
     }
 

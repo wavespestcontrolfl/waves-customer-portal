@@ -434,3 +434,46 @@ describe('confirmBooking — candidate expected-minutes credit (Codex #4664 r3 P
     }));
   });
 });
+
+// GATE_TECH_SHIFT_HOURS (D4): the commit-side mirror of the offer's any-shift rule.
+describe('confirmBooking: an hour no technician\'s shift holds is refused (GATE_TECH_SHIFT_HOURS)', () => {
+  const eligibility = require('../services/technician-eligibility');
+  let load;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    findConflictingVisits.mockResolvedValue([]);
+  });
+  afterEach(() => { if (load) load.mockRestore(); load = null; });
+
+  test('refused SLOT_TAKEN before any insert, asked with the visit\'s own day, start and end', async () => {
+    const holds = jest.fn(() => false);
+    load = jest.spyOn(eligibility, 'loadAnyShiftHolds').mockResolvedValue(holds);
+    const { scheduledQueries } = wireConfirm({ zones: [] });
+    await expect(Availability.confirmBooking(null, 'cust-1', DATE, '14:00', null))
+      .rejects.toMatchObject({ code: 'SLOT_TAKEN', statusCode: 409, message: expect.stringMatching(/no longer offered/i) });
+    expect(load).toHaveBeenCalledWith(db);
+    expect(holds).toHaveBeenCalledWith(DATE, 14 * 60, 15 * 60);
+    expect(scheduledQueries.every((q) => !q.insert.mock.calls.length)).toBe(true);
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('an hour a shift holds commits', async () => {
+    load = jest.spyOn(eligibility, 'loadAnyShiftHolds').mockResolvedValue(() => true);
+    wireConfirm({ zones: [] });
+    expect((await Availability.confirmBooking(null, 'cust-1', DATE, '14:00', null)).confirmationCode).toBeTruthy();
+  });
+
+  test('a failed read of the hours books nothing', async () => {
+    load = jest.spyOn(eligibility, 'loadAnyShiftHolds').mockRejectedValue(new Error('synthetic read failure'));
+    const { scheduledQueries } = wireConfirm({ zones: [] });
+    await expect(Availability.confirmBooking(null, 'cust-1', DATE, '14:00', null)).rejects.toThrow('synthetic read failure');
+    expect(scheduledQueries.every((q) => !q.insert.mock.calls.length)).toBe(true);
+  });
+
+  test('gate off: the real reader reads no technician and the hour commits', async () => {
+    delete process.env.GATE_TECH_SHIFT_HOURS;
+    wireConfirm({ zones: [] });
+    // wireConfirm's db throws on any table but customers, service_zones and booking_config.
+    expect((await Availability.confirmBooking(null, 'cust-1', DATE, '14:00', null)).confirmationCode).toBeTruthy();
+  });
+});
