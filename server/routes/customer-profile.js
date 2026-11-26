@@ -4,13 +4,15 @@
  *
  *   PUT  /api/customer/profile                { firstName?, lastName?, email? }
  *     → 200 { profile, changed: [names saved], emailPending?: { email, expiresInMinutes } }
+ *     → 409 email_unavailable_for_code (the address is on the global suppression list; nothing stored)
  *   POST /api/customer/profile/confirm-email  { code }
  *     → 200 { profile, changed: ['email'] } | 400 code_wrong / code_expired | 429 code_attempts | 409 email_unavailable
  *
  * Names save in one step. An EMAIL change takes two: the typed address is not written anywhere (not customers.email,
  * not the fan-out) until the customer types back the 6-digit code mailed to THAT address (15 minutes, 5 tries;
  * services/customer-email-change-code.js, table customer_email_change_requests). An unproven address must never
- * receive invoices, signing links or queued sends. The confirm step then runs the locked commit below.
+ * receive invoices, signing links or queued sends. Once the code proves the mailbox, the confirm step runs the SAME
+ * fan-out the Customer 360 / admin email edit runs, in the same lock order.
  *
  * Out of scope on purpose: the phone number (it is the login identity).
  * Refused: a contact session (the auth layer answers 403 because these routes are not in CONTACT_SESSION_ROUTES;
@@ -21,13 +23,12 @@
  *
  * Email: customers.email is not unique (migration 20260417000010), but an address held by a live customer on another
  * account is refused 409 at confirm time (after the mailbox is proven, so the refusal cannot be used to probe
- * addresses). After a save the customer gets the "account updated" notice: an email change goes to the OLD address
- * (generic, no new address or name) and to the NEW address; a name-only change goes to the current address.
+ * addresses). A code is good only while customers.email still equals the address on file when it was issued.
+ * Every "account updated" notice from this route is one generic message with no values (see NOTICE_SUMMARY).
  *
  * Commit order mirrors the Customer 360 edit: customers row FOR UPDATE (active, and the session's account, judged on
  * the locked row), then lockAssignedCustomerEmails, then the update, then the email and name fan-outs with the locked
- * before/after rows, then the audit row, all in one transaction. Notices go to the addresses of the committed edit
- * (contactOverride), never to whatever the row says after a later edit.
+ * before/after rows, then the audit row, all in one transaction.
  */
 const express = require('express');
 const Joi = require('joi');
@@ -63,6 +64,9 @@ function gateOn(req, res, next) {
   if (!customerProfileEditLive()) return res.status(404).json({ enabled: false });
   return next();
 }
+
+// The code refusal never says why an address cannot be mailed.
+const CODE_SUPPRESSED = "We can't send email to that address. Please call or text the office.";
 
 // The refusal text never says whether the address belongs to someone else.
 const EMAIL_UNAVAILABLE = 'That email address cannot be used here. Please call or text the office to change it.';
@@ -100,33 +104,10 @@ function diffProfile(current, input) {
   return changes;
 }
 
-function changedItems(current, changes) {
-  const items = [];
-  if (changes.email !== undefined) {
-    items.push({ key: 'email', label: 'Email address', oldValue: clean(current.email), newValue: changes.email });
-  }
-  if (changes.first_name !== undefined || changes.last_name !== undefined) {
-    const nameOf = (first, last) => [clean(first), clean(last)].filter(Boolean).join(' ');
-    items.push({
-      key: 'name',
-      label: 'Name',
-      oldValue: nameOf(current.first_name, current.last_name),
-      newValue: nameOf(
-        changes.first_name !== undefined ? changes.first_name : current.first_name,
-        changes.last_name !== undefined ? changes.last_name : current.last_name,
-      ),
-    });
-  }
-  return items;
-}
-
-// The same fan-out the Customer 360 edit runs (routes/admin-customers.js PUT /:id), inside the edit's transaction
-// with the LOCKED before/after rows: open leads, estimates and queued sends follow the new address; open records
-// follow the new name. The address is typed by the customer and not proven, so: the email scope is the call path's
-// narrow one ('customer_email_missing', it never releases a held first-touch send or settles a staff read-back
-// card), and the newsletter gets one rule (propagateSelfServiceEmailChange): the old address's subscriber row is
-// unlinked from the customer and nothing moves to the new address (the customer can re-subscribe it).
-const SELF_SERVICE_EMAIL_SCOPE = ['customer_email_missing'];
+// The same fan-out the Customer 360 / admin email edit runs (routes/admin-customers.js PUT /:id), with its default
+// options, inside the edit's transaction with the LOCKED before/after rows: open leads, estimates, queued sends and
+// the newsletter subscription follow the new address, and open records follow the new name. The address is already
+// PROVEN by the code mailed to it (confirm step), which is what lets this be the full admin fan-out.
 
 // The customer row under FOR UPDATE, or null. Active is judged on the LOCKED row, so a cancellation that committed
 // after authenticate() cannot be edited past; ownership too: the profile may have moved to another account between
@@ -142,7 +123,7 @@ async function commitProfileEdit(trx, { customerId, input, req, locked = null, e
   const before = locked || await lockOwnedCustomer(trx, { customerId, req });
   if (!before) return null;
   const changes = diffProfile(before, input);
-  if (!Object.keys(changes).length) return { before, after: before, changes, items: [], emailSync: null };
+  if (!Object.keys(changes).length) return { before, after: before, changes, emailSync: null };
   if (enforceQuota) await assertUnderQuota(trx, customerId);
   await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, changes);
   if (changes.email !== undefined) {
@@ -154,8 +135,8 @@ async function commitProfileEdit(trx, { customerId, input, req, locked = null, e
   const after = { ...before, ...changes };
   let emailSync = null;
   if (changes.email !== undefined) {
-    emailSync = await require('../services/customer-email-fanout').propagateSelfServiceEmailChange(
-      { before, after, source: 'Customer app profile edit', reviewReasonCodes: SELF_SERVICE_EMAIL_SCOPE }, trx,
+    emailSync = await require('../services/customer-email-fanout').propagateCustomerEmailChange(
+      { before, after, source: 'Customer app profile edit' }, trx,
     );
   }
   if (changes.first_name !== undefined || changes.last_name !== undefined) {
@@ -174,7 +155,7 @@ async function commitProfileEdit(trx, { customerId, input, req, locked = null, e
     critical: true,
     trx,
   });
-  return { before, after, changes, items: changedItems(before, changes), emailSync };
+  return { before, after, changes, emailSync };
 }
 
 // Deferred work the fan-out could not do inside the transaction (a DOI confirmation to the corrected address, a
@@ -190,51 +171,43 @@ function runPostCommitFanout(emailSync, customerId) {
   }
 }
 
-// What each mailbox is told. The old mailbox of an email change gets a generic alert with NO new address and no
-// new name (a typo fix must not mail the replacement to a stranger); the new mailbox's notice omits the old
-// address; a name-only change goes to the same address as before, so it can show old and new.
-function noticeItems(kind, items) {
-  if (kind === 'old') return [{ key: 'email', label: 'Email address' }];
-  if (kind === 'generic') return [{ key: 'profile', label: 'Account profile' }];
-  if (kind === 'new') return items.map(({ oldValue, old_value, ...rest }) => rest);
-  return items;
-}
-const OLD_ADDRESS_SUMMARY = 'The email address on your Waves account was changed in the customer app. If this was not you, call or text us right away.';
-const OLD_ADDRESS_GREETING = 'there';
-// A name saved while an email change still waits for its code: the current address may be the one being replaced
-// (a mistyped or abandoned mailbox), so it learns that something changed and nothing else: no name, no values.
-const PENDING_EMAIL_SUMMARY = 'Your account profile on your Waves account was changed in the customer app. If this was not you, call or text us right away.';
-const CHANGE_SUMMARY = 'Your name or email address on your Waves account was changed in the customer app.';
+// Every "account updated" notice from this route is ONE generic message with no values: no name (old or new), no
+// address, ever. The current address may be the one being replaced, the old address may belong to someone else, and
+// a customer-typed value has no business in a mailbox that has not proven it is theirs. Recipients are the addresses
+// of the COMMITTED edit, passed as a contactOverride so a later edit cannot redirect a notice: the current address
+// for any change, plus the old address when the email moved. The greeting is neutral and the contact name empty.
+const NOTICE_SUMMARY = 'Your Waves account details were changed in the app. If this was not you, call or text us right away.';
+const NOTICE_GREETING = 'there';
+const NOTICE_ITEMS = [{ key: 'profile', label: 'Account profile' }];
 
-// Fire-and-forget after the save: a notice that fails to send never undoes the change. Every recipient is the
-// address of the COMMITTED edit, passed as a contactOverride, so a later edit cannot redirect a notice to a
-// third mailbox.
-function sendChangeNotices({ customerId, before, after, changes, items, emailPending = false }) {
+function noticeRecipients(before, after, changes) {
+  const addresses = [clean(after.email)];
+  if (changes.email !== undefined) addresses.push(clean(before.email));
+  const seen = new Set();
+  return addresses.filter((email) => {
+    const key = email.toLowerCase();
+    if (!email || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// Fire-and-forget after the save: a notice that fails to send never undoes the change.
+function sendChangeNotices({ customerId, before, after, changes }) {
   const stamp = Date.now();
-  const emailMoved = changes.email !== undefined;
-  const name = clean(after.first_name);
-  const recipients = [];
-  const oldEmail = clean(before.email);
-  if (emailMoved && oldEmail) recipients.push({ key: 'old', kind: 'old', email: oldEmail, summary: OLD_ADDRESS_SUMMARY, greeting: OLD_ADDRESS_GREETING });
-  if (clean(after.email) && emailPending && !emailMoved) {
-    recipients.push({ key: 'current', kind: 'generic', email: clean(after.email), summary: PENDING_EMAIL_SUMMARY, greeting: OLD_ADDRESS_GREETING });
-  } else if (clean(after.email)) {
-    recipients.push({ key: 'current', kind: emailMoved ? 'new' : 'same', email: clean(after.email), summary: CHANGE_SUMMARY, greeting: null });
-  }
-  for (const { key, kind, email, summary, greeting } of recipients) {
+  noticeRecipients(before, after, changes).forEach((email, index) => {
     void Promise.resolve(AccountMembershipEmail.sendAccountUpdated({
       customerId,
       actorCustomerId: customerId,
       alwaysNotify: true,
-      changedItems: noticeItems(kind, items),
-      changeSummary: summary,
+      changedItems: NOTICE_ITEMS,
+      changeSummary: NOTICE_SUMMARY,
       accountSection: 'Account profile',
-      // The old address is greeted with no name at all: neither the old nor the new one belongs in that mailbox.
-      contactOverride: { email, name: greeting ? '' : name },
-      ...(greeting ? { greetingName: greeting } : {}),
-      idempotencyKey: `account.profile_edit:${customerId}:${stamp}:${key}`,
+      contactOverride: { email, name: '' },
+      greetingName: NOTICE_GREETING,
+      idempotencyKey: `account.profile_edit:${customerId}:${stamp}:${index}`,
     })).catch((err) => logger.warn(`[customer-profile] account.updated email failed for ${customerId}: ${err.message}`));
-  }
+  });
 }
 
 function holderOnly(req, res) {
@@ -258,6 +231,9 @@ const FIELD_NAMES = { first_name: 'firstName', last_name: 'lastName', email: 'em
 // customer's own (a re-cased address is not a change).
 async function requestEmailCode(trx, { customerId, locked, typedEmail, req }) {
   if (!typedEmail || typedEmail.toLowerCase() === clean(locked.email).toLowerCase()) return null;
+  // An address on the global suppression list (bounce, spam complaint, do-not-email, or a global unsubscribe) is
+  // never mailed, so no code is stored for it, and the answer does not say why.
+  if (await EmailCode.addressSuppressed(trx, typedEmail)) return { suppressed: true };
   await assertUnderQuota(trx, customerId);
   const newEmail = typedEmail.toLowerCase();
   const issued = await EmailCode.issueRequest(trx, { customerId, newEmail, fromEmail: locked.email });
@@ -304,7 +280,8 @@ router.put('/', gateOn, authenticateAllowInactive, async (req, res, next) => {
       outcome = await db.transaction(async (trx) => {
         const edit = await commitProfileEdit(trx, { customerId, input: nameInput, req });
         if (!edit) return null;
-        return { ...edit, pending: await requestEmailCode(trx, { customerId, locked: edit.after, typedEmail, req }) };
+        const requested = await requestEmailCode(trx, { customerId, locked: edit.after, typedEmail, req });
+        return { ...edit, pending: requested?.suppressed ? null : requested, suppressed: requested?.suppressed === true };
       });
     } catch (err) {
       if (err.profileStatus) return sendProfileError(res, err);
@@ -313,9 +290,12 @@ router.put('/', gateOn, authenticateAllowInactive, async (req, res, next) => {
     // No active row under the lock: the account was cancelled (or removed) after authenticate() read it.
     if (!outcome) return res.status(403).json({ error: 'This account is not active.' });
 
-    const { before, after, changes, items, emailSync, pending } = outcome;
+    const { before, after, changes, emailSync, pending, suppressed } = outcome;
     runPostCommitFanout(emailSync, customerId);
-    if (items.length) sendChangeNotices({ customerId, before, after, changes, items, emailPending: Boolean(pending) });
+    if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
+    if (suppressed) {
+      return res.status(409).json({ error: CODE_SUPPRESSED, code: 'email_unavailable_for_code', profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
+    }
     if (pending && !(await deliverEmailCode(pending, customerId))) {
       return res.status(502).json({ error: 'We could not send the code. Please try again in a moment.', code: 'code_send_failed', profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
     }
@@ -374,9 +354,9 @@ router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res
       return res.status(status).json({ error: message, code, ...(outcome.refused.attemptsLeft !== undefined ? { attemptsLeft: outcome.refused.attemptsLeft } : {}) });
     }
 
-    const { before, after, changes, items, emailSync } = outcome.edit;
+    const { before, after, changes, emailSync } = outcome.edit;
     runPostCommitFanout(emailSync, customerId);
-    if (items.length) sendChangeNotices({ customerId, before, after, changes, items });
+    if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
     return res.json({ profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
   } catch (err) {
     if (err.profileStatus) return sendProfileError(res, err);

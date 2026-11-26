@@ -6,6 +6,12 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'customer-email-change-code-test-secret';
 
 const mockSendOne = jest.fn(async () => ({ messageId: 'm1' }));
+jest.mock('../models/db', () => jest.fn());
+const mockSuppressionRows = jest.fn(async () => []);
+jest.mock('../services/email-template-library', () => ({
+  activeSuppressionRows: (...a) => mockSuppressionRows(...a),
+  GLOBAL_SUPPRESSION_TYPES: new Set(['bounce', 'spam_complaint', 'do_not_email']),
+}));
 jest.mock('../services/sendgrid-mail', () => ({ sendOne: (...a) => mockSendOne(...a) }));
 
 // A tiny in-memory stand-in for the one table, with the few builder calls the service makes.
@@ -34,7 +40,7 @@ const Code = require('../services/customer-email-change-code');
 
 const CUSTOMER = 'c1111111-1111-4111-8111-111111111111';
 let trx;
-beforeEach(() => { trx = makeTrx(); mockSendOne.mockClear(); jest.useRealTimers(); });
+beforeEach(() => { trx = makeTrx(); mockSendOne.mockClear(); mockSuppressionRows.mockReset().mockResolvedValue([]); jest.useRealTimers(); });
 afterAll(() => jest.useRealTimers());
 
 const ON_FILE = 'On.File@Example.test';
@@ -159,6 +165,34 @@ describe('checkCode', () => {
     expect(trx.rows[0].sent_at).toBe('NOW');
     await Code.dropRequest(trx, id);
     expect(trx.rows).toHaveLength(0);
+  });
+});
+
+describe('addressSuppressed (the sender\'s own global test)', () => {
+  test.each([
+    ['bounce', { suppression_type: 'bounce', group_key: 'service_operational' }],
+    ['spam complaint', { suppression_type: 'spam_complaint', group_key: 'marketing_newsletter' }],
+    ['do not email', { suppression_type: 'do_not_email', group_key: null }],
+    ['a global unsubscribe (no group)', { suppression_type: 'unsubscribe', group_key: null }],
+  ])('%s blocks the code', async (_l, row) => {
+    mockSuppressionRows.mockResolvedValue([row]);
+    expect(await Code.addressSuppressed(trx, 'x@example.test')).toBe(true);
+    expect(mockSuppressionRows).toHaveBeenCalledWith('x@example.test', trx);
+  });
+
+  test('a list-only row (marketing newsletter unsubscribe) and no rows do not block a one-time code', async () => {
+    mockSuppressionRows.mockResolvedValue([{ suppression_type: 'unsubscribe', group_key: 'marketing_newsletter' }]);
+    expect(await Code.addressSuppressed(trx, 'x@example.test')).toBe(false);
+    mockSuppressionRows.mockResolvedValue([]);
+    expect(await Code.addressSuppressed(trx, 'x@example.test')).toBe(false);
+  });
+
+  test('the provider handoff re-checks: a suppression added since the request was stored stops the send', async () => {
+    await Code.sendCode({ to: 'x@example.test', code: '123456' });
+    const { providerBoundaryCheck } = mockSendOne.mock.calls[0][0];
+    await expect(providerBoundaryCheck()).resolves.toEqual({ ok: true });
+    mockSuppressionRows.mockResolvedValue([{ suppression_type: 'do_not_email', group_key: null }]);
+    await expect(providerBoundaryCheck()).rejects.toMatchObject({ code: 'address_suppressed' });
   });
 });
 

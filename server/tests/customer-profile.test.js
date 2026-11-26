@@ -46,7 +46,7 @@ const mockLockEmails = jest.fn(async () => { mockOrder.push('lock'); return []; 
 jest.mock('../utils/customer-comms-lock', () => ({ lockAssignedCustomerEmails: (...a) => mockLockEmails(...a) }));
 const mockEmailFanout = jest.fn(async () => { mockOrder.push('emailFanout'); return { pendingConfirmation: null, heldNewsletterResume: null }; });
 const mockResend = jest.fn(async () => {});
-jest.mock('../services/customer-email-fanout', () => ({ propagateSelfServiceEmailChange: (...a) => mockEmailFanout(...a), resendPendingConfirmation: (...a) => mockResend(...a) }));
+jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: (...a) => mockEmailFanout(...a), resendPendingConfirmation: (...a) => mockResend(...a) }));
 const mockNameFanout = jest.fn(async () => { mockOrder.push('nameFanout'); });
 jest.mock('../services/customer-contact-fanout', () => ({ propagateCustomerNameChange: (...a) => mockNameFanout(...a) }));
 const mockConflict = jest.fn(async () => null);
@@ -57,6 +57,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockAudit = jest.fn(async () => 1);
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockAudit(...a) }));
 const mockCode = {
+  addressSuppressed: jest.fn(async () => false),
   issueRequest: jest.fn(),
   markSent: jest.fn(async () => {}),
   dropRequest: jest.fn(async () => {}),
@@ -65,6 +66,7 @@ const mockCode = {
   sendCode: jest.fn(async () => ({ messageId: 'm1' })),
 };
 jest.mock('../services/customer-email-change-code', () => ({
+  addressSuppressed: (...a) => mockCode.addressSuppressed(...a),
   issueRequest: (...a) => mockCode.issueRequest(...a),
   markSent: (...a) => mockCode.markSent(...a),
   dropRequest: (...a) => mockCode.dropRequest(...a),
@@ -124,6 +126,7 @@ beforeEach(() => {
   mockCode.markSent.mockResolvedValue();
   mockCode.dropRequest.mockResolvedValue();
   mockCode.consume.mockResolvedValue();
+  mockCode.addressSuppressed.mockResolvedValue(false);
 });
 afterAll(() => {
   if (savedGate === undefined) delete process.env.GATE_CUSTOMER_PROFILE_EDIT; else process.env.GATE_CUSTOMER_PROFILE_EDIT = savedGate;
@@ -148,6 +151,23 @@ async function confirm(code) {
 const flush = () => new Promise((r) => setImmediate(r));
 
 const NEW_EMAIL = 'new.address@example.test';
+const NOTICE_SUMMARY = 'Your Waves account details were changed in the app. If this was not you, call or text us right away.';
+// Every notice from this route: ONE generic message, neutral greeting, empty contact name, one valueless item.
+const expectGenericNotice = (notice, email) => {
+  expect(notice).toMatchObject({
+    alwaysNotify: true,
+    changeSummary: NOTICE_SUMMARY,
+    changedItems: [{ key: 'profile', label: 'Account profile' }],
+    greetingName: 'there',
+    contactOverride: { email, name: '' },
+    accountSection: 'Account profile',
+  });
+  // No names, no addresses anywhere in it except the recipient.
+  const rest = { ...notice };
+  delete rest.contactOverride;
+  delete rest.idempotencyKey;
+  expect(JSON.stringify(rest)).not.toMatch(/Sam|Pat|Sample|@/);
+};
 const okCheck = (email = NEW_EMAIL) => ({ outcome: 'ok', request: { id: 'req-1', new_email: email } });
 const savedAudits = () => mockAudit.mock.calls.map((c) => c[0].action);
 
@@ -240,16 +260,7 @@ describe('PUT /api/customer/profile', () => {
       expect(savedAudits().sort()).toEqual(['customer.profile_edit', 'customer.profile_email_code_sent']);
       await flush();
       expect(mockSend).toHaveBeenCalledTimes(1);
-      const notice = mockSend.mock.calls[0][0];
-      expect(notice).toMatchObject({
-        greetingName: 'there',
-        contactOverride: { email: OLD_EMAIL, name: '' },
-        changedItems: [{ key: 'profile', label: 'Account profile' }],
-        alwaysNotify: true,
-      });
-      // Recipient, greeting and every detail together: neither the old nor the new name, nor the new address, reach the old mailbox.
-      expect(JSON.stringify(notice)).not.toMatch(/Sam|Pat|Sample|new\.address/);
-      expect(notice.changeSummary).toMatch(/call or text us/);
+      expectGenericNotice(mockSend.mock.calls[0][0], OLD_EMAIL);
       expect(mockCode.sendCode).toHaveBeenCalledWith({ to: NEW_EMAIL, code: '123456' });
     });
 
@@ -270,6 +281,38 @@ describe('PUT /api/customer/profile', () => {
       mockRow.email = null;
       const res = await put({ email: NEW_EMAIL });
       expect(res.body.emailPending.email).toBe(NEW_EMAIL);
+    });
+
+    test('a suppressed address: 409 email_unavailable_for_code, nothing stored, no code, no quota row; a name saved beside it still saved', async () => {
+      mockCode.addressSuppressed.mockResolvedValue(true);
+      const res = await put({ firstName: 'Sam', email: NEW_EMAIL });
+      expect(res).toMatchObject({
+        status: 409,
+        body: { code: 'email_unavailable_for_code', error: "We can't send email to that address. Please call or text the office.", changed: ['firstName'], profile: { firstName: 'Sam' } },
+      });
+      expect(mockCode.addressSuppressed.mock.calls[0][1]).toBe(NEW_EMAIL);
+      expect(mockCode.issueRequest).not.toHaveBeenCalled();
+      expect(mockCode.sendCode).not.toHaveBeenCalled();
+      expect(savedAudits()).toEqual(['customer.profile_edit']);
+      expect(res.body.error).not.toMatch(/suppress|bounce|unsubscrib|complaint/i);
+    });
+
+    test('a suppressed address alone: 409, no audit, no write, no notice', async () => {
+      mockCode.addressSuppressed.mockResolvedValue(true);
+      const res = await put({ email: NEW_EMAIL });
+      expect(res).toMatchObject({ status: 409, body: { code: 'email_unavailable_for_code', changed: [] } });
+      expect(mockAudit).not.toHaveBeenCalled();
+      expect(mockUpdates).toHaveLength(0);
+      await flush();
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    test('the suppression check runs only for an address that would change, and before the quota is spent', async () => {
+      await put({ email: OLD_EMAIL.toUpperCase() });
+      expect(mockCode.addressSuppressed).not.toHaveBeenCalled();
+      mockSavedInHour = 10;
+      mockCode.addressSuppressed.mockResolvedValue(true);
+      expect((await put({ email: NEW_EMAIL })).status).toBe(409);
     });
 
     test('quota: code emails count with saved changes; 10 in the last hour refuses with 429 and sends nothing', async () => {
@@ -300,15 +343,14 @@ describe('PUT /api/customer/profile', () => {
     });
   });
 
-  test('a name-only change: one notice to the current address, names old and new', async () => {
+  test('a name-only change: one generic notice to the current address (no names)', async () => {
     const res = await put({ firstName: 'Sam', lastName: 'Sample' });
     expect(res).toMatchObject({ status: 200, body: { changed: ['firstName'] } });
     expect(mockUpdates).toEqual([{ first_name: 'Sam', updated_at: 'NOW' }]);
     expect(mockCode.issueRequest).not.toHaveBeenCalled();
     await flush();
     expect(mockSend).toHaveBeenCalledTimes(1);
-    expect(mockSend.mock.calls[0][0].contactOverride).toEqual({ email: OLD_EMAIL, name: 'Sam' });
-    expect(mockSend.mock.calls[0][0].changedItems).toEqual([{ key: 'name', label: 'Name', oldValue: 'Pat Sample', newValue: 'Sam Sample' }]);
+    expectGenericNotice(mockSend.mock.calls[0][0], OLD_EMAIL);
   });
 
   test('a name-only edit for a customer with no email on file saves and sends nothing', async () => {
@@ -397,17 +439,19 @@ describe('POST /api/customer/profile/confirm-email', () => {
     const [args] = mockEmailFanout.mock.calls[0];
     expect(args.before).toMatchObject({ email: OLD_EMAIL });
     expect(args.after).toMatchObject({ email: NEW_EMAIL });
-    expect(args.reviewReasonCodes).toEqual(['customer_email_missing']);
+    // The SAME fan-out the admin editor runs, with its default options (no narrowed review scope, newsletter included).
+    expect(args.reviewReasonCodes).toBeUndefined();
+    expect(args.source).toBe('Customer app profile edit');
     expect(savedAudits()).toEqual(['customer.profile_edit']);
     expect(mockAudit.mock.calls[0][0].metadata).toEqual({ fields: ['email'], source: 'customer_portal' });
     expect(mockCode.consume).toHaveBeenCalledWith(expect.anything(), 'req-1');
     await flush();
     expect(mockSend).toHaveBeenCalledTimes(2);
-    const [toOld, toNew] = mockSend.mock.calls.map((c) => c[0]);
-    expect(toOld).toMatchObject({ greetingName: 'there', contactOverride: { email: OLD_EMAIL, name: '' }, changedItems: [{ key: 'email', label: 'Email address' }] });
+    const [toNew, toOld] = mockSend.mock.calls.map((c) => c[0]);
+    expectGenericNotice(toOld, OLD_EMAIL);
+    expectGenericNotice(toNew, NEW_EMAIL);
     expect(JSON.stringify(toOld)).not.toContain(NEW_EMAIL);
-    expect(toNew.contactOverride).toEqual({ email: NEW_EMAIL, name: 'Pat' });
-    expect(toNew.changedItems).toEqual([{ key: 'email', label: 'Email address', newValue: NEW_EMAIL }]);
+    expect(JSON.stringify(toNew)).not.toContain(OLD_EMAIL);
     expect(toOld.idempotencyKey).not.toBe(toNew.idempotencyKey);
   });
 

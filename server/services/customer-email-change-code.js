@@ -16,15 +16,25 @@
 // Storage: customer_email_change_requests (migration 20261126190000). Only an HMAC of the code is stored.
 
 const crypto = require('crypto');
+const db = require('../models/db');
 const config = require('../config');
 const sendgrid = require('./sendgrid-mail');
 const { wrapEmail } = require('./email-template');
+const EmailTemplateLibrary = require('./email-template-library');
 
 const CODE_TTL_MINUTES = 15;
 const MAX_ATTEMPTS = 5;
 // The send runs after the transaction commits, but a stuck provider must not hold the request open.
 const SEND_TIMEOUT_MS = 10_000;
 const TABLE = 'customer_email_change_requests';
+
+// The sender's own global test (email-template-library.js activeSuppressionRows + GLOBAL_SUPPRESSION_TYPES): an
+// active row that blocks every stream, either by type (bounce, spam complaint, do-not-email) or because it has no
+// group (a global unsubscribe). A list-only row (marketing newsletter) does not stop a one-time code.
+async function addressSuppressed(database, email) {
+  const rows = await EmailTemplateLibrary.activeSuppressionRows(email, database);
+  return rows.some((row) => !row.group_key || EmailTemplateLibrary.GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase()));
+}
 
 function generateCode() {
   return String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
@@ -115,9 +125,14 @@ async function sendCode({ to, code }) {
     disableTracking: true,
     suppressErrorLog: true,
     timeoutMs: SEND_TIMEOUT_MS,
+    // Re-checked at the provider handoff, so a suppression added since the request was stored still stops the send.
+    providerBoundaryCheck: async () => {
+      if (await addressSuppressed(db, to)) throw Object.assign(new Error('address suppressed'), { code: 'address_suppressed' });
+      return { ok: true };
+    },
   });
 }
 
 module.exports = {
-  CODE_TTL_MINUTES, MAX_ATTEMPTS, issueRequest, markSent, dropRequest, checkCode, consume, sendCode, buildCodeEmail, hashCode, generateCode,
+  CODE_TTL_MINUTES, MAX_ATTEMPTS, addressSuppressed, issueRequest, markSent, dropRequest, checkCode, consume, sendCode, buildCodeEmail, hashCode, generateCode,
 };
