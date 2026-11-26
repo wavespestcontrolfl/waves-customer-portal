@@ -142,7 +142,8 @@ async function createShortCode(targetUrl, opts = {}) {
       throw err;
     }
   }
-  logger.error(`[short-url] Exhausted retries on code collision: ${lastErr && lastErr.message}`);
+  // Code only: a knex error message carries the bound values, and target_url can hold a bearer token.
+  logger.error(`[short-url] Exhausted retries on code collision (code=${(lastErr && lastErr.code) || 'none'})`);
   throw new Error('short-url: code-generation retries exhausted');
 }
 
@@ -199,7 +200,8 @@ async function shortenOrPassthrough(longUrl, opts = {}) {
     const { shortUrl } = await createShortCode(longUrl, opts);
     return shortUrl;
   } catch (err) {
-    logger.error(`[short-url] shorten failed, using long URL: ${err.message}`);
+    // Code only: a knex message carries the bound target URL, which can hold a bearer token.
+    logger.error(`[short-url] shorten failed, using long URL (code=${(err && err.code) || 'none'})`);
     return longUrl;
   }
 }
@@ -220,7 +222,7 @@ async function createTrackedShortLink(longUrl, opts = {}) {
     const { code, shortUrl } = await createShortCode(longUrl, opts);
     return { code, shortUrl };
   } catch (err) {
-    logger.error(`[short-url] tracked shorten failed, using long URL: ${err.message}`);
+    logger.error(`[short-url] tracked shorten failed, using long URL (code=${(err && err.code) || 'none'})`);
     return { code: null, shortUrl: longUrl };
   }
 }

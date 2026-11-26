@@ -39,7 +39,10 @@ const s3 = new S3Client({
 
 const DEFAULT_TTL_SECONDS = 15 * 60;
 
-async function resolveTechPhotoUrl(s3Key, fallbackUrl, ttlSeconds = DEFAULT_TTL_SECONDS) {
+// A failed presign logs the error code only: never the S3 key (it names the technician's object) or the raw message.
+// `strict` (a public link that must answer exactly like an unknown token on any failure): the failure is THROWN as a
+// fresh code-only error instead of answering the fallback. Every other caller keeps the fallback.
+async function resolveTechPhotoUrl(s3Key, fallbackUrl, ttlSeconds = DEFAULT_TTL_SECONDS, { strict = false } = {}) {
   if (!s3Key) return fallbackUrl || null;
   if (!config.s3?.bucket) return fallbackUrl || null;
   try {
@@ -48,7 +51,9 @@ async function resolveTechPhotoUrl(s3Key, fallbackUrl, ttlSeconds = DEFAULT_TTL_
       Key: s3Key,
     }), { expiresIn: ttlSeconds });
   } catch (err) {
-    logger.warn(`[tech-photo] presign failed for ${s3Key}: ${err.message}`);
+    const code = (err && (err.code || err.name)) || 'none';
+    logger.warn(`[tech-photo] presign failed (code=${code})`);
+    if (strict) throw Object.assign(new Error('tech photo presign failed'), { code });
     return fallbackUrl || null;
   }
 }

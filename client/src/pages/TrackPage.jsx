@@ -8,6 +8,13 @@ import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import AppLinkCards from '../components/crossSell/AppLinkCards';
+
+// A visit text recipient's own tracker token (`vr_` + 48 hex; the holder's is 64 hex): not a socket credential. Mirrors
+// server/utils/recipient-track-token.js.
+const RECIPIENT_TRACK_TOKEN_RE = /^vr_[a-f0-9]{48}$/;
+function isRecipientTrackToken(token) {
+  return RECIPIENT_TRACK_TOKEN_RE.test(token || '');
+}
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -736,7 +743,21 @@ function OnPropertyCard({ data }) {
   );
 }
 
+// A visit text recipient's link (scope 'visit_recipient', GATE_CALL_GIVEN_VISIT_TEXTS): the visit is over and that is
+// all it says. The server sends no summary, report, invoice, review or offer data to this link.
+function RecipientCompleteCard({ data }) {
+  return (
+    <Card accent={COLORS.green}>
+      <TechBlock tech={data.tech} size="lg" />
+      <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: '20px 0 0' }}>
+        {data.service?.type ? `The ${data.service.type.toLowerCase()} visit is complete.` : 'The visit is complete.'}
+      </h1>
+    </Card>
+  );
+}
+
 function CompleteCard({ data }) {
+  if (data.scope === 'visit_recipient') return <RecipientCompleteCard data={data} />;
   const { summary = {} } = data;
   const photos = Array.isArray(summary.photos) ? summary.photos.slice(0, 6) : [];
   return (
@@ -1046,8 +1067,12 @@ export default function TrackPage() {
   // restart, etc.), the user still gets the initial fetch's data and
   // a refresh restores live updates. We don't surface socket errors
   // to the UI.
+  //
+  // Never for a visit text recipient's link: the socket joins the HOLDER's customer room and a recipient's token is not a socket
+  // credential. Its token has its own shape (`vr_` + 48 hex), so the page decides from the URL alone, at mount, before anything is
+  // fetched; the server's socket auth refuses that shape too. Recipients refresh by poll.
   useEffect(() => {
-    if (!token || notFound) return undefined;
+    if (!token || notFound || isRecipientTrackToken(token)) return undefined;
     const origin = socketOrigin();
     const socket = origin
       ? io(origin, { auth: { trackToken: token }, transports: ['websocket', 'polling'], reconnection: true })

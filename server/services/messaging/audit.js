@@ -92,7 +92,7 @@ async function persistAudit(record) {
       // Migration not yet applied. The wrapper proceeds without an audit row.
       return { id: null };
     }
-    logger.warn(`[messaging:audit] persist failed: ${err.message}`);
+    logger.warn(`[messaging:audit] persist failed: (code=${err?.code || 'none'})`);
     return { id: null };
   }
 }

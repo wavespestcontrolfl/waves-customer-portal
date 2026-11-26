@@ -50,7 +50,10 @@ jest.mock('../services/disclaimed-number-holds', () => ({
   disclaimedNumberHeldForVisit: jest.fn(async () => false),
   disclaimedNumberHeld: jest.fn(async () => false),
 }));
-jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
+jest.mock('../services/short-url', () => ({
+  shortenOrPassthrough: jest.fn(async (url) => url),
+  createShortCode: jest.fn(async () => ({ code: 'abc', shortUrl: 'https://go.test/l/abc' })),
+}));
 // The recipient module's database reads (who is on this visit, the once-per-slot claim) run on real
 // PostgreSQL in call-visit-recipient-postgres.test.js; here the senders' use of it is what is pinned.
 jest.mock('../services/call-visit-recipient', () => {
@@ -139,7 +142,7 @@ describe('eligibleEntries: one rule, judged on the V2 entry alone', () => {
   });
 });
 
-describe('informationalBody: no link of any kind, no management or tracker token', () => {
+describe('informationalBody: no management link; only the en-route text carries the tracker link', () => {
   const facts = { label: 'Pest Control', day: 'Tuesday', date: 'December 1', window: 'between 9:00 AM and 11:00 AM' };
 
   test('the sender is "Waves", never "Waves Pest Control"', () => {
@@ -167,11 +170,18 @@ describe('informationalBody: no link of any kind, no management or tracker token
     expect(body.length).toBeLessThan(300);
   });
 
-  test('en route names the technician and the ETA and carries no tracker link', () => {
-    const body = VisitRecipient.informationalBody('en_route', 'Bob', { techName: 'Pat', etaMinutes: 15, trackUrl: 'https://x.test/track/abc' });
-    expect(body).toContain('Pat is on the way, about 15 minutes away.');
-    expect(body).not.toMatch(/https?:|track/i);
+  test('en route names the technician and the ETA and carries the tracker link (owner 2026-11-24)', () => {
+    const body = VisitRecipient.informationalBody('en_route', 'Bob', { techName: 'Pat', etaMinutes: 15, trackUrl: 'https://x.test/t/abc' });
+    expect(body).toBe('Hi Bob, Waves here. Pat is on the way, about 15 minutes away. Track live: https://x.test/t/abc Reply STOP to opt out.');
+    expect(body).not.toMatch(/reschedule|confirm\b/i);
     expect(VisitRecipient.informationalBody('en_route', null, {})).toContain('Hi there,');
+  });
+
+  test('en route drops a missing or non-https tracker link', () => {
+    for (const trackUrl of [undefined, null, '', 'http://x.test/t/abc', 'javascript:alert(1)', 'https://x.test/a b', 42]) {
+      const body = VisitRecipient.informationalBody('en_route', 'Bob', { techName: 'Pat', trackUrl });
+      expect(body).toBe('Hi Bob, Waves here. Pat is on the way. Reply STOP to opt out.');
+    }
   });
 });
 
@@ -400,15 +410,55 @@ describe('sendTechEnRoute hands the en-route text to the visit-only recipients',
     expect(sentTo()).toEqual([HOLDER]);
   });
 
-  test('gate ON: the recipient sender gets the visit, the technician and the ETA, never the tracker link; the holder results are untouched', async () => {
+  test('gate ON: the recipient sender gets the visit, the technician, the ETA and a builder for the recipient\'s OWN tracker link; the holder results are untouched', async () => {
     process.env[GATE] = 'true';
     const result = await enRoute();
     expect(VisitRecipient.notifyVisitRecipients).toHaveBeenCalledWith({
-      scheduledServiceId: 'ss-1', kind: 'en_route', excludePhones: [HOLDER], context: { techName: expect.any(String), etaMinutes: 15 },
+      scheduledServiceId: 'ss-1', kind: 'en_route', excludePhones: [HOLDER],
+      context: { techName: expect.any(String), etaMinutes: 15, trackUrlFor: expect.any(Function) },
     });
-    expect(JSON.stringify(VisitRecipient.notifyVisitRecipients.mock.calls[0][0])).not.toContain('tok-1');
     expect(sentTo()).toEqual([HOLDER]);
     expect(result.results).toHaveLength(1);
+  });
+
+  test('gate ON: the recipient\'s link is built from the recipient token alone; the holder\'s tracker token never reaches the recipient sender', async () => {
+    process.env[GATE] = 'true';
+    await enRoute();
+    const [{ context }] = VisitRecipient.notifyVisitRecipients.mock.calls[0];
+    // No trackUrl of any kind in the context: only a builder that takes the recipient's token.
+    expect(Object.keys(context).sort()).toEqual(['etaMinutes', 'techName', 'trackUrlFor']);
+    const { createShortCode, shortenOrPassthrough } = require('../services/short-url');
+    const url = await context.trackUrlFor('r'.repeat(64));
+    const [target, opts] = createShortCode.mock.calls.at(-1);
+    expect(target).toMatch(/^https:\/\/\S+\/track\/r{64}$/);
+    expect(target).not.toContain('tok-1');
+    // The short code carries no customer: the timeline counts a click on a customer's code as that customer's own.
+    expect(opts).toMatchObject({ kind: 'tracking', entityType: 'visit_text_recipients' });
+    expect(opts.customerId).toBeUndefined();
+    expect(opts.entityId).toBeUndefined();
+    expect(url).toBe('https://go.test/l/abc');
+    // Never the pass-through shortener: it logs the error message and falls back to the long URL.
+    expect(shortenOrPassthrough.mock.calls.filter(([u]) => String(u).includes('r'.repeat(64)))).toEqual([]);
+    expect(JSON.stringify(VisitRecipient.notifyVisitRecipients.mock.calls)).not.toContain('tok-1');
+  });
+
+  test('gate ON: a shortener failure sends no link and logs no token or URL, only a code', async () => {
+    process.env[GATE] = 'true';
+    const logger = require('../services/logger');
+    const { createShortCode } = require('../services/short-url');
+    const recipientToken = 'q'.repeat(64);
+    // A knex error message carries its bound values: the target URL, token included.
+    createShortCode.mockRejectedValueOnce(Object.assign(
+      new Error(`insert into "short_codes" ("target_url") values ('https://portal.test/track/${recipientToken}') - boom`),
+      { code: '08006' },
+    ));
+    await enRoute();
+    const [{ context }] = VisitRecipient.notifyVisitRecipients.mock.calls[0];
+    expect(await context.trackUrlFor(recipientToken)).toBeNull();
+    const logged = JSON.stringify([logger.warn.mock.calls, logger.error.mock.calls, logger.info.mock.calls]);
+    expect(logged).not.toContain(recipientToken);
+    expect(logged).not.toContain('/track/');
+    expect(logged).toContain('code=08006');
   });
 
   test('gate ON: the holder result is the same when the holder send is blocked', async () => {

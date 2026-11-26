@@ -7841,7 +7841,45 @@ not approved for customer copy, the payload instead uses neutral
 `pending_rebook` office recovery with no reason or picker action. That unplaced
 shape returns no stops count, route progress, approximate vehicle or scheduled
 polling, and the stops-ahead POST does not compute or persist a count for it.
-The track payload never returns or mints a reschedule token. A
+The track payload never returns or mints a reschedule token. A second
+token kind resolves on this route while GATE_CALL_GIVEN_VISIT_TEXTS is on: a
+visit text recipient's own `visit_text_recipients.track_token` (`vr_` + 48 lowercase hex, a shape of its own that never matches the holder's 64 hex, so the page and the socket auth refuse it as a socket credential by format; while GATE_CALL_GIVEN_VISIT_TEXTS is off the pre-parser answers it with the generic 404 on all three routes before any limiter or database read; minted
+when their en-route text wins its send claim). LIFETIME RULE (one function, `recipientLinkEligible` in
+`server/services/track-token-expiry.js`, used by the module that resolves the
+token and by the GET and both POST routes): the token opens only while the
+visit has a live, finite `track_token_expires_at` (a null expiry answers 404;
+the holder's legacy null expiry still opens for the holder token only) AND one of: (1)
+EN ROUTE: status and track state both `en_route` and `en_route_at` within the
+last 3 hours; an en-route visit with no `en_route_at` answers 404 (the link is
+closed, it does not open with the vehicle hidden); (2) ON SITE: status `on_site`
+and track state `on_property`, within 4 hours of `arrived_at` (or of
+`en_route_at` when `arrived_at` is null; neither on record answers 404); (3)
+COMPLETE: status `completed` with `completed_at` no more than 2 hours ago (and
+not in the future beyond 5 minutes). A mixed status and track-state pair is a
+stale row and answers 404. Scheduled, cancelled, skipped, rebooking and any
+other state answer 404, as does a parked customer-pick row (`customer_pick_by`
+set and no `window_start`; a completed visit is never parked). An ineligible
+token and any error after the token lookup (the visit read, a permission read,
+the final recheck, the route's own visit read) all answer exactly as an unknown
+token does on every route: the same 404, body and headers, with a code-only
+log. Only an error on the token lookup itself may surface as an error. It returns a reduced whitelist
+payload with `scope: 'visit_recipient'` for that one visit and only in the
+`en_route`, `on_property` and `complete` states: state, technician first name
+and photo, window, lat/lng and town (no street, zip or names), service name,
+live vehicle and ETA, arrival time, `meta.pollIntervalSeconds` (30 while en
+route or on site, else 0). It never returns `summary`, the report, invoice, prep
+or review tokens, photos, the offer and referral cards, `customer`,
+`cancellation`, `visitChange`, stops count or route progress, and the cards and
+summary reads do not run. The recipient path is strictly read-only (no
+geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token) and
+the plain permission reads pass (`recipientPermission`: gate, person on the
+visit, no decline, no callback-number hold on the visit or the person's number,
+no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read; the visit is read again after the permission reads and must still be eligible). The live vehicle shows only while the visit is en route, `tech_status.current_job_id` exactly this visit's own id, decided in the same SELECT that returns the fix (no visit-group lookup: a grouped visit whose focus moved to a sibling shows no truck) and the cached fix was reported and received strictly after the visit's `en_route_at`; otherwise `vehicle` is null. The `tech_status` read is STRICT (`resolveFreshTechPosition` with `strict: true`, used only for this scope): a FAILED read answers 404 exactly like an unknown token (code-only log), while a successful read with no usable fix answers 200 with `vehicle: null`. The technician photo is presigned STRICT for this scope (`resolveTechPhotoUrl(..., { strict: true })`): a signing failure throws a code-only error and answers 404 like an unknown token, never a fallback photo (every other caller keeps its fallback; the helper logs the error code only, never the S3 key or the raw message). The GET makes no visit-change read: an eligible row is en route, on site or just completed, which carries no visit change. Its stops-ahead POST answers nulls and its view POST
+records nothing. The page never opens the live socket for this scope. Every
+handler on this router runs inside `safeRoute`: a thrown or `next(err)` error
+leaves as a fresh Error with only the driver `code`, never the knex message (it
+carries the bound token).
+A
 cancelled or missed visit returns only that the office is the next actor. An
 operational `rescheduled` row adds `visitChange.kind = pending_rebook`; its
 public state is `scheduled` with a null window, no vehicle, no stops count and
@@ -7875,7 +7913,7 @@ also stamped by the `trackPublicPreparser` mount
 the global `/api/` limiter and the shared body parsers, so a limiter 429 on the
 bearer URL carries them too. The same guard answers `/view`'s malformed-token
 404 before any body parsing and drops the request Content-Type so the ignored
-body is never parsed (a malformed / oversized body cannot become a 400/413). Neither companion may grow beyond its single
+body is never parsed (a malformed / oversized body cannot become a 400/413). Its `/view` suffix match is case-insensitive, as Express's routing is (`/:token/VIEW` and `/:token/View` reach the same route and get the same guard). Neither companion may grow beyond its single
 bounded write).
 `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
 + `POST /:token/confirm`; the destination the 24h reminder and booking

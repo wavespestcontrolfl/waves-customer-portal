@@ -653,7 +653,7 @@
     },
     {
       "endpoint": "/admin/dispatch/board",
-      "reviewed": "Handler: today's clocked-in technicians (status, last location, job counts) and today's jobs (id, customer first name and last initial, address, window, status). The technician photo is a presigned S3 URL (tech-photo.js), which the row omits (avatar_url) so the signed_url signals are accepted. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed 2026-10-25 (GATE_TECH_WORK_DAYS): with the gate on, the handler adds one read of technicians (id, work_days) and a boolean off_today per technician; no new column leaves the row, signals and unresolved callees unchanged. Hash re-signed 2026-10-25 after rebasing onto main 33e3daa025 (a followed module changed upstream); same reads, signals and unresolved callees. Hash re-signed 2026-11-20 (GATE_TECH_SHIFT_HOURS, D4 part 1): technician-eligibility.js now also imports etDateString, etParts and validCalendarDate from datetime-et for the new shift reader (loadTechShifts), which this handler never calls; the fingerprint moved only in that import line, with the same reads, signals and unresolved callees.",
+      "reviewed": "Handler: today's clocked-in technicians (status, last location, job counts) and today's jobs (id, customer first name and last initial, address, window, status). The technician photo is a presigned S3 URL (tech-photo.js), which the row omits (avatar_url) so the signed_url signals are accepted. Handler and every followed function read end to end. Keep mode (Codex #6366 round 3): the row lists the response keys it keeps and every other key is dropped, so a new column or an operator-entered text field never reaches the model; the older free-text declarations are retired on this row. Re-reviewed 2026-10-25 (GATE_TECH_WORK_DAYS): with the gate on, the handler adds one read of technicians (id, work_days) and a boolean off_today per technician; no new column leaves the row, signals and unresolved callees unchanged. Hash re-signed 2026-10-25 after rebasing onto main 33e3daa025 (a followed module changed upstream); same reads, signals and unresolved callees. Hash re-signed 2026-11-20 (GATE_TECH_SHIFT_HOURS, D4 part 1): technician-eligibility.js now also imports etDateString, etParts and validCalendarDate from datetime-et for the new shift reader (loadTechShifts), which this handler never calls; the fingerprint moved only in that import line, with the same reads, signals and unresolved callees. Re-read 2026-11-25 (visit text recipient tracker link, #8509): tech-photo.js resolveTechPhotoUrl gained an opt-in `strict` argument (default off; this handler passes none) and its failure log is code-only; nothing this handler reads, returns or writes changed.",
       "scope": "broad",
       "omit": [
         "techs.avatar_url"
@@ -706,7 +706,7 @@
         "services/tech-photo.js#getSignedUrl",
         "services/tech-photo.js#new GetObjectCommand"
       ],
-      "hash": "9913f9db1a67d0a14b3c5141b17c6cf6"
+      "hash": "3f3f5d8785e17d0a4b8d1f9cdf011ba7"
     },
     {
       "endpoint": "/admin/dispatch/jobs/:id",

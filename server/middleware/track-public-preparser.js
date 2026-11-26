@@ -11,17 +11,43 @@
  *    parser never reads the body: a malformed or oversized body can never turn
  *    the view beacon's 404/204 into a 400/413.
  */
-const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
-const VIEW_PATH_RE = /^\/([^/]+)\/view\/?$/;
+// A holder's tracker token (64 hex) or a visit text recipient's own (`vr_` + 48 hex): the same shapes track-public accepts.
+const { isRecipientTrackToken } = require('../utils/recipient-track-token');
+const TRACK_TOKEN_RE = /^(?:[a-f0-9]{64}|vr_[a-f0-9]{48})$/;
+// Express routes case-insensitively (`/:token/VIEW` reaches the view route), so the suffix match is case-insensitive too.
+const VIEW_PATH_RE = /^\/([^/]+)\/view\/?$/i;
+const FIRST_SEGMENT_RE = /^\/([^/]+)/;
+
+function recipientLinksLive() {
+  const gates = require('../config/feature-gates');
+  return typeof gates.callGivenVisitTextsLive === 'function' && gates.callGivenVisitTextsLive() === true;
+}
+
+// Express decodes the :token param once, so a percent-encoded token (`%76r_...`) reaches the route as the plain one. Decide on the
+// SAME decoded value, once. null = a malformed encoding.
+function decodeSegment(segment) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
 
 function trackPublicPreparser(req, res, next) {
   res.set('Cache-Control', 'private, no-store');
   res.set('X-Robots-Tag', 'noindex, nofollow');
   res.set('Referrer-Policy', 'no-referrer');
+  // A visit text recipient's token (`vr_` + 48 hex, GATE_CALL_GIVEN_VISIT_TEXTS) names nothing while that gate is off: the generic
+  // 404 on all three routes (GET, stops-ahead, view), decided here by the token's shape, before any rate limiter, body parser or
+  // database read. The gate is read per request, so unsetting it closes every recipient link at once.
+  const first = FIRST_SEGMENT_RE.exec(req.path || '');
+  const token = first ? decodeSegment(first[1]) : undefined;
+  if (token === null) return res.status(404).json({ error: 'Not found' }); // a malformed percent-encoding is never a token
+  if (token !== undefined && isRecipientTrackToken(token) && !recipientLinksLive()) return res.status(404).json({ error: 'Not found' });
   if (req.method === 'POST') {
     const m = VIEW_PATH_RE.exec(req.path || '');
     if (m) {
-      if (!TRACK_TOKEN_RE.test(m[1])) return res.status(404).json({ error: 'Not found' });
+      if (!TRACK_TOKEN_RE.test(decodeSegment(m[1]) || '')) return res.status(404).json({ error: 'Not found' });
       delete req.headers['content-type'];
     }
   }

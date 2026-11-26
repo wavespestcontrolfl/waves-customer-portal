@@ -10,6 +10,9 @@ const {
 
 const BOUNCIE_LOCATION_FALLBACK_TIMEOUT_MS = 1500;
 
+// A driver error code for a log line, never its message (a knex message carries the bound values).
+const codeOf = (err) => (err && err.code) || 'none';
+
 async function withTimeout(promise, timeoutMs, fallbackValue = null) {
   let timeoutId;
   const timeout = new Promise((resolve) => {
@@ -26,19 +29,31 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
 // is accepted only if it was reported AND received by the server STRICTLY AFTER the mapping's last change
 // (technicians.bouncie_imei_changed_at; NULL = never remapped = no cutoff). A caller-passed
 // `cachedNotBefore` is honored only as an EXTRA floor (it can tighten, never loosen).
-async function readMappingAndCache(techId, dbh = db) {
-  return dbh('technicians as t')
-    .leftJoin('tech_status as ts', 'ts.tech_id', 't.id')
+async function readMappingAndCache(techId, dbh = db, requireCurrentJobIds = null) {
+  // `requireCurrentJobIds` (a visit text recipient's link): the tech_status row joins ONLY while its current_job_id is one of these
+  // visits, so the job condition and the fix come out of the same statement (the JS check in cachedPositionFrom stays as a second
+  // guard). Without it the join is the plain one.
+  const joined = requireCurrentJobIds
+    ? dbh('technicians as t').leftJoin('tech_status as ts', function joinCurrentJob() {
+      this.on('ts.tech_id', 't.id').andOn(dbh.raw('ts.current_job_id::text = ANY(?::text[])', [requireCurrentJobIds.map(String)]));
+    })
+    : dbh('technicians as t').leftJoin('tech_status as ts', 'ts.tech_id', 't.id');
+  return joined
     .where('t.id', techId)
-    .first('t.bouncie_imei', 't.bouncie_imei_changed_at', 'ts.lat', 'ts.lng', 'ts.location_updated_at', 'ts.location_received_at');
+    .first('t.bouncie_imei', 't.bouncie_imei_changed_at', 'ts.lat', 'ts.lng', 'ts.location_updated_at', 'ts.location_received_at', 'ts.current_job_id');
 }
 
-function cachedPositionFrom(row, extraFloor = null) {
-  const lat = finiteNumber(row?.lat);
-  const lng = finiteNumber(row?.lng);
-  const lastReportedAt = row?.location_updated_at;
+// `requiredJobIds` (a visit text recipient's link): the cached fix counts only while the technician's ACTIVE job is one of these
+// visits. A technician who has moved on to another stop is at another customer's home, whatever this visit's state still says.
+function cachedPositionFrom(row = {}, extraFloor, requiredJobIds, requiredAfter) {
+  if (requiredJobIds && !requiredJobIds.map(String).includes(String(row.current_job_id))) return null;
+  const lat = finiteNumber(row.lat);
+  const lng = finiteNumber(row.lng);
+  const lastReportedAt = row.location_updated_at;
   if (lat == null || lng == null || !isFreshTimestamp(lastReportedAt)) return null;
+  // Parsed once. A missing receipt reads as the epoch (or NaN), which is never after a real cutoff: it proves nothing -> untrusted.
   const fixMs = new Date(lastReportedAt).getTime();
+  const receivedMs = new Date(row.location_received_at).getTime();
   const mapped = techMappingCutoff(row.bouncie_imei_changed_at);
   if (mapped != null) {
     const mappedMs = new Date(mapped).getTime();
@@ -48,10 +63,16 @@ function cachedPositionFrom(row, extraFloor = null) {
     // coordinates (tech_status.location_received_at — stamped NOW() only by writers that change
     // lat/lng; tech_status.updated_at is NOT used because status-only writes restamp it) proves the
     // point was written after the remap. A missing receipt cannot prove it -> untrusted.
-    const receivedMs = row.location_received_at ? new Date(row.location_received_at).getTime() : NaN;
     if (!(fixMs > mappedMs) || !(receivedMs > mappedMs)) return null;
   }
   if (extraFloor != null && !(fixMs >= new Date(extraFloor).getTime())) return null;
+  // `requiredAfter` (a recipient's link: this visit's en_route_at): the active job can already be this visit while the cached fix
+  // is still the previous stop's (the technician's last ping before the switch). Both the fix time and the server's receipt time
+  // must be STRICTLY after it; a missing receipt cannot prove it. An unparseable en_route_at is NaN: every comparison is false.
+  if (requiredAfter != null) {
+    const afterMs = new Date(requiredAfter).getTime();
+    if (!(fixMs > afterMs) || !(receivedMs > afterMs)) return null;
+  }
   return {
     lat,
     lng,
@@ -72,6 +93,8 @@ async function resolveBouncieFallback({
   logPrefix,
   dbh = db,
   cachedNotBefore = null,
+  requireCurrentJobIds,
+  requireFixAfter,
 }) {
   try {
     const svc = bouncieService || require('./bouncie');
@@ -106,7 +129,7 @@ async function resolveBouncieFallback({
         requireBouncieImei: imei,
       }), timeoutMs, UNVERIFIED);
     } catch (err) {
-      logger.warn(`[${logPrefix}] tech_status fallback write failed: ${err.message}`);
+      logger.warn(`[${logPrefix}] tech_status fallback write failed (code=${codeOf(err)})`);
       return null;
     }
     if (written === UNVERIFIED) {
@@ -124,7 +147,7 @@ async function resolveBouncieFallback({
     // remap-cutoff acceptance as any cached fix) — never the older fetched coordinates.
     const committedMs = new Date(written.location_updated_at).getTime();
     if (Number.isFinite(committedMs) && committedMs > new Date(lastReportedAt).getTime()) {
-      return cachedPositionFrom(await readMappingAndCache(techId, dbh), cachedNotBefore);
+      return cachedPositionFrom(await readMappingAndCache(techId, dbh, requireCurrentJobIds), cachedNotBefore, requireCurrentJobIds, requireFixAfter);
     }
 
     return {
@@ -138,7 +161,7 @@ async function resolveBouncieFallback({
       source: 'bouncie_api',
     };
   } catch (err) {
-    logger.warn(`[${logPrefix}] Bouncie location fallback failed: ${err.message}`);
+    logger.warn(`[${logPrefix}] Bouncie location fallback failed (code=${codeOf(err)})`);
     return null;
   }
 }
@@ -152,25 +175,33 @@ async function resolveFreshTechPosition({
   cachedNotBefore = null,
   // Optional caller connection (a provider handoff's held transaction, Codex #5334 P1); default = the root pool.
   dbh = db,
+  // Only the cached fix of a technician whose active job (tech_status.current_job_id) is one of these visits.
+  requireCurrentJobIds,
+  // Only a cached fix reported AND received strictly after this instant (this visit's en_route_at).
+  requireFixAfter,
+  // A recipient's link must tell a FAILED tech_status read from "no usable fix": strict throws (a fresh error carrying only the
+  // code) where the default answers null for both.
+  strict,
 } = {}) {
   if (!techId) return null;
 
   let row;
   try {
-    row = await readMappingAndCache(techId, dbh);
+    row = await readMappingAndCache(techId, dbh, requireCurrentJobIds);
   } catch (err) {
-    logger.warn(`[${logPrefix}] tracker mapping / tech_status lookup failed: ${err.message}`);
+    logger.warn(`[${logPrefix}] tracker mapping / tech_status lookup failed (code=${codeOf(err)})`);
+    if (strict) throw Object.assign(new Error('tech_status read failed'), { code: err && err.code });
     return null; // cannot prove which vehicle this is -> no position
   }
   if (!row) return null;
 
-  const cached = cachedPositionFrom(row, cachedNotBefore);
+  const cached = cachedPositionFrom(row, cachedNotBefore, requireCurrentJobIds, requireFixAfter);
   if (cached) return cached;
 
   if (!allowBouncieFallback) return null;
   const imei = String(row.bouncie_imei || '').trim();
   if (!imei) return null;
-  return resolveBouncieFallback({ techId, imei, bouncieService, timeoutMs, logPrefix, dbh, cachedNotBefore });
+  return resolveBouncieFallback({ techId, imei, bouncieService, timeoutMs, logPrefix, dbh, cachedNotBefore, requireCurrentJobIds, requireFixAfter });
 }
 
 module.exports = {

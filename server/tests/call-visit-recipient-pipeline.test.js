@@ -24,12 +24,19 @@ const BOB = '+19415550002';
 describe('recordForCall (the booking step)', () => {
   const db = require('../models/db');
   const inserts = [];
-  const chain = () => {
+  // the visit's own customer and the account holder's number (the visit is the call customer's)
+  let holder = { customer_id: 'cust-1', phone: null };
+  const chain = (table) => {
     const q = {};
-    ['where', 'whereNull', 'whereRaw', 'join', 'onConflict', 'ignore'].forEach((m) => { q[m] = jest.fn(() => q); });
-    q.first = jest.fn(async () => null);
+    ['where', 'whereNull', 'whereRaw', 'join', 'onConflict', 'merge'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.first = jest.fn(async (...cols) => {
+      if (cols.includes('s.customer_id')) return holder;
+      if (table === 'scheduled_services' && cols.includes('customer_id')) return { customer_id: holder.customer_id }; // the in-transaction re-read
+      return null;
+    });
     q.insert = jest.fn((row) => { inserts.push(row); return q; });
     q.returning = jest.fn(async () => [{ id: 'vtr-1' }]);
+    q.del = jest.fn(async () => 1);
     return q;
   };
   const bob = { first_name: 'Bob', last_name: 'Roe', phone_e164: BOB, role: 'spouse_partner', wants_appointment_texts: true };
@@ -49,7 +56,12 @@ describe('recordForCall (the booking step)', () => {
 
   beforeEach(() => {
     inserts.length = 0;
-    db.mockImplementation(() => chain());
+    holder = { customer_id: 'cust-1', phone: null };
+    db.raw = jest.fn((sql) => ({ sql }));
+    db.fn = { now: jest.fn(() => 'now()') };
+    db.mockImplementation((table) => chain(table));
+    // recordForVisit writes inside one transaction (an advisory lock, a re-read of the visit's customer, delete-and-insert)
+    db.transaction = jest.fn(async (fn) => fn(Object.assign((table) => chain(table), { raw: jest.fn(async () => ({})) })));
   });
 
   test('gate off: nothing is written', async () => {
@@ -62,9 +74,16 @@ describe('recordForCall (the booking step)', () => {
     await VisitRecipient.recordForCall(callArgs());
     expect(inserts).toHaveLength(1);
     expect(inserts[0]).toMatchObject({
-      scheduled_service_id: 'ss-1', phone_key: '9415550002', phone_e164: BOB, call_log_id: 'call-1',
+      scheduled_service_id: 'ss-1', customer_id: 'cust-1', phone_key: '9415550002', phone_e164: BOB, call_log_id: 'call-1',
       source: 'call_caller_provided', consent_version: 'owner-ruling-2026-11-24-visit-only',
     });
+  });
+
+  test('gate on: a visit that belongs to another customer than the call\'s records nothing', async () => {
+    process.env[GATE] = 'true';
+    holder = { customer_id: 'cust-other', phone: null };
+    await VisitRecipient.recordForCall(callArgs());
+    expect(inserts).toEqual([]);
   });
 
   test('gate on: a blocked call (do-not-contact, TCPA gate, disclaimed caller number) records nothing', async () => {
