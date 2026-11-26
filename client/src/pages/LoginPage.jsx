@@ -119,7 +119,7 @@ function ResendNotice() {
   return (
     <div className="portal-login-note" role="status">
       <Icon name="info" size={16} strokeWidth={2} style={{ marginTop: 1 }} />
-      <span>If this number is on a Waves account, a new code is on its way.</span>
+      <span>Resend requested. If a new code arrives, enter the newest one.</span>
     </div>
   );
 }

@@ -136,7 +136,7 @@ describe('customer login recovery', () => {
       await reachCodeStep();
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Resend code' })); });
       expect(authMocks.sendCode).toHaveBeenCalledTimes(2);
-      expect(screen.getByText(/If this number is on a Waves account, a new code is on its way/)).toBeInTheDocument();
+      expect(screen.getByText(/Resend requested. If a new code arrives, enter the newest one./)).toBeInTheDocument();
     });
 
 
@@ -147,7 +147,7 @@ describe('customer login recovery', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Resend code' }));
       await waitFor(() => expect(authMocks.sendCode).toHaveBeenCalledTimes(2));
       await act(async () => {});
-      expect(screen.queryByText(/If this number is on a Waves account, a new code is on its way/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Resend requested. If a new code arrives, enter the newest one./)).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Resend code' })).toBeEnabled();
     });
   });
