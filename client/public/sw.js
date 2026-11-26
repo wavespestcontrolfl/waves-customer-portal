@@ -764,7 +764,12 @@ function reconnectPage() {
 
 // The page's response. `decide` tells the shell refresh which one the page
 // got: 'saved' (the saved copy, on a slow network) or 'network'.
-async function answerNavigation(request, attempt, mayServeSaved, decide, navSeq) {
+// `customer`: a GET load of a customer app screen (isSavedCopyPath).
+// `networkOnly`: such a load carrying NETWORK_ONLY_PARAM, a heal reload that
+// must never get the saved copy, even when the network fails (its retry then
+// keeps the mark: the reconnect page reloads the same address).
+async function answerNavigation(request, attempt, { customer, networkOnly }, decide, navSeq) {
+  const mayServeSaved = customer && !networkOnly;
   let timer;
   try {
     if (mayServeSaved) {
@@ -784,7 +789,8 @@ async function answerNavigation(request, attempt, mayServeSaved, decide, navSeq)
         }
       });
       const first = await Promise.race([bodyReady, slow]);
-      if (first === 'slow' || first.bodyFailed) {
+      // Slow, a body that broke off, or no answer at all: the customer copy.
+      if (first === 'slow' || first.bodyFailed || !first.response) {
         const shell = await savedShell();
         if (shell) {
           decide('saved');
@@ -802,9 +808,10 @@ async function answerNavigation(request, attempt, mayServeSaved, decide, navSeq)
       const outcome = await bodyReady;
       if (outcome.bodyFailed) return reconnectPage();
       if (outcome.response) return outcome.response;
-      return await offlineNavigationResponse(request);
+      return reconnectPage();
     }
     const { response } = await attempt;
+    if (customer && !response) return networkOnly ? reconnectPage() : ((await savedShell()) || reconnectPage());
     return response || await offlineNavigationResponse(request);
   } finally {
     clearTimeout(timer);
@@ -863,9 +870,10 @@ self.addEventListener('fetch', event => {
     // Only a GET load of the customer app's own screens may be answered from
     // the saved copy when the network is slow (isSavedCopyPath), and one that
     // follows a reload for a missing chunk (NETWORK_ONLY_PARAM) never is.
-    // Any other page load (a form POST, a link page, a staff page) leaves the
-    // flag unread.
-    const mayServeSaved = event.request.method === 'GET' && isSavedCopyPath(url.pathname) && !url.searchParams.has(NETWORK_ONLY_PARAM);
+    // Any other page load (a form POST, a link page, a staff page) keeps the
+    // plain network-first rule.
+    const customer = event.request.method === 'GET' && isSavedCopyPath(url.pathname);
+    const networkOnly = customer && url.searchParams.has(NETWORK_ONLY_PARAM);
     const attempt = startNavigationFetch(event.request);
     let decide;
     const choice = new Promise(resolve => { decide = resolve; });
@@ -873,7 +881,7 @@ self.addEventListener('fetch', event => {
     // outlive a response sent before the network answers, and waitUntil can
     // throw once respondWith has settled.
     event.waitUntil(refreshShellAfterNavigation(attempt, choice, navSeq, startedAt, isSavedCopyPath(url.pathname)));
-    event.respondWith(answerNavigation(event.request, attempt, mayServeSaved, decide, navSeq));
+    event.respondWith(answerNavigation(event.request, attempt, { customer, networkOnly }, decide, navSeq));
     return;
   }
 

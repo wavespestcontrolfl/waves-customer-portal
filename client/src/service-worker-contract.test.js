@@ -1910,6 +1910,12 @@ describe('service-worker slow page loads', () => {
     await result.settled();
   });
 
+  it('never answers a failed home load with a shell another page stored', async () => {
+    const { worker, load } = await start({ saved: 'other' });
+    worker.setFetch(async () => { throw new TypeError('Failed to fetch'); });
+    expect(String(bodyOf(await load('/').promise))).toContain('Reconnecting');
+  });
+
   it('never answers a slow home load with a shell another page stored', async () => {
     const { network, load } = await start({ saved: 'other' });
     const nav = load();
@@ -1958,6 +1964,12 @@ describe('service-worker slow page loads', () => {
       expect(nav.done).toBe(false);
       network.release();
       expect(bodyOf(await nav.promise)).toBe(networkHtml);
+    });
+
+    it('shows the reconnect page, never the saved copy, when a marked load fails outright', async () => {
+      const { worker, load } = await start();
+      worker.setFetch(async () => { throw new TypeError('Failed to fetch'); });
+      expect(String(bodyOf(await load('/?waves-network=1').promise))).toContain('Reconnecting');
     });
 
     it('rides on its own load only: the next unmarked load gets the saved copy again', async () => {
