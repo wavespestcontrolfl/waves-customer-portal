@@ -320,6 +320,13 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     }
   }
 
+  // onetime_pest.smallJobPrice (GATE_ONE_TIME_PEST_SMALL_JOB): db-bridge rejects a
+  // non-positive value on sync and restores the WHOLE snapshot, so a bad save here
+  // would freeze every other pricing edit. Refuse it before the write.
+  if (configKey === 'onetime_pest' && data?.smallJobPrice !== undefined && !isPositive(data.smallJobPrice)) {
+    return fail('onetime_pest.smallJobPrice must be a positive dollar amount');
+  }
+
   // The global_* singles must be STRICTLY positive: syncConstantsFromDB
   // applies them through truthy `?.value` checks, so a stored 0 would return
   // success here and then be silently ignored at runtime — DB/UI saying one

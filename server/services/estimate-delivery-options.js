@@ -17,8 +17,8 @@ function validateEstimateDeliveryOptions({
       const suffix = nonPestRecurring.length > 3 ? ', and other recurring services' : '';
       return `Offer one-time option is only supported for pest-only recurring estimates. Remove ${names}${suffix} or turn off the one-time choice.`;
     }
-    if (estimateData && require('./pricing-engine/one-time-pest-small-job').smallJobChoiceBlockedByManualDiscount(parseEstimateData(estimateData))) {
-      return 'A small one-spot job with a discount cannot offer the one-time choice. Remove the discount or turn off the one-time choice.';
+    if (estimateData && require('./pricing-engine/one-time-pest-small-job').hasSmallJobLine(parseEstimateData(estimateData))) {
+      return 'A small one-spot job is quoted as its own line, so it cannot offer the one-time choice. Turn off the one-time choice.';
     }
     if (estimateData && !hasPestRecurringServiceForOneTimeOption(estimateData)) {
       return 'Offer one-time option requires recurring pest pricing on the estimate.';

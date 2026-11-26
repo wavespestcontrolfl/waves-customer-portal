@@ -50,29 +50,13 @@ function oneTimePestSmallJobReplaySignal(estData) {
   return storedSmallJobBasePrice(estData);
 }
 
-// The amount of the saved small-job line, for the estimate page's one-time choice, or null.
-function storedSmallJobChoice(estData) {
-  const line = storedSmallJobLine(estData);
-  const price = Number(line?.price);
-  return line && Number.isFinite(price) && price > 0
-    ? { price, label: line.name || 'One-Time Pest Control (small job: one spot)' }
-    : null;
-}
-
-// Whether a saved small-job estimate carries a staff manual discount. The
-// estimate page's [Recurring | One-time] choice prices the one-time side from
-// the line's gross amount and applies a manual discount only to add-on rows,
-// so a small job with a manual discount cannot offer that choice: the staff
-// send it without the choice instead (estimate-delivery-options.js refuses
-// it), and no discount is silently dropped or counted twice.
-function smallJobChoiceBlockedByManualDiscount(estData) {
-  if (!storedSmallJobLine(estData)) return false;
-  const result = estData?.result || estData?.engineResult || estData || {};
-  const line = storedSmallJobLine(estData);
-  const stamped = line?.manualFinalOneTime;
-  if (stamped !== undefined && stamped !== null && stamped !== '') return true;
-  return [result?.manualDiscount, result?.totals?.manualDiscount, result?.summary?.manualDiscount, estData?.summary?.manualDiscount]
-    .some((m) => m && Number(m.amount) > 0);
+// Whether the saved estimate carries a small-job line. Such an estimate never
+// offers the estimate page's [Recurring | One-time] choice: the choice prices
+// its one-time side from the plan and its discounts (member perk, credits,
+// manual discount) follow rules a flat one-spot price does not fit, so the
+// small job is quoted as its own line instead (estimate-delivery-options.js).
+function hasSmallJobLine(estData) {
+  return !!storedSmallJobLine(estData);
 }
 
 // Whether this pricing run prices the one-time pest request as a small job.
@@ -93,6 +77,5 @@ module.exports = {
   smallJobPrice,
   oneTimePestSmallJobReplaySignal,
   oneTimePestSmallJobBasePrice,
-  storedSmallJobChoice,
-  smallJobChoiceBlockedByManualDiscount,
+  hasSmallJobLine,
 };

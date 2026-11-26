@@ -16,7 +16,6 @@ const { ONE_TIME } = require('../services/pricing-engine/constants');
 const {
   oneTimePestSmallJobReplaySignal, oneTimePestSmallJobBasePrice, smallJobPrice,
 } = require('../services/pricing-engine/one-time-pest-small-job');
-const { oneTimeChoiceAmountForEstimate, acceptedOneTimeChoiceListForEstimate } = require('../routes/estimate-public');
 const { CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity-fields');
 
 const GATE = 'GATE_ONE_TIME_PEST_SMALL_JOB';
@@ -148,43 +147,21 @@ describe('one-time pest small job', () => {
     }
   });
 
-  test('the estimate page one-time choice beside a plan is the small-job line, labelled one spot', () => {
-    process.env[GATE] = 'true';
-    const withPlan = (oneTimePest) => ({
-      ...inputFor(oneTimePest),
-      services: { pest: { frequency: 'quarterly' }, oneTimePest },
-    });
-    const SHOWN = { show_one_time_option: true };
-    const small = generateEstimate(withPlan(SMALL));
-    const full = generateEstimate(withPlan({}));
-    expect(otLine(small).price).toBe(150);
-    expect(oneTimeChoiceAmountForEstimate(SHOWN, { engineResult: small })).toBe(150);
-    // Same estimate shown with the gate off later: the saved line still decides.
-    delete process.env[GATE];
-    expect(oneTimeChoiceAmountForEstimate(SHOWN, { engineResult: small })).toBe(150);
-    const accepted = acceptedOneTimeChoiceListForEstimate(SHOWN, { engineResult: small });
-    expect(accepted[0]).toEqual(expect.objectContaining({ service: 'one_time_pest', price: 150 }));
-    expect(accepted[0].label).toMatch(/small job/i);
-    // An estimate with the full one-time line is unchanged.
-    expect(oneTimeChoiceAmountForEstimate(SHOWN, { engineResult: full })).toBe(otLine(full).price);
-    expect(otLine(full).price).toBeGreaterThanOrEqual(ONE_TIME.pest.floor);
-  });
-
-  test('a small job with a staff discount cannot offer the one-time choice (codex #8603 r1 + pre-push)', () => {
+  test('a small-job estimate never offers the one-time choice; a full one-time estimate still can', () => {
     process.env[GATE] = 'true';
     const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
-    const small = generateEstimate({ ...inputFor(SMALL), services: { pest: { frequency: 'quarterly' }, oneTimePest: SMALL } });
+    const withPlan = (oneTimePest) => generateEstimate({ ...inputFor(oneTimePest), services: { pest: { frequency: 'quarterly' }, oneTimePest } });
     const ask = (engineResult) => validateEstimateDeliveryOptions({
       showOneTimeOption: true, onetimeTotal: 150, monthlyTotal: 40, annualTotal: 480,
       estimateData: { engineResult },
     });
-    expect(ask(small)).toBeNull();
-    for (const discounted of [
-      { ...small, lineItems: small.lineItems.map((l) => (l.smallJob ? { ...l, manualFinalOneTime: 0 } : l)) },
-      { ...small, summary: { ...(small.summary || {}), manualDiscount: { type: 'FIXED', value: 20, amount: 20 } } },
-    ]) {
-      expect(ask(discounted)).toMatch(/small one-spot job with a discount/);
-    }
+    expect(ask(withPlan(SMALL))).toMatch(/small one-spot job is quoted as its own line/);
+    // Gate off later: the saved stamp still decides.
+    delete process.env[GATE];
+    const saved = withPlan({});
+    expect(ask({ ...saved, lineItems: saved.lineItems.map((l) => (l.service === 'one_time_pest' ? { ...l, smallJob: true } : l)) }))
+      .toMatch(/small one-spot job is quoted as its own line/);
+    expect(ask(saved)).toBeNull();
   });
 
   test('the price migration adds smallJobPrice once, keeps the other keys and an admin edit', async () => {
@@ -193,6 +170,7 @@ describe('one-time pest small job', () => {
       const audits = [];
       const k = (table) => ({
         where(cond) { this.cond = cond; return this; },
+        forUpdate() { this.locked = true; return this; },
         async first() { return table === 'pricing_config' ? row.current : audits.find((a) => a.changed_by === this.cond.changed_by && a.reason === this.cond.reason); },
         async update({ data }) { row.current = { ...row.current, data }; return 1; },
         async insert(a) { audits.push(a); return [1]; },
@@ -222,5 +200,15 @@ describe('one-time pest small job', () => {
     const rows = JSON.stringify(legacy);
     expect(rows).toMatch(/small job: one spot/);
     expect(rows).toMatch(/One spot only/);
+  });
+
+  test('the admin pricing save refuses a non-positive small-job price before the write', () => {
+    const { validatePricingConfigFor } = require('../routes/admin-pricing-config');
+    const old = { floor: 199, multiplier: 2.2, smallJobPrice: 150 };
+    for (const bad of [0, -5, 'abc']) {
+      expect(validatePricingConfigFor('onetime_pest', { ...old, smallJobPrice: bad }, old))
+        .toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/smallJobPrice/) }));
+    }
+    expect(validatePricingConfigFor('onetime_pest', { ...old, smallJobPrice: 175 }, old)?.ok).not.toBe(false);
   });
 });
