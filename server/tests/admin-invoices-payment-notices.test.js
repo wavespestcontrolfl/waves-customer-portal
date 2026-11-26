@@ -1,6 +1,6 @@
 /**
  * /admin/invoices/payment-notices — the park queue for Zelle notices the
- * reconciler could not settle (GATE_ZELLE_NOTICE_RECONCILE lane). Pins:
+ * reconciler could not settle. Pins:
  *   - the static paths win over /:id (Express order) and are admin-only
  *     (listed in NAMED_INVOICE_GETS, so the single-invoice staff exemption
  *     never applies);

@@ -5,7 +5,6 @@
  * reminder cadence (dunning consolidation §4-§7). runPending reaches it under
  * the live gate (promote, then runner.runCustomerSchedules) and through the
  * kill switch (wiring.releaseIfDark); the admin controls through wiring.js.
- * The shadow run (runner.shadowRun) reads through here and never calls a writer.
  *
  * Every function takes `database` (default: the db module) and uses ONLY that
  * handle; the engine's entry points never inject one, it exists so a transaction

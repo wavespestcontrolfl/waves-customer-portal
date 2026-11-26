@@ -1,12 +1,12 @@
 // Customer-level overdue reminders — the LIVE wiring (dunning consolidation
 // PR 3, plan §4 / §8 / §9.4):
 //   * runPending order: kill switch -> promotion (live gate only) -> the
-//     per-invoice batch (with the ownership predicate) -> the live engine or
-//     the shadow run; gate off with no schedule rows changes nothing.
+//     per-invoice batch (with the ownership predicate) -> the live engine;
+//     gate off with no schedule rows changes nothing.
 //   * fireStep takes the customer's dunning key SHARED before its invoice row
 //     lock and never claims an owned row; sendNextTouchNow routes an owned
 //     customer to the schedule's send-now.
-//   * wiring.js: releaseIfDark (reasons, in-flight, failure alert, shadow-only
+//   * wiring.js: releaseIfDark (reasons, in-flight, failure alert, dark-gate
 //     no-op, allowlist), the send-now live gate, the control results the
 //     routes return (IN_FLIGHT copy end to end through admin.js).
 //   * cross-rail: previsit suppression after a schedule touch; the autopay
@@ -71,11 +71,10 @@ mockDb.chains = [];
 // Arms the revival-read skip above, then runs runPending.
 const runPendingT = () => { mockDb.skipRevival = true; return require('../services/invoice-followups').runPending(); };
 
-const mockGates = { live: false, shadow: false, prereqs: true, allow: null };
+const mockGates = { live: false, prereqs: true, allow: null };
 jest.mock('../config/feature-gates', () => ({
   gates: {},
   dunningCustomerScheduleLive: () => mockGates.live && mockGates.prereqs,
-  dunningCustomerScheduleShadowLive: () => mockGates.shadow && mockGates.prereqs,
   dunningCustomerSchedulePrereqsLive: () => mockGates.prereqs,
   dunningCustomerScheduleAllowlist: () => mockGates.allow,
 }));
@@ -87,8 +86,7 @@ jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(), inv
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn(async () => false) }));
 jest.mock('../services/customer-dunning/runner', () => ({
-  shadowRun: jest.fn(async () => ({})), runCustomerSchedules: jest.fn(async () => ({})), processSchedule: jest.fn(),
-  shadowVerdictBeforeRelease: jest.fn(async () => 'send'),
+  runCustomerSchedules: jest.fn(async () => ({})), processSchedule: jest.fn(),
 }));
 
 const db = require('../models/db');
@@ -119,7 +117,7 @@ beforeEach(() => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
   jest.setSystemTime(NOW);
   jest.clearAllMocks();
-  Object.assign(mockGates, { live: false, shadow: false, prereqs: true, allow: null });
+  Object.assign(mockGates, { live: false, prereqs: true, allow: null });
   Object.assign(mockDb, { results: {}, firsts: {}, log: [], raw: null, throwOn: {}, chains: [], skipRevival: false });
   require('../services/customer-dunning/wiring')._test.resetReadMemory();
 });
@@ -139,14 +137,12 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
     jest.spyOn(Wiring, 'releaseIfDark').mockImplementation(async () => { order.push('releaseIfDark'); return { released: 0, inFlight: 0, failed: 0 }; });
     jest.spyOn(Schedule, 'promote').mockImplementation(async () => { order.push('promote'); return { promoted: [] }; });
     Runner.runCustomerSchedules.mockImplementation(async () => { order.push('runCustomerSchedules'); });
-    Runner.shadowRun.mockImplementation(async () => { order.push('shadowRun'); });
     mockDb.results['invoice_followup_sequences as s'] = () => { order.push('batch'); return []; };
     return order;
   }
 
-  test('live gate on: release, promote, then the batch, then the live engine (never the shadow run)', async () => {
+  test('live gate on: release, promote, then the batch, then the live engine', async () => {
     mockGates.live = true;
-    mockGates.shadow = true;
     const order = trace();
     await expect(runPendingT()).resolves.toEqual({ sent: 0, skipped: 0 });
     expect(order).toEqual(['releaseIfDark', 'promote', 'batch', 'runCustomerSchedules']);
@@ -154,13 +150,6 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
     expect(Schedule.promote).toHaveBeenCalledWith(NOW);
     // claims count the per-invoice loop's wall time: the engine's clock starts at runPending's start
     expect(Runner.runCustomerSchedules).toHaveBeenCalledWith(NOW, { clockStartedAt: NOW.getTime() });
-  });
-
-  test('shadow only: the kill switch still runs first, no promotion, shadowRun after the batch', async () => {
-    mockGates.shadow = true;
-    const order = trace();
-    await runPendingT();
-    expect(order).toEqual(['releaseIfDark', 'batch', 'shadowRun']);
   });
 
   test('a prerequisite off turns the live gate off too: no promotion, no live run', async () => {
@@ -213,14 +202,12 @@ describe('runPending: kill switch -> promotion -> per-invoice batch -> engine', 
   });
 
   test('PIN — live gate off, no schedule rows: one read of the schedule table, no write, no alert, no engine', async () => {
-    mockGates.shadow = false;
     mockDb.results.customer_dunning_schedules = [];
     await expect(runPendingT()).resolves.toEqual({ sent: 0, skipped: 0 });
     expect(tablesRead().filter((t) => t === 'customer_dunning_schedules')).toHaveLength(1);
     expect(writes()).toEqual([]);
     expect(mockNotify).not.toHaveBeenCalled();
     expect(Runner.runCustomerSchedules).not.toHaveBeenCalled();
-    expect(Runner.shadowRun).not.toHaveBeenCalled();
     expect(db.raw).not.toHaveBeenCalled(); // no row fired, so no advisory key either
   });
 });
@@ -545,8 +532,7 @@ describe('releaseIfDark (kill switch, §9.4)', () => {
     expect(release).not.toHaveBeenCalled();
   });
 
-  test('shadow-only state with no schedule rows is a no-op (one read, no write, no alert, no log line)', async () => {
-    mockGates.shadow = true;
+  test('gate dark with no schedule rows is a no-op (one read, no write, no alert, no log line)', async () => {
     const release = jest.spyOn(Schedule, 'release');
     await expect(Wiring.releaseIfDark(NOW)).resolves.toEqual({ released: 0, inFlight: 0, failed: 0 });
     expect(tablesRead()).toEqual(['customer_dunning_schedules']);
@@ -556,27 +542,6 @@ describe('releaseIfDark (kill switch, §9.4)', () => {
     expect(writes()).toEqual([]);
     expect(mockNotify).not.toHaveBeenCalled();
     expect(logger.info).not.toHaveBeenCalled();
-    expect(Runner.shadowVerdictBeforeRelease).not.toHaveBeenCalled(); // no rows: the shadow output is unchanged
-  });
-
-  test('C1: under the shadow gate (live off) each dark schedule gets its shadow verdict BEFORE it is released', async () => {
-    mockGates.shadow = true;
-    mockDb.results.customer_dunning_schedules = [open('s1', CUST), open('s2', CUST2, { status: 'paused' })];
-    const order = [];
-    Runner.shadowVerdictBeforeRelease.mockImplementation(async (schedule) => { order.push(`verdict:${schedule.id}`); return 'send'; });
-    jest.spyOn(Schedule, 'release').mockImplementation(async (schedule) => { order.push(`release:${schedule.id}`); return { closed: true, landed: [] }; });
-    await expect(Wiring.releaseIfDark(NOW)).resolves.toMatchObject({ released: 2 });
-    expect(order).toEqual(['verdict:s1', 'release:s1', 'verdict:s2', 'release:s2']);
-    expect(Runner.shadowVerdictBeforeRelease.mock.calls.map(([s, now]) => [s.id, now])).toEqual([['s1', NOW], ['s2', NOW]]);
-    // shadow off, or the live gate on (its allowlist releasing the others): no shadow verdict is logged
-    Runner.shadowVerdictBeforeRelease.mockClear();
-    mockGates.shadow = false;
-    await Wiring.releaseIfDark(NOW);
-    mockGates.shadow = true;
-    mockGates.live = true;
-    mockGates.allow = new Set([CUST]);
-    await Wiring.releaseIfDark(NOW);
-    expect(Runner.shadowVerdictBeforeRelease).not.toHaveBeenCalled();
   });
 
   test('gate off: every open schedule is released as released_gate_off; a prerequisite off names released_prereq_off', async () => {
@@ -626,7 +591,6 @@ describe('releaseIfDark (kill switch, §9.4)', () => {
   });
 
   test('F5: the open-schedule read failing with the gate dark and no schedule seen is LOGGED only (zero alerts while off)', async () => {
-    mockGates.shadow = true;
     mockDb.throwOn.customer_dunning_schedules = new Error('relation is busy');
     await expect(Wiring.releaseIfDark(NOW)).resolves.toEqual({ released: 0, inFlight: 0, failed: 1 });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('could not read open schedules: relation is busy'));

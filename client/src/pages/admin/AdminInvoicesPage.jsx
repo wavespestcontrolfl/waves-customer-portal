@@ -1277,7 +1277,7 @@ export default function AdminInvoicesPage() {
   );
 }
 
-// ── Zelle payments to review (GATE_ZELLE_NOTICE_RECONCILE lane) ──
+// ── Zelle payments to review (parked by the bank-feed reconciler) ──
 // The park queue for Capital One Zelle notices the reconciler could not
 // settle on its own: one row per notice — payer · amount · memo · reason —
 // with the invoice candidates it found. Apply settles the chosen invoice

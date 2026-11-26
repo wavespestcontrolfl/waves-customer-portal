@@ -1,7 +1,7 @@
 // READ-ONLY — no writes, no locks, no customer contact.
 //
 // Historical replay for the seven-day overdue-reminder spacing rule
-// (server/services/collections/dunning-spacing.js, GATE_DUNNING_SPACING_SHADOW
+// (server/services/collections/dunning-spacing.js,
 // PR 1 of the dunning-unification spacing work). Over the last N days
 // (default 30), lists overdue-reminder events that landed within 7 days
 // of a PREVIOUS overdue-reminder event for the same customer, from ANY of the

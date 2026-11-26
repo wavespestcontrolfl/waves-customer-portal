@@ -4,7 +4,7 @@
 // that is always rolled back, so Postgres itself refuses any write.
 //
 // Customer-level overdue reminders (dunning consolidation §9 step 1): before
-// GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW / GATE_DUNNING_CUSTOMER_SCHEDULE turn
+// GATE_DUNNING_CUSTOMER_SCHEDULE turns
 // on, print what the customer schedule WOULD do for every customer with 2+
 // active per-invoice follow-up sequences:
 //   - the member sequences and their current per-invoice next touches,

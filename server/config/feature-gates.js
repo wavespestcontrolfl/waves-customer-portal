@@ -388,7 +388,6 @@
  *   GATE_LAWN_TECH_PARAGRAPH=true (lawn report "From your technician" paragraph, owner 2026-10-05; FIXED SENTENCES since 2026-10-06: every word comes from the owner-approved LAWN_SENTENCES in lawn-tech-paragraph.js ("Our technician saw {condition} in the {place}.", "There may be early signs of {label}; we will keep an eye on it.", "Today we applied {products}."); at most ONE model call per lawn visit extracts closed-list conditions and places with the technician's exact words and a seenToday judgment, and code keeps an item only when the quote is word for word in one note sentence naming the condition (the model judges, the code verifies, no word lists); the entry { text, slots, v: 2 } freezes first-writer-wins in structured_notes.lawnTechParagraph[assessmentId], is re-checked against its slots at read time and rides reportV2.lead.techParagraph on the web report and the PDF; lane lawn_tech_paragraph on TEXT_POLICIES.report; lawn only; read at call time via lawnTechParagraphLive(); off = no model call, byte-identical payload, PDF and PDF cache key)
  *   GATE_LAWN_COST_PLUS_LIST=true (residential recurring lawn care list price = annual cost / (1 - 0.45), never below the market table (its $55 list minimum retired 2026-11-06), from the v13 program product cost plus 10 more labor minutes a visit; WaveGuard and manual discounts on the lawn line apply in full since owner 2026-11-02 (they stopped at a 35% margin before); owner 2026-10-09; strict opt-in via gateEnvValue, read at CALL time in priceLawnCare and generateEstimate; a saved estimate replays as it was priced (pricingMetadata.lawnCostPlusList); the one-time lawn anchor and commercial lawn stay on the market table; ships DARK, off = byte-identical prices)
  *   GATE_SITEONE_PROGRAMS_CHECK=true (owner 2026-10-26: on the 1st of each month at 9:00 AM ET the portal signs in to siteone.com with the order bot's stored login, reads SiteOne's Early Order Programs, promotions and Partners points, compares them with last month's list and posts one admin notification for new programs, programs ending within 30 days and points expiring within 60 days. Read-only on SiteOne: never adds to the cart, never changes the account, never orders. Strict opt-in via gateEnvValue, read at call time by server/services/procurement/siteone-programs-check.js; dark by default; off = nothing runs. Sends nothing to a customer.)
- *   GATE_SITEONE_EMAIL_ORDER=true (owner 2026-10-26, "OK DO OPTION B": SiteOne's website blocks the order bot, so an owner can instead email ONE pickup order to SiteOne for an open restock request. The Restock tab shows "Email order to SiteOne" on an open request (admins only); it opens a preview with To, Subject, the body and the estimate before tax, and Send email goes out through SendGrid from contact@ to SITEONE_ORDER_EMAIL (cc SITEONE_ORDER_CC). Then the request is marked ordered, so Receive works as today. One email per request, ever. Strict opt-in via gateEnvValue, read at call time by server/services/procurement/vendor-order-email.js via siteOneEmailOrderLive(); dark by default; off = the two routes answer 404 and the tab shows no button. Sends an email to SiteOne, a vendor, never to a customer; the order bot is untouched.)
  *   GATE_SITEONE_DEAL_AI_END_DATE=true (owner 2026-11-19 "B" on the SiteOne Deal End Dates scope page: the Monday 8:00 AM SiteOne deals bell asks Claude Haiku 5.5 for each deal email's end date and shows it with the email's own words, for example: ends Apr 30 ("Offers valid March 1 – April 30, 2026."). The code keeps an answer only when those words are in the email and name that day (the end of a range, not its start). It has a gate because each read is a paid API call: about 2 deal emails a month cost under 1 cent; the cap (20 reads, one Monday run a week) is about $0.04 a week, $0.17 a month. Strict `=== 'true'`, read at run time by server/services/procurement/siteone-deals-digest.js via siteOneDealAiEndDateLive(); dark by default; off (kill: unset) = no model call, and each line keeps the date-pattern deadline it shows today.)
  *   GATE_MOSQUITO_MISTING=true (automatic mosquito misting system pricer: install price by tier, nozzle and riser overage, a $59 monthly plan and per-fill refill rates; the estimate engine accepts services.mosquitoMisting, the legacy mapper emits the plan line and a one-time install item, and the public price ranges list two rows; the line is not a WaveGuard tier service and takes no percent discount; draft prices, dealer cost unknown; also gates the misting system records (owner 2026-10-30): an admin-only Misting system panel on Customer 360 for the install calibration (spray-rate math checked against the label's daily limit) and the tank refill log, via /api/admin/misting-records, which answer 404 and render no panel when off; and the customer app's Home card, GET /api/misting-system (off = `{ system: null }` with no read); strict opt-in via gateEnvValue, read at CALL time via mosquitoMistingLive(); ships DARK, off = the key is ignored and every estimate is byte-identical)
  *   GATE_DEAD_ANIMAL_REMOVAL=true (owner 2026-10-26: the one-time Dead Rodent Removal & Odor Treatment line in the estimate engine: services.deadAnimalRemoval = { tier: reachable | attic | in_wall }, fixed tier prices, in_wall is a custom quote. NEW QUOTES ONLY: off = the estimator hides the choice and the engine refuses the input with a 400 failClosed error (DEAD_ANIMAL_REMOVAL_GATED); an estimate already saved with the line stays a normal estimate. Strict opt-in via gateEnvValue, read at CALL time via deadAnimalRemovalLive(); dark by default. Sends nothing to a customer.)
@@ -3565,16 +3564,6 @@ const gates = {
   // any DB read or browser launch. Opt-in, dark by default; kill = unset.
   siteOnePrograms: gateEnvValue('GATE_SITEONE_PROGRAMS_CHECK'),
 
-  // SiteOne order by email (owner 2026-10-26, "OK DO OPTION B"): an admin
-  // previews and sends ONE pickup-order email to SiteOne for an open restock
-  // request (GET/POST /admin/inventory/restock-requests/:id/siteone-email);
-  // the request then becomes ordered. CALL-time gateEnvValue through
-  // siteOneEmailOrderLive() in procurement/vendor-order-email.js and the
-  // restock queue; this entry is for logGateStatus. Off = both routes answer
-  // 404 and the Restock tab shows no button. Opt-in, dark by default; kill =
-  // unset. The order bot (GATE_AUTO_ORDER_SITEONE) is not touched.
-  siteOneEmailOrder: gateEnvValue('GATE_SITEONE_EMAIL_ORDER'),
-
   // Vendor order dispatch (runs right after the 6:10 ET reorder sweep): an
   // open auto_reorder request whose vendor has an adapter is ORDERED —
   // Sticker Mule reorder API, SiteOne browser bot — under the env spend caps
@@ -3683,26 +3672,9 @@ const gates = {
   // stay off in every environment until explicitly enabled.
   recordedAnnualPrepayReceipt: process.env.GATE_RECORDED_ANNUAL_PREPAY_RECEIPT === 'true',
 
-  // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
-  // "Someone sent you money with Zelle" notices (forwarded from the owner's
-  // personal inbox to contact@), matches the payer + exact amount to ONE open
-  // self-pay invoice and settles it through services/invoice-manual-payment.js
-  // — the operator's Add-payment path — INCLUDING the paid receipt (email +
-  // SMS). OWNER RULING 2026-09-02: an exact single match may mark the invoice
-  // paid and send the receipt with no human in the loop; anything else parks
-  // on the Invoices page for one-click Apply / Ignore. Money + a customer
-  // comm, so it ships dark in prod. OFF = the hook returns before any DB
-  // read and the email flows through normal classification exactly as
-  // today; the parked-notice admin routes stay live so history remains
-  // actionable after a kill. Read at CALL time (gateEnvValue) so unsetting
-  // GATE_ZELLE_NOTICE_RECONCILE on Railway is a live kill switch — the
-  // consumer (services/zelle-notice-reconciler.js) and logGateStatus must
-  // keep using this same parser.
-  zelleNoticeReconcile: isProd ? gateEnvValue('GATE_ZELLE_NOTICE_RECONCILE') : process.env.GATE_ZELLE_NOTICE_RECONCILE !== 'false',
-
   // Zelle payments from the Plaid bank feed — the same decision table and
-  // money path as zelleNoticeReconcile, fed by bank_transactions instead of
-  // email: after each hourly Plaid sync, a new "Zelle money received from
+  // money path as the retired email route, fed by bank_transactions:
+  // after each hourly Plaid sync, a new "Zelle money received from
   // <payer>" credit on a bank account settles the ONE open self-pay invoice
   // that matches it to the cent with a corroborating payer name, receipt
   // email + SMS included (owner ruling 2026-09-02); everything else parks on
@@ -4853,14 +4825,6 @@ const gates = {
   // services/newsletter-proof.js, newsletter-sunset.js and the History stop
   // route. Kill = unset: the issue waits for an APPROVED reply again.
   newsletterAutoSend: process.env.GATE_NEWSLETTER_AUTO_SEND === 'true',
-  // Seven-day overdue-reminder spacing rule, SHADOW ONLY (dunning
-  // unification PR 1, re-sequenced narrow 2026-09-28 — see #5108's wide
-  // version for what this deliberately leaves out). Ships DARK: off unless
-  // exactly 'true'. This entry is for logGateStatus only:
-  // services/collections/contact-policy.js reads GATE_DUNNING_SPACING_SHADOW
-  // at call time and only LOGS what the rule would have held — it never
-  // holds, denies, or changes a send.
-  dunningSpacingShadow: process.env.GATE_DUNNING_SPACING_SHADOW === 'true',
 
   // Orphan-invoice adoption sweep (dunning unification, PR 3b): invoices sent
   // outside the direct-send path never got an invoice_followup_sequences row.
@@ -5270,18 +5234,16 @@ const gates = {
   // Customer-level overdue reminders (dunning consolidation, PR 1: inert
   // foundations — nothing reads these yet). A customer with 2+ actively-
   // dunned open invoices gets ONE customer_dunning_schedules row that owns
-  // the cadence, instead of one reminder per invoice. Both gates ship DARK:
-  // off unless exactly 'true'. These three entries are for logGateStatus
+  // the cadence, instead of one reminder per invoice. The gate ships DARK:
+  // off unless exactly 'true'. These entries are for logGateStatus
   // only; the readers live in services/customer-dunning/ (later PRs), which
-  // read the env at call time. SHADOW computes and logs only (no rows, no
-  // mints, no reservations, no sends); the live gate additionally needs
+  // read the env at call time. The live gate needs
   // GATE_DUNNING_LADDER_90 and the pay-page balance gate (payIncludeBalance)
   // on. dunningCustomerScheduleAllowlist reads ENABLED when
   // DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST (comma list of customer uuids) is
   // CONFIGURED — unset = everyone, configured = only the valid ids, and a
   // configured list with no valid id = nobody (logGateStatus says so). The
   // one-customer canary before a full flip.
-  dunningCustomerScheduleShadow: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true',
   dunningCustomerSchedule: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true',
   dunningCustomerScheduleAllowlist: String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '').trim() !== '',
   // GATE_VISIT_LIVE_ACTIVITY: read at CALL time via visitLiveActivityLive(); this entry is for logGateStatus.
@@ -7393,11 +7355,6 @@ function alertEpisodesLive() {
   return !['off', 'false', '0'].includes(String(process.env.ALERT_EPISODES ?? '').trim().toLowerCase());
 }
 
-// GATE_SITEONE_EMAIL_ORDER read at CALL time (so a flip needs no redeploy).
-function siteOneEmailOrderLive() {
-  return gateEnvValue('GATE_SITEONE_EMAIL_ORDER');
-}
-
 // GATE_TECH_LOGIN_PRIVACY read at CALL time (so a flip needs no redeploy); strict 'true'.
 function techLoginPrivacyLive() {
   return process.env.GATE_TECH_LOGIN_PRIVACY === 'true';
@@ -7812,20 +7769,14 @@ function outlinkTrackingLive() {
 
 // Customer-level dunning gates read at CALL time — strict `=== 'true'`. The
 // `dunningCustomerSchedule*` gates-map entries above are for logGateStatus
-// only. Both ship dark; the live reader is separate from the shadow reader so
-// a shadow run can never be mistaken for authority to send. BOTH readers also
-// require the prerequisites the schedule depends on and fail closed without
-// them: GATE_DUNNING_LADDER_90 (the Day 60/90 cadence, read as
+// only. The reader requires the prerequisites the schedule depends on and
+// fails closed without them: GATE_DUNNING_LADDER_90 (the Day 60/90 cadence, read as
 // invoice-followups.js reads it) and the pay-page balance gate
 // (payIncludeBalance, read as pay-combined.js reads it, via the gates map) —
 // without the first the cadence is the legacy Day 30 one, without the second
 // the page shows one invoice while a reminder names the set.
 function dunningCustomerSchedulePrereqsLive() {
   return process.env.GATE_DUNNING_LADDER_90 === 'true' && gates.payIncludeBalance === true;
-}
-
-function dunningCustomerScheduleShadowLive() {
-  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true' && dunningCustomerSchedulePrereqsLive();
 }
 
 function dunningCustomerScheduleLive() {
@@ -8551,7 +8502,6 @@ module.exports.lawnSinceLastLive = lawnSinceLastLive;
 module.exports.lawnWateringSmsLive = lawnWateringSmsLive;
 module.exports.lawnWateringEveryVisitLive = lawnWateringEveryVisitLive;
 module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrereqsLive;
-module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;
 module.exports.dunningCustomerScheduleLive = dunningCustomerScheduleLive;
 module.exports.dunningCustomerScheduleAllowlist = dunningCustomerScheduleAllowlist;
 module.exports.dunningCustomerScheduleAllowlistStatus = dunningCustomerScheduleAllowlistStatus;
@@ -9196,8 +9146,6 @@ module.exports.callbackSourceTechLive = callbackSourceTechLive;
 module.exports.customerTextToVisitTechLive = customerTextToVisitTechLive;
 // Own line so concurrent gate PRs appending to the shared list never conflict with this one.
 module.exports.smsPromptAutopromoteMode = smsPromptAutopromoteMode;
-// GATE_SITEONE_EMAIL_ORDER reader, on its own line so gate PRs never conflict.
-module.exports.siteOneEmailOrderLive = siteOneEmailOrderLive;
 // GATE_SITEONE_DEAL_AI_END_DATE read at RUN time, strict `=== 'true'`, dark (owner 2026-11-19 "B"). It has a gate because
 // each deal email's end-date read is a paid Claude Haiku call. Off = the Monday SiteOne deals bell makes no model call and
 // keeps its date-pattern deadlines. Kill = unset.

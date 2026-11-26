@@ -1,21 +1,17 @@
 /**
- * services/zelle-notice-reconciler.js — the deterministic decision table the
- * email sync runs on a Capital One Zelle notice (GATE_ZELLE_NOTICE_RECONCILE).
+ * services/zelle-notice-reconciler.js — the shared decision table and money
+ * path (the Plaid bank feed drives it in production; zelle-bank-reconciler
+ * .test.js pins that entry). The email-notice intake was removed 2026-11-26,
+ * so these tests drive the shared decision (`_private.settleOrPark`) through a
+ * small test-only shim that claims a notice row first, as the intake did.
  * Pins, with a per-table db mock:
- *   - gate off ⇒ returns false before ANY DB read; prod semantics = 'true' only;
- *   - non-notice mail ⇒ false, no reads;
- *   - untrusted sender ⇒ parked `sender_unverified`, returns false (classifier still runs);
- *   - the at-most-once claim (email_id UNIQUE): a lost claim decides nothing;
  *   - exact single match by memo invoice number / by corroborating name ⇒
  *     recordManualPayment(zelle, receipt email + SMS) + `auto_applied` + stamps;
  *   - every park reason (no_match, name_mismatch, multiple_matches,
- *     possible_duplicate, apply_failed, parse_failed) with the candidate list;
+ *     possible_duplicate, apply_failed, stale_notice) with the candidate list;
  *   - payer re-resolution drops (rowIsSelfPayDue=false) never auto-apply;
- *   - the sync hook is wired (source pin).
+ *   - stale-claim recovery.
  */
-const fs = require('fs');
-const path = require('path');
-
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.fn = { now: jest.fn(() => 'NOW()') };
@@ -51,11 +47,7 @@ const OpenBalance = require('../services/open-balance');
 const { recordManualPayment } = require('../services/invoice-manual-payment');
 const NotificationService = require('../services/notification-service');
 const logger = require('../services/logger');
-const { maybeHandleZelleNotice, isZelleReconcileEnabled, recoverStaleClaims, sweepStaleClaims, reofferMarkedEmails, RECORDED_BY, ZELLE_RETRY_MARK } = require('../services/zelle-notice-reconciler');
-
-const TEXT = fs.readFileSync(path.join(__dirname, 'fixtures', 'zelle-notice-capitalone.txt'), 'utf8');
-const FORWARDED_AUTH = 'mx.google.com; dkim=pass header.i=@notification.capitalone.com header.s=k1; '
-  + 'spf=pass smtp.mailfrom="owner+caf_=contact=wavespestcontrol.com@gmail.com"; dmarc=pass header.from=capitalone.com';
+const { recoverStaleClaims, sweepStaleClaims, RECORDED_BY, STALE_NOTICE_MS, _private: { settleOrPark } } = require('../services/zelle-notice-reconciler');
 
 // Received one hour ago on the real clock: the reconciler parks anything
 // older than STALE_NOTICE_MS (48h) at first decision, so an absolute date
@@ -63,11 +55,19 @@ const FORWARDED_AUTH = 'mx.google.com; dkim=pass header.i=@notification.capitalo
 const RECEIVED_AT = new Date(Date.now() - 60 * 60 * 1000);
 
 function notice(over = {}) {
-  return {
-    id: 'email-1', from_address: 'capitalone@notification.capitalone.com', subject: 'Good news: Someone sent you money with Zelle®.',
-    body_text: TEXT, body_html: null, snippet: 'PAT DOE has just sent you money', authentication_results: FORWARDED_AUTH,
-    received_at: RECEIVED_AT, ...over,
-  };
+  return { id: 'email-1', payer: 'Pat Doe', amountCents: 11700, memo: 'Quarterly Service Pat D', received_at: RECEIVED_AT, ...over };
+}
+// Test-only stand-in for the removed email intake: claim the notice row (the
+// mock's `returning` queue is the claim), then run the shared decision.
+async function maybeHandleZelleNotice(email) {
+  const parsed = { payerName: email.payer, amountCents: email.amountCents, memo: email.memo };
+  const [row] = await db('inbound_payment_notices')
+    .insert({ email_id: email.id, source: 'capitalone_zelle', payer_name: parsed.payerName, amount_cents: parsed.amountCents, memo: parsed.memo, received_at: email.received_at, status: 'processing', claim_token: require('crypto').randomUUID() })
+    .onConflict('email_id').ignore().returning('*');
+  if (!row) return true; // another pass owns this notice
+  const receivedAt = new Date(row.received_at || email.received_at || Date.now()).getTime();
+  const ageMs = Date.now() - receivedAt;
+  return settleOrPark(row, email, parsed, { cutoffMs: receivedAt, stale: Number.isFinite(receivedAt) && ageMs > STALE_NOTICE_MS, ageMs, ref: email.id });
 }
 const openRow = (over = {}) => ({
   id: 'inv-1', invoice_number: 'WPC-2026-0500', status: 'sent', customer_id: 'cust-1', total: '117.00', credit_applied: 0,
@@ -112,26 +112,8 @@ beforeEach(() => {
   jest.spyOn(Date, 'now').mockReturnValue(FIXTURE_NOW);
   tables = { inbound_payment_notices: { firsts: [], returning: [], calls: [] }, emails: { firsts: [], returning: [], calls: [] } };
   db.mockImplementation((table) => builder(table));
-  delete process.env.GATE_ZELLE_NOTICE_RECONCILE;
   OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async () => []);
   OpenBalance.rowIsSelfPayDue.mockImplementation(async () => true);
-});
-
-describe('gate', () => {
-  test('dev/test: on unless explicitly false; prod: on only when exactly true', () => {
-    expect(isZelleReconcileEnabled({ NODE_ENV: 'test' })).toBe(true);
-    expect(isZelleReconcileEnabled({ NODE_ENV: 'test', GATE_ZELLE_NOTICE_RECONCILE: 'false' })).toBe(false);
-    process.env.GATE_ZELLE_NOTICE_RECONCILE = 'true';
-    expect(isZelleReconcileEnabled({ NODE_ENV: 'production' })).toBe(true);
-    delete process.env.GATE_ZELLE_NOTICE_RECONCILE;
-    expect(isZelleReconcileEnabled({ NODE_ENV: 'production' })).toBe(false);
-  });
-
-  test('gate off ⇒ false with zero DB reads, even for a real notice', async () => {
-    process.env.GATE_ZELLE_NOTICE_RECONCILE = 'false';
-    expect(await maybeHandleZelleNotice(notice())).toBe(false);
-    expect(db).not.toHaveBeenCalled();
-  });
 });
 
 describe('stale notices', () => {
@@ -146,29 +128,8 @@ describe('stale notices', () => {
   });
 });
 
-describe('not ours', () => {
-  test('initial-sync history (backfill) ⇒ false before any read — old notices never settle today\'s invoices', async () => {
-    expect(await maybeHandleZelleNotice(notice(), { backfill: true })).toBe(false);
-    expect(db).not.toHaveBeenCalled();
-  });
-
-  test('ordinary mail ⇒ false, no reads', async () => {
-    expect(await maybeHandleZelleNotice(notice({ subject: 'Hello', body_text: 'Can you come Tuesday?', snippet: 'Can you' }))).toBe(false);
-    expect(db).not.toHaveBeenCalled();
-  });
-
-  test('untrusted sender that still parses ⇒ parked sender_unverified, returns false so the classifier sees it', async () => {
-    claimed();
-    const out = await maybeHandleZelleNotice(notice({ from_address: 'owner@gmail.com', authentication_results: 'mx.google.com; dkim=pass header.i=@gmail.com' }));
-    expect(out).toBe(false);
-    expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ email_id: 'email-1', status: 'processing', payer_name: 'Pat Doe', amount_cents: 11700 });
-    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'sender_unverified' });
-    expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_parked:sender_unverified' });
-    expect(recordManualPayment).not.toHaveBeenCalled();
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', "Billing — review Pat Doe's $117.00 Zelle", 'The email did not prove it came from Capital One.', expect.objectContaining({ dedupeKey: 'zelle-notice:notice-1', bellDefault: true }));
-  });
-
-  test('a lost claim (another sync owns the email) decides nothing', async () => {
+describe('claims', () => {
+  test('a lost claim (another pass owns the notice) decides nothing', async () => {
     // returning [] ⇒ onConflict(email_id).ignore() dropped our insert
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     expect(updatesOf('inbound_payment_notices')).toHaveLength(0);
@@ -200,7 +161,7 @@ describe('auto-apply', () => {
 
   test('the memo invoice number picks one of several exact-cent invoices', async () => {
     claimed();
-    const memoNotice = notice({ body_text: TEXT.replace('Quarterly Service Pat D', 'wpc-2026-0501 lawn') });
+    const memoNotice = notice({ memo: 'wpc-2026-0501 lawn' });
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [
       openRow(), openRow({ id: 'inv-2', invoice_number: 'WPC-2026-0501', customer_id: 'cust-2', customer_first_name: 'Sam', customer_last_name: 'Roe' }),
     ]));
@@ -390,7 +351,7 @@ describe('park reasons', () => {
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [
       openRow(), openRow({ id: 'inv-2', invoice_number: 'WPC-2026-0501', customer_id: 'cust-2', customer_first_name: 'Sam', customer_last_name: 'Roe' }),
     ]));
-    expect(await maybeHandleZelleNotice(notice({ body_text: TEXT.replace('Quarterly Service Pat D', 'WPC-2026-0500 WPC-2026-0501'), snippet: 'x' }))).toBe(true);
+    expect(await maybeHandleZelleNotice(notice({ memo: 'WPC-2026-0500 WPC-2026-0501' }))).toBe(true);
     expect(recordManualPayment).not.toHaveBeenCalled();
     expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'multiple_matches' });
   });
@@ -464,13 +425,6 @@ describe('park reasons', () => {
     expect(recordManualPayment).not.toHaveBeenCalled();
   });
 
-  test('trusted sender whose template did not parse ⇒ parse_failed (amount unknown), handled', async () => {
-    claimed({ id: 'notice-1', payer_name: null, amount_cents: null });
-    expect(await maybeHandleZelleNotice(notice({ body_text: 'Someone sent you money with Zelle. Sign in to see details.', snippet: 'x' }))).toBe(true);
-    expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ amount_cents: null, payer_name: null, status: 'processing' });
-    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'parse_failed' });
-    expect(OpenBalance.openSelfPayInvoicesByAmountDue).not.toHaveBeenCalled();
-  });
 });
 
 describe('owner surfacing under the bell policy', () => {
@@ -529,30 +483,9 @@ describe('stale claim recovery', () => {
     expect(closesOf('inbound_payment_notices')).toEqual([expect.objectContaining({ status: 'parked', park_reason: 'apply_failed' })]);
   });
 
-  test('the sweep re-offers hook-marked emails (oldest first, small batch, no age cap) and clears a mark only while it is still the mark', async () => {
-    const marked = { ...notice({ id: 'email-marked' }), auto_action: ZELLE_RETRY_MARK };
-    tables.emails.selects = [[marked]];
-    const orig = db.getMockImplementation();
-    db.mockImplementation((table) => { const b = orig(table); if (table === 'emails') { const q = tables[table].selects; b.select = jest.fn(async () => (q.length ? q.shift() : [])); } return b; });
-    claimed({ id: 'notice-m', payer_name: 'Pat Doe', amount_cents: 11700 });
-    expect(await reofferMarkedEmails()).toBe(1);
-    const emailCalls = tables.emails.calls;
-    expect(emailCalls).toContainEqual(['where', { auto_action: ZELLE_RETRY_MARK }]);
-    expect(emailCalls.find(([m, col, op]) => m === 'where' && col === 'received_at' && op === '>')).toBeUndefined(); // a mark stays actionable until handled
-    expect(emailCalls).toContainEqual(['orderBy', 'received_at', 'asc']);
-    expect(emailCalls).toContainEqual(['limit', 25]);
-    // The full decision ran: a claim was inserted for the marked email, then parked (no open invoice) …
-    expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ email_id: 'email-marked', status: 'processing' });
-    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'no_match' });
-    // … and the mark is cleared conditionally (never a concurrent owner's stamp).
-    expect(emailCalls).toContainEqual(['where', { id: 'email-marked', auto_action: ZELLE_RETRY_MARK }]);
-  });
-
-  test('the sync-cadence sweep keeps stale-claim RECOVERY running with the gate off (a kill never strands a processing claim); only the marked re-offer is gated', async () => {
-    process.env.GATE_ZELLE_NOTICE_RECONCILE = 'false';
+  test('the sync-cadence sweep runs stale-claim RECOVERY (a kill never strands a processing claim)', async () => {
     expect(await sweepStaleClaims()).toBe(0);
     expect(tables.inbound_payment_notices.calls).toContainEqual(['where', { status: 'processing' }]); // recovery read
-    expect((tables.emails?.calls || []).some(([m, a]) => m === 'where' && a && a.auto_action)).toBe(false); // no marked re-offer
   });
 
   test('nothing stale ⇒ no writes', async () => {
@@ -562,41 +495,10 @@ describe('stale claim recovery', () => {
 });
 
 describe('sync wiring', () => {
-  test('upsertEmail runs the reconciler before classification and skips the classifier when it owns the email', () => {
+  test('the email sync runs the stale-claim sweep on every sync beside the bell sweep', () => {
+    const fs = require('fs');
+    const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'email', 'email-sync.js'), 'utf8');
-    const hook = src.indexOf("require('../zelle-notice-reconciler')");
-    const classify = src.indexOf("require('./email-classifier')");
-    expect(hook).toBeGreaterThan(-1);
-    expect(hook).toBeLessThan(classify);
-    expect(src).toMatch(/zelleHandled = await offerZelleNotice\(email, \{ backfill \}\)/);
-    expect(src).toMatch(/return await maybeHandleZelleNotice\(email, \{ backfill \}\)/);
-    expect(src).toMatch(/if \(!proofHandled && !approvalControl && !zelleHandled && /);
-    // A live notice candidate is born marked: the retry record commits WITH
-    // the insert (never for backfill history, never with the gate off), the
-    // race loser offers only a marked winner row, and the existing-email
-    // branch re-offers ONLY marked rows (never a gate-flip replay of history).
-    // (The insert runs in the transaction that also stores the attachment rows.)
-    expect(src).toMatch(/const preMarked = !backfill && isZelleReconcileEnabled\(\) && isZelleNoticeCandidate\(emailData\);\s*if \(preMarked\) emailData\.auto_action = ZELLE_RETRY_MARK;\s*(?:\/\/[^\n]*\n\s*)*const inserted = await db\.transaction\(async \(trx\) => \{\s*const rows = await trx\('emails'\)\.insert\(emailData\)/);
-    // A false verdict releases the insert-time mark (only while it is still the mark) BEFORE classification runs.
-    expect(src.indexOf('if (preMarked && !zelleHandled) {')).toBeLessThan(src.indexOf("require('./email-classifier')"));
-    expect(src).toMatch(/if \(preMarked && !zelleHandled\) \{\s*await db\('emails'\)\.where\(\{ id: email\.id, auto_action: ZELLE_RETRY_MARK \}\)\.update\(\{ auto_action: null/);
-    expect(src).toMatch(/whereNull\('auto_action'\)\.update\(\{ auto_action: ZELLE_RETRY_MARK/);
-    // A failed mark write PROPAGATES the original error (the message counts as failed; classification never runs).
-    expect(src).toMatch(/catch \(markErr\) \{[\s\S]{0,300}throw err;/);
-    // A MARKED email is owned: classification (which also writes auto_action) must not erase the retry record.
-    expect(src).toMatch(/if \(!marked\) \{[\s\S]{0,200}throw err;\s*\}\s*return true;/);
-    // A 0-row mark (auto_action already set by something other than the reconciler) is NOT a durable record.
-    expect(src).toMatch(/startsWith\('zelle_notice'\)/);
-    // A lost retry record withholds the INCREMENTAL cursor too, with no retry cap (any other failed message holds
-    // it for a capped number of runs; fullSync already withholds on any failed message).
-    expect(src).toMatch(/if \(err\.zelleRetryLost\) held \+= 1;\s*else failed\.push\(msgId\);/);
-    expect(src).toMatch(/last_history_id: held \? state\.last_history_id : latestHistoryId/);
-    // The insert-race loser reloads the winner's row and offers it only while it carries the insert-time mark.
-    expect(src).toMatch(/if \(!inserted\.length\) \{[\s\S]{0,900}winner\.auto_action === ZELLE_RETRY_MARK[\s\S]{0,120}await offerZelleNotice\(winner, \{ backfill \}\)/);
-    expect(src).toMatch(/if \(existing\.auto_action === ZELLE_RETRY_MARK\) \{\s*await offerZelleNotice\(/);
-    expect(src).not.toMatch(/classification == null/);
-    expect(src).toMatch(/\(proofHandled \|\| approvalControl \|\| zelleHandled\) && await bellClaimColumnExists\(\)/);
-    // The stale-claim sweep runs on every sync beside the bell sweep.
     expect(src).toMatch(/sweepUnclaimedCustomerEmailBells\(\)[\s\S]{0,600}require\('\.\.\/zelle-notice-reconciler'\)\.sweepStaleClaims\(\)/);
   });
 });

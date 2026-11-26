@@ -23,9 +23,7 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProductLabelReview from "../../components/admin/ProductLabelReview";
-import SiteOneEmailOrderDialog from "../../components/admin/SiteOneEmailOrderDialog";
 import VendorCancellationDialog from "../../components/admin/VendorCancellationDialog";
-import { etDateString } from "../../lib/timezone";
 import {
   ActionFeedback,
   Badge,
@@ -3259,11 +3257,6 @@ function RestockRequestsTab({
   const loadSequence = useRef(0);
   const [receivingId, setReceivingId] = useState("");
   const [receiveDrafts, setReceiveDrafts] = useState({});
-  // GATE_SITEONE_EMAIL_ORDER: the server tells an admin whether the tab
-  // offers "Email order to SiteOne"; emailOrderFor is the request whose
-  // preview dialog is open.
-  const [emailOrderEnabled, setEmailOrderEnabled] = useState(false);
-  const [emailOrderFor, setEmailOrderFor] = useState(null);
   // The request whose "Record vendor cancellation" dialog is open.
   const [vendorCancelFor, setVendorCancelFor] = useState(null);
   // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
@@ -3316,7 +3309,6 @@ function RestockRequestsTab({
       const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(queueStatus)}${requestId ? `&requestId=${encodeURIComponent(requestId)}` : ""}`);
       if (sequence === loadSequence.current) {
         setRequests(data.requests || []);
-        setEmailOrderEnabled(!!data.siteOneEmailOrder);
       }
     } catch (err) {
       if (sequence === loadSequence.current)
@@ -3482,7 +3474,6 @@ function RestockRequestsTab({
                       canAuthor={canAuthor}
                       evidence={evidence[request.id]}
                       loadEvidence={loadEvidence}
-                      onEmailOrder={emailOrderEnabled ? setEmailOrderFor : null}
                     />
                     <RestockActionCell
                       request={request}
@@ -3499,22 +3490,6 @@ function RestockRequestsTab({
             </TBody>
           </Table>
         </div>
-      )}
-      {emailOrderFor && (
-        <SiteOneEmailOrderDialog
-          request={emailOrderFor}
-          onClose={() => setEmailOrderFor(null)}
-          onSent={async (result) => {
-            setEmailOrderFor(null);
-            showToast(
-              result.requestMarked === false
-                ? "Email sent to SiteOne, but the request was not marked ordered. Use Mark Ordered."
-                : "Order emailed to SiteOne",
-            );
-            await load();
-            onUpdate && onUpdate();
-          }}
-        />
       )}
       {vendorCancelFor && (
         <VendorCancellationDialog
@@ -3573,38 +3548,6 @@ function autoOrderSummary(order) {
 
 // Restock tab — the request's status pill, its automatic-order outcome and
 // the Mark Ordered action, in one cell.
-// The SiteOne order email states a Restock row shows (the server's emailOrder.state; no email =
-// "none"). Only "none" and "retryable" (a stale claim that never started) offer the button.
-const EMAIL_ORDER_STATES = {
-  none: { canSend: true, render: () => null },
-  retryable: {
-    canSend: true,
-    render: (e) => (
-      <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
-        An earlier email to SiteOne never started · PO {e.po}. You can send it
-        again.
-      </div>
-    ),
-  },
-  sending: {
-    canSend: false,
-    render: (e) => (
-      <div className="mt-[6px] text-ui-body text-ink-secondary max-w-[260px]">
-        Email to SiteOne may have gone out · PO {e.po}. Check SendGrid or
-        SiteOne before sending again.
-      </div>
-    ),
-  },
-  sent: {
-    canSend: false,
-    render: (e) => (
-      <div className="mt-[6px] text-ui-body u-nums">
-        Emailed to SiteOne {etDateString(new Date(e.sentAt))} · PO {e.po}
-      </div>
-    ),
-  },
-};
-
 // The one call site passes every prop, so none needs a default.
 function RestockStatusCell({
   request,
@@ -3613,13 +3556,10 @@ function RestockStatusCell({
   canAuthor,
   evidence,
   loadEvidence,
-  onEmailOrder,
 }) {
   const order = request.order;
-  const emailOrder = request.emailOrder;
-  const emailState = EMAIL_ORDER_STATES[emailOrder?.state ?? "none"];
-  // Mark Ordered and Email order share one eligibility: an owner, an open
-  // request, and no bot claim placing.
+  // Mark Ordered eligibility: an owner, an open request, and no bot claim
+  // placing.
   const canAct =
     canAuthor && request.status === "open" && order?.status !== "placing";
   const summary = order ? autoOrderSummary(order) : null;
@@ -3678,7 +3618,6 @@ function RestockStatusCell({
           )}
         </div>
       )}
-      {emailState.render(emailOrder)}
       {canAct && (
         <Button
           onClick={() => runAction(request, "mark_ordered")}
@@ -3689,16 +3628,6 @@ function RestockStatusCell({
           Mark Ordered
         </Button>
       )}
-      {canAct && onEmailOrder && emailState.canSend && (
-          <Button
-            onClick={() => onEmailOrder(request)}
-            disabled={receivingId === request.id}
-            variant="secondary"
-            className="mt-[8px] block"
-          >
-            Email order to SiteOne
-          </Button>
-        )}
     </TD>
   );
 }
@@ -3757,7 +3686,6 @@ function RestockActionCell({
             value={
               draft.quantity ??
               request.order?.orderedQuantity ??
-              request.emailOrder?.orderedQuantity ??
               request.requestedQuantity ??
               ""
             }
