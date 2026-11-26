@@ -876,6 +876,25 @@ Waves Pest Insider" (or "the Waves Newsletter"), why "Gmail readers opened 2 of 
 with neither `dedupeOpenOnly` nor `refreshOnDedupe`: one bell per issue, and a person's Done stays done, so no `RERING` entry is
 owed. A failed read or an alert that could not be written throws, so `job_health` shows it. It holds no send and sends nothing to a customer.
 
+**Stripe webhook health** (owner 2026-11-26, "shouldn't these all be admin notifications now"; `server/services/stripe-webhook-health.js`,
+daily 7:04 AM ET, kill `STRIPE_WEBHOOK_HEALTH_DISABLED`). It replaced the daily FIX email to contact@. The check finds Stripe events the app
+failed to apply (a ledger row with an error or an abandoned claim, no time window) and Stripe-side deliveries our ledger does not show; a check
+that cannot finish (probe error, scan cap, key missing in production) is a finding too, because `job_health` tells nobody. One standing row:
+category `billing` with `bell: true`, area Billing, headline "Billing — check 3 stuck Stripe events" (or "check N Stripe events we may have
+missed", or "fix the daily Stripe webhook check"), why one plain sentence, link `/admin/invoices` (`/admin/settings?tab=integrations` when only
+the check broke), done-when `count_zero`, who `either`. The event ids and types go in `detail`; stored error text and thrown error text never do.
+dedupeKey `stripe-webhook-health`, raised through `raiseAdminAlertWithReopen` with `refreshOnDedupe`: it rings when it first appears and again
+only when a new event or a newly broken check joins the set or the total grows, so one standing problem never rings daily. A clean run closes it
+(`closeAdminAlertKeys`); a person's Done on a still-standing problem stays done. No `RERING` entry is owed (no `dedupeOpenOnly`).
+
+**Knowledge gaps, weekly** (same ruling; `server/services/knowledge/knowledge-gaps-weekly.js`, Monday 8:43 AM ET plus hourly catch-up
+through Tuesday, kill `KNOWLEDGE_GAPS_WEEKLY=off`). It replaced the Monday email. Exception-based: a week with no unanswered question writes
+nothing (the old "none recorded" email was reassurance, not a signal). Category `knowledge` with `bell: true`, headline "Content — fill 12
+knowledge gaps from last week", why "Most asked: “<question>”" (masked like every bell body; a plain line when the words break the section 3
+rules), link `/admin/knowledge`, done-when `gaps_reviewed`, who `either`. The top 10 questions, who asked and the unrated count go in
+`detail`. dedupeKey `knowledge-gaps-weekly:<ET date of the report week's end>`, with neither `dedupeOpenOnly` nor `refreshOnDedupe`, so the
+catch-up ticks dedupe onto the week's row and a person's Done stays done. The 72-hour quiet policy retires an old week's row.
+
 ## 7. How to raise one
 
 `composeAdminAlert(spec)` is pure. It validates the eight parts and returns

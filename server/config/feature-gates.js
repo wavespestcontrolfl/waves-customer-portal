@@ -4336,8 +4336,8 @@ const gates = {
   // (bell-write failure still emails). OFF (default, dev AND prod): every
   // sender emails exactly as before. Requires GATE_AGENT_ACTIVITY too (the
   // rows need a surface) — with it off the helper fails closed to email.
-  // The reply-to-approve flows and the stripe-webhook-health / llm-dispatch
-  // FIX alerts are not routed here. Kill switch: unset. This entry is for
+  // The reply-to-approve flows and the llm-dispatch FIX alerts are not
+  // routed here. Kill switch: unset. This entry is for
   // logGateStatus; the helper reads both env vars at CALL time.
   // Tech visit notifications (Field Team Program Phase 0 item 2,
   // services/tech-visit-notifications.js): the assigned field technician gets
