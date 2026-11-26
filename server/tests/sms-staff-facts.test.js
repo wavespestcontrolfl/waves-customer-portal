@@ -89,6 +89,7 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(ask('Three.', 'How many visits do I have left this year?')).toBe(false);
     // an open-slot answer to an availability question is a scheduling reply, not a plan count
     expect(ask('We have two appointments left on Friday.', 'Do you have any appointments left for Friday?')).toBe(true);
+    expect(ask('We can come Friday morning.', 'Do you have any appointments remaining on Friday?')).toBe(true);
     expect(ask('Three.', 'How many appointments do you have left?')).toBe(true);
     expect(ask('We have plenty of openings this week.', 'How many appointments do you have left?')).toBe(true);
     expect(ask('You have two appointments left on your prepaid plan.', 'Do you have any appointments left for Friday?')).toBe(false);
@@ -157,35 +158,48 @@ describe('prepaid visits left (payment-status contract)', () => {
 
 describe('loadPrepaidPlanFacts', () => {
   afterEach(() => { jest.dontMock('../services/prepaid-series'); jest.resetModules(); });
-  // a db whose scheduled_services read returns the given annual-linked rows
-  const dbWith = (annualRows) => () => { const q = { where: () => q, whereNotNull: () => q, orWhere: () => q, select: async () => annualRows }; return q; };
-  const load = async (plans, annualRows, customerId = 'c1') => {
+  // a db whose scheduled_services read returns the given rows (annual-linked, stamped booster, ...)
+  const dbWith = (rows) => () => { const q = { where: () => q, whereNotNull: () => q, orWhere: () => q, select: async () => rows }; return q; };
+  const load = async (plans, rows, customerId = 'c1') => {
     jest.resetModules();
     jest.doMock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
     jest.doMock('../services/prepaid-series', () => ({
       ANNUAL_PREPAY_METHOD: 'annual_prepay_invoice',
+      hasAnnualCoverage: (row) => !!(row.annual_prepay_term_id || row.prepaid_method === 'annual_prepay_invoice'),
       resolveSeriesParentId: (row) => row.recurring_parent_id || row.id,
       listCustomerPrepaidPlans: jest.fn(async () => { if (plans instanceof Error) throw plans; return plans; }),
     }));
-    return require('../services/sms-staff-facts').loadPrepaidPlanFacts(customerId, { db: dbWith(annualRows) });
+    return require('../services/sms-staff-facts').loadPrepaidPlanFacts(customerId, { db: dbWith(rows) });
   };
   const plan = (over) => ({ seriesParentId: 'p1', serviceType: 'Quarterly Pest Control', remainingVisits: 3, paidVisits: 4, ...over });
+  const row = (over) => ({ id: 'v1', recurring_parent_id: 'p1', service_type: 'Quarterly Pest Control', annual_prepay_term_id: null, prepaid_method: null, prepaid_amount: 50, is_recurring: true, recurring_pattern: 'quarterly', ...over });
+  const LAWN = { label: 'Lawn Care', remaining: 3, paid: 4 };
 
   test('maps the plan rollup; a plan with an impossible count is left out', async () => {
-    expect(await load([plan(), plan({ seriesParentId: 'p2', serviceType: 'Odd', remainingVisits: 9 })], [])).toEqual([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]);
+    expect(await load([plan(), plan({ seriesParentId: 'p2', serviceType: 'Odd', remainingVisits: 9 })], [row()])).toEqual([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]);
   });
 
   test('a series an annual prepay term covers or is linked to is left out: its stamped visits are not the term\'s funded entitlement', async () => {
     const plans = [plan(), plan({ seriesParentId: 'p2', serviceType: 'Lawn Care' })];
-    // one visit of series p1 is linked to an annual term (as a child row of p1); p2 is a manual prepay
-    expect(await load(plans, [{ id: 'v9', recurring_parent_id: 'p1' }])).toEqual([{ label: 'Lawn Care', remaining: 3, paid: 4 }]);
+    // one visit of series p1 is linked to an annual term; p2 is a manual prepay
+    expect(await load(plans, [row({ annual_prepay_term_id: 't1' })])).toEqual([LAWN]);
     // the series parent itself carries the annual stamp
-    expect(await load(plans, [{ id: 'p2', recurring_parent_id: null }])).toEqual([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]);
+    expect(await load(plans, [row({ id: 'p2', recurring_parent_id: null, service_type: 'Lawn Care', prepaid_method: 'annual_prepay_invoice' })])).toEqual([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]);
   });
 
-  test('a label shared with an annual-term series is ambiguous too: the manual plan renders nothing', async () => {
-    const plans = [plan({ remainingVisits: 0 }), plan({ seriesParentId: 'p2', remainingVisits: 4 })];
-    expect(await load(plans, [{ id: 'v9', recurring_parent_id: 'p2' }])).toEqual([]);
+  test('an independently prepaid booster (no cadence, bills its own price) keeps its series out: it is not a plan visit', async () => {
+    const plans = [plan(), plan({ seriesParentId: 'p2', serviceType: 'Lawn Care' })];
+    expect(await load(plans, [row({ id: 'b1', is_recurring: false, recurring_pattern: null, prepaid_amount: 40 })])).toEqual([LAWN]);
+    // a stamped visit that is merely not flagged recurring but has a cadence pattern is a plan visit
+    expect(await load(plans, [row({ is_recurring: false })])).toHaveLength(2);
+  });
+
+  test('a label shared with another series is ambiguous: an exhausted plan beside its renewal renders nothing, an annual-linked renewal (stamped or not) included', async () => {
+    const plans = [plan({ remainingVisits: 0 }), plan({ seriesParentId: 'p3', serviceType: 'Lawn Care' })];
+    expect(await load([plans[0], plan({ seriesParentId: 'p2', remainingVisits: 4 })], [row({ id: 'v9', recurring_parent_id: 'p2', annual_prepay_term_id: 't1' })])).toEqual([]);
+    // the renewal's visits are linked to an annual term but none is stamped yet, so it is not in the rollup at all: its label still counts
+    expect(await load(plans, [row({ id: 'n1', recurring_parent_id: 'p9', annual_prepay_term_id: 't2', prepaid_amount: null })])).toEqual([LAWN]);
+    expect(await load(plans, [row({ id: 'n1', recurring_parent_id: 'p9', annual_prepay_term_id: 't2', prepaid_amount: null, service_type: 'Quarterly Pest Control' })])).toEqual([LAWN]);
   });
 
   test('a failed read is null (an outage), never an empty plan list; no customer is null', async () => {

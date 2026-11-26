@@ -22,7 +22,7 @@ describe('billingFingerprint', () => {
       'FROM scheduled_services t', 'self_pay_override IS TRUE', 'FROM payers p', 'FROM estimate_deposits d', 'FROM customers c WHERE c.id = ?',
       'FROM payment_methods t WHERE t.customer_id = ?', 'FROM annual_prepay_terms t WHERE t.customer_id = ?',
       // the visits of a prepaid plan (the "visits left" sentence): the stamped rows and their whole series
-      't.prepaid_amount > 0', 'COALESCE(t.recurring_parent_id, t.id) IN']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
+      't.prepaid_amount > 0', 't.annual_prepay_term_id IS NOT NULL', 'COALESCE(t.recurring_parent_id, t.id) IN']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
     // every fragment hashes the row itself (md5(<alias>::text)), never a hand-picked column list
     expect(BILLING_FINGERPRINT_SQL).not.toMatch(/concat_ws\('\|'/);
     expect((BILLING_FINGERPRINT_SQL.match(/md5\((?:t|a|p|d|c)::text\)/g) || []).length).toBe(11);

@@ -750,6 +750,27 @@ describe('paymentStatusSendBlockReason - the prepaid visits left sentence', () =
   });
 });
 
+describe('outgoingAmountsStale - a staff-edited body keeps rechecking a copied prepaid sentence it retains', () => {
+  const LEFT = 'Your prepaid Quarterly Pest Control plan has 3 of 4 prepaid visits left.';
+  const SNAP = { customer_id: 'c1', sentences: [LEFT] };
+  const ctx = (remaining) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, hasDepositActivity: false }, prepaidPlans: [{ label: 'Quarterly Pest Control', remaining, paid: 4 }] });
+  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, humanEditedBody: true, paymentStatusSnapshot: SNAP, dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true, ...extra });
+
+  test('a greeting added around the copy does not skip the live recheck: stale once a visit was completed since drafting', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(3));
+    await expect(run(`Hi Dana! ${LEFT}`)).resolves.toMatchObject({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(2));
+    await expect(run(`Hi Dana! ${LEFT}`)).resolves.toEqual({ stale: true, reason: 'payment_status_changed' });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(null));
+    await expect(run(`Hi Dana! ${LEFT}`)).resolves.toMatchObject({ stale: true });
+  });
+
+  test('the staff member\'s own wording (no retained copy) needs no plan read', async () => {
+    await expect(run('Hi Dana, we will see you Tuesday.')).resolves.toMatchObject({ stale: false });
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+});
+
 describe('paymentStatusVerdict - Zelle and plan-price sentences are re-rendered at send time', () => {
   let priorZelle;
   const RECIPIENT = 'payments@wavespestcontrol.com';

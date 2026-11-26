@@ -8,24 +8,28 @@ const logger = require('./logger');
 
 /**
  * The customer's prepaid recurring plans (prepaid-series.listCustomerPrepaidPlans, the same rollup the appointment screens show), as
- * { label, remaining, paid }. A series any of whose visits an ANNUAL prepay term covers or is linked to is left out: its stamped visits
- * are not the term's funded entitlement (a replacement visit may not be stamped yet), so a person answers. null when the read failed;
- * [] when there is none.
+ * { label, remaining, paid }. Left out, so a person answers: a series an ANNUAL prepay term covers or is linked to (its stamped visits are not
+ * the term's funded entitlement: a replacement visit may not be stamped yet), a series carrying an independently prepaid BOOSTER (a visit with
+ * no cadence that bills its own price: it is not a plan visit), and a series whose label another series shares (an exhausted series beside its
+ * renewal, an annual-linked renewal included). null when the read failed; [] when there is none.
  */
 async function loadPrepaidPlanFacts(customerId, { db } = {}) {
   if (!customerId || !db) return null;
   try {
     const series = require('./prepaid-series');
     const plans = await series.listCustomerPrepaidPlans(db, customerId);
-    const annualRows = await db('scheduled_services')
+    const rows = await db('scheduled_services')
       .where({ customer_id: customerId })
-      .where((qb) => qb.whereNotNull('annual_prepay_term_id').orWhere('prepaid_method', series.ANNUAL_PREPAY_METHOD))
-      .select('id', 'recurring_parent_id');
-    const annualSeries = new Set(annualRows.map((row) => String(series.resolveSeriesParentId(row))));
-    // a label shared with ANY other series (an annual renewal beside an exhausted manual plan included) is ambiguous: it renders for none of them
-    const sameLabel = (plan) => plans.filter((other) => String(other.serviceType).toLowerCase() === String(plan.serviceType).toLowerCase()).length;
+      .where((qb) => qb.whereNotNull('annual_prepay_term_id').orWhere('prepaid_method', series.ANNUAL_PREPAY_METHOD).orWhere('prepaid_amount', '>', 0))
+      .select('id', 'recurring_parent_id', 'service_type', 'annual_prepay_term_id', 'prepaid_method', 'prepaid_amount', 'is_recurring', 'recurring_pattern');
+    const annual = rows.filter((row) => series.hasAnnualCoverage(row));
+    const boosters = rows.filter((row) => Number(row.prepaid_amount) > 0 && row.is_recurring === false && !row.recurring_pattern);
+    const excluded = new Set([...annual, ...boosters].map((row) => String(series.resolveSeriesParentId(row))));
+    const label = (value) => String(value || '').toLowerCase();
+    const annualLabels = new Set(annual.map((row) => label(row.service_type)));
+    const sameLabel = (plan) => plans.filter((other) => label(other.serviceType) === label(plan.serviceType)).length;
     return plans
-      .filter((plan) => !annualSeries.has(String(plan.seriesParentId)) && sameLabel(plan) === 1)
+      .filter((plan) => !excluded.has(String(plan.seriesParentId)) && !annualLabels.has(label(plan.serviceType)) && sameLabel(plan) === 1)
       .map((plan) => ({ label: String(plan.serviceType || ''), remaining: Number(plan.remainingVisits), paid: Number(plan.paidVisits) }))
       .filter((plan) => plan.label && Number.isInteger(plan.remaining) && Number.isInteger(plan.paid) && plan.paid > 0 && plan.remaining >= 0 && plan.remaining <= plan.paid);
   } catch (err) {

@@ -230,6 +230,15 @@ async function paymentStatusVerdict({ customerId, body, snapshot = null, inbound
   }
   return copied.length ? copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh, autoSend }) : { reason: null, zelle: null };
 }
+// A staff-EDITED body keeps the staff member's own wording, but a staff-fact sentence the AI copied and the edit left in place (a greeting was
+// added around it) is still a claim about live rows: re-render it ({ stale, reason } or null).
+async function retainedStaffFactStale({ customerId, text, snapshot, dbh }) {
+  const authorized = Array.isArray(snapshot?.sentences) ? snapshot.sentences.filter((s) => typeof s === 'string') : [];
+  const retained = paymentStatus.copiedSentences(text, authorized).filter((t) => staffFactsFor([t]).length);
+  if (!retained.length) return null;
+  const live = await copiedSentencesStillRendered({ customerId, copied: retained, snapshot: snapshot || {}, ctx: null, dbh });
+  return live.reason ? { stale: true, reason: live.reason } : null;
+}
 async function paymentStatusSendBlockReason(args = {}) {
   return (await paymentStatusVerdict(args)).reason;
 }
@@ -347,6 +356,8 @@ async function outgoingAmountsStale({
   // staff member's own wording carries the staff exemption.
   // (an AI draft = a prompt version on the decision; a hand-typed body with none is the staff member's own wording)
   if (promptVersion && humanEditedBody !== true && ZELLE_WORD_RE.test(text) && !zelleBodyContacts(text).length) return { stale: true, reason: 'zelle_claim_unverifiable' };
+  const retained = await retainedStaffFactStale({ customerId, text, snapshot: paymentStatusSnapshot, dbh });
+  if (retained) return retained;
   const zelle = await staffZelleStale({ customerId, text, zelleInvoiceId, inboundMessage, dbh });
   if (zelle.stale) return { stale: true, reason: zelle.reason };
   const amounts = trustOwedAmounts ? { stale: false } : await ownedAmountsStale({ customerId, text, dbh });

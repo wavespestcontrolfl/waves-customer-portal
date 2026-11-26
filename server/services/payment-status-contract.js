@@ -708,7 +708,7 @@ const COUNT_ANSWER_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:more|left|remaining|to
 // the count words themselves are the detector.
 // "Do you have any appointments left on Friday?" asks for an open slot, not for the visits left on the plan, unless it also names the plan.
 const SLOT_ASK_RE = /\b(?:do|does|will|can|could) (?:you|waves|the company|your team)\b[^.?!]{0,20}\b(?:have|got|offer)\b[^.?!]{0,20}\b(?:appointments?|visits?|openings?|slots?)\b|\b(?:appointments?|visits?|openings?|slots?)\b[^.?!]{0,20}\b(?:do|does|will|can|could) (?:you|waves|the company|your team)\b[^.?!]{0,10}\b(?:have|got|offer)\b|\b(?:openings?|slots?|available|availability|open)\b[^.?!]{0,30}\b(?:appointments?|visits?)\b|\b(?:appointments?|visits?)\b[^.?!]{0,30}\b(?:available|open|(?:on |this |next )?(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|this week|next week)\b/i;
-const PLAN_WORD_RE = /\b(?:prepaid|my plan|my account|paid for|covered|remaining)\b/i;
+const PLAN_WORD_RE = /\b(?:prepaid|my plan|my account|paid for|covered)\b/i;
 // ...nor is a question about money, or about time as the thing counted ("How much money is left on my prepaid plan?", "How many hours are left?";
 // but "How many visits do I have left this year?" counts visits).
 const MONEY_OR_TIME_ASK_RE = /\b(?:money|balance|dollars?|credit|funds?|cash)\b|\$|\bhow many\s+(?:more\s+)?(?:hours?|minutes?|days?|weeks?|months?|years?)\b/i;
