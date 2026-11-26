@@ -467,7 +467,9 @@ function savedPriceHolds(saved, terms, deps) {
 async function markEstimate(estimateId, prospectId, terms, shownKey, deps) {
   const conn = deps.db || db;
   const set = { source: 'quote_wizard', lead_source: LEAD_SOURCE, lead_source_detail: LEAD_SOURCE_DETAIL };
-  const merged = { mailProspectId: String(prospectId), mailShownKey: shownKey };
+  // mailTerms: the amounts this booking is made on, written once here. The retry of a committed booking answers with them
+  // (a staff revision can change the draft's totals later; the visit keeps the terms it was booked on).
+  const merged = { mailProspectId: String(prospectId), mailShownKey: shownKey, mailTerms: { annualCents: terms.annualCents, setupCents: terms.setupCents } };
   // Always explicit, a ZERO too: an absent quote reads as a legacy estimate, and a later conversion of this solo pest
   // draft would add the live WaveGuard fee the page never showed (estimate-converter
   // shouldIncludeWaveGuardSetupFeeForRecurring: amount 0 = the quote disclosed no fee).
@@ -575,13 +577,16 @@ async function recoverCommitted(home, contact, offer, shown, deps) {
   // A test double may answer with the customer id alone: then the draft is the shown-price one.
   const customerId = typeof found === 'object' ? found.customerId : found;
   const estimateId = (typeof found === 'object' && found.estimateId) || shownKey;
-  const draft = await (deps.db || db)('estimates').where({ id: estimateId }).first('id', 'annual_total', 'estimate_data');
+  const draft = await (deps.db || db)('estimates').where({ id: estimateId }).first('id', 'estimate_data');
   const estimateToken = draft && (deps.handoffToken || REAL.handoffToken())(estimateId);
   if (!estimateToken) return null;
-  // The terms the committed booking was made on, read from its draft, so the retry's answer shows the same price.
+  // The terms the committed booking was made on (the draft's mailTerms snapshot), so the retry's answer shows the same
+  // price; none when the snapshot is not there.
   const data = typeof draft.estimate_data === 'string' ? (() => { try { return JSON.parse(draft.estimate_data); } catch { return null; } })() : draft.estimate_data;
-  const committed = draftTermsOf(draft, data);
-  return { estimateId, estimateToken, customerId, committedTerms: committed || null };
+  const kept = data && data.mailTerms;
+  const committedTerms = kept && Number.isInteger(kept.annualCents) && kept.annualCents > 0 && Number.isInteger(kept.setupCents) && kept.setupCents >= 0
+    ? { annualCents: kept.annualCents, setupCents: kept.setupCents } : null;
+  return { estimateId, estimateToken, customerId, recovered: true, committedTerms };
 }
 
 // The check createSelfBooking runs inside its transaction, after its own replay and conflict checks, before the visit is
@@ -751,7 +756,10 @@ async function bookHome(token, input, deps = {}) {
   const result = await booking.createSelfBooking({
     ...bookingPayload({ home, contact, offer, pin, gates, estimate: prepared }),
     // Re-read inside the booking transaction: the gate, the prospect row (locked) and the price it still holds.
-    commitGuard: commitGuardFor(home, shown, prepared.estimateId, deps, prepared.terms || shown),
+    // A recovered retry is replay-only: createSelfBooking answers a replay before it calls the guard, so a guard that
+    // runs means the committed visit is gone (cancelled since), and this request, which skipped every price check, must
+    // not insert a new one.
+    commitGuard: prepared.recovered ? async () => false : commitGuardFor(home, shown, prepared.estimateId, deps, prepared.terms),
   });
   // A recovered retry answers with the committed draft's terms; a fresh booking with its own, unless createSelfBooking
   // answered it as the replay of another submission (then this submission's terms are not the committed ones).

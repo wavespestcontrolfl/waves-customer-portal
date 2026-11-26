@@ -419,7 +419,7 @@ describe('bookHome', () => {
     quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 627, priceSetupFee: 0, priceDigest: 'd' });
     quote.judge.mockReturnValue({ price: { annual: 627, setupFee: 0, digest: 'd' } });
     expect((await bookHome(TOKEN, INPUT(), deps)).status).toBe(200);
-    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN), setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } });
+    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN), mailTerms: { annualCents: 62700, setupCents: 0 }, setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } });
   });
 
   test('the booking carries a commit guard that re-reads the gates and the locked prospect row inside its transaction', async () => {
@@ -668,7 +668,7 @@ describe('bookHome', () => {
     // The draft is marked as the quote-wizard draft /book accepts, with the postcard lead source.
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({ source: 'quote_wizard', lead_source: 'mail_new_home', lead_source_detail: 'new_home_postcard' });
-    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN), setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } });
+    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN), mailTerms: { annualCents: 62700, setupCents: 0 }, setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } });
 
     expect(booking.createSelfBooking).toHaveBeenCalledTimes(1);
     const payload = booking.createSelfBooking.mock.calls[0][0];
@@ -915,12 +915,18 @@ describe('the printed price is held for a mailed home', () => {
   test('the retry of a committed booking answers with the price its draft holds', async () => {
     mockRow = held();
     findCommittedBookingCustomer.mockResolvedValue({ customerId: 'cust-1', estimateId: 'est-held' });
-    mockEstimateRow = { id: 'est-held', annual_total: '600.00', estimate_data: { setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } } };
+    // The draft's totals were revised by staff since; the booking's own snapshot is what the retry answers with.
+    mockEstimateRow = { id: 'est-held', annual_total: '999.00', estimate_data: { mailTerms: { annualCents: 60000, setupCents: 0 } } };
     booking.createSelfBooking.mockResolvedValue({ ok: true, body: { replayed: true, booking: { id: 'b1' } } });
     const res = await bookHome(TOKEN, INPUT(), deps);
     expect(res).toMatchObject({ status: 200, body: { booked: true, price: { annual: 600, monthly: 50, setupFee: 0 } } });
     expect(booking.createSelfBooking.mock.calls[0][0].pricing_estimate_id).toBe('est-held');
     expect(saveEstimate).not.toHaveBeenCalled();
+    // Replay-only: if the guard ever runs (the committed visit was cancelled since), no new visit is inserted.
+    expect(await booking.createSelfBooking.mock.calls[0][0].commitGuard({}, {})).toBe(false);
+    // No snapshot on the draft: the retry still succeeds, with no price.
+    mockEstimateRow = { id: 'est-held', estimate_data: {} };
+    expect((await bookHome(TOKEN, INPUT(), deps)).body).not.toHaveProperty('price');
   });
 
   test('a concurrent submission that createSelfBooking answers as a replay carries no price', async () => {
