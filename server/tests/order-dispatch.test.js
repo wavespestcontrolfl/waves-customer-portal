@@ -710,6 +710,8 @@ test('no identical prior vendor order → needs_review no_binding_total, nothing
   expect(r).toMatchObject({ status: 'needs_review', reason: 'no_binding_total' });
   expect(a.place).not.toHaveBeenCalled();
   expect(notify.mock.calls[0][3].detail).toMatch(/identical order by hand/);
+  // The alert says what a usable prior order is: the adapter also returns none when the latest one was not paid or cannot be read.
+  expect(notify.mock.calls[0][3].detail).toMatch(/has no usable prior order of item 4242 at 500 \(the latest order of exactly that item and count must be paid, with a total that can be read\)/);
 });
 
 test('a binding-total lookup error is a definite pre-submit failure', async () => {
