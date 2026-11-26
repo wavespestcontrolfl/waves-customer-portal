@@ -12,6 +12,8 @@ const path = require('path');
 const db = require('../models/db');
 const adminProtocolsRouter = require('../routes/admin-protocols');
 const { isLaterPackageVisit, PACKAGE_SERVICE_KEYS } = require('../services/protocol-package-stage');
+const { PACKAGE_FOLLOWUP_SERVICE_KEYS } = require('../services/package-followup-booking');
+const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
 
 const PARENT = '11111111-1111-4111-8111-111111111111';
 const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
@@ -69,6 +71,16 @@ describe('isLaterPackageVisit', () => {
     // Without a key the generic name is general pest: one card, repeated.
     const generic = { service_type: 'Pest Control Service', service_key_snapshot: null, catalog_service_key: null };
     expect(await later([row(generic), self(generic)])).toBe(false);
+    // A generic name on any package key is that package's treatment: the matcher has a key rule for flea only, and reads the
+    // name as general pest for the others.
+    for (const [key, name] of [['cockroach_control', 'Cockroach Treatment Service'], ['german_roach', 'German Roach Cleanout Service'], ['vehicle_german_roach', 'Vehicle German Roach Treatment (2 Visits)'], ['bed_bug_treatment', 'Bed Bug Treatment Service'], ['flea_tick', 'Flea Control Service']]) {
+      const earlier = row({ service_type: 'Pest Control Service', service_key_snapshot: null, catalog_service_key: key });
+      expect([key, await later([earlier, self({ service_type: name, service_key_snapshot: key })])]).toEqual([key, true]);
+    }
+    // The key names the program: a flea visit after a cockroach visit is its own first treatment, whatever the names say.
+    expect(await later([row({ service_type: 'Pest Control Service', service_key_snapshot: 'cockroach_control' }), self({ service_type: 'Pest Control Service', service_key_snapshot: 'flea_tick' })])).toBe(false);
+    // A keyed row whose name is a non-treatment card of its program is not a treatment.
+    expect(await later([row({ service_type: 'Bed Bug Inspection', service_key_snapshot: 'bed_bug_treatment' }), self({ service_type: 'Bed Bug Treatment Service', service_key_snapshot: 'bed_bug_treatment' })])).toBe(false);
   });
 
   test('a visit with no id, or in an open-ended series, is never read', async () => {
@@ -106,6 +118,8 @@ describe('isLaterPackageVisit', () => {
       expect([key, await later([row(visit), self(visit)])]).toEqual([key, true]);
     }
     expect([...PACKAGE_SERVICE_KEYS].sort()).toEqual(['bed_bug_treatment', 'cockroach_control', 'flea_tick', 'german_roach', 'german_roach_initial', 'vehicle_german_roach']);
+    // Every service the booking side auto-books a visit 2 for is a package here.
+    for (const key of PACKAGE_FOLLOWUP_SERVICE_KEYS) expect(PACKAGE_SERVICE_KEYS.has(key)).toBe(true);
   });
 
   test('a finite series of another program repeats one card', async () => {
@@ -207,6 +221,41 @@ describe('the schedule panel routes read it for a booked visit', () => {
       expect(res.json).not.toHaveBeenCalled();
       expect(next.mock.calls.length + res.status.mock.calls.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('the completion product defaults read the same identity', () => {
+  const CATALOG = [
+    { id: 'ant', name: 'Atticus Antapex WSG', active: true },
+    { id: 'tek', name: 'Tekko Pro IGR', active: true, default_rate: '1', default_unit: 'fl_oz/gal', epa_reg_number: '53883-335' },
+  ];
+  // A legacy flea booking: a generic name, no snapshot, and the live catalog row says flea.
+  const scheduled = { id: VISIT, customer_id: 'c1', service_id: 'svc-flea', service_type: 'Pest Control Service', service_key_snapshot: null, scheduled_date: '2026-12-15', followup_source_service_id: null, recurring_parent_id: PARENT, recurring_ongoing: false };
+  const legacy = { service_type: 'Pest Control Service', service_key_snapshot: null, catalog_service_key: 'flea_tick' };
+  const defaultsDb = (series) => {
+    const dbh = (table) => {
+      const name = String(table);
+      const rows = name === 'scheduled_services as ps' ? series : (name === 'products_catalog' ? CATALOG : []);
+      const query = {};
+      for (const method of ['where', 'orWhere', 'orWhereNull', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'leftJoin', 'select', 'orderByRaw', 'orderBy', 'andWhere', 'whereRaw', 'modify', 'limit']) query[method] = () => query;
+      query.first = async () => (name === 'scheduled_services' ? scheduled : (name === 'services' ? { service_key: 'flea_tick' } : rows[0] || null));
+      query.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+      query.catch = (fn) => Promise.resolve(rows).catch(fn);
+      return query;
+    };
+    dbh.raw = (sql) => sql;
+    return dbh;
+  };
+  const names = (result) => result.products.map((product) => product.name);
+
+  test('a legacy later flea visit gets treatment 2 defaults: no growth regulator', async () => {
+    const laterVisit = await resolveCompletionProductDefaults({ db: defaultsDb([row(legacy), self(legacy)]), serviceId: VISIT });
+    expect(laterVisit).toMatchObject({ programKey: 'flea' });
+    expect(names(laterVisit)).not.toContain('Tekko Pro IGR');
+    // The same visit with a cancelled first visit is treatment 1, read as flea by its live catalog key.
+    const firstVisit = await resolveCompletionProductDefaults({ db: defaultsDb([row({ ...legacy, status: 'cancelled' }), self(legacy)]), serviceId: VISIT });
+    expect(firstVisit).toMatchObject({ programKey: 'flea' });
+    expect(names(firstVisit)).toEqual(expect.arrayContaining(['Atticus Antapex WSG', 'Tekko Pro IGR']));
   });
 });
 

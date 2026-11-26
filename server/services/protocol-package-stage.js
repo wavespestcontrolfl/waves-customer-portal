@@ -17,9 +17,10 @@
 //
 // It is true only when all of these hold:
 //   - the visit is finite (recurring_ongoing === false); an open-ended series uses the same link;
-//   - the visit is a package service (isPackageService): by its catalog key when it has one, else by its name's program. A
-//     finite series of anything else (a seasonal mosquito plan, a cancelled quarterly pest plan, an exterior roach knockdown,
-//     which has no follow-up) repeats one card;
+//   - the visit is a package service (packageStageOf): by its catalog key when it has one, whatever its name says ("Pest
+//     Control Service" booked on the flea or cockroach catalog row), else by its name's program. A finite series of anything
+//     else (a seasonal mosquito plan, a cancelled quarterly pest plan, an exterior roach knockdown, which has no follow-up)
+//     repeats one card;
 //   - an earlier visit of the series is finite, a package service of the same program, a treatment (not an inspection or a
 //     scope review: the cards the program's follow-up rule replaces), dated before this visit, and not called off. With a
 //     cancelled or skipped first visit, the next one is the first treatment in fact, and the one after it is a later visit
@@ -29,14 +30,20 @@
 
 const { MATCH_RULES, matchServiceProtocol } = require('./protocol-matcher');
 
-const { PACKAGE_FOLLOWUP_SERVICE_KEYS } = require('./package-followup-booking');
-
 const PACKAGE_PROGRAMS = new Set(['cockroach', 'flea', 'bed_bug']);
-// The catalog services sold as a package of treatments: the two-treatment set the booking side auto-books a visit 2 for
-// (package-followup-booking.js), and the German cockroach cleanouts the cockroach visit contract lists beside them
-// (visit-facts-contract.js). A known key outside this set is not a package, whatever its program: the exterior roach
-// knockdown (pest_initial_palmetto_knockdown) is a cockroach card with no follow-up.
-const PACKAGE_SERVICE_KEYS = new Set([...PACKAGE_FOLLOWUP_SERVICE_KEYS, 'german_roach', 'german_roach_initial']);
+// The catalog services sold as a package of treatments, and the program of each: the two-treatment set the booking side
+// auto-books a visit 2 for (package-followup-booking.js), and the German cockroach cleanouts the cockroach visit contract lists
+// beside them (visit-facts-contract.js). A known key outside this map is not a package, whatever its program: the exterior
+// roach knockdown (pest_initial_palmetto_knockdown) is a cockroach card with no follow-up.
+const PACKAGE_KEY_PROGRAMS = Object.freeze({
+  cockroach_control: 'cockroach',
+  vehicle_german_roach: 'cockroach',
+  german_roach: 'cockroach',
+  german_roach_initial: 'cockroach',
+  flea_tick: 'flea',
+  bed_bug_treatment: 'bed_bug',
+});
+const PACKAGE_SERVICE_KEYS = new Set(Object.keys(PACKAGE_KEY_PROGRAMS));
 // A row booked before the catalog link has no key: its name decides, and the exterior knockdown card is still not a package.
 const NO_FOLLOWUP_CARDS = new Set(['american_roach_exterior']);
 // An earlier visit in one of these states happened or is still planned.
@@ -55,10 +62,19 @@ function cardOf(row, protocols) {
   return matchServiceProtocol(protocols, row.service_type, { serviceKey: keyOf(row) });
 }
 
-function isPackageService(row, card) {
-  if (!PACKAGE_PROGRAMS.has(card.programKey)) return false;
+// { program, treatment } for a package service row, else null. `treatment`: whether the row's card is a treatment a later
+// visit follows. With a key, the key names the program; the name's card is read only when it is a card of that program (a
+// generic name, which the matcher reads as general pest, leaves the key's word: a treatment).
+function packageStageOf(row, protocols) {
   const key = keyOf(row);
-  return key ? PACKAGE_SERVICE_KEYS.has(String(key)) : !NO_FOLLOWUP_CARDS.has(card.reason);
+  const card = cardOf(row, protocols);
+  if (key) {
+    const program = PACKAGE_KEY_PROGRAMS[String(key)];
+    if (!program) return null;
+    return { program, treatment: card.programKey === program ? isTreatmentCard(program, card.reason) : true };
+  }
+  if (!PACKAGE_PROGRAMS.has(card.programKey) || NO_FOLLOWUP_CARDS.has(card.reason)) return null;
+  return { program: card.programKey, treatment: isTreatmentCard(card.programKey, card.reason) };
 }
 
 // Whether a card of the program is a treatment a later visit follows: the cards its follow-up rule replaces (followupOf), the
@@ -83,8 +99,8 @@ async function isLaterPackageVisit(dbh, visit, { protocols = null } = {}) {
   const self = series.find((row) => String(row.id) === String(visit.id));
   if (!self || self.recurring_ongoing !== false) return false;
   const protocolSet = protocols || require('../config/protocols.json');
-  const ownCard = cardOf(self, protocolSet);
-  if (!isPackageService(self, ownCard)) return false;
+  const own = packageStageOf(self, protocolSet);
+  if (!own) return false;
   const ownDay = dayOf(self.scheduled_date);
   if (!ownDay) return false;
   return series.some((row) => {
@@ -92,8 +108,8 @@ async function isLaterPackageVisit(dbh, visit, { protocols = null } = {}) {
     if (!VISIT_STANDS.has(String(row.status || '').toLowerCase())) return false;
     const day = dayOf(row.scheduled_date);
     if (!day || day >= ownDay) return false;
-    const card = cardOf(row, protocolSet);
-    return card.programKey === ownCard.programKey && isPackageService(row, card) && isTreatmentCard(card.programKey, card.reason);
+    const earlier = packageStageOf(row, protocolSet);
+    return Boolean(earlier) && earlier.program === own.program && earlier.treatment;
   });
 }
 
