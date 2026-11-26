@@ -217,18 +217,19 @@ const MATCH_RULES = [
     reason: 'palm_followup',
     terms: ['palm injection follow', 'palm injection follow up', 'palm injection recheck', 'palm follow', 'palm recheck', 'injection follow'],
   },
-  // Lethal bronzing prevention, the main palm service (owner 2026-11-25, D8): its own Arbor-OTC card when the booking names it.
-  {
-    programKey: 'palm_injection',
-    visit: 4,
-    reason: 'palm_lethal_bronzing',
-    terms: ['lethal bronzing', 'bronzing', 'arbor otc', 'arbor-otc', 'oxytetracycline'],
-  },
   {
     programKey: 'palm_injection',
     visit: 1,
     reason: 'palm_diagnosis',
     terms: ['palm injection assessment', 'palm injection diagnosis', 'manganese injection', 'magnesium injection'],
+  },
+  // Lethal bronzing prevention, the main palm service (owner 2026-11-25, D8): its own Arbor-OTC card when the booking names it. After the
+  // assessment and follow-up rules: a booking that names both a stage and the disease keeps its stage card.
+  {
+    programKey: 'palm_injection',
+    visit: 4,
+    reason: 'palm_lethal_bronzing',
+    terms: ['lethal bronzing', 'bronzing', 'arbor otc', 'arbor-otc', 'oxytetracycline'],
   },
   {
     programKey: 'palm_injection',
@@ -428,7 +429,9 @@ function programKeyForService(serviceType) {
     normalized.includes('palm recheck') ||
     // Lethal bronzing prevention (D8): its own palm card.
     normalized.includes('lethal bronzing') ||
-    normalized.includes('arbor otc')
+    normalized.includes('bronzing prevention') ||
+    normalized.includes('arbor otc') ||
+    normalized.includes('oxytetracycline')
   ) return 'palm_injection';
   if (
     normalized.includes('termite') ||

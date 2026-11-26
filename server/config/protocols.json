@@ -2662,7 +2662,7 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Palm Injection Assessment\nTag each palm: an ID, a photo, its species, clear-trunk height, trunk width and canopy width\nScreen out: no injection for lethal bronzing symptoms, a dead spear leaf, Ganoderma, Thielaviopsis, Fusarium wilt, fruit the family eats, or open flowers (IMA-jet)\nFirst lethal bronzing visit: drill a sawdust sample from each palm, flame the bit between palms, bag and label each palm separately for the UF Plant Diagnostic Center\nNo Arbor-OTC dose until the palm tests negative",
+        "primary": "Palm Injection Assessment\nTag each palm: an ID, a photo, its species, clear-trunk height, trunk width and canopy width\nScreen out: no injection for lethal bronzing symptoms, a dead spear leaf, Ganoderma, Thielaviopsis, Fusarium wilt, fruit the family eats, or open flowers (for an insect injection)\nFirst lethal bronzing visit: drill a sawdust sample from each palm, flame the bit between palms, bag and label each palm separately for the UF Plant Diagnostic Center\nNo lethal bronzing dose until the palm tests negative",
         "secondary": "Insects: recommend a soil drench first; inject only when a drench is impractical\nNutrient pattern: correct the soil fertilizer first; inject only after it fails\nEscalate severe decline, bud rot or an unclear diagnosis before any treatment\nQuote injection separately from Tree & Shrub service",
         "material_cost": "inspection",
         "labor_cost": "inspection",
@@ -2682,15 +2682,7 @@
             "scope": "plant",
             "treatmentApplied": false
           },
-          "Screen out: no injection for lethal bronzing symptoms, a dead spear leaf, Ganoderma, Thielaviopsis, Fusarium wilt, fruit the family eats, or open flowers (IMA-jet)": {
-            "scope": "plant",
-            "treatmentApplied": false
-          },
           "First lethal bronzing visit: drill a sawdust sample from each palm, flame the bit between palms, bag and label each palm separately for the UF Plant Diagnostic Center": {
-            "scope": "plant",
-            "treatmentApplied": false
-          },
-          "No Arbor-OTC dose until the palm tests negative": {
             "scope": "plant",
             "treatmentApplied": false
           },
@@ -2709,14 +2701,22 @@
           "Quote injection separately from Tree & Shrub service": {
             "scope": "plant",
             "treatmentApplied": false
+          },
+          "Screen out: no injection for lethal bronzing symptoms, a dead spear leaf, Ganoderma, Thielaviopsis, Fusarium wilt, fruit the family eats, or open flowers (for an insect injection)": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "No lethal bronzing dose until the palm tests negative": {
+            "scope": "plant",
+            "treatmentApplied": false
           }
         }
       },
       {
         "visit": 2,
         "month": "Any",
-        "primary": "Palm Injection Application\nConfirm the palm's tag, its test or diagnosis, and the screen-out list before drilling\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 Arborplug; inject with the QUIK-jet Air\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
-        "secondary": "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp\nInsects after a diagnosis (royal palm bug, whitefly, mealybug, soft scale): IMA-jet 10, undiluted, by trunk inch. Royal palm bug under 12 in: ⅜ or ¾ tsp an inch; 12 to 23 in: ¾ or 1⅛ tsp. Not in flower; no food palm for 365 days; no repeat inside a year\nPalmetto weevil or leaf skeletonizer on a valuable palm, before crown damage: TREE-äge G4, the LOW column (10 to 12 in trunk: 5¼ to 7 tsp), may be diluted 1 to 9 with water. Carry the Florida 2(ee) bulletin\nCoconut bud rot, lab-confirmed Phytophthora only: PHOSPHO-jet, 2 tsp to 1 fl oz diluted to 1 to 2 fl oz. Never for Fusarium wilt\nNutrients, last resort after soil fertilizer fails: PALM-jet Mg, 1¼ to 6 tsp by palm size. Alone, max 3 a year, not within 2 weeks of any other injection, not above 90°F\nDiagnosed manganese or iron pattern: Mn-Jet Fe by canopy width (6 to 12 ft: 2¼ to 5 tsp; 12 to 24 ft: 5¼ to 10 tsp; 24 to 48 ft: 10¼ to 15 tsp), one hole, late summer or fall",
+        "primary": "Palm Injection Application\nConfirm the palm's tag, its test or diagnosis, and the screen-out list before drilling\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
+        "secondary": "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp\nInsects after a diagnosis (royal palm bug, whitefly, mealybug, soft scale): IMA-jet 10, undiluted, by trunk inch. Royal palm bug under 12 in: ⅜ or ¾ tsp an inch; 12 to 23 in: ¾ or 1⅛ tsp. Not in flower; no food palm for 365 days; no repeat inside a year\nPalmetto weevil or leaf skeletonizer on a valuable palm, before crown damage: TREE-äge G4, the LOW column (10 to 12 in trunk: 5¼ to 7 tsp), may be diluted 1 to 9 with water. Carry the Florida 2(ee) bulletin\nCoconut bud rot, lab-confirmed Phytophthora only: PHOSPHO-jet, 2 tsp to 1 fl oz diluted to 1 to 2 fl oz; any other palm: the dose from the label's canopy-spread table. Never for Fusarium wilt\nNutrients, last resort after soil fertilizer fails: PALM-jet Mg, 1¼ to 6 tsp by palm size. Alone, max 3 a year, not within 2 weeks of any other injection, not above 90°F\nDiagnosed manganese or iron pattern: Mn-Jet Fe by canopy width (6 to 12 ft: 2¼ to 5 tsp; 12 to 24 ft: 5¼ to 10 tsp; 24 to 48 ft: 10¼ to 15 tsp), one hole, late summer or fall",
         "lineMeta": {
           "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp": {
             "scope": "plant",
@@ -2724,7 +2724,8 @@
             "catalogProductHints": [
               "Arborjet Arbor OTC Fungicide 5 oz"
             ],
-            "completionApplicationMethod": "trunk_injection"
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
           },
           "Insects after a diagnosis (royal palm bug, whitefly, mealybug, soft scale): IMA-jet 10, undiluted, by trunk inch. Royal palm bug under 12 in: ⅜ or ¾ tsp an inch; 12 to 23 in: ¾ or 1⅛ tsp. Not in flower; no food palm for 365 days; no repeat inside a year": {
             "scope": "plant",
@@ -2732,7 +2733,8 @@
             "catalogProductHints": [
               "Arborjet Ima-Jet 10"
             ],
-            "completionApplicationMethod": "trunk_injection"
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
           },
           "Palmetto weevil or leaf skeletonizer on a valuable palm, before crown damage: TREE-äge G4, the LOW column (10 to 12 in trunk: 5¼ to 7 tsp), may be diluted 1 to 9 with water. Carry the Florida 2(ee) bulletin": {
             "scope": "plant",
@@ -2740,15 +2742,8 @@
             "catalogProductHints": [
               "Arborjet Tree-Age G-4 Injectable Insecticide"
             ],
-            "completionApplicationMethod": "trunk_injection"
-          },
-          "Coconut bud rot, lab-confirmed Phytophthora only: PHOSPHO-jet, 2 tsp to 1 fl oz diluted to 1 to 2 fl oz. Never for Fusarium wilt": {
-            "scope": "plant",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Arborjet PHOSPHO-Jet Systemic Fungicide"
-            ],
-            "completionApplicationMethod": "trunk_injection"
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
           },
           "Nutrients, last resort after soil fertilizer fails: PALM-jet Mg, 1¼ to 6 tsp by palm size. Alone, max 3 a year, not within 2 weeks of any other injection, not above 90°F": {
             "scope": "plant",
@@ -2756,7 +2751,8 @@
             "catalogProductHints": [
               "Arborjet Palm-Jet Palm Nutrition"
             ],
-            "completionApplicationMethod": "trunk_injection"
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
           },
           "Diagnosed manganese or iron pattern: Mn-Jet Fe by canopy width (6 to 12 ft: 2¼ to 5 tsp; 12 to 24 ft: 5¼ to 10 tsp; 24 to 48 ft: 10¼ to 15 tsp), one hole, late summer or fall": {
             "scope": "plant",
@@ -2764,17 +2760,14 @@
             "catalogProductHints": [
               "ArborJet Mn-Jet Fe Micros"
             ],
-            "completionApplicationMethod": "trunk_injection"
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
           },
           "Palm Injection Application": {
             "scope": "plant",
             "treatmentApplied": false
           },
           "Confirm the palm's tag, its test or diagnosis, and the screen-out list before drilling": {
-            "scope": "plant",
-            "treatmentApplied": false
-          },
-          "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 Arborplug; inject with the QUIK-jet Air": {
             "scope": "plant",
             "treatmentApplied": false
           },
@@ -2789,6 +2782,19 @@
           "A leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why": {
             "scope": "plant",
             "treatmentApplied": false
+          },
+          "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Coconut bud rot, lab-confirmed Phytophthora only: PHOSPHO-jet, 2 tsp to 1 fl oz diluted to 1 to 2 fl oz; any other palm: the dose from the label's canopy-spread table. Never for Fusarium wilt": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Arborjet PHOSPHO-Jet Systemic Fungicide"
+            ],
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
           }
         },
         "material_cost": "inventory",
@@ -2849,7 +2855,7 @@
       {
         "visit": 4,
         "month": "Any",
-        "primary": "Lethal Bronzing Prevention\nConfirm the palm tested negative (first visit) or is on the 3-month plan\nScreen out: symptoms, a dead spear leaf, or fruit the family eats\nLethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 Arborplug; inject with the QUIK-jet Air\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
+        "primary": "Lethal Bronzing Prevention\nConfirm the palm tested negative (first visit) or is on the 3-month plan\nScreen out: symptoms, a dead spear leaf, or fruit the family eats\nLethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
         "secondary": "A palm with symptoms or a positive test: no dose; recommend removal\nTell the customer: keep the base of the palm clear; no dry time; the plugs stay in the trunk; we come back every 3 months",
         "lineMeta": {
           "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp": {
@@ -2858,7 +2864,8 @@
             "catalogProductHints": [
               "Arborjet Arbor OTC Fungicide 5 oz"
             ],
-            "completionApplicationMethod": "trunk_injection"
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
           },
           "Lethal Bronzing Prevention": {
             "scope": "plant",
@@ -2869,10 +2876,6 @@
             "treatmentApplied": false
           },
           "Screen out: symptoms, a dead spear leaf, or fruit the family eats": {
-            "scope": "plant",
-            "treatmentApplied": false
-          },
-          "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 Arborplug; inject with the QUIK-jet Air": {
             "scope": "plant",
             "treatmentApplied": false
           },
@@ -2893,6 +2896,10 @@
             "treatmentApplied": false
           },
           "Tell the customer: keep the base of the palm clear; no dry time; the plugs stay in the trunk; we come back every 3 months": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector": {
             "scope": "plant",
             "treatmentApplied": false
           }

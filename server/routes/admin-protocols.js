@@ -61,7 +61,7 @@ const { stripPriceTokensFromText, deepStripPriceTokens, stripOwnerOnlyProtocolCo
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
 const roundsCatchUp = require('../services/lawn-rounds-catchup');
 const { completionRateFields } = require('../utils/protocol-label-rate');
-const { addonCardHints, labelRateFor } = require('../services/completion-product-defaults');
+const { addonCardHints, labelRateFor, resolveCatalogProductForName } = require('../services/completion-product-defaults');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -646,7 +646,10 @@ function buildCompletionActions({ lines, products, programKey, visit, addonHints
     const lineForMatch = meta && Array.isArray(meta.catalogProductHints)
       ? { ...line, catalogProductHints: meta.catalogProductHints }
       : line;
-    const product = matchCatalogProduct(lineForMatch, products);
+    // A line flagged exactCatalogName (an injection label's own bottle) takes that row or none: a near name is another formulation.
+    const product = meta?.exactCatalogName
+      ? resolveCatalogProductForName(meta.catalogProductHints?.[0], products, { exactOnly: true })
+      : matchCatalogProduct(lineForMatch, products);
     const kind = actionKindForLine(line, product);
     // De-branded lines (have lineMeta) display their own text — do NOT run
     // actionLabel, which appends the matched product's brand name and re-leaks

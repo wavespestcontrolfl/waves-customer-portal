@@ -40,9 +40,34 @@ describe('palm injection card', () => {
     expect(visit('Palm Injection Assessment')).toBe(1);
   });
 
+  test('the job card never names a product on the assessment and takes only the exact bottle on an injection line', async () => {
+    const jobCard = require('../services/job-card');
+    const card = (catalog, serviceType) => jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType, serviceCategory: 'tree_shrub', serviceKey: 'palm_injection', scheduledDate: '2026-11-27', addons: [] }, protocols, catalog, dbh: () => ({}) });
+    expect((await card(PRODUCTS, 'Palm Injection Assessment')).lines).toEqual([]);
+    const full = await card(PRODUCTS, 'Palm Injection Service');
+    expect(full.lines.map((l) => [l.product.id, l.selected]).sort()).toEqual([['g4', false], ['ima10', false], ['mn', false], ['otc5', false], ['phos', false], ['pj', false]]);
+    // G-4 and IMA-jet 10 missing from the catalog: the card leaves them unresolved, never R10 or the 5% IMA-jet.
+    const partial = await card(PRODUCTS.filter((p) => !['g4', 'ima10'].includes(p.id)), 'Palm Injection Service');
+    expect(partial.lines.map((l) => l.product.id)).not.toEqual(expect.arrayContaining(['r10']));
+    expect(partial.lines.map((l) => l.product.id)).not.toContain('ima5');
+    const actions = buildCompletionActions({ lines: [...parseProtocolLines(visitOf(2).secondary, 'conditional')], products: PRODUCTS.filter((p) => p.id !== 'g4'), programKey: 'palm_injection', visit: visitOf(2) });
+    expect(actions.map((a) => a.product?.id)).not.toContain('r10');
+    // Its safety rules ride the card.
+    expect(full.procedure.safety.join(' ')).toMatch(/Never inject a palm whose fruit or nuts the family eats/);
+  });
+
+  test('a stage name beats the disease name, and both prevention names reach the palm program', () => {
+    const visit = (name) => matchServiceProtocol(protocols, name).matchedVisit?.visit;
+    const program = (name) => matchServiceProtocol(protocols, name).programKey;
+    expect(visit('Palm Injection Assessment - Lethal Bronzing')).toBe(1);
+    expect(visit('Palm Injection Follow Up - Lethal Bronzing')).toBe(3);
+    expect([program('Oxytetracycline Injection'), visit('Oxytetracycline Injection')]).toEqual(['palm_injection', 4]);
+    expect([program('Palm Bronzing Prevention'), visit('Palm Bronzing Prevention')]).toEqual(['palm_injection', 4]);
+  });
+
   test('the assessment tests before the first Arbor-OTC dose and screens out food palms', () => {
     const steps = visitOf(1).primary;
-    expect(steps).toMatch(/No Arbor-OTC dose until the palm tests negative/);
+    expect(steps).toMatch(/No lethal bronzing dose until the palm tests negative/);
     expect(steps).toMatch(/fruit the family eats/);
     expect(protocols.palm_injection.safety_rules.join(' ')).toMatch(/Never inject a palm whose fruit or nuts the family eats/);
   });

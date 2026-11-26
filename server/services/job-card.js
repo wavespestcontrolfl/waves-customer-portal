@@ -1607,7 +1607,10 @@ function linesFromLineMeta(visit, catalog) {
     for (const hint of meta?.catalogProductHints || []) {
       // An area add-on visit (labelFacts) finds its product through the one resolver the feed, the picker and the
       // yearly limit use (area-addon-governed-rate.js), so a renamed product is the same row on every surface.
-      const product = visit?.labelFacts ? resolveProductIn(hint, catalog).product : matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
+      // A line flagged exactCatalogName (an injection label's own bottle) takes that row or none: a near name is another formulation.
+      const product = visit?.labelFacts ? resolveProductIn(hint, catalog).product
+        : meta?.exactCatalogName ? resolveCatalogProductForName(hint, catalog, { exactOnly: true })
+          : matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
       if (!product || lines.some((l) => l.raw === raw && l.product.id === product.id)) continue;
       // Conditional when the line sits in the visit's secondary text OR is
       // phrased as a condition (isConditionalLine).
@@ -1697,6 +1700,8 @@ function linesFromProtocolText(visit, catalog) {
   const parsed = [...parseProtocolLines(visit?.primary, 'base'), ...parseProtocolLines(visit?.secondary, 'conditional')];
   const out = [];
   for (const line of parsed) {
+    // A line its lineMeta marks as no treatment (an inspection, a screen-out, a trap) names no product, whatever its words say.
+    if (visit?.lineMeta?.[line.raw]?.treatmentApplied === false) continue;
     // The parser's own flag (secondary text, "if …") plus the wider
     // condition phrasing the protocols use: a primary line the tech has to
     // justify is conditional work, never selected base work.
