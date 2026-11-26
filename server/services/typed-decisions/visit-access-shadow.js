@@ -221,7 +221,8 @@ function currentAnswers({ providers, questionIds, stateRow, existing, subjectHas
     if (complete(onState[provider])) known[provider] = onState[provider];
     else if (complete(fromReviews)) { known[provider] = fromReviews; backfill[provider] = fromReviews; }
   }
-  return { known, backfill };
+  const onStateProviders = Object.keys(onState).filter((provider) => Object.keys(onState[provider] || {}).length);
+  return { known, backfill, onStateProviders };
 }
 
 // One writer at a time per visit across the sweep's state publish and a
@@ -464,7 +465,7 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
     .select('provider', 'question_id', 'subject_hash', 'label_status', 'sampled_for', 'jev_answer');
   const questionIds = Object.keys(pkg.questions);
   const stateRow = await dbh(STATES_TABLE).where({ scheduled_service_id: svc.id, subject_hash: built.subjectHash }).first('answers');
-  const { known, backfill } = currentAnswers({ providers, questionIds, stateRow, existing, subjectHash: built.subjectHash });
+  const { known, backfill, onStateProviders } = currentAnswers({ providers, questionIds, stateRow, existing, subjectHash: built.subjectHash });
   const due = providers.filter((provider) => !known[provider]);
   // The state is kept before anyone is asked or any row is requeued, so every
   // stored answer has the exact text it was judged on, whatever is edited
@@ -482,6 +483,9 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
     .onConflict(['scheduled_service_id', 'subject_hash'])
     .merge({
       created_at: trx.fn.now(),
+      // The same digest restamped for a different customer (a merge or undo) is new evidence: the row takes a new id,
+      // so a technician's card read for the previous customer names an id that no longer exists.
+      id: trx.raw(`CASE WHEN ${STATES_TABLE}.customer_id IS DISTINCT FROM ?::uuid THEN gen_random_uuid() ELSE ${STATES_TABLE}.id END`, [svc.customer_id]),
       customer_id: svc.customer_id,
       ...(answers ? { answers: trx.raw(`COALESCE(${STATES_TABLE}.answers, '{}'::jsonb) || ?::jsonb`, [JSON.stringify(answers)]) } : {}),
     });
@@ -501,7 +505,9 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
   // answered for this state is a first attempt; one that already holds any
   // provider's answer for it is a retry, whichever provider is down. So an
   // outage of either provider never keeps later visits from being asked.
-  const retry = existing.some((row) => row.subject_hash === built.subjectHash);
+  // A provider whose current answers sit only on the state row (its review rows are frozen under an older digest) has
+  // answered too.
+  const retry = existing.some((row) => row.subject_hash === built.subjectHash) || onStateProviders.length > 0;
   const budget = retry ? 'retryVisits' : 'askedVisits';
   if (out[budget] >= (retry ? MAX_RETRY_VISITS : MAX_ASKED_VISITS)) { out.deferred += 1; return; }
   out[budget] += 1;

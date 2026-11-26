@@ -89,6 +89,8 @@ describe('visit access flags: the quote a technician reads', () => {
   let visitId;
   let seq = 0;
   let lastHash;
+  let lastId;
+  const ids = {};
 
   const visit = () => ({ id: visitId, customer_id: customerId });
   // One stored state for a customer, with the providers' answers on it ({ provider: { question: boolean } },
@@ -97,7 +99,8 @@ describe('visit access flags: the quote a technician reads', () => {
     seq += 1;
     const hash = `${String(seq).padStart(2, '0')}`.padEnd(64, 'a');
     const onState = Object.fromEntries(Object.entries(answers).map(([provider, said]) => [provider, Object.fromEntries(QUESTIONS.map((q) => [q, Boolean(said[q])]))]));
-    await database('visit_access_states').insert({ scheduled_service_id: visitId, subject_hash: hash, state: JSON.stringify(state), customer_id: customer, answers: JSON.stringify(onState), created_at: at });
+    const [{ id: stateId }] = await database('visit_access_states').insert({ scheduled_service_id: visitId, subject_hash: hash, state: JSON.stringify(state), customer_id: customer, answers: JSON.stringify(onState), created_at: at }).returning('id');
+    ids[hash] = stateId;
     for (const [provider, said] of Object.entries(answers)) {
       for (const q of QUESTIONS) {
         await database('decision_reviews').insert({
@@ -107,10 +110,11 @@ describe('visit access flags: the quote a technician reads', () => {
       }
     }
     lastHash = hash;
+    lastId = stateId;
     return hash;
   }
   const tap = (questionId, verdict, over = {}) => flags.tapAccessFlag(database, {
-    visitId, scope: (q) => q, questionId, verdict, subjectHash: lastHash, ...over,
+    visitId, scope: (q) => q, questionId, verdict, evidenceId: lastId, ...over,
   }, who);
   const lock = async () => { const holder = await database.transaction(); await lockVisitAccess(holder, visitId); return holder; };
   const verdicts = () => database('visit_access_verdicts').where({ scheduled_service_id: visitId }).orderBy('created_at');
@@ -154,11 +158,11 @@ describe('visit access flags: the quote a technician reads', () => {
     const out = await flags.accessFlagsFor(database, visit());
     expect(out.map((f) => f.questionId)).toEqual(['dog_on_property', 'contact_before_arrival']);
     expect(out[0]).toEqual({
-      questionId: 'dog_on_property', title: 'Dog or other animal may be loose', tone: 'amber', status: 'open', subjectHash: hash,
+      questionId: 'dog_on_property', title: 'Dog or other animal may be loose', tone: 'amber', status: 'open', evidenceId: ids[hash],
       quote: 'Our dog Biscuit will be in the yard', source: 'Customer text', saveToFile: 'pets',
     });
     expect(out[0]).not.toHaveProperty('readAt');
-    expect(out[1]).toMatchObject({ tone: 'plain', title: 'Customer asked for a call or text before you arrive', quote: 'Please text first', saveToFile: null, subjectHash: hash });
+    expect(out[1]).toMatchObject({ tone: 'plain', title: 'Customer asked for a call or text before you arrive', quote: 'Please text first', saveToFile: null, evidenceId: ids[hash] });
   });
 
   test('only the newest stored state counts: an older state\'s yes does not show', async () => {
@@ -224,9 +228,9 @@ describe('visit access flags: the quote a technician reads', () => {
   test('a tap for evidence that moved, or for a question that shows no card, is a conflict and writes nothing', async () => {
     const old = await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T09:00:00Z') });
     await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T10:00:00Z') });
-    await expect(tap('dog_on_property', 'right', { subjectHash: old })).resolves.toEqual({ conflict: true });
+    await expect(tap('dog_on_property', 'right', { evidenceId: ids[old] })).resolves.toEqual({ conflict: true });
     await expect(tap('needs_code_key_or_person', 'right')).resolves.toEqual({ conflict: true });
-    await expect(tap('dog_on_property', 'right', { subjectHash: 'f'.repeat(64) })).resolves.toEqual({ conflict: true });
+    await expect(tap('dog_on_property', 'right', { evidenceId: randomUUID() })).resolves.toEqual({ conflict: true });
     expect(await verdicts()).toEqual([]);
     expect(await pets()).toBeUndefined();
   });
@@ -267,20 +271,20 @@ describe('visit access flags: the quote a technician reads', () => {
     expect(await database('property_preferences').where({ customer_id: customerId }).first()).toBeUndefined();
   });
 
-  test('a Right carries forward to newer evidence; a Wrong does not; a verdict on the newest evidence wins', async () => {
+  test('a Right carries forward to newer evidence; a Wrong does not; a verdict on the newest evidence hides its card', async () => {
     await seed({ answers: { typesafe: { dog_on_property: true, past_access_problem: true, contact_before_arrival: true } }, at: new Date('2026-10-06T09:00:00Z') });
     await tap('dog_on_property', 'right');
     await tap('past_access_problem', 'wrong');
     // The pet save changed the state: a newer read asks again.
     const second = await seed({ answers: { typesafe: { dog_on_property: true, past_access_problem: true, contact_before_arrival: true } }, at: new Date('2026-10-06T10:00:00Z') });
     const out = await flags.accessFlagsFor(database, visit());
-    expect(out.map((f) => [f.questionId, f.status, f.subjectHash])).toEqual([
-      ['dog_on_property', 'right', second], ['contact_before_arrival', 'open', second], ['past_access_problem', 'open', second],
+    expect(out.map((f) => [f.questionId, f.status, f.evidenceId])).toEqual([
+      ['dog_on_property', 'right', ids[second]], ['contact_before_arrival', 'open', ids[second]], ['past_access_problem', 'open', ids[second]],
     ].sort((a, b) => QUESTIONS.indexOf(a[0]) - QUESTIONS.indexOf(b[0])));
     expect(out.find((f) => f.questionId === 'dog_on_property').saveToFile).toBeNull();
-    // a Wrong on the newest evidence beats the carried Right
-    await tap('dog_on_property', 'wrong');
-    expect((await flags.accessFlagsFor(database, visit())).map((f) => f.questionId)).not.toContain('dog_on_property');
+    // a verdict already on the newest evidence beats the carried Right (the other question is open and takes one)
+    await tap('contact_before_arrival', 'wrong');
+    expect((await flags.accessFlagsFor(database, visit())).map((f) => f.questionId)).not.toContain('contact_before_arrival');
   });
 
   test('a carried Right still shows when the newest state holds no yes for the question', async () => {
@@ -289,7 +293,7 @@ describe('visit access flags: the quote a technician reads', () => {
     const second = await seed({ answers: {}, at: new Date('2026-10-06T10:00:00Z') });
     const out = await flags.accessFlagsFor(database, visit());
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ questionId: 'dog_on_property', status: 'right', subjectHash: second });
+    expect(out[0]).toMatchObject({ questionId: 'dog_on_property', status: 'right', evidenceId: ids[second] });
   });
 
   test('a visit that is not the technician\'s, or no longer at one premises, is not found and writes nothing', async () => {
@@ -336,7 +340,7 @@ describe('visit access flags: the quote a technician reads', () => {
     // a customer merge or undo changes the visit's customer; the visit id stays
     const other = { id: visitId, customer_id: randomUUID() };
     await expect(flags.accessFlagsFor(database, other)).resolves.toEqual([]);
-    await expect(flags.tapAccessFlag(database, { visitId, scope: (q) => q, questionId: 'dog_on_property', verdict: 'right', subjectHash: lastHash }, who)).resolves.toMatchObject({ saved: true });
+    await expect(flags.tapAccessFlag(database, { visitId, scope: (q) => q, questionId: 'dog_on_property', verdict: 'right', evidenceId: lastId }, who)).resolves.toMatchObject({ saved: true });
     await database('visit_access_verdicts').del();
     await database('property_preferences').del();
     await database('scheduled_services').update({ customer_id: other.customer_id });
@@ -356,8 +360,14 @@ describe('visit access flags: the quote a technician reads', () => {
     // the visit moves to another customer (a merge or undo) and the sweep restamps the identical state for them
     const next = randomUUID();
     await database('scheduled_services').update({ customer_id: next });
-    await database('visit_access_states').update({ customer_id: next });
-    expect((await flags.accessFlagsFor(database, { id: visitId, customer_id: next }))[0]).toMatchObject({ questionId: 'dog_on_property', status: 'open', saveToFile: 'pets' });
+    await database('visit_access_states').update({ customer_id: next, id: randomUUID() });
+    const staleCardId = lastId;
+    lastId = (await database('visit_access_states').where({ scheduled_service_id: visitId }).first()).id;
+    // a card still open on A's screen (A's evidence id) is refused for B: nothing is written or saved on B
+    await expect(tap('dog_on_property', 'right', { evidenceId: staleCardId })).resolves.toEqual({ conflict: true });
+    expect(await verdicts()).toHaveLength(1);
+    expect(await database('property_preferences').where({ customer_id: next }).first()).toBeUndefined();
+    expect((await flags.accessFlagsFor(database, { id: visitId, customer_id: next }))[0]).toMatchObject({ questionId: 'dog_on_property', status: 'open', saveToFile: 'pets', evidenceId: lastId });
     await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'right', saved: true });
     expect((await verdicts()).map((v) => v.customer_id).sort()).toEqual([customerId, next].sort());
     expect(await database('property_preferences').where({ customer_id: next }).first()).toMatchObject({ pet_details: expect.stringMatching(PET_LINE) });
@@ -376,6 +386,19 @@ describe('visit access flags: the quote a technician reads', () => {
     await holder.commit();
     await expect(racing).resolves.toEqual({ status: 'right', saved: true });
     await expect(tap('dog_on_property', 'right', { visitId: 'not-a-uuid' })).resolves.toEqual({ notFound: true });
+  });
+
+  test('a carried Right has no buttons and takes no verdict: nothing is inserted and a cleared pet field stays cleared', async () => {
+    await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T09:00:00Z') });
+    await expect(tap('dog_on_property', 'right')).resolves.toEqual({ status: 'right', saved: true });
+    await database('property_preferences').update({ pet_details: null });
+    // the pet save changed the state: a newer state carries the Right forward
+    await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T10:00:00Z') });
+    expect((await flags.accessFlagsFor(database, visit()))[0]).toMatchObject({ status: 'right', saveToFile: null });
+    await expect(tap('dog_on_property', 'right')).resolves.toEqual({ conflict: true });
+    await expect(tap('dog_on_property', 'wrong')).resolves.toEqual({ conflict: true });
+    expect(await verdicts()).toHaveLength(1);
+    expect((await pets()).pet_details).toBeNull();
   });
 
   test('a Right given for another customer never carries to this one', async () => {

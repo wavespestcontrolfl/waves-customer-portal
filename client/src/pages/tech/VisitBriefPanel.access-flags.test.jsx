@@ -23,14 +23,16 @@ const SERVICE = {
 };
 const stop = { key: 'row:svc-1', isVisit: false, services: [SERVICE], primary: SERVICE, liveCount: 1 };
 
-const HASH = 'a'.repeat(64);
+const EVID = '11111111-1111-4111-8111-111111111111';
+const EVID2 = '22222222-2222-4222-8222-222222222222';
+const EVID3 = '33333333-3333-4333-8333-333333333333';
 const DOG = {
   questionId: 'dog_on_property', title: 'Dog or other animal may be loose', tone: 'amber', status: 'open',
-  subjectHash: HASH, quote: 'Our dog Biscuit will be in the yard', source: 'Customer text', saveToFile: 'pets',
+  evidenceId: EVID, quote: 'Our dog Biscuit will be in the yard', source: 'Customer text', saveToFile: 'pets',
 };
 const CALL = {
   questionId: 'contact_before_arrival', title: 'Customer asked for a call or text before you arrive', tone: 'plain', status: 'open',
-  subjectHash: HASH, quote: null, source: 'Read: customer text', saveToFile: null,
+  evidenceId: EVID, quote: null, source: 'Read: customer text', saveToFile: null,
 };
 
 function renderWith(brief, request = vi.fn(async () => ({ status: 'right' })), onRetry = vi.fn()) {
@@ -81,7 +83,7 @@ describe('Visit Brief: Before you go in', () => {
     const request = renderWith({ brief: null, accessFlags: [CALL] }, vi.fn(async () => ({ status: 'right' })));
     fireEvent.click(screen.getByRole('button', { name: 'Right' }));
     await waitFor(() => expect(screen.getByText('Marked right. Thanks.')).toBeInTheDocument());
-    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/access-flags/contact_before_arrival', { method: 'POST', body: JSON.stringify({ verdict: 'right', subjectHash: HASH }) });
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/access-flags/contact_before_arrival', { method: 'POST', body: JSON.stringify({ verdict: 'right', evidenceId: EVID }) });
     expect(screen.queryByRole('button', { name: 'Wrong' })).toBeNull();
   });
 
@@ -95,7 +97,7 @@ describe('Visit Brief: Before you go in', () => {
     const request = renderWith({ brief: null, accessFlags: [DOG] }, vi.fn(async () => ({ status: 'wrong' })));
     fireEvent.click(screen.getByRole('button', { name: 'Wrong' }));
     await waitFor(() => expect(screen.getByText('Marked wrong. Hidden for this visit.')).toBeInTheDocument());
-    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/access-flags/dog_on_property', { method: 'POST', body: JSON.stringify({ verdict: 'wrong', subjectHash: HASH }) });
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/access-flags/dog_on_property', { method: 'POST', body: JSON.stringify({ verdict: 'wrong', evidenceId: EVID }) });
   });
 
   it('a flag already marked right shows its line on load, with no buttons', () => {
@@ -125,11 +127,11 @@ describe('Visit Brief: Before you go in', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Wrong' }));
     await waitFor(() => expect(screen.getByText('Marked wrong. Hidden for this visit.')).toBeInTheDocument());
     // New evidence (another hash) for the same question: the old answer does not hide the new card.
-    rerender(view({ ...CALL, subjectHash: 'b'.repeat(64) }));
+    rerender(view({ ...CALL, evidenceId: EVID2 }));
     expect(screen.queryByText('Marked wrong. Hidden for this visit.')).toBeNull();
     expect(screen.getByRole('button', { name: 'Right' })).toBeInTheDocument();
     // The server now says right (answered elsewhere): no buttons, whatever this card held before.
-    rerender(view({ ...CALL, subjectHash: 'b'.repeat(64), status: 'right' }));
+    rerender(view({ ...CALL, evidenceId: EVID2, status: 'right' }));
     expect(screen.getByText('Marked right. Thanks.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Right' })).toBeNull();
   });
@@ -162,7 +164,7 @@ describe('Visit Brief: Before you go in', () => {
           status: 'ready',
           byService: {
             'svc-1': { estimate: null, brief: { brief: null, accessFlags: [{ ...DOG, status: 'right' }] } },
-            'svc-2': { estimate: null, brief: { brief: null, accessFlags: [{ ...DOG, subjectHash: 'c'.repeat(64) }] } },
+            'svc-2': { estimate: null, brief: { brief: null, accessFlags: [{ ...DOG, evidenceId: EVID3 }] } },
           },
         }}
         request={request}
@@ -176,6 +178,6 @@ describe('Visit Brief: Before you go in', () => {
     expect(screen.getByText('Marked right. Thanks.')).toBeInTheDocument();
     // the sibling is still open, and its tap goes to its own visit with its own evidence
     fireEvent.click(screen.getByRole('button', { name: 'Wrong' }));
-    await waitFor(() => expect(request).toHaveBeenCalledWith('/admin/schedule/svc-2/access-flags/dog_on_property', { method: 'POST', body: JSON.stringify({ verdict: 'wrong', subjectHash: 'c'.repeat(64) }) }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith('/admin/schedule/svc-2/access-flags/dog_on_property', { method: 'POST', body: JSON.stringify({ verdict: 'wrong', evidenceId: EVID3 }) }));
   });
 });

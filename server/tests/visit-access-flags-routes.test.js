@@ -38,7 +38,8 @@ jest.mock('../services/previsit-brief', () => ({
   WDO_BRIEF_TYPE: 'wdo_inspection',
   VISIT_BRIEF_TYPE: 'visit_brief_v1',
 }));
-jest.mock('../services/away-watch', () => ({ ...jest.requireActual('../services/away-watch'), awayWatchCardLines: jest.fn(async () => null) }));
+const mockAwayWatchCardLines = jest.fn(async () => null);
+jest.mock('../services/away-watch', () => ({ ...jest.requireActual('../services/away-watch'), awayWatchCardLines: (...a) => mockAwayWatchCardLines(...a) }));
 const mockAccessFlagsFor = jest.fn();
 const mockTap = jest.fn();
 jest.mock('../services/visit-access-flags', () => ({
@@ -59,11 +60,13 @@ const setGate = (value) => {
   if (value) { process.env.GATE_TYPED_DECISIONS = 'true'; process.env.GATE_VISIT_ACCESS_FLAGS = value; }
 };
 
-const HASH = 'a'.repeat(64);
-const FLAG = { questionId: 'dog_on_property', subjectHash: HASH, title: 'Dog or other animal may be loose', tone: 'amber', status: 'open' };
+const EVID = '11111111-1111-4111-8111-111111111111';
+const FLAG = { questionId: 'dog_on_property', evidenceId: EVID, title: 'Dog or other animal may be loose', tone: 'amber', status: 'open' };
 
 // `owned` answers the atomic ownership-scoped fetch; `stillOwned` the recheck probe after the flags were read.
+let mockCurrentCustomer = 'cust-1';
 function stubVisit({ owned = true, stillOwned = true, recheckThrows = false, currentCustomer = 'cust-1' } = {}) {
+  mockCurrentCustomer = currentCustomer;
   const row = { id: 'svc-1', customer_id: 'cust-1', pre_service_brief: null };
   db.mockImplementation(() => {
     const q = {};
@@ -76,7 +79,7 @@ function stubVisit({ owned = true, stillOwned = true, recheckThrows = false, cur
         if (recheckThrows) throw new Error('db down');
         // the recheck names the customer the brief was built for; the visit's current customer decides
         const named = q.cond['scheduled_services.customer_id'];
-        return stillOwned && (named === undefined || named === currentCustomer) ? { id: 'svc-1' } : undefined;
+        return stillOwned && (named === undefined || named === mockCurrentCustomer) ? { id: 'svc-1' } : undefined;
       }
       return owned ? row : undefined;
     });
@@ -162,6 +165,30 @@ describe('GET /:id/visit-brief access flags', () => {
     });
   });
 
+  test('with Away Watch AND the cards on, a customer merge during the Away Watch lookup withholds the whole answer', async () => {
+    const saved = process.env.GATE_AWAY_WATCH;
+    process.env.GATE_AWAY_WATCH = 'true';
+    try {
+      stubVisit();
+      // the customer changes while the Away Watch lookup runs, after the flags were read
+      mockAwayWatchCardLines.mockImplementationOnce(async () => { mockCurrentCustomer = 'cust-2'; return { lines: ['Away Watch: take 3 photos'] }; });
+      await withServer(async (base) => {
+        const res = await call(base, '/admin/schedule/svc-1/visit-brief', { role: 'technician' });
+        expect(await res.json()).toEqual({ brief: null });
+      });
+      expect(mockAccessFlagsFor).toHaveBeenCalled();
+      expect(mockAwayWatchCardLines).toHaveBeenCalled();
+      // unchanged customer: everything serves
+      stubVisit();
+      await withServer(async (base) => {
+        const res = await call(base, '/admin/schedule/svc-1/visit-brief', { role: 'technician' });
+        expect(await res.json()).toEqual({ brief: null, accessFlags: [FLAG] });
+      });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_AWAY_WATCH; else process.env.GATE_AWAY_WATCH = saved;
+    }
+  });
+
   test('an ownership check that cannot be made withholds the answer too', async () => {
     stubVisit({ recheckThrows: true });
     mockAccessFlagsFor.mockResolvedValue([]);
@@ -174,7 +201,7 @@ describe('GET /:id/visit-brief access flags', () => {
 
 describe('POST /:id/access-flags/:questionId', () => {
   const tap = (base, over = {}) => call(base, `/admin/schedule/svc-1/access-flags/${over.questionId || 'dog_on_property'}`, {
-    method: 'POST', role: over.role || 'technician', body: 'body' in over ? over.body : { verdict: 'right', subjectHash: HASH },
+    method: 'POST', role: over.role || 'technician', body: 'body' in over ? over.body : { verdict: 'right', evidenceId: EVID },
   });
 
   test.each(['shadow', null])('gate %s: 404 before anything is read', async (value) => {
@@ -186,14 +213,14 @@ describe('POST /:id/access-flags/:questionId', () => {
     expect(mockTap).not.toHaveBeenCalled();
   });
 
-  test('an unknown flag, verdict or evidence hash is 400 and touches nothing', async () => {
+  test('an unknown flag, verdict or evidence id is 400 and touches nothing', async () => {
     stubVisit();
     await withServer(async (base) => {
       expect((await tap(base, { questionId: 'constructor' })).status).toBe(400);
       expect((await tap(base, { questionId: 'not_a_question' })).status).toBe(400);
-      expect((await tap(base, { body: { verdict: 'maybe', subjectHash: HASH } })).status).toBe(400);
+      expect((await tap(base, { body: { verdict: 'maybe', evidenceId: EVID } })).status).toBe(400);
       expect((await tap(base, { body: { verdict: 'right' } })).status).toBe(400);
-      expect((await tap(base, { body: { verdict: 'right', subjectHash: 'not-a-hash' } })).status).toBe(400);
+      expect((await tap(base, { body: { verdict: 'right', evidenceId: 'not-an-id' } })).status).toBe(400);
       expect((await tap(base, { body: undefined })).status).toBe(400);
     });
     expect(mockTap).not.toHaveBeenCalled();
@@ -217,7 +244,7 @@ describe('POST /:id/access-flags/:questionId', () => {
     });
   });
 
-  test('the assigned technician taps: the tap carries the visit, the evidence hash and the assignment scope', async () => {
+  test('the assigned technician taps: the tap carries the visit, the evidence id and the assignment scope', async () => {
     stubVisit();
     mockTap.mockResolvedValueOnce({ status: 'right', saved: true });
     await withServer(async (base) => {
@@ -225,7 +252,7 @@ describe('POST /:id/access-flags/:questionId', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ status: 'right', saved: true });
     });
-    expect(mockTap).toHaveBeenCalledWith(db, expect.objectContaining({ visitId: 'svc-1', questionId: 'dog_on_property', verdict: 'right', subjectHash: HASH, scope: expect.any(Function) }),
+    expect(mockTap).toHaveBeenCalledWith(db, expect.objectContaining({ visitId: 'svc-1', questionId: 'dog_on_property', verdict: 'right', evidenceId: EVID, scope: expect.any(Function) }),
       expect.objectContaining({ labeledBy: 'tech@example.test', actorId: 'tech-1' }));
   });
 
@@ -233,7 +260,7 @@ describe('POST /:id/access-flags/:questionId', () => {
     stubVisit();
     mockTap.mockResolvedValueOnce({ status: 'wrong', saved: false });
     await withServer(async (base) => {
-      expect(await (await tap(base, { body: { verdict: 'wrong', subjectHash: HASH } })).json()).toEqual({ status: 'wrong' });
+      expect(await (await tap(base, { body: { verdict: 'wrong', evidenceId: EVID } })).json()).toEqual({ status: 'wrong' });
     });
   });
 });

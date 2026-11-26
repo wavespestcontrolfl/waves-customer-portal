@@ -457,6 +457,42 @@ describe('visit access shadow: rules that need no database', () => {
     expect(await rows(home)).toHaveLength(Object.keys(pkg.questions).length);
   });
 
+  test('the same digest restamped for a different customer is new evidence: the state row takes a new id', async () => {
+    const home = await visit();
+    await sweep();
+    const [before] = await database('visit_access_states').where({ scheduled_service_id: home });
+    // an unchanged pass keeps the row's id
+    await sweep();
+    expect((await database('visit_access_states').where({ scheduled_service_id: home }))[0].id).toBe(before.id);
+    // a customer merge or undo: the visit now belongs to a customer with the same address and no texts, so the digest is identical
+    const next = randomUUID();
+    await database('customers').insert({ id: next, address_line1: '100 Example St', zip: '34200', city: 'Bradenton' });
+    await database('scheduled_services').where({ id: home }).update({ customer_id: next });
+    await sweep();
+    const after = await database('visit_access_states').where({ scheduled_service_id: home });
+    expect(after).toHaveLength(1);
+    expect(after[0].subject_hash).toBe(before.subject_hash);
+    expect(after[0].customer_id).toBe(next);
+    expect(after[0].id).not.toBe(before.id);
+  });
+
+  test('a visit whose other provider is down counts as a retry when the first provider answered only on the state row', async () => {
+    const home = await visit();
+    await sweep();
+    // Jev's review rows are labeled (frozen under this digest), then new evidence arrives
+    await database('decision_reviews').where({ subject_id: home }).update({ label_status: 'confirmed_correct' });
+    await text('Our dog Biscuit is loose in the yard', '2026-10-05T13:00:00Z');
+    expect(await sweep()).toMatchObject({ asked: 1 });
+    const [newest] = await database('visit_access_states').where({ scheduled_service_id: home }).orderBy('created_at', 'desc');
+    expect(newest.answers.typesafe).toBeTruthy();
+    expect(await rows(home)).toHaveLength(Object.keys(pkg.questions).length);
+    expect((await rows(home)).every((r) => r.subject_hash !== newest.subject_hash)).toBe(true);
+    // the second provider is switched on and down: only the state row says anyone answered this digest
+    process.env.GATE_TYPED_DECISIONS_CLEF = 'true';
+    mockAsk.mockImplementation(async (_id, _state, opts) => (opts && opts.provider === 'cloudflare' ? { ok: false } : reply()));
+    expect(await sweep()).toMatchObject({ asked: 1, failed: 1, retryVisits: 1, askedVisits: 0 });
+  });
+
   test('publishing a state waits for the visit lock a technician\'s tap holds', async () => {
     const home = await visit();
     const holder = await database.transaction();

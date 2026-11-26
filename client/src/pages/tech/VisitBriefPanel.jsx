@@ -257,7 +257,7 @@ function AccessFlagCard({ flag, serviceId, request, onChanged }) {
   async function send(verdict) {
     setTap((t) => ({ ...t, busy: true, error: '' }));
     try {
-      const out = await request(`/admin/schedule/${encodeURIComponent(serviceId)}/access-flags/${encodeURIComponent(flag.questionId)}`, { method: 'POST', body: JSON.stringify({ verdict, subjectHash: flag.subjectHash }) });
+      const out = await request(`/admin/schedule/${encodeURIComponent(serviceId)}/access-flags/${encodeURIComponent(flag.questionId)}`, { method: 'POST', body: JSON.stringify({ verdict, evidenceId: flag.evidenceId }) });
       // Only an explicit answer counts: an empty 2xx leaves the outcome unknown, so the buttons stay.
       const status = out?.status === 'right' || out?.status === 'wrong' ? out.status : (out?.saved === true ? 'right' : null);
       if (!status) throw new Error('Could not save. Try again.');
@@ -325,7 +325,7 @@ function AccessFlagsSection({ members, grouped, request, onChanged }) {
       {members.map(({ service, flags }) => (
         <div key={service.id}>
           <MemberLabel service={service} show={grouped} />
-          {flags.map((f) => <AccessFlagCard key={`${service.id}:${f.questionId}:${f.subjectHash}`} flag={f} serviceId={service.id} request={request} onChanged={onChanged} />)}
+          {flags.map((f) => <AccessFlagCard key={`${service.id}:${f.questionId}:${f.evidenceId}`} flag={f} serviceId={service.id} request={request} onChanged={onChanged} />)}
         </div>
       ))}
     </div>

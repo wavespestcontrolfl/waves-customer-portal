@@ -21,7 +21,10 @@
  * verdict that does not name the visit's CURRENT customer is no evidence.
  *
  * The tap writes ONE row to visit_access_verdicts, keyed by visit, customer,
- * question and the evidence digest (`subjectHash`) the card was read from. It runs in one
+ * question and the evidence digest the card was read from. The card names that
+ * evidence by `evidenceId`, the id of its visit_access_states row; the sweep gives
+ * the row a new id when the same digest is restamped for a different customer, so
+ * an id is evidence for one customer only. It runs in one
  * transaction that takes the visit's advisory lock (the one the sweep takes to
  * publish a state, so the digest checked is still current at commit) and a FOR
  * SHARE lock on the visit row (so a reassignment cannot land between the
@@ -111,10 +114,10 @@ function pickQuote(state, questionId) {
 // The eligibility answers are the state's own, never the review rows, which a
 // label preserves under an older digest.
 async function loadEvidence(dbh, visit) {
-  const stored = await dbh(STATES).where({ scheduled_service_id: visit.id }).orderBy('created_at', 'desc').first('subject_hash', 'state', 'answers', 'customer_id');
+  const stored = await dbh(STATES).where({ scheduled_service_id: visit.id }).orderBy('created_at', 'desc').first('id', 'subject_hash', 'state', 'answers', 'customer_id');
   if (!stored || !stored.customer_id || String(stored.customer_id) !== String(visit.customer_id)) return null;
   const verdicts = await dbh(VERDICTS).where({ scheduled_service_id: visit.id, customer_id: visit.customer_id }).select('question_id', 'subject_hash', 'verdict');
-  return { hash: stored.subject_hash, state: parse(stored.state) || {}, answers: parse(stored.answers) || {}, verdicts };
+  return { id: stored.id, hash: stored.subject_hash, state: parse(stored.state) || {}, answers: parse(stored.answers) || {}, verdicts };
 }
 
 // One question as the technician sees it: a verdict on the newest evidence
@@ -154,7 +157,7 @@ async function accessFlagsFor(dbh, visit) {
       if (!view.shown) continue;
       const flag = FLAGS[questionId];
       flags.push({
-        questionId, title: flag.title, tone: flag.tone, status: view.status, subjectHash: ev.hash, ...pickQuote(ev.state, questionId),
+        questionId, title: flag.title, tone: flag.tone, status: view.status, evidenceId: ev.id, ...pickQuote(ev.state, questionId),
         saveToFile: questionId === 'dog_on_property' && view.status === 'open' && !(await petsOnFile(dbh, visit.customer_id)) ? 'pets' : null,
       });
     }
@@ -206,11 +209,11 @@ async function savePet(trx, visit, who) {
  * verdict and writes nothing. `saved` is true only for the tap that created the
  * Right and wrote the pet line.
  *
- * @param {{visitId:string, scope:Function, questionId:string, verdict:'right'|'wrong', subjectHash:string}} tap
+ * @param {{visitId:string, scope:Function, questionId:string, verdict:'right'|'wrong', evidenceId:string}} tap
  * @param {{labeledBy:string, actorId:string|null, ip:string|null, userAgent:string|null}} who
  */
 async function tapAccessFlag(dbh, tap, who) {
-  const { visitId, scope, questionId, verdict, subjectHash } = tap;
+  const { visitId, scope, questionId, verdict, evidenceId } = tap;
   return dbh.transaction(async (trx) => {
     // The visit id from the request is only looked up; the lock is taken on the id the database returns, the same
     // canonical string the sweep locks, so every spelling of a UUID takes the same lock. One writer at a time per visit
@@ -223,16 +226,19 @@ async function tapAccessFlag(dbh, tap, who) {
       .forShare().first('scheduled_services.id', 'scheduled_services.customer_id');
     if (!visit || !(await visitSinglePremises(visit.id, trx))) return { notFound: true };
     const ev = await loadEvidence(trx, visit);
-    if (!ev || ev.hash !== subjectHash) return { conflict: true };
+    // The card must name the newest state AND the customer the locked visit has now: the row id carries both (loadEvidence
+    // already requires the row's customer to be the visit's), so a card read for another customer is refused.
+    if (!ev || ev.id !== evidenceId) return { conflict: true };
     const view = questionView(ev, questionId);
     if (view.newestVerdict) return { status: view.newestVerdict, saved: false };
-    if (!view.shown) return { conflict: true };
+    // Only an open card takes a verdict: a carried Right has no buttons and must not insert or save anything.
+    if (!view.shown || view.status !== 'open') return { conflict: true };
     const [created] = await trx(VERDICTS)
-      .insert({ scheduled_service_id: visit.id, customer_id: visit.customer_id, question_id: questionId, subject_hash: subjectHash, verdict, technician_id: UUID_RE.test(String(who.actorId)) ? who.actorId : null })
+      .insert({ scheduled_service_id: visit.id, customer_id: visit.customer_id, question_id: questionId, subject_hash: ev.hash, verdict, technician_id: UUID_RE.test(String(who.actorId)) ? who.actorId : null })
       .onConflict(['scheduled_service_id', 'customer_id', 'question_id', 'subject_hash']).ignore().returning('id');
     // A concurrent tap on the same evidence won: its verdict stands.
     if (!created) {
-      const stored = await trx(VERDICTS).where({ scheduled_service_id: visit.id, customer_id: visit.customer_id, question_id: questionId, subject_hash: subjectHash }).first('verdict');
+      const stored = await trx(VERDICTS).where({ scheduled_service_id: visit.id, customer_id: visit.customer_id, question_id: questionId, subject_hash: ev.hash }).first('verdict');
       return { status: stored.verdict, saved: false };
     }
     const saved = verdict === 'right' && questionId === 'dog_on_property' ? await savePet(trx, visit, who) : false;
