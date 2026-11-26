@@ -9,7 +9,7 @@
  *   2. pickUniqueGif walks candidates against a shared used-set; exhausted
  *      candidates yield null (renderer falls back to the event photo)
  *      rather than a repeat.
- *   3. assembleBeehiivNewsletter end-to-end: terms that all share the same
+ *   3. assembleWeeklyNewsletter end-to-end: terms that all share the same
  *      Giphy top result render distinct GIFs per section.
  *   4. The divider is the self-hosted 2026 mascot badge at 48px — not the
  *      old Beehiiv-CDN asset.
@@ -20,7 +20,7 @@ const {
   pickUniqueGif,
   pickUniqueGifWithRetry,
   heroTitleText,
-  assembleBeehiivNewsletter,
+  assembleWeeklyNewsletter,
 } = require('../services/newsletter-draft');
 
 function giphyGif(id) {
@@ -147,7 +147,7 @@ describe('searchGiphyCandidates', () => {
   });
 });
 
-describe('assembleBeehiivNewsletter — no GIF repeats in one issue', () => {
+describe('assembleWeeklyNewsletter — no GIF repeats in one issue', () => {
   const realFetch = global.fetch;
   afterEach(() => {
     global.fetch = realFetch;
@@ -167,11 +167,14 @@ describe('assembleBeehiivNewsletter — no GIF repeats in one issue', () => {
     };
   }
 
-  test('three events whose terms share a Giphy top result get three distinct GIFs', async () => {
+  // Short weekly format (owner 2026-11-26): no GIFs at all, so the issue
+  // never queries Giphy and can never repeat one. The helpers above stay
+  // only until they are retired with this suite.
+  test('the short weekly format renders no GIF and never calls Giphy, even with a key set', async () => {
     process.env.GIPHY_API_KEY = 'test-key';
     global.fetch = jest.fn(async () => ({ ok: true, json: async () => ({ data: SHARED_RANKING }) }));
 
-    const html = await assembleBeehiivNewsletter({
+    const html = await assembleWeeklyNewsletter({
       selectedSubject: 'Weekend Lineup',
       greeting: 'Hey there',
       introText: 'Big week ahead.',
@@ -179,13 +182,13 @@ describe('assembleBeehiivNewsletter — no GIF repeats in one issue', () => {
       events: [eventFixture(1), eventFixture(2), eventFixture(3)],
     });
 
-    const gifUrls = [...html.matchAll(/https:\/\/media0\.giphy\.com\/media\/[^"]+\/giphy\.gif/g)].map(m => m[0]);
-    expect(gifUrls.length).toBe(4); // intro + 3 events
-    expect(new Set(gifUrls).size).toBe(4); // ALL distinct — the actual owner rule
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(html).not.toMatch(/giphy\.com/);
+    expect(html).not.toContain('<img');
   });
 
   test('flagship has NO divider squiggle (owner 2026-07-30); nothing references the Beehiiv CDN', async () => {
-    const html = await assembleBeehiivNewsletter({
+    const html = await assembleWeeklyNewsletter({
       selectedSubject: 'Weekend Lineup',
       greeting: 'Hey there',
       introText: 'Big week ahead.',

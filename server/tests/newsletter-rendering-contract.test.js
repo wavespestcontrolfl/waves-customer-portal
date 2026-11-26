@@ -4,7 +4,7 @@ const {
   wrapEmail,
 } = require('../services/email-template');
 const {
-  assembleBeehiivNewsletter,
+  assembleWeeklyNewsletter,
 } = require('../services/newsletter-draft');
 const {
   WAVES_ADDRESS_LINE,
@@ -39,7 +39,8 @@ function renderedThemeNames(html, idPattern) {
     theme.name,
   ]));
 
-  return [...html.matchAll(new RegExp(`<h2 id="${idPattern}"(?: class="[^"]*")? style="([^"]+)"`, 'g'))]
+  const idAttr = idPattern ? ` id="${idPattern}"` : '';
+  return [...html.matchAll(new RegExp(`<h2${idAttr}(?: class="[^"]*")? style="([^"]+)"`, 'g'))]
     .map((match) => {
       const style = match[1];
       const colors = /color:(#[0-9A-F]{6});background:(#[0-9A-F]{6});border-left:4px solid (#[0-9A-F]{6});/i.exec(style);
@@ -182,19 +183,20 @@ describe('newsletter rendering contract', () => {
     }
   });
 
-  test('renders the theme rotation inline across flagship sections', async () => {
-    const eventHtml = await assembleBeehiivNewsletter({
+  test('renders the theme rotation inline across the flagship day headers', async () => {
+    // One event on each of four days: the day headers take the rotation.
+    const eventHtml = await assembleWeeklyNewsletter({
       selectedSubject: 'Four local picks',
       events: Array.from({ length: 4 }, (_, index) => ({
         eventId: `a0000000-0000-4000-8000-00000000000${index}`,
-        title: `Event ${index + 1}`,
-        emoji: '🌊',
-        description: `Description ${index + 1}`,
+        sourceTitle: `Event ${index + 1}`,
+        startAt: `2026-12-0${3 + index}T23:00:00Z`,
+        why: `Reason ${index + 1}`,
       })),
     });
 
     expect({
-      flagship: renderedThemeNames(eventHtml, 'evt-[^"]+'),
+      flagship: renderedThemeNames(eventHtml, null),
     }).toMatchInlineSnapshot(`
       {
         "flagship": [

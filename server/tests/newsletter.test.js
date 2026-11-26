@@ -30,7 +30,7 @@ const {
   markdownToHtml,
   sanitizeProseFields,
   safeUrl,
-  assembleBeehiivNewsletter,
+  assembleWeeklyNewsletter,
 } = require('../services/newsletter-draft');
 const { findHallucinatedClaims, validateNewsletterDraft } = require('../services/newsletter-validator');
 const { preflightDigest } = require('../services/newsletter-autopilot');
@@ -1807,129 +1807,6 @@ describe('newsletter Beehiiv-parity render devices', () => {
   });
 });
 
-describe('newsletter assembly — Beehiiv-parity event rendering', () => {
-  const { assembleBeehiivNewsletter } = require('../services/newsletter-draft');
-  const baseEvent = {
-    eventId: 'a0000000-0000-4000-8000-000000000002',
-    emoji: '🎸',
-    title: 'Freckled Fin Gets Loud',
-    sourceTitle: 'Lisa & The All Terrain Band',
-    description: 'Lisa & The All Terrain Band are rolling in with big energy.',
-    dateStr: 'Friday, June 12',
-    timeStr: '8:00 PM',
-    clockEmoji: '🕗',
-    location: 'Freckled Fin Irish Pub, Holmes Beach',
-    address: null,
-    eventUrl: 'https://example.com/fin',
-    imageUrl: 'https://cdn.example.com/fin.jpg',
-    isFree: true,
-    scoopLabel: 'Here\'s the scoop:',
-    highlights: ['🎶 Crowd-pleaser setlist', '🍀 Irish pub vibes'],
-    proTip: 'Pro tip: Get there before 8 for a table.',
-    linkText: 'Grab your spot',
-    closingLine: 'Lace up — **this one\'s a sweat sesh.**',
-  };
-
-  test('renders the full Beehiiv event anatomy without doubled labels or generic anchors', async () => {
-    const html = await assembleBeehiivNewsletter({ selectedSubject: 'Test', events: [{ ...baseEvent }] });
-    // date | clock time line
-    expect(html).toContain('📅 <strong>Friday, June 12</strong> | 🕗 <strong>8:00 PM</strong>');
-    // DB-verified FREE badge
-    expect(html).toContain('🎟️ <strong>FREE</strong>');
-    // rotating anchor text, not "Tickets & Info"
-    expect(html).toContain('>Grab your spot</a>');
-    expect(html).not.toContain('Tickets &amp; Info');
-    // event name inline-linked in the description — via the evclick
-    // tracking token (the live sender substitutes a per-recipient
-    // redirect; proof/preview/archive resolve it back to the direct url)
-    expect(html).toContain('<a href="{{evclick:a0000000-0000-4000-8000-000000000002}}"');
-    expect(html).not.toContain('<a href="https://example.com/fin"');
-    // rotating scoop label; plain "•" bullets with model emojis stripped
-    // (baseEvent highlights deliberately carry leading emojis to prove the
-    // strip — and old persisted drafts still have them)
-    expect(html).toContain('Here&#39;s the scoop:');
-    expect(html).toMatch(/<li[^>]*>• Crowd-pleaser setlist</);
-    expect(html).toMatch(/<li[^>]*>• Irish pub vibes</);
-    // pro tip label never doubles
-    expect(html).toContain('<strong>Pro tip:</strong>');
-    expect(html).not.toMatch(/Pro tip:\s*<\/strong>\s*<em>\s*Pro tip/i);
-  });
-
-  test('no Giphy key → event image fallback renders; isFree false → no FREE badge', async () => {
-    const html = await assembleBeehiivNewsletter({
-      selectedSubject: 'Test',
-      events: [{ ...baseEvent, isFree: false, gifSearchTerm: 'rock band' }],
-    });
-    expect(html).toContain('https://cdn.example.com/fin.jpg');
-    expect(html).not.toContain('🎟️ <strong>FREE</strong>');
-  });
-
-  test('no eventId → ticket links fall back to the direct url (no tracking token)', async () => {
-    const html = await assembleBeehiivNewsletter({
-      selectedSubject: 'Test',
-      events: [{ ...baseEvent, eventId: null }],
-    });
-    expect(html).toContain('<a href="https://example.com/fin"');
-    expect(html).not.toContain('{{evclick:');
-  });
-
-  test('image-first visual rule: GIF-shaped urls reject → GIF fallback; still art replaces the GIF and carries the caption', async () => {
-    for (const bad of [
-      'https://cdn.example.com/loop.gif',
-      'https://cdn.example.com/image?file=promo.gif',
-      'https://cdn.example.com/image?format=gif&id=9',
-      'https://media2.giphy.com/media/abc/200.webp',
-    ]) {
-      const html = await assembleBeehiivNewsletter({
-        selectedSubject: 'Test',
-        events: [{ ...baseEvent, imageUrl: bad }],
-      });
-      expect(html).not.toContain(bad.slice(24));
-    }
-    const jpg = await assembleBeehiivNewsletter({ selectedSubject: 'Test', events: [{ ...baseEvent, gifCaption: 'Mood: fiddle chaos.' }] });
-    expect(jpg).toMatch(/<img src="https:\/\/cdn\.example\.com\/fin\.jpg"[^>]*max-height:280px/);
-    // Real art REPLACES the reaction GIF (owner direction 2026-07-29) and
-    // the caption-genre punchline rides under it.
-    expect(jpg).not.toContain('giphy');
-    expect(jpg).toContain('Mood: fiddle chaos.');
-    // Standards-clients-only: Outlook's Word engine cannot aspect-fit a
-    // bounded box, so no MSO-visible variant.
-    expect(jpg).toMatch(/<!--\[if !mso\]><!--><div[^>]*>\s*<img src="https:\/\/cdn\.example\.com\/fin\.jpg"/);
-    expect(jpg).not.toMatch(/\[if mso\]><img src="https:\/\/cdn\.example\.com\/fin\.jpg"/);
-  });
-
-  test('closing checklist renders ✔️ items and the sign-off defaults to the Team form', async () => {
-    const html = await assembleBeehiivNewsletter({
-      selectedSubject: 'Test',
-      events: [{ ...baseEvent }],
-      closingHeading: 'That\'s the scoop, crew',
-      closingText: 'Whatever you pick, we support it.',
-      closingChecklist: ['Pack a chair', 'Hydrate like it\'s your job'],
-    });
-    expect(html).toContain('✔️ Pack a chair');
-    expect(html).toContain('✔️ Hydrate like it&#39;s your job');
-    expect(html).toContain('— The Waves Team');
-  });
-
-  test('P.S. label never doubles when the model writes the prefix itself; label-only ps renders nothing', async () => {
-    const html = await assembleBeehiivNewsletter({
-      selectedSubject: 'Test',
-      events: [{ ...baseEvent }],
-      ps: 'P.S. If you loved this, forward it to a friend who owns a tutu. 🤡',
-    });
-    expect(html).toContain('<strong>P.S.</strong>');
-    expect(html).not.toMatch(/P\.S\.<\/strong>\s*<em>\s*p\.?\s?s/i);
-    expect(html.match(/P\.S\./g)).toHaveLength(1);
-
-    const labelOnly = await assembleBeehiivNewsletter({
-      selectedSubject: 'Test',
-      events: [{ ...baseEvent }],
-      ps: 'P.S.',
-    });
-    expect(labelOnly).not.toContain('<strong>P.S.</strong>');
-  });
-});
-
 describe('DB-locked prices vs the hallucinated-claim scan', () => {
   const { findHallucinatedClaims } = require('../services/newsletter-validator');
 
@@ -2012,15 +1889,15 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
     expect(clean.errors).toEqual([]);
   });
 
-  test('assembled meta-box price validates cleanly via the structural span — no lock list needed for HTML', async () => {
-    const { assembleBeehiivNewsletter } = require('../services/newsletter-draft');
-    const html = await assembleBeehiivNewsletter({
+  test('assembled fact-line price validates cleanly via the structural span — no lock list needed for HTML', async () => {
+    const { assembleWeeklyNewsletter } = require('../services/newsletter-draft');
+    const html = await assembleWeeklyNewsletter({
       selectedSubject: 'T',
       events: [{
         eventId: 'a0000001-0000-4000-8000-000000000001',
-        emoji: '🎭', title: 'A Show', sourceTitle: 'The Show', description: 'The Show is on.',
-        dateStr: 'Friday, June 12', eventUrl: 'https://example.com/x',
-        isFree: false, priceText: 'From $25',
+        sourceTitle: 'The Show', why: 'The Show is on.',
+        startAt: '2026-11-27T22:00:00Z', eventUrl: 'https://example.com/x',
+        priceText: 'From $25',
       }],
     });
     expect(html).toContain('<span data-db-price="a0000001-0000-4000-8000-000000000001">From $25</span>');
@@ -2028,149 +1905,10 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
   });
 });
 
-describe('uniform event treatment (owner direction 2026-07-29 v2: consistent full cards, no tiers)', () => {
-  const { assembleBeehiivNewsletter, buildFlagshipTextBody } = require('../services/newsletter-draft');
-  const mk = (n, over = {}) => ({
+describe('event order (portfolio rank)', () => {
+  const mk = (n) => ({
     eventId: `a000000${n}-0000-4000-8000-00000000000${n}`,
-    emoji: ['🎸', '🎭', '🏈', '🎡', '🍫'][n],
-    title: `Curiosity Title ${n}`,
     sourceTitle: `Official Event ${n}`,
-    description: `Official Event ${n} is the move this weekend.`,
-    dateStr: 'Friday, June 12',
-    timeStr: '8:00 PM',
-    location: `Venue ${n}, Sarasota`,
-    eventUrl: `https://example.com/ev${n}`,
-    imageUrl: null,
-    isFree: false,
-    priceText: n === 1 ? 'From $25' : null,
-    labels: n === 2 ? ['Family', 'Worth the drive'] : [],
-    highlights: ['Big stage', 'Bigger snacks'],
-    scoopLabel: "Here's the scoop:",
-    proTip: 'Get there before 8 for a table.',
-    closingLine: 'A **kicker** line.',
-    linkText: 'Grab your spot',
-    ...over,
-  });
-  const draft = () => ({ selectedSubject: 'Test', events: [0, 1, 2, 3, 4].map((n) => mk(n)) });
-
-  test('every event renders the SAME full anatomy — no shortlist, no tier furniture gating', async () => {
-    const html = await assembleBeehiivNewsletter(draft());
-    expect(html).not.toContain('The Weekend Shortlist');
-    // Furniture renders once PER EVENT (5 events).
-    expect(html.match(/Pro tip:/g)).toHaveLength(5);
-    expect(html.match(/Here&#39;s the scoop:/g)).toHaveLength(5);
-    expect(html.match(/kicker/g)).toHaveLength(5);
-  });
-
-  test('TOC: centered fold-out, bare read-time summary; witty entries that never give the events away', async () => {
-    const html = await assembleBeehiivNewsletter(draft());
-    expect(html).toContain('<details>');
-    expect(html).toContain('~5-minute read');
-    expect(html).toMatch(/<summary[^>]*text-align:center/);
-    expect(html).not.toContain('weekend pick');
-    expect(html).not.toContain('North Port to Tampa');
-    // Curiosity titles tease; official names NEVER appear in the list
-    // (owner 2026-07-30 — supersedes the real-names directive).
-    expect(html).toMatch(/<a href="#evt-curiosity-title-0"[^>]*>🎸 <strong>Curiosity Title 0<\/strong><\/a>/);
-    expect(html).not.toMatch(/<li[^>]*>[^<]*<a[^>]*>[^<]*<strong>Official Event 0/);
-    // ENFORCED tease: a model title echoing the official name falls back
-    // to a generic no-spoilers entry.
-    const leaky = await assembleBeehiivNewsletter({
-      selectedSubject: 'T',
-      events: [mk(1, { title: 'Official Event 1' })],
-    });
-    expect(leaky).toContain('Weekend pick #1');
-    expect(leaky).not.toMatch(/<a[^>]*>🎭 <strong>Official Event 1<\/strong><\/a>/);
-  });
-
-  test('no wave-divider squiggle in the flagship; all event visuals share one size cap', async () => {
-    const html = await assembleBeehiivNewsletter(draft());
-    expect(html).not.toContain('waves-divider');
-    // GIF fallback carries the same 280px cap as still photos.
-    const withArt = await assembleBeehiivNewsletter({ selectedSubject: 'T', events: [mk(1, { imageUrl: 'https://cdn.example.com/a.jpg' })] });
-    expect(withArt).toMatch(/<img src="https:\/\/cdn\.example\.com\/a\.jpg"[^>]*max-height:280px/);
-    // Capped event GIFs are mso-hidden like still photos — Word ignores
-    // max-height and would render them at natural size. Intro/PI GIFs
-    // stay uncapped and mso-visible.
-    const { gifBlock } = require('../services/newsletter-draft');
-    const capped = gifBlock('https://media2.giphy.com/media/x/g.gif', 'cap', { capHeight: true });
-    expect(capped).toContain('<!--[if !mso]><!-->');
-    expect(capped).toContain('max-height:280px');
-    const natural = gifBlock('https://media2.giphy.com/media/x/g.gif', 'cap');
-    expect(natural).not.toContain('[if !mso]');
-    expect(natural).not.toContain('max-height');
-  });
-
-  test('TOC links target real anchors: <a name> + matching h2 id per event', async () => {
-    const html = await assembleBeehiivNewsletter(draft());
-    expect(html).toContain('href="#evt-curiosity-title-0"');
-    expect(html).toContain('<a name="evt-curiosity-title-0"></a>');
-    expect(html).toMatch(/<h2 id="evt-curiosity-title-0" class="dm-chip"/);
-  });
-
-  test('duplicate image urls render ONCE — repeats fall back to their GIF slot; Homeowner Minute never renders', async () => {
-    const html = await assembleBeehiivNewsletter({
-      selectedSubject: 'T',
-      homeownerMinute: 'A tip that must not render.',
-      events: [
-        mk(1, { imageUrl: 'https://cdn.example.com/shared.jpg' }),
-        mk(2, { imageUrl: 'https://cdn.example.com/shared.jpg' }),
-      ],
-    });
-    expect(html.match(/https:\/\/cdn\.example\.com\/shared\.jpg/g)).toHaveLength(1);
-    expect(html).not.toContain('Homeowner Minute');
-    expect(html).not.toContain('A tip that must not render');
-  });
-
-  test('DB-locked price renders (FREE wins over priceText); labels chip line renders', async () => {
-    const html = await assembleBeehiivNewsletter(draft());
-    expect(html).toMatch(/🎟️ <span data-db-price="a0000001-[^"]+">From \$25<\/span>/);
-    expect(html).toContain('🏷️ <em>Family · Worth the drive</em>');
-    const free = await assembleBeehiivNewsletter({ selectedSubject: 'T', events: [mk(1, { isFree: true })] });
-    expect(free).toContain('🎟️ <strong>FREE</strong>');
-    expect(free).not.toContain('From $25');
-  });
-
-  test('share banner is forward-only (no social profile links); dividers are not links', async () => {
-    const html = await assembleBeehiivNewsletter(draft());
-    expect(html).toContain('Forward them this email');
-    expect(html).not.toContain('facebook.com/wavespestcontrol');
-    expect(html).not.toMatch(/<a href="https:\/\/www\.wavespestcontrol\.com\/"[^>]*>\s*<img src="[^"]*divider/);
-  });
-
-  test('buildFlagshipTextBody: content-equivalent — EVERY event serializes its furniture; no unreviewed CTA', () => {
-    const text = buildFlagshipTextBody({
-      greeting: 'Hey there!',
-      introText: 'Big weekend **ahead**.',
-      transitionLine: "Let's get into it",
-      events: [mk(1), mk(3, { isFree: true })],
-      closingHeading: 'That is the scoop, crew',
-      closingText: 'Go outside.',
-      closingChecklist: ['Hydrate like it\'s your job'],
-      ps: 'Forward this to a friend.',
-      signoff: '— The Waves Team',
-    });
-    expect(text).toContain('== Curiosity Title 1 ==');
-    expect(text).toContain("Here's the scoop:");
-    expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | Tickets: From $25');
-    // evclick token — sendCampaign substitutes both MIME parts.
-    expect(text).toContain('Details & tickets: {{evclick:a0000001-0000-4000-8000-000000000001}}');
-    expect(findHallucinatedClaims(text, [{ eventId: 'a0000001-0000-4000-8000-000000000001', price: 'From $25' }], 'text')).toEqual([]);
-    expect(text).toContain('FREE');
-    // Furniture for BOTH events (uniform).
-    expect(text.match(/Pro tip:/g)).toHaveLength(2);
-    expect(text.match(/- Big stage/g)).toHaveLength(2);
-    expect(text).toContain("Let's get into it");
-    expect(text).toContain('== That is the scoop, crew ==');
-    expect(text).toContain("[ ] Hydrate like it's your job");
-    expect(text).toContain('P.S. Forward this to a friend.');
-    expect(text).not.toContain('Schedule a visit');
-    // Homeowner Minute retired from the flagship (owner 2026-07-30).
-    expect(text).not.toContain('Homeowner Minute');
-    const withAddr = buildFlagshipTextBody({ events: [mk(1, { address: '123 Main St' })] });
-    expect(withAddr).toContain('Venue 1, Sarasota (123 Main St)');
-    expect(text).not.toContain('**');
-    expect(text).toContain('{{feedback-text}}');
   });
 
   test('sortByCallerRank re-asserts portfolio order over a reordered model echo', () => {
@@ -2237,7 +1975,7 @@ describe('newsletter greeting personalization + render polish', () => {
     stripGreetingNameToken,
     stripPersonalizationTokens,
     plainBulletText,
-    assembleBeehiivNewsletter,
+    assembleWeeklyNewsletter,
   } = require('../services/newsletter-draft');
 
   test('greetingWithNameToken slots the token inside the sentence, before trailing punctuation', () => {
@@ -2279,17 +2017,17 @@ describe('newsletter greeting personalization + render polish', () => {
   });
 
   test('assembly: 22px greeting carries the name token; flagship has no divider squiggle', async () => {
-    const html = await assembleBeehiivNewsletter({
+    const html = await assembleWeeklyNewsletter({
       selectedSubject: 'Test',
       greeting: 'Hey there!',
       events: [{
         eventId: 'a0000000-0000-4000-8000-000000000009',
-        emoji: '🎸', title: 'A Show', description: 'Come see it.',
-        dateStr: 'Friday, June 12', timeStr: '8:00 PM', clockEmoji: '🕗',
+        sourceTitle: 'A Show', why: 'Come see it.',
+        startAt: '2026-11-27T22:00:00Z',
       }],
     });
     expect(html).toContain(`Hey there${GREETING_NAME_TOKEN}!`);
-    expect(html).toMatch(/font-size:22px[^>]*>👋/);
+    expect(html).toMatch(/font-size:22px[^>]*><strong>Hey there/);
     expect(html).not.toContain('waves-divider');
     expect(html).not.toContain('width="100"');
   });
@@ -2604,7 +2342,7 @@ describe('newsletter sanitizeProseFields — URL strip on free-prose fields', ()
   });
 });
 
-describe('newsletter assembleBeehiivNewsletter — end-to-end injection + URL locking', () => {
+describe('newsletter assembleWeeklyNewsletter — end-to-end injection + URL locking', () => {
   // No GIPHY_API_KEY in the test env, so searchGiphy returns null and assembly
   // is deterministic and network-free.
   test('a malicious event title/description cannot inject live markup, and a bad eventUrl is dropped', async () => {
@@ -2625,7 +2363,7 @@ describe('newsletter assembleBeehiivNewsletter — end-to-end injection + URL lo
       }],
       homeownerMinute: 'Seal your foundation.',
     };
-    const html = await assembleBeehiivNewsletter(draft);
+    const html = await assembleWeeklyNewsletter(draft);
     // No live tags from model/ingested fields
     expect(html).not.toContain('onerror="steal()"');
     expect(html).not.toContain('<a href="https://evil.example">');
