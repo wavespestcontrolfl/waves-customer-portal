@@ -43,6 +43,7 @@ describe('one-time pest ask: both options', () => {
     ['a text thread, not a call', intentWith({ oneTimePest: {} }), { channel: 'sms_thread' }],
     ['a bedroom-band unit', intentWith({ oneTimePest: {} }), { channel: 'call', unitBandPricing: { eligible: true } }],
     ['a current customer', intentWith({ oneTimePest: {} }), { channel: 'call', currentCustomer: true }],
+    ['the lookup says the property is commercial', intentWith({ oneTimePest: {} }), { channel: 'call', propertyType: 'commercial' }],
   ])('leaves the ask alone when %s', (_label, intent, where = onCall) => {
     const before = JSON.stringify(intent.services);
     expect(offerPlanWithOneTimeChoice(intent, where)).toBe(false);
