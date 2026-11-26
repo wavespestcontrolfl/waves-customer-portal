@@ -48,7 +48,9 @@ jest.mock('../services/estimate-consumer-notice', () => ({
 const mockLimiterOptions = [];
 jest.mock('express-rate-limit', () => (options) => {
   mockLimiterOptions.push(options);
-  return (_req, _res, next) => next();
+  const passThrough = (_req, _res, next) => next();
+  passThrough.limiterOptions = options;
+  return passThrough;
 });
 
 const express = require('express');
@@ -222,10 +224,12 @@ describe('POST /:token/consumer-notice', () => {
     expect(res).toMatchObject({ status: 404, body: { error: 'Estimate not found' } });
   });
 
-  test('the route limiter counts every probe: 10 an hour, never skipped', () => {
-    const limiter = mockLimiterOptions.find((o) => o.max === 10 && o.windowMs === 60 * 60 * 1000);
-    expect(limiter).toBeDefined();
-    expect(limiter.skip).toBeUndefined();
+  test('the route itself carries a limiter that counts every probe: 10 an hour, never skipped', () => {
+    const layer = estimatePublicRouter.stack.find((l) => l.route && l.route.path === '/:token/consumer-notice' && l.route.methods.post);
+    expect(layer).toBeDefined();
+    const [limiter] = layer.route.stack;
+    expect(limiter.handle.limiterOptions).toMatchObject({ max: 10, windowMs: 60 * 60 * 1000 });
+    expect(limiter.handle.limiterOptions.skip).toBeUndefined();
   });
 });
 
