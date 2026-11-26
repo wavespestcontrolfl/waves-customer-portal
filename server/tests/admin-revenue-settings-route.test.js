@@ -79,11 +79,13 @@ describe('PUT /api/admin/revenue/settings owner office time', () => {
     ['hours above numeric(6,2)', { ownerOfficeHoursPerMonth: 10000 }],
     ['a rate above numeric(8,2)', { ownerOfficeHourlyRate: 1000000 }],
     ['a third decimal', { ownerOfficeHourlyRate: '21.295' }],
+    ['a field wage above numeric(8,2)', { ownerFieldHourlyRate: 1000000 }],
+    ['a field wage with a third decimal', { ownerFieldHourlyRate: '25.005' }],
   ])('%s is a 400 with the field named, and nothing is written', async (_n, body) => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/revenue/settings`, { method: 'PUT', headers: auth('admin'), body: JSON.stringify(body) });
       expect(res.status).toBe(400);
-      expect((await res.json()).error).toMatch(/ownerOffice/);
+      expect((await res.json()).error).toMatch(/owner(Office|Field)/);
       expect(mockReads).toEqual(['company_financials']); // read the latest row, never inserted or updated
     });
   });

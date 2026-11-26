@@ -65,6 +65,16 @@ describe('buildSettingsRow (revenue settings merge)', () => {
     expect(buildSettingsRow(LATEST, { loadedLaborRate: -1 }, '2026-07-04').error).toMatch(/loadedLaborRate/);
   });
 
+  test('the owner field wage overlays only itself, carries forward through other saves, and clears on null', () => {
+    const withWage = { ...LATEST, owner_office_hourly_rate: '40.00', owner_field_hourly_rate: '25.00' };
+    const { row } = buildSettingsRow(withWage, { ownerFieldHourlyRate: '27.5' }, '2026-07-04');
+    expect(row.owner_field_hourly_rate).toBe(27.5);
+    expect(row.owner_office_hourly_rate).toBe('40.00');
+    expect(buildSettingsRow(withWage, { ownerOfficeHourlyRate: 45 }, '2026-07-04').row.owner_field_hourly_rate).toBe('25.00');
+    expect(buildSettingsRow(withWage, { ownerFieldHourlyRate: null }, '2026-07-04').row.owner_field_hourly_rate).toBeNull();
+    expect(buildSettingsRow(withWage, { ownerFieldHourlyRate: 25 }, '2026-07-04').row.overhead_entered_at).toBe(withWage.overhead_entered_at);
+  });
+
   test('owner office time saves overlay only the sent keys, carry forward, clear on null, and leave overhead_entered_at alone', () => {
     const withOwner = { ...LATEST, owner_office_hours_per_month: '10.00', owner_office_hourly_rate: '40.00' };
     const { row } = buildSettingsRow(withOwner, { ownerOfficeHoursPerMonth: 12.5 }, '2026-07-04');
@@ -92,6 +102,10 @@ describe('buildSettingsRow (revenue settings merge)', () => {
     ['an empty string', 'ownerOfficeHoursPerMonth', ''],
     ['a boolean', 'ownerOfficeHoursPerMonth', true],
     ['an object', 'ownerOfficeHourlyRate', {}],
+    ['a field wage with a third decimal', 'ownerFieldHourlyRate', '25.005'],
+    ['a field wage above numeric(8,2)', 'ownerFieldHourlyRate', 1000000],
+    ['a field wage with an exponent', 'ownerFieldHourlyRate', '1e2'],
+    ['a negative field wage', 'ownerFieldHourlyRate', -1],
     ['NaN', 'ownerOfficeHoursPerMonth', NaN],
   ])('owner office time refuses %s (a 400 message, nothing coerced)', (_n, key, value) => {
     const { row, error } = buildSettingsRow(LATEST, { [key]: value }, '2026-07-04');
