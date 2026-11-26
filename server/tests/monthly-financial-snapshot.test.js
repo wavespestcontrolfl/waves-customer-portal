@@ -308,6 +308,58 @@ describe('runMonthlyFinancialSnapshots', () => {
     expect(mockBuildPnl.mock.calls[0][0]).not.toBe(db);
   });
 
+  // A transaction that fails with `failures` serialization errors (SQLSTATE 40001) before it lets one through.
+  const serializationFailures = (db, failures, code = '40001') => {
+    const real = db.transaction;
+    const state = { attempts: 0 };
+    db.transaction = async (cb, opts) => {
+      state.attempts += 1;
+      if (state.attempts <= failures) throw Object.assign(new Error('could not serialize access due to concurrent update'), { code });
+      return real(cb, opts);
+    };
+    return state;
+  };
+
+  test('a serialization failure repeats the whole pair on a fresh snapshot, then succeeds', async () => {
+    mockBuildPnl.mockResolvedValue(PNL);
+    const { db, committed } = runDb();
+    const state = serializationFailures(db, 2);
+    const res = await svc.runMonthlyFinancialSnapshots({ now: NOW, db });
+    expect(state.attempts).toBe(3);
+    expect(res.months).toEqual(['2026-11-01', '2026-10-01']);
+    expect(committed).toHaveLength(2); // the two failed attempts kept nothing
+  });
+
+  test('a single upsert (the backfill) retries a serialization failure the same way', async () => {
+    mockBuildPnl.mockResolvedValue(PNL);
+    const { db, committed } = runDb();
+    const state = serializationFailures(db, 1);
+    expect((await svc.upsertMonthSnapshot('2026-10', db)).month).toBe('2026-10-01');
+    expect(state.attempts).toBe(2);
+    expect(committed).toHaveLength(1);
+    expect(mockBuildPnl).toHaveBeenCalledTimes(1); // compute ran on the attempt that got a transaction
+  });
+
+  test('the retry is bounded: three attempts, then the serialization error reaches the caller', async () => {
+    mockBuildPnl.mockResolvedValue(PNL);
+    const { db, committed } = runDb();
+    const state = serializationFailures(db, 99);
+    await expect(svc.runMonthlyFinancialSnapshots({ now: NOW, db })).rejects.toMatchObject({ code: '40001' });
+    expect(state.attempts).toBe(3);
+    expect(committed).toEqual([]);
+    // The same bound on the single upsert (the backfill path).
+    const alwaysFails = { attempts: 0, transaction: async () => { alwaysFails.attempts += 1; throw Object.assign(new Error('x'), { code: '40001' }); } };
+    await expect(svc.upsertMonthSnapshot('2026-10', alwaysFails)).rejects.toMatchObject({ code: '40001' });
+    expect(alwaysFails.attempts).toBe(3);
+  });
+
+  test.each([['a deadlock (40P01)', '40P01'], ['no code', null], ['a unique violation (23505)', '23505']])('%s is not retried', async (_n, code) => {
+    const { db } = runDb();
+    const state = serializationFailures(db, 99, code);
+    await expect(svc.runMonthlyFinancialSnapshots({ now: NOW, db })).rejects.toThrow(/could not serialize/);
+    expect(state.attempts).toBe(1);
+  });
+
   test('if the month-before refresh fails, nothing is kept, so the pair stays missing and the catch-up retries it', async () => {
     mockBuildPnl.mockResolvedValue(PNL);
     const first = runDb({ failOn: '2026-10-01' });

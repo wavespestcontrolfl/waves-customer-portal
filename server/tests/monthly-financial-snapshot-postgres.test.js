@@ -17,6 +17,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { randomUUID } = require('node:crypto');
 const svc = require('../services/monthly-financial-snapshot');
+const { dateOnlyString: dateOnly } = require('../utils/date-only');
 
 jest.setTimeout(60000);
 const GATE = 'GATE_PNL_PAY_RUN_WAGES';
@@ -345,33 +346,48 @@ postgres('monthly financial snapshot (live Postgres)', () => {
     });
 
     describe('isolation', () => {
-      // A wrapper that hands the service the real pool and records, from inside each transaction it opens, the
-      // isolation level Postgres is actually running it at. These writes commit, so they use a month far from real
-      // data and are deleted afterwards.
-      const spied = () => {
+      // A wrapper that hands the service the real pool and, inside every top-level transaction the service opens,
+      // records the isolation level Postgres is actually running it at and the snapshot rows it has written; then it
+      // ROLLS BACK on purpose once the service's callback has succeeded. Nothing is ever committed, so a persistent
+      // QA database keeps whatever it holds for these months.
+      const ROLLBACK = new Error('rolled back on purpose');
+      const spied = (months) => {
         const seen = [];
+        const written = [];
         const db = (...args) => database(...args);
         db.raw = (...args) => database.raw(...args);
-        db.transaction = (cb, options) => database.transaction(async (inner) => {
-          seen.push((await inner.raw('SHOW transaction_isolation')).rows[0].transaction_isolation);
-          return cb(inner);
-        }, options);
-        return { db, seen };
+        db.transaction = async (cb, options) => {
+          let result;
+          try {
+            await database.transaction(async (inner) => {
+              seen.push((await inner.raw('SHOW transaction_isolation')).rows[0].transaction_isolation);
+              result = await cb(inner);
+              written.push(...await inner('monthly_financial_snapshots').whereIn('month', months).orderBy('month'));
+              throw ROLLBACK;
+            }, options);
+          } catch (err) {
+            if (err !== ROLLBACK) throw err;
+          }
+          return result;
+        };
+        return { db, seen, written };
       };
-      const cleanup = () => database('monthly_financial_snapshots').whereIn('month', ['2001-01-01', '2001-02-01']).del();
-      afterEach(cleanup);
+      const MONTHS = ['2001-01-01', '2001-02-01'];
 
-      it('upsertMonthSnapshot and the monthly pair both run REPEATABLE READ', async () => {
-        await cleanup();
-        const one = spied();
+      it('upsertMonthSnapshot and the monthly pair both run REPEATABLE READ, and nothing stays committed', async () => {
+        const before = await database('monthly_financial_snapshots').whereIn('month', MONTHS).orderBy('month');
+        const one = spied(MONTHS);
         await svc.upsertMonthSnapshot('2001-01', one.db);
         expect(one.seen).toEqual(['repeatable read']);
-        expect(await database('monthly_financial_snapshots').where({ month: '2001-01-01' }).first('id')).toBeTruthy();
-        const pair = spied();
+        expect(one.written.map((r) => dateOnly(r.month))).toEqual(['2001-01-01']);
+        const pair = spied(MONTHS);
         // now = 2001-03-02 05:35 ET: the pair is February and January 2001.
         const res = await svc.runMonthlyFinancialSnapshots({ now: new Date('2001-03-02T10:35:00Z'), db: pair.db });
         expect(res.months).toEqual(['2001-02-01', '2001-01-01']);
         expect(pair.seen).toEqual(['repeatable read']); // one transaction for both months
+        expect(pair.written.map((r) => dateOnly(r.month))).toEqual(['2001-01-01', '2001-02-01']);
+        // Both transactions rolled back: the rows (or their absence) are exactly what they were.
+        expect(await database('monthly_financial_snapshots').whereIn('month', MONTHS).orderBy('month')).toEqual(before);
       });
     });
   });

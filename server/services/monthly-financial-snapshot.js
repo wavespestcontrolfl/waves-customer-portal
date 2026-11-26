@@ -204,9 +204,27 @@ async function writeMonthSnapshot(month, trx, computedAt) {
   return snapshot;
 }
 
+// Postgres refuses a REPEATABLE READ transaction that conflicts with one that committed after its snapshot began
+// (SQLSTATE 40001, serialization_failure; a concurrent upsert of the same row is the usual case, e.g. the cron and
+// a backfill run at once). Nothing is kept from the failed attempt, so the WHOLE read and write is repeated on a
+// fresh snapshot, a bounded number of times, then the error goes to the caller.
+const SERIALIZATION_FAILURE = '40001';
+const SNAPSHOT_ATTEMPTS = 3;
+
+async function inSnapshotTransaction(db, work) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await db.transaction(work, SNAPSHOT_ISOLATION);
+    } catch (err) {
+      if (!err || err.code !== SERIALIZATION_FAILURE || attempt >= SNAPSHOT_ATTEMPTS) throw err;
+      logger.warn(`[monthly-financial-snapshot] serialization failure, retrying (attempt ${attempt + 1} of ${SNAPSHOT_ATTEMPTS})`);
+    }
+  }
+}
+
 /** Compute and store one month in its own REPEATABLE READ transaction. Returns the stored values. */
 async function upsertMonthSnapshot(month, db = require('../models/db'), computedAt = new Date()) {
-  return db.transaction((trx) => writeMonthSnapshot(month, trx, computedAt), SNAPSHOT_ISOLATION);
+  return inSnapshotTransaction(db, (trx) => writeMonthSnapshot(month, trx, computedAt));
 }
 
 /**
@@ -224,21 +242,21 @@ async function pairNeedsRun(db, months, now) {
 
 /**
  * The monthly job body. On the 2nd it writes last month and re-writes the month before it (late ledger entries),
- * both in ONE REPEATABLE READ transaction: if either write fails neither row changes, so the pair stays missing (or
+ * both in ONE REPEATABLE READ transaction (retried whole on a serialization failure): if either write fails neither row changes, so the pair stays missing (or
  * stale) and a catch-up run on days 3 to 7 does the whole pair again. With catchUp it does nothing unless
  * pairNeedsRun.
  */
 async function runMonthlyFinancialSnapshots({ now = new Date(), catchUp = false, db = require('../models/db') } = {}) {
   const months = [monthOffset(now, -1), monthOffset(now, -2)];
   if (catchUp && !(await pairNeedsRun(db, months, now))) return { skipped: 'already_written', months: [] };
-  const written = await db.transaction(async (trx) => {
+  const written = await inSnapshotTransaction(db, async (trx) => {
     const done = [];
     for (const month of months) {
       await writeMonthSnapshot(month, trx, now);
       done.push(month);
     }
     return done;
-  }, SNAPSHOT_ISOLATION);
+  });
   logger.info(`[monthly-financial-snapshot] wrote ${written.join(', ')}`);
   return { skipped: null, months: written };
 }
