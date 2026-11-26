@@ -252,6 +252,21 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
   } catch { return null; }
 }
 
+// Texting AI facts (owner 2026-11-25): the prepaid visits left and the prep guide of the BOOKED visit's service (sms-staff-facts). Counts
+// and published template text only (never technician or visit notes); each read fails soft to null. OPT IN (`includeSmsStaffFacts`):
+// only the texting AI's draft, its send-time rechecks and the unanswered-text fingerprint ask for them, every other caller skips the
+// reads and the keys. Only for GATE_SMS_REAL_ANSWERS drafts, and never in a frozen replay (asOf): these read today's rows, never an
+// earlier day's.
+async function loadSmsStaffFacts({ customer, asOfDate, optedIn }) {
+  if (optedIn !== true || asOfDate || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { prepaidPlans: null, prepGuide: null };
+  const staffFacts = require('./sms-staff-facts');
+  const [prepaidPlans, prepGuide] = await Promise.all([
+    staffFacts.loadPrepaidPlanFacts(customer.id, { db }),
+    staffFacts.loadPrepGuideFacts(customer.id, { db }),
+  ]);
+  return { prepaidPlans, prepGuide };
+}
+
 // GATE_SMS_PROMPT_B1 (change A, owner 2026-10-24): the LATEST finished visit's service_findings (title, detail, recommendation, severity,
 // category) for the texting AI's SERVICE HISTORY. Only when that visit has customer-safe notes (customerSafeVisitNotes returned text:
 // a held or suppressed report shows none), every text field through the access-code redactor, never technician_notes. Fail soft:
@@ -1320,6 +1335,8 @@ class ContextAggregator {
   // inbound SMS webhook resolve a single active customer with deleted_at and
   // shared-number protection — re-looking up by phone here could silently
   // pick a different (or deleted) account that shares the number.
+  // `includeSmsStaffFacts` (owner 2026-11-25): the prepaid visits left and the booked visit's prep guide, for the texting AI's draft,
+  // its send-time recheck and the unanswered-text fingerprint only (loadSmsStaffFacts).
   // `includeLiveEta` (Codex round-2 P2, PR #5334 — inverted from the
   // earlier opt-OUT `skipLiveEta`): LIVE ETA resolution is an external GPS +
   // Distance Matrix call, so it defaults OFF and every caller that discards
@@ -1336,7 +1353,7 @@ class ContextAggregator {
   // open promises the visit loops list) drops rows created after it, so a draft written minutes after
   // a customer's text cannot see the reply staff sent in between. Unset = today's reads, unchanged.
   // Booking, invoice and visit state still reads as of now; that state has no history to rewind to.
-  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, asOf = null } = {}) {
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, asOf = null } = {}) {
     const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
     const cappedAt = (qb) => (asOfDate ? qb.where('created_at', '<=', asOfDate) : qb);
     // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
@@ -1461,6 +1478,7 @@ class ContextAggregator {
 
     const lastService = serviceHistory[0] || null;
     const latestVisitFindings = await loadLatestVisitFindings(serviceHistory[0]);
+    const { prepaidPlans, prepGuide } = await loadSmsStaffFacts({ customer, asOfDate, optedIn: includeSmsStaffFacts });
     // Third-party Bill-To (Codex r2, mirrors billing-v2 /balance): a payment
     // against a payer-billed invoice is the PAYER's even though the row sits
     // under the homeowner's customer_id — exclude those from both the
@@ -1747,6 +1765,8 @@ class ContextAggregator {
         // estimate must never report its creation date as the send date.
         sentAt: pendingEstimate.sent_at || null,
       } : null,
+      prepaidPlans,
+      prepGuide,
       propertyPrefs: propertyPrefs || {},
       // v10: property facts the drafter may draw on. Access CODES are
       // presence-booleans ONLY — the values never enter a prompt (they would

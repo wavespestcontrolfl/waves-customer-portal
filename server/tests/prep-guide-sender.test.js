@@ -1004,6 +1004,49 @@ describe('sendPrepToCustomer', () => {
     expect(await nextUpcomingVisit('cust-1', 'flea')).toBeNull();
   });
 
+  // The texting AI's PREP GUIDE reads the booked visit through the senders' own eligibility (sms-staff-facts.loadPrepGuideFacts).
+  describe('nextGuideVisit', () => {
+    // one visit table the family LIKE keywords select from: a row is returned for the family whose keyword it carries
+    const visitsFor = (rows) => {
+      db.mockImplementation((table) => {
+        if (table !== 'scheduled_services') return customersQuery();
+        let keywords = [];
+        const q = { limit: jest.fn(() => q), offset: jest.fn(() => q), where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q), orderBy: jest.fn(() => q),
+          whereRaw: jest.fn((sql, params) => { if (!keywords.length && /LOWER\(service_type\) LIKE/.test(sql)) keywords = params.map((p) => p.replace(/%/g, '')); return q; }),
+          select: jest.fn(async () => { if (visitLookupError) throw visitLookupError; return rows.filter((r) => keywords.some((kw) => r.service_type.toLowerCase().includes(kw))); }) };
+        return q;
+      });
+    };
+    const day = (n) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+
+    test('the soonest booked visit any guide covers wins, with that guide', async () => {
+      const { nextGuideVisit } = require('../services/prep-guide-sender');
+      visitsFor([
+        liveVisit({ id: 'svc-pest', service_type: 'Quarterly Pest Control', scheduled_date: day(9) }),
+        liveVisit({ id: 'svc-flea', service_type: 'Flea Treatment', scheduled_date: day(3) }),
+        liveVisit({ id: 'svc-lawn', service_type: 'Lawn Care', scheduled_date: day(5) }),
+      ]);
+      expect(await nextGuideVisit('cust-1')).toMatchObject({ key: 'flea', visit: { id: 'svc-flea' } });
+    });
+
+    test('a guide already assigned to the visit wins over the family that found it; a visit underway is skipped', async () => {
+      const { nextGuideVisit } = require('../services/prep-guide-sender');
+      visitsFor([liveVisit({ id: 'svc-1', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: 'prep.cockroach' })]);
+      expect(await nextGuideVisit('cust-1')).toMatchObject({ key: 'cockroach', visit: { id: 'svc-1' } });
+      visitsFor([liveVisit({ id: 'svc-2', service_type: 'Pest Control', status: 'en_route' })]);
+      expect(await nextGuideVisit('cust-1')).toBeNull();
+    });
+
+    test('no covered visit is null; a lookup error throws (the caller fails soft)', async () => {
+      const { nextGuideVisit } = require('../services/prep-guide-sender');
+      visitsFor([liveVisit({ service_type: 'Tree & Shrub' })]);
+      expect(await nextGuideVisit('cust-1')).toBeNull();
+      visitLookupError = new Error('down');
+      await expect(nextGuideVisit('cust-1')).rejects.toThrow('down');
+      visitLookupError = null;
+    });
+  });
+
   test('no upcoming visit → the email prep_url stays the portal visits tab', async () => {
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'email' });
 

@@ -709,6 +709,33 @@ describe('liveZelleFacts', () => {
 // THE CONTRACT AT SEND TIME for money content: a copied Zelle / plan-price sentence is re-rendered from live data; anything money-shaped
 // the draft did not copy is held.
 // ---------------------------------------------------------------------------------------------------------------------
+// Texting AI facts (owner 2026-11-25): a prepaid visit count is a plan status. The rendered sentence is re-rendered from live rows at send
+// (the context is read WITH the staff facts), and a count in the model's own words is unauthorized whatever the customer asked.
+describe('paymentStatusSendBlockReason - the prepaid visits left sentence', () => {
+  const LEFT = 'Your prepaid Quarterly Pest Control plan has 3 of 4 prepaid visits left.';
+  const SNAP = { customer_id: 'c1', sentences: [LEFT] };
+  const ctx = (plans) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, hasDepositActivity: false }, prepaidPlans: plans });
+  const run = (body, extra = {}) => paymentStatusSendBlockReason({ customerId: 'c1', body, snapshot: SNAP, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'When is my next visit?', ...extra });
+
+  test('the copy goes out while the plan still reads 3 of 4, read with the staff facts; a changed count is payment_status_changed', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]));
+    await expect(run(LEFT)).resolves.toBeNull();
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith({ id: 'c1' }, { includeSmsStaffFacts: true });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ label: 'Quarterly Pest Control', remaining: 2, paid: 4 }]));
+    await expect(run(LEFT)).resolves.toBe('payment_status_changed');
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(null));
+    await expect(run(LEFT)).resolves.toBe('payment_status_changed');
+  });
+
+  test('a count in the model\'s own words is unauthorized with no billing read, snapshot or not', async () => {
+    for (const body of ['You have 3 visits left.', 'Three treatments remain.', `${LEFT} You have 2 visits remaining after this one.`]) {
+      expect({ body, r: await run(body) }).toEqual({ body, r: 'payment_status_unauthorized' });
+    }
+    await expect(run('You have 3 visits left.', { snapshot: null })).resolves.toBe('payment_status_unauthorized');
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+});
+
 describe('paymentStatusVerdict - Zelle and plan-price sentences are re-rendered at send time', () => {
   let priorZelle;
   const RECIPIENT = 'payments@wavespestcontrol.com';

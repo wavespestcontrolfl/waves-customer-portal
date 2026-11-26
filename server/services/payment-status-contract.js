@@ -72,6 +72,8 @@ const AMT = '\\$\\d+\\.\\d{2}';
 const TENDER = '(?: (?:card|ACH))?';
 const DAY = '[A-Z][a-z]{2} \\d{1,2}, \\d{4}';
 const INVOICE = '[A-Za-z0-9][A-Za-z0-9-]{0,29}';
+// a service name inside a prepaid-plan sentence (no period or comma, so the sentence cannot split or pose as another one)
+const PLAN_LABEL = "[A-Za-z][A-Za-z0-9 &'()/+-]{1,58}";
 const SHAPES = Object.freeze({
   payment_received: new RegExp(`^We received your ${AMT}${TENDER} payment on ${DAY}\\.$`),
   payment_partly_refunded: new RegExp(`^We received your ${AMT}${TENDER} payment on ${DAY}, and ${AMT} of it was refunded\\.$`),
@@ -89,6 +91,9 @@ const SHAPES = Object.freeze({
   // the money every reply may need to state (owner 2026-10-01 ~23:58Z): the plan price, the card charge, and Zelle per target invoice
   dues_monthly: new RegExp(`^Your monthly plan price is ${AMT}\\.$`),
   dues_card_charge: new RegExp(`^When your dues are charged to the credit card on file, the monthly charge is ${AMT}: ${AMT} dues plus a ${AMT} credit-card fee\\.$`),
+  // prepaid recurring plans (owner 2026-11-25, texting AI fix step 2): rendered from the plan rollup (sms-staff-facts.js), copied the same
+  // way. A prepaid plan sentence states visits, never money.
+  prepaid_visits_left: new RegExp(`^Your prepaid ${PLAN_LABEL} plan has \\d{1,3} of \\d{1,3} prepaid visits? left\\.$`),
   zelle_offer: new RegExp(`^You can pay invoice ${INVOICE} by Zelle to [^,\\n]{3,80}, with your name or the invoice number in the Zelle memo\\.$`),
   zelle_invoice_unavailable: new RegExp(`^Zelle isn't available for invoice ${INVOICE} right now\\.$`),
   zelle_not_offered: /^We don't take Zelle right now\.$/,
@@ -241,7 +246,21 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   const depositUnknown = billing.hasDepositActivity !== false;
   const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length || depositUnknown || !everyRowRenders(billing, rows, todayParts))
     ? null : absenceSentence(billing, rows, todayParts);
-  return [...out, ...(absence ? [absence] : []), ...duesSentences(context), ...zelleSentences(billing.zelleFacts)];
+  return [...out, ...(absence ? [absence] : []), ...duesSentences(context), ...prepaidSentences(context), ...zelleSentences(billing.zelleFacts)];
+}
+
+const labelOk = (label) => new RegExp(`^${PLAN_LABEL}$`).test(String(label || ''));
+
+// Prepaid recurring plans (context.prepaidPlans, sms-staff-facts.loadPrepaidPlanFacts): visits left of the visits paid for.
+function prepaidSentences(context) {
+  const out = [];
+  for (const plan of (Array.isArray(context?.prepaidPlans) ? context.prepaidPlans : []).slice(0, 3)) {
+    const { remaining, paid } = plan || {};
+    if (labelOk(plan?.label) && Number.isInteger(remaining) && Number.isInteger(paid) && paid > 0 && paid < 1000 && remaining >= 0 && remaining <= paid) {
+      out.push({ kind: 'prepaid_visits_left', text: `Your prepaid ${plan.label} plan has ${remaining} of ${paid} prepaid visit${paid === 1 ? '' : 's'} left.` });
+    }
+  }
+  return out;
 }
 
 // The monthly plan price, and the card charge only when the lane resolved it exactly (context.customer.billingLane, the same facts the
@@ -654,9 +673,13 @@ function attributesOffTarget(t, { namedDates, namedTenders, amounts }) {
 // grammar ("fifty dollars", "45/mo") and no mention of Zelle - whatever the wording, in any scope. (An unparseable check fails closed.)
 const MONEY_FIGURE_RE = /\$\s?\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars?|bucks|usd)\b/i;
 const ZELLE_WORD_RE = /\bzelle\b/i;
+// The visit COUNT of a prepaid plan ("3 visits left", "seven prepaid visits") is a plan status like an amount: only the rendered
+// prepaid sentence may state it. Broad on purpose; a false hold goes to staff, a missed count would state a plan status unchecked.
+const PREPAID_COUNT_RE = /\b(?:visits?|applications?|treatments?)\s+(?:are\s+|is\s+)?(?:still\s+)?(?:left|remaining|remain)\b|\b(?:left|remaining)\s+(?:prepaid\s+)?(?:visits?|applications?|treatments?)\b|\bprepaid\s+(?:\w+\s+)?(?:visits?|applications?|treatments?)\b/i;
+const claimsPrepaidCount = (text) => PREPAID_COUNT_RE.test(String(text ?? ''));
 function remainderHasMoney(remainder) {
   const text = String(remainder ?? '');
-  if (MONEY_FIGURE_RE.test(text) || ZELLE_WORD_RE.test(text)) return true;
+  if (MONEY_FIGURE_RE.test(text) || ZELLE_WORD_RE.test(text) || claimsPrepaidCount(text)) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
@@ -908,6 +931,7 @@ module.exports = {
   isPaymentScoped,
   autoSendScopeBlock,
   remainderIsInert,
+  claimsPrepaidCount,
   // every module regex, for the adversarial-input timing test
-  REGEXES: { TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
+  REGEXES: { PREPAID_COUNT_RE, TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
 };

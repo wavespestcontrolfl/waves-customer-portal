@@ -40,7 +40,7 @@ const { isRealProviderSend } = require('./sms-auto-send');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { resolveProjectEmailRecipientForSend, ensureServicePrepToken } = require('./project-email');
 const { portalUrl } = require('../utils/portal-url');
-const { formatDisplayDate } = require('../utils/date-only');
+const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
@@ -347,6 +347,24 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
     logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${[].concat(customerIds).filter(Boolean).join(',')}: ${err.name} (code=${err.code})`);
     return null;
   }
+}
+
+// The soonest booked visit that ANY visit-prep guide covers, with its guide key: { key, visit } or null. The same eligibility the senders
+// apply (upcomingFamilyVisits: the family keywords and exclusions, the 'upcoming' page state, the ET date), asked once per guide and
+// merged soonest first (date, window, id), so the texting AI's PREP GUIDE (sms-staff-facts) never reads a visit the senders would not
+// prep. A guide already assigned to the visit (prep_template_key naming a live visit guide) wins over the family that found it; a
+// how-to guide never matches. THROWS on a lookup error.
+const sortKey = (visit) => [dateOnlyString(visit.scheduled_date), String(visit.window_start || ''), String(visit.id).padStart(12, '0')].join('|');
+async function nextGuideVisit(customerId) {
+  let best = null;
+  for (const [key, config] of Object.entries(PREP_CONFIG)) {
+    if (config.guide || !config.serviceKeywords?.length) continue;
+    const [visit] = await upcomingFamilyVisits([customerId], config, 1);
+    if (visit && (!best || sortKey(visit) < sortKey(best.visit))) best = { key, visit };
+  }
+  if (!best) return null;
+  const assigned = Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === best.visit.prep_template_key);
+  return { key: assigned ? assigned[0] : best.key, visit: best.visit };
 }
 
 async function nextUpcomingVisits(customerId, config) {
@@ -1184,5 +1202,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 }
 
 module.exports = {
-  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, buildWateringBlock, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
+  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, nextGuideVisit, settleHeldEnrollment, buildWateringBlock, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
 };

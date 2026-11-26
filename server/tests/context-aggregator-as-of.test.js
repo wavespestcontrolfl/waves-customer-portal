@@ -10,6 +10,11 @@ jest.mock('../services/visit-loops-facts', () => ({
   emptyVisitLoops: () => ({ lateAlert: null, pastWindow: null, weOwe: [], customerWaiting: [] }),
 }));
 
+jest.mock('../services/sms-staff-facts', () => ({
+  loadPrepaidPlanFacts: jest.fn(async () => [{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]),
+  loadPrepGuideFacts: jest.fn(async () => ({ key: 'flea', label: 'Flea Treatment', sentences: ['Vacuum every carpet before we arrive.'] })),
+}));
+
 const db = require('../models/db');
 db.schema = { hasTable: async () => true };
 const { loadVisitLoops } = require('../services/visit-loops-facts');
@@ -115,5 +120,32 @@ describe('getContextForCustomer asOf', () => {
     expect(calls.some(([m, a]) => m === 'where' && a[0] === 'created_at' && a[1] === '<' && a[2] === before)).toBe(true);
     expect(cap(calls, 'created_at', '<=')).toBe(true);
     expect(cap(calls, 'updated_at', '<=')).toBe(true);
+  });
+});
+
+// Texting AI facts (owner 2026-11-25): the prepaid visits left and the booked visit's prep guide are OPT IN (includeSmsStaffFacts), read
+// only for a live GATE_SMS_REAL_ANSWERS context: never for another caller, a frozen replay or a gate-off draft.
+describe('getContextForCustomer texting AI staff facts', () => {
+  const staffFacts = require('../services/sms-staff-facts');
+  const reads = () => staffFacts.loadPrepaidPlanFacts.mock.calls.length + staffFacts.loadPrepGuideFacts.mock.calls.length;
+
+  test('an opted-in live gate-on context carries both and reads them for the customer', async () => {
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true });
+    expect(context.prepaidPlans).toEqual([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]);
+    expect(context.prepGuide).toMatchObject({ key: 'flea' });
+    expect(staffFacts.loadPrepaidPlanFacts).toHaveBeenCalledWith(customer.id, { db });
+    expect(staffFacts.loadPrepGuideFacts).toHaveBeenCalledWith(customer.id, { db });
+  });
+
+  test('every other caller (no opt-in), a frozen replay and a gate-off context read none of it', async () => {
+    const plain = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
+    expect(plain.prepaidPlans).toBeNull();
+    expect(plain.prepGuide).toBeNull();
+    const replay = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true, asOf: ASOF });
+    expect(replay.prepaidPlans).toBeNull();
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const off = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true });
+    expect(off.prepGuide).toBeNull();
+    expect(reads()).toBe(0);
   });
 });

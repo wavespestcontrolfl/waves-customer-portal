@@ -176,7 +176,8 @@ function bodyHasPaymentStatusVocabulary(body) {
 function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = null, statusVocabulary = true } = {}) {
   const text = String(body || '');
   if (!text) return false;
-  if (bodyAmountCents(text).length || ZELLE_WORD_RE.test(text)) return true;
+  // a prepaid visit count (the rendered sentence or the model's own words) is judged and fingerprinted like an amount, whatever the customer asked
+  if (bodyAmountCents(text).length || ZELLE_WORD_RE.test(text) || paymentStatus.claimsPrepaidCount(text)) return true;
   if (statusVocabulary && strictForVersion(promptVersion)
       && paymentStatus.assertsPaymentStatus(text, { inboundText: inboundMessage == null ? null : String(inboundMessage) })) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
@@ -186,9 +187,10 @@ const bodyNeedsBillingBoundaryCheck = bodyNeedsPaymentRecheck;
 
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing
 // context is a failed read, not an empty account.
-async function loadCustomerContext(customerId, dbh = db) {
+// `staffFacts`: also the facts the texting AI copies sentences from (the prepaid visits left), so a copied sentence is re-rendered from live rows.
+async function loadCustomerContext(customerId, dbh = db, { staffFacts = false } = {}) {
   const customerRow = await dbh('customers').where({ id: customerId }).first();
-  return customerRow ? require('./context-aggregator').getContextForCustomer(customerRow) : null;
+  return customerRow ? require('./context-aggregator').getContextForCustomer(customerRow, staffFacts ? { includeSmsStaffFacts: true } : {}) : null;
 }
 
 /**
@@ -233,7 +235,7 @@ async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx,
   if (!customerId) return { reason: 'payment_status_recheck_no_customer', zelle: null };
   if (snapshot.customer_id && String(snapshot.customer_id) !== String(customerId)) return { reason: 'payment_status_changed', zelle: null };
   try {
-    const context = ctx || await loadCustomerContext(customerId, dbh);
+    const context = ctx || await loadCustomerContext(customerId, dbh, { staffFacts: true });
     // Codex round-75 P2: the aggregator reports an inner read failure as billing.unavailable (not a throw) - an outage, retryable,
     // never "the sentence is no longer true"
     if (!context || context.billing?.unavailable === true) return { reason: 'payment_status_recheck_failed', zelle: null };
