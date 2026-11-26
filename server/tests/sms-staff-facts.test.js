@@ -51,7 +51,7 @@ describe('prepaid visits left (payment-status contract)', () => {
     // the claim detector uses the question's visit nouns: appointments count too
     expect(check('You have three appointments left.')).toBe(false);
     // an explicit coverage claim is a count claim whatever the customer asked
-    for (const claim of ['Your plan still covers three visits.', 'The plan has four visits.']) {
+    for (const claim of ['Your plan still covers three visits.', 'The plan has four visits.', 'You have three services left.']) {
       expect(paymentStatus.checkPaymentStatusReply({ reply: claim, sentences, inboundText: 'When is my next visit?' }).ok).toBe(false);
     }
     for (const own of ['You have 3 visits left.', 'Three treatments remain on your plan.', 'You have two prepaid visits.', 'There are 3 left visits.',
@@ -89,6 +89,8 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(ask('Three.', 'How many visits do I have left this year?')).toBe(false);
     // an open-slot answer to an availability question is a scheduling reply, not a plan count
     expect(ask('We have two appointments left on Friday.', 'Do you have any appointments left for Friday?')).toBe(true);
+    expect(ask('Three.', 'How many appointments do you have left?')).toBe(true);
+    expect(ask('We have plenty of openings this week.', 'How many appointments do you have left?')).toBe(true);
     expect(ask('You have two appointments left on your prepaid plan.', 'Do you have any appointments left for Friday?')).toBe(false);
     expect(ask('Three.', 'How many are left on my plan?')).toBe(false);
     // a treatment-frequency question is not a plan-count question
@@ -120,6 +122,7 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(check(LAWN, 'How many cockroach treatments do I have left?')).toBe(false);
     // a service name the alias table does not know is held for a person, not answered with whichever plan was copied
     expect(check(LAWN, 'How many ant treatments do I have left?')).toBe(false);
+    expect(check(LAWN, 'How many visits for ants do I have left?')).toBe(false);
     expect(check(LAWN, 'How many more visits do I have left?')).toBe(true);
     // two services named: only a plan that names both answers ("Lawn Pest Control" is turf service, not the pest plan)
     expect(check(LEFT, 'How many Lawn Pest Control visits do I have left?')).toBe(false);
@@ -178,6 +181,11 @@ describe('loadPrepaidPlanFacts', () => {
     expect(await load(plans, [{ id: 'v9', recurring_parent_id: 'p1' }])).toEqual([{ label: 'Lawn Care', remaining: 3, paid: 4 }]);
     // the series parent itself carries the annual stamp
     expect(await load(plans, [{ id: 'p2', recurring_parent_id: null }])).toEqual([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]);
+  });
+
+  test('a label shared with an annual-term series is ambiguous too: the manual plan renders nothing', async () => {
+    const plans = [plan({ remainingVisits: 0 }), plan({ seriesParentId: 'p2', remainingVisits: 4 })];
+    expect(await load(plans, [{ id: 'v9', recurring_parent_id: 'p2' }])).toEqual([]);
   });
 
   test('a failed read is null (an outage), never an empty plan list; no customer is null', async () => {

@@ -22,8 +22,10 @@ async function loadPrepaidPlanFacts(customerId, { db } = {}) {
       .where((qb) => qb.whereNotNull('annual_prepay_term_id').orWhere('prepaid_method', series.ANNUAL_PREPAY_METHOD))
       .select('id', 'recurring_parent_id');
     const annualSeries = new Set(annualRows.map((row) => String(series.resolveSeriesParentId(row))));
+    // a label shared with ANY other series (an annual renewal beside an exhausted manual plan included) is ambiguous: it renders for none of them
+    const sameLabel = (plan) => plans.filter((other) => String(other.serviceType).toLowerCase() === String(plan.serviceType).toLowerCase()).length;
     return plans
-      .filter((plan) => !annualSeries.has(String(plan.seriesParentId)))
+      .filter((plan) => !annualSeries.has(String(plan.seriesParentId)) && sameLabel(plan) === 1)
       .map((plan) => ({ label: String(plan.serviceType || ''), remaining: Number(plan.remainingVisits), paid: Number(plan.paidVisits) }))
       .filter((plan) => plan.label && Number.isInteger(plan.remaining) && Number.isInteger(plan.paid) && plan.paid > 0 && plan.remaining >= 0 && plan.remaining <= plan.paid);
   } catch (err) {
