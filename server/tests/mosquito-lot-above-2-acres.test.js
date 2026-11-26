@@ -179,6 +179,76 @@ describe('recurring mosquito above 2 acres: no system send path sends it', () =>
   });
 });
 
+// Property records stop a home lot at 200,000 sq ft (4.59 acres): the lookups, the website and the saved customer lot all store a
+// larger parcel as exactly that number. A NEW quote at that number is "4.59 acres or more", so it is not priced by the per-acre
+// rule: it keeps the hand price above (the same flat price and reason), and staff are told to enter the real size.
+describe('recurring mosquito at the 200,000 sq ft record cap: hand price for a new quote too', () => {
+  const { MOSQUITO_RECORD_LOT_CAP_SQFT, MOSQUITO_LOT_AT_RECORD_CAP_TEXT } = require('../services/pricing-engine/service-pricing');
+  const fresh = (lotSqFt, extra = {}) => generateEstimate({
+    homeSqFt: 2000, lotSqFt, stories: 1, yearBuilt: 2005, services: { mosquito: { tier: 'seasonal9' } }, ...extra,
+  }).lineItems.find((l) => l.service === 'mosquito');
+
+  test('the cap is the number the lookups and the website stop a home lot at', () => {
+    const read = (file) => require('fs').readFileSync(require.resolve(file), 'utf8');
+    expect(MOSQUITO_RECORD_LOT_CAP_SQFT).toBe(200000);
+    expect(read('../services/property-lookup/ai-property-lookup')).toContain('const LOT_SQFT_MAX = 200_000;');
+    expect(read('../routes/public-quote')).toContain('const LOT_CAP = commercialDetected ? 50_000_000 : 200000;');
+  });
+
+  test('a new quote at exactly the cap is never priced as 4.59 acres: the flat price and the hand-price reason, as before the rule', () => {
+    const capped = fresh(200000);
+    const before = fresh(200000, LEGACY);
+    expect(capped.perVisit).toBe(before.perVisit);
+    expect(capped.annual).toBe(1053);
+    expect(capped.tiers.map((t) => t.perVisit)).toEqual(before.tiers.map((t) => t.perVisit));
+    expect(capped.requiresManualReview).toBe(true);
+    expect(capped.manualReviewReasons[0]).toBe(REASON);
+    expect(capped.mosquitoLotAtRecordCap).toBe(true);
+    expect(capped.mosquitoAddedAcres).toBeUndefined();
+    // Staff wording never rides the line a customer page reads.
+    expect(JSON.stringify(capped)).not.toContain(MOSQUITO_LOT_AT_RECORD_CAP_TEXT);
+    // An explicit treatable area at the cap is the same truncated size.
+    const treatable = fresh(100000, { mosquitoTreatableSqFt: 200000 });
+    expect(treatable.manualReviewReasons[0]).toBe(REASON);
+    expect(treatable.mosquitoLotAtRecordCap).toBe(true);
+  });
+
+  test('one square foot either side of the cap, and a typed 10 acres, are real sizes: priced at $85 per added acre', () => {
+    const twoAcres = fresh(87120).perVisit;
+    expect(twoAcres).toBe(117);
+    for (const lot of [199999, 200001, 10 * ACRE]) {
+      const line = fresh(lot);
+      expect(line.mosquitoLotAtRecordCap).toBeUndefined();
+      expect(line.manualReviewReasons).not.toContain(REASON);
+      expect(line.perVisit).toBe(Math.round(twoAcres + 85 * (lot - 87120) / ACRE));
+    }
+    expect(fresh(10 * ACRE).perVisit).toBe(797);
+  });
+
+  test('an unmeasured lot at the cap keeps the unverified-area hold, not the size instruction', () => {
+    const line = fresh(200000, { lotSizeMeasured: false });
+    expect(line.manualReviewReasons).toContain('mosquito_treatable_area_unverified');
+    expect(line.manualReviewReasons).not.toContain(REASON);
+    expect(line.mosquitoLotAtRecordCap).toBeUndefined();
+  });
+
+  test('call quote: the draft lane parks it and tells the operator to enter the real lot size', () => {
+    const intent = {
+      decision: 'draft', services: { mosquito: { tier: 'seasonal9' } }, is_commercial: false, category: 'RESIDENTIAL',
+      address: '123 Sample St, Parrish, FL 34219', confidence: 'high', constraint_flags: [], customer_phone: '+19415550100',
+      evidence: [{ speaker: 'caller', quote: 'mosquito control please', decision: 'mosquito' }],
+    };
+    const out = classifyLane({
+      intent, propertyFacts: { home: { value: 2000, source: 'county_roll' } },
+      engineResult: { lineItems: [fresh(200000)] }, totals: { monthly: 87.75, annual: 1053, oneTime: 0 }, comps: null, calibration: [],
+    });
+    expect(out.lane).toBe(LANES.YELLOW);
+    expect(out.reasons).toContain(MOSQUITO_LOT_AT_RECORD_CAP_TEXT);
+    expect(out.reasons).not.toContain(STAFF_TEXT);
+    expect(lineRequiresReview(fresh(200000))).toBe(true);
+  });
+});
+
 describe('POST /api/public/quote/calculate: recurring mosquito above 2 acres', () => {
   let server;
   let base;
@@ -214,6 +284,36 @@ describe('POST /api/public/quote/calculate: recurring mosquito above 2 acres', (
     expect(body.reason).toBe('acre_or_larger_property');
     expect(body.reason).not.toBe(REASON);
     expect(JSON.stringify(body)).not.toContain(STAFF_TEXT);
+  });
+
+  test('a confirmed 10-acre lot is stored as the 200,000 sq ft cap, so it is never priced as 4.59 acres: the hand-price hold, and the bell says to enter the real size', async () => {
+    const { MOSQUITO_LOT_AT_RECORD_CAP_TEXT } = require('../services/pricing-engine/service-pricing');
+    const { notifyAdmin } = require('../services/notification-service');
+    const db = require('../models/db');
+    notifyAdmin.mockClear();
+    db.__recorded.length = 0;
+    const { status, body } = await quote(10);
+    expect(status).toBe(202);
+    expect(body.quote_required).toBe(true);
+    expect(body.reason).toBe(REASON);
+    expect(body.monthly_total).toBeUndefined();
+    expect(body.annual_total).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain(MOSQUITO_LOT_AT_RECORD_CAP_TEXT);
+    const bell = notifyAdmin.mock.calls.find((c) => /Manual quote needed/.test(c[1]));
+    expect(bell[2]).toContain(MOSQUITO_LOT_AT_RECORD_CAP_TEXT);
+    // The stored draft holds the capped lot with the hold on its mosquito line, not a per-acre price for 4.59 acres.
+    const row = db.__recorded.find((w) => w.table === 'estimates' && w.op === 'insert');
+    const data = typeof row.row.estimate_data === 'string' ? JSON.parse(row.row.estimate_data) : row.row.estimate_data;
+    expect(data.engineInput.lotSqFt).toBe(200000);
+    const line = data.manualQuoteLines.find((l) => l.service === 'mosquito');
+    expect(line.manualReviewReasons[0]).toBe(REASON);
+    expect(line.mosquitoLotAtRecordCap).toBe(true);
+    expect(line.mosquitoAddedAcres).toBeUndefined();
+    expect(line.perVisit).toBe(117);
+    expect(data.quoteRequiredReason).toBe(REASON);
+    // Just under the cap is a real size: the 1-acre-and-up review, as a 3-acre lot.
+    const under = await quote(4.5);
+    expect(under.body.reason).toBe('acre_or_larger_property');
   });
 
   test('half an acre still shows a price', async () => {

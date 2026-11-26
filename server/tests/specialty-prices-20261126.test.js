@@ -629,6 +629,28 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
     throws409({ result: { quoteRequiredItems: [{ service: 'bed_bug', reason: 'manual' }] } });
   });
 
+  test('every key and name a mosquito, bed bug or wasp row goes by is found, with no tier list beside it', () => {
+    // The catalog's recurring mosquito rows (cadence keys and names), with no results.mq list.
+    throws409({ result: { recurring: { services: [{ name: 'Seasonal Mosquito Control', service: 'mosquito_seasonal', mo: 87.75 }] } } });
+    throws409({ result: { recurring: { services: [{ name: 'Monthly Mosquito Control', service: 'mosquito_monthly', mo: 103 }] } } });
+    throws409({ result: { recurring: { services: [{ name: 'Seasonal Mosquito Control', mo: 87.75 }] } } });
+    throws409({ result: { lineItems: [{ service: 'mosquito_monthly', annual: 1236 }] } });
+    throws409({ result: { lineItems: [{ service: 'mosquito_program' }] } });
+    // The browser's own names: the program row and its tier rows (named by `n`), wherever the tier list sits.
+    throws409({ result: { recurring: { services: [{ name: 'Mosquito (Seasonal Mosquito Program (9 visits))', mo: 87.75 }] } } });
+    throws409({ result: { mq: [{ pv: 117, v: 9 }] } });
+    throws409({ sendSnapshot: { tiers: [{ n: 'Monthly Mosquito Program (12 visits)', pv: 103, v: 12 }] } });
+    // A label in place of a name; plural and joined spellings; a commercial mosquito row (no exemption for it).
+    throws409({ result: { specItems: [{ label: 'Bed Bugs (2 rooms)', price: 1026 }] } });
+    throws409({ result: { oneTime: { items: [{ name: 'Bedbug Heat Treatment', price: 2400 }] } } });
+    throws409({ result: { oneTime: { items: [{ service: 'wasp_hornet_removal', price: 275 }] } } });
+    throws409({ result: { oneTime: { items: [{ name: 'Baldfaced Hornets', price: 350 }] } } });
+    throws409({ result: { oneTime: { items: [{ name: 'Yellowjackets (ground)', price: 350 }] } } });
+    throws409({ result: { lineItems: [{ service: 'commercial_mosquito', annual: 4800 }] } });
+    // A marker on a container hides nothing under it: the rows are read one at a time.
+    throws409({ result: { name: 'Mosquito Misting Service Plan', service: 'mosquito_misting', recurring: { services: [{ name: 'Seasonal Mosquito Control', service: 'mosquito_seasonal', mo: 87.75 }] } } });
+  });
+
   test('a 3-acre mosquito client save on an unmeasured lot is refused; the server keeps its unverified-area hold at the flat price', () => {
     const unmeasured = browser({ mq: true });
     unmeasured.inputs.lotSqFt = 3 * ACRE;
@@ -659,6 +681,8 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
     // The misting plan and the one-time mosquito visit are other services: these rules do not price them.
     expect(() => assertFallback({ result: { recurring: { services: [{ name: 'Mosquito Misting Service Plan', service: 'mosquito_misting', mo: 99 }] } } })).not.toThrow();
     expect(() => assertFallback({ result: { oneTime: { items: [{ name: 'One-Time Mosquito', service: 'one_time_mosquito', price: 199 }] } } })).not.toThrow();
+    expect(() => assertFallback({ result: { oneTime: { items: [{ name: 'OT Mosquito', price: 199 }, { service: 'mosquito_one_time', price: 199 }] } } })).not.toThrow();
+    expect(() => assertFallback({ result: { lineItems: [{ service: 'mosquito_misting_installation', price: 2400 }, { service: 'mosquito_misting_refill', price: 120 }] } })).not.toThrow();
   });
 
   test('there is no unchanged-resave exception: the same rows, inputs and totals as the stored estimate are refused too', async () => {

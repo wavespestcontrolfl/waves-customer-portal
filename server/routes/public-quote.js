@@ -162,7 +162,7 @@ const {
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
-const { PLUGGING_AREA_REQUIRED_REASON } = require('../services/pricing-engine/service-pricing');
+const { PLUGGING_AREA_REQUIRED_REASON, MOSQUITO_LOT_AT_RECORD_CAP_TEXT } = require('../services/pricing-engine/service-pricing');
 // customQuoteReason the engine stamps on every top dressing line (estimate-engine.js).
 const TOP_DRESSING_QUOTE_ONLY_REASON = 'top_dressing_quote_only';
 // Reasons the office prices by hand: a keyed quote-on-request product and top
@@ -3846,7 +3846,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
               ? `${serviceInterest} · needs the area to plug (sq ft) · ${quoteFullAddress}`
             : quoteRequiredReason === 'mosquito_lot_above_2_acres'
-              ? `${serviceInterest} · Lot above 2 acres: set the mosquito price by hand · ${quoteFullAddress}`
+              ? `${serviceInterest} · ${manualQuoteLine?.mosquitoLotAtRecordCap === true ? MOSQUITO_LOT_AT_RECORD_CAP_TEXT : 'Lot above 2 acres: set the mosquito price by hand'} · ${quoteFullAddress}`
             : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)

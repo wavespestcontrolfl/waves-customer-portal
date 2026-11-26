@@ -4826,6 +4826,12 @@ const MOSQUITO_LOT_ABOVE_2_ACRES_SQFT = 87120;
 const MOSQUITO_LOT_ABOVE_2_ACRES_REASON = 'mosquito_lot_above_2_acres';
 // Staff wording (draft lane reason, office bell, estimate tool). Never shown to a customer.
 const MOSQUITO_LOT_ABOVE_2_ACRES_TEXT = 'Lot above 2 acres: set the mosquito price by hand';
+// Property records stop a home lot at 200,000 sq ft (4.59 acres): the county and AI lookups (ai-property-lookup LOT_SQFT_MAX), the
+// website quote (public-quote LOT_CAP) and the customer's saved lot each store a larger parcel as exactly that number. So a lot AT
+// that number means "4.59 acres or more", not a size. Its added acres are not priced: it keeps the hand-price hold and the flat
+// price it has on main. A number above it can only be typed by staff or verified by a tech, and is priced as entered.
+const MOSQUITO_RECORD_LOT_CAP_SQFT = 200000;
+const MOSQUITO_LOT_AT_RECORD_CAP_TEXT = 'Lot is 4.59 acres or more (property records stop there): enter the real lot size to price mosquito, or set the price by hand';
 
 function priceMosquito(property, options = {}) {
   const {
@@ -4887,7 +4893,9 @@ function priceMosquito(property, options = {}) {
   // without a parcel). An unmeasured lot (lotSizeMeasured:false) is not a size: the unverified-area hold below speaks for it.
   const lotSqFtUsed = Math.max(Number(property.lotSqFt) || 0, areaResolution.mosquitoTreatableSqFt || 0);
   const lotAbove2Acres = options.lotSizeMeasured !== false && lotSqFtUsed > MOSQUITO_LOT_ABOVE_2_ACRES_SQFT;
-  const legacyHandPrice = options.legacySpecialty1126 === true;
+  // A lot at the record cap is a truncated size (4.59 acres or more): hand price, as a quote priced before the rule.
+  const lotAtRecordCap = lotAbove2Acres && lotSqFtUsed === MOSQUITO_RECORD_LOT_CAP_SQFT;
+  const legacyHandPrice = options.legacySpecialty1126 === true || lotAtRecordCap;
   // The acres past the second (pro-rated), priced for a new quote; zero for a lot at or under 2 acres and for a legacy quote.
   const addedAcres = lotAbove2Acres && !legacyHandPrice
     ? (lotSqFtUsed - MOSQUITO_LOT_ABOVE_2_ACRES_SQFT) / MOSQUITO_SQFT_PER_ACRE
@@ -5016,6 +5024,8 @@ function priceMosquito(property, options = {}) {
     pricingSqFt,
     // Acres past the second that this price carries ($85 per visit each, pro-rated); 0 on a lot at or under 2 acres.
     ...(addedAcres > 0 ? { mosquitoAddedAcres: Math.round(addedAcres * 1000) / 1000, mosquitoAddedAcreAdder: MOSQUITO_ADDED_ACRE_PER_VISIT } : {}),
+    // The lot is the record cap, so the real lot may be larger: staff read MOSQUITO_LOT_AT_RECORD_CAP_TEXT beside the hold.
+    ...(lotAtRecordCap ? { mosquitoLotAtRecordCap: true } : {}),
     basePrice, pressureMultiplier: pressure,
     pressureBeforeCap,
     perVisit, visits, annual, monthly,
@@ -10880,7 +10890,7 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, MOSQUITO_LOT_ABOVE_2_ACRES_REASON, MOSQUITO_LOT_ABOVE_2_ACRES_TEXT, MOSQUITO_LOT_ABOVE_2_ACRES_SQFT, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
+  priceMosquito, MOSQUITO_LOT_ABOVE_2_ACRES_REASON, MOSQUITO_LOT_ABOVE_2_ACRES_TEXT, MOSQUITO_LOT_ABOVE_2_ACRES_SQFT, MOSQUITO_RECORD_LOT_CAP_SQFT, MOSQUITO_LOT_AT_RECORD_CAP_TEXT, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
