@@ -18,15 +18,14 @@
  * Where each rule lives (CLAUDE.md rule 22): standard minutes = job-costing JOB_COST_STANDARD / standardLaborMinutesFor;
  * what a visit earns = job-costing (read from service_records.revenue, never restated); plan members = billing-lane
  * MEMBERSHIP_TIER_SQL; internal test accounts = mrr-breakdown excludeInternalTestCustomers; chargeable autopay =
- * autopay-eligibility autopayActivePredicate; paid prepay terms = annual-prepay-renewals coveredTermsAsOf; the owner =
- * the owner login (intelligence-bar/ib-access fullAccessAllowlist); the P&L = pnl-report buildPnlReport.
+ * autopay-eligibility autopayActivePredicate; paid prepay terms = annual-prepay-renewals coveredTermsAsOf; the owner and the
+ * owner's stops at standard minutes = ops-buyer-metrics (resolveOwnerTechnician, ownerStopRows, standardStopMinutes); the P&L = pnl-report buildPnlReport.
  */
 
 const { MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 const { excludeInternalTestCustomers } = require('./mrr-breakdown');
 const { autopayActivePredicate } = require('./autopay-eligibility');
-const { fullAccessAllowlist } = require('./intelligence-bar/ib-access');
-const { standardLaborMinutesFor, JOB_COST_STANDARD } = require('./job-costing');
+const { resolveOwnerTechnician, ownerStopRows, standardStopMinutes } = require('./ops-buyer-metrics');
 
 const ADD_BACK_CATEGORIES = ['Interest', 'Depreciation'];
 const MATURE_PLAN_MONTHS = 12;
@@ -50,42 +49,25 @@ function timeAllowance(hours, hourlyRate) {
 }
 
 /**
- * The owner's technician row: the one admin login on the owner allow-list (IB_FULL_ACCESS_EMAILS, default the owner's
- * contact address), the same identity the owner-only actions use. { id, onPayroll } or null when zero or several rows
- * match: an ambiguous owner is "unavailable", never a guess. onPayroll = the row is a W-2 employee, so a paycheck (not
- * an allowance) pays for the owner's time.
+ * The owner for the snapshot: ops-buyer-metrics.js resolveOwnerTechnician (the ONE active field technician with the admin
+ * role whose phone is a known owner phone; none or several = unavailable, so null here), plus whether that row is a W-2
+ * employee (onPayroll: a paycheck, not an allowance, pays for the owner's time).
  */
-async function resolveOwnerTechnician(db) {
-  const rows = await db('technicians')
-    .where('role', 'admin')
-    .whereRaw('lower(btrim(email)) = ANY(?)', [fullAccessAllowlist()])
-    .select('id', 'employment_type');
-  if (rows.length !== 1) return null;
-  return { id: rows[0].id, onPayroll: rows[0].employment_type === 'w2' };
+async function ownerForSnapshot(db) {
+  const owner = await resolveOwnerTechnician(db);
+  if (!owner.id) return null;
+  const row = await db('technicians').where({ id: owner.id }).first('employment_type');
+  return { id: owner.id, onPayroll: !!row && row.employment_type === 'w2' };
 }
 
 /**
- * Minutes of the owner's field time in [startDate, endDate]: per physical stop (a grouped visit, scheduled_services.
- * visit_id, is one stop) the sum of its services' standard on-site minutes, plus one standard drive. A service type
- * with no standard (a specialty or one-off job) keeps job-costing's costed labor_hours. App tap spans are never read.
- * Every completed stop counts, callbacks included: the owner's time was spent.
+ * Minutes of the owner's field time in [startDate, endDate]: ops-buyer-metrics.js ownerStopRows (per physical stop, a
+ * grouped visit is one stop) at the job-costing standard minutes of every service done there plus one standard drive
+ * (standardStopMinutes). App tap spans are never read. Every completed stop counts, callbacks included.
  */
 async function ownerFieldMinutes(db, ownerId, startDate, endDate) {
-  const rows = await db('service_records as sr')
-    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
-    .where('sr.status', 'completed')
-    .whereBetween('sr.service_date', [startDate, endDate])
-    .whereRaw('COALESCE(sr.technician_id, ss.technician_id) = ?', [ownerId])
-    .select(db.raw('COALESCE(ss.visit_id::text, sr.id::text) AS stop_key'), 'sr.service_type', 'sr.labor_hours');
-  const onSiteByStop = new Map();
-  for (const row of rows) {
-    const standard = standardLaborMinutesFor(row.service_type);
-    const minutes = standard != null ? standard : num(row.labor_hours) * 60;
-    onSiteByStop.set(row.stop_key, (onSiteByStop.get(row.stop_key) || 0) + minutes);
-  }
-  let total = 0;
-  for (const onSite of onSiteByStop.values()) total += onSite + JOB_COST_STANDARD.defaultDriveMinutes;
-  return { minutes: total, stops: onSiteByStop.size };
+  const stops = await ownerStopRows(db, ownerId, startDate, endDate);
+  return { minutes: standardStopMinutes(stops, require('./job-costing')), stops: stops.length };
 }
 
 /**
@@ -94,7 +76,7 @@ async function ownerFieldMinutes(db, ownerId, startDate, endDate) {
  */
 async function ownerFieldTime(db, financials, startDate, endDate) {
   const rate = num(financials && financials.owner_field_hourly_rate);
-  const owner = await resolveOwnerTechnician(db);
+  const owner = await ownerForSnapshot(db);
   if (!owner) return { hours: null, allowance: rate > 0 ? null : 0, onPayroll: false };
   const { minutes } = await ownerFieldMinutes(db, owner.id, startDate, endDate);
   // Hundredths of an hour, the precision the column and the allowance both use.
@@ -200,7 +182,7 @@ async function buyerColumns(db, { startDate, endDate, financials, pnl, officeAll
 
 module.exports = {
   timeAllowance,
-  resolveOwnerTechnician,
+  ownerForSnapshot,
   ownerFieldMinutes,
   ownerFieldTime,
   ebitdaOf,

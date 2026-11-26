@@ -84,11 +84,11 @@ describe('dashboard request recovery', () => {
     expect(result.current.values.staleVisits).toBeUndefined();
     rerender({ tab: 'today' });
     expect(result.current.values.staleVisits).toEqual({ visits: [] });
-    expect(adminFetch).toHaveBeenCalledTimes(11);
+    expect(adminFetch).toHaveBeenCalledTimes(12);
     rerender({ tab: 'profit' });
     expect(result.current.values.ebitda).toBeTruthy();
     expect(result.current.values.kpis).toBe(retainedKpis);
-    expect(adminFetch).toHaveBeenCalledTimes(11);
+    expect(adminFetch).toHaveBeenCalledTimes(12);
   });
 
   it('refreshes a stale hidden section while reusing shared feeds refreshed more recently', async () => {
@@ -297,7 +297,7 @@ describe('dashboard request recovery', () => {
 
     await act(async () => newCycle.resolve());
     await waitFor(() => expect(result.current.refreshing).toBe(false));
-    expect(adminFetch).toHaveBeenCalledTimes(34);
+    expect(adminFetch).toHaveBeenCalledTimes(35);
     expect(adminFetch.mock.calls.slice(4, 14).map(([path]) => path)).toEqual([
       '/admin/dashboard/alerts',
       '/admin/dashboard/today-completion',

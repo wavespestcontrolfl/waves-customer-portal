@@ -13,6 +13,8 @@ jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), 
   },
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The owner phones, as ops-buyer-metrics.js tells the owner apart.
+jest.mock('../services/twilio', () => ({ isKnownOwnerPhone: (phone) => ['+19415550100', '+19415550101'].includes(phone) }));
 
 const { randomUUID } = require('node:crypto');
 const snapshot = require('../services/monthly-financial-snapshot');
@@ -21,14 +23,13 @@ const view = require('../services/buyer-view');
 const { buildPnlReport } = require('../services/pnl-report');
 
 jest.setTimeout(60000);
-const OWNER_EMAIL = 'owner-sample@example.test';
+const OWNER_PHONE = '+19415550100';
 const NOW = new Date('2026-11-26T15:00:00Z'); // Thursday, 10 AM ET
 
 postgres('buyer view (live Postgres)', () => {
   let database;
   let trx;
   let seq = 0;
-  const OLD_EMAILS = process.env.IB_FULL_ACCESS_EMAILS;
 
   const customer = async (fields = {}) => {
     seq += 1;
@@ -41,7 +42,9 @@ postgres('buyer view (live Postgres)', () => {
   const technician = async (fields = {}) => {
     seq += 1;
     const id = randomUUID();
-    await trx('technicians').insert({ id, name: `Sample Tech ${seq}`, ...fields });
+    await trx('technicians').insert({
+      id, name: `Sample Tech ${seq}`, active: true, employment_status: 'active', field_dispatchable: true, ...fields,
+    });
     return id;
   };
   // A completed service_records row; `scheduled` makes its scheduled_services row too (group, prepay term).
@@ -97,20 +100,18 @@ postgres('buyer view (live Postgres)', () => {
   beforeEach(async () => {
     trx = await database.transaction();
     mockConnection = trx;
-    process.env.IB_FULL_ACCESS_EMAILS = OWNER_EMAIL;
     // Only this test's technicians count: any seeded one is set aside inside the rolled-back transaction.
-    await trx('technicians').update({ role: 'technician', email: null });
+    await trx('technicians').update({ role: 'technician', employment_status: 'inactive' });
     await trx('service_records').del();
     await trx('scheduled_services').del();
   });
   afterEach(async () => {
     await trx.rollback();
-    if (OLD_EMAILS === undefined) delete process.env.IB_FULL_ACCESS_EMAILS; else process.env.IB_FULL_ACCESS_EMAILS = OLD_EMAILS;
   });
 
   describe('the owner and the owner\'s field time', () => {
     it('counts the owner\'s completed stops at standard minutes, a grouped visit once, and nobody else\'s', async () => {
-      const owner = await technician({ role: 'admin', email: OWNER_EMAIL });
+      const owner = await technician({ role: 'admin', phone: OWNER_PHONE });
       const other = await technician({ role: 'technician' });
       const home = await customer();
       const grouped = await group(home, '2026-10-05');
@@ -125,7 +126,7 @@ postgres('buyer view (live Postgres)', () => {
     });
 
     it('hours x the wage in effect on the last day: later rows never change an earlier month', async () => {
-      const owner = await technician({ role: 'admin', email: OWNER_EMAIL });
+      const owner = await technician({ role: 'admin', phone: OWNER_PHONE });
       const home = await customer();
       for (let day = 1; day <= 8; day += 1) await visit(home, `2026-10-${String(day).padStart(2, '0')}`, { technician_id: owner });
       await settings({ owner_field_hourly_rate: '30.00' }, '2026-10-20');
@@ -134,26 +135,25 @@ postgres('buyer view (live Postgres)', () => {
       expect(await cols.ownerFieldTime(trx, octoberFin, '2026-10-01', '2026-10-31')).toEqual({ hours: 6, allowance: 180, onPayroll: false });
     });
 
-    it('two owner-login rows, or none, is unavailable; an owner on payroll is flagged', async () => {
-      process.env.IB_FULL_ACCESS_EMAILS = 'a-sample@example.test, b-sample@example.test';
-      await technician({ role: 'admin', email: 'a-sample@example.test' });
-      await technician({ role: 'admin', email: 'b-sample@example.test' });
-      expect(await cols.resolveOwnerTechnician(trx)).toBeNull();
-      await trx('technicians').where({ email: 'b-sample@example.test' }).update({ email: 'c-sample@example.test' });
-      expect(await cols.resolveOwnerTechnician(trx)).toMatchObject({ onPayroll: false });
-      await trx('technicians').where({ email: 'a-sample@example.test' }).update({ employment_type: 'w2' });
-      expect(await cols.resolveOwnerTechnician(trx)).toMatchObject({ onPayroll: true });
-      // A technician-role row with the owner's address is not the owner login.
-      process.env.IB_FULL_ACCESS_EMAILS = 'c-sample@example.test';
-      await trx('technicians').where({ email: 'c-sample@example.test' }).update({ role: 'technician' });
-      expect(await cols.resolveOwnerTechnician(trx)).toBeNull();
+    it('two owners, none, an inactive admin or a technician-role row with the owner phone is unavailable; an owner on payroll is flagged', async () => {
+      expect(await cols.ownerForSnapshot(trx)).toBeNull();
+      const owner = await technician({ role: 'admin', phone: OWNER_PHONE });
+      expect(await cols.ownerForSnapshot(trx)).toEqual({ id: owner, onPayroll: false });
+      const second = await technician({ role: 'admin', phone: '+19415550101' });
+      expect(await cols.ownerForSnapshot(trx)).toBeNull(); // two known owner phones
+      await trx('technicians').where({ id: second }).update({ employment_status: 'inactive' });
+      expect(await cols.ownerForSnapshot(trx)).toEqual({ id: owner, onPayroll: false });
+      await trx('technicians').where({ id: owner }).update({ employment_type: 'w2' });
+      expect(await cols.ownerForSnapshot(trx)).toMatchObject({ onPayroll: true });
+      await trx('technicians').where({ id: owner }).update({ role: 'technician' });
+      expect(await cols.ownerForSnapshot(trx)).toBeNull();
     });
   });
 
   describe('a month snapshot with the buyer columns', () => {
     let planOld; let planNew; let nonMember; let testAccount; let owner;
     const seedMonth = async () => {
-      owner = await technician({ role: 'admin', email: OWNER_EMAIL });
+      owner = await technician({ role: 'admin', phone: OWNER_PHONE });
       const other = await technician({ role: 'technician' });
       planOld = await customer({ waveguard_tier: 'Gold', member_since: '2024-01-01', autopay_enabled: true });
       planNew = await customer({ waveguard_tier: 'Silver', member_since: '2026-09-15' });
@@ -211,7 +211,7 @@ postgres('buyer view (live Postgres)', () => {
       await trx('company_financials').update({ owner_field_hourly_rate: null });
       expect(await snapshot.computeMonthSnapshot('2026-10', trx)).toMatchObject({ owner_field_hours: 1.83, owner_field_allowance: 0 });
       await trx('company_financials').update({ owner_field_hourly_rate: 25 });
-      await trx('technicians').where({ email: OWNER_EMAIL }).update({ email: 'someone-else@example.test' });
+      await trx('technicians').where({ phone: OWNER_PHONE }).update({ phone: '+19415550999' });
       const row = await snapshot.computeMonthSnapshot('2026-10', trx);
       expect(row).toMatchObject({ owner_field_hours: null, owner_field_allowance: null, owner_paid_profit: null, book_gross_margin_pct: null });
       expect(row.sde).not.toBeNull();
@@ -219,7 +219,7 @@ postgres('buyer view (live Postgres)', () => {
 
     it('an owner on payroll: no allowance, and profit, SDE and margin stay blank', async () => {
       await seedMonth();
-      await trx('technicians').where({ email: OWNER_EMAIL }).update({ employment_type: 'w2' });
+      await trx('technicians').where({ phone: OWNER_PHONE }).update({ employment_type: 'w2' });
       expect(await snapshot.computeMonthSnapshot('2026-10', trx)).toMatchObject({
         owner_field_allowance: 0, owner_paid_profit: null, sde: null, book_gross_margin_pct: null, owner_field_hours: 1.83,
       });
@@ -309,7 +309,7 @@ postgres('buyer view (live Postgres)', () => {
 
     it('the owner\'s field hours a week over the last 12 weeks, standard minutes', async () => {
       expect(await view.ownerHoursPerWeek(trx, NOW)).toEqual({ value: null, available: false });
-      const owner = await technician({ role: 'admin', email: OWNER_EMAIL });
+      const owner = await technician({ role: 'admin', phone: OWNER_PHONE });
       const home = await customer();
       for (let day = 1; day <= 8; day += 1) await visit(home, `2026-10-${String(day).padStart(2, '0')}`, { technician_id: owner });
       await visit(home, '2026-09-03', { technician_id: owner }); // before the window (it opens 2026-09-04)

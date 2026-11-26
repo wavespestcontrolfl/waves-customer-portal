@@ -12,7 +12,7 @@ const { dateOnlyString } = require('../utils/date-only');
 const { monthOffset, monthWindow } = require('./monthly-financial-snapshot');
 const { MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 const { excludeInternalTestCustomers } = require('./mrr-breakdown');
-const { resolveOwnerTechnician, ownerFieldMinutes } = require('./monthly-snapshot-buyer-columns');
+const { ownerForSnapshot, ownerFieldMinutes } = require('./monthly-snapshot-buyer-columns');
 
 const WINDOW_MONTHS = 12;
 const HOURS_WEEKS = 12;
@@ -198,7 +198,7 @@ async function planRevenueKept(db, now) {
 
 /** The owner's field hours a week over the last 12 weeks (standard minutes), or null when the owner is not resolvable. */
 async function ownerHoursPerWeek(db, now) {
-  const owner = await resolveOwnerTechnician(db);
+  const owner = await ownerForSnapshot(db);
   if (!owner) return { value: null, available: false };
   const end = etDateString(now);
   const start = etDateString(addETDays(now, -(HOURS_WEEKS * 7 - 1)));

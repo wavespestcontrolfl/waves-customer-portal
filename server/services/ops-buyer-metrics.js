@@ -397,6 +397,7 @@ module.exports = {
   isReturnRecord,
   splitStopsByOwner,
   resolveOwnerTechnician,
+  ownerStopRows,
   trailingWindow,
   STOPS_PER_FULL_DAY,
 };

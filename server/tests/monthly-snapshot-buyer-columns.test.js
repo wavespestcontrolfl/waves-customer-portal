@@ -5,6 +5,8 @@
  * Synthetic numbers only.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The owner phones: the same predicate ops-buyer-metrics.js uses to tell the owner apart.
+jest.mock('../services/twilio', () => ({ isKnownOwnerPhone: (phone) => ['+19415550100', '+19415550101'].includes(phone) }));
 
 const cols = require('../services/monthly-snapshot-buyer-columns');
 
@@ -25,6 +27,7 @@ function makeDb(results = {}) {
   db.__q = (entry) => new Proxy({}, {
     get(_t, method) {
       if (method === 'then') return (resolve, reject) => Promise.resolve(results[entry.table] ?? []).then(resolve, reject);
+      if (method === 'first') return (...args) => { entry.calls.push([method, ...args]); return Promise.resolve((results[entry.table] || [])[0] ?? null); };
       return (...args) => { entry.calls.push([method, ...args]); return db.__q(entry); };
     },
   });
@@ -85,18 +88,16 @@ describe('ebitdaOf and profitColumns', () => {
 });
 
 describe('the owner and the owner\'s field time', () => {
-  const OLD = process.env.IB_FULL_ACCESS_EMAILS;
-  afterEach(() => { if (OLD === undefined) delete process.env.IB_FULL_ACCESS_EMAILS; else process.env.IB_FULL_ACCESS_EMAILS = OLD; });
+  const OWNER = '+19415550100';
 
-  test('the owner is the one admin technician on the owner login allow-list; two matches or none is unavailable', async () => {
-    process.env.IB_FULL_ACCESS_EMAILS = 'Owner@example.test, second@example.test';
-    const one = makeDb({ technicians: [{ id: 't1', employment_type: null }] });
-    expect(await cols.resolveOwnerTechnician(one)).toEqual({ id: 't1', onPayroll: false });
+  test('the owner is ops-buyer-metrics\' one admin technician with a known owner phone; two or none is unavailable', async () => {
+    const one = makeDb({ technicians: [{ id: 't1', phone: OWNER, employment_type: null }, { id: 't9', phone: '+19415550999' }] });
+    expect(await cols.ownerForSnapshot(one)).toEqual({ id: 't1', onPayroll: false });
     expect(one.callsFor('technicians')).toContainEqual(['where', 'role', 'admin']);
-    expect(one.callsFor('technicians')).toContainEqual(['whereRaw', 'lower(btrim(email)) = ANY(?)', [['owner@example.test', 'second@example.test']]]);
-    expect(await cols.resolveOwnerTechnician(makeDb({ technicians: [{ id: 't1' }, { id: 't2' }] }))).toBeNull();
-    expect(await cols.resolveOwnerTechnician(makeDb({ technicians: [] }))).toBeNull();
-    expect(await cols.resolveOwnerTechnician(makeDb({ technicians: [{ id: 't3', employment_type: 'w2' }] }))).toEqual({ id: 't3', onPayroll: true });
+    expect(await cols.ownerForSnapshot(makeDb({ technicians: [{ id: 't1', phone: OWNER }, { id: 't2', phone: '+19415550101' }] }))).toBeNull();
+    expect(await cols.ownerForSnapshot(makeDb({ technicians: [{ id: 't9', phone: '+19415550999' }, { id: 't8', phone: null }] }))).toBeNull();
+    expect(await cols.ownerForSnapshot(makeDb({ technicians: [] }))).toBeNull();
+    expect(await cols.ownerForSnapshot(makeDb({ technicians: [{ id: 't3', phone: OWNER, employment_type: 'w2' }] }))).toEqual({ id: 't3', onPayroll: true });
   });
 
   const stops = [
@@ -112,7 +113,7 @@ describe('the owner and the owner\'s field time', () => {
   });
 
   test('hours and allowance: hundredths of an hour x the rate in effect; no rate counts 0; an unresolvable owner is unavailable', async () => {
-    const results = { technicians: [{ id: 't1', employment_type: null }], service_records: stops };
+    const results = { technicians: [{ id: 't1', phone: OWNER, employment_type: null }], service_records: stops };
     expect(await cols.ownerFieldTime(makeDb(results), { owner_field_hourly_rate: '25.00' }, '2026-10-01', '2026-10-31'))
       .toEqual({ hours: 2.67, allowance: 66.75, onPayroll: false }); // 160 min = 2.67 h; 267 x 2500 cents
     expect(await cols.ownerFieldTime(makeDb(results), null, '2026-10-01', '2026-10-31')).toEqual({ hours: 2.67, allowance: 0, onPayroll: false });
@@ -122,7 +123,7 @@ describe('the owner and the owner\'s field time', () => {
   });
 
   test('an owner on payroll: the hours are reported, no allowance is charged', async () => {
-    const db = makeDb({ technicians: [{ id: 't1', employment_type: 'w2' }], service_records: stops });
+    const db = makeDb({ technicians: [{ id: 't1', phone: OWNER, employment_type: 'w2' }], service_records: stops });
     expect(await cols.ownerFieldTime(db, { owner_field_hourly_rate: '25.00' }, '2026-10-01', '2026-10-31')).toEqual({ hours: 2.67, allowance: 0, onPayroll: true });
   });
 });
