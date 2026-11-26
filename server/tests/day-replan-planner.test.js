@@ -457,6 +457,21 @@ describe('the day closes with the night pass bound', () => {
     const stored = [stop('m', 0, 9, { workMin: 30, storedMin: 90, pref: { startMin: 16 * 60, endMin: 17 * 60 } }), stop('z', 0, 18, { movable: false })];
     expect(planDay(input(stored)).best.slots.m).toBe(16 * 60);
     expect(planDay(input(stored, { options: { closeByWork: true } })).reason).toBe('no_feasible_order');
+    // The van reaches a 16:00 hour at 16:45 (a fixed stop until 16:00, then 45 minutes of drive): 60 minutes of work end 17:45.
+    const lateArrival = [
+      stop('a', 0, 15, { movable: false, workMin: 60 }),
+      stop('m', 45, 9, { workMin: 60, pref: { startMin: 16 * 60, endMin: 17 * 60 } }),
+      stop('z', 45, 18, { movable: false }),
+    ];
+    expect(planDay(input(lateArrival)).best.slots.m).toBe(16 * 60);
+    expect(planDay(input(lateArrival, { options: { closeByWork: true } })).reason).toBe('no_feasible_order');
+    // A fixed stop that ends after the close keeps its place: z (18:00) is in every plan above.
+    // The current route is measured as it is: a movable stop that already ends after the close does not void it.
+    const alreadyLate = [stop('a', 0, 15, { movable: false, workMin: 60 }), stop('m', 45, 16, { workMin: 60 })];
+    const plain = planDay(input(alreadyLate));
+    const held = planDay(input(alreadyLate, { options: { closeByWork: true } }));
+    expect(plain.current.endMin).toBe(17 * 60 + 45);
+    expect(held.current).toEqual(plain.current);
     // Work no longer than the window: the same answer with and without it.
     const short = [stop('m', 0, 9, { workMin: 60, pref: { startMin: 16 * 60, endMin: 17 * 60 } }), stop('z', 0, 18, { movable: false })];
     expect(planDay(input(short, { options: { closeByWork: true } })).best.slots.m).toBe(16 * 60);

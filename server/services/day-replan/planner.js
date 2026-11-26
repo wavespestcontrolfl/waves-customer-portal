@@ -234,6 +234,9 @@ function step(ctx, state, idx) {
   if (t < slot) t = slot;
   t += stop.workMin;
   if (t > ctx.dayEndMin) return null;
+  // A shift closes the day (closeByWork): a movable stop's simulated work ends by the close, however late in its hour
+  // the van arrives. A fixed stop keeps its hour, and the current route is measured as it is (simulateCurrent).
+  if (ctx.opts.closeByWork === true && stop.movable && t > ctx.opts.closeMin) return null;
   return { t, prev: idx, drive: state.drive + d, used, slot, lastSlot: slot };
 }
 
