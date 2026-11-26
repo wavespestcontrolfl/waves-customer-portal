@@ -8,6 +8,7 @@ import usePortalActivity from '../hooks/usePortalActivity';
 import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import usePortalRead, { PortalReadProvider, READ_TIMEOUT_MS, usePortalRefresh } from '../hooks/usePortalRead';
+import { homeIdentityKey, readHomeReads } from '../lib/homeSnapshot';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
 import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
@@ -2888,6 +2889,64 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
         ))}
       </div>
     </section>
+  );
+}
+
+// Every tab behind the saved home screen shows this until the account is fresh.
+function AccountUpdatingNotice() {
+  return (
+    <section data-glass="card" role="status" style={{ padding: 20, marginBottom: 16, borderRadius: 14, color: B.glassNavy }}>
+      <h2 style={{ fontSize: 20, margin: '0 0 8px' }}>Updating…</h2>
+      <p style={{ fontSize: 16, lineHeight: 1.5, margin: 0 }}>We are loading your latest account details. Your plan, billing and settings will open as soon as they arrive.</p>
+    </section>
+  );
+}
+
+// The saved home screen (customerSaved): what the app paints at once on a weak
+// signal while the account loads. It is NOT the portal: no tab, no overlay, no
+// read, no write and nothing derived from the account's money. It shows the
+// saved profile line and the two saved visit cards from storage, and it makes
+// no network request. When the account turns fresh the normal portal mounts
+// once and starts every live read exactly once.
+function SavedHomeView({ customer, entry, identity, property }) {
+  const [reads] = useState(() => readHomeReads(identity, property));
+  const next = reads['next-visit'];
+  const last = reads['latest-service'];
+  const nextVisit = next?.data?.next || null;
+  const lastVisit = last?.data?.services?.[0] || null;
+  const savedRead = (read) => ({ updatedAt: read?.updatedAt || null, error: '', offline: false, pending: true, refresh: () => {} });
+  const address = formatPropertyAddress(entry?.address ? entry : customer);
+  const label = entry?.profileLabel || '';
+  return (
+    <PortalGlassContext.Provider value={true}>
+      <div className="portal-root" style={{ minHeight: '100vh', background: 'transparent', fontFamily: FONTS.body, color: PORTAL_SHELL.body }}>
+        <div style={{
+          background: PORTAL_SHELL.surface, borderBottom: `1px solid ${PORTAL_SHELL.border}`,
+          padding: '12px 16px', paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Customer Portal</div>
+            <div role="status" data-testid="portal-updating" style={{ fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.3 }}>Updating…</div>
+          </div>
+        </div>
+        <main id="portal-main" style={{ maxWidth: 760, margin: '0 auto', padding: '24px 16px 32px', boxSizing: 'border-box' }}>
+          <section data-glass="card" style={{ padding: 20, marginBottom: 16, borderRadius: 14, color: B.glassNavy }}>
+            <h1 style={{ fontSize: 24, margin: 0 }}>Hello {customer.firstName || 'there'}!</h1>
+            {label && <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 4 }}>{label}</div>}
+            {address && <div style={{ fontSize: 16, marginTop: 2 }}>{address}</div>}
+          </section>
+          <AccountUpdatingNotice />
+          <SavedPortalRead title="Saved next visit" read={savedRead(next)}>
+            <SavedVisitDetails visits={nextVisit ? [nextVisit] : []} />
+          </SavedPortalRead>
+          <SavedPortalRead title="Saved completed visit" read={savedRead(last)}>
+            <SavedVisitDetails visits={lastVisit ? [lastVisit] : []} />
+          </SavedPortalRead>
+        </main>
+      </div>
+    </PortalGlassContext.Provider>
   );
 }
 
@@ -18547,7 +18606,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
 const APP_RATING_ASK_DELAY_MS = 8000;
 
 export default function PortalPage() {
-  const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
+  const { customer, customerSaved = false, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
   const isMobileShell = useIsMobile(900);
   // C4: /auth/me reports `cancelled` for a churned account admitted under
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
@@ -18567,7 +18626,8 @@ export default function PortalPage() {
   // probe and falls back home only once the server said it is off.
   // One key per signed-in customer and session: the activity beacon and the Messages probe restart on it.
   const sessionKey = `${customer?.id ?? ''}:${sessionEpoch}`;
-  const messagesGate = usePortalMessagesGate(!!customer?.id && !allowedTabs, sessionKey);
+  // Nothing probes or loads behind the saved home screen: these start when the account is fresh.
+  const messagesGate = usePortalMessagesGate(!!customer?.id && !allowedTabs && !customerSaved, sessionKey);
   const tabBlocked = (tab) => (!!allowedTabs && !allowedTabs.includes(tab)) || (tab === 'messages' && messagesGate.off);
   // Rollback applies to this mounted session, including tab/property navigation.
   const [refreshEnabled] = useState(() => new URLSearchParams(window.location.search).get('appRefresh') !== '0');
@@ -18600,7 +18660,7 @@ export default function PortalPage() {
     tabBlocked(initialTab) ? homeTab : initialTab,
   );
   // Tab view beacon (server-gated by GATE_PORTAL_ACTIVITY; a dark gate stops it).
-  usePortalActivity(activeTab, sessionKey);
+  usePortalActivity(customerSaved ? null : activeTab, sessionKey);
   // Re-probe the Messages count when the customer changes tab (and for the first probe).
   // The open Waves Chat sheet reports the count itself, as the Messages page does.
   const [showWavesChat, setShowWavesChat] = useState(false);
@@ -18765,7 +18825,7 @@ export default function PortalPage() {
   // the feature is live (404 hides both). reportIssuePrefill carries the
   // category/location/note/photos a "Request service" next-step hands to
   // the New Request form.
-  const photoIdGate = usePhotoIdGate(sessionEpoch, !cancelledAccount && !contactSession);
+  const photoIdGate = usePhotoIdGate(sessionEpoch, !cancelledAccount && !contactSession && !customerSaved);
   const [showPhotoId, setShowPhotoId] = useState(false);
   const [reportIssuePrefill, setReportIssuePrefill] = useState(null);
   // Store rating pop-up (GATE_APP_RATING_PROMPT, owner 2026-11-02 "do the rating
@@ -18776,7 +18836,7 @@ export default function PortalPage() {
   // phone check; the server decides (finished visit, 120-day spacing) and the
   // store decides last.
   const biometricLocked = useBiometricLock();
-  const appRatingQuiet = activeTab === 'dashboard' && !cancelledAccount && !contactSession && !biometricLocked;
+  const appRatingQuiet = activeTab === 'dashboard' && !cancelledAccount && !contactSession && !biometricLocked && !customerSaved;
   useEffect(() => {
     if (!appRatingQuiet || !isNativeApp()) return undefined;
     // Cleanup runs the moment the screen stops being quiet, so a claim still
@@ -18858,6 +18918,10 @@ export default function PortalPage() {
   // entry ids against this, never against customer.id directly.
   const activePropertyId = selectedProperty?.key || customer.id;
   const activeProperty = portalProperties.find((property) => property.id === activePropertyId) || null;
+  // The saved home screen stands in for the whole portal until the account is
+  // fresh (see SavedHomeView): none of the tabs below mounts, so none of their
+  // reads, purchase flows or SetupIntent return handling can start from it.
+  if (customerSaved) return <SavedHomeView customer={customer} entry={activeProperty} identity={homeIdentityKey(api.token)} property={activePropertyId} />;
   // Every saved property of this profile retired (closed): the list names no
   // selectable entry (`selected.key` null). No house to show, edit or file
   // under (GitHub codex r5 P1) — the header shows no address, My Property
@@ -18998,7 +19062,8 @@ export default function PortalPage() {
 
   return (
     <PortalGlassContext.Provider value={true}>
-    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}>
+    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}
+      persistIdentity={cancelledAccount || contactSession ? null : homeIdentityKey(api.token)} persistProperty={activePropertyId}>
       {/* Always registered (codex #4207 r2): a gate rollback drops the client
           to profile mode, but the refresh token still forwards its property
           claim — when the gate returns, the next refresh must re-read the

@@ -39,6 +39,8 @@ export default function useFactList(status, isEditing = () => false) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const token = useRef(0);
+  // One list operation at a time: while a refresh runs, Load more is ignored; a refresh that starts while a Load more runs wins (that page is dropped).
+  const [refreshing, setRefreshing] = useState(false);
   const pagesLoaded = useRef(1);
   // The status the page shows now. A reload or page read started for another status (a save that finished after the admin
   // switched tabs) is dropped, so it can never fill this status with another status's facts.
@@ -52,6 +54,7 @@ export default function useFactList(status, isEditing = () => false) {
     if (shown.current !== status) return;
     const mine = ++token.current;
     const isQuiet = quiet === true;
+    setRefreshing(true);
     if (!isQuiet) {
       pagesLoaded.current = 1;
       setLoading(true);
@@ -71,14 +74,17 @@ export default function useFactList(status, isEditing = () => false) {
       if (!isQuiet) setPage(EMPTY);
       setError(errorMessage(requestError, "The facts could not be loaded."));
     } finally {
-      if (mine === token.current) setLoading(false);
+      if (mine === token.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [status]);
 
   useEffect(() => { reload(); }, [reload]);
 
   const loadMore = async () => {
-    if (!page.nextCursor || loadingMore || shown.current !== status) return;
+    if (!page.nextCursor || loadingMore || refreshing || shown.current !== status) return;
     const mine = token.current;
     setLoadingMore(true);
     setError("");
@@ -95,5 +101,5 @@ export default function useFactList(status, isEditing = () => false) {
     }
   };
 
-  return { ...page, loading, loadingMore, error, reload, loadMore };
+  return { ...page, loading, loadingMore, refreshing, error, reload, loadMore };
 }

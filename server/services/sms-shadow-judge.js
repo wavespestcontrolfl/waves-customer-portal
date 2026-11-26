@@ -73,6 +73,11 @@ const VERDICTS = ['draft_better', 'equivalent', 'human_better', 'draft_unsafe', 
 // fails when the render comes within 100 chars of it.
 const COMPANY_FACTS_JUDGE_CAP = 6000;
 const LABEL_FACTS_JUDGE_CAP = 2000;
+// MORE COMPANY FACTS (the owner-approved bank, PR 4): outside the static section, so without an allowance a full bank would count against the
+// 6000-character budget of the rest of the block and push the thread and calls out of the judge's view. The exact section is exempt like
+// the static one, with its own cap: the size of a FULL section (header + 20 lines x (400 characters + "- " + newline)), 8,140 characters,
+// so no line the bank allows is ever clipped, and what a bank adds to the judge prompt is bounded by it.
+const BANK_FACTS_JUDGE_CAP = require('./sms-company-facts').BANK_SECTION_MAX_CHARS;
 function sanitizeFactsForJudge(block) {
   const { EXEMPLAR_INJECTION_RE } = require('./sms-shadow-drafter');
   const { knownCompanyFactsRenders } = require('./sms-company-facts');
@@ -123,21 +128,45 @@ function sanitizeFactsForJudge(block) {
     }
   }
   let section = '';
+  let bank = null;
   let rest = lines;
   let insertAt = 0;
   if (start !== -1) {
     const company = lines.slice(start, labelStart).join('\n').slice(0, COMPANY_FACTS_JUDGE_CAP);
     const label = lines.slice(labelStart, billing).join('\n').slice(0, LABEL_FACTS_JUDGE_CAP);
     section = label ? `${company}\n${label}` : company;
-    rest = [...lines.slice(0, start), ...lines.slice(billing)];
-    insertAt = rest.slice(0, start).join('\n').length + (start > 0 ? 1 : 0);
+    // The bank section, only at its exact spot (before the company section, directly before VISIT STATUS & OPEN LOOPS), also leaves the budget.
+    bank = bankExemption(lines, start);
+    rest = [...bank.before, ...lines.slice(billing)];
+    insertAt = bank.before.join('\n').length + (bank.before.length > 0 ? 1 : 0);
   }
   const capped = rest.join('\n').slice(0, 6000);
   if (!section) return capped;
   // Same position as in the drafter's block when it survived the cap;
   // otherwise (the rest was already shorter than the offset) at the end.
   const at = Math.min(insertAt, capped.length);
-  return `${capped.slice(0, at)}${section}\n${capped.slice(at)}`;
+  const withCompany = `${capped.slice(0, at)}${section}\n${capped.slice(at)}`;
+  if (!bank.text) return withCompany;
+  // the bank sits before the company section, so its offset is never past `at`
+  const bankPlace = Math.min(bank.offset, at);
+  return `${withCompany.slice(0, bankPlace)}${bank.text}\n${withCompany.slice(bankPlace)}`;
+}
+
+// The bank section in the judge's lines: { before, text, offset }. `before`: the lines ahead of the company section that starts at line
+// `start`, minus the bank section; `text`: the section, capped ('' when the block has none at the exact spot); `offset`: its character offset
+// in the text without it.
+function bankExemption(lines, start) {
+  const { bankFactsRangeInLines, isOwnerBankLine } = require('./sms-company-facts');
+  const range = bankFactsRangeInLines(lines, start);
+  // Size exemption only for a verified section: every line is wording the owner approved (any time: the judge grades stored drafts nightly),
+  // as the snapshot knows it. Anything else (multi-line visit data, a stale snapshot) stays inside the ordinary context budget.
+  const verified = range && lines.slice(range.start + 1, range.end).every((l) => isOwnerBankLine(l.slice(2), { at: 'any' }));
+  if (!verified) return { before: lines.slice(0, start), text: '', offset: 0 };
+  return {
+    before: [...lines.slice(0, range.start), ...lines.slice(range.end, start)],
+    text: lines.slice(range.start, range.end).join('\n').slice(0, BANK_FACTS_JUDGE_CAP),
+    offset: range.start > 0 ? lines.slice(0, range.start).join('\n').length + 1 : 0,
+  };
 }
 
 function buildJudgePrompt({ inboundMessage, draftReply, humanReply, intent, contextSummary, factsBlock }) {
@@ -547,6 +576,7 @@ module.exports = {
     V2_UNSAFE,
     V2_SHAPE,
     COMPANY_FACTS_JUDGE_CAP,
+    BANK_FACTS_JUDGE_CAP,
     buildJudgePrompt,
     sanitizeFactsForJudge,
     parseJudgeResponse,

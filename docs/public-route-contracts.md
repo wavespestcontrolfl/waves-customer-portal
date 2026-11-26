@@ -6046,6 +6046,13 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+Recurring mosquito above 2 acres (owner 2026-11-26): a `mosquito` service on a
+measured lot above 87,120 sq ft (gross lot or treatable area) answers `202` with
+`quote_required: true`, `reason: "mosquito_lot_above_2_acres"`, no price fields,
+and the message "Mosquito control for a property this size is priced by our
+team — we'll review your lot and send your exact price shortly." The office bell
+reads "Lot above 2 acres: set the mosquito price by hand". Lots at or below
+2 acres price as before; an unmeasured lot keeps `mosquito_treatable_area_unverified`.
 A `leadId` that names a web-form lead (`lead_type` `form_submission`; its
 id reaches a visitor only through the quiz hand-off) is written only while
 that lead passes the hand-off's rule: open, not deleted, not commercial
@@ -6085,6 +6092,26 @@ re-read first, with the same rule for an undecided answer; any other profile
 prices its own `poolCageSize`, exactly as before the gate. Either way a Large or
 Oversized cage is held as before. The response
 shape does not change; `quote_required` was already a possible answer.
+Returning customer setup fee (`GATE_RETURNING_SETUP_FEE_GAP`, owner
+2026-11-24, "make this a rule"; dark by default;
+`server/services/returning-setup-fee-waiver.js`): gate on, a contact the
+server matches to a customer whose plan lapsed, quoting a solo pest or a
+solo mosquito plan inside one plan cycle plus 30 days of that customer's
+last completed visit of the same plan (quarterly 121 days, bi-monthly 91,
+monthly 60), is quoted no WaveGuard setup fee. The response answers
+`has_setup_fee: false` and omits `setup_fee_amount`, the answer an active
+member already gets, and the draft freezes `setupFeeQuote: { amount: 0,
+waived: 'returning_customer', kind: 'waveguard_membership' }`, which the
+self-booking handoff reads (no fee is queued). The rule is asked last and
+only about a membership fee still owed: an active member's waiver and an
+already-queued fee's waiver are settled first, from the reads the route
+already makes, and the visit history is not read for them. A failed
+history read keeps the fee (`resolveSetupFeeQuoteWithReturningRule`). The
+response carries no visit date and no reason; like the member waiver, a
+`false` here tells the visitor only that no setup fee applies to this
+quote. Gate off, an unmatched contact, a bundle, a rodent setup or a visit
+outside the window: the response is exactly as before. No field is added
+or removed; `has_setup_fee: false` was already a possible answer.
 `services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
 present tier must be a currently-sold one (`standard`/`enhanced`) or the
 route answers 400 before pricing — `light` (4x/quarterly, retired for new
@@ -9175,7 +9202,38 @@ the relay's own call history) drops the source through
 `relay-protocol.whereNotSandboxCall` — so a test call, or a stranger dialling
 the test number, can neither create dispatch work nor move a metric. The
 transcript, latency summary and version stamps land on the sandbox row
-exactly as in production; that record is the bake-off. Any change to the
+exactly as in production; that record is the bake-off. With
+`GATE_VOICE_SANDBOX_RECORDING` on (dark; Twilio bills a recorded minute, so
+the owner flips it), the first `/relay-sandbox` delivery that carries a
+valid `X-Twilio-Signature` decides whether the call is recorded and stamps
+it on the row as `metadata.sandbox_recording_ok` (true or false). The
+signature is checked in the route, whatever the middleware mode: a delivery
+without a valid one writes no stamp, records nothing and gets the same
+document for every `From`, so the response never reveals which numbers are
+staff; with the gate off no delivery writes the key. A redelivery reuses
+the stored value and never replaces it. The stamp is true only when the
+posted `StirVerstat` is a passed full attestation (the carrier vouches for
+the number, so a spoofed caller ID does not count) and the posted `From`,
+in strict E.164, is a configured staff forward number as a whole
+(`twilio-numbers.isStaffForwardE164`; never a last-ten-digit match, and a
+configured value that is not one unambiguous number, or a CSR map entry
+with no name, authorizes nobody).
+`/relay-sandbox/cell` does not decide again: it honours that stamp only on
+its own validly signed request, with the gate still on and the relay
+attached, and reads it in its one ownership read of the row. A recorded call's document, the GPT-Live cell document below
+included, adds
+`<Start><Recording channels="dual" trim="do-not-trim"/></Start>` after the
+recording disclosure and before its `<Connect>`: at most one recording a
+call, and no `recordingStatusCallback`, so `/recording-status` and the
+call-recording pipeline never see it. An answer document that records also
+sets `finishOnKey=""` on its cell `<Gather>`, so no key press (a lone `#`
+under Twilio's default) can end the disclosure early and fall through to
+the recording: every key press reaches `/relay-sandbox/cell`, which replays
+the disclosure first. Any other caller, a refused call, or the gate off
+gets the unchanged document. The CallSid recovery
+lookup never brings the recording onto the sandbox row: the lookup refuses
+an internal row by its stored source, whatever `To` the `/call-status`
+callback that scheduled it carried. Any change to the
 number gate or the dry-run invariant is security-critical).
 `/api/webhooks/twilio/relay-sandbox/live-complete` + the `/ws/voice-live/{CallSid}/{token}` WebSocket path
 (GPT-Live trial, dark behind `GATE_VOICE_GPT_LIVE_TEST`, owner 2026-11-19, spend cap $5. With the gate on, cell code
@@ -10337,6 +10395,31 @@ when lawn is added back, with the gate on or off — the one-time option never
 sits on an estimate that carries a companion program. The page's tiles drive
 the existing dry-run → `previewBasis` → commit steps; there is no tier
 parameter on accept, the slot routes or any intent route.
+Returning customer setup fee (`GATE_RETURNING_SETUP_FEE_GAP`, owner
+2026-11-24, "make this a rule"; dark by default;
+`server/services/returning-setup-fee-waiver.js`): every re-price on this
+rail (dry run and commit; a removal, a restore and an add; the customer,
+the staff send-time park and its revert) decides the returning-customer
+rule again for the plan AFTER the change. The answer the estimate stored
+for the plan before the change is dropped first (the operator waiver that
+names the rule, or a frozen zero `setupFeeQuote` named
+`returning_customer`), so a waiver decided for one plan never rides a
+change onto another. Gate on, the linked customer's visit history is then
+read and the recompute decides on the plan it priced: a solo pest or solo
+mosquito plan inside one plan cycle plus 30 days of that customer's last
+completed visit of the same plan carries no WaveGuard setup fee, and the
+answer is stored on the estimate; any other outcome prices the fee as the
+engine does. A removal that leaves a solo plan therefore shows and bills
+the setup fee unless the rule waives it for THAT plan. The dry run and the
+commit run the same decision, and the `previewBasis` digest binds the
+money it produces. A failed history read answers 409 `reprice_unavailable`
+before any price is made (dry run and commit), like this rail's other
+fail-closed lookups, and nothing is written. A staff or move waiver is not
+the rule's and is kept. Gate off, or an estimate with no linked customer:
+no history read and no new refusal; an estimate that never held the rule's
+answer answers exactly as before, and one that holds it (stored while the
+gate was on) loses it at its next change here and prices the fee. The
+response shape does not change.
 
 The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
 (STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is

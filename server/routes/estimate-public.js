@@ -23,7 +23,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
-const { isAssessmentVisit, excludeAssessmentBookings, hadCompletedAssessmentLook } = require('../services/assessment-booking');
+const { isAssessmentVisit, excludeAssessmentBookings, hadCompletedAssessmentLook, paidEstimateVisitsQuery } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -3670,6 +3670,8 @@ const FRIENDLY_QUOTE_REASONS = {
     'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.',
   retired_tree_shrub_cadence_requote:
     'Our tree & shrub programs have been updated since this quote was sent — call Waves and we’ll refresh your tree & shrub plan with current pricing.',
+  mosquito_lot_above_2_acres:
+    'Mosquito service for a lot this size is priced by Waves — we’ll confirm your price before it’s finalized.',
   retired_tree_shrub_cadence_selection:
     'This estimate’s tree & shrub plan uses a retired schedule — call Waves and we’ll refresh your quote with the current tree & shrub options.',
 };
@@ -13759,34 +13761,35 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // where createTermForAnnualPrepay defaults the start). Guarding with
         // bare "today" 409'd a legitimate next-term renewal whose current
         // term ends before the booked first visit.
-        const reservedStartRow = await trx('scheduled_services')
-          .where({ source_estimate_id: estimate.id })
-          .whereNotNull('customer_id')
-          .whereNull('reservation_expires_at')
-          .orderBy('scheduled_date', 'asc')
-          .first('scheduled_date');
+        const reservedStartRow = await paidEstimateVisitsQuery(trx, {
+          estimateId: estimate.id,
+          customerId,
+        }).first('scheduled_services.scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
-        try {
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx,
-            customerId,
-            overlapTermStart,
-            false,
-            'Customer already has an annual prepay term through',
-            estimate.id,
-          );
-        } catch (overlapErr) {
-          if (overlapErr && overlapErr.annualPrepayOverlap) {
-            const conflict = estimateAcceptError(
-              'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
-              409,
+        const assertAnnualPrepayStart = async (termStart) => {
+          try {
+            await lockAndAssertNoAnnualPrepayOverlap(
+              trx,
+              customerId,
+              termStart,
+              false,
+              'Customer already has an annual prepay term through',
+              estimate.id,
             );
-            conflict.code = 'ANNUAL_PREPAY_OVERLAP';
-            throw conflict;
+          } catch (overlapErr) {
+            if (overlapErr && overlapErr.annualPrepayOverlap) {
+              const conflict = estimateAcceptError(
+                'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
+                409,
+              );
+              conflict.code = 'ANNUAL_PREPAY_OVERLAP';
+              throw conflict;
+            }
+            throw overlapErr;
           }
-          throw overlapErr;
-        }
+        };
+        await assertAnnualPrepayStart(overlapTermStart);
         // Quote revalidation INSIDE the accept transaction (Codex r15):
         // the acknowledged total projected the balance + inspection offer +
         // deposit credit as of the 402 round-trip — credit consumed by
@@ -13862,6 +13865,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
           autoSendInvoice: false,
+          // The converter re-reads the paid visits. If dispatch cancels or
+          // moves the anchor after the check above, verify the exact
+          // normalized start the term is about to be written on while this
+          // transaction still holds the same customer overlap lock.
+          verifyAnnualPrepayTermStart: async (normalizedStart) => {
+            if (dateOnly(normalizedStart) === overlapTermStart) return;
+            await assertAnnualPrepayStart(dateOnly(normalizedStart));
+          },
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
           // Genuinely ADOPTED pre-existing appointment (not a reservation
@@ -18594,6 +18605,18 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         return { status: 409, body: ({ error: 'reprice_unavailable' }) };
       }
     }
+    // Returning customer $99 rule (GATE_RETURNING_SETUP_FEE_GAP): a service change re-prices the quote, so it
+    // decides again, as a staff save does. The stored answer was for the plan before the change (one plan
+    // family) and is dropped; the customer's visit history decides for the plan after it. A failed read fails
+    // closed, like every other lookup here. Null while the gate is off or the estimate has no customer.
+    const Returning = require('../services/returning-setup-fee-waiver');
+    Returning.dropReturningSetupWaiver(parsedData);
+    let returningVisitHistory = null;
+    try {
+      returningVisitHistory = await Returning.loadReturningVisitHistory(db, { customerId: estimate.customer_id });
+    } catch (_) {
+      return { status: 409, body: ({ error: 'reprice_unavailable' }) };
+    }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     // A line this mutation ADDS was never sold: the add rail, or the customer taking a staff-parked
     // offer. The STAFF restore is the compensation of a send that delivered on no channel
@@ -18601,6 +18624,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const lineIsAdded = mode === 'add' || (mode === 'restore' && staffOffered && actor !== 'staff');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
+      returningVisitHistory,
       // A line this mutation adds (the add rail, or the customer taking a staff-parked offer) was
       // never sold, so the lawn pricer's v13 bahia review still applies to it. The STAFF restore is
       // the compensation of a send that delivered on no channel (revertLeadServiceForSend): it puts
@@ -18623,6 +18647,8 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     if (!reprice.recomputed) {
       return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
+    // The rule's answer for the plan after the change, stored where the page and the accept read a waiver.
+    Returning.storeReturningSetupWaiver(parsedData, reprice.returningSetupFeeWaiver);
 
     const afterResult = reprice.serverResult;
     // An add the engine declined to price (e.g. no turf basis after all) must
@@ -30623,6 +30649,10 @@ async function buildPricingBundleInner(estimate) {
         // (same rule as the fee card above).
         const anchorFrozenFee = Number(estData?.setupFeeQuote?.amount);
         if (estData?.setupFeeQuote && !(anchorFrozenFee > 0)) return rawV1OneTimeTotal;
+        // Returning customer inside one cycle + 30 days (GATE_RETURNING_SETUP_FEE_GAP): the save left the fee out
+        // of the stored totals and finalize strips the fee card, so the anchor must not add it back. A staff
+        // waiver keeps today's anchor.
+        if (require('../services/returning-setup-fee-waiver').returningSetupFeeWaiverOf(estData)) return rawV1OneTimeTotal;
         const fee = anchorFrozenFee > 0 ? anchorFrozenFee : (Number(PEST.initialFee || 99) || 99);
         return Math.round(((Number(rawV1OneTimeTotal) || 0) + fee) * 100) / 100;
       }

@@ -103,6 +103,8 @@ function resolveOptions(options) {
   for (const key of Object.keys(DEFAULT_OPTIONS)) {
     if (options && options[key] != null && Number.isFinite(Number(options[key]))) merged[key] = Number(options[key]);
   }
+  // Not a number: set by the runner for a day a technician's shift closes (lastStartHour).
+  merged.closeByWork = options?.closeByWork === true;
   return merged;
 }
 
@@ -178,9 +180,14 @@ function prefAllows(pref, hour) {
   return hour * 60 >= pref.startMin && hour * 60 < pref.endMin;
 }
 
-/** Last start hour whose window still ends by the day's close (the night pass's after_hours rule). */
+/**
+ * Last start hour whose window still ends by the day's close (the night pass's after_hours rule). options.closeByWork
+ * (a technician's shift set the close): the stop's work and its stored length (storedMin) must end by it too.
+ */
 function lastStartHour(ctx, stop) {
-  return Math.floor((ctx.opts.closeMin - (Number(stop.slotWidthMin) || 60)) / 60);
+  const width = Number(stop.slotWidthMin) || 60;
+  const block = ctx.opts.closeByWork === true ? Math.max(width, Number(stop.workMin) || 0, Number(stop.storedMin) || 0) : width;
+  return Math.floor((ctx.opts.closeMin - block) / 60);
 }
 
 function hourUsable(ctx, stop, hour, used) {
@@ -227,6 +234,9 @@ function step(ctx, state, idx) {
   if (t < slot) t = slot;
   t += stop.workMin;
   if (t > ctx.dayEndMin) return null;
+  // A shift closes the day (closeByWork): a movable stop's simulated work ends by the close, however late in its hour
+  // the van arrives. A fixed stop keeps its hour, and the current route is measured as it is (simulateCurrent).
+  if (ctx.opts.closeByWork === true && stop.movable && t > ctx.opts.closeMin) return null;
   return { t, prev: idx, drive: state.drive + d, used, slot, lastSlot: slot };
 }
 

@@ -1178,7 +1178,10 @@ async function runView(conn, runId, { evaluation = null } = {}) {
   if (notes.length) view.techRewardsNotes = notes;
   // Stops that need review in a draft's production shares: the owner reads this before he finalizes. Present only when there is one.
   if (run.status === 'draft') {
-    const reviewNotes = view.checks.map((check) => productionSharePay.reviewNote(check.name, check.productionShare && check.productionShare.needsReviewCount)).filter(Boolean);
+    const reviewNotes = view.checks.flatMap((check) => [
+      productionSharePay.reviewNote(check.name, check.productionShare && check.productionShare.needsReviewCount),
+      productionSharePay.takeBackNote(check.name, check.productionShare && check.productionShare.takeBackToSetCount),
+    ]).filter(Boolean);
     if (reviewNotes.length) view.productionShareNotes = reviewNotes;
   }
   return view;
@@ -1303,6 +1306,13 @@ async function confirmShareInputs(trx, run, used, technicianIds) {
   }
 }
 
+// Refund bells for a draft or recompute: raised only after the run was saved, for the technicians whose checks the evaluation drafted. A refused
+// run (a 409, a week already paid) raises none; the bell never blocks the run.
+async function alertRefundFlagsAfterCommit(shareInputs, technicianIds, weekStart) {
+  if (!shareInputs || !technicianIds.length) return;
+  await productionSharePay.alertRefundFlags(productionSharePay.restrictInputs(shareInputs, technicianIds), weekStart);
+}
+
 async function draftRun(input, actor, conn = db) {
   const v = validate(createSchema, input);
   const { start, end } = validateWeek(v.weekStart);
@@ -1313,6 +1323,8 @@ async function draftRun(input, actor, conn = db) {
   const seasonScores = await readSeasonScores(conn, payDate);
   const shareInputs = await productionSharePay.readInputs(conn, start);
   let runId;
+  // The technicians the successful evaluation drafted a check for: refund bells are raised for them only, and only after the run is saved.
+  let checkedIds = [];
   try {
     runId = await conn.transaction(async (trx) => {
       await lockRunWrite(trx, today);
@@ -1336,12 +1348,14 @@ async function draftRun(input, actor, conn = db) {
       }
       await replaceDraftChecks(trx, id, evaluation.checks);
       await audit(trx, actorId, 'payroll.run_drafted', 'payroll_runs', id, { run_id: id });
+      checkedIds = evaluation.checks.map((check) => check.technician_id);
       return id;
     });
   } catch (err) {
     if (err && err.code === '23505') throw taken;
     throw err;
   }
+  await alertRefundFlagsAfterCommit(shareInputs, checkedIds, start);
   return runView(conn, runId);
 }
 
@@ -1351,6 +1365,8 @@ async function recomputeRun(runId, actor, conn = db) {
   const today = etDateString();
   const seasonScores = await readSeasonScoresOfRun(conn, runId);
   const shareInputs = await readShareInputsOfRun(conn, runId);
+  let checkedIds = [];
+  let weekStart = '';
   await conn.transaction(async (trx) => {
     await lockRunWrite(trx, today);
     const run = await loadRun(trx, runId, { lock: true });
@@ -1362,7 +1378,10 @@ async function recomputeRun(runId, actor, conn = db) {
     const evaluation = await evaluate(trx, run, { lock: true, shareInputs });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
+    checkedIds = evaluation.checks.map((check) => check.technician_id);
+    weekStart = run.week_start;
   });
+  await alertRefundFlagsAfterCommit(shareInputs, checkedIds, weekStart);
   return runView(conn, runId);
 }
 
@@ -1611,6 +1630,8 @@ async function setCheckNumber(checkId, input, actor, conn = db) {
 const stubShare = (figures, shareCents) => ({
   creditedCents: figures.creditedCents, barCents: figures.barCents, aboveBarCents: figures.aboveBarCents,
   rateBps: figures.rateBps, barType: figures.barType, shifts: figures.shifts, shareCents,
+  // Refund take-backs moved this week (the net, negative = credit given back): creditedCents is after them (payroll-production-share.js).
+  ...(Number(figures.refundTakeBackCents) ? { refundTakeBackCents: Number(figures.refundTakeBackCents) } : {}),
 });
 
 async function getStub(checkId, conn = db) {

@@ -9,7 +9,11 @@ jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(), syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/voice-agent/relay-server', () => ({ isRelayAttached: jest.fn(() => true) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), voiceGptLiveTestLive: () => process.env.GATE_VOICE_GPT_LIVE_TEST === 'true' }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => true),
+  voiceGptLiveTestLive: () => process.env.GATE_VOICE_GPT_LIVE_TEST === 'true',
+  voiceSandboxRecordingLive: () => process.env.GATE_VOICE_SANDBOX_RECORDING === 'true',
+}));
 jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
 // The REST client is a fake (the TwiML builder stays real), so a run with real
 // Twilio credentials in the environment can never call the API.
@@ -34,6 +38,13 @@ const { VOICE_RELAY_SANDBOX_SOURCE, spanishWelcomeGreeting } = require('../servi
 // An UNREGISTERED number: a registered Waves line is refused as the sandbox target.
 const SANDBOX = '+19415550199';
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+// GATE_VOICE_SANDBOX_RECORDING: a staff forward number (the only caller ever recorded), the carrier verdict that
+// vouches for it, the one instruction the gate adds, and the stamp that carries the decision to the cell document.
+const STAFF_PHONE = '+19415550142';
+const A_ATTESTED = 'TN-Validation-Passed-A';
+const SANDBOX_RECORDING = '<Start><Recording channels="dual" trim="do-not-trim"/></Start>';
+const RECORDING_STAMP = 'sandbox_recording_ok';
+const STAFF_PHONE_ENV = ['WAVES_FALLBACK_FORWARD_NUMBERS', 'OWNER_PHONE', 'ADAM_PHONE', 'VIRGINIA_PHONE', 'OFFICE_MANAGER_PHONE', 'WAVES_OFFICE_MANAGER_PHONE', 'WAVES_CSR_NUMBER_MAP'];
 
 function handlerFor(path) {
   const layer = voiceRouter.stack.find((l) => l.route && l.route.path === path);
@@ -48,6 +59,16 @@ function mockRes() {
   res.send = jest.fn((body) => { res.body = body; return res; });
   res.sendStatus = jest.fn((code) => { res.statusCode = code; return res; });
   return res;
+}
+
+// A request as Twilio sends it: signed over the public URL and the form body (undefined fields are not posted).
+// `signed: false` leaves the header off; mutate the returned body to model a tampered one.
+function twilioReq(routePath, fields, { signed = true } = {}) {
+  const body = Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+  const url = `/api/webhooks/twilio${routePath}`;
+  const headers = { host: 'portal.example.com', 'x-forwarded-proto': 'https' };
+  if (signed) headers['x-twilio-signature'] = require('twilio').getExpectedTwilioSignature(process.env.TWILIO_AUTH_TOKEN || '', `https://portal.example.com${url}`, body);
+  return { body, headers, originalUrl: url, protocol: 'http', get: (name) => headers[String(name).toLowerCase()] };
 }
 
 // The answer handler takes the per-CallSid advisory lock, reads the row
@@ -77,6 +98,9 @@ beforeEach(() => {
   process.env.SERVER_DOMAIN = 'portal.example.com';
   delete process.env.VOICE_RELAY_PROFILE;
   delete process.env.VOICE_RELAY_SANDBOX_ATTRS;
+  delete process.env.GATE_VOICE_SANDBOX_RECORDING;
+  for (const name of STAFF_PHONE_ENV) delete process.env[name];
+  process.env.WAVES_FALLBACK_FORWARD_NUMBERS = STAFF_PHONE;
 });
 
 describe('sandboxNumber — a registered live line is never the sandbox (hook P1)', () => {
@@ -98,6 +122,73 @@ describe('sandboxNumber — a registered live line is never the sandbox (hook P1
     TWILIO_NUMBERS._ownedLast10 = null; // the owned set is cached once
     process.env.VOICE_RELAY_SANDBOX_NUMBER = parked;
     expect(isSandboxCall({ body: { To: parked } })).toBe(true);
+  });
+});
+
+// The recording decision's number check. The forwarding code's isStaffForwardNumber matches the last ten digits (right
+// for "is this leg internal"); a decision to record a voice needs the whole number.
+describe('isStaffForwardE164: the whole number, never its last ten digits', () => {
+  test('matches a configured staff number in any env spelling, only for a caller number in strict E.164', () => {
+    process.env.WAVES_FALLBACK_FORWARD_NUMBERS = '+19415550142, (941) 555-0143';
+    process.env.WAVES_CSR_NUMBER_MAP = '19415550144:Pat';
+    process.env.OWNER_PHONE = '941-555-0145';
+    for (const staff of ['+19415550142', '+19415550143', '+19415550144', '+19415550145']) expect(TWILIO_NUMBERS.isStaffForwardE164(staff)).toBe(true);
+    for (const other of ['+19415550100', '+4419415550142', '+449415550142', '9415550142', '19415550142', ' +19415550142', '+1941555014', 'anonymous', '', null, undefined, 19415550142]) {
+      expect(TWILIO_NUMBERS.isStaffForwardE164(other)).toBe(false);
+    }
+    // The last-ten-digit matcher is unchanged: it still treats the foreign look-alike as internal.
+    expect(TWILIO_NUMBERS.isStaffForwardNumber('+4419415550142')).toBe(true);
+    expect([...TWILIO_NUMBERS.staffForwardLast10()].sort()).toEqual(['9415550142', '9415550143', '9415550144', '9415550145']);
+  });
+
+  test('no staff number configured: nothing matches', () => {
+    delete process.env.WAVES_FALLBACK_FORWARD_NUMBERS;
+    expect(TWILIO_NUMBERS.isStaffForwardE164(STAFF_PHONE)).toBe(false);
+  });
+
+  // The call router reads a WAVES_CSR_NUMBER_MAP entry only when it has a number AND a name (getCsrNumberMap). An
+  // entry it ignores (a stale bare number, a name deleted but the colon left) must not make that number a staff phone.
+  test('a CSR map entry counts only with a number and a name, as the call router reads it', () => {
+    delete process.env.WAVES_FALLBACK_FORWARD_NUMBERS;
+    process.env.WAVES_CSR_NUMBER_MAP = '+19415550142, +19415550143:, +19415550144:  ,+19415550145:Pat, :Sam';
+    for (const unnamed of ['+19415550142', '+19415550143', '+19415550144']) expect(TWILIO_NUMBERS.isStaffForwardE164(unnamed)).toBe(false);
+    expect(TWILIO_NUMBERS.isStaffForwardE164('+19415550145')).toBe(true);
+    // The last-ten-digit set that marks a leg internal is unchanged: it still holds every number written there.
+    expect([...TWILIO_NUMBERS.staffForwardLast10()].sort()).toEqual(['9415550142', '9415550143', '9415550144', '9415550145']);
+  });
+
+  // The configured side is read as strictly as the caller's side. Guessing here would let a staff entry that is not a
+  // plain number authorize a DIFFERENT caller, whom the carrier then truthfully vouches for.
+  test('a configured value is read only when it is one unambiguous number', () => {
+    const read = (raw) => TWILIO_NUMBERS.staffNumberE164(raw);
+    for (const raw of ['+19415550142', '(941) 555-0142', '941-555-0142', '941.555.0142', '1 941 555 0142', '1-941-555-0142', '+1 (941) 555-0142', ' +19415550142 ']) {
+      expect(read(raw)).toBe('+19415550142');
+    }
+    expect(read('+44 20 7946 0958')).toBe('+442079460958');
+    for (const raw of [
+      '4419415550142', '0019415550142', '011 44 20 7946 0958', // a country code without its "+"
+      '941-555-0142 x123', '+1 941 555 0142 ext 5', '19415550142;ext=5', '9415550142123', // an extension
+      '+1 941 555 0142 +1 941 555 0143', '941 555 0142 941 555 0143', // two numbers in one entry
+      '+1941555014', '555-0142', '94155501425', '+1 041 555 0142', '+1 941 055 0142', '+0 123456789', '+', '', '   ', null, undefined,
+    ]) {
+      expect(read(raw)).toBeNull();
+    }
+  });
+
+  test('an ambiguous configured value authorizes nobody, least of all the number a loose reading would make of it', () => {
+    // toE164 would read these two as +1 941 555 0142 and +1 555 014 2123.
+    process.env.WAVES_FALLBACK_FORWARD_NUMBERS = '4419415550142, 941-555-0142 x123';
+    process.env.WAVES_CSR_NUMBER_MAP = '4419415550143:Pat';
+    process.env.OWNER_PHONE = '941-555-0144 ext 9';
+    for (const caller of ['+19415550142', '+15550142123', '+4419415550142', '+19415550143', '+4419415550143', '+19415550144']) {
+      expect(TWILIO_NUMBERS.isStaffForwardE164(caller)).toBe(false);
+    }
+    // A plain entry beside them still counts, and an explicit foreign number matches only itself.
+    process.env.VIRGINIA_PHONE = '941-555-0145';
+    process.env.ADAM_PHONE = '+44 20 7946 0958';
+    expect(TWILIO_NUMBERS.isStaffForwardE164('+19415550145')).toBe(true);
+    expect(TWILIO_NUMBERS.isStaffForwardE164('+442079460958')).toBe(true);
+    expect(TWILIO_NUMBERS.isStaffForwardE164('+12079460958')).toBe(false);
   });
 });
 
@@ -301,6 +392,172 @@ describe('POST /relay-sandbox', () => {
     await expect(stampRelayProfile('CA-prod-3', { relayProfileId: 'nova_hints_v1' })).resolves.toBeUndefined(); // fail-soft
   });
 
+  // GATE_VOICE_SANDBOX_RECORDING: the test-call grader needs audio, and the sandbox line keeps none. The gate spends
+  // money (Twilio bills a recorded minute) and records a voice, so the regressions that matter are a recording nobody
+  // approved (gate off, or a caller who is not provably staff), a response that tells an unsigned request which numbers
+  // are staff, a recording that starts before the disclosure ends, and one the recording pipeline hears about.
+  describe('GATE_VOICE_SANDBOX_RECORDING on the answer document', () => {
+    beforeEach(() => { process.env.TWILIO_AUTH_TOKEN = 'test-token'; });
+    afterEach(() => {
+      delete process.env.TWILIO_AUTH_TOKEN;
+      delete process.env.TWILIO_SIGNATURE_VALIDATION;
+    });
+    // One answer webhook from a signed, A-attested staff phone unless overridden. Returns the document and the
+    // metadata the handler wrote on the sandbox row (insert, or the adoption update when `existing` is given).
+    const answer = async ({ fields = {}, signed = true, tamper = null, existing } = {}) => {
+      const { insert, update } = primeInsert({ existing });
+      const req = twilioReq('/relay-sandbox', { CallSid: 'CA-sb-rec', To: SANDBOX, From: STAFF_PHONE, StirVerstat: A_ATTESTED, ...fields }, { signed });
+      if (tamper) Object.assign(req.body, tamper);
+      const res = mockRes();
+      await handlerFor('/relay-sandbox')(req, res);
+      const meta = insert.mock.calls.length ? JSON.parse(insert.mock.calls[0][0].metadata) : JSON.parse(update.mock.calls[0][0].metadata.bindings[0]);
+      return { xml: res.body, meta };
+    };
+    // The answer document every caller got before the gate: the cell <Gather> with Twilio's default finish key.
+    const UNCHANGED_GATHER = '<Gather input="dtmf" numDigits="2" timeout="3" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST"><Play>';
+    const expectUnchangedDocument = (xml) => {
+      expect(xml).toContain(UNCHANGED_GATHER);
+      expect(xml).toContain('</Gather><Connect');
+      expect(xml).not.toMatch(/<Start|<Recording|finishOnKey/);
+    };
+    // A verified delivery that decided "not staff": no recording, and the row says so.
+    const expectNotRecorded = ({ xml, meta }) => {
+      expectUnchangedDocument(xml);
+      expect(meta[RECORDING_STAMP]).toBe(false);
+    };
+    // A delivery with no say (unverified, or the gate off): no recording, and it writes no stamp at all.
+    const expectNoSay = ({ xml, meta }) => {
+      expectUnchangedDocument(xml);
+      expect(meta).not.toHaveProperty(RECORDING_STAMP);
+    };
+    const sandboxRow = (stamp) => ({ id: 7, source: VOICE_RELAY_SANDBOX_SOURCE, metadata: { relay_sandbox: true, stir_verstat: A_ATTESTED, ...(stamp === undefined ? {} : { [RECORDING_STAMP]: stamp }) } });
+
+    test('gate off: a signed, attested staff phone is not recorded, and the document and the row are what they were', async () => {
+      const { xml, meta } = await answer();
+      expectUnchangedDocument(xml);
+      expect(meta).toEqual({ relay_sandbox: true, stir_verstat: A_ATTESTED });
+    });
+
+    // Twilio's default finish key ends a <Gather> with no digits when "#" is pressed alone: no action is requested,
+    // the nested disclosure stops, and the next verb runs. On a document that records, that next verb is the
+    // recording. With no finish key every key press is input and goes to the cell handler, which replays the
+    // disclosure outside any <Gather> before it records.
+    test('gate on: a recorded document has no finish key, so no key press can skip the disclosure and reach the recording', async () => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      const { xml } = await answer();
+      expect(xml).toContain(`<Gather input="dtmf" numDigits="2" timeout="3" action="/api/webhooks/twilio/relay-sandbox/cell" method="POST" finishOnKey=""><Play>`);
+      // the only route to the recording inside this document is the end of the <Gather>
+      expect(xml).toMatch(new RegExp(`</Play></Gather>${SANDBOX_RECORDING}<Connect`));
+      expect(xml.split('<Gather')).toHaveLength(2);
+    });
+
+    test('gate on: a signed, A-attested staff phone starts ONE dual-channel recording after the disclosure <Gather> and before the relay, with no status callback, and the row is stamped', async () => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      const { xml, meta } = await answer();
+      expect(xml).toContain(`</Gather>${SANDBOX_RECORDING}<Connect`);
+      expect(xml.split('<Recording')).toHaveLength(2);
+      // No callback: /recording-status never hears of a sandbox recording, so nothing transcribes or extracts it.
+      expect(xml).not.toMatch(/recordingStatusCallback/i);
+      expect(meta).toEqual({ relay_sandbox: true, stir_verstat: A_ATTESTED, [RECORDING_STAMP]: true });
+      // The adoption path (a row /call-status wrote first) carries the same stamp.
+      const adopted = await answer({ existing: { id: 7, source: null } });
+      expect(adopted.xml).toContain(SANDBOX_RECORDING);
+      expect(adopted.meta[RECORDING_STAMP]).toBe(true);
+      // A staff number written without a country code in the env is the same +1 number.
+      process.env.WAVES_FALLBACK_FORWARD_NUMBERS = '(941) 555-0142';
+      expect((await answer()).xml).toContain(SANDBOX_RECORDING);
+    });
+
+    test('gate on: an unsigned or tampered request never learns that a number is staff and writes no stamp, in every middleware mode', async () => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      for (const mode of ['log', 'disabled', 'enforce']) {
+        process.env.TWILIO_SIGNATURE_VALIDATION = mode;
+        expectNoSay(await answer({ signed: false }));
+        // signed for a stranger's number, then the posted From swapped to the staff number
+        expectNoSay(await answer({ fields: { From: '+19415550100' }, tamper: { From: STAFF_PHONE } }));
+      }
+      delete process.env.TWILIO_AUTH_TOKEN; // nothing to verify with
+      expectNoSay(await answer());
+    });
+
+    // The first verified delivery decides for the call. A redelivery (Twilio retries an answer webhook) must not turn
+    // a refusal into a recording because the staff list changed in between, nor replace the stored answer at all.
+    test('gate on: a redelivery reuses the stored decision and never writes another', async () => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      // refused first; this delivery alone would say yes
+      expectNoSay(await answer({ existing: sandboxRow(false) }));
+      // approved first; the number is no longer configured as staff, so this delivery alone would say no
+      delete process.env.WAVES_FALLBACK_FORWARD_NUMBERS;
+      const kept = await answer({ existing: sandboxRow(true) });
+      expect(kept.xml).toContain(`</Gather>${SANDBOX_RECORDING}<Connect`);
+      expect(kept.meta).not.toHaveProperty(RECORDING_STAMP);
+      process.env.WAVES_FALLBACK_FORWARD_NUMBERS = STAFF_PHONE;
+      // metadata read back as text is the same stored decision
+      const text = sandboxRow(false);
+      expectNoSay(await answer({ existing: { ...text, metadata: JSON.stringify(text.metadata) } }));
+      // an approved call still needs THIS delivery verified and the gate on to get the instruction
+      expectNoSay(await answer({ existing: sandboxRow(true), signed: false }));
+      delete process.env.GATE_VOICE_SANDBOX_RECORDING;
+      expectNoSay(await answer({ existing: sandboxRow(true) }));
+    });
+
+    test('gate on: a row with no decision yet (written first by /call-status, or by a delivery with no say) gets this delivery\'s', async () => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      for (const existing of [sandboxRow(undefined), sandboxRow('true'), sandboxRow(null), { id: 7, source: null, metadata: null }, { id: 7, source: null, metadata: '{not json' }]) {
+        const first = await answer({ existing });
+        expect(first.xml).toContain(SANDBOX_RECORDING);
+        expect(first.meta[RECORDING_STAMP]).toBe(true);
+        expectNotRecorded(await answer({ existing, fields: { From: '+19415550100' } }));
+      }
+    });
+
+    test('gate on: a staff number the carrier does not vouch for is not recorded (a spoofed caller ID is not staff)', async () => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      for (const StirVerstat of ['TN-Validation-Passed-B', 'TN-Validation-Passed-C', 'TN-Validation-Failed-A', 'No-TN-Validation', '', undefined]) {
+        expectNotRecorded(await answer({ fields: { StirVerstat } }));
+      }
+    });
+
+    test('gate on: only the WHOLE staff number counts (a stranger, a foreign number with the same last ten digits, a national-format, withheld or missing number are not recorded)', async () => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      // The forwarding code's last-ten-digit match accepts the foreign number; this decision must not.
+      expect(TWILIO_NUMBERS.isStaffForwardNumber('+4419415550142')).toBe(true);
+      for (const From of ['+19415550100', '+4419415550142', '+449415550142', '9415550142', '19415550142', 'anonymous', '', undefined]) {
+        expectNotRecorded(await answer({ fields: { From } }));
+      }
+      // The same strictness on the configured side: an entry that is not one plain number authorizes nobody.
+      process.env.WAVES_FALLBACK_FORWARD_NUMBERS = '4419415550142, 941-555-0142 x123';
+      for (const From of ['+19415550142', '+15550142123', '+4419415550142']) expectNotRecorded(await answer({ fields: { From } }));
+    });
+
+    test('gate on with no staff phone configured: nobody is recorded (fail closed)', async () => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      delete process.env.WAVES_FALLBACK_FORWARD_NUMBERS;
+      expectNotRecorded(await answer());
+    });
+
+    // The route calls the reader through `?.()`, so a reader that is not exported would read as "off" for good
+    // (the 11-18 lost-export trap). This suite mocks the gate module, so the real one is checked here.
+    test('the real gate module exports the reader, and only exactly "true" turns it on', () => {
+      const { voiceSandboxRecordingLive } = jest.requireActual('../config/feature-gates');
+      for (const value of [undefined, '', 'TRUE', '1', 'yes', ' true', 'false']) {
+        if (value === undefined) delete process.env.GATE_VOICE_SANDBOX_RECORDING;
+        else process.env.GATE_VOICE_SANDBOX_RECORDING = value;
+        expect(voiceSandboxRecordingLive()).toBe(false);
+      }
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      expect(voiceSandboxRecordingLive()).toBe(true);
+    });
+
+    test('relay not attached: the spoken notice and hangup start no recording', async () => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      isRelayAttached.mockImplementation(() => false);
+      const { xml } = await answer();
+      expect(xml).toContain('<Hangup/>');
+      expect(xml).not.toMatch(/<Start|<Recording/);
+    });
+  });
+
   test('a DB failure still answers with valid TwiML (hangup), never a 500 into the call', async () => {
     db.mockImplementation(() => { throw new Error('pool down'); });
     const res = mockRes();
@@ -351,6 +608,83 @@ describe('POST /relay-sandbox/cell', () => {
       relay_profile_id: 'flux_partials_probe_v1',
       relay_attrs: expect.objectContaining({ speechModel: 'flux', partialPrompts: 'true' }),
       relay_language: null,
+    });
+  });
+
+  // GATE_VOICE_SANDBOX_RECORDING on the cell document. The cell never decides who is staff: it honours the stamp the
+  // answer webhook put on the row, on its own verified signature, with a relay that can take the call.
+  describe('GATE_VOICE_SANDBOX_RECORDING on the cell document', () => {
+    beforeEach(() => {
+      process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+      process.env.TWILIO_AUTH_TOKEN = 'test-token';
+    });
+    afterEach(() => {
+      delete process.env.TWILIO_AUTH_TOKEN;
+      delete process.env.TWILIO_SIGNATURE_VALIDATION;
+    });
+    // One cell callback over a sandbox row with this metadata (stamped true unless overridden).
+    const stamped = (value) => ({ relay_sandbox: true, [RECORDING_STAMP]: value });
+    const render = async ({ metadata = stamped(true), signed = true, tamper = null, From = '+19415550100', asText = false } = {}) => {
+      const update = jest.fn().mockResolvedValue(1);
+      // The row as the query asked for it: metadata only when the handler selected it.
+      const first = jest.fn(async (...columns) => ({
+        source: VOICE_RELAY_SANDBOX_SOURCE,
+        ...(columns.includes('metadata') ? { metadata: asText ? JSON.stringify(metadata) : metadata } : {}),
+      }));
+      db.mockImplementation(() => ({ where: jest.fn(() => ({ update, first })) }));
+      db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+      const req = twilioReq('/relay-sandbox/cell', { CallSid: 'CA-sb-rec', To: SANDBOX, From, Digits: '09' }, { signed });
+      if (tamper) Object.assign(req.body, tamper);
+      const res = mockRes();
+      await handlerFor('/relay-sandbox/cell')(req, res);
+      return { xml: res.body, first };
+    };
+    const RECORDED = new RegExp(`<Response><Play>https://[^<]+\\.mp3</Play>${SANDBOX_RECORDING}<Connect[ >]`);
+    const expectRelayNotRecorded = (xml) => {
+      expect(xml).toMatch(/<Response><Play>https:\/\/[^<]+\.mp3<\/Play><Connect[ >]/); // the caller still gets the relay
+      expect(xml).not.toMatch(/<Start|<Recording/);
+    };
+
+    test('a stamped call is recorded after the replayed disclosure and before the relay, once, with no status callback', async () => {
+      const { xml, first } = await render();
+      expect(xml).toMatch(RECORDED);
+      expect(xml.split('<Recording')).toHaveLength(2);
+      expect(xml).not.toMatch(/recordingStatusCallback/i);
+      // The stamp rides the ownership read: one query for the row, never a second one the call would wait on.
+      expect(first.mock.calls).toEqual([['source', 'metadata']]);
+      expect((await render({ asText: true })).xml).toMatch(RECORDED); // metadata read back as text
+    });
+
+    test('the stamp decides, not the number this request posts', async () => {
+      // stamped at answer, and this callback posts a number that is not staff: still that call's recording
+      expect((await render({ From: '+19415550100' })).xml).toMatch(RECORDED);
+      // not stamped exactly true, and this callback posts the staff number: never recorded
+      for (const metadata of [stamped(false), stamped('true'), stamped(1), stamped(null), { relay_sandbox: true }, null]) {
+        expectRelayNotRecorded((await render({ metadata, From: STAFF_PHONE })).xml);
+      }
+    });
+
+    test('an unsigned or tampered cell callback reads no stamp and starts no recording, in every middleware mode', async () => {
+      for (const mode of ['log', 'disabled', 'enforce']) {
+        process.env.TWILIO_SIGNATURE_VALIDATION = mode;
+        for (const opts of [{ signed: false }, { tamper: { Digits: '10' } }]) {
+          const { xml, first } = await render(opts);
+          expect(xml).not.toMatch(/<Start|<Recording/);
+          expect(first.mock.calls).toEqual([['source']]); // the ownership read as it was: the stamp is not even selected
+        }
+      }
+    });
+
+    test('a relay that cannot take the call, or the gate off: the same document and the same row read as before, no recording', async () => {
+      isRelayAttached.mockImplementation(() => false);
+      const detached = await render();
+      expectRelayNotRecorded(detached.xml);
+      expect(detached.first.mock.calls).toEqual([['source']]);
+      isRelayAttached.mockImplementation(() => true);
+      delete process.env.GATE_VOICE_SANDBOX_RECORDING;
+      const off = await render();
+      expectRelayNotRecorded(off.xml);
+      expect(off.first.mock.calls).toEqual([['source']]); // gate off: the query is what it was
     });
   });
 
@@ -463,9 +797,9 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
   // The ledger (voice_gpt_live_ledger): the spent read (`first(raw)` answers
   // `usd`) and the claim (`insert().onConflict().ignore().returning()`,
   // [] = already claimed). call_log in the same transaction: the stamp.
-  function primeLive({ usd = 0, budgetFails = false, stampFails = false, stampRows = 1, claimed = true } = {}) {
+  function primeLive({ usd = 0, budgetFails = false, stampFails = false, stampRows = 1, claimed = true, rowMetadata } = {}) {
     const prodUpdate = jest.fn(() => Promise.resolve(1));
-    const builder = { where: jest.fn(() => builder), first: jest.fn(async () => ({ source: VOICE_RELAY_SANDBOX_SOURCE })), update: prodUpdate };
+    const builder = { where: jest.fn(() => builder), first: jest.fn(async () => ({ source: VOICE_RELAY_SANDBOX_SOURCE, ...(rowMetadata ? { metadata: rowMetadata } : {}) })), update: prodUpdate };
     db.mockImplementation(() => builder);
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     const spent = jest.fn(async () => {
@@ -596,6 +930,33 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
     expect(update.mock.calls[0][0].metadata.sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
     delete process.env.TWILIO_ACCOUNT_SID;
     delete process.env.TWILIO_AUTH_TOKEN;
+  });
+
+  test('GATE_VOICE_SANDBOX_RECORDING: a call the answer webhook stamped is recorded on cell 71 after the disclosure and before the Stream; an unstamped call, a refused call and the gate off are not', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    process.env.GATE_VOICE_SANDBOX_RECORDING = 'true';
+    const render = async (stamp, prime = {}) => {
+      primeLive({ rowMetadata: { relay_sandbox: true, [RECORDING_STAMP]: stamp }, ...prime });
+      const res = mockRes();
+      await handlerFor('/relay-sandbox/cell')(cell('71', 'CA-sb-live', { extra: { From: STAFF_PHONE } }), res);
+      return res.body;
+    };
+    const xml = await render(true);
+    expect(xml).toMatch(new RegExp(`^<\\?xml version="1.0" encoding="UTF-8"\\?><Response><Play>https://[^<]+\\.mp3</Play>${SANDBOX_RECORDING}<Connect action="/api/webhooks/twilio/relay-sandbox/live-complete"><Stream `));
+    expect(xml.split('<Recording')).toHaveLength(2);
+    expect(xml).not.toMatch(/recordingStatusCallback/i);
+    // Not stamped at answer: the staff number on this callback changes nothing.
+    expect(await render(false)).toMatch(/<\/Play><Connect action=/);
+    // A refused call (the budget is used up) plays a notice and hangs up: nothing to record.
+    const refused = await render(true, { usd: 5 });
+    expect(refused).toContain('budget is used up');
+    expect(refused).not.toMatch(/<Start|<Recording/);
+    // The relay went away between the answer and the key press: the live cell says so and hangs up.
+    isRelayAttached.mockImplementation(() => false);
+    expect(await render(true)).not.toMatch(/<Start|<Recording/);
+    isRelayAttached.mockImplementation(() => true);
+    delete process.env.GATE_VOICE_SANDBOX_RECORDING;
+    expect(await render(true)).toMatch(/<\/Play><Connect action=/);
   });
 
   test('gate on: 72 selects the delta voice', async () => {

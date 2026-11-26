@@ -371,6 +371,22 @@ describe('the reviewed text hash the page sends', () => {
     expect(deleted).toEqual(['company_fact_bank']);
   });
 
+  test('a malformed precondition is a 400 INVALID_PRECONDITION for an edit and a discard, and nothing is read or written', async () => {
+    const never = { transaction: () => { throw new Error('must not open a transaction'); } };
+    const good = { baseTextSha256: sha256('x'), baseUpdatedAt: '2026-11-25T15:00:00.123Z', expectStatus: 'draft' };
+    const bad = [
+      { baseTextSha256: 'not-hex' }, { baseTextSha256: 'a'.repeat(63) }, { baseTextSha256: 12 }, { baseTextSha256: '' },
+      { baseUpdatedAt: 'yesterday' }, { baseUpdatedAt: 20261125 }, { baseUpdatedAt: '' },
+      { expectStatus: 'retired' }, { expectStatus: '' }, { expectStatus: ['draft'] },
+    ];
+    for (const part of bad) {
+      await expect(Bank.editFact(ID, { topic: 'Areas', ...good, ...part }, owner, { dbi: never })).rejects.toMatchObject({ code: 'INVALID_PRECONDITION', status: 400 });
+      if (!('expectStatus' in part)) await expect(Bank.discardDraft(ID, owner, { dbi: never, ...good, ...part })).rejects.toMatchObject({ code: 'INVALID_PRECONDITION', status: 400 });
+    }
+    // Not sent (undefined or null) is fine: an older caller has no guard to check.
+    await expect(Bank.editFact(ID, { topic: 'Areas', baseTextSha256: null, baseUpdatedAt: undefined }, owner, { dbi: dbFor('We service Parrish.') })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+  });
+
   // A transaction that answers every read with "nothing" and the locked draft with `row`, enough to reach the approve checks.
   const approveDb = (text) => {
     const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(text.trim()), supersedes_id: null };
@@ -707,5 +723,59 @@ describe('snapshot', () => {
     release();
     await inflight;
     expect(Bank.getApprovedBankFacts({ now: T0 })).toEqual([]);
+  });
+});
+
+describe('the snapshot refresh starts on the first read (a process without the scheduler)', () => {
+  const db = require('../models/db');
+  const flush = async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); };
+  beforeEach(() => { jest.useFakeTimers(); Bank._test.resetSnapshot(); Bank._test.setLazyStart(true); db.mockClear(); });
+  afterEach(() => { Bank.stopBankRefresh(); Bank._test.setLazyStart(false); Bank._test.resetSnapshot(); jest.useRealTimers(); });
+
+  test('a read with no prior start answers [] at once and triggers exactly one load; more reads start no more timers or loads', async () => {
+    expect(Bank.getApprovedBankFacts()).toEqual([]);
+    await flush();
+    const callsPerLoad = db.mock.calls.length;
+    expect(callsPerLoad).toBeGreaterThan(0);
+    expect(jest.getTimerCount()).toBe(1);
+    expect(Bank.renderBankFactsSection()).toBe('');
+    expect(Bank.bankVersionHash()).toBe('');
+    Bank.getApprovedBankFacts();
+    await flush();
+    expect(db.mock.calls.length).toBe(callsPerLoad);
+    expect(jest.getTimerCount()).toBe(1);
+    jest.advanceTimersByTime(Bank.REFRESH_MS);
+    await flush();
+    expect(db.mock.calls.length).toBe(callsPerLoad * 2); // the one timer loads again every minute
+  });
+
+  test('the scheduler start stays idempotent with a read that already started it, and the other way round', async () => {
+    Bank.startBankRefresh();
+    Bank.startBankRefresh();
+    await flush();
+    const callsPerLoad = db.mock.calls.length;
+    expect(jest.getTimerCount()).toBe(1);
+    Bank.getApprovedBankFacts();
+    await flush();
+    expect(db.mock.calls.length).toBe(callsPerLoad);
+    expect(jest.getTimerCount()).toBe(1);
+  });
+
+  test('a stopped refresh stays stopped on a read; a start brings it back; a failed load never throws into the reader', async () => {
+    Bank.startBankRefresh();
+    Bank.stopBankRefresh();
+    expect(jest.getTimerCount()).toBe(0);
+    expect(() => Bank.getApprovedBankFacts()).not.toThrow();
+    expect(jest.getTimerCount()).toBe(0);
+    Bank.startBankRefresh();
+    expect(jest.getTimerCount()).toBe(1);
+  });
+
+  test('Jest skips the lazy start unless a test turns it on', async () => {
+    Bank._test.setLazyStart(false);
+    Bank.getApprovedBankFacts();
+    await flush();
+    expect(db).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
   });
 });

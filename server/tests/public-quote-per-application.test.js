@@ -639,6 +639,78 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(resolveSetupFeeQuoteDecision(rodent, {})).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
   });
 
+  // GATE_RETURNING_SETUP_FEE_GAP (owner 2026-11-24): the website quote freezes the same answer the staff save
+  // stores, so self-booking (it reads the frozen amount) queues no fee. Regressions: the wizard still discloses
+  // $99 to a customer back inside the window, the rule reaches the rodent setup, or the frozen quote (it belongs
+  // to whoever typed the matching phone) carries a visit date.
+  test('the returning-customer rule freezes a zero membership fee, names its reason and no dates', () => {
+    const { resolveSetupFeeQuoteDecision } = _internals;
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const membership = { qualifies: true, kind: 'waveguard_membership', amount: 99 };
+    const rodent = { qualifies: true, kind: 'rodent_bait_setup', amount: 99 };
+    expect(resolveSetupFeeQuoteDecision(membership, { returningWaives: true })).toEqual({ amount: 0, waived: 'returning_customer', kind: 'waveguard_membership' });
+    expect(resolveSetupFeeQuoteDecision(rodent, { returningWaives: true })).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
+    expect(resolveSetupFeeQuoteDecision(membership, { activeMember: true, returningWaives: true }).waived).toBe('existing_member');
+    // The rule decides on the wizard's own raw engine lines (monthly > 0), the lines its fee basis reads.
+    const lines = (services) => generateEstimate({ ...BASE_PROPERTY, services }).lineItems
+      .filter((item) => Number(item?.monthlyAfterDiscount ?? item?.monthly) > 0);
+    const history = { todayKey: '2026-11-24', lastByFamily: { pest_control: { lastVisitKey: '2026-08-21', cycleDays: 91 } } };
+    expect(Returning.decideReturningSetupFeeWaiverForPlan(lines({ pest: { frequency: 'quarterly' } }), history))
+      .toEqual(expect.objectContaining({ family: 'pest_control', gapDays: 95, windowDays: 121 }));
+    expect(Returning.decideReturningSetupFeeWaiverForPlan(lines({ pest: { frequency: 'quarterly' }, mosquito: {} }), history)).toBeNull();
+    // The decision runs inside the draft write's transaction, with the matched customer, on the quote's own lines (source contract).
+    const publicQuote = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(publicQuote).toMatch(/resolveSetupFeeQuoteWithReturningRule\(\s+setupFeeBasis,\s+\{ activeMember, feeAlreadyQueued, queuedForThisDraft \},\s+\{ q, customerId, recurringLines: recurringQuoteLines\(estimate\) \},/);
+  });
+
+  // The rule is the last reason, asked only about a membership fee still owed. Regressions: a failed history read
+  // turns a member's or a queued fee's waiver back into a $99 quote, the history is read for a fee already waived,
+  // or a failed read waives.
+  describe('the returning-customer rule on the website quote (GATE_RETURNING_SETUP_FEE_GAP)', () => {
+    afterEach(() => { delete process.env.GATE_RETURNING_SETUP_FEE_GAP; jest.restoreAllMocks(); });
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const { resolveSetupFeeQuoteWithReturningRule } = _internals;
+    const membership = { qualifies: true, kind: 'waveguard_membership', amount: 99 };
+    const rodent = { qualifies: true, kind: 'rodent_bait_setup', amount: 99 };
+    const recurringLines = generateEstimate({ ...BASE_PROPERTY, services: { pest: { frequency: 'quarterly' } } }).lineItems
+      .filter((item) => Number(item?.monthlyAfterDiscount ?? item?.monthly) > 0);
+    const failingRead = () => ({ transaction: jest.fn(async () => { throw new Error('db down'); }) });
+    const decide = (basis, facts, q) => resolveSetupFeeQuoteWithReturningRule(basis, facts, { q, customerId: 'cust-back', recurringLines });
+
+    test('a member\'s and a queued fee\'s waiver stand when the history read fails, and the history is never read for them', async () => {
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      for (const [facts, waived] of [[{ activeMember: true }, 'existing_member'], [{ feeAlreadyQueued: true }, 'fee_already_queued']]) {
+        const q = failingRead();
+        await expect(decide(membership, facts, q)).resolves.toEqual({ amount: 0, waived, kind: 'waveguard_membership' });
+        expect(q.transaction).not.toHaveBeenCalled();
+      }
+      // The rodent setup is never the rule's: no history read for it either.
+      const q = failingRead();
+      await expect(decide(rodent, {}, q)).resolves.toEqual({ amount: 99, kind: 'rodent_bait_setup' });
+      expect(q.transaction).not.toHaveBeenCalled();
+    });
+
+    test('a fee still owed keeps its amount when the history read fails, and is waived when the history shows a visit inside the window', async () => {
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      const q = failingRead();
+      await expect(decide(membership, {}, q)).resolves.toEqual({ amount: 99, kind: 'waveguard_membership' });
+      expect(q.transaction).toHaveBeenCalledTimes(1);
+      // The savepoint read answers the customer's history: a quarterly pest visit 95 days back (window 121).
+      const history = { todayKey: '2026-11-24', lastByFamily: { pest_control: { lastVisitKey: '2026-08-21', cycleDays: 91 } } };
+      await expect(decide(membership, {}, { transaction: async () => history }))
+        .resolves.toEqual({ amount: 0, waived: Returning.FROZEN_WAIVED_REASON, kind: 'waveguard_membership' });
+      // A visit outside the window keeps the fee.
+      const old = { todayKey: '2026-11-24', lastByFamily: { pest_control: { lastVisitKey: '2026-07-01', cycleDays: 91 } } };
+      await expect(decide(membership, {}, { transaction: async () => old })).resolves.toEqual({ amount: 99, kind: 'waveguard_membership' });
+    });
+
+    test('gate off: no history read and the fee stays', async () => {
+      const q = failingRead();
+      await expect(decide(membership, {}, q)).resolves.toEqual({ amount: 99, kind: 'waveguard_membership' });
+      expect(q.transaction).not.toHaveBeenCalled();
+    });
+  });
+
   test('the queued-claim probes carry draft provenance for the rodent kind (source contracts, codex #3591 r64 P1)', () => {
     const fs = require('fs');
     const path = require('path');

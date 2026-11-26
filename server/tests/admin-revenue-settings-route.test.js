@@ -73,6 +73,22 @@ beforeEach(() => {
   mockReads.length = 0;
 });
 
+describe('PUT /api/admin/revenue/settings owner office time', () => {
+  test.each([
+    ['a numeric prefix', { ownerOfficeHoursPerMonth: '12oops' }],
+    ['hours above numeric(6,2)', { ownerOfficeHoursPerMonth: 10000 }],
+    ['a rate above numeric(8,2)', { ownerOfficeHourlyRate: 1000000 }],
+    ['a third decimal', { ownerOfficeHourlyRate: '21.295' }],
+  ])('%s is a 400 with the field named, and nothing is written', async (_n, body) => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/revenue/settings`, { method: 'PUT', headers: auth('admin'), body: JSON.stringify(body) });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/ownerOffice/);
+      expect(mockReads).toEqual(['company_financials']); // read the latest row, never inserted or updated
+    });
+  });
+});
+
 describe('GET /api/admin/revenue/settings role boundary', () => {
   test('a technician gets 403 and no company figures; nothing is read', async () => {
     await withServer(async (baseUrl) => {

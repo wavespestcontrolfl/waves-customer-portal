@@ -3,8 +3,8 @@
 /**
  * Company facts bank (owner 2026-11-25 "all rec"): owner-approved lines the agents may state beside the code lines
  * in COMPANY_FACTS (services/sms-company-facts.js). The DB row is the source of truth, the opposite of
- * knowledge_base mirroring code. PR 1: the writer, the checks and the runtime snapshot. NO reader yet: nothing in
- * this release calls getApprovedBankFacts or renderBankFactsLines, and an empty bank changes nothing, so there is
+ * knowledge_base mirroring code. PR 1: the writer, the checks and the runtime snapshot. Readers: the voice agent (relay-conversation buildBasePrompt, per call) and email
+ * drafts (email-actions companyFactsSystemEntry, per draft); texting comes later. An empty bank changes nothing, so there is
  * no gate (the off switch is retiring the row).
  *
  * Life cycle: draft -> approved -> retired. A retired line comes back only as a NEW draft (restoreAsDraft). An edit
@@ -263,6 +263,16 @@ function renderBankFactsLines(facts = getApprovedBankFacts()) {
   return list.length ? list.map((f) => `- ${f.text}`).join('\n') : '';
 }
 
+/**
+ * The section a reader appends right after the code lines of COMPANY_FACTS: one header line, then `- line` per fact.
+ * '' for an empty bank (the reader's prompt or entry is then byte-identical to before). One header for voice and email.
+ */
+const BANK_SECTION_HEADER = 'More company facts (approved by the owner; state these plainly, same as the company facts above):';
+function renderBankFactsSection(facts = getApprovedBankFacts()) {
+  const lines = renderBankFactsLines(facts);
+  return lines ? `${BANK_SECTION_HEADER}\n${lines}` : '';
+}
+
 /** Hash of the approved ids and text hashes, in approval order: '' for an empty bank. For readers that stamp a version. */
 function bankVersionHash(facts = getApprovedBankFacts()) {
   const list = Array.isArray(facts) ? facts : [];
@@ -415,10 +425,15 @@ async function editApprovedRow(trx, row, f, actor) {
 /** What the editor (or the discard button) saw when it opened, as sent: { baseTextSha256, baseUpdatedAt, expectStatus }, every part optional. */
 function openedState(input) {
   const open = input && typeof input === 'object' ? input : {};
+  const given = (key) => open[key] !== undefined && open[key] !== null;
+  // A precondition that is sent but malformed is a bad request, never silently ignored (an ignored guard would let the write through).
+  if (given('baseTextSha256') && !(typeof open.baseTextSha256 === 'string' && /^[0-9a-f]{64}$/i.test(open.baseTextSha256.trim()))) throw new FactError('INVALID_PRECONDITION', 400);
+  if (given('baseUpdatedAt') && !(typeof open.baseUpdatedAt === 'string' && !Number.isNaN(Date.parse(open.baseUpdatedAt)))) throw new FactError('INVALID_PRECONDITION', 400);
+  if (given('expectStatus') && !['draft', 'approved'].includes(open.expectStatus)) throw new FactError('INVALID_PRECONDITION', 400);
   return {
-    base: typeof open.baseTextSha256 === 'string' ? open.baseTextSha256.trim().toLowerCase() : '',
-    baseUpdatedAt: typeof open.baseUpdatedAt === 'string' ? Date.parse(open.baseUpdatedAt) : NaN,
-    expectStatus: ['draft', 'approved'].includes(open.expectStatus) ? open.expectStatus : '',
+    base: given('baseTextSha256') ? open.baseTextSha256.trim().toLowerCase() : '',
+    baseUpdatedAt: given('baseUpdatedAt') ? Date.parse(open.baseUpdatedAt) : NaN,
+    expectStatus: given('expectStatus') ? open.expectStatus : '',
   };
 }
 
@@ -638,10 +653,14 @@ async function factHistory(id, { dbi = db } = {}) {
 /* ── Snapshot ─────────────────────────────────────────────────────────── */
 
 let state = { facts: Object.freeze([]), loadedAt: 0 };
+// Every wording the owner ever approved (approved now, or retired after approval), by text hash, with the windows it was live: not a list of live lines. See getEverApprovedHashes.
+let approvedHashes = { map: new Map(), loadedAt: 0 };
 let generation = 0;
 let startedReads = 0; // refreshes started, in order
 let appliedRead = 0; // the newest-started read whose result is in `state`
 let refreshTimer = null;
+let lazyStartInTests = false; // test hook: Jest skips the lazy start unless a test turns it on
+let stopped = false; // stopBankRefresh() ran: a later read does not start the refresh again
 let lastDropKey = '';
 
 /**
@@ -659,6 +678,40 @@ async function readApprovers(dbi, ids) {
     approvers.get(e.fact_id).push({ actor: e.actor_id, sha: detail.text_sha256 });
   }
   return approvers;
+}
+
+/**
+ * Every wording with an OWNER approval event, whatever became of the row afterwards (still approved, retired, replaced): a Map of text_sha256
+ * -> windows [from, to] in epoch ms, `to` null while the line is live. A window opens at an owner 'approved' event and closes at that fact's next
+ * 'retired' event (events are append-only, so the map only grows and a window only closes). A stored texting draft carries its bank section as
+ * plain text; the map lets its readers accept a parsed line only when it is exact owner wording AND the owner had approved it by the time the
+ * draft was built (see wasApprovedAt), so a line retired long before cannot be revived by a section forged into a newer draft.
+ */
+async function readEverApprovedHashes(dbi) {
+  const events = await dbi('company_fact_bank_events').whereIn('action', ['approved', 'retired']).select('fact_id', 'action', 'detail', 'at');
+  const ms = (at) => { const t = at == null ? 0 : new Date(at).getTime(); return Number.isFinite(t) ? t : 0; };
+  const byFact = new Map();
+  for (const e of events) {
+    if (!byFact.has(e.fact_id)) byFact.set(e.fact_id, []);
+    byFact.get(e.fact_id).push(e);
+  }
+  const out = new Map();
+  for (const list of byFact.values()) {
+    list.sort((x, y) => ms(x.at) - ms(y.at));
+    let open = null;
+    for (const e of list) {
+      const detail = e.detail && typeof e.detail === 'object' ? e.detail : {};
+      if (e.action === 'retired') {
+        if (open) open[1] = ms(e.at);
+        open = null;
+      } else if (detail.owner === true && typeof detail.text_sha256 === 'string' && /^[0-9a-f]{64}$/.test(detail.text_sha256)) {
+        if (!out.has(detail.text_sha256)) out.set(detail.text_sha256, []);
+        open = [ms(e.at), null];
+        out.get(detail.text_sha256).push(open);
+      }
+    }
+  }
+  return out;
 }
 
 /** True when the owner ticked for every warning code the screens find today (the acknowledgement stored with the approval). */
@@ -723,15 +776,17 @@ async function refreshBankFacts({ dbi = db, now = Date.now } = {}) {
   const startedAt = now();
   try {
     const facts = await loadVerifiedFacts(dbi);
+    const everApproved = await readEverApprovedHashes(dbi);
     if (startedIn === generation && myRead > appliedRead) {
       appliedRead = myRead;
       state = { facts, loadedAt: startedAt };
+      approvedHashes = { map: everApproved, loadedAt: startedAt };
     }
   } catch (err) {
     logger.warn(`[company-facts-bank] snapshot refresh failed (code ${err?.code || 'unknown'}); keeping the last copy until it goes stale`);
   }
   // Through the age-checked getter: a failed read must not hand a caller a copy past its five minutes.
-  return getApprovedBankFacts({ now: now() });
+  return freshFacts(now());
 }
 
 /**
@@ -743,10 +798,43 @@ const readVerifiedFacts = async ({ dbi = db } = {}) => {
   return { facts: kept, consideredIds };
 };
 
-/** The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS. */
-function getApprovedBankFacts({ now = Date.now() } = {}) {
+// The age-checked copy, with no side effect: what refreshBankFacts hands back and what getApprovedBankFacts serves.
+function freshFacts(now) {
   if (!state.loadedAt || now - state.loadedAt > STALE_MS) return [];
   return state.facts;
+}
+
+/**
+ * Every wording the owner ever approved, as a Map of sha256(trimmed text) -> live windows. SYNC, same age rule as the snapshot: empty before
+ * the first load and after STALE_MS (fail closed: nothing is then recognized as owner wording). A retire closes a window but never removes
+ * the hash, so a stored draft that carries a since-retired line still reads it as owner wording. An invalidate() keeps the map (it only grows).
+ */
+function getEverApprovedHashes({ now = Date.now() } = {}) {
+  if (!approvedHashes.loadedAt || now - approvedHashes.loadedAt > STALE_MS) return new Map();
+  return approvedHashes.map;
+}
+
+/**
+ * True when the owner approved this wording (hash) at or before `at` and had not retired it more than STALE_MS before `at` (a process may
+ * render a line from a snapshot up to STALE_MS old, so a draft built just after a retire still carries it). `at` defaults to now: a reader
+ * with no draft time accepts only a line that is live now. `at: 'any'` skips the time (a size or topic check that grants nothing).
+ */
+function wasApprovedAt(sha, at = Date.now(), opts = {}) {
+  const windows = getEverApprovedHashes(opts).get(sha);
+  if (!windows) return false;
+  if (at === 'any') return true;
+  const t = at instanceof Date ? at.getTime() : Number(at);
+  return Number.isFinite(t) && windows.some(([from, to]) => t >= from && (to === null || t < to + STALE_MS));
+}
+
+/**
+ * The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS.
+ * The first read in a process that never started the refresh (managed dev, a process without the scheduler) starts it, once:
+ * that read still returns [] and never waits for the load, so a call or a draft is never held up. Jest skips this unless a test turns it on.
+ */
+function getApprovedBankFacts({ now = Date.now() } = {}) {
+  if (!refreshTimer && !stopped && (process.env.NODE_ENV !== 'test' || lazyStartInTests)) startBankRefresh();
+  return freshFacts(now);
 }
 
 /** After an approve or retire in THIS process: drop the copy (fail closed), then reload at once. */
@@ -756,15 +844,17 @@ function invalidate(opts = {}) {
   return refreshBankFacts(opts);
 }
 
-/** Boot hook (scheduler.js, before the GATE_CRON_JOBS return): load now, then every minute. */
+/** Boot hook (scheduler.js, before the GATE_CRON_JOBS return): load now, then every minute. Idempotent; a first read starts it too. */
 function startBankRefresh() {
   if (refreshTimer) return;
+  stopped = false;
   refreshBankFacts().catch(() => {});
   refreshTimer = setInterval(() => { refreshBankFacts().catch(() => {}); }, REFRESH_MS);
   if (typeof refreshTimer.unref === 'function') refreshTimer.unref();
 }
 
 function stopBankRefresh() {
+  stopped = true;
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = null;
 }
@@ -778,6 +868,7 @@ module.exports = {
   STALE_MS,
   STATUSES,
   SOURCES,
+  BANK_SECTION_HEADER,
   checkFactText,
   createDraft,
   editFact,
@@ -789,12 +880,15 @@ module.exports = {
   getFact,
   factHistory,
   getApprovedBankFacts,
+  getEverApprovedHashes,
+  wasApprovedAt,
   readVerifiedFacts,
   refreshBankFacts,
   renderBankFactsLines,
+  renderBankFactsSection,
   bankVersionHash,
   invalidate,
   startBankRefresh,
   stopBankRefresh,
-  _test: { sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
+  _test: { setLazyStart: (on) => { lazyStartInTests = on === true; }, sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = null; stopped = false; state = { facts: Object.freeze([]), loadedAt: 0 }; approvedHashes = { map: new Map(), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
 };

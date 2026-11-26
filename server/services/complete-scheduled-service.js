@@ -7931,6 +7931,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const { frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
             serviceData.completedAddonLines = await frozenAddonLinesForCompletion(svc.id, trx);
           } catch { /* render falls back to live rows */ }
+          // The visit's place in its plan series freezes too (returning-setup-fee-waiver.js reads it): a
+          // frequency change rewrites the series root's row after its visits completed. Each frozen line that has
+          // a cadence of its own gets that cadence's cycle from the same read. Fail-soft like the lines above: a
+          // failed read omits the series and leaves the lines as frozen, and the reader falls back to the
+          // schedule row.
+          try {
+            const frozenPlan = await require('./returning-setup-fee-waiver')
+              .frozenPlanSeriesForCompletion(svc.id, trx, serviceData.completedAddonLines);
+            if (frozenPlan) {
+              serviceData.completedSeries = frozenPlan.series;
+              if (frozenPlan.addonLines) serviceData.completedAddonLines = frozenPlan.addonLines;
+            }
+          } catch { /* the reader falls back to the schedule row */ }
           // The PRIMARY identity freezes for the same reason (codex P2
           // r15): update-details can repoint service_id/service_type after
           // completion, and a generic report has no typed snapshot to

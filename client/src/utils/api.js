@@ -1,5 +1,6 @@
 import { clearNativeBadge } from '../native/nativeBadge';
 import { consentAttestation, saveOnlyConsentAttestation } from '../lib/paymentMethodConsentText';
+import { clearSavedHome, dropSavedHomeUnlessSameIdentity } from '../lib/homeSnapshot';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const REFRESH_LOCK_NAME = 'waves-customer-refresh';
@@ -89,6 +90,9 @@ export class ApiClient {
     this.refreshToken = refreshToken;
     this.getCache.clear();
     this.inflightGets.clear();
+    // A token for another login, property or actor ends the saved home screen;
+    // a same-session rotation keeps it.
+    dropSavedHomeUnlessSameIdentity(token);
     // Storage events fire once per key. Publish the refresh credential first
     // so another tab reacting to the access-token event can never pair the new
     // access token with the already-consumed refresh token.
@@ -106,6 +110,8 @@ export class ApiClient {
     this.inflightGets.clear();
     localStorage.removeItem('waves_token');
     localStorage.removeItem('waves_refresh_token');
+    // The saved home screen belongs to the login that just ended.
+    clearSavedHome();
   }
 
   adoptTokens(token, refreshToken) {

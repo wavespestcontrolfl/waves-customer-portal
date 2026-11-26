@@ -1,10 +1,14 @@
 'use strict';
 
-// Weekly knowledge-gaps email (owner 2026-10-01: "send me a weekly email").
-// Lists the questions the knowledge base could not fully answer last week —
-// the to-do list for new knowledge entries (sourced from UF/IFAS fact
-// sheets, labels and our own protocols). Every week, even a quiet one, so
-// the owner sees it working.
+// Weekly knowledge-gaps admin notification (owner 2026-10-01: "send me a
+// weekly email"; owner 2026-11-26: "shouldn't these all be admin
+// notifications now"). One Content row a week listing the questions the
+// knowledge base could not fully answer — the to-do list for new knowledge
+// entries (sourced from UF/IFAS fact sheets, labels and our own protocols).
+// Exception-based: a week with no gaps writes nothing. The old email also
+// went out on a quiet week "so the owner sees it working"; that is
+// reassurance, not a signal anyone acts on, and the cron still records its
+// run in job_health, so the bell stays quiet instead.
 //
 // Source: knowledge_queries rows with coverage 'none' or 'partial'. WikiQA
 // records coverage on every answer (texting assistant, lead agent, tech
@@ -12,29 +16,27 @@
 // logged automatically (their queries can carry customer names, addresses
 // and phones); an empty search offers the operator an "add to knowledge
 // gaps" button, and only rows they tap land here (asked_by
-// 'intelligence_bar', coverage 'none').
+// 'intelligence_bar', coverage 'none'). The questions go in the row's
+// `detail` redacted like every bell body, never in the headline.
 //
 // Cron: Monday 8:43am ET in scheduler.js, inside runExclusive, then hourly
-// at :43 through Tuesday as catch-up ticks — the once-per-week stamp makes
-// them no-ops after a successful send, and a failed send or a deploy over
-// 8:43 is retried the same week.
-// Kill: KNOWLEDGE_GAPS_WEEKLY=off. Recipient: KNOWLEDGE_GAPS_EMAIL
-// (internal inboxes only, default contact@).
+// at :43 through Tuesday as catch-up ticks. The row's dedupeKey names the
+// report week, so the catch-up ticks dedupe onto it (a person's Done stays
+// done), and a failed write or a deploy over 8:43 is retried the same week.
+// Kill: KNOWLEDGE_GAPS_WEEKLY=off.
 
-const sendgrid = require('../sendgrid-mail');
 const logger = require('../logger');
 const db = require('../../models/db');
-const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
-const { etWeekStart, addETDaysAtWallClock, parseETDateTime } = require('../../utils/datetime-et');
+const { raiseAdminAlert, breaksAlertRules } = require('../admin-alert-compose');
+const { redactedWords, whyWithQuote, shortDateET } = require('../admin-alert-names');
+const { etWeekStart, etDateString, addETDaysAtWallClock, parseETDateTime } = require('../../utils/datetime-et');
 
-const OPS_KEY = 'knowledge-gaps-weekly';
+const DEDUPE_PREFIX = 'knowledge-gaps-weekly';
 const WINDOW_DAYS = 7;
 const TOP_N = 10;
 const QUESTION_MAX = 140;
+const DETAIL_MAX_CHARS = 2000;
 
-const recipient = () => process.env.KNOWLEDGE_GAPS_EMAIL || 'contact@wavespestcontrol.com';
-const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
-const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const killed = () => ['off', 'false', '0'].includes(String(process.env.KNOWLEDGE_GAPS_WEEKLY || '').trim().toLowerCase());
 
 // Plain names for who asked.
@@ -82,8 +84,9 @@ async function loadWeek(now = new Date()) {
   return { rows, unrated: Number(unrated?.n || 0) };
 }
 
-// Pure: the week's gap rows (+ unrated count) → subject + plain-text body.
-function composeGapsEmail({ rows: allRows = [], unrated = 0 } = {}, now = new Date()) {
+// Pure: the week's gap rows (+ unrated count) → the alert spec and its detail text, or null when the
+// week had no gap (a quiet week writes nothing).
+function composeGapsAlert({ rows: allRows = [], unrated = 0 } = {}, now = new Date()) {
   // A question with no words (punctuation only) is not a gap anyone can fill.
   const rows = allRows.filter((r) => questionKey(r.query));
   const groups = new Map();
@@ -99,33 +102,25 @@ function composeGapsEmail({ rows: allRows = [], unrated = 0 } = {}, now = new Da
   // Most asked first; ties: more "not answered at all", then most recent.
   const ranked = [...groups.values()].sort((a, b) => b.count - a.count || b.none - a.none || b.last - a.last);
   const total = ranked.reduce((n, g) => n + g.count, 0);
-
-  const unratedLine = unrated
-    ? `${unrated} answer${unrated === 1 ? '' : 's'} had no coverage rating, so whether ${unrated === 1 ? 'it' : 'they'} fully answered is unknown.`
-    : null;
-
-  if (!ranked.length) {
-    return {
-      subject: 'Knowledge gaps: none recorded this week',
-      text: ['No knowledge gaps were recorded last week.', ...(unratedLine ? [unratedLine] : [])].join('\n'),
-      gaps: 0,
-    };
-  }
+  if (!ranked.length) return null;
 
   const lines = ranked.slice(0, TOP_N).map((g, i) => {
     const times = g.count > 1 ? ` — asked ${g.count}×` : '';
     const how = g.none === g.count ? 'not answered' : (g.none ? 'not or only partly answered' : 'only partly answered');
-    return `${i + 1}. "${clip(g.question, QUESTION_MAX)}"${times}\n   ${how} · ${[...g.sources].join(', ')}`;
+    return `${i + 1}. "${clip(redactedWords(g.question), QUESTION_MAX)}"${times}\n   ${how} · ${[...g.sources].join(', ')}`;
   });
 
   const bySource = new Map();
   for (const r of rows) bySource.set(sourceLabel(r.asked_by), (bySource.get(sourceLabel(r.asked_by)) || 0) + 1);
   const sourceLine = [...bySource.entries()].sort((a, b) => b[1] - a[1]).map(([s, n]) => `${s} ${n}`).join(', ');
 
+  const unratedLine = unrated
+    ? `${unrated} answer${unrated === 1 ? '' : 's'} had no coverage rating, so whether ${unrated === 1 ? 'it' : 'they'} fully answered is unknown.`
+    : null;
+
   const { start, end } = reportWindow(now);
-  const fmt = (d) => d.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' });
-  const text = [
-    `${total} question${total === 1 ? '' : 's'} the knowledge base couldn't fully answer (${fmt(start)} – ${fmt(end)}).`,
+  const detail = [
+    `${total} question${total === 1 ? '' : 's'} the knowledge base couldn't fully answer (${shortDateET(start)} – ${shortDateET(end)}).`,
     '',
     `Top ${Math.min(TOP_N, ranked.length)}:`,
     ...lines,
@@ -134,48 +129,32 @@ function composeGapsEmail({ rows: allRows = [], unrated = 0 } = {}, now = new Da
     `Asked by: ${sourceLine}.`,
     ...(unratedLine ? [unratedLine] : []),
     'Each one is a candidate knowledge entry, written from UF/IFAS fact sheets, product labels or our protocols.',
-  ].join('\n');
+  ].join('\n').slice(0, DETAIL_MAX_CHARS);
 
-  return { subject: `Knowledge gaps: ${total} question${total === 1 ? '' : 's'} this week`, text, gaps: total };
-}
+  // The most asked question leads the why when its words pass the copy rules; else a plain line.
+  const quoted = whyWithQuote({ lead: 'Most asked: ', quote: redactedWords(ranked[0].question) });
+  const plainWhy = `The knowledge base could not fully answer ${total === 1 ? 'a question' : `${total} questions`} last week.`;
+  const why = ranked[0].question && !breaksAlertRules(quoted) ? quoted : plainWhy;
 
-// Durable weekly guard: a stamp at or after this report's end tick means this
-// week's email already went out (deploy-overlap ticks can't double-send).
-// A read failure sends anyway (a rare double beats a silently skipped week).
-async function sentThisWeek(now = new Date()) {
-  try {
-    const row = await db('ops_email_send_state').where({ email_key: OPS_KEY }).first('last_sent_at');
-    return Boolean(row?.last_sent_at && new Date(row.last_sent_at).getTime() >= reportWindow(now).end.getTime());
-  } catch (err) {
-    logger.warn(`[knowledge-gaps-weekly] send-marker read failed (${err.code || err.name || 'error'}) — proceeding without the guard`);
-    return false;
-  }
-}
-
-async function stampSent() {
-  try {
-    const now = new Date();
-    await db('ops_email_send_state')
-      .insert({ email_key: OPS_KEY, last_sent_at: now, updated_at: now })
-      .onConflict('email_key')
-      .merge({ last_sent_at: now, updated_at: now });
-  } catch (err) {
-    logger.warn(`[knowledge-gaps-weekly] send-marker write failed (${err.code || err.name || 'error'}) — next tick may re-send`);
-  }
+  return {
+    spec: {
+      area: 'Content',
+      action: `fill ${total} knowledge gap${total === 1 ? '' : 's'} from last week`,
+      why,
+      severity: 'needs-you',
+      link: '/admin/knowledge',
+      subject: { type: 'check', id: DEDUPE_PREFIX },
+      doneWhen: 'gaps_reviewed',
+      who: 'either',
+    },
+    detail,
+    gaps: total,
+  };
 }
 
 async function runKnowledgeGapsWeekly(opts = {}) {
   const now = opts.now || new Date();
   if (killed()) return { skipped: 'disabled' };
-  const to = recipient();
-  // FAIL CLOSED: owner/internal inboxes only.
-  if (!isInternalEmailRecipient(to)) {
-    logger.warn('[knowledge-gaps-weekly] recipient is not an internal address — set a valid KNOWLEDGE_GAPS_EMAIL');
-    return { skipped: 'recipient' };
-  }
-  const mailer = opts.sendgrid || sendgrid;
-  if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) return { skipped: 'unconfigured' };
-  if (await (opts.sentThisWeek || sentThisWeek)(now)) return { skipped: 'recent_send' };
 
   let week;
   try {
@@ -184,34 +163,37 @@ async function runKnowledgeGapsWeekly(opts = {}) {
     logger.error(`[knowledge-gaps-weekly] query failed: ${err.message}`);
     return { skipped: 'query_failed' };
   }
-  const composed = composeGapsEmail(week, now);
+  const composed = composeGapsAlert(week, now);
+  if (!composed) return { skipped: 'nothing_found', gaps: 0 };
 
-  let result;
   try {
-    result = await mailer.sendOne({
-      to,
-      fromEmail: fromEmail(),
-      fromName: FROM_NAME,
-      subject: composed.subject,
-      text: composed.text,
-      categories: ['ops', OPS_KEY],
-      suppressErrorLog: true,
-    });
+    const result = await (opts.raiseAlert || raiseAlert)(composed, reportWindow(now).end);
+    // raiseAdminAlert passes the writer's null (a failed write) through without throwing; every real outcome
+    // (written, deduped onto this week's row, deliberately suppressed) carries deduped or suppressed.
+    if (!result || (typeof result.deduped !== 'boolean' && result.suppressed !== true)) {
+      logger.error('[knowledge-gaps-weekly] alert write failed (no row written)');
+      return { raised: false, error: true, gaps: composed.gaps };
+    }
   } catch (err) {
-    logger.error(`[knowledge-gaps-weekly] send failed (${err.code || err.name || 'error'})`);
-    return { sent: false, error: true, gaps: composed.gaps };
+    logger.error(`[knowledge-gaps-weekly] alert failed (${err.code || err.name || 'error'})`);
+    return { raised: false, error: true, gaps: composed.gaps };
   }
-  if (result?.ok === false) {
-    logger.error(`[knowledge-gaps-weekly] send reported not ok (${result.error || 'unknown'})`);
-    return { sent: false, error: true, gaps: composed.gaps };
-  }
-  await (opts.stampSent || stampSent)();
-  logger.info(`[knowledge-gaps-weekly] sent: ${composed.subject}`);
-  return { sent: true, gaps: composed.gaps };
+  logger.info(`[knowledge-gaps-weekly] raised: ${composed.gaps} gap(s)`);
+  return { raised: true, gaps: composed.gaps };
+}
+
+// One row per report week: the key names the week, so a catch-up tick finds this week's row and dedupes.
+function raiseAlert({ spec, detail }, weekEnd) {
+  return raiseAdminAlert('knowledge', spec, {
+    dedupeKey: `${DEDUPE_PREFIX}:${etDateString(weekEnd)}`,
+    // Under GATE_ADMIN_BELL_POLICY the 'knowledge' category is denied unless the call site tags it.
+    bell: true,
+    detail,
+  });
 }
 
 // Gaps saved from the Intelligence Bar are questions with no answer: they
-// belong in this email, not in the recent Q&A lists (admin-knowledge.js,
+// belong in the weekly alert, not in the recent Q&A lists (admin-knowledge.js,
 // knowledge.js). Apply to a knowledge_queries query to leave them out.
 function withoutSavedGaps(q) {
   return q.where((w) => w.whereNull('asked_by').orWhereNot('asked_by', 'intelligence_bar'));
@@ -221,5 +203,5 @@ module.exports = {
   questionKey,
   withoutSavedGaps,
   runKnowledgeGapsWeekly,
-  _private: { composeGapsEmail, reportWindow, questionKey, sourceLabel, loadWeek, sentThisWeek, OPS_KEY },
+  _private: { composeGapsAlert, reportWindow, questionKey, sourceLabel, loadWeek },
 };

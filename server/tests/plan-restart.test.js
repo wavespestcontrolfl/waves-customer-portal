@@ -44,6 +44,10 @@ jest.mock('../services/self-booking-plan-sync', () => ({
   isCommercialServiceRow: () => false,
   isRodentLedServiceRow: (row) => /rodent/i.test(String(row.service_type || '')),
   uniqueServiceFamilies: (keys) => Array.from(new Set(keys.map((k) => ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'].find((f) => k === f || k.startsWith(`${f}_`)) || k))),
+  // The returning-customer setup fee read (GATE_RETURNING_SETUP_FEE_GAP) classifies history with the real helpers.
+  isNonBaitRodentServiceRow: (...a) => jest.requireActual('../services/self-booking-plan-sync').isNonBaitRodentServiceRow(...a),
+  isOneTimeBookingSource: (...a) => jest.requireActual('../services/self-booking-plan-sync').isOneTimeBookingSource(...a),
+  catalogBillingTypeIsOneTime: (...a) => jest.requireActual('../services/self-booking-plan-sync').catalogBillingTypeIsOneTime(...a),
 }));
 
 const mockMint = jest.fn();
@@ -207,6 +211,7 @@ function builder(table) {
   b.whereNull = (col) => { conds.push((r) => r[norm(col)] == null); return b; };
   b.orderBy = () => b;
   b.leftJoin = () => b;
+  b.join = () => b;
   b.select = () => b;
   b.forUpdate = () => b;
   b.limit = (n) => { limitN = n; return b; };
@@ -331,7 +336,7 @@ describe('mintRestartEstimate', () => {
       pest: { frequency: 'quarterly', version: undefined },
       lawn: { track: 'st_augustine', tier: 'enhanced', lawnFreq: 9 },
     });
-    expect(recomputeDeps).toEqual({ priorQualifyingServices: [], recurringCustomer: false });
+    expect(recomputeDeps).toEqual({ priorQualifyingServices: [], recurringCustomer: false, returningVisitHistory: null });
 
     const row = tables.estimates[0];
     expect(row).toEqual(expect.objectContaining({
@@ -354,6 +359,72 @@ describe('mintRestartEstimate', () => {
     // Audit note, no customer send of any kind.
     expect(tables.customer_interactions).toHaveLength(1);
     expect(tables.customer_interactions[0].subject).toMatch(/^Restart estimate requested from portal/);
+  });
+
+  // Owner 2026-11-24 rule on the customer's own restart tap. Regressions: the restart quote still shows and bills
+  // $99 inside the window, or a failed history read blocks the tap or waives the fee.
+  describe('returning customer setup fee (GATE_RETURNING_SETUP_FEE_GAP)', () => {
+    afterEach(() => { delete process.env.GATE_RETURNING_SETUP_FEE_GAP; });
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const mintSoloPest = async (mintDeps = deps()) => {
+      const { generateEstimate } = require('../services/pricing-engine');
+      const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+      // The recompute double prices as the real one does for this rule: it decides on the history it is handed.
+      recompute.mockReset();
+      recompute.mockImplementation(async (_data, deps) => {
+        const raw = generateEstimate({ homeSqFt: 2200, lotSqFt: 9000, stories: 1, services: { pest: { frequency: 'quarterly' } } });
+        const { mapped, waiver } = Returning.mapWithReturningWaiver(raw, mapV1ToLegacyShape, { history: deps.returningVisitHistory });
+        return {
+          recomputed: true, serverResult: mapped, rawEngineResult: { lineItems: [] }, returningSetupFeeWaiver: waiver,
+          serverTotals: { monthlyTotal: 50, annualTotal: 600, onetimeTotal: mapped.oneTime.total },
+        };
+      });
+      tables.cancellation_cases[0].scope = JSON.stringify(['pest_control']);
+      await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: mintDeps, now: () => new Date('2026-11-24T17:00:00Z'), randomBytes: () => Buffer.from('abcdef0123456789') });
+      return JSON.parse(tables.estimates[0].estimate_data);
+    };
+    const pestVisit = {
+      id: 'visit-old', customer_id: 'cust-1', status: 'completed', scheduled_date: '2026-08-21',
+      service_type: 'Pest Control Service', is_recurring: true, recurring_pattern: 'quarterly',
+    };
+
+    test('back inside one cycle + 30 days: the quote freezes no fee and stores the reason', async () => {
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      tables.scheduled_services = [pestVisit];
+      const stored = await mintSoloPest();
+      expect(recompute).toHaveBeenCalledTimes(1);
+      // The frozen zero names the rule, so a later re-price drops it and decides again (never a zero for any plan).
+      expect(stored.setupFeeQuote).toEqual({ amount: 0, waived: 'returning_customer', kind: 'waveguard_membership' });
+      expect(stored.operatorPriceAdjustment).toEqual(expect.objectContaining({
+        waiveSetupFee: true, returningCustomerGap: expect.objectContaining({ family: 'pest_control', gapDays: 95, windowDays: 121 }),
+      }));
+      Returning.dropReturningSetupWaiver(stored);
+      expect(stored).not.toHaveProperty('setupFeeQuote');
+      expect(stored).not.toHaveProperty('operatorPriceAdjustment');
+    });
+
+    test('gate off, or a history read that fails: the fee is frozen as before and the tap still gets its quote', async () => {
+      tables.scheduled_services = [pestVisit];
+      const off = await mintSoloPest();
+      expect(off.setupFeeQuote).toEqual({ amount: 99, kind: 'waveguard_membership' });
+      expect(off.operatorPriceAdjustment).toBeUndefined();
+
+      // Fail the history read only: the one read that joins the catalog onto the visits as svc.
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      tables.estimates = [];
+      const historyRead = jest.fn(() => { throw new Error('db down'); });
+      const failingDb = {
+        transaction: async (fn) => fn(fakeTrx(null, (table) => {
+          const b = builder(table);
+          if (table === 'scheduled_services as s') b.leftJoin = (joined) => (joined === 'services as svc' ? historyRead() : b);
+          return b;
+        })),
+      };
+      const failed = await mintSoloPest(deps({ db: failingDb }));
+      expect(historyRead).toHaveBeenCalled();
+      expect(failed.setupFeeQuote).toEqual({ amount: 99, kind: 'waveguard_membership' });
+      expect(failed.operatorPriceAdjustment).toBeUndefined();
+    });
   });
 
   test('a failed audit note fails the mint (aborted pg transaction must never resolve with a URL)', async () => {

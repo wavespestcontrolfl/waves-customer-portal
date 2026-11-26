@@ -617,7 +617,7 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(generate).toContain('bedbugPrepStatus: form.bedbugPrepStatus');
     expect(generate).toContain('bedbugOccupancyType: form.bedbugOccupancyType');
     expect(generate).toContain('fetch("/api/admin/estimator/calculate-estimate"');
-    expect(generate).toContain('body: JSON.stringify({ profile, selectedServices, options })');
+    expect(generate).toContain('body: JSON.stringify({ profile, selectedServices, options, lead })');
 
     // A positive server-request check alone would still pass if a rejected
     // request fell back to the deprecated client calculator. Keep the live
@@ -763,6 +763,6 @@ describe('deprecated client estimator pricing drift guards', () => {
     const generate = adminToolViewSource.slice(generateAt, saveAt);
     expect(generate).toContain('existingCustomerId: existingCustomerMatch?.id || form.customerId || null');
     expect(generate).toContain('fetch("/api/admin/estimator/calculate-estimate"');
-    expect(generate).toContain('body: JSON.stringify({ profile, selectedServices, options })');
+    expect(generate).toContain('body: JSON.stringify({ profile, selectedServices, options, lead })');
   });
 });

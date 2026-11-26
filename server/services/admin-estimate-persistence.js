@@ -109,6 +109,14 @@ async function leadCustomerIdForEstimate(database, leadId, body) {
   return customer ? String(customer.id) : null;
 }
 
+// The estimate tool's preview resolves a linked lead's customer exactly as the save will (above), from the lead
+// and the typed contact the builder holds, so the returning-customer rule decides for the same customer in both.
+async function leadCustomerIdForPreview(database, lead) {
+  const leadId = normalizeLinkedLeadId(lead && lead.leadId);
+  if (typeof leadId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(leadId)) return null;
+  return leadCustomerIdForEstimate(database, leadId, { customerPhone: lead.customerPhone, customerEmail: lead.customerEmail });
+}
+
 // The lead-form webhook's draft is superseded once staff save the lead's real
 // estimate. lead-webhook never FK-links that draft to its lead, so no save
 // reuses or retires it: it sat in the drafts list beside the sent quote
@@ -1427,12 +1435,29 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     // mapping — recurring rows/totals are untouched, and the waiver stays
     // honored downstream (estimateOperatorSetupFeeWaived) exactly as at
     // first send.
-    if (opAdj && typeof opAdj === 'object' && opAdj.waiveSetupFee === true && Array.isArray(v1?.lineItems)) {
+    // The returning-customer rule's stored answer rides the same field (returning-setup-fee-waiver.js,
+    // GATE_RETURNING_SETUP_FEE_GAP). It holds for one plan family and is replayed below, so this estimate-wide
+    // zeroing is a staff or move waiver's only.
+    const Returning = require('./returning-setup-fee-waiver');
+    const storedReturning = Returning.returningSetupFeeWaiverOf(estimateData);
+    const operatorSetupFeeWaived = !storedReturning && !!(opAdj && typeof opAdj === 'object' && opAdj.waiveSetupFee === true);
+    if (operatorSetupFeeWaived && Array.isArray(v1?.lineItems)) {
       for (const li of v1.lineItems) {
         if (li && Number(li.initialFee) > 0) li.initialFee = 0;
       }
     }
-    const serverResult = mapResult(v1);
+    // A write that re-prices passes the customer's visit history (deps.returningVisitHistory; it dropped the
+    // stored answer first) and the rule decides here, on the server-priced plan. A read-only replay (the public
+    // page, a reconcile, an offered option) carries the stored answer instead: it marks the engine result again
+    // only for the plan family it names, so the mapped totals match the save's, mosquito included, and another
+    // mix never borrows it. A staff or move waiver already covers the fee, and a verified member's fee is the
+    // existing-member waiver's (membershipSnapshot), so the rule decides nothing beside either: the history is
+    // null for an active member (loadReturningVisitHistory verifies it for the save and the preview alike), and
+    // a caller that verified the member itself (deps.recurringCustomer) is held to the same answer here.
+    const ruleDecides = !operatorSetupFeeWaived && deps.recurringCustomer !== true;
+    const { mapped: serverResult, waiver: returningSetupFeeWaiver } = Returning.mapWithReturningWaiver(v1, mapResult, {
+      history: ruleDecides ? deps.returningVisitHistory : null, stored: storedReturning,
+    });
     const serverTotals = deriveTotalsFromEstimateData({ result: serverResult });
     // The curve the recompute actually priced pest with — persisted into the
     // replayable engineInputs by the caller so a later stored-inputs replay
@@ -1446,7 +1471,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     // raw shape the card's own quote derivation consumed, so the check can
     // never diverge on mapping differences. Additive; existing callers read
     // only serverResult/serverTotals.
-    return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion, rawEngineResult: v1 };
+    return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion, rawEngineResult: v1, returningSetupFeeWaiver };
   } catch (error) {
     // failClosed policy rejections (gated/invalid add-on inside the replayed
     // inputs) propagate — wrapping them as ENGINE_ERROR would hand them to
@@ -1460,7 +1485,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1477,7 +1502,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory });
   } catch (error) {
     // Fail-open is for BROKEN engines only. A failClosed policy rejection
     // (gated/invalid add-on in the replay) must block the save outright —
@@ -1527,7 +1552,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     if (drift.hasDrift) {
       logger.warn(`[pricing-authority] server recompute corrected client preview annualDelta=${drift.annualDelta} pctAnnual=${drift.pctAnnual}`);
     }
-    return { totals: result.serverTotals, audit, fallbackReason: null };
+    return { totals: result.serverTotals, audit, fallbackReason: null, returningSetupFeeWaiver: result.returningSetupFeeWaiver };
   }
 
   audit.pricing_authority = 'CLIENT_FALLBACK';
@@ -1542,7 +1567,16 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   // fallbackReason rides OUTSIDE audit (audit spreads into the row): the
   // route rings the admin bell for ENGINE_ERROR only after the save's
   // transaction committed, never from a dryRun preflight (pre-push codex P1).
-  return { totals: clientPreview, audit, fallbackReason: result.reason || 'UNKNOWN' };
+  // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
+  // totals already say (returningWaiverForUnpricedSave). A result priced without the fee by the rule (a fresh
+  // preview, or a reopened estimate's stored result), for a customer the rule no longer waives, would store
+  // totals $99 under the bill: refused, for a fresh preview.
+  const unpriced = require('./returning-setup-fee-waiver')
+    .returningWaiverForUnpricedSave(estimateData, returningVisitHistory, { answerHeld: returningAnswerHeld });
+  if (unpriced.stale) {
+    throw errorWithStatus('This preview left out a setup fee the customer now owes. Generate the estimate again, then save.', 409);
+  }
+  return { totals: clientPreview, audit, fallbackReason: result.reason || 'UNKNOWN', returningSetupFeeWaiver: unpriced.waiver };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -2075,6 +2109,12 @@ async function resolveEstimateWritePayload({
     delete trustedEstimateData.deliveryState;
     delete trustedEstimateData.websiteLinkText;
   }
+  // Returning customer $99 rule (GATE_RETURNING_SETUP_FEE_GAP): its answer is server-owned and decided again by
+  // every save (the pricing below). A posted or carried copy is dropped here, before anything reads it. That the
+  // quote held one is kept: a save the server cannot price needs it to judge the posted totals.
+  const Returning = require('./returning-setup-fee-waiver');
+  const returningAnswerHeld = Returning.holdsReturningSetupWaiver(storedEstimateData, trustedEstimateData);
+  Returning.dropReturningSetupWaiver(trustedEstimateData);
   // Moving PR B1 (GATE_MOVING_ESTIMATE): estimate_data.move and its setup-fee
   // waiver are server-owned. A create naming a move (body.moveId) takes them
   // from the verified move; a revise carries the stored row's; a browser copy
@@ -2159,6 +2199,7 @@ async function resolveEstimateWritePayload({
   let setupWaiverPriorQualifyingServices = [];
   let groupedEstimate = !!(body.groupWithEstimateId || body.estimateGroupId);
   let perPropertyStreetScope = null;
+  let returningVisitHistory = null;
   if (body.customerId) {
     try {
       const evidence = await resolveCustomerQualifyingEvidence(database, {
@@ -2181,6 +2222,15 @@ async function resolveEstimateWritePayload({
     } catch (err) {
       logger.warn(`[admin-estimate] active-plan lookup skipped: ${err.message}`);
     }
+    // The returning-customer rule's evidence: the customer's last performed plan visits (null while the gate is
+    // off). A failed read refuses the save, like the existing-services read above: pricing without it would
+    // charge a $99 the estimate tool's preview showed as waived.
+    try {
+      returningVisitHistory = await Returning.loadReturningVisitHistory(database, { customerId: body.customerId, now: now() });
+    } catch (err) {
+      logger.warn(`[admin-estimate] visit history lookup failed — refusing save: ${err.message}`);
+      throw errorWithStatus('Could not confirm this customer\'s visit history. Retry the save.', 503);
+    }
   }
   const pricing = await resolveServerAuthoritativePricing({
     estimateData: trustedEstimateData,
@@ -2193,8 +2243,12 @@ async function resolveEstimateWritePayload({
     recurringCustomer,
     // The add-ons' yearly-limit history, read here from the verified customer (never from the posted data).
     areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId }),
+    returningVisitHistory,
+    returningAnswerHeld,
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
+  // The rule's answer, stored as the operator waiver every setup-fee reader honors, with its evidence.
+  Returning.storeReturningSetupWaiver(trustedEstimateData, pricing.returningSetupFeeWaiver);
   const totals = pricing.totals;
   applyResolvedTotalsToEstimateData(trustedEstimateData, totals, quoteRequired);
   // The combined-tier reprice only landed in the persisted/charged totals when
@@ -2259,6 +2313,8 @@ async function resolveEstimateWritePayload({
   // staff-only preview: never stored on the estimate.
   if (trustedEstimateData.result && typeof trustedEstimateData.result === 'object') {
     delete trustedEstimateData.result.currentServiceTierOffer;
+    // So is the preview's returning-customer note (the last visit date); the stored answer is the adjustment above.
+    delete trustedEstimateData.result.returningSetupFeeWaiver;
   }
   // Freeze the WaveGuard membership card onto the estimate, computed from the
   // SAME repriced data + prior services, so the customer-facing card reflects
@@ -4050,6 +4106,7 @@ module.exports = {
   normalizeClientPestFloorMetadata,
   reviseAdminEstimate,
   serverRecomputeFromEstimateData,
+  leadCustomerIdForPreview,
   resolveServerAuthoritativePricing,
   compareClientToServer,
   sanitizeClientIdentityFields,
