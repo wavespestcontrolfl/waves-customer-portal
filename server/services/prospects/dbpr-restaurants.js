@@ -384,6 +384,11 @@ function firstVisitCitation(row) {
   return [row.notes.label, ...initial].join(' ');
 }
 
+// Two citations are the same when their letters and digits match, case aside: separators, punctuation and
+// spacing ("Basic - From …" against "Basic - - From …") never tell two citations apart. Counting two near copies
+// as one can only give no answer, never a wrong one.
+const citationKey = (text) => compact(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+
 // At most FINDING_TEXT_MAX characters, cut between characters (code points): half an emoji is not valid text, and
 // PostgreSQL refuses it in a JSON column.
 const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
@@ -506,7 +511,7 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   // whatever their later notes) count once and are one finding.
   const keys = new Set();
   const distinct = ofVisit.filter((row) => {
-    const key = `${row.code} ${compact(firstVisitCitation(row))}`;
+    const key = `${row.code} ${citationKey(firstVisitCitation(row))}`;
     if (keys.has(key)) return false;
     keys.add(key);
     return true;

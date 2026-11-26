@@ -381,6 +381,9 @@ describe('parseInspectionReport', () => {
     const doorAgain = row('35B-01-4', 'Basic - - From initial inspection : Basic - Gap under the back door. '
       + '- From follow-up inspection 2026-09-03: Corrected on site.');
     expect(read(`${door}${doorAgain}`, 2)).toBeNull();
+    // Separators and case never tell two citations apart: an extra dash in the label is the same citation.
+    const doorDash = row('35B-01-4', 'Basic - - - From initial inspection : basic - gap under the back door!');
+    expect(read(`${door}${doorDash}`, 2)).toBeNull();
     const vent = row('35B-01-4', 'Basic - - From initial inspection : Basic - Gap around the vent pipe. '
       + '- From follow-up inspection 2026-09-03: **Time Extended**');
     expect(read(`${door}${vent}`, 2)).toEqual({ pestEvidence: false, findings: [] });
