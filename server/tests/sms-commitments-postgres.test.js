@@ -2986,6 +2986,32 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(dispatchWithFallback).not.toHaveBeenCalled();
     });
 
+    test('a call in the hold sent to voicemail counts only while a person was on it', async () => {
+      const after = await callbackAsk();
+      const at = (ms) => new Date(message.created_at.getTime() + ms).toISOString();
+      // The customer texted while leaving the voicemail: a person had left the call.
+      await callIn(new Date(message.created_at.getTime() - 60000),
+        { metadata: { ended_at: at(60000), conference_path: { hold: { voicemail_at: at(-10000) } } } });
+      const now = new Date(after.getTime() + 300000);
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, await mockPg('call_commitments').first(), message, now);
+      expect(evidence.records.filter((r) => r.type === 'call')).toHaveLength(0);
+      // Held to voicemail after the text: the person spoke with them after it, until then.
+      const spoke = await callIn(new Date(message.created_at.getTime() - 30000),
+        { metadata: { ended_at: at(90000), conference_path: { hold: { voicemail_at: at(20000) } } } });
+      expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ fulfilled: 1 });
+      const { fulfillment } = await mockPg('call_commitments').first();
+      expect(fulfillment).toMatchObject({ record_type: 'call', record_id: spoke.id });
+      expect(new Date(fulfillment.matched_at).getTime()).toBe(message.created_at.getTime() + 20000);
+    });
+
+    test('a short staff call back that reached the customer closes the ask', async () => {
+      const after = await callbackAsk();
+      const short = await outboundCall(after, { source: 'admin-click', duration_seconds: 40 });
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 120000) })).toMatchObject({ fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ basis: 'person_reply', record_id: short.id });
+      expect(dispatchWithFallback).not.toHaveBeenCalled();
+    });
+
     test('a call back that a cached "open" verdict judged is closed now, with no model call', async () => {
       const after = await callbackAsk();
       await outboundCall(after, { source: 'admin-callback', metadata: { customer_leg: { status: 'completed', duration_seconds: 163 } } });

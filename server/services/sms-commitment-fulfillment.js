@@ -377,21 +377,27 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
       // exactly the fields it read before, so its evidence hash is unchanged.
       const callIn = textCallbackAsk(commitment);
       const { callEndedAtSql } = require('./sms-pending-conversations');
+      // When a person was last on the call: its end, or the moment the hold
+      // sent a call in to voicemail (admin-alert-contact-witnesses.js reads a
+      // call in the same way).
+      const { holdVoicemailAtSql } = require('./admin-alert-contact-witnesses');
+      const spokeUntil = (table) => `COALESCE(${holdVoicemailAtSql(table)}, ${callEndedAtSql(table)})`;
       const rows = await conn('call_log').where({ customer_id: customerId })
-        // A call in counts when it ENDED after the text, so a text sent while
-        // the phone rang is answered by it: a row is inserted when the call
-        // starts, and no call runs a day. A row inserted after the call was
-        // over, with no end stamp from Twilio, has no end and counts for
-        // nothing (callEndedAtSql, the Messages reader's definition).
+        // A call in counts when a person was still on it after the text
+        // (spokeUntil), so a text sent while the phone rang is answered by
+        // it: a row is inserted when the call starts, and no call runs a day.
+        // A row inserted after the call was over, with no end stamp from
+        // Twilio, has no end and counts for nothing (callEndedAtSql, the
+        // Messages reader's definition).
         // A staff call back already ringing when the text came is read the
         // same way.
         .where((q) => (callIn
           ? q.where((o) => o.where('direction', 'outbound').where((t) => t.where('created_at', '>', after)
             .orWhere((e) => e.where('created_at', '>', new Date(after.getTime() - DAY_MS))
-              .whereRaw(`${callEndedAtSql('call_log')} > ?`, [after]).whereRaw(`${callEndedAtSql('call_log')} <= ?`, [now]))))
+              .whereRaw(`${spokeUntil('call_log')} > ?`, [after]).whereRaw(`${spokeUntil('call_log')} <= ?`, [now]))))
             .orWhere((w) => w.where({ direction: 'inbound', status: 'completed', answered_by: 'human' })
               .where('created_at', '>', new Date(after.getTime() - DAY_MS))
-              .whereRaw(`${callEndedAtSql('call_log')} > ?`, [after]).whereRaw(`${callEndedAtSql('call_log')} <= ?`, [now]))
+              .whereRaw(`${spokeUntil('call_log')} > ?`, [after]).whereRaw(`${spokeUntil('call_log')} <= ?`, [now]))
           : q.where('direction', 'outbound').where('created_at', '>', after)))
         // A call back reaches the customer on ANY of their phones (primary,
         // alternate, service contact), and a call in may come from any of
@@ -400,7 +406,7 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
         .where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
         // Who placed the call and whether it reached the customer (personCallBack).
         .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', ...callContactSelects(conn),
-          ...(callIn ? ['direction', 'answered_by', conn.raw(`${callEndedAtSql('call_log')} as ended_at`)] : []))
+          ...(callIn ? ['direction', 'answered_by', conn.raw(`${spokeUntil('call_log')} as ended_at`)] : []))
         // Last in the chain, after every call_log reference: the sandbox
         // census (voice-relay-sandbox-dry-run.test.js) reads each one forward.
         .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b));
@@ -959,8 +965,10 @@ function customerWitness(record, commitment, records = []) {
       // automated notice; a staff promise, any text written after it.
       && (commitment.kind !== 'other' || (writtenAfterAsk(record, commitment) && (staffPromise(commitment) || operatorReply(record)))),
     // A call in that a person answered answers a text call-back ask only.
+    // For one, a call back that reached the customer (personCallBack) counts
+    // whatever the staff leg's length: the helper has its own leg checks.
     call: () => (record.direction === 'inbound' ? textCallbackAsk(commitment) && personAnsweredCallIn(record)
-      : record.status === 'completed' && Number(record.duration_seconds) >= 60
+      : record.status === 'completed' && (Number(record.duration_seconds) >= 60 || (textCallbackAsk(commitment) && personCallBack(record)))
       // A general ask takes only a call back that reached the customer.
       && (commitment.kind !== 'other' || personCallBack(record))),
     // The candidate query already restricts this to a person-sent Gmail row
