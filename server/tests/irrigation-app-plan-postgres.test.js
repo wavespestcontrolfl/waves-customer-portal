@@ -179,6 +179,7 @@ const SKIP = !process.env.DATABASE_URL;
 
   async function addLawnCustomer() {
     const id = randomUUID();
+    mockOwnIds.push(id);
     await mockTransaction('customers').insert({ id, first_name: 'Second', phone: '9415550101',
       email: 'second@example.invalid', active: true, pipeline_stage: 'active_customer',
       address_line1: '200 Fixture Lane', city: 'Sarasota', zip: '34236', latitude: 27.3, longitude: -82.5 });
