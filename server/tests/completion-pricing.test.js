@@ -1,4 +1,4 @@
-const { acceptedPricing, acceptedVisitBreakdown, matchServiceLine, propertyMatches } = require('../services/completion-pricing');
+const { acceptedPricing, acceptedVisitBreakdown, matchServiceLine, propertyMatches, estimateDiscountContext, invoiceDiscountContext } = require('../services/completion-pricing');
 
 describe('completion estimate evidence', () => {
   const line = { source: 'recurring', cadence: 'quarterly', serviceId: 'pest',
@@ -147,6 +147,100 @@ describe('completion estimate evidence', () => {
     // One-time work never takes the recurring tier.
     expect(acceptedPricing({ source: 'one_time', price: 96, sourceLine: { priceBeforeDiscount: 120, priceAfterDiscount: 96 } }, platinum).discounts)
       .toEqual([{ name: 'Accepted estimate discount', dollars: 24, named: false }]);
+  });
+
+  test('a row that saved only its net takes the list price and tier of the engine line beside it, when every figure agrees', () => {
+    // The mapped lawn shape: per visit, per year and per month are all the accepted net, with only a rate on the row.
+    // The engine's own line of the service keeps the list annual and the tier record.
+    const waveguard = (tier, amount) => ({ appliedDiscounts: [{ tier, type: 'waveguard', amount }] });
+    const engineLawn = (extra = {}) => ({ service: 'lawn_care', name: 'Lawn Care', annual: 1068, perApp: 118.67, frequency: 9,
+      annualBeforeDiscount: 1068, annualAfterDiscount: 961.2, discount: waveguard('silver', 0.1), ...extra });
+    const lawnRow = (sourceLine = {}, perApplicationPrice = 106.8) => ({ ...line, perApplicationPrice, parentRecurringDiscounted: true,
+      serviceKey: 'lawn_care_6week', sourceLine: { service: 'lawn_care', perTreatment: perApplicationPrice, annual: 961.2,
+        annualAfterDiscount: 961.2, visitsPerYear: 9, discount: { effectiveDiscount: 0.1, appliedDiscountPercent: 0.1 }, ...sourceLine } });
+    const silver = (engineLineItems = [engineLawn()], estimateTier = { tier: 'silver', amount: 0.1 }) => ({ tierDiscounted: true, estimateTier, engineLineItems });
+    const quote = (row, context) => {
+      const { base, amount, discounts } = acceptedPricing(row, context);
+      return [base, amount, discounts.map(({ name, dollars, percent, named }) => [name, dollars, percent, named])];
+    };
+    // $1,068 a year over 9 visits is $118.67 a visit; 10% off is $106.80, the visit's price. The total does not change.
+    expect(quote(lawnRow(), silver())).toEqual([118.67, 106.8, [['WaveGuard Silver', 11.87, 10, true]]]);
+    const oneLine = [106.8, 106.8, []];
+    // Any figure that disagrees keeps the row's own net as its base: one line.
+    expect(quote(lawnRow({ annualAfterDiscount: 961.11 }), silver())).toEqual([106.8, 106.8, []]);
+    expect(quote(lawnRow(), silver([engineLawn({ frequency: 8 })]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn({ annualBeforeDiscount: undefined })]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn({ annualAfterDiscount: 961.11 })]))).toEqual(oneLine);
+    // The engine applied another tier or rate than the estimate's, or another discount beside the tier.
+    expect(quote(lawnRow(), silver([engineLawn({ discount: waveguard('gold', 0.1) })]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn()], { tier: 'silver', amount: 0.15 }))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn({ discount: { appliedDiscounts: [...waveguard('silver', 0.1).appliedDiscounts,
+      { type: 'military', amount: 0.05 }] } })]))).toEqual(oneLine);
+    // The engine's WaveGuard records name two tiers at one rate: no record.
+    expect(quote(lawnRow(), silver([engineLawn({ discount: { appliedDiscounts: [...waveguard('silver', 0.1).appliedDiscounts,
+      ...waveguard('gold', 0.1).appliedDiscounts] } })]))).toEqual(oneLine);
+    // The per-visit share comes from whole cents: $600.30 over 4 visits is $150.08 (a float divide gives $150.07), and
+    // 10% off is $135.07.
+    const fourVisits = lawnRow({ annual: 540.27, annualAfterDiscount: 540.27, visitsPerYear: 4 }, 135.07);
+    const engineFour = (perApp) => engineLawn({ frequency: 4, annual: 600.3, annualBeforeDiscount: 600.3, annualAfterDiscount: 540.27, perApp });
+    expect(quote(fourVisits, silver([engineFour(undefined)]))).toEqual([150.08, 135.07, [['WaveGuard Silver', 15.01, 10, true]]]);
+    // The per-visit list price the engine saved wins when it is the share under either rounding ($150.07, a float
+    // divide; the $135.07 net sits a cent off 10% of it, as the engine discounts the annual); a saved price that is neither
+    // conflicts with the annual: one line.
+    expect(quote(fourVisits, silver([engineFour(150.07)]))).toEqual([150.07, 135.07, [['WaveGuard Silver', 15, 10, true]]]);
+    expect(quote(fourVisits, silver([engineFour(150.2)]))).toEqual([135.07, 135.07, []]);
+    expect(quote(fourVisits, silver([{ ...engineFour(undefined), perVisit: 150.2 }]))).toEqual([135.07, 135.07, []]);
+    expect(quote(fourVisits, silver([{ ...engineFour(150.07), perVisit: 150.07 }]))).toEqual([150.07, 135.07, [['WaveGuard Silver', 15, 10, true]]]);
+    // Staff moved the engine line's own price: part of the saving is theirs.
+    expect(quote(lawnRow(), silver([engineLawn({ manualFinalAnnual: 900 })]))).toEqual(oneLine);
+    // The row saved another annual than its net: not the net-only shape.
+    expect(quote(lawnRow({ annual: 1068 }), silver())).toEqual(oneLine);
+    // A list-price row that saved $150.07 for that same annual (a float divide) still proves the tier at $135.07.
+    const floatSaved = { ...line, perApplicationPrice: 135.07, parentRecurringDiscounted: true, sourceLine: { service: 'pest_control',
+      perTreatment: 150.07, annual: 600.3, annualAfterDiscount: 540.27, visitsPerYear: 4 } };
+    expect(quote(floatSaved, { tierDiscounted: true, estimateTier: { tier: 'silver', amount: 0.1 } }))
+      .toEqual([150.07, 135.07, [['WaveGuard Silver', 15, 10, true]]]);
+    // Two engine lines of the service, none, or no tier the estimate itself names (a staff discount on recurring work,
+    // a Bronze estimate).
+    expect(quote(lawnRow(), silver([engineLawn(), engineLawn({ annual: 1200, annualBeforeDiscount: 1200 })]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([]))).toEqual(oneLine);
+    expect(quote(lawnRow(), silver([engineLawn()], null))).toEqual(oneLine);
+    // Both annuals agree with each other but not with the tier rate on the list annual ($1,068 at 10% is $961.20).
+    expect(quote(lawnRow({ annual: 961.23, annualAfterDiscount: 961.23 }), silver([engineLawn({ annualAfterDiscount: 961.23 })])))
+      .toEqual(oneLine);
+    // A row that records another discount of its own is not the tier's saving.
+    expect(quote(lawnRow({ discount: { effectiveDiscount: 0.1, appliedDiscounts: [{ type: 'military', amount: 0.1 }] } }), silver()))
+      .toEqual(oneLine);
+    // A malformed discount record on the row keeps one line and does not throw.
+    expect(quote(lawnRow({ discount: { effectiveDiscount: 0.1, appliedDiscounts: 'silver' } }), silver())).toEqual(oneLine);
+    // Only the invoice's context carries the engine lines: the Complete Service card prices from the estimate's context
+    // alone, so a recovered list price never becomes a price a proposal could cut to.
+    const saved = { id: 'e1', waveguard_tier: 'Silver',
+      estimate_data: { engineResult: { lineItems: [engineLawn()] }, result: { recurring: { tier: 'Silver', discount: 0.1 } } } };
+    expect(estimateDiscountContext(saved)).not.toHaveProperty('engineLineItems');
+    expect(invoiceDiscountContext(saved)).toEqual({ ...estimateDiscountContext(saved), engineLineItems: [engineLawn()] });
+    expect(quote(lawnRow(), estimateDiscountContext(saved))).toEqual(oneLine);
+    expect(quote(lawnRow(), invoiceDiscountContext(saved))).toEqual([118.67, 106.8, [['WaveGuard Silver', 11.87, 10, true]]]);
+    // A row with its own list or net figures is priced by them, never by the engine line.
+    expect(quote(lawnRow({ priceAfterDiscount: 106.8 }), silver())).toEqual(oneLine);
+    // The engine list price is taken only when the list-price rules name the whole saving as the tier: a row that
+    // recorded another rate (0%), a row flagged out of percentage discounts, or a service credit keeps its own net as
+    // its base, with no saving, so no surface sees a list price the row never proved.
+    expect(quote(lawnRow({ discount: { effectiveDiscount: 0, appliedDiscountPercent: 0 } }), silver())).toEqual(oneLine);
+    expect(quote(lawnRow({ excludeFromPctDiscount: true }), silver())).toEqual(oneLine);
+    expect(quote(lawnRow({ serviceSpecificDiscounts: [{ amount: 5 }] }), silver())).toEqual(oneLine);
+    // A row with a WaveGuard record of its own is not the net-only shape: its record is never paired with the engine's
+    // list price (a Gold record would print Gold for a Silver saving).
+    expect(quote(lawnRow({ discount: { effectiveDiscount: 0.1, appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.1 }] } }), silver()))
+      .toEqual(oneLine);
+    // The tree-and-shrub shape that rounds another way: $565 a year over 6 visits at 20% is $75.34 a visit, but the row
+    // saved $451.92 a year and bills $75.32. The figures disagree by 2 cents, so the row keeps one line.
+    const shrub = engineLawn({ service: 'tree_shrub', name: 'Tree & Shrub', annual: 565, perApp: 94.17, frequency: 6,
+      annualBeforeDiscount: 565, annualAfterDiscount: 452, discount: waveguard('platinum', 0.2) });
+    const shrubRow = lawnRow({ service: 'tree_shrub', annual: 451.92, annualAfterDiscount: 451.92, visitsPerYear: 6,
+      discount: { effectiveDiscount: 0.2, appliedDiscountPercent: 0.2 } }, 75.32);
+    expect(quote({ ...shrubRow, serviceKey: 'tree_shrub_program' }, silver([shrub], { tier: 'platinum', amount: 0.2 })))
+      .toEqual([75.32, 75.32, []]);
   });
 
   describe('acceptedVisitBreakdown', () => {
