@@ -1081,6 +1081,8 @@ function tierBenefitFigures(tierValue) {
     recurringDiscountPct: percentText(WAVEGUARD.tiers[key]?.discount),
     oneTimeDiscountPct: percentText(WAVEGUARD.recurringCustomerOneTimePerk),
     palmCredit: earnsPalmCredit ? (Number.isInteger(palmCredit) ? `$${palmCredit}` : money(palmCredit)) : '',
+    // The per-visit palm minimum the credit never goes below (owner 2026-11-26), from the same config the pricer reads.
+    palmMinimum: Number.isInteger(Number(PALM.minPerVisit)) ? `$${Number(PALM.minPerVisit)}` : money(Number(PALM.minPerVisit)),
   };
 }
 
@@ -1150,7 +1152,7 @@ async function sendMembershipTierUpgraded({
       // A whole line, blank below the tier that earns the credit: the list
       // block drops an item that resolves blank.
       palm_credit_line: figures.palmCredit
-        ? `A ${figures.palmCredit} per palm credit each year on palm injections`
+        ? `A ${figures.palmCredit} per palm credit each year on palm injections (the ${figures.palmMinimum} minimum per application still applies)`
         : '',
       // A whole sentence, blank when the stored rate did not move: the
       // paragraph block drops when it resolves blank.

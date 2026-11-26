@@ -1621,7 +1621,7 @@ function facebookPreviewSettleMs() {
 }
 
 // Never rejects.
-async function readFacebookLinkPreview(link, token) {
+async function readFacebookLinkPreview(link, token, { settleMs } = {}) {
   try {
     const res = await fetch('https://graph.facebook.com/v25.0/', {
       method: 'POST',
@@ -1636,7 +1636,7 @@ async function readFacebookLinkPreview(link, token) {
     const data = await res.json();
     // updated_time means Facebook read the page just now; its picture fetch
     // starts after that read.
-    if (data && data.updated_time) await sleep(facebookPreviewSettleMs());
+    if (data && data.updated_time) await sleep(settleMs === undefined ? facebookPreviewSettleMs() : settleMs);
   } catch (err) {
     logger.warn(`[social] Facebook link preview refresh failed: ${err.name}`);
   }
@@ -1675,25 +1675,160 @@ async function postToFacebook(message, link, imageUrl) {
     return { platform: 'facebook', postId: data.post_id || data.id, success: true, imageUrl };
   }
 
-  const body = { message, access_token: token };
-  if (link) {
-    body.link = link;
-    await refreshFacebookLinkPreview(link, token);
+  if (!link) {
+    const id = await createFacebookFeedPost({ message, access_token: token });
+    logger.info(`[social] Facebook post created: ${id}`);
+    return { platform: 'facebook', postId: id, success: true };
   }
 
+  await refreshFacebookLinkPreview(link, token);
+  const body = { message, link, access_token: token, published: false };
+  let id = await createFacebookFeedPost(body);
+  let size = await readFacebookLinkPictureSize(id, token);
+  if (size && isSmallFacebookPicture(size)) {
+    // Facebook gave the hidden post the small side thumbnail. Nobody has seen
+    // it: delete it, ask Facebook to read the page again, wait, try once more.
+    // The first post is never published after this point, so even a delete
+    // whose answer is lost leaves at most one hidden copy nobody sees.
+    logger.warn(`[social] Facebook link picture came back ${size.width}x${size.height}; trying once more`);
+    await deleteFacebookPost(id, token);
+    await readFacebookLinkPreview(link, token, { settleMs: FACEBOOK_PICTURE_RETRY_SETTLE_MS });
+    id = await createFacebookFeedPost(body);
+    size = await readFacebookLinkPictureSize(id, token);
+    if (size && isSmallFacebookPicture(size)) {
+      logger.warn(`[social] Facebook link picture still ${size.width}x${size.height}; publishing anyway`);
+    }
+  }
+  if (!(await publishFacebookPost(id, token))) {
+    // Facebook never confirmed either way, so the post may be public. It is
+    // recorded as sent: a failed record lets the next blog run (checkAndPublish,
+    // shareUrlOnce skip only non-failed rows) make a second public post. If it
+    // stayed hidden, the share is missing on Facebook, never doubled.
+    logger.warn(`[social] Facebook post ${id}: publish not confirmed; recorded as sent so no second post is made`);
+    return { platform: 'facebook', postId: id, success: true, publishUnconfirmed: true };
+  }
+  logger.info(`[social] Facebook post created: ${id}${size ? ` (picture ${size.width}x${size.height})` : ''}`);
+  return { platform: 'facebook', postId: id, success: true };
+}
+
+// A link post Facebook draws with the small side thumbnail reports a picture of
+// about 200x200 (8 of 88 blog shares 2026-08..11-20, and 2 of 6 after the read
+// above went live). A full card reports 630 px or more.
+const FACEBOOK_SMALL_PICTURE_PX = 300;
+const FACEBOOK_PICTURE_RETRY_SETTLE_MS = 4000;
+
+function isSmallFacebookPicture({ width, height }) {
+  return Math.max(width, height) <= FACEBOOK_SMALL_PICTURE_PX;
+}
+
+async function createFacebookFeedPost(body) {
   const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/feed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`Facebook API ${res.status}: ${err}`);
   }
   const data = await res.json();
-  logger.info(`[social] Facebook post created: ${data.id}`);
-  return { platform: 'facebook', postId: data.id, success: true };
+  return data.id;
+}
+
+// The picture Facebook attached to a post, or null when it cannot be read.
+// Never rejects: a failed read publishes the post as it is.
+async function readFacebookLinkPictureSize(postId, token) {
+  try {
+    const url = `https://graph.facebook.com/v25.0/${postId}?fields=attachments{media}&access_token=${encodeURIComponent(token)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const image = data?.attachments?.data?.[0]?.media?.image;
+    const width = Number(image?.width);
+    const height = Number(image?.height);
+    return width > 0 && height > 0 ? { width, height } : null;
+  } catch (err) {
+    logger.warn(`[social] Facebook link picture read failed: ${err.name}`); // never the message: the URL carries the token
+    return null;
+  }
+}
+
+// True only when Facebook confirms the delete. The small-picture path ignores
+// the answer: that post is never published, so a lost delete leaves a hidden copy.
+async function deleteFacebookPost(postId, token) {
+  try {
+    const res = await fetch(`https://graph.facebook.com/v25.0/${postId}?access_token=${encodeURIComponent(token)}`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return data?.success === true;
+  } catch (err) {
+    logger.warn(`[social] Facebook hidden post delete failed: ${err.name}`);
+    return false;
+  }
+}
+
+// 'public', 'hidden', or 'unknown' (the read failed: the post may be public).
+async function readFacebookPostState(postId, token) {
+  try {
+    const url = `https://graph.facebook.com/v25.0/${postId}?fields=is_published&access_token=${encodeURIComponent(token)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS) });
+    if (!res.ok) return 'unknown';
+    const data = await res.json();
+    if (data?.is_published === true) return 'public';
+    if (data?.is_published === false) return 'hidden';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function requestFacebookPublish(postId, token) {
+  try {
+    const res = await fetch(`https://graph.facebook.com/v25.0/${postId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_published: true, access_token: token }),
+    });
+    if (res.ok) return null;
+    // Status + Graph error code only: the body can echo request data.
+    let code = '';
+    try { code = String((await res.json())?.error?.code ?? '').replace(/\D/g, '').slice(0, 6); } catch { /* no JSON */ }
+    const err = new Error(`Facebook publish API ${res.status}${code ? ` (code ${code})` : ''}`);
+    err.refused = res.status >= 400 && res.status < 500; // Facebook answered no (bad token, bad post)
+    return err;
+  } catch (err) {
+    return new Error(`Facebook publish failed: ${err.name}`); // never the message: it can quote the token
+  }
+}
+
+// Make the hidden post public. Publishing the same post twice is harmless, so
+// a failed publish is asked once more on the SAME post before anything else.
+// Then:
+//   public                    -> true: done (an answer was lost).
+//   Facebook said no (4xx) BOTH times -> never public: delete it (best
+//                                effort) and throw.
+//   reads hidden              -> delete it. Confirmed: throw, so a retry of
+//                                the whole post is safe. Not confirmed: false.
+//   anything else             -> false: the post may be public.
+// false = the caller records the post as sent with its id and never makes a
+// new one, so a post that did go public is never doubled; the cost is a share
+// that may stay hidden.
+async function publishFacebookPost(postId, token) {
+  const first = await requestFacebookPublish(postId, token);
+  if (!first) return true;
+  const second = await requestFacebookPublish(postId, token);
+  if (!second) return true;
+  const state = await readFacebookPostState(postId, token);
+  if (state === 'public') return true;
+  if (first.refused && second.refused) {
+    await deleteFacebookPost(postId, token);
+    throw second;
+  }
+  if (state === 'hidden' && await deleteFacebookPost(postId, token)) throw second;
+  return false;
 }
 
 function sleep(ms) {

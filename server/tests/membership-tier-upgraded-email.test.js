@@ -163,7 +163,7 @@ describe('sendMembershipTierUpgraded: benefit lines come from the pricing consta
   });
 
   test('the per-palm credit line shows from the tier that earns it, and not below it', async () => {
-    const line = `- A $${PALM.flatCreditPerPalm} per palm credit each year on palm injections`;
+    const line = `- A $${PALM.flatCreditPerPalm} per palm credit each year on palm injections (the $${PALM.minPerVisit} minimum per application still applies)`;
     expect(PALM.flatCreditMinTier).toBe('gold');
 
     const silver = await sendAndRender({
