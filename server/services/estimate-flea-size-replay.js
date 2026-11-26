@@ -111,22 +111,25 @@ const isDelivered = (row) => !!row && (!!row.sent_at || ['sent', 'viewed'].inclu
 const addressKeyOf = (value) => String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 
 // The home size a replayable input prices from, in one normal form (the V2 translator already folds squareFootage into homeSqFt):
-// the living area (or, with none, the footprint) and the story count. Compared across carriers only after both sides pass through
-// the SAME translation, so an editor that normalizes a field is not mistaken for an edit.
+// the living area, the explicit footprint (the legacy ground-floor pricer gives it precedence, so a footprint correction is a size
+// edit even when a living area is present) and the story count. Compared across carriers only after both sides pass through the SAME
+// translation, so an editor that normalizes a field is not mistaken for an edit.
 function sizeKeyOf(v1) {
   if (!isRecord(v1)) return null;
   const living = Number(v1.homeSqFt) > 0 ? Number(v1.homeSqFt) : (Number(v1.livingAreaSqFt) > 0 ? Number(v1.livingAreaSqFt) : (Number(v1.buildingSqFt) > 0 ? Number(v1.buildingSqFt) : 0));
-  const footprint = living ? 0 : (Number(v1.footprintSqFt) > 0 ? Number(v1.footprintSqFt) : (Number(v1.footprint) > 0 ? Number(v1.footprint) : 0));
+  const footprint = Number(v1.footprintSqFt) > 0 ? Number(v1.footprintSqFt) : (Number(v1.footprint) > 0 ? Number(v1.footprint) : 0);
   return { living: Math.round(living), footprint: Math.round(footprint), stories: Number(v1.stories) > 0 ? Number(v1.stories) : 1 };
 }
 
-// The size the STORED estimate was quoted on: its request translated like a recompute does, else its engine inputs.
+// The size the STORED estimate was quoted on: its request translated like a recompute does, else its engine inputs, else the
+// legacy inputs carrier (an inputs-only quote; the replay detector reads the same carrier).
 function storedSizeKey(data, translate) {
   const req = isRecord(data.engineRequest) ? data.engineRequest : null;
   if (req && isRecord(req.profile) && typeof translate === 'function') {
     try { return sizeKeyOf(translate(req.profile, Array.isArray(req.selectedServices) ? req.selectedServices : [], req.options || {})); } catch { /* fall through */ }
   }
-  return isRecord(data.engineInputs) ? sizeKeyOf(data.engineInputs) : null;
+  if (isRecord(data.engineInputs)) return sizeKeyOf(data.engineInputs);
+  return isRecord(data.inputs) ? sizeKeyOf(data.inputs) : null;
 }
 const sameSize = (a, b) => a.living === b.living && a.footprint === b.footprint && a.stories === b.stories;
 

@@ -192,3 +192,35 @@ describe('flea size basis replay', () => {
     expect(replayed.total).toBe(ordinary.total);
   });
 });
+
+// A delivered legacy flea quote keeps its ground-floor price through a revision, until staff correct the home size: then the
+// line prices on today's whole-home rule. The size comparison must see every carrier and field the legacy pricer read.
+describe('flea price record: a size correction on a delivered legacy quote moves it to the whole-home rule', () => {
+  const { fleaPriceRecord, generateWithFleaRecord } = require('../services/estimate-flea-size-replay');
+  const sent = { sent_at: '2026-11-20T15:00:00Z', status: 'sent', address: '1 Example Way' };
+  const fleaLine = (estimate) => estimate.lineItems.find((line) => line.service === 'flea_package');
+  const base = { lotSqFt: 7500, propertyType: 'single_family', services: { flea: {} } };
+
+  test('an inputs-only quote (legacy inputs carrier) re-prices when the living area changes', () => {
+    const record = fleaPriceRecord(sent, { inputs: { ...base, homeSqFt: 3000, stories: 2 } });
+    expect(record).toMatchObject({ basis: 'ground_floor', priorSize: { living: 3000, stories: 2 } });
+    const revised = { ...base, homeSqFt: 4000, stories: 2 };
+    expect(fleaLine(generateWithFleaRecord(generateEstimate, revised, record))).toEqual(fleaLine(generateEstimate(revised)));
+  });
+
+  test('an inputs-only quote with the size unchanged keeps the ground-floor price', () => {
+    const record = fleaPriceRecord(sent, { inputs: { ...base, homeSqFt: 3000, stories: 2 } });
+    const same = { ...base, homeSqFt: 3000, stories: 2 };
+    expect(fleaLine(generateWithFleaRecord(generateEstimate, same, record)))
+      .toEqual(fleaLine(generateEstimate({ ...same, fleaSizeBasisReplay: 'ground_floor' })));
+  });
+
+  test('a footprint correction re-prices even when a living area is present', () => {
+    const prior = { ...base, homeSqFt: 3000, stories: 2, footprintSqFt: 1500 };
+    const data = { engineInputs: prior, result: { lineItems: [{ service: 'flea_package', footprintUsed: 1500 }] } };
+    const record = fleaPriceRecord(sent, data);
+    expect(record).toMatchObject({ basis: 'ground_floor', priorSize: { living: 3000, footprint: 1500, stories: 2 } });
+    const revised = { ...prior, footprintSqFt: 1800 };
+    expect(fleaLine(generateWithFleaRecord(generateEstimate, revised, record))).toEqual(fleaLine(generateEstimate(revised)));
+  });
+});
