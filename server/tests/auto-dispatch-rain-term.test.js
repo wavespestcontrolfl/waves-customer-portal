@@ -19,6 +19,8 @@ jest.mock('../services/auto-dispatch/apply', () => ({
   previewGroupMove: jest.fn(), applyAutoDispatchMove: jest.fn(), makeMemberGuard: jest.fn(), makeMoveGuard: jest.fn(),
   unitMoveSize: jest.fn(), revalidatePlacement: jest.fn(),
 }));
+// The closure days (strict read, once per run): none unless a test says so.
+jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 
 const candidateSlots = require('../services/auto-dispatch/candidate-slots');
@@ -26,6 +28,7 @@ const db = require('../models/db');
 const flexTier = require('../services/auto-dispatch/flex-tier');
 const apply = require('../services/auto-dispatch/apply');
 const rainFit = require('../services/scheduling/rain-fit');
+const blackout = require('../services/scheduling/blackout-dates');
 const rainTerm = require('../services/auto-dispatch/rain-term');
 const { ZONE_COORDS } = require('../services/scheduling/forecast-zones');
 const { recordAuditEvent } = require('../services/audit-log');
@@ -531,6 +534,82 @@ describe('per-floor uncertainty and Sunday last', () => {
       service, prefs: {}, ctx: {}, guard: flexGuard(service), evalResult, run,
     });
     expect(evalResult.audit.constraints.rain_term.best_73h).toMatchObject({ date: '2026-11-29' });
+  });
+});
+
+describe('unread inputs never read as verified', () => {
+  const allWet = async (read = async () => hoursFor(WET_DAYS)) => stateWith(read);
+  const noteVisit = async (state, service = visit()) => {
+    const evalResult = freshEval();
+    await rainTerm.note(state, {
+      service, prefs: {}, ctx: {}, guard: flexGuard(service), evalResult, run,
+    });
+    return evalResult.audit.constraints.rain_term;
+  };
+
+  test('closure days: read strictly once per run; an unreadable list is an error row, a closed day is not an answer', async () => {
+    const state = await allWet();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')] });
+    blackout.getBlackoutDates.mockClear();
+    expect((await noteVisit(state)).reason).toBe('drier_date_found');
+    await noteVisit(state);
+    expect(blackout.getBlackoutDates).toHaveBeenCalledTimes(1);
+    expect(blackout.getBlackoutDates).toHaveBeenCalledWith('2026-11-29', expect.any(String), expect.anything(), { strict: true });
+    // A closed day drops its slots.
+    const closedState = await allWet();
+    blackout.getBlackoutDates.mockResolvedValueOnce(new Set(['2026-12-02']));
+    expect(await noteVisit(closedState)).toMatchObject({ best_5day: null, status_5day: 'none' });
+    // An unreadable list is an error for every searched row, never verified.
+    const brokenState = await allWet();
+    blackout.getBlackoutDates.mockRejectedValue(new Error('settings read failed'));
+    try {
+      expect(await noteVisit(brokenState)).toMatchObject({ reason: 'error', error: 'CLOSURES_UNREAD', would_move: false });
+      expect((await noteVisit(brokenState)).reason).toBe('error');
+    } finally {
+      blackout.getBlackoutDates.mockReset().mockResolvedValue(new Set());
+    }
+  });
+
+  test('a free slot on a day the forecast did not cover in full makes that floor uncertain, never none', async () => {
+    // 12-02 has only 3 of 9 work hours read (below half): no wetness, so a slot there cannot be judged.
+    const thin = async () => [...hoursFor({ '2026-11-29': 90, '2026-11-30': 10, '2026-12-01': 85 }),
+      ...hoursFor({ '2026-12-02': 10 }).filter((h) => Number(h.startTime.slice(11, 13)) < 11)];
+    const state = await allWet(thin);
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')] });
+    const row = await noteVisit(state);
+    expect(row).toMatchObject({ would_move: false, status_5day: 'uncertain_forecast', status_73h: 'uncertain_forecast', reason: 'uncertain_forecast' });
+    // A day read in part (5 of 9 hours: enough to judge) is a usable answer elsewhere, but a floor
+    // that finds nothing on it is still uncertain.
+    const partial = async () => [...hoursFor({ '2026-11-29': 90, '2026-11-30': 10, '2026-12-01': 85 }),
+      ...hoursFor({ '2026-12-02': 90 }).filter((h) => Number(h.startTime.slice(11, 13)) < 13)];
+    const partialState = await allWet(partial);
+    expect(partialState.partial.has('sarasota|2026-12-02')).toBe(true);
+    expect(await noteVisit(partialState)).toMatchObject({ status_5day: 'uncertain_forecast' });
+    // A day read in full with no slot on it is a verified none.
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [] });
+    expect(await noteVisit(await allWet())).toMatchObject({ status_5day: 'none', status_73h: 'none', reason: 'no_drier_date' });
+    // A partly read current day is flagged on the row.
+    expect(rainTerm._test.dayReading(hoursFor({ '2026-12-02': 10 }).slice(0, 12), '2026-12-02').complete).toBe(false);
+  });
+
+  test('every searched row carries both floors\' statuses, whatever path built it', async () => {
+    const state = await allWet();
+    const probe = candidateSlots._internals.filterAndScoreSharedModelCandidates;
+    const rows = {};
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')] });
+    rows.found = await noteVisit(state);
+    probe.mockRejectedValue(new Error('probe read failed'));
+    rows.occupancy = await noteVisit(state);
+    probe.mockReset().mockImplementation(async (_svc, _geo, slots) => slots);
+    rows.grouped = await noteVisit(state, visit({ visit_id: 'vis1' }));
+    rows.none = await (async () => { candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [] }); return noteVisit(state); })();
+    rows.noBand = await (async () => { const svc = visit(); const evalResult = freshEval(); await rainTerm.note(state, { service: svc, prefs: {}, ctx: {}, guard: { window: null, meta: null }, evalResult, run }); return evalResult.audit.constraints.rain_term; })();
+    candidateSlots.findValidCandidateSlots.mockRejectedValue(new Error('boom'));
+    rows.error = await noteVisit(state);
+    for (const [name, row] of Object.entries(rows)) {
+      expect([name, typeof row.status_5day, typeof row.status_73h]).toEqual([name, 'string', 'string']);
+    }
+    expect(rows.occupancy).toMatchObject({ reason: 'occupancy_unverified', status_5day: 'unverified' });
   });
 });
 

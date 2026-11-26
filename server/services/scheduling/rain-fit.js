@@ -363,6 +363,8 @@ async function bookingRainPlan({
   // Services past the cap are not looked up, so they cannot be called
   // rain-OK: one unclassified entry makes the whole booking outdoor rather
   // than letting the classified ones speak for it (Codex #6120 r4).
+  // Strict: services past the cap were never looked up, so the list is not read in full.
+  if (strict && overflow) throw Object.assign(new Error('visit holds more services than the cap'), { code: 'SERVICES_UNREAD' });
   const services = strict ? await withCatalogKeys(listed, db, { strict: true }) : await withCatalogKeys(listed, db);
   return { services: overflow ? [...services, OVERFLOW_SERVICE] : services, rainSpan: stored?.span || null };
 }

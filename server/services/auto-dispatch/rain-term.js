@@ -76,6 +76,10 @@ const MAX_OCCUPANCY_CHECKS = 4;
 // The search lifts the legacy first-80 cap (candidate-slots.js SCORE_CAP) to this; reaching it means the list may be cut.
 const SEARCH_SCORE_CAP = 1000;
 const HOUR_MIN = 60;
+// A row that never reached the search (no forecast, dry day, indoor visit, no band) says so on both floors.
+const STATUS_NOT_SEARCHED = 'not_searched';
+// Closure days are read strictly once per run, this many days out from today (the widest band ends by day 13).
+const CLOSURE_SPAN_DAYS = 16;
 
 const REASONS = {
   OFF_BAND: 'out_of_forecast_range',
@@ -90,6 +94,7 @@ const REASONS = {
   CAPPED: 'uncertain_capped',
   GROUPED: 'grouped_unverified',
   OCCUPANCY: 'occupancy_unverified',
+  FORECAST: 'uncertain_forecast',
   FOUND: 'drier_date_found',
   FOUND_73H: 'drier_date_only_with_73h_floor',
   FOUND_73H_UNSURE: 'drier_date_with_73h_floor_5day_uncertain',
@@ -106,12 +111,12 @@ const round2 = (n) => Math.round(n * 100) / 100;
 const trustFor = (lead) => LEAD_TRUST[lead] || 0;
 
 /**
- * One day's wetness 0..1 from an NWS hourly list, or null when under half the
- * work hours are in it (an unread day is not a dry one). NWS startTime carries
- * the grid's own local hour, as ads/rain-mode.js reads it.
+ * One day's reading from an NWS hourly list: { wetness 0..1, complete }. wetness is null when
+ * under half the work hours are in the list (an unread day is not a dry one); complete = every
+ * work hour was read. NWS startTime carries the grid's own local hour, as ads/rain-mode.js reads it.
  */
-function dayWetness(hours, day) {
-  if (!Array.isArray(hours)) return null;
+function dayReading(hours, day) {
+  if (!Array.isArray(hours)) return { wetness: null, complete: false };
   let sum = 0;
   let read = 0;
   let total = 0;
@@ -124,8 +129,10 @@ function dayWetness(hours, day) {
       read += 1;
     }
   }
-  return read * 2 >= total ? sum / read : null;
+  return { wetness: read * 2 >= total ? sum / read : null, complete: read === total };
 }
+
+const dayWetness = (hours, day) => dayReading(hours, day).wetness;
 
 // What the forecast says about a date a candidate could land on: a dry reading
 // far out is shrunk toward PRIOR_WETNESS (a weak forecast does not prove a dry day),
@@ -149,14 +156,17 @@ async function start(run, deps = {}) {
   const dates = [];
   for (let lead = FIRST_LEAD_DAYS; lead <= LAST_LEAD_DAYS; lead++) dates.push(shiftDateStr(run.today, lead));
   const state = {
-    dates, forecast: new Map(), unread: [], searches: 0, startedAt: Date.now(),
+    dates, forecast: new Map(), partial: new Set(), unread: [], searches: 0, startedAt: Date.now(),
     deps, counts: { in_range: 0, out_of_range: 0, errors: 0 },
   };
   await Promise.all(Object.keys(ZONE_COORDS).map(async (zone) => {
     try {
       const hours = await readArea(zone, read);
       if (!hours) { state.unread.push(zone); return; }
-      state.forecast.set(zone, new Map(dates.map((d) => [d, dayWetness(hours, d)])));
+      const readings = dates.map((d) => [d, dayReading(hours, d)]);
+      state.forecast.set(zone, new Map(readings.map(([d, r]) => [d, r.wetness])));
+      // A day with some hours missing is read, but never vouched for as complete.
+      readings.filter(([, r]) => !r.complete).forEach(([d]) => state.partial.add(`${zone}|${d}`));
     } catch {
       state.unread.push(zone);
     }
@@ -300,6 +310,8 @@ function rowFor(service, area, lead, wet, extra) {
     best_5day: null,
     best_73h: null,
     would_move: false,
+    status_5day: STATUS_NOT_SEARCHED,
+    status_73h: STATUS_NOT_SEARCHED,
     ...extra,
   };
 }
@@ -340,56 +352,64 @@ async function firstFree(options, check) {
   return {};
 }
 
-// One floor's answer: found, none (a verified "no slot"), unverified (the probe could not
-// vet the slots it was given) or uncertain_capped (the search list may have been cut).
-function floorStatus(result, capped) {
+// One floor's answer: found, unverified (the probe could not vet the slots it was given),
+// uncertain_capped (the search list may have been cut), uncertain_forecast (a free slot sits
+// on a day the forecast did not cover in full) or none (a verified "no slot").
+function floorStatus(result, { capped, unread }) {
   if (result.opt) return 'found';
   if (result.unverified) return 'unverified';
-  return capped ? 'uncertain_capped' : 'none';
+  if (capped) return 'uncertain_capped';
+  return unread ? 'uncertain_forecast' : 'none';
+}
+
+// Whether a free slot the band admits sits on a day within the forecast window that is
+// unread or only partly read: the floor cannot be called empty. Days past the window are
+// outside what this shadow judges by design, so they do not count.
+function forecastGap(slots, { service, band, run, wetByDate, zone, state }) {
+  const orig = toDateStr(service.scheduled_date);
+  return slots.some((slot) => {
+    const date = toDateStr(slot.date);
+    const lead = daysBetween(run.today, date);
+    if (date === orig || !trustFor(lead) || !flexTier.flexWindowAdmits(band, orig, date)) return false;
+    return wetByDate.get(date) == null || state.partial.has(`${zone}|${date}`);
+  });
+}
+
+// The closure days (the owner's days off, holidays, one-off dates) read strictly once per
+// run, as the rain record reads them: the capacity search's own closure read does not fail
+// closed on a malformed holiday list. An unreadable list is the run's problem (every searched
+// row says `error`), never a verified answer.
+function closedDays(state, run) {
+  if (!state.closures) {
+    state.closures = Promise.resolve()
+      .then(() => require('../scheduling/blackout-dates')
+        .getBlackoutDates(state.dates[0], shiftDateStr(run.today, CLOSURE_SPAN_DAYS), db, { strict: true }))
+      .catch(() => { throw Object.assign(new Error('closure days unreadable'), { code: 'CLOSURES_UNREAD' }); });
+  }
+  return state.closures;
 }
 
 function verdictReason({
-  best5, best73, capped, candidate, status5,
+  best5, best73, candidate, status5, status73, grouped,
 }) {
   if (best5) return REASONS.FOUND;
   if (best73) return status5 === 'none' ? REASONS.FOUND_73H : REASONS.FOUND_73H_UNSURE;
-  if (candidate) return REASONS.GROUPED;
-  return capped ? REASONS.CAPPED : REASONS.NONE;
+  if (candidate) return grouped ? REASONS.GROUPED : REASONS.OCCUPANCY;
+  const both = [status5, status73];
+  if (both.includes('uncertain_capped')) return REASONS.CAPPED;
+  return both.includes('uncertain_forecast') ? REASONS.FORECAST : REASONS.NONE;
 }
 
-// The verdict for a visit already known wet and outdoor: searches once, answers twice.
-// A visit that moves with others (`grouped`) cannot be verified here, so its best drier
-// slot is a `candidate` only and nothing would move.
-async function searchVerdict({
-  service, prefs, ctx, guard, run,
-}, state, base, wetByDate, grouped) {
-  const bands = bandsFor(service, guard, run);
-  if (!bands) return { ...base, reason: REASONS.NO_BAND };
-  if (state.searches >= MAX_SEARCHES_PER_RUN) return { ...base, reason: REASONS.BUDGET };
-  state.searches += 1;
-  const { slots, capped } = await freeSlots(service, prefs, ctx, bands);
-  const common = {
-    service, run, currentWet: wetByDate.get(base.current.date), wetByDate,
-  };
-  const opts5 = drierOptions(slots, { ...common, band: bands.current });
-  const opts73 = drierOptions(slots, { ...common, band: bands.pending73h, afterFloor: true });
-  if (grouped) return groupedVerdict({ base, opts5, opts73, capped });
-  const check = {
-    service, ctx, run, memo: new Map(),
-  };
-  const r5 = await firstFree(opts5, check);
-  let r73 = await firstFree(opts73, check);
-  // Any slot valid under the 5-day floor is valid under 73 hours when it also starts 73 hours out.
-  if (!r73.opt && r5.opt && startsAfterFloor(r5.opt.slot, run)) r73 = r5;
-  const unverified = !r5.opt && !r73.opt && (r5.unverified || r73.unverified);
-  if (unverified) {
-    return {
-      ...base, would_move_73h: false, candidate: { floor: r5.unverified ? '5day' : '73h', ...shownSlot(r5.unverified || r73.unverified) }, reason: REASONS.OCCUPANCY,
-    };
-  }
-  const best5 = shownSlot(r5.opt);
-  const best73 = shownSlot(r73.opt);
-  const status5 = floorStatus(r5, capped);
+// The one place a searched row is built, so no path can drop a floor's status.
+function searchRow(base, {
+  r5, r73, cov5, cov73, grouped,
+}) {
+  const best5 = grouped ? null : shownSlot(r5.opt);
+  const best73 = grouped ? null : shownSlot(r73.opt);
+  const status5 = floorStatus(r5, cov5);
+  const status73 = floorStatus(r73, cov73);
+  const pending = r5.unverified || r73.unverified;
+  const candidate = !best5 && !best73 && pending ? { floor: r5.unverified ? '5day' : '73h', ...shownSlot(pending) } : null;
   return {
     ...base,
     best_5day: best5,
@@ -397,23 +417,53 @@ async function searchVerdict({
     would_move: !!best5,
     would_move_73h: !!best73,
     status_5day: status5,
-    status_73h: floorStatus(r73, capped),
+    status_73h: status73,
+    ...(candidate ? { candidate } : {}),
     reason: verdictReason({
-      best5, best73, capped, status5,
+      best5, best73, candidate, status5, status73, grouped,
     }),
   };
 }
 
-// A visit that moves with others cannot be verified: its best drier slot is a candidate only.
-function groupedVerdict({
-  base, opts5, opts73, capped,
-}) {
-  const top5 = opts5[0] || null;
-  const first = top5 || opts73[0] || null;
-  const candidate = first && { floor: top5 ? '5day' : '73h', ...shownSlot(first) };
-  return {
-    ...base, would_move_73h: false, ...(candidate ? { candidate } : {}), reason: verdictReason({ capped, candidate }),
+// The verdict for a visit already known wet and outdoor: searches once, answers twice.
+// A visit that moves with others (`grouped`) cannot be verified here, so its best drier
+// slot is a `candidate` only and nothing would move.
+async function searchVerdict({
+  service, prefs, ctx, guard, run,
+}, state, base, area, grouped) {
+  const bands = bandsFor(service, guard, run);
+  if (!bands) return { ...base, reason: REASONS.NO_BAND };
+  if (state.searches >= MAX_SEARCHES_PER_RUN) return { ...base, reason: REASONS.BUDGET };
+  const closed = await closedDays(state, run);
+  state.searches += 1;
+  const found = await freeSlots(service, prefs, ctx, bands);
+  const slots = found.slots.filter((slot) => !closed.has(toDateStr(slot.date)));
+  const wetByDate = state.forecast.get(area);
+  const common = {
+    service, run, currentWet: wetByDate.get(base.current.date), wetByDate,
   };
+  const gap = { ...common, zone: area, state };
+  const cov = (band) => ({ capped: found.capped, unread: forecastGap(slots, { ...gap, band }) });
+  const cov5 = cov(bands.current);
+  const cov73 = cov(bands.pending73h);
+  const opts5 = drierOptions(slots, { ...common, band: bands.current });
+  const opts73 = drierOptions(slots, { ...common, band: bands.pending73h, afterFloor: true });
+  if (grouped) {
+    // Nothing is vetted: the best slot of each floor stays unverified.
+    return searchRow(base, {
+      r5: opts5.length ? { unverified: opts5[0] } : {}, r73: opts73.length ? { unverified: opts73[0] } : {}, cov5, cov73, grouped,
+    });
+  }
+  const check = {
+    service, ctx, run, memo: new Map(),
+  };
+  const r5 = await firstFree(opts5, check);
+  let r73 = await firstFree(opts73, check);
+  // Any slot valid under the 5-day floor is valid under 73 hours when it also starts 73 hours out.
+  if (!r73.opt && r5.opt && startsAfterFloor(r5.opt.slot, run)) r73 = r5;
+  return searchRow(base, {
+    r5, r73, cov5, cov73, grouped,
+  });
 }
 
 async function judge(args, state) {
@@ -427,9 +477,10 @@ async function judge(args, state) {
   if (!area) return { row: { ...base, reason: REASONS.NO_AREA } };
   if (wet == null) return { row: { ...base, reason: REASONS.NO_FORECAST } };
   base.current.score = round2(wet * trustFor(lead));
+  if (state.partial.has(`${area}|${date}`)) base.current.partial_forecast = true;
   if (wet * trustFor(lead) < WET_SCORE) return { row: { ...base, reason: REASONS.DRY } };
   if (!(await isOutdoor(service))) return { row: { ...base, reason: REASONS.INDOOR } };
-  return { row: await searchVerdict(args, state, base, state.forecast.get(area), await movesWithOthers(service)) };
+  return { row: await searchVerdict(args, state, base, area, await movesWithOthers(service)) };
 }
 
 /**
@@ -446,7 +497,9 @@ async function note(state, args) {
     state.counts.in_range += 1;
   } catch (err) {
     state.counts.errors += 1;
-    row = { mode: MODE_SHADOW, would_move: false, reason: REASONS.ERROR, error: err.code || err.name || 'error' };
+    row = {
+      mode: MODE_SHADOW, would_move: false, status_5day: 'unverified', status_73h: 'unverified', reason: REASONS.ERROR, error: err.code || err.name || 'error',
+    };
   }
   state.counts[row.reason] = (state.counts[row.reason] || 0) + 1;
   if (row.would_move_73h && !row.would_move) {
@@ -500,5 +553,5 @@ async function finish(state, run) {
 
 module.exports = {
   start, note, carry, kept, finish, dayWetness, expectedWetness, modeOf,
-  _test: { drierOptions }, MODE_SHADOW, LEAD_TRUST, WET_SCORE, DRIER_MARGIN, PRIOR_WETNESS, FLOOR_HOURS_PENDING, MAX_SEARCHES_PER_RUN, REASONS,
+  _test: { drierOptions, dayReading }, MODE_SHADOW, LEAD_TRUST, WET_SCORE, DRIER_MARGIN, PRIOR_WETNESS, FLOOR_HOURS_PENDING, MAX_SEARCHES_PER_RUN, REASONS,
 };
