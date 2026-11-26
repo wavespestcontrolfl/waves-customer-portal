@@ -55,15 +55,55 @@ function twoStoryRowFields(row) {
   };
 }
 
-// { factor } from the first saved V2 exclusion row: its stamped factor, or 1 (no factor) when the row has no stamp.
-// null when the estimate holds no exclusion row (nothing was quoted, so the current rule prices it).
+// Does the stored data ask for a rodent exclusion in any replayable carrier? Reads the request itself (an Admin V2 save can
+// carry engineRequest.selectedServices only) and every stored input carrier (services.exclusion / rodentExclusion), like
+// fleaSizeBasisSignalForReplay does for flea.
+function storedRequestsExclusion(estData) {
+  let data = estData;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return false; }
+  }
+  if (!data || typeof data !== 'object') return false;
+  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
+  if (request && Array.isArray(request.selectedServices)
+    && request.selectedServices.some((key) => String(key || '').toUpperCase() === 'EXCLUSION')) return true;
+  const container = require('./estimate-result-container').storedEstimateContainer(data) || null;
+  return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
+    .some((carrier) => !!exclusionPickIn(carrier));
+}
+
+// A sent estimate that kept its priced rows only in the frozen snapshot bundle: the rows the bundle carries, stamped or not.
+function snapshotExclusionRows(estData) {
+  const { isRodentExclusionRow } = require('../../shared/estimate-purchased-warranty.cjs');
+  let data = estData;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return []; }
+  }
+  const bundle = data && data.sendSnapshot && typeof data.sendSnapshot === 'object' ? data.sendSnapshot.pricingBundle : null;
+  if (!bundle || typeof bundle !== 'object') return [];
+  const breakdown = bundle.oneTimeBreakdown && typeof bundle.oneTimeBreakdown === 'object' ? bundle.oneTimeBreakdown : {};
+  return [].concat(breakdown.items || [], breakdown.specItems || [], bundle.services || [], bundle.frequencies || [])
+    .filter((row) => row && typeof row === 'object' && isRodentExclusionRow(row));
+}
+
+// { factor } for a replay. Evidence, in order:
+//  1. the saved V2 exclusion rows (result / engineResult): the stamped factor, or 1 for a row with no stamp (priced before
+//     the rule);
+//  2. the frozen send snapshot's rows, when the snapshot carries any;
+//  3. no rows anywhere but the stored request or inputs still ask for an exclusion (an issued estimate that kept only its
+//     inputs, which the public route rebuilds once it invalidates the snapshot): factor 1. A replay never raises a sold
+//     price; at worst an inputs-only two-story quote replays without the factor, which favors the customer.
+// null only when nothing in the data asks for an exclusion (nothing was quoted, so the current rule prices it).
 function twoStoryRoofReplaySignal(estData) {
   const { isRodentExclusionRow } = require('../../shared/estimate-purchased-warranty.cjs');
-  for (const row of require('./estimate-result-container').storedRodentExclusionRows(estData)) {
-    if (!isRodentExclusionRow(row)) continue;
-    return { factor: twoStoryRowFields(row).twoStoryRoofFactor || 1 };
+  const rows = require('./estimate-result-container').storedRodentExclusionRows(estData).filter((row) => isRodentExclusionRow(row));
+  const snapshotRows = rows.length ? [] : snapshotExclusionRows(estData);
+  const evidence = rows.length ? rows : snapshotRows;
+  if (evidence.length) {
+    const stamped = evidence.map((row) => twoStoryRowFields(row).twoStoryRoofFactor).find((factor) => factor > 0);
+    return { factor: stamped || 1 };
   }
-  return null;
+  return storedRequestsExclusion(estData) ? { factor: 1 } : null;
 }
 
 // The measured eave feet of a Barrel tile pick, validated BEFORE any coercion: a finite number >= 0 or a numeric string;

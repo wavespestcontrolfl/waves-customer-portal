@@ -215,6 +215,53 @@ describe('replay: each stored exclusion row decides the factor', () => {
     expect(total(estimate(ADV_ONLY, { stories: 1 }))).toBe(600);
   });
 
+  // An issued estimate that kept only its inputs and a send snapshot (no result, no engineResult).
+  const inputsOnly = (extra = {}) => ({
+    engineInputs: baseInput({ stories: 2, services: { exclusion: { pricingVersion: 'v2', ...ADV_ONLY } } }),
+    sendSnapshot: { sentAt: '2026-11-20T15:00:00Z', pricingBundle: { oneTimeBreakdown: { items: [{ service: 'rodent_exclusion', price: 600 }] } } },
+    ...extra,
+  });
+  // What the public route does before it rebuilds the pricing: drop the frozen bundle.
+  const invalidated = (saved) => { const { pricingBundle: _b, ...rest } = saved.sendSnapshot; return { ...saved, sendSnapshot: rest }; };
+
+  test('an issued inputs-only estimate sold at $600 replays at $600 after its snapshot is invalidated (public rebuild and recompute)', async () => {
+    const saved = inputsOnly();
+    expect(twoStoryRoofReplaySignal(saved)).toEqual({ factor: 1 });
+    expect(twoStoryRoofReplaySignal(invalidated(saved))).toEqual({ factor: 1 });
+    expect(publicReplayTotal(invalidated(saved))).toBe(600);
+    expect(publicReplayTotal(saved)).toBe(600);
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const out = await serverRecomputeFromEstimateData(invalidated(saved), { needsSync: () => false, replaySavedPricingKnobs: true });
+    expect(total({ lineItems: out.rawEngineResult.lineItems })).toBe(600);
+  });
+
+  test('every request carrier counts as asking for an exclusion', () => {
+    const exclusionInputs = { services: { exclusion: { pricingVersion: 'v2', ...ADV_ONLY } } };
+    for (const saved of [
+      { engineRequest: { profile: {}, selectedServices: ['PEST', 'EXCLUSION'] } },
+      { engineInputs: exclusionInputs },
+      { inputs: exclusionInputs },
+      { engineInput: exclusionInputs },
+      { engineInputs: { services: { rodentExclusion: { pricingVersion: 'v2' } } } },
+      { result: { inputs: exclusionInputs } },
+      JSON.stringify({ engineInputs: exclusionInputs }),
+    ]) expect(twoStoryRoofReplaySignal(saved)).toEqual({ factor: 1 });
+  });
+
+  test('a send snapshot that carries a stamped exclusion row restores its factor, an unstamped one replays factor 1', () => {
+    const row = { service: 'rodent_exclusion', price: 780, twoStoryRoofRule: 1, twoStoryRoofFactor: 1.3 };
+    const withBundle = (items) => ({ sendSnapshot: { pricingBundle: { oneTimeBreakdown: { items } } } });
+    expect(twoStoryRoofReplaySignal(withBundle([row]))).toEqual({ factor: 1.3 });
+    expect(twoStoryRoofReplaySignal(withBundle([{ service: 'rodent_exclusion', price: 600 }]))).toEqual({ factor: 1 });
+  });
+
+  test('nothing asks for an exclusion: no signal', () => {
+    expect(twoStoryRoofReplaySignal({ engineInputs: baseInput({ services: { flea: {} } }) })).toBeNull();
+    expect(twoStoryRoofReplaySignal({ engineRequest: { profile: {}, selectedServices: ['PEST'] } })).toBeNull();
+    expect(twoStoryRoofReplaySignal({})).toBeNull();
+    expect(twoStoryRoofReplaySignal(null)).toBeNull();
+  });
+
   test('no exclusion row stored: nothing is pinned and the current rule prices it', () => {
     expect(twoStoryRoofReplaySignal({ engineResult: { lineItems: [] } })).toBeNull();
     expect(twoStoryRoofReplaySignal({ engineResult: { lineItems: [{ service: 'flea_package', price: 300 }] } })).toBeNull();
