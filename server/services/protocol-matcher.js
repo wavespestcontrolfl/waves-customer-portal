@@ -511,11 +511,31 @@ function mistingSystemMatchOverride(serviceType, serviceKey) {
   return null;
 }
 
+// Package programs whose later visit has its own card. A name that states a later stage anywhere ("Flea Control Service
+// Recheck", "German Roach Treatment 2", "Bed Bug Treatment Follow-Up") gets that card: the rule terms alone need the words
+// side by side ("flea recheck"), so such a name fell to the first treatment and its growth regulator.
+const STAGE_BY_NAME_RULES = { bed_bug: 'bed_bug_followup', flea: 'flea_followup', cockroach: 'cockroach_followup' };
+const LATER_STAGE_WORD = '(?:re-?check|follow[\\s-]?up|clearance)';
+const LATER_STAGE_RE = new RegExp(`\\b${LATER_STAGE_WORD}\\b`, 'i');
+// "Treatment 2", "Visit #3", "2nd treatment", "third visit". Not a count of visits sold: "Treatment (2 Visits)", "2 treatments".
+const NUMBERED_STAGE_RE = /\b(?:treatment|visit|service)\s*#?\s*[23]\b(?!\s*(?:visits?|treatments?|services?|pack|x)\b)|\b(?:second|third|2nd|3rd)\s+(?:treatment|visit|service)\b/i;
+// A package sold on the first visit names its later visit as an extra: "Cleanout + 14 Day Follow-up", "Treatment with Recheck".
+const PACKAGE_EXTRA_RE = new RegExp(`(?:\\+|&|\\b(?:and|with|plus|incl|includes|including)\\b)[^a-z0-9]*(?:an?\\s+|one\\s+|free\\s+)?(?:\\d+[\\s-]*(?:day|week)s?[\\s-]*)?${LATER_STAGE_WORD}\\b`, 'i');
+
+function namesLaterStage(serviceType) {
+  const raw = String(serviceType || '');
+  if (PACKAGE_EXTRA_RE.test(raw)) return false;
+  return LATER_STAGE_RE.test(raw) || NUMBERED_STAGE_RE.test(raw);
+}
+
 // The rule for a booking: the first rule of its program whose terms the name carries, or the rule that claims its catalog
-// service key. The key wins, except over a rule marked `explicitStage` (the name itself says "treatment 2" or "heat").
-function ruleFor(keyRule, rules, normalized) {
+// service key. The key wins, except over a rule marked `explicitStage` (the name itself says "treatment 2" or "heat") and over
+// a later stage the name states (namesLaterStage).
+function ruleFor(keyRule, rules, normalized, serviceType) {
   const named = rules.find((rule) => rule.terms.some((term) => matchesTerm(normalized, term)));
-  return named?.explicitStage ? named : keyRule || named;
+  if (named?.explicitStage) return named;
+  const later = namesLaterStage(serviceType) ? rules.find((rule) => rule.reason === STAGE_BY_NAME_RULES[rule.programKey]) : null;
+  return later || keyRule || named;
 }
 
 function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month = null } = {}) {
@@ -530,7 +550,7 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
     if (fallbackProgramKey === 'lawn') return false;
     return rule.programKey === fallbackProgramKey;
   });
-  const matchedRule = ruleFor(keyRule, rules, normalized);
+  const matchedRule = ruleFor(keyRule, rules, normalized, serviceType);
   const programKey = matchedRule?.programKey || fallbackProgramKey;
   const program = protocols?.[programKey] || null;
   if (!program) return { programKey, program: null, matchedVisit: null, matched: false, reason: 'program_missing' };
