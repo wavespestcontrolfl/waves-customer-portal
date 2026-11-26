@@ -2421,8 +2421,10 @@ function isSandboxCall(req) {
 // document), so a call starts at most one recording. No
 // recordingStatusCallback on purpose: /recording-status never hears of it, so
 // the call-recording pipeline (transcription, extraction, leads) never sees a
-// sandbox recording. It is fetched from Twilio by CallSid and deleted there
-// once graded. Raw XML: the pinned twilio helper has no <Recording> noun.
+// sandbox recording. Nothing in the portal deletes it: the test-call grader
+// (an operator script outside this repo) fetches it from Twilio by CallSid
+// and deletes it there once graded. Raw XML: the pinned twilio helper has no
+// <Recording> noun.
 const SANDBOX_RECORDING_XML = '<Start><Recording channels="dual" trim="do-not-trim"/></Start>';
 const SANDBOX_RECORDING_STAMP = 'sandbox_recording_ok';
 
