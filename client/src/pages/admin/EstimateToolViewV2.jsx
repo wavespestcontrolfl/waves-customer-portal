@@ -14,6 +14,7 @@ import React, {
 import {
   applyServerRodentBaitBracketsPricingConfig,
   applyServerRodentSetupFeePricingConfig,
+  applyServerPalmPricingConfig,
   applyServerRodentWaveguardPricingConfig,
   collectMarginReviewNotes,
   fmt,
@@ -3940,6 +3941,8 @@ export default function EstimateToolViewV2({
         fetchRow("rodent_waveguard"),
       ]);
       if (!active) return;
+      // The palm minimum is independent of the rodent rows: a failed load keeps the $75 default.
+      fetchRow("palm_pricing").then((palmRow) => { if (active && palmRow.ok) applyServerPalmPricingConfig(palmRow.data); });
       setExclusionWholeHomeAvailable(waveguardRow.wholeHome === true);
       setRoofReadAvailable(waveguardRow.roofRead === true);
       setExclusionRoofStyleAvailable(waveguardRow.roofStyle === true);

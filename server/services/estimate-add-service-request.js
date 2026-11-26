@@ -243,6 +243,16 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
 
   // The lawn list mode the saved estimate priced with (no pin when it priced no lawn).
   Object.assign(updatedInputs, require('./estimate-floor-signal-replay').savedLawnCostPlusSignal(estData));
+  // The price rules the saved estimate was priced with (the 2026-11-26 fixes): an older quote keeps its existing lines'
+  // prices when a service is added to it.
+  // The saved price-rule signals: the rules the estimate was priced with, the services an earlier revision added under
+  // the current rules, and the palm minimum a sold palm line carries (a Settings edit never moves an existing line).
+  const savedRules = require('./estimate-floor-signal-replay').savedFloorReplaySignals(estData);
+  for (const key of ['legacyPricingRules', 'currentRulesServices', 'palmMinPerVisitReplay']) {
+    if (savedRules[key] !== undefined) updatedInputs[key] = savedRules[key];
+  }
+  // The service being added was never quoted: it prices under the current rules, the existing lines keep theirs.
+  updatedInputs.addedServiceKeys = [serviceKey];
 
   try {
     // A quoted flea package keeps the size rule it was sent under (estimate-flea-size-replay); the signal rides the engine call
@@ -256,7 +266,8 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
     const newBaseMonthly = Math.round((Number(legacyResult?.recurring?.annualBeforeDiscount || 0) / 12) * 100) / 100;
     const draftEstimateData = removeSendSnapshotPricingBundle({
       ...estData,
-      inputs: updatedInputs,
+      // The replay-only price-rule keys ride the saved result's stamp, never the stored inputs.
+      inputs: (({ addedServiceKeys: _a, legacyPricingRules: _l, currentRulesServices: _c, palmMinPerVisitReplay: _p, ...rest }) => rest)(updatedInputs),
       result: legacyResult,
       baseMonthly: newBaseMonthly > 0 ? newBaseMonthly : (estData?.baseMonthly || 0),
       onetimeTotalBase: newOneTime,

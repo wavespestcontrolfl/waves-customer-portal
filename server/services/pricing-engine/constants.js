@@ -802,7 +802,7 @@ const COMMERCIAL_TREE_SHRUB = {
 };
 // Commercial PEST (general pest control for non-residential accounts). Cost-
 // buildup split into an EXTERIOR base (perimeter barrier + monitoring —
-// always included) and an INTERIOR service component (footprint-driven —
+// always included) and an INTERIOR service component (sized on total interior area, every floor —
 // customer-selectable, ON by default; owner 2026-08-17). The component sums
 // reproduce the pre-split combined buildup exactly (4+2=6 material base,
 // 15+10=25 base labor), so a default (interior-on) quote is cent-identical
@@ -823,9 +823,9 @@ const COMMERCIAL_PEST = {
   // Interior service component — customer-selectable add-on (on by default).
   interior: {
     materialPerVisitBase: 2,          // interior baseline chemistry per visit
-    materialPerKSqFtPerVisit: 1.5,    // $/1000 sqft footprint/visit — added product for larger interiors
+    materialPerKSqFtPerVisit: 1.5,    // $/1000 sqft of total interior area/visit — added product for larger interiors
     laborMinutesBase: 10,             // interior base per visit
-    laborMinutesPerKSqFt: 6,          // interior treatment labor per 1000 sqft footprint
+    laborMinutesPerKSqFt: 6,          // interior treatment labor per 1000 sqft of total interior area
   },
   laborOverheadMinutesPerVisit: 10,   // reporting / logbook / pest-sighting documentation
   routeDriveMinutes: 15,

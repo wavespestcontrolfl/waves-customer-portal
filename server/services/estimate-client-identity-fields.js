@@ -49,6 +49,13 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   // The lawn minimum per visit after discounts a saved quote was priced with
   // (owner 2026-11-06): a posted 0 must never switch the $55 minimum off.
   'lawnMinimumPerVisitAfterDiscount',
+  // Which price rules a saved quote was priced with (the 2026-11-26 fixes): server-derived from its own stamp, so a
+  // posted false must never switch a sent quote onto the new rules, nor a posted true freeze a new one.
+  'legacyPricingRules',
+  // The per-visit palm minimum a saved quote was priced with: server-derived from its own palm row.
+  'palmMinPerVisitReplay',
+  // The services a legacy estimate priced under the current rules (added by a revision): server-derived from its stamp.
+  'currentRulesServices',
 ]);
 
 // Deletes every server-owned field from `obj` IN PLACE (plain objects only;

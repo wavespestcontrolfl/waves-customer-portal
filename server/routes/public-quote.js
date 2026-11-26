@@ -3352,9 +3352,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ...(Array.isArray(estimate?.property?.turfFlags) && estimate.property.turfFlags.length
             ? { property: { turfFlags: estimate.property.turfFlags } }
             : {}),
+          // Which price rules priced this quote (the 2026-11-26 fixes): the saved-estimate reader replays under them
+          // (estimate-floor-signal-replay.js), so a wizard quote priced under the fixes never replays on the old rules.
+          ...(typeof estimate?.pricingMetadata?.legacyPricingRules === 'boolean'
+            ? { pricingMetadata: { legacyPricingRules: estimate.pricingMetadata.legacyPricingRules } }
+            : {}),
           lineItems: (estimate?.lineItems || []).map(item => ({
             service: item.service,
             name: item.name || item.label || item.displayName,
+            ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
             annual: item.annualAfterDiscount ?? item.annual ?? null,
             monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
             price: item.priceAfterDiscount ?? item.price ?? null,
