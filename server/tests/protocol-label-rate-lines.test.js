@@ -71,16 +71,22 @@ describe('card lines that carry a label rate for their own pest', () => {
     expect(lineFor('cockroach', 1)).toMatchObject({ declaredRate: { lo: 2, hi: 2, unit: 'fl_oz' }, labelUseRate: true, selected: true });
     const flea = lineFor('flea', 1);
     expect(flea).toMatchObject({ declaredRate: { lo: 0.66, hi: 0.66, unit: 'fl_oz' }, labelUseRate: true });
-    // The flea rate is weaker than the catalog band, so a row with another or no registration number gets it too, on the job
-    // card and in the close-out alike: never that row's stronger catalog rate. A row whose own band is weaker keeps its band.
+    // The flea rate is weaker than the catalog band. A row with another or no registration number gets no rate: not the card's
+    // (not verified for that product) and not the catalog's stronger one. The line carries the hold the tank search shows.
     const fleaCard = protocols.flea.visits.find((visit) => visit.visit === 1);
     for (const epa of ['53883-444', null]) {
       const other = _test.linesFromLineMeta(fleaCard, [{ ...TEKKO, epa_reg_number: epa }]).find((line) => line.product.id === 't');
-      expect(other).toMatchObject({ declaredRate: { lo: 0.66, hi: 0.66, unit: 'fl_oz' }, labelUseRate: true });
+      expect(other.declaredRate).toBeUndefined();
+      expect(other.labelUseRate).toBeUndefined();
+      expect(other).toMatchObject({ labelRateRefused: true, labelHold: expect.stringContaining('53883-335') });
     }
-    const weakerRow = _test.linesFromLineMeta(fleaCard, [{ ...TEKKO, epa_reg_number: null, default_rate: '0.5' }]).find((line) => line.product.id === 't');
-    expect(weakerRow.labelUseRate).toBeUndefined();
-    expect(weakerRow.declaredRate).toBeUndefined();
+    // The right registration with a weaker catalog band (or one that cannot be read) keeps the catalog: no card rate, no hold.
+    for (const band of ['0.5', '0.25-0.5', '1/2']) {
+      const weakerRow = _test.linesFromLineMeta(fleaCard, [{ ...TEKKO, default_rate: band }]).find((line) => line.product.id === 't');
+      expect(weakerRow.labelUseRate).toBeUndefined();
+      expect(weakerRow.declaredRate).toBeUndefined();
+      expect(weakerRow.labelHold).toBeUndefined();
+    }
   });
 
   test('the card line names no product or rate: a completion action records the generic step, the verified rate rides only with the product', () => {
@@ -154,10 +160,16 @@ describe('the completion form gets the cockroach label rate', () => {
     // The flea card prefills and reviews Tekko Pro at its own shared-tank rate: never the cockroach 2, and never the catalog 1
     // (1 fl oz per gallon at the card's gallon per 1,000 sq ft is 1.5 times the flea label amount).
     // 0.66 is the prefill and the review ceiling: the card's tank goes out at 1 gallon per 1,000 sq ft, where anything above 0.66 fl
-    // oz per gallon is above the label amount per area. Any registration, as on the job card.
+    // oz per gallon is above the label amount per area.
     expect(await run(TEKKO, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66', labelUseRate: true });
-    expect(await run({ ...TEKKO, epa_reg_number: '53883-444' }, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66', labelUseRate: true });
-    expect((await run({ ...TEKKO, epa_reg_number: null, default_rate: '0.5' }, 'Flea Treatment', 'flea_tick')).defaultRate).toBe('0.5');
+    // Another or no registration number: the rate starts blank (never the catalog's stronger 1), as the tank search withholds it.
+    for (const epa of ['53883-444', null]) {
+      expect(await run({ ...TEKKO, epa_reg_number: epa }, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '', labelUseRate: true });
+    }
+    // The right registration with a weaker catalog band keeps that band.
+    const weakerBand = await run({ ...TEKKO, default_rate: '0.5' }, 'Flea Treatment', 'flea_tick');
+    expect(weakerBand.defaultRate).toBe('0.5');
+    expect(weakerBand.labelUseRate).toBeUndefined();
     // Every other label-rate line keeps its card rate as the ceiling: PolyZone on the mosquito card is 1.1, though its catalog band
     // reaches 1.5.
     const polyzone = { id: 't', name: 'Suspend Polyzone', active: true, default_rate: '0.25-1.5', default_unit: 'fl_oz/gal', epa_reg_number: '101563-143' };
