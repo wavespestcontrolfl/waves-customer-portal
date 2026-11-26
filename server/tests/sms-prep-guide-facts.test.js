@@ -45,12 +45,16 @@ describe('loadPrepGuideFacts', () => {
     jest.resetModules();
     jest.doMock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
     jest.doMock('../models/db', () => jest.fn());
-    const sender = { bookedPrepGuide: jest.fn(async () => { if (state.booked instanceof Error) throw state.booked; return state.booked; }), prepFamilyForServiceType: jest.fn(() => state.family) };
+    const sender = {
+      bookedPrepGuide: jest.fn(async () => { if (state.booked instanceof Error) throw state.booked; return state.booked; }),
+      completedPrepGuide: jest.fn(async () => (state.family ? { pestType: state.family[0], config: state.family[1] } : { pestType: null, config: null })),
+    };
     const library = {
       loadTemplateByKey: jest.fn(async (key) => {
         if (state.template instanceof Error) throw state.template;
         if (state.template === 'unpublished') return { template: { template_key: key }, activeVersion: null };
-        return { template: { template_key: key }, activeVersion: { id: 'v7', blocks: state.blocks } };
+        // an archived template can keep its active version: the status is what switches it off
+        return { template: { template_key: key, status: state.template === 'archived' ? 'archived' : 'active' }, activeVersion: { id: 'v7', blocks: state.blocks } };
       }),
     };
     jest.doMock('../services/prep-guide-sender', () => sender);
@@ -75,27 +79,28 @@ describe('loadPrepGuideFacts', () => {
       ],
     });
     expect(sender.bookedPrepGuide).toHaveBeenCalledWith(['c1']);
-    expect(sender.prepFamilyForServiceType).not.toHaveBeenCalled(); // a booked visit decides; the last service is never consulted
+    expect(sender.completedPrepGuide).not.toHaveBeenCalled(); // a booked visit decides; the last service is never consulted
     expect(library.loadTemplateByKey).toHaveBeenCalledWith('prep.interior_pest', database); // the row the customer's prep page renders
   });
 
   test('no booked visit: the last completed service\'s family, by the sender\'s own match rule', async () => {
-    const { result, sender } = await load({ booked: null, family: ['flea', FLEA] }, { last: { service_type: 'Flea Treatment' } });
+    const { result, sender } = await load({ booked: null, family: ['flea', FLEA] }, { last: { service_type: 'Flea Treatment', scheduled_service_id: 'ss-1' } });
     expect(result).toMatchObject({ source: 'last', key: 'prep.flea', label: 'Flea Treatment' });
-    expect(sender.prepFamilyForServiceType).toHaveBeenCalledWith('Flea Treatment');
+    expect(sender.completedPrepGuide).toHaveBeenCalledWith({ scheduledServiceId: 'ss-1', serviceType: 'Flea Treatment' }); // (the visit that completed: its assigned guide first)
     expect((await load({ booked: null, family: null })).result).toEqual({ sections: [] }); // no guide covers it: a successful read of nothing
-    expect((await load({ booked: null, family: ['flea', FLEA] }, { last: null })).sender.prepFamilyForServiceType).toHaveBeenCalledWith(undefined);
+    expect((await load({ booked: null, family: ['flea', FLEA] }, { last: null })).sender.completedPrepGuide).toHaveBeenCalledWith({ scheduledServiceId: undefined, serviceType: undefined });
   });
 
   test('a booked visit with no nameable guide gets none: the last service\'s guide is never put in its place', async () => {
     const { result, sender } = await load({ booked: { visit: { id: 'v1' }, pestType: null, config: null }, family: ['flea', FLEA] });
     expect(result).toEqual({ sections: [] });
-    expect(sender.prepFamilyForServiceType).not.toHaveBeenCalled();
+    expect(sender.completedPrepGuide).not.toHaveBeenCalled();
   });
 
   test('an unpublished guide, or one with no usable sentence, is a successful read of nothing', async () => {
     const booked = { visit: { id: 'v1' }, pestType: 'interior_pest', config: PEST };
     expect((await load({ booked, template: 'unpublished' })).result).toEqual({ sections: [] });
+    expect((await load({ booked, template: 'archived' })).result).toEqual({ sections: [] }); // archived, though its version is still the active one
     expect((await load({ booked, blocks: [{ type: 'paragraph', content: 'See https://example.com now please.' }] })).result).toEqual({ sections: [] });
     expect((await load({ booked, blocks: '[]' })).result).toEqual({ sections: [] });
   });

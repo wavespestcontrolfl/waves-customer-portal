@@ -1087,37 +1087,44 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
     expect(scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).some(([sql]) => /NOT LIKE/.test(String(sql)))).toBe(false);
   });
 
-  test('bookedPrepGuide reads the whole stop: a guide ANY live member carries decides, two guides or an unknown one name none, and only a stop with none is matched by its service types', async () => {
+  test('bookedPrepGuide reads the whole stop from the snapshot its page state was judged on: a guide ANY live member carries decides, two guides or an unknown one name none, and only a stop with none is matched by its service types', async () => {
     const appointmentPublic = require('../routes/appointment-public');
-    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit').mockResolvedValue({ state: 'upcoming', phase: null });
-    // the first db('scheduled_services') call is the soonest-visit query, the second is the stop's members
+    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit');
     const stop = async (visit, members) => {
-      const base = db.getMockImplementation();
-      let calls = 0;
-      db.mockImplementation((table) => {
-        if (table !== 'scheduled_services') return base(table);
-        calls += 1;
-        if (calls === 1) return base(table);
-        return { where: () => ({ whereNotIn: () => ({ select: async () => { if (members instanceof Error) throw members; return members; } }) }) };
-      });
-      upcomingVisitRow = { ...VISIT, visit_id: 'stop-1', ...visit };
-      try { return await sender.bookedPrepGuide(['cust-1']); } finally { db.mockImplementation(base); }
+      spy.mockResolvedValue({ state: 'upcoming', phase: null, ...(members ? { members } : {}) });
+      upcomingVisitRow = { ...VISIT, visit_id: members ? 'stop-1' : undefined, ...visit };
+      return sender.bookedPrepGuide(['cust-1']);
     };
     try {
       const keyed = { id: 'svc-2', service_type: 'Pest Control', prep_template_key: 'prep.interior_pest' };
+      const first = { id: 'svc-1', service_type: 'Lawn Care', prep_template_key: null };
       // the soonest row carries no key (inferred: a lawn service), its stop-mate carries the guide the customer received
-      expect(await stop({ id: 'svc-1', service_type: 'Lawn Care' }, [{ id: 'svc-1', service_type: 'Lawn Care', prep_template_key: null }, keyed])).toMatchObject({ pestType: 'interior_pest' });
+      expect(await stop(first, [first, keyed])).toMatchObject({ pestType: 'interior_pest' });
       // two assigned guides in one stop, or an assigned key that is not ours: no single guide
-      expect(await stop({ id: 'svc-1', service_type: 'Lawn Care' }, [{ id: 'svc-1', service_type: 'Lawn Care', prep_template_key: 'prep.lawn' }, keyed])).toMatchObject({ pestType: null, config: null });
-      expect(await stop({ id: 'svc-1', service_type: 'Lawn Care' }, [{ id: 'svc-1', service_type: 'Lawn Care', prep_template_key: 'prep.retired' }, keyed])).toMatchObject({ pestType: null, config: null });
+      expect(await stop(first, [{ ...first, prep_template_key: 'prep.lawn' }, keyed])).toMatchObject({ pestType: null, config: null });
+      expect(await stop(first, [{ ...first, prep_template_key: 'prep.retired' }, keyed])).toMatchObject({ pestType: null, config: null });
       // no key anywhere: the stop's service types (one family names it, two families name none, a service no guide covers is ignored)
-      expect(await stop({ id: 'svc-1', service_type: 'Pest Control' }, [{ id: 'svc-1', service_type: 'Pest Control' }, { id: 'svc-2', service_type: 'Termite Inspection' }])).toMatchObject({ pestType: 'interior_pest' });
-      expect(await stop({ id: 'svc-1', service_type: 'Pest Control' }, [{ id: 'svc-1', service_type: 'Pest Control' }, { id: 'svc-2', service_type: 'Lawn Care' }])).toMatchObject({ pestType: null, config: null });
-      // the booked visit left its stop between the page-state read and the member read (detached or cancelled): the pick is refused, not guided from the stale row
-      await expect(stop({ id: 'svc-1', service_type: 'Lawn Care', prep_template_key: 'prep.lawn' }, [keyed])).rejects.toThrow('no longer a live member of its stop');
-      // a failed member read is a failed pick, never a smaller stop
-      await expect(stop({ id: 'svc-1', service_type: 'Pest Control' }, new Error('members down'))).rejects.toThrow('members down');
+      const pest = { id: 'svc-1', service_type: 'Pest Control' };
+      expect(await stop(pest, [pest, { id: 'svc-2', service_type: 'Termite Inspection' }])).toMatchObject({ pestType: 'interior_pest' });
+      expect(await stop(pest, [pest, { id: 'svc-2', service_type: 'Lawn Care' }])).toMatchObject({ pestType: null, config: null });
+      // the snapshot is the whole stop: the visit row's own key is not read when the page state judged the stop on its members
+      expect(await stop({ ...pest, prep_template_key: 'prep.lawn' }, [pest, keyed])).toMatchObject({ pestType: 'interior_pest' });
+      // an ungrouped visit (no snapshot) is its own stop
+      expect(await stop({ ...pest, prep_template_key: 'prep.lawn' }, null)).toMatchObject({ pestType: 'lawn' });
     } finally { spy.mockRestore(); }
+  });
+
+  test('completedPrepGuide: the guide assigned to the completed visit, else its service type\'s family; an unknown stored key names none', async () => {
+    servicePrepRow = { prep_template_key: 'prep.bed_bug_heat' };
+    // a generically named visit that was booked on the heat guide keeps it after it completes
+    expect(await sender.completedPrepGuide({ scheduledServiceId: 'ss-1', serviceType: 'Bed Bug Treatment' })).toMatchObject({ pestType: 'bed_bug_heat' });
+    servicePrepRow = { prep_template_key: 'prep.retired' };
+    expect(await sender.completedPrepGuide({ scheduledServiceId: 'ss-1', serviceType: 'Bed Bug Treatment' })).toEqual({ pestType: null, config: null });
+    servicePrepRow = { prep_template_key: null };
+    expect(await sender.completedPrepGuide({ scheduledServiceId: 'ss-1', serviceType: 'Bed Bug Treatment' })).toMatchObject({ pestType: 'bed_bug' });
+    expect(await sender.completedPrepGuide({ serviceType: 'Pest Control' })).toMatchObject({ pestType: 'interior_pest' }); // no visit row: by name
+    expect(await sender.completedPrepGuide({ serviceType: 'Termite Inspection' })).toEqual({ pestType: null, config: null });
+    expect(await sender.completedPrepGuide({})).toEqual({ pestType: null, config: null });
   });
 
   test('bookedPrepGuide throws on a failed lookup, and on a grouped stop whose members could not be read: a failed read is never "nothing booked"', async () => {

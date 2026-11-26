@@ -628,6 +628,29 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     expect(out.visit.anyConfirmable).toBe(false);
   });
 
+  test('the page-state reader hands back the live members it judged a grouped stop on, with the guide each carries (the texting AI\'s prep guide pick reads that snapshot, never a second read)', async () => {
+    const { visitServicesFor } = appointmentRouter._test;
+    const rows = [
+      { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2099-08-05', window_start: '09:00:00', window_end: '11:00:00', technician_id: 't1', prep_template_key: null },
+      { id: 'b', service_type: 'Lawn Fertilization', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2099-08-05', window_start: '10:00:00', window_end: '12:00:00', technician_id: 't1', prep_template_key: 'prep.lawn' },
+    ];
+    mockDb.mockImplementation((table) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, orderBy: () => api,
+        select: async (...columns) => { api.columns = columns; return rows; },
+        first: async () => (table === 'service_visits' ? { window_start: '09:00:00' } : null),
+      };
+      return api;
+    });
+    const info = await visitServicesFor({ id: 'a', visit_id: 'v1' });
+    expect(info.members).toEqual(rows);
+    const state = await appointmentRouter.pageStateForVisit({ id: 'a', visit_id: 'v1', status: 'confirmed', scheduled_date: '2099-08-05', window_start: '09:00:00', window_end: '11:00:00' });
+    expect(state.members).toEqual(rows);
+    expect(state.state).toBe('upcoming');
+    // an ungrouped visit carries no snapshot
+    expect(await appointmentRouter.pageStateForVisit({ id: 'a', status: 'confirmed', scheduled_date: '2099-08-05', window_start: '09:00:00', window_end: '11:00:00' })).not.toHaveProperty('members');
+  });
+
   test('members that no longer share one stop fail closed — on the page (visitUnknown) and under the confirm locks (CHANGED) (local audit)', async () => {
     const { visitServicesFor, membersOneStop, membersMatchShown, membershipKeyFor } = appointmentRouter._test;
     expect(membersOneStop([{ id: 'a', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '10:00' }, { id: 'b', scheduled_date: '2026-08-05', window_start: '10:00', window_end: '11:00' }])).toBe(true);

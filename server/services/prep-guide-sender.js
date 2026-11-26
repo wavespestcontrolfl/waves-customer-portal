@@ -331,7 +331,8 @@ async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywo
       const page = await pageStateForVisit(r);
       // `strict` (the texting AI's prep guide pick): a grouped stop whose members could not be read is a failed lookup, never a visit to skip
       if (strict && page.unknown) throw new Error(`visit ${r.id} could not be read as a stop`);
-      if (page.state === 'upcoming') found.push(r);
+      // `strict` also carries the stop snapshot the verdict was judged on (a grouped visit's live members), never a second read of it
+      if (page.state === 'upcoming') found.push(strict ? { ...r, stop_members: page.members || null } : r);
       if (found.length >= max) return found;
     }
     if (rows.length < VISIT_PAGE) return found;
@@ -375,10 +376,26 @@ function prepFamilyForServiceType(serviceType) {
   return Object.entries(PREP_CONFIG).find(([, config]) => prepConfigMatches(config, serviceType)) || null;
 }
 
+// [pestType, config] of the guide family a stored prep_template_key names, or null when it is not one of ours.
+function prepFamilyForStoredKey(templateKey) {
+  return Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === templateKey) || null;
+}
+
+/**
+ * The guide a COMPLETED service carried: the guide assigned to its visit row (prep_template_key) when it has one (unknown key: none),
+ * else the family its service type belongs to. { pestType, config } or null. THROWS on a lookup error.
+ */
+async function completedPrepGuide({ scheduledServiceId = null, serviceType = null } = {}) {
+  const row = scheduledServiceId ? await db('scheduled_services').where({ id: scheduledServiceId }).first('prep_template_key') : null;
+  const family = row?.prep_template_key ? prepFamilyForStoredKey(row.prep_template_key) : prepFamilyForServiceType(serviceType);
+  return { pestType: family?.[0] || null, config: family?.[1] || null };
+}
+
 /**
  * The prep guide the customer's BOOKED visit gets: the soonest upcoming visit as the customer's own page lists it (upcomingFamilyVisits'
  * filters and order, across every service: a visit no guide covers is still THE booked visit, so an earlier completed service's guide is
- * never put in its place), and the guide its page shows. The page is one STOP: every live member of a grouped visit counts. A guide the
+ * never put in its place), and the guide its page shows. The page is one STOP: every live member of a grouped visit counts, read from the
+ * snapshot the page state was judged on. A guide the
  * visit already carries (its stored prep_template_key) decides, on any member; only a stop with none is matched by its service types.
  * Members that point at two guides, or a stored key that is not one of ours, name no guide (never a guess between them).
  * { visit, pestType, config } or null with no booked visit; pestType and config are null when no single guide can be named. THROWS on a
@@ -387,15 +404,8 @@ function prepFamilyForServiceType(serviceType) {
 async function bookedPrepGuide(customerIds) {
   const [visit] = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, 1, { strict: true });
   if (!visit) return null;
-  const members = visit.visit_id
-    ? await db('scheduled_services').where({ visit_id: visit.visit_id }).whereNotIn('status', CLOSED_VISIT_STATUSES).select('id', 'service_type', 'prep_template_key')
-    : [];
-  // the stop is the member snapshot just read: a visit that is no longer among its live members (detached or cancelled since the page
-  // state was read) is not a booked visit any more, so the pick is refused rather than guided from the stale row
-  if (visit.visit_id && !members.some((member) => member.id === visit.id)) throw new Error(`visit ${visit.id} is no longer a live member of its stop`);
-  const stop = members.length ? members : [visit];
-  const storedKeys = new Set(stop.filter((row) => row.prep_template_key).map((row) => (
-    Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === row.prep_template_key)?.[0] || null)));
+  const stop = visit.stop_members || [visit];
+  const storedKeys = new Set(stop.filter((row) => row.prep_template_key).map((row) => prepFamilyForStoredKey(row.prep_template_key)?.[0] || null));
   const families = storedKeys.size ? storedKeys : new Set(stop.map((row) => prepFamilyForServiceType(row.service_type)?.[0] || undefined).filter(Boolean));
   const [pestType] = families.size === 1 ? [...families] : [null];
   return { visit, pestType: pestType || null, config: pestType ? PREP_CONFIG[pestType] : null };
@@ -1233,5 +1243,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 
 module.exports = {
   sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, buildWateringBlock, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
-  prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide,
+  prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide, completedPrepGuide,
 };
