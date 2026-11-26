@@ -781,7 +781,15 @@ async function answerNavigation(request, attempt, mayServeSaved, decide, navSeq)
   try {
     if (mayServeSaved) {
       const slow = new Promise(resolve => { timer = setTimeout(resolve, SLOW_NAV_MS, 'slow'); });
-      if ((await Promise.race([attempt, slow])) === 'slow') {
+      // fetch() resolves once the headers land; the page can still stall
+      // before the HTML that names its entry script arrives. So the network
+      // wins only with the whole (small) HTML body in hand: read a copy of
+      // it, which buffers the same bytes for the page's own response.
+      const bodyReady = attempt.then(async outcome => {
+        if (outcome.copy) await outcome.copy.clone().text().catch(() => {});
+        return outcome;
+      });
+      if ((await Promise.race([bodyReady, slow])) === 'slow') {
         const shell = await savedShell();
         if (shell) {
           decide('saved');

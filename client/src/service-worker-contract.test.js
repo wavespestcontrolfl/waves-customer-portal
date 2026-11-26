@@ -1850,7 +1850,7 @@ describe('service-worker slow page loads', () => {
 
   it('starts no timer for a non-GET page load', async () => {
     const { network, load } = await start();
-    const nav = load('/dashboard', { method: 'POST' });
+    const nav = load('/', { method: 'POST' });
     await vi.advanceTimersByTimeAsync(20000);
     expect(nav.done).toBe(false);
     network.release();
@@ -1871,22 +1871,29 @@ describe('service-worker slow page loads', () => {
     `/report/${'e'.repeat(32)}`,
     '/admin/dispatch',
     '/tech',
-  ])('waits for the network on %s, which is not a customer app screen, and keeps the flag', async (path) => {
-    const { worker, network, load } = await start();
-    worker.dispatchMessage({ type: 'waves:network-next-navigation' });
+  ])('waits for the network on %s, which is not a customer app screen', async (path) => {
+    const { network, load } = await start();
     const nav = load(path);
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(20000);
     expect(nav.done).toBe(false);
     network.release();
     expect(bodyOf(await nav.promise)).toBe(networkHtml);
-    // The flag is still set: the next customer-screen load waits too.
-    const next = gatedNetwork();
-    worker.setFetch(next.serve);
-    const home = load('/');
-    expect(vi.getTimerCount()).toBe(0);
-    next.release();
-    await home.promise;
+  });
+
+  it('serves the saved copy when the headers land fast but the HTML body stalls', async () => {
+    const { worker, load } = await start();
+    let releaseBody;
+    const bodyGate = new Promise(resolve => { releaseBody = resolve; });
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? gatedResponse(networkHtml, bodyGate)
+      : fakeResponse(`asset:${request.url}`)));
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    releaseBody();
+    await result.settled();
   });
 
   it('never answers a slow home load with a shell another page stored', async () => {
@@ -1951,12 +1958,13 @@ describe('service-worker slow page loads', () => {
       expect(bodyOf(await second.promise)).toBe(networkHtml);
     });
 
-    it('is not used up by a POST page load or an offer link', async () => {
+    it('stays set through a POST, an offer link and a staff page load', async () => {
       const { worker, network, load } = await start();
       worker.dispatchMessage({ type: 'waves:network-next-navigation' });
       network.release();
-      await load('/dashboard', { method: 'POST' }).promise;
+      await load('/', { method: 'POST' }).promise;
       await load(`/careers/offer/${'b'.repeat(64)}`).promise;
+      await load('/admin/dispatch').promise;
       const next = gatedNetwork();
       worker.setFetch(next.serve);
       const nav = load();
