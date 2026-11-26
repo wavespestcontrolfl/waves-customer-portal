@@ -3,7 +3,7 @@ import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 import { clearNativeBadge } from '../native/nativeBadge';
 import { endVisitCards } from '../native/visitCard';
-import { clearHomeSnapshot, clearSavedHome, readHomeSnapshot, snapshotEligible, writeHomeSnapshot } from '../lib/homeSnapshot';
+import { clearSavedHome, homeIdentityKey, readHomeSnapshot, snapshotEligible, writeHomeSnapshot } from '../lib/homeSnapshot';
 
 const AuthContext = createContext(null);
 
@@ -180,6 +180,8 @@ export function AuthProvider({ children }) {
   // confirmed by /auth/me: no money, no payment actions, an "Updating…" note.
   // Flips false when a fresh load lands or the session ends.
   const [customerSaved, setCustomerSaved] = useState(false);
+  const customerSavedRef = useRef(false);
+  customerSavedRef.current = customerSaved;
   // Delete the saved home screen and stop showing it. Every identity or
   // session boundary below calls this; refs and setters only, so stable.
   const dropSavedHome = useCallback(() => {
@@ -290,6 +292,9 @@ export function AuthProvider({ children }) {
     // anything — only our own retry chain passes a number.
     const n = Number.isFinite(Number(attempt)) ? Number(attempt) : 0;
     const epoch = sessionEpochRef.current;
+    // Who this request is for, captured before it leaves: the saved screen is
+    // written only if the same login still holds the token afterwards.
+    const requestIdentity = homeIdentityKey(api.token);
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -306,8 +311,9 @@ export function AuthProvider({ children }) {
       customerRef.current = data;
       setCustomer(data);
       setCustomerSaved(false);
-      // A cancelled or contact session has a narrower screen that is never saved.
-      if (!snapshotEligible(data)) clearHomeSnapshot();
+      // A cancelled or contact session has a narrower screen that is never
+      // saved: drop the saved account AND the saved home reads.
+      if (!snapshotEligible(data)) clearSavedHome();
       const propertyReadSeq = ++propertyReadSeqRef.current;
       try {
         const propertyData = await api.getAuthProperties({ scope: 'saved' });
@@ -317,7 +323,7 @@ export function AuthProvider({ children }) {
           adoptPropertyPayload(propertyData);
           setPropertiesError(null);
           // Save this account for the next weak-signal start (money stripped).
-          writeHomeSnapshot({ token: api.token, me: data, propertyPayload: propertyData });
+          writeHomeSnapshot({ token: api.token, requestIdentity, me: data, propertyPayload: propertyData });
         }
       } catch (propertyErr) {
         // Same staleness rule as the success path: if the session changed
@@ -457,7 +463,10 @@ export function AuthProvider({ children }) {
         setCustomer(null);
         setLoading(true);
       }
-      if (identityChanged) {
+      // A new session family for the same customer replaces the family the
+      // SAVED screen was loaded under: do not keep it up while the new load
+      // stalls offline (same go-pending pattern as an identity change).
+      if (identityChanged || (familyChanged && customerSavedRef.current)) {
         // The token now points at a DIFFERENT customer — the old one must not
         // keep rendering (and firing actions) against it while loadCustomer
         // is in flight or retrying. Same go-pending pattern as switchProperty;

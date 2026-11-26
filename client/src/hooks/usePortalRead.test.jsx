@@ -488,4 +488,36 @@ describe('saved home reads', () => {
     await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toContain('Disabled'));
     expect(localStorage.getItem(HOME_READS_KEY)).not.toContain('Disabled');
   });
+
+  it('a denied read empties every mounted sibling, in memory and on disk', async () => {
+    seed();
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 403 }); }} lastLoad={never} otherLoad={never} />);
+    // latest-service never answers, yet it must not keep its hydrated data.
+    await waitFor(() => expect(screen.getByTestId('latest-service').textContent).toBe('none|false|false'));
+    expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('an answer that was already on the way when a sibling was denied is discarded and writes nothing', async () => {
+    seed();
+    let release;
+    const lateLast = () => new Promise((resolve) => { release = resolve; });
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 401 }); }} lastLoad={lateLast} otherLoad={never} />);
+    await waitFor(() => expect(localStorage.getItem(HOME_READS_KEY)).toBeNull());
+    await act(async () => { release({ services: [{ id: 'late', serviceType: 'Late Visit', date: '2026-12-02' }] }); });
+    expect(screen.getByTestId('latest-service').textContent).not.toContain('Late Visit');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('saves nothing when the login that started the read is not the provider\'s login', async () => {
+    const otherToken = tokenFor({ customerId: 'cust-1', sessionId: 'fam-2' });
+    let release;
+    // The read starts while another login's token is stored, and answers after this provider's login is back.
+    localStorage.setItem('waves_token', otherToken);
+    render(<HomeReads nextLoad={() => new Promise((resolve) => { release = resolve; })} lastLoad={never} otherLoad={never} />);
+    localStorage.setItem('waves_token', TOKEN);
+    await act(async () => { release({ next: { id: 'x', serviceType: 'Wrong Login Visit' } }); });
+    expect(screen.getByTestId('next-visit').textContent).toContain('Wrong Login Visit');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
 });

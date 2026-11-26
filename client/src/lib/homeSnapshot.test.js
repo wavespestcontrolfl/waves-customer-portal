@@ -28,8 +28,11 @@ const PROPS = {
   selected: { key: 'cust-1:p1', customerId: 'cust-1', propertyId: 'p1' },
 };
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => { localStorage.clear(); localStorage.setItem('waves_token', TOKEN); });
 afterEach(() => localStorage.clear());
+
+// A write for the login that is current: the request identity was captured from this token.
+const save = (me = ME, token = TOKEN) => writeHomeSnapshot({ token, requestIdentity: homeIdentityKey(token), me, propertyPayload: PROPS });
 
 describe('homeIdentityKey', () => {
   it('binds customer, session family, property and actor; rotation of the access token keeps it', () => {
@@ -49,7 +52,7 @@ describe('homeIdentityKey', () => {
 
 describe('account snapshot', () => {
   it('never stores money, notification prefs or unknown fields, in the profile or the property list', () => {
-    expect(writeHomeSnapshot({ token: TOKEN, me: ME, propertyPayload: PROPS })).toBe(true);
+    expect(save(ME)).toBe(true);
     const raw = localStorage.getItem(HOME_SNAPSHOT_KEY);
     for (const word of ['monthlyRate', 'accountCredit', 'autoApplyAccountCredit', 'credits', 'annualPrepay', 'futureMoneyField', 'smsEnabled', 'geo']) {
       expect(raw).not.toContain(word);
@@ -62,17 +65,17 @@ describe('account snapshot', () => {
   });
 
   it('reads back only for the same login', () => {
-    writeHomeSnapshot({ token: TOKEN, me: ME, propertyPayload: PROPS });
+    save(ME);
     expect(readHomeSnapshot(makeToken({ customerId: 'cust-2', sessionId: 'fam-1' }))).toBeNull();
     // A mismatch deletes the entry: the other identity's token cannot "retry" it either.
     expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
-    writeHomeSnapshot({ token: TOKEN, me: ME, propertyPayload: PROPS });
+    save(ME);
     expect(readHomeSnapshot(makeToken({ customerId: 'cust-1', sessionId: 'fam-1' }, 'rotated'))).not.toBeNull();
   });
 
   it('rejects and deletes an expired entry, a future-dated one and a wrong version', () => {
     const write = (patch) => {
-      writeHomeSnapshot({ token: TOKEN, me: ME, propertyPayload: PROPS });
+      save(ME);
       const entry = JSON.parse(localStorage.getItem(HOME_SNAPSHOT_KEY));
       localStorage.setItem(HOME_SNAPSHOT_KEY, JSON.stringify({ ...entry, ...patch }));
     };
@@ -89,11 +92,11 @@ describe('account snapshot', () => {
   });
 
   it('never saves, and never adopts, a cancelled or contact account', () => {
-    expect(writeHomeSnapshot({ token: TOKEN, me: { ...ME, cancelled: true }, propertyPayload: PROPS })).toBe(false);
-    expect(writeHomeSnapshot({ token: TOKEN, me: { ...ME, actor: { kind: 'contact', slot: 1 } }, propertyPayload: PROPS })).toBe(false);
+    expect(save({ ...ME, cancelled: true })).toBe(false);
+    expect(save({ ...ME, actor: { kind: 'contact', slot: 1 } })).toBe(false);
     expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
     // A planted entry with the right identity but a cancelled / contact body is refused too.
-    writeHomeSnapshot({ token: TOKEN, me: ME, propertyPayload: PROPS });
+    save(ME);
     const entry = JSON.parse(localStorage.getItem(HOME_SNAPSHOT_KEY));
     localStorage.setItem(HOME_SNAPSHOT_KEY, JSON.stringify({ ...entry, customer: { ...entry.customer, cancelled: true } }));
     expect(readHomeSnapshot(TOKEN)).toBeNull();
@@ -103,7 +106,7 @@ describe('account snapshot', () => {
 
   it('a token for another identity deletes the saved entries; a same-session rotation keeps them', () => {
     localStorage.setItem('waves_token', TOKEN);
-    writeHomeSnapshot({ token: TOKEN, me: ME, propertyPayload: PROPS });
+    save(ME);
     writeHomeRead(homeIdentityKey(TOKEN), 'cust-1:p1', 'next-visit', { next: null }, Date.now());
     dropSavedHomeUnlessSameIdentity(makeToken({ customerId: 'cust-1', sessionId: 'fam-1' }, 'rotated'));
     expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).not.toBeNull();
@@ -111,6 +114,35 @@ describe('account snapshot', () => {
     dropSavedHomeUnlessSameIdentity(makeToken({ customerId: 'cust-1', sessionId: 'fam-1', propertyId: 'p2' }));
     expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
     expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+});
+
+describe('who a snapshot write is for', () => {
+  // Another login of the SAME customer (a new session family): only the request identity tells it apart.
+  const OTHER = makeToken({ customerId: 'cust-1', sessionId: 'fam-9' });
+  const STRANGER = makeToken({ customerId: 'cust-2', sessionId: 'fam-9' });
+
+  it('writes nothing when another login holds the token by the time the response lands', () => {
+    // The request left under TOKEN; a refresh adopted another tab's new login.
+    const requestIdentity = homeIdentityKey(TOKEN);
+    localStorage.setItem('waves_token', OTHER);
+    expect(writeHomeSnapshot({ token: OTHER, requestIdentity, me: ME, propertyPayload: PROPS })).toBe(false);
+    expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
+  });
+
+  it('writes nothing when the stored login differs from the token in memory', () => {
+    localStorage.setItem('waves_token', STRANGER);
+    expect(save(ME, TOKEN)).toBe(false);
+    expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
+  });
+
+  it('writes nothing when the profile is not the token\'s customer', () => {
+    expect(save({ ...ME, id: 'cust-2' })).toBe(false);
+    expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
+  });
+
+  it('writes for the matching login', () => {
+    expect(save()).toBe(true);
   });
 });
 

@@ -7,7 +7,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from './useAuth';
-import { HOME_SNAPSHOT_KEY, HOME_STORE_MAX_AGE_MS, writeHomeSnapshot } from '../lib/homeSnapshot';
+import { HOME_READS_KEY, HOME_SNAPSHOT_KEY, HOME_STORE_MAX_AGE_MS, homeIdentityKey, writeHomeRead, writeHomeSnapshot } from '../lib/homeSnapshot';
 
 vi.mock('../native/nativeBadge', () => ({ clearNativeBadge: vi.fn() }));
 vi.mock('../native/visitCard', () => ({ endVisitCards: vi.fn() }));
@@ -63,7 +63,10 @@ function Probe() {
 }
 const mount = async () => { await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); }); };
 const savedSnapshot = () => localStorage.getItem(HOME_SNAPSHOT_KEY);
-const seedSnapshot = (token = TOKEN, me = { ...FRESH_ME, lastName: 'Saved' }) => writeHomeSnapshot({ token, me, propertyPayload: PROPS });
+const seedSnapshot = (token = TOKEN, me = { ...FRESH_ME, lastName: 'Saved' }) => {
+  localStorage.setItem('waves_token', token);
+  return writeHomeSnapshot({ token, requestIdentity: homeIdentityKey(token), me, propertyPayload: PROPS });
+};
 const pendingForever = () => api.getMe.mockImplementation(() => new Promise(() => {}));
 const text = (id) => screen.getByTestId(id).textContent;
 
@@ -285,5 +288,52 @@ describe('saved home screen at launch', () => {
     await act(async () => { release(FRESH_ME); });
     expect(text('name')).toBe('');
     expect(savedSnapshot()).toBeNull();
+  });
+
+  it('a profile that answers after another login took the token saves nothing under the new identity', async () => {
+    localStorage.setItem('waves_token', TOKEN);
+    let release;
+    api.getMe.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    await mount();
+    // A token refresh adopted another tab's new login; no storage event reached the handler.
+    const other = makeToken({ customerId: 'cust-1', sessionId: 'fam-7' });
+    localStorage.setItem('waves_token', other);
+    api.token = other;
+    await act(async () => { release({ ...FRESH_ME, firstName: 'Customer', lastName: 'A' }); });
+    expect(savedSnapshot()).toBeNull();
+  });
+
+  it('a same-customer new session family drops the saved screen and waits, even when the new load stalls', async () => {
+    seedSnapshot();
+    localStorage.setItem('waves_token', TOKEN);
+    pendingForever();
+    await mount();
+    expect(text('saved')).toBe('true');
+    await act(async () => {
+      localStorage.setItem('waves_token', makeToken({ customerId: 'cust-1', sessionId: 'fam-2' }));
+      window.dispatchEvent(new StorageEvent('storage', { key: 'waves_token' }));
+    });
+    expect(text('name')).toBe('');
+    expect(text('saved')).toBe('false');
+    expect(text('loading')).toBe('true');
+    expect(authApi.properties).toHaveLength(0);
+  });
+
+  it('a fresh cancelled account also deletes the saved home reads', async () => {
+    seedSnapshot();
+    writeHomeRead(homeIdentityKey(TOKEN), 'cust-1:p1', 'next-visit', { next: null }, Date.now());
+    expect(localStorage.getItem(HOME_READS_KEY)).not.toBeNull();
+    api.getMe.mockResolvedValue({ ...FRESH_ME, cancelled: true });
+    await mount();
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+    expect(savedSnapshot()).toBeNull();
+  });
+
+  it('a fresh contact account deletes the saved home reads too', async () => {
+    seedSnapshot();
+    writeHomeRead(homeIdentityKey(TOKEN), 'cust-1:p1', 'next-visit', { next: null }, Date.now());
+    api.getMe.mockResolvedValue({ ...FRESH_ME, actor: { kind: 'contact', slot: 1 } });
+    await mount();
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
   });
 });

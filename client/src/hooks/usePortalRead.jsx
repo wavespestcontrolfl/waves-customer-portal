@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useBiometricLock } from '../components/BiometricGate';
 import { isNativeApp } from '../native/platform';
-import { clearHomeReads, readHomeReads, writeHomeRead } from '../lib/homeSnapshot';
+import { clearHomeReads, readHomeReads, storedHomeIdentity, writeHomeRead } from '../lib/homeSnapshot';
 
 const PortalReadContext = createContext(null);
 export const READ_TIMEOUT_MS = 15000;
@@ -32,11 +32,28 @@ export function PortalReadProvider({ enabled, persistIdentity = null, persistPro
   if (cache.current === null) cache.current = hydrateSavedReads(enabled ? persistIdentity : null, persistProperty);
   const persistRef = useRef({ identity: persistIdentity, property: persistProperty });
   persistRef.current = { identity: enabled ? persistIdentity : null, property: persistProperty };
-  const persistRead = useCallback((key, entry) => {
+  // The login stored in this browser when a read starts; its answer is saved
+  // only if that login is still this provider's login (a late response after a
+  // login change writes nothing, see writeHomeRead).
+  const readStamp = useCallback(() => storedHomeIdentity(), []);
+  const persistRead = useCallback((key, entry, stamp) => {
     const { identity, property } = persistRef.current;
+    if (stamp !== identity) return;
     writeHomeRead(identity, property, key, entry.data, entry.updatedAt);
   }, []);
-  const forgetSaved = useCallback(() => clearHomeReads(), []);
+  // Access denied: every mounted reader loses its data and bumps its own
+  // sequence, so an answer already on the way is discarded and a sibling can
+  // neither keep showing hydrated data nor write the cache or storage again.
+  const invalidated = useRef(new Set()).current;
+  const onInvalidate = useCallback((reset) => {
+    invalidated.add(reset);
+    return () => invalidated.delete(reset);
+  }, [invalidated]);
+  const invalidate = useCallback((message) => {
+    cache.current.clear();
+    clearHomeReads();
+    [...invalidated].forEach((reset) => reset(message));
+  }, [invalidated]);
   const readers = useRef(new Set()).current;
   const [online, setOnline] = useState(() => navigator.onLine !== false);
   const [refreshing, setRefreshing] = useState(false);
@@ -121,8 +138,9 @@ export function PortalReadProvider({ enabled, persistIdentity = null, persistPro
     wasLocked.current = locked;
   }, [locked, refresh]);
 
-  const value = useMemo(() => ({ enabled, cache: cache.current, register, online, refreshing, refresh, persistRead, forgetSaved }),
-    [enabled, register, online, refreshing, refresh, persistRead, forgetSaved]);
+  const value = useMemo(() => ({
+    enabled, cache: cache.current, register, online, refreshing, refresh, persistRead, readStamp, onInvalidate, invalidate,
+  }), [enabled, register, online, refreshing, refresh, persistRead, readStamp, onInvalidate, invalidate]);
   return <PortalReadContext.Provider value={value}>{children}</PortalReadContext.Provider>;
 }
 
@@ -138,7 +156,9 @@ export default function usePortalRead(key, load) {
   const register = portal?.enabled ? portal.register : null;
   const offline = portal?.enabled && !portal.online;
   const persistRead = portal?.enabled ? portal.persistRead : undefined;
-  const forgetSaved = portal?.enabled ? portal.forgetSaved : undefined;
+  const readStamp = portal?.enabled ? portal.readStamp : undefined;
+  const onInvalidate = portal?.enabled ? portal.onInvalidate : undefined;
+  const invalidate = portal?.enabled ? portal.invalidate : undefined;
   const loadRef = useRef(load);
   loadRef.current = load;
   const sequence = useRef(0);
@@ -156,6 +176,7 @@ export default function usePortalRead(key, load) {
 
   const refresh = useCallback(async ({ preserveVerified = false } = {}) => {
     const attempt = ++sequence.current;
+    const stamp = readStamp?.();
     // Background reads preserve a healthy view so they do not collapse scroll
     // or remove focused inputs. Manual retries, offline/error/remounted-cache
     // states remain unverified until success; 401/403 still clear cache below.
@@ -173,16 +194,17 @@ export default function usePortalRead(key, load) {
         loadRef.current(),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('The connection is taking too long. Please try again.')), READ_TIMEOUT_MS); }),
       ]);
+      // Superseded, or access was denied to a sibling (its reset bumps this sequence).
       if (sequence.current !== attempt) return;
       const next = { data, updatedAt: Date.now(), loading: false, pending: false, verified: navigator.onLine !== false, error: '' };
       cache?.set(key, next);
-      persistRead?.(key, next);
+      persistRead?.(key, next, stamp);
       setState(next);
     } catch (error) {
       if (sequence.current !== attempt) return;
       // An explicit access denial must not leave cached customer details behind.
       const denied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
-      if (denied) { cache?.clear(); forgetSaved?.(); }
+      if (denied) { if (invalidate) invalidate(error?.message); else cache?.clear(); }
       setState(previous => ({
         ...previous,
         ...(denied ? { data: undefined, updatedAt: null } : {}),
@@ -194,13 +216,21 @@ export default function usePortalRead(key, load) {
     } finally {
       clearTimeout(timer);
     }
-  }, [cache, key, persistRead, forgetSaved]);
+  }, [cache, key, persistRead, readStamp, invalidate]);
 
   useEffect(() => {
     void refresh();
     return () => { sequence.current += 1; };
   }, [refresh]);
   useEffect(() => register?.(refresh), [register, refresh]);
+  // A denial seen by ANY reader empties this one too and drops its own answer
+  // still in flight.
+  useEffect(() => onInvalidate?.((message) => {
+    sequence.current += 1;
+    setState(previous => ({
+      ...previous, data: undefined, updatedAt: null, loading: false, pending: false, verified: false, error: message || 'Could not update this information.',
+    }));
+  }), [onInvalidate]);
 
   const update = useCallback((change) => {
     sequence.current += 1;
@@ -208,10 +238,10 @@ export default function usePortalRead(key, load) {
       if (previous.data === undefined) return previous;
       const next = { ...previous, data: change(previous.data), error: '', loading: false, pending: false, verified: navigator.onLine !== false, updatedAt: Date.now() };
       cache?.set(key, next);
-      persistRead?.(key, next);
+      persistRead?.(key, next, readStamp?.());
       return next;
     });
-  }, [cache, key, persistRead]);
+  }, [cache, key, persistRead, readStamp]);
 
   return { ...state, refresh, update, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
 }

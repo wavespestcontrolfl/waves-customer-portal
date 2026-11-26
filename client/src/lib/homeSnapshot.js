@@ -139,13 +139,29 @@ export function snapshotEligible(me) {
   return !!me && me.cancelled !== true && me.actor?.kind !== 'contact';
 }
 
-export function writeHomeSnapshot({ token, me, propertyPayload }) {
+// The identity of the login stored in this browser right now (what another tab
+// may have replaced since a request started).
+export function storedHomeIdentity() {
+  try { return homeIdentityKey(localStorage.getItem('waves_token')); } catch { return null; }
+}
+
+// Writes the saved account only for the login that asked for it. `requestIdentity`
+// is homeIdentityKey of the token captured BEFORE the /auth/me request left;
+// the write needs the token now in use AND the token in storage to carry the
+// same identity, and the returned profile to be that token's customer. A
+// response that outlived a login change (another tab's new login adopted by a
+// token refresh) writes nothing, so customer A's name and address can never be
+// saved under B's identity.
+export function writeHomeSnapshot({ token, requestIdentity, me, propertyPayload }) {
   const identity = homeIdentityKey(token);
   const properties = snapshotProperties(propertyPayload);
-  if (!identity || !properties || !snapshotEligible(me)) {
+  if (!snapshotEligible(me)) {
     clearHomeSnapshot();
     return false;
   }
+  const payload = tokenPayload(token);
+  if (!identity || !properties || identity !== requestIdentity || identity !== storedHomeIdentity()
+    || String(payload?.customerId) !== String(me?.id)) return false;
   writeEntry(HOME_SNAPSHOT_KEY, {
     v: HOME_STORE_VERSION, identity, savedAt: Date.now(), customer: snapshotCustomer(me), properties,
   });
@@ -204,9 +220,7 @@ export function readHomeReads(identity, property) {
 export function writeHomeRead(identity, property, key, data, updatedAt) {
   if (!identity || !property || !SAVED_READ_KEYS.includes(key)) return;
   // A late response after sign-out or a login change must not write at all.
-  let stored = null;
-  try { stored = localStorage.getItem('waves_token'); } catch { /* storage blocked */ }
-  if (homeIdentityKey(stored) !== identity) return;
+  if (storedHomeIdentity() !== identity) return;
   const entry = readEntry(HOME_READS_KEY);
   const same = entryUsable(entry, identity) && entry.property === property && entry.reads && typeof entry.reads === 'object';
   writeEntry(HOME_READS_KEY, {

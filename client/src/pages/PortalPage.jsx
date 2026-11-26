@@ -3139,6 +3139,36 @@ function DashboardTab({ customer, accountSaved = false, onSwitchTab, onOpenPlanS
       .catch(() => {});
   }, []);
 
+  // The saved home screen mounted this tab before the account was fresh, so
+  // its mount-only reads may have failed on a weak signal. When the account
+  // turns fresh (customerSaved true -> false) read them again, and clear the
+  // old error first so a stale "unavailable" never outlives a good load.
+  const wasAccountSaved = useRef(accountSaved);
+  useEffect(() => {
+    const turnedFresh = wasAccountSaved.current && !accountSaved;
+    wasAccountSaved.current = accountSaved;
+    if (!turnedFresh) return;
+    setBalanceStatus('loading');
+    setStatsStatus('loading');
+    setBillingModeStatus('loading');
+    setReferralStatsStatus('loading');
+    api.getBalance().then(d => { setBalance(d); setBalanceStatus('ready'); }).catch(err => { console.error(err); setBalanceStatus('error'); });
+    api.getServiceStats().then(d => { setStats(d); setStatsStatus('ready'); }).catch(err => { console.error(err); setStatsStatus('error'); });
+    api.getAutopay().then(d => {
+      setBillingMode(d?.billing_mode || null);
+      setResolvedNonMonthly(d?.non_monthly_billing === true);
+      setBillingModeStatus('ready');
+    }).catch(() => setBillingModeStatus('error'));
+    api.getReferrals().then(d => {
+      if (d?.stats) setReferralStats({
+        ...d.stats,
+        totalEarned: d.totalEarned != null ? Number(d.totalEarned) / 100 : 0,
+        rewardPerReferral: d.capReached === true ? 0 : Number(d.rewardPerReferral) || 0,
+      });
+      setReferralStatsStatus('ready');
+    }).catch(err => { console.error(err); setReferralStatsStatus('error'); });
+  }, [accountSaved]);
+
   // position:relative lets the glass specular pseudo-elements anchor to each
   // card; inert without the glass theme mounted (no offsets, no stacking context).
   const card = { ...PORTAL_CARD_STYLE, position: 'relative' };

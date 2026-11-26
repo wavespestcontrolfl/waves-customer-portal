@@ -161,4 +161,26 @@ describe('saved home screen in the portal', () => {
     expect(screen.queryByText('Other House Visit')).not.toBeInTheDocument();
     expect(localStorage.getItem(HOME_READS_KEY) || '').not.toContain('Other House Visit');
   });
+
+  it('reloads the balance when the account turns fresh, even if the saved screen\'s first read failed offline', async () => {
+    api.getBalance.mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ currentBalance: 120 });
+    const { rerender } = view();
+    await screen.findByText(/hello pat/i);
+    await waitFor(() => expect(api.getBalance).toHaveBeenCalledTimes(1));
+    auth.saved = false;
+    auth.customer = FRESH_CUSTOMER;
+    rerender(<BrowserRouter><PortalPage /></BrowserRouter>);
+    expect(await screen.findByText('Pay now')).toBeInTheDocument();
+    expect(api.getBalance).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Billing unavailable')).not.toBeInTheDocument();
+  });
+
+  it('does not reload anything extra on a normal fresh launch', async () => {
+    auth.saved = false;
+    auth.customer = FRESH_CUSTOMER;
+    view();
+    await screen.findByText(/hello pat/i);
+    await waitFor(() => expect(api.getBalance).toHaveBeenCalled());
+    expect(api.getBalance).toHaveBeenCalledTimes(1);
+  });
 });
