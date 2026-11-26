@@ -877,15 +877,18 @@ async function sheetPlanned({ plan, items, addOns }, knex) {
  * opening the sheet.
  */
 async function loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoScout) {
-  const empty = (unavailable = null) => ({ source: null, items: [], addOns: [], unavailable });
-  if (visitType === 'unknown') return empty('billing_mode_lookup_failed');
+  const empty = (unavailable = null, held = []) => ({ source: null, items: [], addOns: [], unavailable, ...(held.length ? { group11HeldProductIds: held } : {}) });
+  // A visit with no program rows still has the product search: a product at its label limit on applications in a row
+  // (a third Velista) stays out of it. The sheet holds these ids whatever the guide does.
+  const searchHeld = async () => (featureGates.lawnV13Live?.() === true ? (await fungicideHolds({ svc, knex })).heldProductIds : []);
+  if (visitType === 'unknown') return empty('billing_mode_lookup_failed', await searchHeld());
   // buildPlanForService keys the program off the CUSTOMER (tier / billing mode),
   // so it can return the seasonal recipe for a member's one-time or
   // per-application appointment. Only a recurring program appointment gets it.
-  if (visitType !== 'recurring') return empty();
+  if (visitType !== 'recurring') return empty(null, await searchHeld());
   try {
     const loaded = await loadPlan(svc, knex, tetrinoScout);
-    if (!loaded) return empty();
+    if (!loaded) return empty(null, await searchHeld());
     const sheet = await sheetPlanned(loaded, knex);
     const weed = await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures });
     const chinch = await loadChinch({ loaded, sheet, svc, knex, readFailures });
@@ -1202,7 +1205,7 @@ async function group11PassOver({ svc, knex }) {
 //     every other case both rows stay passed over.
 // A history read that fails holds every listed product (nobody read its run) and leaves the Group 11 pass-over as it
 // was, the way an unread take-all status counts as mapped.
-async function fungicideHolds({ svc, knex }) {
+async function fungicideHolds({ svc, knex, strict = false }) {
   const group11 = await group11PassOver({ svc, knex });
   const engine = require('./waveguard-approval-engine');
   let takeAllMapped = group11;
@@ -1217,12 +1220,13 @@ async function fungicideHolds({ svc, knex }) {
     logger.warn(`[lawn-fast] fungicide history unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     successiveHeld = [...engine.SUCCESSIVE_USE_LIMITS];
   }
-  return { takeAllMapped, successiveHeld, heldProductIds: await limitedCatalogIds({ svc, knex, limits: successiveHeld }) };
+  return { takeAllMapped, successiveHeld, heldProductIds: await limitedCatalogIds({ svc, knex, limits: successiveHeld, strict }) };
 }
 
 // The catalog ids of the held products, by registration number or name (the engine's isLimitedProduct). A failed read
-// leaves the month's own rows held (lawn-treatment-guide.js successiveHeldAddOns), and says so in the log.
-async function limitedCatalogIds({ svc, knex, limits }) {
+// leaves the month's own rows held (lawn-treatment-guide.js successiveHeldAddOns), and says so in the log. `strict`
+// (the guide's answer): it throws, so the answer fails and the sheet keeps the holds its context gave it.
+async function limitedCatalogIds({ svc, knex, limits, strict = false }) {
   if (!limits.length) return [];
   try {
     const { isLimitedProduct } = require('./waveguard-approval-engine');
@@ -1230,6 +1234,7 @@ async function limitedCatalogIds({ svc, knex, limits }) {
     return (catalog || []).filter((row) => limits.some((limit) => isLimitedProduct(limit, { epa: row.epa_reg_number, name: row.name }))).map((row) => String(row.id));
   } catch (err) {
     logger.warn(`[lawn-fast] held fungicide catalog rows unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    if (strict) throw err;
     return [];
   }
 }
@@ -1280,7 +1285,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
   // loadWeedMix catches a defect into readFailures for the context's sake; here that would read as "no weed group".
   if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-  const { takeAllMapped, successiveHeld, heldProductIds } = await fungicideHolds({ svc, knex });
+  const { takeAllMapped, successiveHeld, heldProductIds } = await fungicideHolds({ svc, knex, strict: true });
   const [offers, chinch] = await Promise.all([
     guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex), takeAllMapped, successiveHeld }),
     loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex, places: await limitPlaces(svc, knex) }) : null,
@@ -1598,6 +1603,7 @@ module.exports = {
   takeAllMappedOn,
   group11PassOver,
   fungicideHolds,
+  loadPlannedProducts,
   guidedProductIds,
   group11HeldContext,
   takeAllProductIdsFor,

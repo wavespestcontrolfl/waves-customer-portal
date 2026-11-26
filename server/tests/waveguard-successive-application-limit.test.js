@@ -55,8 +55,9 @@ describe('successiveRun: the product\'s unbroken run that ends at the lawn\'s la
     expect(run([artavia('2026-11-20', { treated_property_id: null }), velista('2026-11-03'), velista('2026-10-06')])).toEqual(['2026-11-03', '2026-10-06']);
     expect(run([artavia('2026-11-20', { treated_property_id: 'other-home' }), velista('2026-11-03'), velista('2026-10-06')])).toEqual(['2026-11-03', '2026-10-06']);
     expect(run([velista('2026-11-03', { treated_property_id: null }), velista('2026-10-06')])).toEqual(['2026-11-03', '2026-10-06']);
-    // A visit that names no property: history that names none is its own.
-    expect(run([artavia('2026-11-20', { treated_property_id: null }), velista('2026-11-03', { treated_property_id: null })], null)).toEqual([]);
+    // A visit whose property could not be established: the customer's whole history is one lawn.
+    expect(run([velista('2026-11-03'), velista('2026-10-06', { treated_property_id: 'other-home' })], null)).toEqual(['2026-11-03', '2026-10-06']);
+    expect(run([artavia('2026-11-20', { treated_property_id: 'other-home' }), velista('2026-11-03'), velista('2026-10-06')], null)).toEqual([]);
   });
 
   test('one service record is one application: two visits on one date are two, a tank mix is one', () => {
@@ -120,7 +121,7 @@ describe('successiveRun: the product\'s unbroken run that ends at the lawn\'s la
 // category history read, which is the one that reads up to and including the visit's date ("<=").
 function fakeKnex({ catalog = [], history = [], fail = false, failCatalog = false, seen = {} }) {
   const knex = (table) => {
-    const state = { through: null, property: undefined, excluded: undefined };
+    const state = { through: null, property: undefined, excluded: undefined, statuses: null };
     const settle = async () => {
       if (table === 'products_catalog') { if (failCatalog) throw new Error('catalog read failed'); return catalog; }
       if (table === 'customer_turf_profiles') return null;
@@ -129,11 +130,13 @@ function fakeKnex({ catalog = [], history = [], fail = false, failCatalog = fals
       Object.assign(seen, state);
       return history.filter((entry) => entry.service_date <= state.through
         && entry.scheduled_service_id !== state.excluded
-        && (entry.treated_property_id == null || entry.treated_property_id === state.property));
+        && (state.statuses || []).includes(entry.status || 'completed')
+        // No property filter: a visit whose property could not be established reads the customer's whole history.
+        && (state.property === undefined || entry.treated_property_id == null || entry.treated_property_id === state.property));
     };
     const query = {
       join: () => query, leftJoin: () => query, orderBy: () => query, select: () => query, limit: () => query, first: () => query,
-      whereIn: () => query, whereNull: () => query,
+      whereIn: (column, values) => { if (column === 'sr.status') state.statuses = values; return query; }, whereNull: () => query,
       modify: (fn) => { fn(query); return query; },
       whereRaw: (sql, bindings) => {
         if (/scheduled_service_id/.test(sql)) state.excluded = bindings?.[0];
@@ -217,14 +220,25 @@ describe('the approval engine names a third Velista in a row', () => {
     expect(limitBlocks(await evaluate(fall, { propertyId: null, seen }))).toHaveLength(1);
     expect(seen.property).toBe(HOME);
     expect(resolver.mock.calls[0][0]).toMatchObject({ id: 'visit-dec', customer_id: 'customer-1' });
-    // None resolves: only history that names no property is this visit's.
+    // None resolves: the customer's whole history is judged, so the two applications recorded at the home still count.
     resolver.mockResolvedValue(null);
-    expect(limitBlocks(await evaluate(fall, { propertyId: null }))).toEqual([]);
-    // The resolver fails: strict throws, else the visit reads as one with no property.
+    const whole = {};
+    expect(limitBlocks(await evaluate(fall, { propertyId: null, seen: whole }))).toHaveLength(1);
+    expect(whole.property).toBeUndefined();
+    // The resolver fails: strict throws, else the visit is judged on the whole history too.
     resolver.mockRejectedValue(new Error('resolver failed'));
     await expect(evaluate(fall, { propertyId: null, strict: true })).rejects.toThrow('resolver failed');
-    expect(limitBlocks(await evaluate(fall, { propertyId: null }))).toEqual([]);
+    expect(limitBlocks(await evaluate(fall, { propertyId: null }))).toHaveLength(1);
     resolver.mockRestore();
+  });
+
+  test('a visit closed as incomplete keeps its applications: Velista on one counts', async () => {
+    const seen = {};
+    const history = [velista('2026-11-03', { status: 'incomplete' }), velista('2026-10-06'), artavia('2026-09-08')];
+    expect(limitBlocks(await evaluate(history, { seen }))).toHaveLength(1);
+    expect(seen.statuses).toEqual(['completed', 'incomplete']);
+    // Another status (a draft) is not an application.
+    expect(limitBlocks(await evaluate([velista('2026-11-03', { status: 'draft' }), velista('2026-10-06')]))).toEqual([]);
   });
 
   test('a failed history read throws when strict (the job card withholds), else reads as no finding', async () => {
@@ -299,6 +313,21 @@ describe('Fast Complete and the treatment guide pass the Velista row over at its
     // The catalog read fails too: the month's own Velista row is still held by its name (successiveHeldAddOns).
     expect(await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ history: fall, failCatalog: true }) }))
       .toEqual({ takeAllMapped: false, successiveHeld: [VELISTA], heldProductIds: [] });
+  });
+
+  test('a visit with no program rows (one-time, per application): the Velista catalog row is still held from its search', async () => {
+    jest.spyOn(featureGates, 'lawnV13Live').mockReturnValue(true);
+    const knex = fakeKnex({ catalog: CATALOG, history: fall });
+    for (const visitType of ['one_time', 'unknown']) {
+       
+      expect(await fastComplete.loadPlannedProducts(svc, knex, visitType, new Set(), null)).toMatchObject({ source: null, items: [], group11HeldProductIds: ['vel'] });
+    }
+    // Nothing reached: the payload is as before.
+    expect(await fastComplete.loadPlannedProducts(svc, fakeKnex({ catalog: CATALOG, history: [] }), 'one_time', new Set(), null)).toEqual({ source: null, items: [], addOns: [], unavailable: null });
+  });
+
+  test('the guide\'s answer fails when the held catalog rows cannot be read, so the sheet keeps its own holds', async () => {
+    await expect(fastComplete.fungicideHolds({ svc, knex: fakeKnex({ history: fall, failCatalog: true }), strict: true })).rejects.toThrow('catalog read failed');
   });
 
   test('a month whose rows do not list Velista: its catalog row is still held from the search', async () => {

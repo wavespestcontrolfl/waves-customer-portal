@@ -388,7 +388,9 @@ const successiveLimitFor = (product) => SUCCESSIVE_USE_LIMITS.find((limit) => is
 const rowGroups = (row) => [row.catalog_group, row.catalog_moa_group, row.moa_group]
   .flatMap((value) => String(value ?? '').split(GROUP_SPLIT)).map(bareGroup).filter(Boolean);
 
-// The lawn's completed applications of one product category up to the visit's date, as product rows (newest first).
+const APPLIED_RECORD_STATUSES = Object.freeze(['completed', 'incomplete']);
+
+// The lawn's recorded applications of one product category up to the visit's date, as product rows (newest first).
 // A failed read throws when strict, else reads as no history.
 async function categoryHistory(knex, { customerId, propertyId, category, serviceDate, serviceId = null, strict = false }) {
   return savepointRead(knex, (k) => k('service_products as sp')
@@ -396,9 +398,16 @@ async function categoryHistory(knex, { customerId, propertyId, category, service
     .leftJoin('products_catalog as pc', function () {
       this.on('sp.product_name', '=', 'pc.name');
     })
-    .modify((query) => scopeToTreatedProperty(query, propertyId, { joinVisit: true, includeUnplaced: true }))
+    // A visit whose property cannot be established is judged on the customer's whole history (the repeat-group finding's
+    // own scope): reading only the unplaced records would drop every application recorded at the property itself.
+    .modify((query) => {
+      if (propertyId) return scopeToTreatedProperty(query, propertyId, { joinVisit: true, includeUnplaced: true });
+      return query.leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+        .leftJoin('property_application_history as pah_scope', 'pah_scope.service_product_id', 'sp.id');
+    })
     .where('sr.customer_id', customerId)
-    .where('sr.status', 'completed')
+    // A visit closed as incomplete keeps the products that did go down: they are applications too.
+    .whereIn('sr.status', APPLIED_RECORD_STATUSES)
     .where('sr.service_date', '<=', serviceDate)
     // The visit being judged is not its own history (a close-out can be read again after its record exists).
     .modify((query) => { if (serviceId) query.whereRaw('(sr.scheduled_service_id IS NULL OR sr.scheduled_service_id <> ?)', [serviceId]); })
@@ -427,9 +436,10 @@ function applicationsOf(rows) {
 }
 
 // The dates, newest first, of the product's unbroken run of applications that ends at the lawn's latest fungicide
-// application. `propertyId`: the visit's property (null = a visit that names none).
+// application. `propertyId`: the visit's property. Null = none could be established: the rows are the customer's
+// whole history (categoryHistory), judged as one lawn.
 function successiveRun(limit, rows, { propertyId = null } = {}) {
-  const here = (row) => String(row.treated_property_id ?? '') === String(propertyId ?? '');
+  const here = (row) => !propertyId || String(row.treated_property_id ?? '') === String(propertyId);
   const run = [];
   for (const application of applicationsOf(rows)) {
     if (application.rows.some((row) => isLimitedProduct(limit, { epa: row.recorded_epa || row.catalog_epa, name: row.product_name }))) run.push(application.day);
