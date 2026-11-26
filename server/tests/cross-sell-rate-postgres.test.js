@@ -209,11 +209,28 @@ postgres('cross-sell rate (live Postgres)', () => {
     test('a service riding on a plan visit as an add-on counts as its own family', async () => {
       const c = await customer('AddOn');
       const v = await visit(c, { ...PEST });
-      await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v, service_name: 'Termite Bait Monitoring', service_key_snapshot: 'termite_bait', created_at: '2026-02-01T12:00:00Z' });
+      await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v, service_name: 'Termite Bait Monitoring', service_key_snapshot: 'termite_bait', recurring_pattern: 'quarterly', created_at: '2026-02-01T12:00:00Z' });
+      const once = await customer('AddOnOnce');
+      const v3 = await visit(once, { ...PEST });
+      // A one-time add-on (no recurring pattern of its own) is not a service the customer holds.
+      await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v3, service_name: 'Mosquito Event', service_key_snapshot: 'mosquito_seasonal', created_at: '2026-02-01T12:00:00Z' });
       const plain = await customer('AddOnNoFamily');
       const v2 = await visit(plain, { ...PEST });
       await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v2, service_name: 'WaveGuard Membership', service_key_snapshot: 'waveguard_membership', created_at: '2026-02-01T12:00:00Z' });
-      expect(await counts()).toEqual({ recurringCustomers: 2, multiServiceCustomers: 1 });
+      expect(await counts()).toEqual({ recurringCustomers: 3, multiServiceCustomers: 1 });
+    });
+
+    test('a visit cancelled after the day still counts for that day; one cancelled before it, or with no time, does not', async () => {
+      const later = await customer('CancelledLater');
+      await visit(later, { ...PEST });
+      await visit(later, { ...LAWN, status: 'cancelled', cancelled_at: '2026-11-10T15:00:00Z' });
+      const before = await customer('CancelledBefore');
+      await visit(before, { ...PEST });
+      await visit(before, { ...LAWN, status: 'cancelled', cancelled_at: '2026-10-20T15:00:00Z' });
+      const noTime = await customer('CancelledNoTime');
+      await visit(noTime, { ...PEST });
+      await visit(noTime, { ...LAWN, status: 'cancelled', cancelled_at: null });
+      expect(await counts()).toEqual({ recurringCustomers: 3, multiServiceCustomers: 1 });
     });
 
     test('a series child with no recurring flag still counts', async () => {

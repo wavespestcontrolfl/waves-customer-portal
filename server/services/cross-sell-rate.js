@@ -84,16 +84,21 @@ const COUNTED_VISITS_SQL = `
     FROM scheduled_services ss
     -- A legacy series child carries recurring_parent_id with no is_recurring flag; a NULL status is open.
     WHERE (ss.is_recurring = true OR ss.recurring_parent_id IS NOT NULL)
-      AND COALESCE(ss.is_callback, false) = false AND ss.status IS DISTINCT FROM 'cancelled'
+      AND COALESCE(ss.is_callback, false) = false
+      -- A visit cancelled after the day was still held on it (a cancellation with no time stamp counts as cancelled).
+      AND (ss.status IS DISTINCT FROM 'cancelled' OR ss.cancelled_at >= (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York')
   ),
   v AS (
     SELECT pv.*, ${familySql('pv')} AS fam FROM plan_visits pv
     UNION ALL
-    -- A service riding on a plan visit as an add-on (termite bait, mosquito, rodent bait) is a service the customer holds.
+    -- A RECURRING service riding on a plan visit as an add-on (termite bait, mosquito, rodent bait) is a service the
+    -- customer holds; a one-time add-on is not. An add-on records no channel of its own, so its source is the office.
     SELECT a.id, pv.customer_id, pv.scheduled_date, a.created_at, a.service_key_snapshot, a.service_name AS service_type,
-           pv.source_estimate_id, pv.source, pv.source_call_log_id, pv.booking_source, ${familySql('a', 'service_name')} AS fam
+           NULL::uuid AS source_estimate_id, NULL AS source, NULL::uuid AS source_call_log_id, NULL AS booking_source,
+           ${familySql('a', 'service_name')} AS fam
     FROM scheduled_service_addons a
     JOIN plan_visits pv ON pv.id = a.scheduled_service_id
+    WHERE a.recurring_pattern IS NOT NULL
   ),
   held AS (
     SELECT v.customer_id, v.fam
@@ -110,7 +115,7 @@ const COUNTED_VISITS_SQL = `
   )`;
 
 function asOfBindings(asOf) {
-  return [asOf, asOf, asOf, asOf];
+  return [asOf, asOf, asOf, asOf, asOf];
 }
 
 function requireDate(value) {
@@ -277,8 +282,6 @@ async function getCrossSellSummary({ months = 12, db = require('../models/db'), 
   const limit = Math.max(1, Math.min(36, parseInt(months, 10) || 12));
   const stored = await db('monthly_financial_snapshots')
     .whereNotNull('recurring_customers')
-    // A month before the June 2026 visit import holds no booked visits (0 of 0): it is not a reading.
-    .where('recurring_customers', '>', 0)
     .orderBy('month', 'desc')
     .limit(limit)
     .select('month', 'recurring_customers', 'multi_service_customers');
