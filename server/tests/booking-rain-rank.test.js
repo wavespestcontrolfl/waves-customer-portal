@@ -321,6 +321,38 @@ describe('withCatalogKeys', () => {
     expect(rainTierOf('avoid', hourly, today, plan.rainSpan)(chip)).toBe(2);
   });
 
+  test('bookingRainPlan strict: an unreadable visit or catalog throws; the default keeps the fallback and the same answer', async () => {
+    load(jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null })));
+    const { bookingRainPlan } = require('../services/scheduling/rain-fit');
+    const args = { bestRows: true, serviceId: 'svc-1' };
+    // A readable visit answers the same with or without strict.
+    expect((await bookingRainPlan({ ...args, strict: true }, visitDb())).services).toEqual((await bookingRainPlan(args, visitDb())).services);
+    // A visit read that fails: default falls back to the primary name, strict throws.
+    const broken = () => { throw new Error('db down'); };
+    expect((await bookingRainPlan({ ...args, serviceType: 'Pest Control' }, broken)).services.map((svc) => svc.name)).toEqual(['Pest Control']);
+    await expect(bookingRainPlan({ ...args, serviceType: 'Pest Control', strict: true }, broken)).rejects.toMatchObject({ code: 'SERVICES_UNREAD' });
+    // A failed catalog read: default keeps the name, strict throws.
+    load(jest.fn(async () => { throw new Error('catalog down'); }));
+    const again = require('../services/scheduling/rain-fit');
+    expect((await again.bookingRainPlan(args, visitDb())).services.length).toBeGreaterThan(0);
+    await expect(again.bookingRainPlan({ ...args, strict: true }, visitDb())).rejects.toThrow('catalog down');
+  });
+
+  test('bookingRainPlan strict: more services than the cap throw; the default keeps the overflow marker', async () => {
+    load(jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null })));
+    const { bookingRainPlan, OVERFLOW_SERVICE } = require('../services/scheduling/rain-fit');
+    const many = Array.from({ length: 14 }, (_, i) => ({ name: `Service ${i}`, key: `svc_${i}` }));
+    const db = () => { throw new Error('no stored read in this case'); };
+    // Sent with no visit to read: 14 services against a cap of 12.
+    const sent = { bestRows: true, serviceTypes: many.map((m) => m.name), serviceKeys: many.map((m) => m.key) };
+    const plain = await bookingRainPlan(sent, db);
+    expect(plain.services[plain.services.length - 1]).toEqual(OVERFLOW_SERVICE);
+    await expect(bookingRainPlan({ ...sent, strict: true }, db)).rejects.toMatchObject({ code: 'SERVICES_UNREAD' });
+    // Under the cap strict answers as the default does.
+    const few = { bestRows: true, serviceTypes: ['A one', 'B two'], serviceKeys: ['a_one', 'b_two'] };
+    expect((await bookingRainPlan({ ...few, strict: true }, db)).services).toEqual((await bookingRainPlan(few, db)).services);
+  });
+
   test('bookingServices: a move of this service alone leaves the shared stop out', async () => {
     expect(await visitNames({ serviceId: 'svc-1', moveAlone: true })).toEqual([['WDO Inspection', 'wdo_inspection'], ['Rodent Check', null]]);
   });
