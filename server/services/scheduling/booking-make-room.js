@@ -283,7 +283,7 @@ function chainCandidate({ day, startMin, env, request, slot, shiftMin, emptyHour
   if (chain.reason) return { reason: chain.reason };
   const fixed = chain.moves.map((m) => env.fixedReason(m.row, day.quick)).find(Boolean);
   if (fixed) return { reason: `fixed_${fixed}` };
-  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, shiftMin, moves: chain.moves, slot, ...(emptyHour ? { emptyHour: true } : {}) };
+  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, shiftMin, moves: chain.moves, slot, ...(emptyHour ? { emptyHour: true } : {}), ...(day.shift ? { shiftEndMin: day.shift.endMin } : {}) };
   if (hitsAny(chainRanges(candidate), day.taken)) return { reason: 'taken_by_other' };
   const { prev } = neighbours(day.own, startMin, day.home);
   candidate.detourMin = addedDrive(env.legMin, prev, request.point, pointOf(chain.moves[0].row));
@@ -460,6 +460,9 @@ async function routeKeepsWindows(candidate, { conn, env, request, caches }) {
   const moved = new Map(candidate.moves.map((m) => [String(m.row.id), m]));
   const result = env.evaluateArrivalPlacement({ ...context, rows: context.rows.map((row) => shiftRow(row, moved.get(String(row.id)))) }, {
     windowStart: hhmm(candidate.startMin), windowEnd: hhmm(candidate.startMin + candidate.durationMin), durationMinutes: candidate.durationMin,
+    // GATE_TECH_SHIFT_HOURS: the route with the new visit keeps the technician's shift end too (route_shift_end): the
+    // visit ends by it when the route reaches it late, and it moves no stop to end after it.
+    ...(candidate.shiftEndMin != null ? { shiftEndMin: candidate.shiftEndMin } : {}),
   });
   if (result?.feasible !== true) return `route_${result?.reason || 'unknown'}`;
   // find-time's own test: `fit.detourMinutes > capFor(date, tech.id)`.

@@ -8,7 +8,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const RouteOptimizer = require('../route-optimizer');
 const { loadTechStartPoint } = require('./tech-start-point');
-const { gateEnvValue, multiTechConfirmLive } = require('../../config/feature-gates');
+const { gateEnvValue, multiTechConfirmLive, techShiftHoursLive } = require('../../config/feature-gates');
+const { savepointScope } = require('../../utils/savepoint-read');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
@@ -1576,15 +1577,52 @@ async function buySaveRoads({
   return { lookups, refused: budget.refused || undefined, timedOut: outcome === 'timeout' };
 }
 
+/**
+ * GATE_TECH_SHIFT_HOURS (D4): the shift end a picked block's route check is held to, minute of day,
+ * or null. The finders hand the engine `shiftEndMin` for every hour they list (find-time.js
+ * shiftEndOf); this is the same limit for an hour a person or an automatic mover picked, so a
+ * block the shift holds on the clock is also refused, or told, when the route reaches it late and
+ * the work ends after the shift end (`shift_end`).
+ * Null, and so no limit, when: the gate is off (nothing is read), the check has no route or no
+ * technician, the technician has no set hours that day, or the block itself is outside the shift.
+ * That last case is the picked-hour rule's own (the office's shift line, an automatic mover's
+ * refusal): the route check does not say it a second time.
+ * A failed read is logged and gives null: this limit never fails a check or a save. On a
+ * transaction the read runs in its own savepoint, so a failed read leaves the transaction usable.
+ */
+async function pickedShiftEnd(context, { conn = db, date, windowStart, windowEnd, durationMinutes }) {
+  const technicianId = context?.target?.technician_id;
+  if (!techShiftHoursLive() || !technicianId || !date) return null;
+  try {
+    const { loadTechShifts } = require('../technician-eligibility');
+    const shiftOf = await savepointScope(conn, (c) => loadTechShifts(c, { technicianIds: [technicianId], now: context.now }));
+    const shift = shiftOf(technicianId, String(date).split('T')[0]);
+    if (!shift) return null;
+    // The block rule of the other shift checks: the longer of the window and the length.
+    const { startMin, endMin } = require('./window-rules').rowBlockMinutes({
+      window_start: windowStart, window_end: windowEnd, estimated_duration_minutes: durationMinutes,
+    });
+    if (startMin == null || startMin < shift.startMin || endMin > shift.endMin) return null;
+    return shift.endMin;
+  } catch (err) {
+    logger.warn(`[arrival-route] shift hours unread for the route check on ${date}: ${err.message}`);
+    return null;
+  }
+}
+
 async function checkArrivalPlacement({
   windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, lateDays = false, ...options
 }) {
   const live = pickerRoadCheckLive();
   const loadContext = options.conn?.isTransaction && roads !== true ? loadSavedRouteContext : loadArrivalRouteContext;
   const context = await loadContext({ fromActiveStop: live, ...options });
+  // A caller's own `shiftEndMin` stands; otherwise the picked block's technician's (pickedShiftEnd).
+  const shiftEndMin = Number.isFinite(options.shiftEndMin) ? options.shiftEndMin
+    : await pickedShiftEnd(context, { conn: options.conn, date: options.date, windowStart, windowEnd, durationMinutes });
   // `lateDays`: only the staff picked-hour verdict asks for it, so an hour the
   // list offered on an already-late day is judged the same when picked. Saves and every other caller do not.
-  const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false, ...(lateDays === true ? { lateDays: true } : {}) };
+  const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false, ...(lateDays === true ? { lateDays: true } : {}),
+    ...(shiftEndMin != null ? { shiftEndMin } : {}) };
   const roadTimes = require('./hint-road-times');
   // A staff save reads the road times its picker bought; it never buys.
   if (context && roads === 'cache') context.travel = staffSaveTravel(options.date);
@@ -1609,5 +1647,5 @@ module.exports = {
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
   blockedIntervalsFor, loadDayScheduleBlocks,
-  _internals: { clockOrder, storedOrderStale, groupRouteStops, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },
+  _internals: { clockOrder, storedOrderStale, groupRouteStops, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel, pickedShiftEnd },
 };

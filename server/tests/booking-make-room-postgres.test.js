@@ -310,8 +310,16 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     process.env.GATE_TECH_SHIFT_HOURS = 'true';
     expect(await prove()).toEqual({ reason: 'past_shift_end' });
     expect(await offer()).toEqual([]);
-    // A shift that ends at 1:00 PM holds the chain.
+    // A shift that ends at 1:00 PM holds the chain's booked hours. On the route the technician reaches the moved stops
+    // late in their hours, so the last one ends after 1:00 PM: the route check refuses it.
     await mockConn('technicians').where({ id: techId }).update({ shift_end: '13:00' });
+    expect(await prove()).toEqual({ reason: 'route_shift_end' });
+    expect(await offer()).toEqual([]);
+    // The route's later stops run late too: the visit moves the day's last stop to end after a 3:00 PM shift end.
+    await mockConn('technicians').where({ id: techId }).update({ shift_end: '15:00' });
+    expect(await prove()).toEqual({ reason: 'route_shift_end' });
+    // A shift that ends at 5:00 PM holds the chain on the clock and on the route.
+    await mockConn('technicians').where({ id: techId }).update({ shift_end: '17:00' });
     expect((await prove()).moves).toHaveLength(3);
     expect(await offer()).toEqual([`${DAY} 09:00`]);
     // A shift that starts after the new visit's hour does not hold the new visit.

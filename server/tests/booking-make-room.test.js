@@ -1664,6 +1664,24 @@ describe('technician shift hours', () => {
     expect(await prove(Object.assign(shiftDeps({ startMin: 8 * 60, endMin: 12 * 60 + 45, source: 'roster' }), { loadDayStops: jest.fn(async () => short) }))).toEqual({ reason: 'past_shift_end' });
   });
 
+  test('the route check on the moved day is handed the shift end, and its shift_end answer refuses the hour', async () => {
+    const deps = shiftDeps(hours(8, 13));
+    await check({ deps });
+    const { placement } = deps.evaluated.find((e) => e.placement.windowStart === '09:00');
+    expect(placement).toEqual({ windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60, shiftEndMin: 13 * 60 });
+    // No set hours: the option is not passed at all.
+    const none = shiftDeps(null);
+    await check({ deps: none });
+    expect(none.evaluated.every((e) => !('shiftEndMin' in e.placement))).toBe(true);
+    // The engine's refusal names the shift end.
+    const late = shiftDeps(hours(8, 13), { evaluateArrivalPlacement: jest.fn((_context, asked) => (asked.shiftEndMin === 13 * 60
+      ? { feasible: false, reason: 'shift_end' } : { feasible: true, detourMinutes: ROUTE_DETOUR_MIN })) });
+    expect(await prove(late)).toEqual({ reason: 'route_shift_end' });
+    const { report } = await check({ deps: shiftDeps(hours(8, 13), { evaluateArrivalPlacement: late.evaluateArrivalPlacement }) });
+    expect(at9(report)).toBeUndefined();
+    expect(report.byReason.route_shift_end).toBeGreaterThan(0);
+  });
+
   test('the real dependencies are the gate reader and the shift loader', () => {
     const deps = _internals.defaultDeps();
     expect(deps.shiftHoursOn).toBe(require('../config/feature-gates').techShiftHoursLive);
