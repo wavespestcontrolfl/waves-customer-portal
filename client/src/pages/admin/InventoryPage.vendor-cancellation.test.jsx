@@ -44,7 +44,7 @@ function installFetch({ requests = [ORDERED_REQUEST], record = () => reply({ suc
   queue = vi.fn((url) => {
     const path = String(url);
     if (path.includes('/vendor-cancellation')) return Promise.resolve(record());
-    if (path.includes('/restock-requests?')) return Promise.resolve(reply({ requests, siteOneEmailOrder: false }));
+    if (path.includes('/restock-requests?')) return Promise.resolve(reply({ requests }));
     if (path.includes('/inventory/stats')) return Promise.resolve(reply({ restockRequests: { open: 1 } }));
     return Promise.resolve(reply({}));
   });
