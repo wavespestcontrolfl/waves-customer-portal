@@ -21,6 +21,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 const { RE_SERVICE_SERVICE_KEYS } = require('./re-service');
+const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require('./no-cost-visit-types');
 
 const ASSESSMENT_DISPLAY_NAME = 'Waves Assessment';
 const ASSESSMENT_NAME_RE = /^waves assessment$/i;
@@ -97,6 +98,10 @@ function paidEstimateVisitsQuery(database, { estimateId, customerId }) {
     })
     .whereNull('scheduled_services.reservation_expires_at')
     .whereRaw('scheduled_services.is_callback IS NOT TRUE')
+    // An included follow-up keeps its parent's paid name, so the flag decides; billing's always-free labels
+    // (re-service, follow-up, re-visit, appointment, estimate) are free whatever the catalog says.
+    .whereRaw('scheduled_services.followup_included IS NOT TRUE')
+    .whereRaw("COALESCE(scheduled_services.service_type, '') !~* ?", [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX])
     // Same classifier as annual-prepay-renewals: catalog key, the key stored on the visit (a legacy visit with no
     // catalog link keeps only that), then the re-service label.
     .whereRaw(

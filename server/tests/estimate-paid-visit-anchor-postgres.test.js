@@ -96,6 +96,14 @@ postgres('paid-visit anchor for annual renewals (real PostgreSQL)', () => {
     expect((await resolve()).map((row) => row.id)).toEqual([paid]);
   });
 
+  test('an included follow-up and an always-free label never anchor the term', async () => {
+    await visit({ scheduled_date: '2098-01-10', followup_included: true });
+    await visit({ scheduled_date: '2098-01-15', service_type: 'Pest Re Service' });
+    const paid = await visit({ scheduled_date: '2098-02-10' });
+
+    expect((await resolve()).map((row) => row.id)).toEqual([paid]);
+  });
+
   test('excludes another customer, holds, catalog assessments and retained history; same-day visits order by start time', async () => {
     const assessment = await trx('services').where({ service_key: 'lawn_inspection' }).first('id');
     const paidService = await trx('services')
