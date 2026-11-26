@@ -239,26 +239,30 @@ const TWILIO_NUMBERS = {
   // config in twilio-voice-webhook.js: WAVES_FALLBACK_FORWARD_NUMBERS, the named
   // staff env fallbacks, and the WAVES_CSR_NUMBER_MAP keys. Re-read on each call
   // (env is static in prod; deliberately NOT cached so tests can vary env per case).
-  staffForwardLast10() {
-    const set = new Set();
-    const add = (raw) => {
-      const d = String(raw == null ? '' : raw).replace(/\D/g, '').slice(-10);
-      if (d.length === 10) set.add(d);
-    };
-    String(process.env.WAVES_FALLBACK_FORWARD_NUMBERS || '').split(',').forEach(add);
+  // Every configured staff forward / CSR number as written in the env, handed to `add` one at a time.
+  eachStaffForwardRaw(add) {
+    String(process.env.WAVES_FALLBACK_FORWARD_NUMBERS || '').split(',').forEach((raw) => add(raw));
     [
       process.env.OWNER_PHONE,
       process.env.ADAM_PHONE,
       process.env.VIRGINIA_PHONE,
       process.env.OFFICE_MANAGER_PHONE,
       process.env.WAVES_OFFICE_MANAGER_PHONE,
-    ].forEach(add);
+    ].forEach((raw) => add(raw));
     // WAVES_CSR_NUMBER_MAP entries are "<number>:<name>" — the key is the number.
     String(process.env.WAVES_CSR_NUMBER_MAP || '').split(',').forEach((pair) => {
       const p = pair.trim();
       if (!p) return;
       const idx = p.lastIndexOf(':');
       add(idx > 0 ? p.slice(0, idx) : p);
+    });
+  },
+
+  staffForwardLast10() {
+    const set = new Set();
+    this.eachStaffForwardRaw((raw) => {
+      const d = String(raw == null ? '' : raw).replace(/\D/g, '').slice(-10);
+      if (d.length === 10) set.add(d);
     });
     return set;
   },
@@ -268,6 +272,38 @@ const TWILIO_NUMBERS = {
     const last10 = digits.slice(-10);
     if (last10.length !== 10) return false;
     return this.staffForwardLast10().has(last10);
+  },
+
+  // One configured staff number as ONE unambiguous E.164 string, or null. Two spellings count: an explicit
+  // international number ("+" first, then the whole number) and a plain US / Canada number (ten digits, or eleven
+  // starting with 1). Spaces, dots, dashes and parentheses are formatting. Anything else is refused, never guessed
+  // at: a country code written without its "+" ("4419415550142" must not become +1 941 555 0142), an extension or any
+  // letter ("941-555-0142 x12" must not become another number's last ten digits), two numbers in one entry.
+  staffNumberE164(raw) {
+    const text = String(raw == null ? '' : raw).trim();
+    if (!text || /[^\d+().\-\s]/.test(text) || text.lastIndexOf('+') > 0) return null;
+    const digits = text.replace(/\D/g, '');
+    const nanp = /^1[2-9]\d{2}[2-9]\d{6}$/;
+    if (text.startsWith('+')) {
+      if (digits.startsWith('1')) return nanp.test(digits) ? `+${digits}` : null;
+      return /^[2-9]\d{7,14}$/.test(digits) ? `+${digits}` : null;
+    }
+    if (digits.length === 10) return nanp.test(`1${digits}`) ? `+1${digits}` : null;
+    return digits.length === 11 && nanp.test(digits) ? `+${digits}` : null;
+  },
+
+  // The WHOLE number matches a configured staff number, for a decision the last-ten-digit match above is too loose for
+  // (a foreign number can end in a staff number's ten digits). Both sides are strict: the caller's number must already
+  // be E.164 as Twilio posts a phone caller and is compared as is, never normalized; a configured number counts only
+  // when staffNumberE164 can read it without guessing.
+  isStaffForwardE164(phoneNumber) {
+    const caller = typeof phoneNumber === 'string' ? phoneNumber : '';
+    if (!/^\+[1-9]\d{7,14}$/.test(caller)) return false;
+    let match = false;
+    this.eachStaffForwardRaw((raw) => {
+      if (this.staffNumberE164(raw) === caller) match = true;
+    });
+    return match;
   },
 
   // Internal = one of our Twilio lines OR a staff forward / CSR cell. An internal

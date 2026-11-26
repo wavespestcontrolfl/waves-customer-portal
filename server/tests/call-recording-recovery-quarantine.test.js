@@ -454,3 +454,72 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     expect(recordingsSpy.list).toHaveBeenCalledTimes(2);
   });
 });
+
+// An internal call (the voice-agent sandbox, the tech voice line) never takes recording audio into the pipeline.
+// GATE_VOICE_SANDBOX_RECORDING leaves a staff test recording at Twilio under the sandbox call's own CallSid, so this
+// lookup would find it. The row's stored source must refuse it here, at the one place every recovery entry point
+// passes through: the status callback that schedules a recovery decides from its request's To, which a delayed
+// callback or a changed sandbox number can get wrong.
+describe('recoverRecordingForCall: an internal call takes no recording audio', () => {
+  const recording = { sid: 'REstaff00000000000000000000000001', status: 'completed', dateCreated: '2026-11-25T12:00:00Z', duration: '60', uri: '/2010-04-01/Accounts/AC/Recordings/REstaff00000000000000000000000001.json' };
+  const recordingsSpy = require('twilio').__recordingsSpy;
+  const OLD_SID = process.env.TWILIO_ACCOUNT_SID;
+  const OLD_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+  beforeAll(() => {
+    process.env.TWILIO_ACCOUNT_SID = 'ACtest00000000000000000000000000';
+    process.env.TWILIO_AUTH_TOKEN = 'testtoken';
+  });
+  afterAll(() => {
+    if (OLD_SID === undefined) delete process.env.TWILIO_ACCOUNT_SID; else process.env.TWILIO_ACCOUNT_SID = OLD_SID;
+    if (OLD_TOKEN === undefined) delete process.env.TWILIO_AUTH_TOKEN; else process.env.TWILIO_AUTH_TOKEN = OLD_TOKEN;
+  });
+  beforeEach(() => {
+    recordingsSpy.mockClear();
+    recordingsSpy.list.mockClear();
+    recordingsSpy.list.mockImplementation(async () => [recording]);
+    db.__builder.update.mockClear();
+    db.__builder.whereRaw.mockClear();
+  });
+  afterEach(() => recordingsSpy.list.mockImplementation(async () => []));
+
+  test.each(['voice_relay_sandbox', 'tech_voice'])('a %s row is refused ahead of the Twilio lookup', async (source) => {
+    const processor = require('../services/call-recording-processor');
+    db.__state.call = { id: 'c-internal', source, recording_url: null, recording_sid: null, transcription_metadata: null };
+    expect(await processor.recoverRecordingForCall('CAtest0000000000000000000000000006')).toEqual({ success: true, skipped: true, reason: 'internal_call' });
+    expect(recordingsSpy.list).not.toHaveBeenCalled();
+    expect(recordingsSpy).not.toHaveBeenCalled();
+    expect(db.__builder.update).not.toHaveBeenCalled();
+  });
+
+  // The refusal must not swallow a duty: a row flagged for card data still gets its owed delete retried, whatever
+  // its source. That cleanup deletes by the SID the row holds; it never lists the CallSid's recordings, so the staff
+  // test recording is neither found nor attached.
+  test.each(['voice_relay_sandbox', 'tech_voice'])('a %s row flagged for card data still has its owed recording deleted, with no lookup and nothing attached', async (source) => {
+    const processor = require('../services/call-recording-processor');
+    const OWED = 'REowed00000000000000000000000001';
+    db.__state.call = { id: 'c-internal-pan', source, recording_url: null, recording_sid: OWED, transcription_metadata: { pan_detected: true } };
+    const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000008');
+    expect(out).toEqual({ success: true, skipped: true, reason: 'pan_quarantined' });
+    expect(recordingsSpy).toHaveBeenCalledWith(OWED);
+    expect(recordingsSpy.list).not.toHaveBeenCalled();
+    for (const [write] of db.__builder.update.mock.calls) {
+      expect(JSON.stringify(write)).not.toContain(recording.sid);
+    }
+  });
+
+  test('an ordinary row is still recovered, and its write refuses a row that turned internal while Twilio was asked', async () => {
+    const processor = require('../services/call-recording-processor');
+    for (const source of [null, undefined, '', 'admin-callback']) {
+      db.__builder.update.mockClear();
+      db.__builder.whereRaw.mockClear();
+      db.__state.call = { id: 'c-plain', source, recording_url: null, transcription_metadata: null };
+      const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000007');
+      expect(out).toMatchObject({ success: true, recovered: true, recordingSid: recording.sid });
+      expect(db.__builder.update).toHaveBeenCalledWith(expect.objectContaining({ recording_sid: recording.sid }));
+      expect(db.__builder.whereRaw.mock.calls).toEqual(expect.arrayContaining([
+        ["COALESCE(??, '') <> ?", ['source', 'voice_relay_sandbox']],
+        ["COALESCE(??, '') <> ?", ['source', 'tech_voice']],
+      ]));
+    }
+  });
+});

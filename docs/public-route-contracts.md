@@ -9182,7 +9182,37 @@ the relay's own call history) drops the source through
 `relay-protocol.whereNotSandboxCall` — so a test call, or a stranger dialling
 the test number, can neither create dispatch work nor move a metric. The
 transcript, latency summary and version stamps land on the sandbox row
-exactly as in production; that record is the bake-off. Any change to the
+exactly as in production; that record is the bake-off. With
+`GATE_VOICE_SANDBOX_RECORDING` on (dark; Twilio bills a recorded minute, so
+the owner flips it), the first `/relay-sandbox` delivery that carries a
+valid `X-Twilio-Signature` decides whether the call is recorded and stamps
+it on the row as `metadata.sandbox_recording_ok` (true or false). The
+signature is checked in the route, whatever the middleware mode: a delivery
+without a valid one writes no stamp, records nothing and gets the same
+document for every `From`, so the response never reveals which numbers are
+staff; with the gate off no delivery writes the key. A redelivery reuses
+the stored value and never replaces it. The stamp is true only when the
+posted `StirVerstat` is a passed full attestation (the carrier vouches for
+the number, so a spoofed caller ID does not count) and the posted `From`,
+in strict E.164, is a configured staff forward number as a whole
+(`twilio-numbers.isStaffForwardE164`; never a last-ten-digit match, and a
+configured value that is not one unambiguous number authorizes nobody).
+`/relay-sandbox/cell` does not decide again: it honours that stamp only on
+its own validly signed request, with the gate still on and the relay
+attached. A recorded call's document, the GPT-Live cell document below
+included, adds
+`<Start><Recording channels="dual" trim="do-not-trim"/></Start>` after the
+recording disclosure and before its `<Connect>`: at most one recording a
+call, and no `recordingStatusCallback`, so `/recording-status` and the
+call-recording pipeline never see it. An answer document that records also
+sets `finishOnKey=""` on its cell `<Gather>`, so no key press (a lone `#`
+under Twilio's default) can end the disclosure early and fall through to
+the recording: every key press reaches `/relay-sandbox/cell`, which replays
+the disclosure first. Any other caller, a refused call, an unreadable
+stamp, or the gate off gets the unchanged document. The CallSid recovery
+lookup never brings the recording onto the sandbox row: `/call-status` and
+the lookup itself each refuse an internal row by its stored source, not by
+the callback's `To`. Any change to the
 number gate or the dry-run invariant is security-critical).
 `/api/webhooks/twilio/relay-sandbox/live-complete` + the `/ws/voice-live/{CallSid}/{token}` WebSocket path
 (GPT-Live trial, dark behind `GATE_VOICE_GPT_LIVE_TEST`, owner 2026-11-19, spend cap $5. With the gate on, cell code
