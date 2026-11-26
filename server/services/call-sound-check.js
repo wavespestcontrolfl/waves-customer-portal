@@ -1,26 +1,64 @@
 'use strict';
 
 /**
- * Call sound check: the model call (owner 2026-11-25 "both").
+ * Call sound check (GATE_CALL_SOUND_CHECK, dark; owner 2026-11-25 "both").
  *
- * A model LISTENS to one call recording and notes what a transcript cannot show: the customer's mood at the start
- * and at the end, whether the customer was upset, how often staff talked over the customer, whether staff sounded
- * rushed, and any risky claim staff made. `hear` makes that one call, checks the answer and returns the checked note.
- * The model's raw reply stays inside `hear`.
+ * A model LISTENS to the recording of each newly processed call and notes what a transcript cannot show: the
+ * customer's mood at the start and at the end, whether the customer was upset, how often staff talked over the
+ * customer, whether staff sounded rushed, and any risky claim staff made. Notes only: the answer is saved on the call
+ * (call_log.metadata.sound_check). No bell, no text, nothing a customer sees.
  *
- * Nothing calls `hear` yet. Every listen is a paid Gemini call (MODELS.ROUTES.callSoundCheck), so the job that picks
- * the calls comes as its own change, with a gate and a daily spend cap.
+ * Every listen is a paid Gemini call (MODELS.ROUTES.callSoundCheck, `hear` below), so the job is built around its
+ * spend:
+ *   - a call gets ONE record, written while it has none, and so one attempt: a failed listen is not tried again
+ *     (the one exception sent nothing: with no Gemini key the claim is taken back and the tick stops);
+ *   - the call is CLAIMED before the model is asked, and the claim holds the attempt's worst cost (`reserved_usd`),
+ *     so a process that dies mid-call can neither ask again nor drop spend from the day's total;
+ *   - the ET day stops at DAILY_CAP_USD: a call is claimed only while the day's total plus its own worst cost fits;
+ *   - a model with no usable llm_model_prices row makes no call, because the cap could not be kept.
+ * Every dollar figure here is an ESTIMATE from the portal's price table (services/llm-cost.js), not Google's bill.
+ *
+ * Never sent: an internal call (voice-agent sandbox, tech voice line), a call flagged for card data, a call still in
+ * the pipeline, audio longer than MAX_SECONDS, and a recording that is not the pipeline's own MP3.
  */
 
+const db = require('../models/db');
+const logger = require('./logger');
 const MODELS = require('../config/models');
+const llmCost = require('./llm-cost');
+const { canonicalTwilioRecordingUrl } = require('../utils/twilio-recording-url');
+const { callSoundCheckLive } = require('../config/feature-gates');
 const { dispatch, rejectCall } = require('./llm/call');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { scrubPansDetailed } = require('../utils/pan-scrub');
+const { etDateString } = require('../utils/datetime-et');
 
+const METADATA_KEY = 'sound_check';
 const PROMPT_VERSION = 'sound-check-v1';
+// The top of the range the owner approved (2026-11-25: $0.33 to $0.83 a day). A constant on purpose: raising the
+// spend is a code change with the owner's yes, never a variable.
+const DAILY_CAP_USD = 0.83;
+const BATCH = 3;
+const LOOKBACK_HOURS = 48;
+const MIN_SECONDS = 20;
+const MAX_SECONDS = 30 * 60;
+// Base64 adds a third, and Gemini takes at most 20 MB in one inline request.
+const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
 const MAX_TOKENS = 4096;
 const TIMEOUT_MS = 120_000;
+// The reserve's input side: Google documents 32 tokens for a second of audio; the prompt and its schema sit well
+// inside the allowance.
+const AUDIO_TOKENS_PER_SECOND = 32;
+const PROMPT_TOKENS_ALLOWANCE = 1500;
 const TONE_MAX = 40;
 const CLAIM_MAX = 240;
+
+// No card number was heard on the call: not by the recording's own scrub, not by live transcription (a masked card
+// number, a quarantine, or a card pause, which means a card was read out).
+const NOT_CARD_FLAGGED_SQL = "COALESCE(transcription_metadata::jsonb ->> 'pan_detected', '') <> 'true'"
+  + " AND COALESCE(metadata #>> '{live_transcription,pan_detected}', '') <> 'true'"
+  + " AND (metadata #> '{live_transcription,quarantined_at}') IS NULL"
+  + " AND (metadata #> '{live_transcription,card_pause}') IS NULL";
 
 const PROMPT = [
   'You will hear one recorded phone call to or from a pest control and lawn care company in Florida.',
@@ -124,8 +162,185 @@ async function hear(audio) {
   };
 }
 
+const round6 = (n) => Math.round(n * 1e6) / 1e6;
+
+// Estimated USD of one call's token usage at the model's price, or null when it cannot be priced.
+function costOf(price, usage) {
+  return llmCost.costUsd('gemini', usage, llmCost.audioInputRates(llmCost.ratesForCall(price, usage.input_tokens)));
+}
+
+// The most one attempt can cost: every second of audio at the documented token rate, the prompt allowance, and the
+// whole output limit (Gemini counts thinking and the answer against it) at the dearer of the two rates. Infinity when
+// it cannot be priced: such a call never fits the cap.
+function worstCaseUsd(price, seconds) {
+  const input = Math.ceil(seconds) * AUDIO_TOKENS_PER_SECOND + PROMPT_TOKENS_ALLOWANCE;
+  const asAnswer = costOf(price, { input_tokens: input, output_tokens: MAX_TOKENS });
+  const asThinking = costOf(price, { input_tokens: input, reasoning_tokens: MAX_TOKENS });
+  return asAnswer == null || asThinking == null ? Infinity : Math.max(asAnswer, asThinking);
+}
+
+// Usage with real counts. The Gemini adapter returns an object of nulls when the reply has no usageMetadata.
+const hasCounts = (usage) => Boolean(usage) && usage.input_tokens != null && usage.output_tokens != null;
+
+// What an attempt cost. Usage the provider reported is priced. Anything else (a timeout, a refused or failed
+// request, an answer with no usage counts) counts as the whole reserve: the figure may read high, never low.
+function attemptCostUsd(price, usage, reserved) {
+  return (hasCounts(usage) ? costOf(price, usage) : null) ?? reserved;
+}
+
+// The model's price, only when the table lists its audio input rate: a row with no audio rate was pulled before
+// that rate was stored, or the feed does not say what audio costs, and either way the cap could read low.
+async function priceOfModel(conn, model) {
+  const price = llmCost.priceFor((await llmCost.loadPrices(conn)).map, model);
+  if (!price || price.audioInput == null) return null;
+  return Number.isFinite(worstCaseUsd(price, MAX_SECONDS)) ? price : null;
+}
+
+// The ET day's spend so far: what finished attempts cost plus what unfinished claims reserved.
+async function daySpendUsd(conn, day, now) {
+  const since = new Date(now.getTime() - (LOOKBACK_HOURS + 24) * 60 * 60 * 1000);
+  const row = await whereNotSandboxCall(conn('call_log'))
+    .where('created_at', '>=', since)
+    .whereRaw("metadata->:key->>'day' = :day", { key: METADATA_KEY, day })
+    .select(conn.raw("COALESCE(SUM(COALESCE((metadata->:key->>'spent_usd')::numeric, 0) + COALESCE((metadata->:key->>'reserved_usd')::numeric, 0)), 0) AS total", { key: METADATA_KEY }))
+    .first();
+  return Number(row?.total) || 0;
+}
+
+// No record yet. Only an object can take one: the merge in recordPatch would turn any other jsonb value into an
+// array, and a call whose record cannot be read back would be claimed, and paid for, on every tick.
+const whereNoRecord = (qb) => qb.whereRaw("jsonb_typeof(COALESCE(metadata, '{}'::jsonb)) = 'object' AND metadata->:key IS NULL", { key: METADATA_KEY });
+const recordPatch = (conn, record) => conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [METADATA_KEY]: record })]);
+
+// A processed, recorded, ordinary call from the last two days with no record, oldest first.
+function candidates(conn, now) {
+  const since = new Date(now.getTime() - LOOKBACK_HOURS * 60 * 60 * 1000);
+  return whereNoRecord(whereNotSandboxCall(conn('call_log')))
+    .where('processing_status', 'processed')
+    .where('created_at', '>=', since)
+    .whereNull('processing_token')
+    .whereRaw("NULLIF(btrim(recording_url), '') IS NOT NULL")
+    .whereRaw('COALESCE(recording_duration_seconds, duration_seconds, 0) >= ?', [MIN_SECONDS])
+    .whereRaw(NOT_CARD_FLAGGED_SQL)
+    .orderBy('created_at', 'asc')
+    .limit(BATCH)
+    .select('id', 'recording_url', 'recording_duration_seconds', 'duration_seconds');
+}
+
+// A call's first and only record, written while it has none: two writers cannot both record, or both claim, a call.
+// A claim (`status: 'started'`) also repeats what must still be true of the call before its audio is sent.
+async function writeFirstRecord(conn, call, record) {
+  const query = whereNoRecord(conn('call_log').where({ id: call.id }));
+  if (record.status === 'started') {
+    whereNotSandboxCall(query)
+      .where({ processing_status: 'processed', recording_url: call.recording_url })
+      .whereNull('processing_token')
+      .whereRaw(NOT_CARD_FLAGGED_SQL);
+  }
+  return (await query.update({ metadata: recordPatch(conn, record) })) > 0;
+}
+
+// Ask the model about a claimed call and put the outcome in place of the claim.
+async function listen(conn, call, audio, claim, price) {
+  const heard = await hear(audio);
+  const claimed = () => conn('call_log').where({ id: call.id }).whereRaw("metadata->:key->>'status' = 'started'", { key: METADATA_KEY });
+  if (heard.reason === 'no_key') {
+    // Nothing was sent, so nothing is owed and the call keeps its turn. No call after it could be sent either.
+    await claimed().update({ metadata: conn.raw('metadata - ?::text', [METADATA_KEY]) });
+    throw new Error('no Gemini API key: no recording was sent');
+  }
+  const outcome = heard.note
+    ? { status: 'done', note: heard.note, model: heard.model, prompt_version: PROMPT_VERSION, usage: heard.usage }
+    : { status: 'failed', reason: heard.reason };
+  const record = { ...outcome, spent_usd: round6(attemptCostUsd(price, heard.usage, claim.reserved_usd)), day: claim.day, at: claim.at };
+  const saved = await claimed().update({ metadata: recordPatch(conn, record) });
+  // The claim, with its reserve, is then still on the call, so the day's total covers this attempt.
+  if (!saved) logger.warn(`[call-sound-check] outcome not saved for call ${call.id}: its claim was gone after the model call`);
+  return outcome.status;
+}
+
+/**
+ * Check one candidate. Returns what happened: 'done', 'failed', 'skipped' (a record that ends the call's turn with no
+ * model call, or a claim another writer won) or 'capped' (no room left in the day; nothing written).
+ */
+// The ET day an attempt is charged to, read from the clock at that moment, and what that day has spent so far.
+async function dayNow(conn, clock) {
+  const at = clock();
+  const day = etDateString(at);
+  return { day, at: at.toISOString(), room: DAILY_CAP_USD - (await daySpendUsd(conn, day, at)) };
+}
+
+async function checkOne(conn, call, ctx) {
+  const first = await dayNow(conn, ctx.clock);
+  const end = async (status, reason) => {
+    await writeFirstRecord(conn, call, { status, reason, day: first.day, at: first.at });
+    return status;
+  };
+  const rowSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || 0;
+  if (!/\.mp3$/i.test(String(call.recording_url))) return end('skipped', 'not_mp3');
+  // The download sends the Twilio account's credentials, so only the one exact Twilio URL is fetched, over https.
+  const url = canonicalTwilioRecordingUrl(call.recording_url);
+  if (!url) return end('skipped', 'not_twilio_url');
+  if (rowSeconds > MAX_SECONDS) return end('skipped', 'too_long');
+  // Nothing is downloaded for a call the day has no room for.
+  if (worstCaseUsd(ctx.price, rowSeconds) > first.room) return 'capped';
+
+  let audio;
+  try {
+    audio = await ctx.download(url, rowSeconds);
+  } catch (err) {
+    logger.warn(`[call-sound-check] download failed for call ${call.id}: ${String(err.message).slice(0, 120)}`);
+    return end('failed', 'download_failed');
+  }
+  // The audio itself says how long it is; with no readable frame header, the lowest MP3 bitrate (8 kbps) bounds it.
+  const seconds = Math.max(rowSeconds, ctx.audioSeconds(audio) ?? audio.length / 1000);
+  if (audio.length > MAX_AUDIO_BYTES || seconds > MAX_SECONDS) return end('skipped', 'too_long');
+  const reserved = worstCaseUsd(ctx.price, seconds);
+  // The claim is charged to the day it is written in: a tick or a download can run past midnight ET.
+  const now = await dayNow(conn, ctx.clock);
+  if (reserved > now.room) return 'capped';
+
+  const claim = { status: 'started', reserved_usd: round6(reserved), day: now.day, at: now.at };
+  if (!(await writeFirstRecord(conn, call, claim))) return 'skipped';
+  return listen(conn, call, audio, claim, ctx.price);
+}
+
+/**
+ * One pass (scheduler: every 5 minutes, inside runExclusive). `download` and `audioSeconds` are the pipeline's
+ * recording download and its MP3 length estimate; tests pass their own.
+ */
+async function runCallSoundCheck({ conn = db, now, clock, download, audioSeconds } = {}) {
+  if (!callSoundCheckLive()) return { skipped: true, reason: 'gated_off' };
+  const model = MODELS.ROUTES.callSoundCheck.model;
+  const price = await priceOfModel(conn, model);
+  if (!price) throw new Error(`no usable price for ${model}: the daily cap cannot be kept, so no call is made`);
+  const pipeline = () => require('./call-recording-processor');
+  // `clock` is read before each claim; a fixed `now` (tests) stands for every read.
+  const readClock = clock || (now ? () => now : () => new Date());
+  const ctx = {
+    price,
+    clock: readClock,
+    // With the call's length the pipeline's download refuses a cut-off file, so the model never judges half a call.
+    download: download || ((url, expectedSeconds) => pipeline().downloadRecording(url, { expectedSeconds })),
+    audioSeconds: audioSeconds || ((buffer) => pipeline().estimateMp3DurationSeconds(buffer)),
+  };
+  const tally = { done: 0, failed: 0, skipped: 0, capped: 0 };
+  for (const call of await candidates(conn, readClock())) {
+    const kind = await checkOne(conn, call, ctx);
+    tally[kind] += 1;
+    // No room for this call today: it and the calls after it wait for the next ET day, oldest first, or age out.
+    if (kind === 'capped') break;
+  }
+  if (tally.done || tally.failed || tally.skipped || tally.capped) logger.info(`[call-sound-check] tick: ${JSON.stringify(tally)}`);
+  return tally;
+}
+
 module.exports = {
+  runCallSoundCheck,
   hear,
+  METADATA_KEY,
+  DAILY_CAP_USD,
   // exported for tests
   normalizeNote,
+  worstCaseUsd,
 };

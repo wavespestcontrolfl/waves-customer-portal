@@ -309,7 +309,7 @@ const DEFAULTS = Object.freeze({
   // Call sound check (owner 2026-11-25 "both"): the one lane where a model
   // LISTENS to a call recording (caller mood, talk-over, rushed answers, risky
   // claims). Gemini 4 Neon, the model the owner's call archive run listened
-  // with.
+  // with. Dark behind GATE_CALL_SOUND_CHECK.
   GEMINI_CALL_SOUND_CHECK: 'gemini-4-neon',
   // App lawn + tree/shrub/palm Photo ID (owner 2026-10-02, "same as pest"):
   // the model for photoIdPlantV2's one Gemini read; set from the 27-photo eval.
@@ -472,7 +472,8 @@ const GEMINI_PHOTO_ID_PLANT = process.env.MODEL_GEMINI_PHOTO_ID_PLANT || DEFAULT
 const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
 const GEMINI_LAWN_ASSESSMENT = process.env.MODEL_GEMINI_LAWN_ASSESSMENT || DEFAULTS.GEMINI_LAWN_ASSESSMENT;
 // Call sound check (services/call-sound-check.js): its own selector, so a
-// photo-lane change never moves the one audio lane.
+// photo-lane change never moves the one audio lane. Its daily spend cap is
+// priced from this model's llm_model_prices row; a model with no row makes no call.
 const GEMINI_CALL_SOUND_CHECK = process.env.MODEL_GEMINI_CALL_SOUND_CHECK || DEFAULTS.GEMINI_CALL_SOUND_CHECK;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
@@ -656,7 +657,7 @@ const ROUTES = Object.freeze({
   // Call sound check (owner 2026-11-25 "both", call-sound-check.js): the model
   // hears the call recording (the payload's `audio`). Single leg, no automatic
   // fallback: only the Gemini leg of llm/call.js takes audio, and a miss
-  // leaves the call without a sound note.
+  // leaves the call without a sound note. Dark behind GATE_CALL_SOUND_CHECK.
   callSoundCheck: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_CALL_SOUND_CHECK }),
 });
 

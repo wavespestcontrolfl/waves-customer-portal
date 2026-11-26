@@ -24,10 +24,10 @@
  * usage for, and models the feed does not list, are counted as unpriced —
  * never guessed. Image, video and embedding calls write no ledger row, so
  * they are not in these totals. An audio call sent through llm/call.js does
- * write one, and the lane totals price all of its input at the model's TEXT
- * rate: the ledger does not say which tokens were audio. The feed's audio
- * input rate is stored (`audioInput`) for a lane that prices its own audio
- * calls. Nothing here is customer-facing.
+ * write one, and the ledger does not say which of its tokens were audio. A
+ * lane that sends audio (AUDIO_INPUT_LANES) has every input token priced at
+ * the dearer of the model's text and audio input rate; any other lane prices
+ * input at the text rate. Nothing here is customer-facing.
  */
 
 const db = require('../models/db');
@@ -303,6 +303,18 @@ function ratesForCall(p, prompt) {
  * rate (an overestimate, never an underestimate); cache writes with no
  * listed write rate, or an unknown provider → null (unpriced).
  */
+// Lanes whose calls send audio. Their totals price input with audioInputRates.
+const AUDIO_INPUT_LANES = new Set(['call_sound_check']);
+
+// The rates of a call whose input may be audio. Its input count has no audio share in it, so every input token
+// is priced at the dearer of the text and the audio input rate (a model with no listed audio rate bills audio as
+// text), and a cache read as plain input: the feed lists no cached-audio rate. The figure may read high, never low.
+function audioInputRates(rates) {
+  if (!rates || rates.input == null) return rates;
+  const input = Math.max(rates.input, rates.audioInput ?? rates.input);
+  return { ...rates, input, cacheRead: input };
+}
+
 function costUsd(provider, t, p) {
   if (!p || p.input == null || p.output == null) return null;
   const n = (v) => Math.max(0, Number(v) || 0);
@@ -401,6 +413,7 @@ function foldLaneCosts(rows, prices) {
     let rates = price && r.per_call ? ratesForCall(price, promptTokens(r.provider, r)) : price;
     // a session turn that reached a tier may be several shorter calls: unknown which rate applies
     if (r.row_kind === 'session_turn' && rates !== price) rates = null;
+    if (AUDIO_INPUT_LANES.has(r.lane_id)) rates = audioInputRates(rates);
     const cost = costUsd(r.provider, r, rates);
     if (cost == null) lane.unpricedCalls += calls;
     else {
@@ -553,6 +566,8 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
 }
 
 module.exports = {
+  audioInputRates,
+  AUDIO_INPUT_LANES,
   pullPrices,
   loadPrices,
   laneCosts,
