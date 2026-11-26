@@ -535,6 +535,34 @@ describe('a profile with no verdict flag and no evidence', () => {
     expect(structuralTrustVerdicts({ ...base, constructionTrusted: false, fieldEvidence: { constructionMaterial: COUNTY } }).constructionTrusted).toBe(false);
   });
 
+  test('evidence sources are an allowlist: model_inference, listing and other non-record sources are untrusted, raw arrays too', () => {
+    const { structuralFactIsRecordBacked } = require('../services/lookup-confidence');
+    const base = { constructionMaterial: 'WOOD_FRAME', foundationType: 'RAISED' };
+    for (const sourceType of ['model_inference', 'listing', 'aggregator', 'ai', 'vision', 'generic', 'unknown', '']) {
+      // single object and raw array shapes, with fieldVerify omitted
+      expect(structuralTrustVerdicts({ ...base, fieldEvidence: { foundationType: { sourceType } } }).foundationTrusted).toBe(false);
+      expect(structuralTrustVerdicts({ ...base, _fieldEvidence: { foundationType: [{ sourceType, value: 'RAISED' }] } }).foundationTrusted).toBe(false);
+      // a machine stamp true does not survive non-accepted evidence for the same field
+      expect(structuralTrustVerdicts({ ...base, foundationTrusted: true, _fieldEvidence: { foundationType: [{ sourceType }] } }).foundationTrusted).toBe(false);
+      // the lookup's own record stamp refuses it as well
+      expect(structuralFactIsRecordBacked({ record: { foundationType: 'RAISED', _fieldEvidence: { foundationType: [{ sourceType }] } }, field: 'foundationType' })).toBe(false);
+    }
+    for (const sourceType of ['county', 'cadastral', 'permit', 'builder', 'verified']) {
+      expect(structuralTrustVerdicts({ ...base, _fieldEvidence: { foundationType: [{ sourceType }] } }).foundationTrusted).toBe(true);
+      expect(structuralFactIsRecordBacked({ record: { foundationType: 'RAISED', _fieldEvidence: { foundationType: { sourceType } } }, field: 'foundationType' })).toBe(true);
+    }
+    // a value a person typed still wins
+    expect(structuralTrustVerdicts({ ...base, _manualFields: ['foundationType'], _fieldEvidence: { foundationType: [{ sourceType: 'model_inference' }] } }).foundationTrusted).toBe(true);
+  });
+
+  test('through the translator: an AI-inferred raised foundation on block walls prices the slab cell with the note', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const input = translateV2CallToV1Input({ homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St', constructionMaterial: 'CBS', foundationType: 'RAISED', constructionTrusted: true, foundationTrusted: true, fieldEvidence: { foundationType: [{ sourceType: 'model_inference' }] } }, ['WDO'], { urgency: 'ROUTINE' });
+    const line = wdoLine(generateEstimate(input));
+    expect(line.price).toBe(175);
+    expect(staffNote(line)).toBeTruthy();
+  });
+
   test('through the translator: a satellite-only wood frame prices block with the note', () => {
     const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
     const input = translateV2CallToV1Input({ homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St', constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', dataSources: { propertyRecord: false, satellite: true } }, ['WDO'], { urgency: 'ROUTINE' });

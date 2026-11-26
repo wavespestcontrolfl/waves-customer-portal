@@ -337,7 +337,11 @@ function structuralFactIsTrustworthy({ record, field }) {
 function structuralFactIsRecordBacked({ record, field }) {
   const value = record?.[field];
   const known = value != null && String(value).trim() !== '' && String(value).trim().toUpperCase() !== 'UNKNOWN';
-  return known && structuralFactIsTrustworthy({ record, field });
+  if (!known || !structuralFactIsTrustworthy({ record, field })) return false;
+  // Field evidence, when present, must come from an accepted source: an AI-reported "county" claim (model_inference),
+  // a listing or a generic web page does not back the price premium.
+  const evidence = firstStructuralEvidence(record?._fieldEvidence?.[field]);
+  return !evidence || evidenceSourceIsAccepted(evidence);
 }
 
 // The trust verdict the WDO price reads for one structural field of a PROFILE (the enriched lookup profile the estimator posts back,
@@ -346,7 +350,16 @@ function structuralFactIsRecordBacked({ record, field }) {
 // in (_manualFields). A wrong-premise flag makes machine readings untrusted. The profile's own false
 // stamp and any fieldVerify evidence always win. Everything else (an old profile, a record-only profile, missing sources) is untrusted:
 // the WDO price falls back to block / slab and adds the staff note. This can only lower a quote versus the frame and crawl cells.
-const UNTRUSTED_EVIDENCE_SOURCES = new Set(['', 'satellite', 'ai', 'vision', 'generic', 'unknown']);
+// Allowlist (not a denylist): only these evidence sources back a frame or crawl premium. Anything else (satellite, AI or
+// model_inference, listing, aggregator, generic, unknown, missing) is untrusted.
+const ACCEPTED_STRUCTURAL_EVIDENCE_SOURCES = new Set(['county', 'cadastral', 'permit', 'builder', 'verified']);
+function evidenceSourceIsAccepted(evidence) {
+  return ACCEPTED_STRUCTURAL_EVIDENCE_SOURCES.has(String(evidence?.sourceType || '').trim().toLowerCase());
+}
+function firstStructuralEvidence(stored) {
+  if (Array.isArray(stored)) return stored.find((e) => e && typeof e === 'object') || null;
+  return stored && typeof stored === 'object' ? stored : null;
+}
 function profileStructuralFactIsTrusted(profile, { field, flag }) {
   // A value a staff member or tech typed in (the estimator's manual-field list) is a person confirming it: trusted, even over a
   // stale machine stamp from the lookup that was there before the edit.
@@ -355,10 +368,12 @@ function profileStructuralFactIsTrusted(profile, { field, flag }) {
   if (hasWrongPremiseFlag(profile)) return false;
   if (profile?.[flag] === false) return false;
   const stored = profile?.fieldEvidence?.[field] ?? profile?._fieldEvidence?.[field];
-  const evidence = Array.isArray(stored) ? stored[0] : stored;
-  if (evidence?.fieldVerify) return false;
+  const evidence = firstStructuralEvidence(stored);
+  if (Array.isArray(stored) ? stored.some((e) => e?.fieldVerify) : evidence?.fieldVerify) return false;
+  // Evidence from a source outside the allowlist overrides a machine stamp true (the stamp was computed from that evidence).
+  if (evidence && !evidenceSourceIsAccepted(evidence)) return false;
   if (profile?.[flag] === true) return true;
-  return !!evidence && !UNTRUSTED_EVIDENCE_SOURCES.has(String(evidence.sourceType || '').toLowerCase());
+  return !!evidence;
 }
 const WDO_STRUCTURAL_FIELDS = Object.freeze({
   construction: { field: 'constructionMaterial', flag: 'constructionTrusted' },
