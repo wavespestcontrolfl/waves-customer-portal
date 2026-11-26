@@ -196,6 +196,14 @@ describe('computeMonthSnapshot', () => {
     company_financials: { first: fin },
   });
 
+  test('job profit is NULL when visits carry no costed gross profit, 0 when there are no visits, and the sum otherwise', async () => {
+    const jobs = (row) => svc.jobRevenueForWindow(makeDb({ service_records: { first: row } }), '2026-10-01', '2026-10-31');
+    expect((await jobs({ revenue: '500', weighted_margin: null, visits: 3, profit_values: 0, gross_profit: null })).grossProfit).toBeNull();
+    expect((await jobs({ revenue: '0', weighted_margin: null, visits: 0, profit_values: 0, gross_profit: null })).grossProfit).toBe(0);
+    expect((await jobs({ revenue: '1000', weighted_margin: '80', visits: 2, profit_values: 2, gross_profit: '800.004' })).grossProfit).toBe(800);
+    expect((await jobs({ revenue: '0', weighted_margin: null, visits: 1, profit_values: 1, gross_profit: '-100' })).grossProfit).toBe(-100);
+  });
+
   test('office cost is the ledger plus the owner allowance, and cost per stop divides by paid stops', async () => {
     mockBuildPnl.mockResolvedValue(pnl(9000, 1800, 0.2));
     const db = dbFor({ ledger: 1000, stops: 100, rev: 10000, margin: '52.456', fin: { owner_office_hours_per_month: '10', owner_office_hourly_rate: '50' } });

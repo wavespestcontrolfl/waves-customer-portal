@@ -45,7 +45,8 @@ function tiles(data, arDays) {
     {
       label: "Gross margin",
       value: pct(grossMargin.bookPct),
-      sub: `from the books · per job at standard minutes ${pct(grossMargin.perJobAtStandardPct)}${partial(grossMargin.bookMonthsCounted)}`,
+      // Each margin says its own month count: the books margin and the per-job margin are stored from different columns.
+      sub: `from the books${coverage(grossMargin.bookMonthsCounted)} · per job at standard minutes ${pct(grossMargin.perJobAtStandardPct)}${coverage(grossMargin.perJobMonthsCounted)}`,
     },
     {
       label: "Owner-paid profit",

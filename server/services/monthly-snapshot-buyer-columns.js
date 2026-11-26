@@ -26,6 +26,7 @@
 const { MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 const { excludeInternalTestCustomers } = require('./mrr-breakdown');
 const { autopayActivePredicate } = require('./autopay-eligibility');
+const { LABEL_ONLY_REALIGN_LANES } = require('./self-booking-plan-sync');
 const { resolveOwnerTechnician, ownerStopRows, standardStopMinutes } = require('./ops-buyer-metrics');
 
 const ADD_BACK_CATEGORIES = ['Interest', 'Depreciation'];
@@ -97,6 +98,15 @@ function ebitdaOf(pnl) {
   return round2(num(pnl.netIncome) + num((pnl.deductions || {}).depreciation) + addedBack);
 }
 
+// numeric(7,2) holds up to 99999.99. A margin on a tiny revenue can be far past that: store no percent (the dollars are kept)
+// instead of failing the whole snapshot write.
+const MARGIN_PCT_LIMIT = 99999.99;
+function bookMarginPct(profit, revenue) {
+  if (!(revenue > 0)) return null;
+  const pct = round2((profit / revenue) * 100);
+  return Math.abs(pct) > MARGIN_PCT_LIMIT ? null : pct;
+}
+
 /** Profit figures of a month; all four are null when a paycheck covers the owner (the paycheck would have to be added back). */
 function profitColumns({ pnl, officeAllowance, field, cashRevenue }) {
   const empty = { book_gross_profit: null, book_gross_margin_pct: null, owner_paid_profit: null, sde: null };
@@ -107,7 +117,7 @@ function profitColumns({ pnl, officeAllowance, field, cashRevenue }) {
     // Dollars are stored beside the percent so a period's margin is total profit over total revenue: a month with no or
     // negative revenue has no percent but still has a profit (or loss) that belongs in the period.
     book_gross_profit: round2(num(pnl.grossProfit) - field.allowance),
-    book_gross_margin_pct: cashRevenue > 0 ? round2(((num(pnl.grossProfit) - field.allowance) / cashRevenue) * 100) : null,
+    book_gross_margin_pct: bookMarginPct(num(pnl.grossProfit) - field.allowance, cashRevenue),
     owner_paid_profit: round2(sde - officeAllowance - field.allowance),
     sde,
   };
@@ -121,9 +131,11 @@ function profitColumns({ pnl, officeAllowance, field, cashRevenue }) {
  *     billed one_time, or with no catalog link its service type names a one-time job or an inspection). That covers a tiered
  *     customer's standalone WDO inspection and a paid one-time booster that only hangs off a series (recurring_parent_id);
  *  3. a child visit of a recurring series (recurring_parent_id) is plan revenue;
- *  4. otherwise membership on the visit date: the tier FROZEN on the service record at completion (service_tier, with
- *     service_tier_source 'auto' meaning a label, not a paying member) where it was recorded; else the customer's tier now
- *     (billing-lane MEMBERSHIP_TIER_SQL), counted only after the plan started (PLAN_START_SQL) and before churned_at.
+ *  4. otherwise membership on the visit date: the tier FROZEN on the service record at completion (service_tier) where it was
+ *     recorded, and only with VERIFIED provenance: completion-tier-snapshot writes NULL when it could not verify, and 'auto'
+ *     for a label, so neither counts (a NULL needs the independent evidence above); else the customer's tier now
+ *     (billing-lane MEMBERSHIP_TIER_SQL, not an auto-derived label), counted only after the plan started (PLAN_START_SQL) and
+ *     before churned_at.
  * Offboarding clears the tier, so the markers, the frozen tier and the churn date keep a departed customer's earlier plan
  * visits counted. No cancel date exists for a customer whose tier was cleared without churned_at, so those are kept only
  * through the markers or the frozen tier.
@@ -144,13 +156,17 @@ const ONE_TIME_VISIT_SQL = `COALESCE(sv.billing_type = 'one_time' OR (sv.id IS N
   AND COALESCE(ss.service_type, sr.service_type) ~* '(^|[^a-z0-9])(one[-_ ]time|onetime|clean[-_ ]out|cleanout|initial[-_ ]only|inspection)($|[^a-z0-9])'), false)`;
 // MEMBERSHIP_TIER_SQL (billing-lane) pointed at the tier frozen on the service record instead of the customer's tier now.
 const FROZEN_MEMBERSHIP_SQL = MEMBERSHIP_TIER_SQL.replaceAll('waveguard_tier', 'sr.service_tier');
+// The customer's tier now is an auto-derived label, not a paying membership: SQL form of self-booking-plan-sync
+// isAutoDerivedTierLabelRow (provenance 'auto', no positive monthly rate, a label-only billing lane).
+const AUTO_LABEL_SQL = `COALESCE(c.waveguard_tier_source = 'auto' AND COALESCE(c.monthly_rate, 0) <= 0
+  AND (c.billing_mode IS NULL OR c.billing_mode IN (${LABEL_ONLY_REALIGN_LANES.map((lane) => `'${lane}'`).join(', ')})), false)`;
 const PLAN_VISIT_SQL = `(
   ss.is_recurring IS TRUE OR ss.annual_prepay_term_id IS NOT NULL
   OR (NOT ${ONE_TIME_VISIT_SQL}
       AND (ss.recurring_parent_id IS NOT NULL
         OR (CASE WHEN sr.service_tier IS NOT NULL
-              THEN ${FROZEN_MEMBERSHIP_SQL} AND sr.service_tier_source IS DISTINCT FROM 'auto'
-              ELSE ${MEMBERSHIP_TIER_SQL}
+              THEN ${FROZEN_MEMBERSHIP_SQL} AND sr.service_tier_source IS NOT NULL AND sr.service_tier_source <> 'auto'
+              ELSE ${MEMBERSHIP_TIER_SQL} AND NOT ${AUTO_LABEL_SQL}
                 AND ${PLAN_START_SQL} <= sr.service_date
                 AND (c.churned_at IS NULL OR sr.service_date <= c.churned_at)
             END))))`;
@@ -209,30 +225,56 @@ async function eligibleJobRevenue(db, startDate, endDate) {
 
 /**
  * Money refunded against one prepay term's invoice by `endDate`, in dollars, or null when a refund exists that cannot be
- * placed in time. Refunds are the Stripe ledger's outflow rows (pnl-report outflowTransactionsQuery: refund, dispute and the
- * like, dated by when they happened) tied to the invoice or to its payment. payments.refund_amount is a cumulative stamp with
- * no date: when it is more than the ledger holds in total, part of a refund has no date, so the month cannot be allocated.
+ * placed. Refunds are the Stripe ledger's outflow rows (pnl-report outflowTransactionsQuery: refund, dispute and the like,
+ * dated by when they happened).
+ *  - A ledger row that names an invoice belongs to THAT invoice only: a sibling invoice paid on the same PaymentIntent or
+ *    charge never charges its refund to this term.
+ *  - A row with no invoice is attributed through the processor identifiers (the payment's PaymentIntent or charge) only when
+ *    they map to exactly one invoice. When several invoices share them, such a row cannot be allocated: NULL.
+ *  - A term with no invoice and no identifiers has nothing to match: 0 (never "every unlinked refund").
+ * payments.refund_amount is a cumulative stamp with no date: when it is more than the ledger holds in total for the payment,
+ * part of a refund has no date, so the month cannot be allocated: NULL.
  */
 async function termRefunds(db, term, endDate) {
   const { outflowTransactionsQuery } = require('./pnl-report');
-  const tied = (query) => query.where(function tiedToTermInvoice() {
-    this.where('spt.invoice_id', term.invoice_id);
-    if (term.payment_intent_id) this.orWhere('lp.stripe_payment_intent_id', term.payment_intent_id);
-    if (term.charge_id) this.orWhere('lp.stripe_charge_id', term.charge_id);
+  const ids = { pi: term.payment_intent_id || null, charge: term.charge_id || null };
+  if (!term.invoice_id && !ids.pi && !ids.charge) return 0;
+  const ofPayment = (query) => query.where(function paymentIds() {
+    this.whereRaw('false');
+    if (ids.pi) this.orWhere('lp.stripe_payment_intent_id', ids.pi);
+    if (ids.charge) this.orWhere('lp.stripe_charge_id', ids.charge);
   });
-  const total = (query) => tied(query).select(db.raw('COALESCE(SUM(-spt.amount), 0)::text AS total')).first();
-  const byEnd = num((await total(outflowTransactionsQuery(db, '1900-01-01', endDate))).total);
-  const ever = num((await total(outflowTransactionsQuery(db, '1900-01-01', '2999-12-31'))).total);
-  const stamped = await db('payments')
-    .whereRaw("COALESCE(metadata->>'source', '') <> 'invoice_refund'")
-    .where(function paymentOfTermInvoice() {
+  const sum = (query) => query.select(db.raw('COALESCE(SUM(-spt.amount), 0)::text AS total')).first();
+  const upTo = (date) => outflowTransactionsQuery(db, '1900-01-01', date);
+
+  const named = term.invoice_id
+    ? num((await sum(upTo(endDate).where('spt.invoice_id', term.invoice_id))).total)
+    : 0;
+  let unnamed = 0;
+  if (ids.pi || ids.charge) {
+    const sharing = await db('invoices').where(function invoicesOnPayment() {
       this.whereRaw('false');
-      if (term.payment_intent_id) this.orWhere('stripe_payment_intent_id', term.payment_intent_id);
-      if (term.charge_id) this.orWhere('stripe_charge_id', term.charge_id);
-    })
-    .select(db.raw('COALESCE(SUM(refund_amount), 0)::text AS total'))
-    .first();
-  return num(stamped.total) > ever + 0.005 ? null : byEnd;
+      if (ids.pi) this.orWhere('stripe_payment_intent_id', ids.pi);
+      if (ids.charge) this.orWhere('stripe_charge_id', ids.charge);
+    }).count({ n: '*' }).first();
+    const unnamedTotal = num((await sum(ofPayment(upTo(endDate)).whereNull('spt.invoice_id'))).total);
+    if (num(sharing.n) > 1 && unnamedTotal !== 0) return null;
+    unnamed = num(sharing.n) > 1 ? 0 : unnamedTotal;
+  }
+  const stamped = ids.pi || ids.charge
+    ? await db('payments')
+      .whereRaw("COALESCE(metadata->>'source', '') <> 'invoice_refund'")
+      .where(function paymentOfTermInvoice() {
+        this.whereRaw('false');
+        if (ids.pi) this.orWhere('stripe_payment_intent_id', ids.pi);
+        if (ids.charge) this.orWhere('stripe_charge_id', ids.charge);
+      })
+      .select(db.raw('COALESCE(SUM(refund_amount), 0)::text AS total'))
+      .first()
+    : { total: 0 };
+  // Everything the ledger holds for the payment, whichever invoice it names, to compare with the payment's own stamp.
+  const ledgerForPayment = ids.pi || ids.charge ? num((await sum(ofPayment(upTo('2999-12-31')))).total) : 0;
+  return num(stamped.total) > ledgerForPayment + 0.005 ? null : named + unnamed;
 }
 
 /**

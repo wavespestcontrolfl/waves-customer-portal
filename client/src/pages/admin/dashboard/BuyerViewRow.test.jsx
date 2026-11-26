@@ -40,6 +40,12 @@ describe("BuyerViewRow", () => {
     expect(screen.queryByText(/of 12 months/)).not.toBeInTheDocument();
   });
 
+  test("the books margin and the per-job margin each say their own month count", () => {
+    const data = { ...DATA, grossMargin: { ...DATA.grossMargin, bookMonthsCounted: 9, perJobMonthsCounted: 6 } };
+    render(<BuyerViewRow data={data} />);
+    expect(screen.getByText(/from the books \(9 of 12 months\) · per job at standard minutes 55.1% \(6 of 12 months\)/)).toBeInTheDocument();
+  });
+
   test("SDE and the profit margin each say their own month count", () => {
     const data = { ...DATA, ownerProfit: { ...DATA.ownerProfit, sdeMonthsCounted: 11, monthsCounted: 8 } };
     render(<BuyerViewRow data={data} />);

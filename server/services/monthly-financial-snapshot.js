@@ -137,15 +137,18 @@ async function jobRevenueForWindow(db, startDate, endDate) {
     .select(
       db.raw('COALESCE(SUM(revenue), 0)::text as revenue'),
       db.raw('100.0 * SUM(gross_profit) / NULLIF(SUM(revenue), 0) as weighted_margin'),
-      db.raw('COALESCE(SUM(gross_profit), 0)::text as gross_profit'),
+      db.raw('COUNT(*)::int as visits'),
+      db.raw('COUNT(gross_profit)::int as profit_values'),
+      db.raw('SUM(gross_profit)::text as gross_profit'),
     )
     .first();
   const margin = row && row.weighted_margin != null ? Number(row.weighted_margin) : null;
   return {
     revenue: round2(row && row.revenue),
     grossMarginPct: Number.isFinite(margin) ? round2(margin) : null,
-    // The dollars behind the percent, kept in a month with no revenue (a callback-only month is a loss).
-    grossProfit: round2(row && row.gross_profit),
+    // The dollars behind the percent, kept in a month with no revenue (a callback-only month is a loss). 0 only when there are no
+    // visits; NULL when visits exist but none carries a gross_profit value (job-costing has not costed them), never a made-up 0.
+    grossProfit: row && Number(row.visits) > 0 && Number(row.profit_values) === 0 ? null : round2(row && row.gross_profit),
   };
 }
 

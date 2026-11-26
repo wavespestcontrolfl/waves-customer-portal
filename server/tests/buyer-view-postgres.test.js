@@ -283,6 +283,22 @@ postgres('buyer view (live Postgres)', () => {
       expect((await cols.recurringRevenue(trx, '2026-10-01', '2026-10-31', NOW)).recurring_revenue).toBe(70);
     });
 
+    it('frozen tier needs verified provenance (NULL means unverified), and a current auto-derived label is not a membership', async () => {
+      const other = await technician({ role: 'technician' });
+      const unverified = await customer({ waveguard_tier: null, member_since: '2024-01-01' });
+      await visit(unverified, '2026-10-02', { revenue: 11, technician_id: other, service_tier: 'Gold', service_tier_source: null });
+      const verified = await customer({ waveguard_tier: null, member_since: '2024-01-01' });
+      await visit(verified, '2026-10-03', { revenue: 70, technician_id: other, service_tier: 'Gold', service_tier_source: 'manual' });
+      const unverifiedButSeries = await customer({ waveguard_tier: null, member_since: '2024-01-01' });
+      await series(unverifiedButSeries, '2024-02-01');
+      await visit(unverifiedButSeries, '2026-10-04', { revenue: 5, technician_id: other, service_tier: 'Gold', service_tier_source: null }, { is_recurring: true });
+      const label = await customer({ waveguard_tier: 'Gold', waveguard_tier_source: 'auto', member_since: '2024-01-01' }); // no rate, label lane
+      await visit(label, '2026-10-05', { revenue: 13, technician_id: other });
+      const payingAuto = await customer({ waveguard_tier: 'Gold', waveguard_tier_source: 'auto', monthly_rate: 80, billing_mode: 'monthly_membership', member_since: '2024-01-01' });
+      await visit(payingAuto, '2026-10-06', { revenue: 9, technician_id: other }); // a paying member whose source still says auto is not a label
+      expect((await cols.recurringRevenue(trx, '2026-10-01', '2026-10-31', NOW)).recurring_revenue).toBe(70 + 5 + 9);
+    });
+
     it('stores field time, the books margin, SDE and owner-paid profit with the owner\'s allowances taken out', async () => {
       await seedMonth();
       const row = await snapshot.computeMonthSnapshot('2026-10', trx);
@@ -336,6 +352,20 @@ postgres('buyer view (live Postgres)', () => {
   });
 
   describe('per-job margin from stored job profit', () => {
+    it('visits with revenue but no gross profit costed store NULL job profit, not 0; a month with no visits stores 0; NULL months leave the year', async () => {
+      const home = await customer();
+      await visit(home, '2026-08-10', { revenue: 500, gross_profit: null }); // revenue, not costed
+      await visit(home, '2026-09-10', { revenue: 1000, gross_profit: 800 });
+      const august = await snapshot.upsertMonthSnapshot('2026-08', trx);
+      const july = await snapshot.upsertMonthSnapshot('2026-07', trx);
+      const september = await snapshot.upsertMonthSnapshot('2026-09', trx);
+      expect(august).toMatchObject({ completed_job_revenue: 500, job_gross_profit: null });
+      expect(july).toMatchObject({ completed_job_revenue: 0, job_gross_profit: 0 });
+      expect(september.job_gross_profit).toBe(800);
+      const payload = await view.getBuyerView({ db: trx, now: NOW });
+      expect(payload.grossMargin).toMatchObject({ perJobAtStandardPct: 80, perJobMonthsCounted: 2 }); // August is left out of both sides
+    });
+
     it('a $1,000 month at $200 cost and a callback-only month that lost $100 give 70% over the two months, not 80%', async () => {
       const other = await technician({ role: 'technician' });
       const home = await customer();
@@ -426,6 +456,48 @@ postgres('buyer view (live Postgres)', () => {
         const paymentId = await payment('pi_sample_2', { refund_amount: 500, refund_status: 'partial' });
         await refund(paymentId, 200, '2026-09-10T15:00:00Z'); // 300 of the 500 has no ledger row
         expect(await cols.prepaidOwed(trx, '2026-10-31')).toBeNull();
+      });
+
+      it('an invoice-less legacy term is untouched by an unrelated refund that names no invoice and no payment', async () => {
+        await trx('annual_prepay_terms').insert({
+          customer_id: home, prepay_amount: 1200, term_start: '2026-06-01', term_end: '2027-05-31', status: 'active', created_at: '2026-06-02T15:00:00Z',
+        });
+        await refund(null, 500, '2026-09-10T15:00:00Z'); // someone else's refund: no invoice_id, no payment_id
+        expect(await cols.prepaidOwed(trx, '2026-10-31')).toBe(1200);
+      });
+
+      describe('one PaymentIntent paying combined invoices', () => {
+        const sibling = async () => {
+          const id = randomUUID();
+          await trx('invoices').insert({
+            id, customer_id: home, token: `tok-${randomUUID()}`, invoice_number: `INV-${randomUUID().slice(0, 8)}`,
+            status: 'paid', paid_at: '2026-06-02T15:00:00Z', total: 300, stripe_payment_intent_id: 'pi_shared',
+          });
+          return id;
+        };
+        const refundNamed = (paymentId, invoiceId, amount, at) => trx('stripe_payout_transactions').insert({
+          type: 'refund', reporting_category: 'refund', amount: -amount, payment_id: paymentId, invoice_id: invoiceId, created_at_stripe: at,
+        });
+
+        it('a refund the ledger names for the sibling invoice is not charged to the term; one naming the term\'s invoice is', async () => {
+          await term({}, { stripe_payment_intent_id: 'pi_shared' });
+          const termInvoice = (await trx('invoices').where({ stripe_payment_intent_id: 'pi_shared', total: 1200 }).first('id')).id;
+          const siblingId = await sibling();
+          const paymentId = await payment('pi_shared', { amount: 1500, refund_amount: 150, refund_status: 'partial' });
+          await refundNamed(paymentId, siblingId, 150, '2026-09-10T15:00:00Z');
+          expect(await cols.prepaidOwed(trx, '2026-10-31')).toBe(1200); // the sibling's refund is the sibling's
+          await trx('payments').where({ id: paymentId }).update({ refund_amount: 250 });
+          await refundNamed(paymentId, termInvoice, 100, '2026-09-11T15:00:00Z');
+          expect(await cols.prepaidOwed(trx, '2026-10-31')).toBe(1100); // only the 100 that names the term's invoice
+        });
+
+        it('a refund naming no invoice on a shared PaymentIntent cannot be allocated: NULL, not a guess', async () => {
+          await term({}, { stripe_payment_intent_id: 'pi_shared' });
+          await sibling();
+          const paymentId = await payment('pi_shared', { amount: 1500, refund_amount: 150, refund_status: 'partial' });
+          await refund(paymentId, 150, '2026-09-10T15:00:00Z'); // invoice_id null
+          expect(await cols.prepaidOwed(trx, '2026-10-31')).toBeNull();
+        });
       });
 
       it('a term with no refunds is unaffected by another term\'s refund', async () => {

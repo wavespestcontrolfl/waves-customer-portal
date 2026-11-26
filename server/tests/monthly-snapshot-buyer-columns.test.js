@@ -92,6 +92,17 @@ describe('ebitdaOf and profitColumns', () => {
       .toEqual({ book_gross_profit: null, book_gross_margin_pct: null, owner_paid_profit: null, sde: 1260 });
   });
 
+  test('a margin past what numeric(7,2) holds is stored as no percent, with the dollars kept, instead of failing the snapshot write', () => {
+    // $1 of revenue against $2,000 of owner field allowance: -199,900%.
+    const tiny = cols.profitColumns({ pnl: { ...pnl, grossProfit: 1 }, officeAllowance: 0, field: { allowance: 2000, onPayroll: false }, cashRevenue: 1 });
+    expect(tiny.book_gross_margin_pct).toBeNull();
+    expect(tiny.book_gross_profit).toBe(-1999);
+    const huge = cols.profitColumns({ pnl: { ...pnl, grossProfit: 2000 }, officeAllowance: 0, field: { allowance: 0, onPayroll: false }, cashRevenue: 1 });
+    expect(huge.book_gross_margin_pct).toBeNull(); // +200,000%
+    const edge = cols.profitColumns({ pnl: { ...pnl, grossProfit: 999.99 }, officeAllowance: 0, field: { allowance: 0, onPayroll: false }, cashRevenue: 1 });
+    expect(edge.book_gross_margin_pct).toBe(99999);
+  });
+
   test('no revenue gives no margin, never a divide by zero', () => {
     const noRevenue = cols.profitColumns({ pnl, officeAllowance: 0, field: { allowance: 0, onPayroll: false }, cashRevenue: 0 });
     expect(noRevenue.book_gross_margin_pct).toBeNull();
@@ -144,6 +155,15 @@ describe('the owner and the owner\'s field time', () => {
   test('an owner on payroll: the hours are reported, no allowance is charged', async () => {
     const db = makeDb({ technicians: [{ id: 't1', phone: OWNER, employment_type: 'w2' }], service_records: stops });
     expect(await cols.ownerFieldTime(db, { owner_field_hourly_rate: '25.00' }, '2026-10-01', '2026-10-31')).toEqual({ hours: 2.67, allowance: 0, onPayroll: true });
+  });
+});
+
+describe('the plan-visit rule text, provenance', () => {
+  test('the frozen tier needs a verified, non-label source; a current auto label is excluded using the shared label lanes', () => {
+    expect(cols.PLAN_VISIT_SQL).toContain("sr.service_tier_source IS NOT NULL AND sr.service_tier_source <> 'auto'");
+    expect(cols.PLAN_VISIT_SQL).not.toContain('IS DISTINCT FROM');
+    expect(cols.PLAN_VISIT_SQL).toContain("c.waveguard_tier_source = 'auto'");
+    expect(cols.PLAN_VISIT_SQL).toContain("'per_visit', 'one_time'");
   });
 });
 
