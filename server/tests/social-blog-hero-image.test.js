@@ -636,6 +636,16 @@ describe('blogHeroSocialImageUrl', () => {
       expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
     });
 
+    test('a refused publish never copies Facebook\'s answer text into the error', async () => {
+      mockPictureGraph({
+        sizes: [{ width: 720, height: 720 }],
+        publish: () => ({ ok: false, status: 400, json: async () => ({ error: { code: 190, message: 'bad access_token=SENTINEL' } }), text: async () => 'access_token=SENTINEL' }),
+      });
+      const res = await share();
+      expect(res.platforms[0].error).toMatch(/Facebook publish API 400 \(code 190\)/);
+      expect(JSON.stringify(res.platforms)).not.toContain('SENTINEL');
+    });
+
     test('a refused publish deletes the hidden post and reports the failure', async () => {
       const calls = mockPictureGraph({
         sizes: [{ width: 720, height: 720 }],

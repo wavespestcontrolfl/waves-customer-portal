@@ -1656,7 +1656,10 @@ async function requestFacebookPublish(postId, token) {
       body: JSON.stringify({ is_published: true, access_token: token }),
     });
     if (res.ok) return null;
-    const err = new Error(`Facebook publish API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    // Status + Graph error code only: the body can echo request data.
+    let code = '';
+    try { code = String((await res.json())?.error?.code ?? '').replace(/\D/g, '').slice(0, 6); } catch { /* no JSON */ }
+    const err = new Error(`Facebook publish API ${res.status}${code ? ` (code ${code})` : ''}`);
     err.refused = res.status >= 400 && res.status < 500; // Facebook answered no (bad token, bad post)
     return err;
   } catch (err) {
