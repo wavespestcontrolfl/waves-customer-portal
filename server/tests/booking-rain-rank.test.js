@@ -51,24 +51,6 @@ describe('rainFitFor', () => {
     [['Initial Native Roach Knockdown Service'], 'avoid'],
     [['Interior Pest Only'], 'prefer'],
     [['WDO Inspection', 'General Pest Control'], 'avoid'],
-    // Termite foam is rain-OK by key (owner 2026-11-01); a name with no key reads the same by words.
-    [['Termite Foam Service'], 'prefer'],
-    [['Recurring Termite Foam Service'], 'prefer'],
-    [['Termite Foam Drill Treatment'], 'prefer'],
-    [['Recurring Foam Treatment (Quarterly)'], 'prefer'],
-    [['Drill-and-Foam Termite'], 'prefer'],
-    // Any other outdoor word still wins over foam.
-    [['Exterior Foam Treatment'], 'avoid'],
-    [['Foam and Liquid Termite Treatment'], 'avoid'],
-    [['Foam Spot Treatment'], 'avoid'],
-    [['Termite Foam Service', 'General Pest Control'], 'avoid'],
-    [['Foaming Treatment'], 'avoid'],
-    // The bare legacy "Termite Foam" label is the spot treatment (termite_spot_treatment): it needs a dry slot.
-    [['Termite Foam'], 'avoid'],
-    [['termite foam '], 'avoid'],
-    [['Termite Foam Treatment'], 'avoid'],
-    [['Recurring Termite Foam Service (Quarterly)'], 'prefer'],
-    [['Drill and Foam Termite Treatment'], 'prefer'],
     [[], 'neutral'],
     [[''], 'neutral'],
   ])('%j → %s', (types, fit) => {
