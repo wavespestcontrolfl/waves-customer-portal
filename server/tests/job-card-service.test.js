@@ -2881,7 +2881,7 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     for (const [serviceType, serviceKey] of [['Rodent Trap Check - Additional', 'rodent_trap_check_additional'], ['Standard Retainer Service', 'trap_only_retainer_standard']]) {
       const out = await card({ serviceType, serviceKey });
       expect([serviceKey, out.visit.visit, out.lines, out.note]).toEqual([serviceKey, 4, [], 'Trap and exclusion work: steps only, no products on this card']);
-      expect(out.procedure.steps[0]).toBe("Rodent Trap Check (on the customer's report)");
+      expect(out.procedure.steps[0]).toBe("Rodent Trap Check (on the customer's report, or a retainer's scheduled check)");
       expect(out.procedure.safety.join(' ')).toMatch(/P100/);
     }
     const setup = await card({ serviceType: 'Rodent Trapping Service', serviceKey: 'rodent_trapping' });

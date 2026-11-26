@@ -24,8 +24,24 @@ describe('rodent card close-out actions', () => {
 
   test('the pest plan rodent visit splits home and commercial bait into their own if-needed actions', () => {
     const visit = protocols.pest.visits.find((v) => v.visit === 5);
-    const bait = actionsOf('pest', visit).filter((action) => ['tomcat', 'blox'].includes(action.product?.id));
-    expect(bait.map((action) => [action.product.id, action.conditional, action.treatmentApplied]).sort()).toEqual([['blox', true, true], ['tomcat', true, true]]);
+    // Every other line (the inspection, the attic snap traps, the carcass removal) records no treatment.
+    const treated = actionsOf('pest', visit).filter((action) => action.treatmentApplied);
+    expect(treated.map((action) => [action.product?.id, action.conditional]).sort()).toEqual([['blox', true], ['tomcat', true]]);
+  });
+
+  test('no rodent card lists the snap trap as a product line, keyed or legacy', () => {
+    for (const visit of protocols.rodent.visits) {
+      for (const action of actionsOf('rodent', visit)) expect([visit.visit, action.product?.id]).not.toEqual([visit.visit, 'victor']);
+    }
+  });
+
+  test('both exclusion cards check for bats and live animals in the steps, before sealing', () => {
+    for (const n of [3, 6]) {
+      const steps = protocols.rodent.visits.find((v) => v.visit === n).primary.split('\n');
+      const bats = steps.findIndex((line) => /^Check for bats/.test(line));
+      const seal = steps.findIndex((line) => /^Seal every numbered entry/.test(line));
+      expect([n, bats >= 0, bats < seal]).toEqual([n, true, true]);
+    }
   });
 
   test('both trap setup cards ask about peanut allergies before the bait step', () => {

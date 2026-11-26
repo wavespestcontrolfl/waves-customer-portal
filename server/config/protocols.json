@@ -1971,6 +1971,30 @@
               "Contrac Blox"
             ],
             "completionApplicationMethod": "bait_placement"
+          },
+          "Rodent monitoring / bait": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Inspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Snap traps in the attic only, spread apart, screwed or tied down, when activity is active": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Document exclusion findings with photos": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Escalate seal-up proposal when entry points are active": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Remove carcasses and reset traps on follow-up": {
+            "scope": "interior",
+            "treatmentApplied": false
           }
         },
         "material_cost": "inventory",
@@ -2068,10 +2092,7 @@
         "lineMeta": {
           "Attic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched": {
             "scope": "interior",
-            "treatmentApplied": false,
-            "catalogProductHints": [
-              "Victor Expanded Trigger Rat Snap Trap"
-            ]
+            "treatmentApplied": false
           },
           "Rodent Trapping Setup": {
             "scope": "interior",
@@ -2123,8 +2144,8 @@
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Exclusion / Entry-Point Repair\nSeal every numbered entry with 1/4 in galvanized hardware cloth, sheet metal, copper mesh with sealant, or mortar at tile eaves\nFoam alone, chicken wire and steel wool (it rusts) are not exclusion\nFinal trap check: remove every trap, log the catches by trap (A1 to A8), and take out the trap map",
-        "secondary": "Check for bats and live animals before sealing: never seal an animal into an occupied void\nFlag inaccessible or declined repairs in the customer note\nRecommend sanitation or trimming when pressure is recurring",
+        "primary": "Exclusion / Entry-Point Repair\nCheck for bats and live animals before sealing: never seal an animal into an occupied void\nSeal every numbered entry with 1/4 in galvanized hardware cloth, sheet metal, copper mesh with sealant, or mortar at tile eaves\nFoam alone, chicken wire and steel wool (it rusts) are not exclusion\nFinal trap check: remove every trap, log the catches by trap (A1 to A8), and take out the trap map",
+        "secondary": "Flag inaccessible or declined repairs in the customer note\nRecommend sanitation or trimming when pressure is recurring",
         "material_cost": "materials",
         "labor_cost": "scope",
         "tiers": {
@@ -2168,8 +2189,8 @@
       {
         "visit": 4,
         "month": "Any",
-        "primary": "Rodent Trap Check (on the customer's report)\nRemove each catch with nitrile gloves: spray 1 part bleach to 9 parts water, wait 5 minutes, double-bag\nRe-bait and reset each sprung trap\nLog which traps caught (A1 to A8)\nLast check (no new catches and the entries are sealed): remove every trap and the trap map",
-        "secondary": "Repeat catches on one side mean an entry is still open: quote exclusion\nIf activity does not match rats or mice, refer wildlife out\nTrap-only retainer: the same numbered 8-trap check, with the catch map",
+        "primary": "Rodent Trap Check (on the customer's report, or a retainer's scheduled check)\nRemove each catch with nitrile gloves: spray 1 part bleach to 9 parts water, wait 5 minutes, double-bag\nRe-bait and reset each sprung trap\nLog which traps caught (A1 to A8)\nLast check (no new catches and the entries are sealed): remove every trap and the trap map",
+        "secondary": "Repeat catches on one side mean an entry is still open: quote exclusion\nIf activity does not match rats or mice, refer wildlife out\nTrap-only retainer: the same numbered 8-trap check on each booked visit, with the catch map; the traps come out when the retainer ends",
         "material_cost": "inventory",
         "labor_cost": "follow_up",
         "tiers": {
@@ -2178,21 +2199,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "A check visit comes only on the customer's report of a sound or a smell (owner 2026-11-23). Say what changed: catches by trap, new evidence, entries found.",
+        "notes": "A check visit comes on the customer's report of a sound or a smell (owner 2026-11-23). A trap-only retainer also gets its booked checks: the traps stay while the retainer runs. Say what changed: catches by trap, new evidence, entries found.",
         "lineMeta": {
-          "Rodent Trap Check (on the customer's report)": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
           "Re-bait and reset each sprung trap": {
             "scope": "interior",
             "treatmentApplied": false
           },
           "Log which traps caught (A1 to A8)": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
-          "Trap-only retainer: the same numbered 8-trap check, with the catch map": {
             "scope": "interior",
             "treatmentApplied": false
           },
@@ -2209,6 +2222,14 @@
             "treatmentApplied": false
           },
           "If activity does not match rats or mice, refer wildlife out": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Rodent Trap Check (on the customer's report, or a retainer's scheduled check)": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Trap-only retainer: the same numbered 8-trap check on each booked visit, with the catch map; the traps come out when the retainer ends": {
             "scope": "interior",
             "treatmentApplied": false
           }
@@ -2274,15 +2295,12 @@
       {
         "visit": 6,
         "month": "Any",
-        "primary": "Rodent Exclusion & Trapping\nInspect top down and number every entry point (photo each)\nSeal every numbered entry with 1/4 in galvanized hardware cloth, sheet metal, copper mesh with sealant, or mortar at tile eaves\nAttic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched\nAsk about peanut allergies in the home before baiting\nScrew or zip-tie every trap; bait each with a pea-size amount (no peanut if anyone has a peanut allergy)\nMap each trap (A1 to A8): the follow-up checks catch the rats sealed inside, and the last check removes every trap",
-        "secondary": "Check for bats and live animals before sealing: never seal an animal into an occupied void\nFoam alone, chicken wire and steel wool are not exclusion\nTell the customer: call us on a snap or a dead-rat smell",
+        "primary": "Rodent Exclusion & Trapping\nInspect top down and number every entry point (photo each)\nCheck for bats and live animals before sealing: never seal an animal into an occupied void\nSeal every numbered entry with 1/4 in galvanized hardware cloth, sheet metal, copper mesh with sealant, or mortar at tile eaves\nAttic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched\nAsk about peanut allergies in the home before baiting\nScrew or zip-tie every trap; bait each with a pea-size amount (no peanut if anyone has a peanut allergy)\nMap each trap (A1 to A8): the follow-up checks catch the rats sealed inside, and the last check removes every trap",
+        "secondary": "Foam alone, chicken wire and steel wool are not exclusion\nTell the customer: call us on a snap or a dead-rat smell",
         "lineMeta": {
           "Attic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched": {
             "scope": "interior",
-            "treatmentApplied": false,
-            "catalogProductHints": [
-              "Victor Expanded Trigger Rat Snap Trap"
-            ]
+            "treatmentApplied": false
           },
           "Screw or zip-tie every trap; bait each with a pea-size amount (no peanut if anyone has a peanut allergy)": {
             "scope": "interior",
