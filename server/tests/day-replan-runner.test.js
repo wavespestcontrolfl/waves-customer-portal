@@ -809,6 +809,10 @@ describe('technician shift hours', () => {
     expect(outsideShift(row('a', 0, 10, { estimated_duration_minutes: 61 }), shift)).toBe('outside_shift');
     expect(outsideShift(row('a', 0, 10, { window_start: null }), shift)).toBe('outside_shift');
     expect(outsideShift(row('a', 0, 13), null)).toBeNull();
+    // An end the minute rule cannot read exactly (seconds) is outside: the stop is not moved.
+    expect(outsideShift(row('a', 0, 10, { window_end: '11:00:30' }), shift)).toBe('outside_shift');
+    // The planner stop carries the longest stored length of its rows.
+    expect(_internals.plannerStop([{ row: row('a', 0, 10, { estimated_duration_minutes: 75 }), why: null, pref: null }]).storedMin).toBe(75);
   });
 
   test('a failed read of the hours plans nothing', async () => {

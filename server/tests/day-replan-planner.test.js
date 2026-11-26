@@ -453,6 +453,10 @@ describe('the day closes with the night pass bound', () => {
     expect(planDay(input(long)).best.slots.m).toBe(16 * 60);
     expect(planDay(input(long, { options: { closeByWork: true } })).reason).toBe('no_feasible_order');
     expect(planDay(input(long, { options: { closeByWork: 'yes' } })).best.slots.m).toBe(16 * 60);
+    // The stored length counts as the work does (plan minutes can be shorter than it).
+    const stored = [stop('m', 0, 9, { workMin: 30, storedMin: 90, pref: { startMin: 16 * 60, endMin: 17 * 60 } }), stop('z', 0, 18, { movable: false })];
+    expect(planDay(input(stored)).best.slots.m).toBe(16 * 60);
+    expect(planDay(input(stored, { options: { closeByWork: true } })).reason).toBe('no_feasible_order');
     // Work no longer than the window: the same answer with and without it.
     const short = [stop('m', 0, 9, { workMin: 60, pref: { startMin: 16 * 60, endMin: 17 * 60 } }), stop('z', 0, 18, { movable: false })];
     expect(planDay(input(short, { options: { closeByWork: true } })).best.slots.m).toBe(16 * 60);

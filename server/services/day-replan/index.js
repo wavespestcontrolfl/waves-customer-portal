@@ -512,6 +512,8 @@ function plannerStop(group) {
     // No booked end: a move keeps it open (the writer clears the end instead of persisting one) and a rollback restores NULL.
     openEnd: group.length === 1 && !lead.window_end,
     workMin: group.length > 1 ? coVisitMinutes(group.map((e) => e.row)) : workDuration(lead),
+    // The longest stored length of its rows: with the window, the block a shift must hold (planner closeByWork).
+    storedMin: Math.max(0, ...group.map((e) => Number(e.row.estimated_duration_minutes) || 0)),
     movable: group.every((e) => !e.why),
     pref: group[0].pref || null,
   };
@@ -566,10 +568,13 @@ function techDayEnv(env, techId, dateStr) {
   return { ...env, shift, openMin: Math.max(env.openMin, Math.ceil(shift.startMin / 60) * 60), closeMin: Math.min(env.closeMin, shift.endMin) };
 }
 
-/** Fixed reason `outside_shift`: the stop's block (the longer of its window and its work) is not inside the day's shift. */
+/**
+ * Fixed reason `outside_shift`: the stop's block (the longer of its window and its length) is not inside the day's
+ * shift. The movers' own reading (shiftBlockMinutes): a bound it cannot read to the minute is a block no shift holds.
+ */
 function outsideShift(row, shift) {
   if (!shift) return null;
-  const { startMin, endMin } = require('../scheduling/window-rules').rowBlockMinutes(row);
+  const { startMin, endMin } = require('../scheduling/window-rules').shiftBlockMinutes(row);
   return startMin == null || startMin < shift.startMin || endMin > shift.endMin ? 'outside_shift' : null;
 }
 

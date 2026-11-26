@@ -182,11 +182,11 @@ function prefAllows(pref, hour) {
 
 /**
  * Last start hour whose window still ends by the day's close (the night pass's after_hours rule). options.closeByWork
- * (a technician's shift set the close): the stop's work must end by it too, so the block is the longer of the two.
+ * (a technician's shift set the close): the stop's work and its stored length (storedMin) must end by it too.
  */
 function lastStartHour(ctx, stop) {
   const width = Number(stop.slotWidthMin) || 60;
-  const block = ctx.opts.closeByWork === true ? Math.max(width, Number(stop.workMin) || 0) : width;
+  const block = ctx.opts.closeByWork === true ? Math.max(width, Number(stop.workMin) || 0, Number(stop.storedMin) || 0) : width;
   return Math.floor((ctx.opts.closeMin - block) / 60);
 }
 
