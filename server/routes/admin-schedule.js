@@ -24898,7 +24898,27 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       }
       return awayWatch ? { ...payload, awayWatch } : payload;
     };
-    const answer = async (payload) => res.json(await withAwayWatch(await withFacts(payload)));
+    // GATE_VISIT_ACCESS_FLAGS=on: the flags the hourly access sweep found for this visit (services/visit-access-flags.js),
+    // with their Right / Wrong status. They quote the customer's redacted words, so they get the same reassignment
+    // recheck as the facts: a visit that moved to another technician while they were read answers nothing. Gate off
+    // (or shadow): no read at all. Fail-soft: a read failure omits the key.
+    const withAccessFlags = async (payload) => {
+      if (!require('../config/feature-gates').visitAccessCardsLive()) return payload;
+      const accessFlags = await require('../services/visit-access-flags').accessFlagsFor(db, svc);
+      if (!accessFlags || !accessFlags.length) return payload;
+      try {
+        const stillOwned = await db('scheduled_services')
+          .where({ 'scheduled_services.id': svc.id })
+          .modify((q) => technicianCurrentVisitFilter(req, q))
+          .first('scheduled_services.id');
+        if (!stillOwned) return { brief: null };
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief access flags recheck failed for ${svc.id}: ${err.message}`);
+        return payload;
+      }
+      return { ...payload, accessFlags };
+    };
+    const answer = async (payload) => res.json(await withAwayWatch(await withAccessFlags(await withFacts(payload))));
     if (!svc.pre_service_brief) return answer({ brief: null });
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
@@ -24928,6 +24948,36 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a gate code changed since generation must reach the tech from the
     // live facts, not the cached copy.
     await answer(served);
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/access-flags/:questionId   body { verdict: 'right' | 'wrong' }
+// The technician's tap on one visit access flag (GATE_VISIT_ACCESS_FLAGS=on; off or shadow = 404). Labels the
+// question's review rows for the visit's newest stored state through the shared label write, and on Right for a dog
+// flag with no pets on file saves one pet line to the profile (services/visit-access-flags.js). Sends nothing to a
+// customer. Same assignment check as GET /:id/visit-brief: a technician reaches only a visit assigned to them.
+router.post('/:id/access-flags/:questionId', async (req, res, next) => {
+  try {
+    const { visitAccessCardsLive } = require('../config/feature-gates');
+    if (!visitAccessCardsLive()) return res.status(404).json({ error: 'Not found' });
+    const { packageFor } = require('../services/typed-decisions/packages');
+    const { questionId } = req.params;
+    if (!Object.prototype.hasOwnProperty.call(packageFor('visit_access.v1').questions, questionId)) {
+      return res.status(400).json({ error: 'Unknown flag' });
+    }
+    const verdict = req.body && req.body.verdict;
+    if (verdict !== 'right' && verdict !== 'wrong') return res.status(400).json({ error: "verdict must be 'right' or 'wrong'" });
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.id', 'scheduled_services.customer_id');
+    if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    const { labelerName } = require('../services/typed-decisions/label-write');
+    const result = await require('../services/visit-access-flags').tapAccessFlag(db, svc, { questionId, verdict }, {
+      labeledBy: labelerName(req), actorId: req.technicianId ? String(req.technicianId) : null, ip: req.ip, userAgent: req.get('user-agent') || null,
+    });
+    if (!result) return res.status(404).json({ error: 'No such flag on this visit' });
+    res.json(result.saved ? { status: result.status, saved: true } : { status: result.status });
   } catch (err) { next(err); }
 });
 

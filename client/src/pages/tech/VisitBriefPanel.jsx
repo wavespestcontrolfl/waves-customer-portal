@@ -5,6 +5,8 @@
 //     last-visit previews, prepaid, billingLane.prediction)
 //   - GET /admin/schedule/:id/estimate-source  → the Quoted section
 //   - GET /admin/schedule/:id/visit-brief      → access codes + history
+//     (+ `accessFlags` with GATE_VISIT_ACCESS_FLAGS=on: the "Before you go in"
+//     cards; their Right / Wrong tap is POST /admin/schedule/:id/access-flags/:questionId)
 //     (LLM prose only when GATE_PREVISIT_BRIEF serves a brief; the
 //     deterministic `facts` block when GATE_VISIT_FACTS is on; silent
 //     degrade to day-row alerts alone when both are dark)
@@ -227,6 +229,98 @@ const alertRowStyle = (a, split) => {
     ...(split ? { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 } : {}),
   };
 };
+
+// "Before you go in": the access and safety flags the hourly AI read found for
+// this visit (visit-brief `accessFlags`, GATE_VISIT_ACCESS_FLAGS=on). Each card
+// quotes the customer's own words; Right / Wrong teaches the reader, and Right on a
+// dog flag with no pets on file saves a pet line to the profile. A wrong flag
+// stays as its one line for this view and is gone on reload.
+const FLAG_AMBER = { border: '#fcd34d', title: '#854d0e', badge: '#fef3c7' };
+const flagButtonStyle = (filled, busy) => ({
+  minHeight: 44, flex: 1, padding: '8px 12px', borderRadius: 8, fontSize: 14, fontWeight: 500, cursor: busy ? 'default' : 'pointer',
+  border: `1px solid ${filled ? DARK.teal : DARK.border}`, background: filled ? DARK.teal : 'transparent',
+  color: filled ? DARK.onAccent : DARK.text, opacity: busy ? 0.6 : 1,
+});
+
+function flagLine(status, saved) {
+  if (status === 'wrong') return 'Marked wrong. Hidden for this visit.';
+  return saved ? 'Saved to Pets. Thanks.' : 'Marked right. Thanks.';
+}
+
+function AccessFlagCard({ flag, serviceId, request }) {
+  const [tap, setTap] = useState({ busy: false, status: flag.status === 'right' ? 'right' : null, saved: false, error: '' });
+  const amber = flag.tone === 'amber';
+  const answered = tap.status === 'right' || tap.status === 'wrong';
+  async function send(verdict) {
+    setTap((t) => ({ ...t, busy: true, error: '' }));
+    try {
+      const out = await request(`/admin/schedule/${encodeURIComponent(serviceId)}/access-flags/${encodeURIComponent(flag.questionId)}`, { method: 'POST', body: JSON.stringify({ verdict }) });
+      setTap({ busy: false, status: out?.status === 'wrong' || out?.status === 'right' ? out.status : verdict, saved: out?.saved === true, error: '' });
+    } catch (err) {
+      setTap((t) => ({ ...t, busy: false, error: err?.message || 'Could not save. Try again.' }));
+    }
+  }
+  return (
+    <div
+      data-testid={`access-flag-${flag.questionId}`}
+      style={{ background: DARK.card, border: `1px solid ${amber ? FLAG_AMBER.border : DARK.border}`, borderRadius: 10, padding: 12, margin: '6px 0 0' }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <span
+          aria-hidden="true"
+          style={{ flexShrink: 0, width: 24, height: 24, borderRadius: '50%', background: amber ? FLAG_AMBER.badge : DARK.bg, border: amber ? 'none' : `1px solid ${DARK.border}`, color: amber ? FLAG_AMBER.title : DARK.muted, fontSize: 14, fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+        >
+          {amber ? '!' : 'i'}
+        </span>
+        <div style={{ minWidth: 0 }}>
+          <p style={{ margin: 0, fontSize: 15, fontWeight: 500, lineHeight: 1.35, color: amber ? FLAG_AMBER.title : DARK.text }}>{flag.title}</p>
+          {flag.quote && <p style={{ margin: '4px 0 0', fontSize: 14, color: DARK.muted }}>{`\u201C${flag.quote}\u201D`}</p>}
+          {flag.source && <p style={{ margin: '2px 0 0', fontSize: 14, color: DARK.muted }}>{flag.source}</p>}
+        </div>
+      </div>
+      {answered ? (
+        <p role="status" style={{ ...factMutedStyle, margin: '10px 0 0' }}>{flagLine(tap.status, tap.saved)}</p>
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button type="button" disabled={tap.busy} onClick={() => send('right')} style={flagButtonStyle(true, tap.busy)}>
+              {flag.saveToFile === 'pets' ? 'Right \u00B7 save to file' : 'Right'}
+            </button>
+            <button type="button" disabled={tap.busy} onClick={() => send('wrong')} style={flagButtonStyle(false, tap.busy)}>Wrong</button>
+          </div>
+          {tap.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red, margin: '8px 0 0' }}>{tap.error}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Flags are per visit; a grouped stop shows each question once, from the first member that has it. Each flag keeps the
+// visit it was read for, which is the visit its tap goes to.
+function collectAccessFlags(services, byService) {
+  const out = [];
+  for (const s of services) {
+    const list = byService[s.id]?.brief?.accessFlags;
+    for (const flag of Array.isArray(list) ? list : []) {
+      if (flag?.questionId && !out.some((f) => f.questionId === flag.questionId)) out.push({ ...flag, serviceId: s.id });
+    }
+  }
+  return out;
+}
+
+function AccessFlagsSection({ flags, request }) {
+  if (!request || !flags.length) return null;
+  const readAt = flags.map((f) => f.readAt).filter(Boolean).sort().pop();
+  return (
+    <div data-testid="visit-brief-access-flags">
+      <div style={{ ...sectionLabelStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+        <span>Before you go in</span>
+        {readAt && <span style={{ fontWeight: 400, color: DARK.muted }}>{`Read by AI \u00B7 ${formatETTime(readAt)} ET`}</span>}
+      </div>
+      {flags.map((f) => <AccessFlagCard key={f.questionId} flag={f} serviceId={f.serviceId} request={request} />)}
+    </div>
+  );
+}
 
 function AccessSection({ alerts, access, gate = null }) {
   const gateActions = useGateCodeActions(gate);
@@ -1241,6 +1335,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       awayWatch: d.brief?.awayWatch || null,
     };
   });
+  const accessFlags = collectAccessFlags(stop.services, byService);
   // GATE_AWAY_WATCH: the member's Away Watch lines (3 outside photos; Welcome Home sweep) are per member, the same on
   // every service of the stop, so the first member that answered carries them.
   const awayWatchLines = memberBits.map((m) => m.awayWatch?.lines).find((lines) => Array.isArray(lines) && lines.length) || null;
@@ -1296,6 +1391,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         />
       )}
       {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
+      <AccessFlagsSection flags={accessFlags} request={request} />
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
       {request && fertilizerVisits.map(member => <div key={member.id}>
         {fertilizerVisits.length > 1 && <strong>{member.serviceType || member.service_type}</strong>}

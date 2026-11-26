@@ -50,6 +50,21 @@ describe('visit access shadow: rules that need no database', () => {
     expect(mockAsk).not.toHaveBeenCalled();
   });
 
+  test('the sweep runs under shadow and on; the technician cards run under on alone (and only with GATE_TYPED_DECISIONS)', () => {
+    const gatesModule = require('../config/feature-gates');
+    const read = (typed, value) => {
+      gates(false);
+      if (typed) process.env.GATE_TYPED_DECISIONS = 'true';
+      if (value !== undefined) process.env.GATE_VISIT_ACCESS_FLAGS = value;
+      return [gatesModule.visitAccessSweepLive(), gatesModule.visitAccessCardsLive()];
+    };
+    expect(read(true, 'shadow')).toEqual([true, false]);
+    expect(read(true, ' ON ')).toEqual([true, true]);
+    expect(read(true, 'true')).toEqual([false, false]);
+    expect(read(true, undefined)).toEqual([false, false]);
+    expect(read(false, 'on')).toEqual([false, false]);
+  });
+
   test.each([
     ['a keyword code', 'Gate code is 4471, thanks', '4471'],
     ['a bare keypad entry', 'Use 2468# at the box', '2468'],
@@ -296,6 +311,13 @@ describe('visit access shadow: rules that need no database', () => {
     expect(second).toHaveLength(first.length);
     expect(second.find((r) => r.question_id === 'dog_on_property').jev_answer).toMatchObject({ yes: true });
     expect(second[0].subject_hash).not.toBe(first[0].subject_hash);
+  });
+
+  test('GATE_VISIT_ACCESS_FLAGS=on runs the same sweep as shadow', async () => {
+    process.env.GATE_VISIT_ACCESS_FLAGS = 'on';
+    const visitId = await visit();
+    expect(await sweep()).toMatchObject({ considered: 1, asked: 1, recorded: 1 });
+    expect(await rows(visitId)).toHaveLength(Object.keys(pkg.questions).length);
   });
 
   test('with the Clef gate on both providers answer, and a case where they differ queues both rows', async () => {

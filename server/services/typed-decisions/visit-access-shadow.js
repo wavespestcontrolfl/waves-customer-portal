@@ -1,7 +1,7 @@
 /**
- * Visit access and safety flags, shadow leg (visit_access.v1; dark behind
- * GATE_VISIT_ACCESS_FLAGS=shadow, honoured only while GATE_TYPED_DECISIONS is
- * live).
+ * Visit access and safety flags, sweep leg (visit_access.v1; dark behind
+ * GATE_VISIT_ACCESS_FLAGS=shadow or on, honoured only while GATE_TYPED_DECISIONS
+ * is live).
  *
  * For each of today's and tomorrow's open visits the sweep builds one small
  * state (the visit's service line, how many visits came before it, a few
@@ -10,9 +10,9 @@
  * questions to each live provider and records every answer in
  * decision_reviews (subject_type 'scheduled_services').
  *
- * SHADOW ONLY: nothing here is shown to a technician, written to a visit, a
- * brief or a customer record, belled or sent. The rows are evidence for the
- * later card flags.
+ * Nothing here is shown to a technician, written to a visit, a brief or a
+ * customer record, belled or sent. The rows are the evidence services/
+ * visit-access-flags.js reads for the technician's flags (GATE_VISIT_ACCESS_FLAGS=on).
  *
  * What leaves, exactly. The saved codes never do: the state says only
  * WHETHER codes are on file (`structured.has_codes`). The two fields whose
@@ -40,7 +40,7 @@
  */
 const crypto = require('crypto');
 const logger = require('../logger');
-const { visitAccessShadowLive, typedDecisionsClefLive } = require('../../config/feature-gates');
+const { visitAccessSweepLive, typedDecisionsClefLive } = require('../../config/feature-gates');
 
 const PACKAGE_ID = 'visit_access.v1';
 const SUBJECT_TYPE = 'scheduled_services';
@@ -529,7 +529,7 @@ async function settleCohorts({ dbh, pkg, svc, built }) {
  */
 async function runVisitAccessSweep({ dbh = null, now = new Date() } = {}) {
   const out = { considered: 0, asked: 0, recorded: 0, unchanged: 0, skipped: 0, failed: 0, deferred: 0, askedVisits: 0, retryVisits: 0 };
-  if (!visitAccessShadowLive()) return { ...out, skippedReason: 'gate_off' };
+  if (!visitAccessSweepLive()) return { ...out, skippedReason: 'gate_off' };
   try {
     const conn = dbh || require('../../models/db');
     const { etDateString, addETDays } = require('../../utils/datetime-et');
