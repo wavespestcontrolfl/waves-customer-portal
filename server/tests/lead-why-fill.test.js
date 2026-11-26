@@ -54,11 +54,11 @@ describe('switch_reason rules', () => {
 describe('previous_company', () => {
   test('names one rival from the fixed list, any case', () => {
     expect(planLeadWhy(lead(), [switchChunk('I have been with ORKIN for years')], NOW).previous_company).toBe('Orkin');
-    expect(planLeadWhy(lead(), [switchChunk('our old company', { topics: ['Tru Green'] })], NOW).previous_company).toBe('TruGreen');
+    expect(planLeadWhy(lead(), [switchChunk('our old company was Tru Green, we were with Tru Green for years')], NOW).previous_company).toBe('TruGreen');
     expect(PREVIOUS_COMPANIES).toContain('Turner');
   });
   test('two different rivals is ambiguous and stays NULL', () => {
-    expect(planLeadWhy(lead(), [switchChunk('Orkin quoted me, but I am leaving Terminix')], NOW).previous_company).toBeUndefined();
+    expect(planLeadWhy(lead(), [switchChunk('We had Orkin, then we were with Terminix')], NOW).previous_company).toBeUndefined();
   });
   test('a bare word is not a rival', () => {
     expect(planLeadWhy(lead(), [switchChunk('an arrow on the sign pointed to the house')], NOW).previous_company).toBeUndefined();
@@ -71,6 +71,21 @@ describe('prior-provider evidence (Codex #8521)', () => {
     const patch = planLeadWhy(lead(), [c], NOW);
     expect(patch.previous_company).toBeUndefined();
     expect(patch.switch_reason).toBeUndefined();
+  });
+  test('a use phrase must name the rival itself', () => {
+    const c = chunk('competitor_mention', 'We had ants and Orkin quoted us $99');
+    const patch = planLeadWhy(lead(), [c], NOW);
+    expect(patch.previous_company).toBeUndefined();
+    expect(patch.switch_reason).toBeUndefined();
+  });
+  test('agent words in context never decide a reason', () => {
+    const c = chunk('objection', 'That is too much for us', { context: 'Agent: do you need to talk to your husband first?' });
+    expect(planLeadWhy(lead(), [c], NOW).not_booked_reason).toBe('price');
+  });
+  test('spam and cancelled leads get no not-booked reason', () => {
+    for (const status of ['spam', 'cancelled']) {
+      expect(planLeadWhy(lead({ status }), [chunk('objection', 'That is too much for us')], NOW).not_booked_reason).toBeUndefined();
+    }
   });
   test('the caller saying they used the rival counts', () => {
     const c = chunk('competitor_mention', 'We had Turner for three years and they raised the price every renewal');
@@ -123,7 +138,7 @@ describe('not_booked_reason rules', () => {
 });
 
 describe('never overwrite an office-set value', () => {
-  const chunks = [switchChunk('Orkin raised the price on us'), chunk('objection', 'too expensive')];
+  const chunks = [switchChunk('We were with Orkin and they raised the price on us'), chunk('objection', 'too expensive')];
   test('set fields are absent from the patch; empty ones are filled', () => {
     const l = lead({ switch_reason: 'contract', previous_company: 'Hughes', not_booked_reason: 'spouse' });
     expect(planLeadWhy(l, chunks, NOW)).toEqual({});

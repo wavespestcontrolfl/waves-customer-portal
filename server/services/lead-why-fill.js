@@ -36,6 +36,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
 
 const LOOKBACK_DAYS = 120;
 const PAGE_SIZE = 200;
@@ -50,13 +51,18 @@ const EXISTING_CUSTOMER_MARGIN_DAYS = 1;
 const DAY_MS = 86400000;
 
 // Statuses that never get a not-booked reason (booked, junk, or not a lead).
-const NO_NOT_BOOKED_STATUSES = new Set(['won', 'duplicate', 'disqualified', 'handled']);
+const NO_NOT_BOOKED_STATUSES = new Set(['won', 'disqualified', ...NON_ENGAGED_LEAD_STATUSES]);
 const LOST_STATUSES = new Set(['lost', 'unresponsive']);
 
 const SWITCH_TAGS = new Set(['competitor_mention', 'churn_signal', 'complaint']);
 // Evidence the caller actually USED another provider. A rival named only as a
 // quote ("Orkin quoted me $99") is not a prior relationship.
-const PRIOR_PROVIDER_RE = /(current|previous|prior|existing|former|old|last) (provider|company|pest|exterminator|guy|service)|switch(ing|ed)? (from|over from|providers|companies)|provider switch|(we|i) (had|used|were with|was with|'ve had|'ve been with|have been with|have been using|have had)\b|(we|i) (have|use) (them|[a-z]+ (pest|lawn|termite|exterminat))|currently (with|using|have)|cancel+(ed|ing)? (with|our|my|them)|(been|was|were) with (them|[a-z]+) for/i;
+const PRIOR_PROVIDER_RE = /(current|previous|prior|existing|former|old|last) (pest |lawn )?(provider|company|exterminator|guy|service)|switch(ing|ed)? (from|over from|providers|companies)|provider switch|currently (with|using) (a|an|another|them)|cancel+(ed|ing)? (with|our|my) (provider|company|service)/i;
+// A rival counts as the previous company only when a use phrase names it:
+// "we had Turner", "switching from Orkin", "been with Hughes".
+// At most one word between the phrase and the name ("had the Turner guy" is
+// two, so "we had ants and Orkin quoted us" never links Orkin).
+const RIVAL_USE_LEAD = String.raw`\b(?:had|have had|used|been using|been with|was with|were with|leaving|left|cancel+(?:ed|ing)?|switch(?:ing|ed)? from|currently (?:have|use|with))\s+(?:the\s+)?(?:\w+\s+)?`;
 const NO_PRIOR_PROVIDER_RE = /never (used|had|been with)|first time|no (current|previous|prior) (provider|company)|don'?t have (a|any) (provider|company|pest)/i;
 
 // First match wins. Specific complaint themes sit before the broad price theme.
@@ -109,13 +115,16 @@ const RIVALS = [
   ['Rentokil', /rentokil/i],
 ];
 
+const RIVAL_USE = RIVALS.map(([name, re]) => [name, new RegExp(RIVAL_USE_LEAD + '(?:' + re.source + ')', 'i')]);
+
 const SWITCH_REASONS = SWITCH_RULES.map(([reason]) => reason);
 const NOT_BOOKED_REASONS = [...NOT_BOOKED_RULES.map(([reason]) => reason), 'no_response'];
 const PREVIOUS_COMPANIES = RIVALS.map(([name]) => name);
 
 const isBlank = (v) => v === null || v === undefined || String(v).trim() === '';
 const topicsText = (c) => (Array.isArray(c.topics) ? c.topics.join(' ') : '');
-const chunkText = (c) => [c.quote, c.context, topicsText(c)].filter(Boolean).join(' ').toLowerCase();
+// Quote + topics only: `context` can hold the agent's surrounding sentences.
+const chunkText = (c) => [c.quote, topicsText(c)].filter(Boolean).join(' ').toLowerCase();
 const joinText = (chunks) => chunks.map(chunkText).join(' ');
 const firstRule = (rules, text) => (text ? (rules.find(([, re]) => re.test(text)) || [])[0] || null : null);
 
@@ -124,7 +133,8 @@ const firstRule = (rules, text) => (text ? (rules.find(([, re]) => re.test(text)
 function aboutPriorProvider(c) {
   if (!SWITCH_TAGS.has(c.tag)) return false;
   const text = chunkText(c);
-  return PRIOR_PROVIDER_RE.test(text) && !NO_PRIOR_PROVIDER_RE.test(text);
+  if (NO_PRIOR_PROVIDER_RE.test(text)) return false;
+  return PRIOR_PROVIDER_RE.test(text) || RIVAL_USE.some(([, re]) => re.test(text));
 }
 
 /**
@@ -144,7 +154,7 @@ function planLeadWhy(lead, chunks, now = new Date()) {
       if (reason) patch.switch_reason = reason;
     }
     if (isBlank(lead.previous_company)) {
-      const named = RIVALS.filter(([, re]) => re.test(text)).map(([name]) => name);
+      const named = RIVAL_USE.filter(([, re]) => re.test(text)).map(([name]) => name);
       if (named.length === 1) patch.previous_company = named[0];
     }
   }
@@ -286,10 +296,14 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
       // Guard each field against a concurrent office edit: write only if still NULL.
       let wrote = 0;
       for (const key of keys) {
-        wrote += await conn('leads').where({ id: lead.id }).whereNull(key).update({ [key]: patch[key] });
+        // Write only if the field is still empty, the lead is not deleted, and its
+        // status is the one the reason was computed from (a booking in between wins).
+        // why_filled_at rides in the same update, so it never lags its field.
+        const q = conn('leads').where({ id: lead.id }).whereNull(key).whereNull('deleted_at');
+        if (lead.status == null) q.whereNull('status'); else q.where('status', lead.status);
+        wrote += await q.update({ [key]: patch[key], why_filled_at: now });
       }
       if (wrote) {
-        await conn('leads').where({ id: lead.id }).update({ why_filled_at: now });
         stats.filled += 1;
         stats.fields += wrote;
       }
