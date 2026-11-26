@@ -89,6 +89,7 @@ export default function RescheduleDialogView({
   durationMinutes,
   handleManualReschedule,
   manualConflicts,
+  manualShiftWarning,
   manualAvailability,
   onClose,
 }) {
@@ -199,6 +200,7 @@ export default function RescheduleDialogView({
                 conflicts={stripCoversRouteWarning(manualAvailability, { currentDate: manualDate, currentStart: manualTime })
                   ? (manualConflicts || []).filter((conflict) => !conflict.warning)
                   : manualConflicts}
+                shiftWarning={manualShiftWarning}
                 style={{ marginTop: 10 }}
               />
             )}

@@ -236,8 +236,8 @@ describe('loadPromiseFacts', () => {
       ];
       const messages = [msg('s1'), msg('s2', { id: 3, metadata: { rendered_slot_ms: NEW_SLOT } })];
       const out = await facts(fakeConn({ messages, members }), ['s1', 's2']);
-      expect(out.s1).toEqual({ level: 'hour', start: new Date(NEW_SLOT) });
-      expect(out.s2).toEqual({ level: 'hour', start: new Date(NEW_SLOT) });
+      expect(out.s1).toEqual({ level: 'hour', start: new Date(NEW_SLOT), firstStart: new Date(NEW_SLOT) });
+      expect(out.s2).toEqual({ level: 'hour', start: new Date(NEW_SLOT), firstStart: new Date(NEW_SLOT) });
       const onlyOld = await facts(fakeConn({ messages: [msg('s1')], members }), ['s1', 's2']);
       expect(onlyOld).toEqual({ s1: { level: 'none', start: null }, s2: { level: 'none', start: null } });
     });
@@ -258,7 +258,7 @@ describe('loadPromiseFacts', () => {
       const out = await facts(fakeConn({ messages: [grouped], members }), ['s2']);
       expect(out.s2).toEqual({ level: 'none', start: null });
       const sameDay = members.map((m) => ({ ...m, scheduled_date: '2026-11-12' }));
-      expect((await facts(fakeConn({ messages: [grouped], members: sameDay }), ['s2'])).s2).toEqual({ level: 'hour', start: new Date(SLOT) });
+      expect((await facts(fakeConn({ messages: [grouped], members: sameDay }), ['s2'])).s2).toEqual({ level: 'hour', start: new Date(SLOT), firstStart: new Date(SLOT) });
     });
 
     test('a pick hand-off still stands when its sibling holds only an old-date hour (codex P1)', async () => {
@@ -326,5 +326,43 @@ describe('readSnapshot: one read-only REPEATABLE READ snapshot per decision (own
     const far = new Date(NOW.getTime() + 5 * 24 * 3600 * 1000);
     expect(await timePromise.dayOnlyReplayDecision(base, { id: 's1', startAt: far, now: NOW, reminder24hEnabled: true })).toBe(false);
     expect(base.transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Owner 2026-11-25 *cap 2* (row 62): the day re-plan caps a told stop at 2 hours after the EARLIEST hour told for the
+// date, in the current run of hour notices (earliestToldOnDate).
+describe('earliestToldOnDate (cap 2)', () => {
+  const { earliestToldOnDate } = require('../services/auto-dispatch/told-visits');
+  const at = (iso) => new Date(iso);
+  const told = (startIso, sentIso, over = {}) => ({ visit_id: 's1', start_at: startIso ? at(startIso) : null, communicated_at: at(sentIso), ...over });
+  const now = at('2026-11-10T12:00:00Z');
+  const DAY = '2026-11-12';
+
+  test('told 9 then 11 on the same date: the first is 9', () => {
+    const events = [told('2026-11-12T14:00:00Z', '2026-11-05T15:00:00Z'), told('2026-11-12T16:00:00Z', '2026-11-09T15:00:00Z')];
+    expect(earliestToldOnDate(events, DAY, now)).toEqual(at('2026-11-12T14:00:00Z'));
+  });
+
+  test('an hour told for another date ends the run: only the hours after it count', () => {
+    const events = [
+      told('2026-11-12T13:00:00Z', '2026-10-01T15:00:00Z'), // 8 AM, an older run
+      told('2026-11-14T14:00:00Z', '2026-10-20T15:00:00Z'), // moved to another date
+      told('2026-11-12T16:00:00Z', '2026-11-09T15:00:00Z'), // back on the 12th at 11
+    ];
+    expect(earliestToldOnDate(events, DAY, now)).toEqual(at('2026-11-12T16:00:00Z'));
+  });
+
+  test('a day-only notice or a withdrawn time ends the run; an unknown window is skipped', () => {
+    const base = told('2026-11-12T14:00:00Z', '2026-11-01T15:00:00Z');
+    const last = told('2026-11-12T16:00:00Z', '2026-11-09T15:00:00Z');
+    expect(earliestToldOnDate([base, told(null, '2026-11-05T15:00:00Z', { level: 'day' }), last], DAY, now)).toEqual(last.start_at);
+    expect(earliestToldOnDate([base, told(null, '2026-11-05T15:00:00Z', { withdrawn: true }), last], DAY, now)).toEqual(last.start_at);
+    expect(earliestToldOnDate([base, told(null, '2026-11-05T15:00:00Z'), last], DAY, now)).toEqual(base.start_at);
+  });
+
+  test('a notice after `now` does not count; no known slot gives null', () => {
+    expect(earliestToldOnDate([told('2026-11-12T13:00:00Z', '2026-11-11T15:00:00Z')], DAY, now)).toBeNull();
+    expect(earliestToldOnDate([told(null, '2026-11-05T15:00:00Z')], DAY, now)).toBeNull();
+    expect(earliestToldOnDate([], DAY, now)).toBeNull();
   });
 });
