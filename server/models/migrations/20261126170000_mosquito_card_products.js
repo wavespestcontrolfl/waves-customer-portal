@@ -62,16 +62,14 @@ async function hasTables(knex, tables) {
   return true;
 }
 
-// Each named product resolves to exactly one active catalog row, or nothing changes (logged): no list names a product the catalog
-// cannot resolve. Tekko Pro is matched by its EPA number too: an inactive row with the same name holds another registration.
+// Each named product resolves to exactly one active catalog row, or nothing changes (logged): the lists store names, and the
+// close-out resolver refuses a name two active rows share. Tekko Pro's one active row must also hold EPA 53883-335: an inactive row
+// with the same name holds another registration (Tekko Trio data).
 async function productsResolve(knex) {
-  const counts = await Promise.all([
-    knex('products_catalog').where({ name: POLYZONE, active: true }).select('id'),
-    knex('products_catalog').where({ name: TEKKO, epa_reg_number: TEKKO_EPA, active: true }).select('id'),
-    knex('products_catalog').where({ name: DUNK, active: true }).select('id'),
-  ]);
-  if (counts.every((rows) => rows.length === 1)) return true;
-  console.log(`${LOG} active catalog rows: ${counts.map((rows) => rows.length).join(', ')} for "${POLYZONE}", "${TEKKO}" (EPA ${TEKKO_EPA}), "${DUNK}"; need one each: nothing changed`);
+  const found = await Promise.all([POLYZONE, TEKKO, DUNK].map((name) => knex('products_catalog').where({ name, active: true }).select('id', 'epa_reg_number')));
+  const tekko = found[1];
+  if (found.every((rows) => rows.length === 1) && tekko[0].epa_reg_number === TEKKO_EPA) return true;
+  console.log(`${LOG} active catalog rows: ${found.map((rows) => rows.length).join(', ')} for "${POLYZONE}", "${TEKKO}" (need EPA ${TEKKO_EPA}), "${DUNK}"; need one each: nothing changed`);
   return false;
 }
 

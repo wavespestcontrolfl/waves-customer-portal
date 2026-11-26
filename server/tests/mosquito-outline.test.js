@@ -204,16 +204,15 @@ describe('the product list', () => {
   test('active catalog rows with the active ingredient, no rate; the inactive duplicate never prints', async () => {
     const products = section(await build(), 'products');
     expect(products.bullets).toEqual([
-      'Barrier spray: Suspend Polyzone (deltamethrin)',
-      'Larval control: Tekko Pro IGR (pyriproxyfen + novaluron)',
+      'Barrier spray: Suspend Polyzone (deltamethrin); Tekko Pro IGR (pyriproxyfen + novaluron)',
     ]);
     expect(products.bullets.join(' ')).not.toMatch(/hydroprene|Tekko Trio|%/);
   });
 
   test.each([
-    ['dunks only', { dunkCount: 2, stationCount: 0 }, 'Larval control: Tekko Pro IGR (pyriproxyfen + novaluron); Summit Mosquito Dunk Tablets (bacillus thuringiensis subsp. israelensis solids)'],
-    ['stations only', { dunkCount: 0, stationCount: 1 }, 'Larval control: Tekko Pro IGR (pyriproxyfen + novaluron); In2Care Mosquito Station (beauveria bassiana spores + pyriproxyfen)'],
-    ['both', { dunkCount: 3, stationCount: 2 }, 'Larval control: Tekko Pro IGR (pyriproxyfen + novaluron); Summit Mosquito Dunk Tablets (bacillus thuringiensis subsp. israelensis solids); In2Care Mosquito Station (beauveria bassiana spores + pyriproxyfen)'],
+    ['dunks only', { dunkCount: 2, stationCount: 0 }, 'Larval control: Summit Mosquito Dunk Tablets (bacillus thuringiensis subsp. israelensis solids)'],
+    ['stations only', { dunkCount: 0, stationCount: 1 }, 'Larval control: In2Care Mosquito Station (beauveria bassiana spores + pyriproxyfen)'],
+    ['both', { dunkCount: 3, stationCount: 2 }, 'Larval control: Summit Mosquito Dunk Tablets (bacillus thuringiensis subsp. israelensis solids); In2Care Mosquito Station (beauveria bassiana spores + pyriproxyfen)'],
   ])('add-on rows print only with counts above zero: %s', async (_name, addOns, larval) => {
     const products = section(await build({ rows: [programRow(addOns)] }), 'products');
     expect(products.bullets[1]).toBe(larval);
@@ -222,18 +221,18 @@ describe('the product list', () => {
   test('a row with no add-ons key, or null add-ons, prints neither add-on row', async () => {
     for (const row of [{ service: 'mosquito' }, { service: 'mosquito', addOns: null }]) {
       const products = section(await build({ rows: [row] }), 'products');
-      expect(products.bullets[1]).toBe('Larval control: Tekko Pro IGR (pyriproxyfen + novaluron)');
+      expect(products.bullets).toEqual(['Barrier spray: Suspend Polyzone (deltamethrin); Tekko Pro IGR (pyriproxyfen + novaluron)']);
     }
   });
 
   test('the barrier is the mosquito card\'s PolyZone; CrossCheck Plus, Scion and Atticus Talak never print (owner 2026-11-25, D7)', async () => {
     const talak = { ...CATALOG[1], name: 'Atticus Talak 7.9 F' };
-    expect(section(await build({ catalog: [...CATALOG, talak] }), 'products').bullets[0]).toBe('Barrier spray: Suspend Polyzone (deltamethrin)');
+    expect(section(await build({ catalog: [...CATALOG, talak] }), 'products').bullets[0]).toBe('Barrier spray: Suspend Polyzone (deltamethrin); Tekko Pro IGR (pyriproxyfen + novaluron)');
   });
 
   test('a retired (inactive) product drops; with every row gone the section leaves out', async () => {
     const noPolyzone = CATALOG.map((row) => (row.name === 'Suspend Polyzone' ? { ...row, active: false } : row));
-    expect(section(await build({ catalog: noPolyzone }), 'products').bullets[0]).toBe('Larval control: Tekko Pro IGR (pyriproxyfen + novaluron)');
+    expect(section(await build({ catalog: noPolyzone }), 'products').bullets[0]).toBe('Barrier spray: Tekko Pro IGR (pyriproxyfen + novaluron)');
     const result = await build({ catalog: CATALOG.map((row) => ({ ...row, active: false })) });
     expect(section(result, 'products')).toBeUndefined();
     expect(result.validation.status).toBe('passed');

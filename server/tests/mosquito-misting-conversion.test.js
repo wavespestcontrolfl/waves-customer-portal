@@ -287,18 +287,25 @@ describe('protocols and the job card route by catalog key', () => {
       expect(out.procedure.safetyRules).toBeUndefined();
       expect(out.procedure.safety.join(' ')).toMatch(/Pause for rain, fog, wind over 10 mph/);
     }
-    // the barrier mosquito program declares safety rules too and must not gain a Safety section
+    // the barrier mosquito program shows its own safety rules (wind, water strips, no fogger; owner 2026-11-25, D7), never the misting ones
     const barrier = await visitFor(null, '21-day mosquito misting');
     expect(barrier.procedure.name).toBe('Mosquito Control Protocol');
-    expect(barrier.procedure).not.toHaveProperty('safety');
-    // a pest visit is unchanged
-    const pest = await visitFor('pest_general_quarterly', 'Quarterly Pest Control Service');
-    if (pest.procedure) expect(pest.procedure).not.toHaveProperty('safety');
+    expect(barrier.procedure.safety).toEqual(protocols.mosquito.safety_rules);
+    expect(barrier.procedure.safety.join(' ')).toMatch(/wind is over 15 mph/);
+    // a pest visit is unchanged (its own category: the mosquito category above would open the mosquito program)
+    const pest = await resolveVisitProducts({
+      facts: { serviceCategory: 'pest_control', serviceType: 'Quarterly Pest Control Service', serviceKey: 'pest_general_quarterly', scheduledDate: '2027-03-10', isLawn: false },
+      protocols, catalog: [], dbh: null, deps: {},
+    });
+    expect(pest.procedure.name).not.toBe('Mosquito Control Protocol');
+    expect(pest.procedure).not.toHaveProperty('safety');
     // every other program that declares safety_rules without a field guide stays free of the new field
     for (const [programKey, program] of Object.entries(protocols)) {
-      if (programKey === 'mosquito_misting' || !program || !program.safety_rules) continue;
+      // The safety-field programs (job-card.js SAFETY_ON_CARD_PROGRAMS) are skipped. No category: a 'mosquito' category would open the
+      // mosquito program for every name, so each program is matched by its own name.
+      if (['mosquito_misting', 'mosquito', 'flea', 'bed_bug'].includes(programKey) || !program || !program.safety_rules) continue;
       const out = await resolveVisitProducts({
-        facts: { serviceCategory: 'mosquito', serviceType: program.name, scheduledDate: '2027-03-10', isLawn: false },
+        facts: { serviceCategory: null, serviceType: program.name, scheduledDate: '2027-03-10', isLawn: false },
         protocols, catalog: [], dbh: null, deps: { programKey },
       });
       if (out.procedure) expect(out.procedure).not.toHaveProperty('safety');
@@ -311,8 +318,9 @@ describe('protocols and the job card route by catalog key', () => {
     const job = require('fs').readFileSync(path.join(__dirname, '..', 'services/job-card.js'), 'utf8');
     expect(job).toContain("...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),");
     expect(job).toContain("...(fieldGuide ? {} : mistingSafetyField(program, programKey || match?.programKey)),");
-    // The safety field is for the programs on this list only (misting, and the indoor flea and bed bug sprays): Tree & Shrub is not on it.
-    expect(job).toContain("const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'flea', 'bed_bug'];");
+    // The safety field is for the programs on this list only (misting, the mosquito barrier, and the indoor flea and bed bug sprays):
+    // Tree & Shrub is not on it.
+    expect(job).toContain("const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug'];");
     expect(job).toContain("if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};");
   });
 

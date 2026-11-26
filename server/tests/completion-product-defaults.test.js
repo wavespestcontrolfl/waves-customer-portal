@@ -431,14 +431,24 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
     expect(result.names).toEqual(['Atticus Antapex WSG', 'Tekko Pro IGR', 'Advion Evolution Cockroach Gel Bait']);
   });
 
-  test('mosquito: the barrier visits prefill PolyZone + Tekko Pro; the source-reduction visit prefills the Bti dunk (owner 2026-11-25, D7)', () => {
+  test('mosquito: the barrier visits prefill PolyZone + Tekko Pro; the source-reduction visit prefills the Bti dunk; callbacks prefill no spray (owner 2026-11-25, D7)', () => {
     for (const [serviceType, serviceKey] of [['Monthly Mosquito Control Service', 'mosquito_monthly'], ['Seasonal Mosquito Control Service', 'mosquito_seasonal'], ['One-Time Mosquito Control Service', 'mosquito_one_time']]) {
       const result = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType, serviceKey });
       expect([serviceType, result.programKey, result.source, result.names]).toEqual([serviceType, 'mosquito', 'protocol_visit', ['Suspend Polyzone', 'Tekko Pro IGR']]);
     }
     expect(realProtocols.mosquito.visits.find((v) => v.visit === 2).completionDefaultProducts).toEqual(['Summit Mosquito Dunk Tablets']);
+    // A callback (booked from a finished visit, or named so) prefills no spray: PolyZone repeats only at 21 days, Tekko Pro outdoors not inside 14.
+    for (const args of [{ serviceType: 'Monthly Mosquito Control Service', serviceKey: 'mosquito_monthly', isFollowup: true }, { serviceType: 'Mosquito Callback' }]) {
+      const callback = resolveCompletionDefaultProductNames({ protocols: realProtocols, ...args });
+      expect([callback.matchedVisit.visit, callback.matchedVisit.reason || callback.reason, callback.source, callback.names]).toEqual([4, expect.anything(), 'none', []]);
+    }
+    // A booked station service gets the station card and default, never the larvicide visit's dunk.
+    const stations = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Mosquito Treatment - Stations' });
+    expect([stations.matchedVisit.visit, stations.names]).toEqual([5, ['In2Care Mosquito Station']]);
+    const dunks = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Mosquito Treatment - Dunks' });
+    expect([dunks.matchedVisit.visit, dunks.names]).toEqual([2, ['Summit Mosquito Dunk Tablets']]);
     const names = realProtocols.mosquito.visits.flatMap((v) => v.completionDefaultProducts);
-    for (const retired of ['Scion Insecticide', 'In2Care Mosquito Station', 'Tekko Trio']) expect(names).not.toContain(retired);
+    for (const retired of ['Scion Insecticide', 'Tekko Trio']) expect(names).not.toContain(retired);
   });
 
   test('other curated-less programs (pest visit 1, termite) carry no field yet', () => {

@@ -2092,7 +2092,7 @@
         "visit": 1,
         "month": "Any",
         "primary": "Mosquito Barrier Treatment\nWalk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nBarrier: Suspend PolyZone 1.1 fl oz per gallon, 1 gallon per 1,500 sq ft, with the mist blower from the ground up to 10 ft: leaf undersides, shaded shrubs, under decks, the lanai base and fence lines\nGrowth regulator in the same tank: Tekko Pro 1 fl oz per gallon\nHand the customer the dump-and-drain note with their containers ticked",
-        "secondary": "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days), or an Altosid 30-day briquet. Never an HOA or CDD pond\nCallback before day 21: inspect and larvicide; spray only LESCO Crosscheck Plus at its low rate, with no repeat inside 7 days",
+        "secondary": "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days), or an Altosid 30-day briquet. Never an HOA or CDD pond",
         "material_cost": "inventory",
         "labor_cost": "standard",
         "tiers": {
@@ -2135,13 +2135,6 @@
               "Altosid 30 Day Briquets"
             ],
             "completionApplicationMethod": "spot_treatment"
-          },
-          "Callback before day 21: inspect and larvicide; spray only LESCO Crosscheck Plus at its low rate, with no repeat inside 7 days": {
-            "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "LESCO Crosscheck Plus"
-            ]
           }
         },
         "completionDefaultProducts": [
@@ -2181,7 +2174,7 @@
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Event / Heavy-Pressure Mosquito Service\nSpray the barrier 24 to 72 hours before the event, on the seating areas, lanai, pool deck, paths and shaded perimeter\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nBarrier: Suspend PolyZone 1.1 fl oz per gallon, 1 gallon per 1,500 sq ft, with the mist blower from the ground up to 10 ft: leaf undersides, shaded shrubs, under decks, the lanai base and fence lines\nGrowth regulator in the same tank: Tekko Pro 1 fl oz per gallon",
+        "primary": "Event / Heavy-Pressure Mosquito Service\nInspect the seating areas, lanai, pool deck and paths 24 to 72 hours before the event\nSpray the barrier only on the shaded shrubs, hedges and plant beds around those areas. No spray on the pool deck, paths or other paved surfaces\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nBarrier: Suspend PolyZone 1.1 fl oz per gallon, 1 gallon per 1,500 sq ft, with the mist blower from the ground up to 10 ft: leaf undersides, shaded shrubs, under decks, the lanai base and fence lines\nGrowth regulator in the same tank: Tekko Pro 1 fl oz per gallon",
         "secondary": "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days), or an Altosid 30-day briquet. Never an HOA or CDD pond\nSet expectations: this is short-term relief; recommend the recurring plan when pressure is seasonal",
         "material_cost": "inventory",
         "labor_cost": "event",
@@ -2230,6 +2223,68 @@
         "completionDefaultProducts": [
           "Suspend Polyzone",
           "Tekko Pro IGR"
+        ]
+      },
+      {
+        "visit": 4,
+        "month": "Any",
+        "primary": "Mosquito Callback\nAsk the customer where and when they are bitten\nWalk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nLarvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days), or an Altosid 30-day briquet. Never an HOA or CDD pond",
+        "secondary": "Spray only if adults are resting: LESCO Crosscheck Plus at its low rate, on shaded resting sites, with no repeat inside 7 days. No PolyZone or Tekko Pro before day 21\nNote why pressure came back: new water, a neighbor's yard, rain, or a missed area",
+        "lineMeta": {
+          "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days), or an Altosid 30-day briquet. Never an HOA or CDD pond": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Summit Mosquito Dunk Tablets",
+              "Altosid 30 Day Briquets"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          },
+          "Spray only if adults are resting: LESCO Crosscheck Plus at its low rate, on shaded resting sites, with no repeat inside 7 days. No PolyZone or Tekko Pro before day 21": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "LESCO Crosscheck Plus"
+            ],
+            "completionApplicationMethod": "perimeter_spray"
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "tiers": {
+          "bronze": false,
+          "silver": true,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "A re-service visit. It prefills no spray: PolyZone repeats only at 21 days, and Tekko Pro outdoors not inside 14 days."
+      },
+      {
+        "visit": 5,
+        "month": "Any",
+        "primary": "Mosquito Station Service\nService each In2Care station by its label: refill the water, replace the insert, and log the station count\nKeep stations in shade, near the resting sites, away from where children and pets play",
+        "secondary": "Walk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads",
+        "lineMeta": {
+          "Service each In2Care station by its label: refill the water, replace the insert, and log the station count": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "In2Care Mosquito Station"
+            ],
+            "completionApplicationMethod": "station_check"
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "tiers": {
+          "bronze": false,
+          "silver": true,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "The In2Care station add-on the customer bought. Stations are off the barrier card's defaults, not out of service.",
+        "completionDefaultProducts": [
+          "In2Care Mosquito Station"
         ]
       }
     ]

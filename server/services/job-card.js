@@ -1408,9 +1408,10 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
  * the booking's catalog service key — a matcher rule that claims it fixes
  * the visit regardless of the display name.
  */
-// The safety rules of the misting, flea and bed bug programs as a procedure field ({ safety: [...] }), or {} for any other program (they
-// keep their procedure). Flea and bed bug are indoor sprays: people and pets out until dry, fish tanks covered, nothing fogged.
-const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'flea', 'bed_bug'];
+// The safety rules of the misting, mosquito, flea and bed bug programs as a procedure field ({ safety: [...] }), or {} for any other
+// program (they keep their procedure). Flea and bed bug are indoor sprays: people and pets out until dry, fish tanks covered, nothing
+// fogged. Mosquito: the wind limit, the strips from water and storm drains, and no fogger (owner 2026-11-25, D7).
+const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'mosquito', 'flea', 'bed_bug'];
 function mistingSafetyField(program, effectiveProgramKey) {
   if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};
   return { safety: program.safety_rules.map((rule) => String(rule)) };

@@ -105,6 +105,8 @@ describe('20261126170000 mosquito card products', () => {
     for (const catalog of [
       [{ id: 'tekko', name: 'Tekko Pro IGR', epa_reg_number: '53883-335', active: true }, { id: 'dunk', name: 'Summit Mosquito Dunk Tablets', active: true }],
       [{ id: 'pz', name: 'Suspend Polyzone', active: true }, { id: 'trio', name: 'Tekko Pro IGR', epa_reg_number: '53883-444', active: true }, { id: 'dunk', name: 'Summit Mosquito Dunk Tablets', active: true }],
+      // Both Tekko Pro registrations active under one name: the lists would store a name the close-out cannot resolve.
+      [{ id: 'pz', name: 'Suspend Polyzone', active: true }, { id: 'tekko', name: 'Tekko Pro IGR', epa_reg_number: '53883-335', active: true }, { id: 'trio', name: 'Tekko Pro IGR', epa_reg_number: '53883-444', active: true }, { id: 'dunk', name: 'Summit Mosquito Dunk Tablets', active: true }],
     ]) {
       const { knex, db } = fakeKnex({ catalog });
       await migration.up(knex);
