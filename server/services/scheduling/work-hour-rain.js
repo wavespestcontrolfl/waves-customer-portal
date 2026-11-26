@@ -248,6 +248,15 @@ function spanChances(hours, day, startMin, endMin, afterHours) {
   return chancesFor(hours, day, spanHours(startMin, endMin, afterHours));
 }
 
+/** The chance for every hour a same-day slot can use at the visit's point: the work hours plus the drying hours after
+ *  close, as read (null = no reading). A reorder's span lies inside it, so the decision can be replayed. */
+function dayChances(hours, day, afterHours) {
+  const last = DAY_CLOSE / 60 + afterHours;
+  const hourNumbers = [];
+  for (let h = DAY_OPEN / 60; h < Math.min(24, last); h += 1) hourNumbers.push(h);
+  return chancesFor(hours, day, hourNumbers);
+}
+
 module.exports = {
   MEASURABLE_IN,
   STATIONS,
@@ -263,5 +272,6 @@ module.exports = {
   spanWetAt,
   spanChances,
   workHourChances,
+  dayChances,
   _clearCache: () => cache.clear(),
 };

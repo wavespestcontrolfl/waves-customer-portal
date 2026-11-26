@@ -109,7 +109,10 @@ describe('proposals', () => {
     const out = await run({ now: TUE_CUTOFF, conn, read: jest.fn(async () => hoursFor(MORNING)), deps: deps([stop()]) });
     expect(out.problems).toEqual([]);
     // Rain 8 to 11 and the visit at 9: the nearest dry hours after it are 12:00 (its own hours and the 2 drying hours read dry).
-    expect(out.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), peak: 80, decision: 'reorder', to_start: '12:00' }]);
+    expect(out.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), day_chances: expect.any(Array), peak: 80, decision: 'reorder', to_start: '12:00' }]);
+    // The reorder's own hours (12:00 on) are inside day_chances, read from the same snapshot: the decision replays.
+    expect(out.proposals[0].day_chances).toHaveLength(11);
+    expect(out.proposals[0].day_chances.slice(4).every((c) => c != null && c < 40)).toBe(true);
     expect(daysOf(conn)[WED].cutoff.proposals).toEqual(out.proposals);
   });
 
@@ -138,7 +141,7 @@ describe('proposals', () => {
     const out = await run({ now: TUE_CUTOFF, conn, read: jest.fn(async () => hoursFor(ALL_DAY)), deps: d });
     // Thursday is the next work day; 08:00 is the day's first start. Not a recurring visit: it moves alone.
     expect(out.proposals).toEqual([{
-      id: 'v01', start: '09:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), next_day: THU, next_day_chances: expect.any(Array), peak: 80, decision: 'day_move', to_date: THU, to_start: '08:00', plan_moves: 'one_visit',
+      id: 'v01', start: '09:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), day_chances: expect.any(Array), next_day: THU, next_day_chances: expect.any(Array), peak: 80, decision: 'day_move', to_date: THU, to_start: '08:00', plan_moves: 'one_visit',
     }]);
     expect(d.blackoutDates).toHaveBeenCalledWith(THU, '2026-12-03');
   });
@@ -148,7 +151,7 @@ describe('proposals', () => {
       now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()]),
       read: jest.fn(async () => hoursFor({ ...ALL_DAY, [THU]: 'all' })),
     });
-    expect(out.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), next_day: THU, next_day_chances: expect.any(Array), peak: 80, decision: 'call_list', reason: 'no_dry_slot' }]);
+    expect(out.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), day_chances: expect.any(Array), next_day: THU, next_day_chances: expect.any(Array), peak: 80, decision: 'call_list', reason: 'no_dry_slot' }]);
     expect(out.proposals[0].to_date).toBeUndefined();
   });
 
@@ -340,7 +343,7 @@ describe('proposals', () => {
     d.rainOut.conflictsForTarget = taken();
     const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hoursFor({ [WED]: [8, 9, 10] })) });
     expect(out.proposals).toEqual([{
-      id: 'v01', start: '09:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), next_day: THU, next_day_chances: expect.any(Array), peak: 80, decision: 'day_move', to_date: THU, to_start: '08:00', plan_moves: 'one_visit',
+      id: 'v01', start: '09:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), day_chances: expect.any(Array), next_day: THU, next_day_chances: expect.any(Array), peak: 80, decision: 'day_move', to_date: THU, to_start: '08:00', plan_moves: 'one_visit',
     }]);
     // The next work day wet as well: the office call list.
     n = 0;
@@ -969,7 +972,7 @@ describe('audit fixes', () => {
   test('at 6 AM a stop that starts within two hours still has its rain judged', async () => {
     const row = stop({ window_start: '08:00:00', window_end: '09:00:00' });
     const out = await run({ now: WED_RECHECK, conn: fakeConn(), deps: deps([row]), read: jest.fn(async () => hoursOn(WED, [8, 9, 10])) });
-    expect(out.proposals).toEqual([{ id: 'v01', start: '08:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), peak: 80, decision: 'reorder', to_start: '11:00' }]);
+    expect(out.proposals).toEqual([{ id: 'v01', start: '08:00', span: expect.any(Array), gauges: expect.any(Array), span_chances: expect.any(Array), day_chances: expect.any(Array), peak: 80, decision: 'reorder', to_start: '11:00' }]);
   });
 
   test('the Saturday 2 PM run does not freeze Monday; the Sunday 2 PM run does', async () => {

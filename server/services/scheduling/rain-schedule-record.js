@@ -267,7 +267,12 @@ async function proposeFor(row, ctx) {
   // run, so rain-pass's wet verdict and these alternatives judge the same hours.
   const hourly = await read(row.visit.point.lat, row.visit.point.lng);
   // The hours this decision used, raw: the visit's span plus its drying hours (compact, from the hour its work starts).
-  if (Array.isArray(hourly)) base.span_chances = workHours.spanChances(hourly, day, base.span[0], base.span[1], RAIN_AFTER_HOURS);
+  if (Array.isArray(hourly)) {
+    base.span_chances = workHours.spanChances(hourly, day, base.span[0], base.span[1], RAIN_AFTER_HOURS);
+    // Every same-day hour a later slot could use (work hours plus drying after close, from 8 AM): a reorder's own span
+    // and the hours that rejected the others are all inside it, so the reorder can be replayed.
+    base.day_chances = workHours.dayChances(hourly, day, RAIN_AFTER_HOURS);
+  }
   // A hour already taken by an earlier proposal is never offered, over the cap or not.
   const own = await reorderStart(row, ctx, hourly);
   if (own != null) {
