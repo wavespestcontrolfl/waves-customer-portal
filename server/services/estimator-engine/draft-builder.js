@@ -35,6 +35,7 @@ const {
 } = require('../estimate-automation-duplicates');
 const { LOOKUP_PALM_REVIEW_REASON } = require('./lookup-palm-review');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
+const { callAutoSendShadowVerdict } = require('./call-auto-send-shadow');
 const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS } = require('../pricing-engine/unit-band-pricing');
 const { sameStreetAddress } = require('./address-compare');
 const { scopeUnresolvedVerdict, businessReviewReasons } = require('./business-scope-engine');
@@ -1180,8 +1181,15 @@ async function writeGuardedLeadEstimateLink(context, estimateId) {
   await q.update({ estimate_id: estimateId });
 }
 
-async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
+async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null, quotePromised = null }) {
   const token = crypto.randomBytes(16).toString('hex');
+  // Fail-soft: a shadow verdict must never cost the draft itself.
+  let autoSendShadow = null;
+  try {
+    autoSendShadow = callAutoSendShadowVerdict({ origin, quotePromised, intent, propertyFacts, context, priorQualifyingServices });
+  } catch (shadowErr) {
+    logger.warn(`[estimator-engine] call auto-send shadow verdict failed: ${shadowErr.message}`);
+  }
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
 
@@ -1539,6 +1547,9 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           calibration,
           composer: { model: model || null, confidence: intent.confidence },
           reviewNotes,
+          // Watch-only verdict of the call auto-send rule (owner 2026-11-25
+          // *build*, step 1). Review data only: nothing reads it to send.
+          ...(autoSendShadow ? { autoSendShadow } : {}),
         },
       }),
       address: intent.address,

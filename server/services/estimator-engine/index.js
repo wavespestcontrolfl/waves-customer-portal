@@ -3219,7 +3219,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     let draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
       propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
-      membershipSnapshot, priorQualifyingServices, origin,
+      membershipSnapshot, priorQualifyingServices, origin, quotePromised,
     });
 
     if (draft.blocked && UNIT_FENCE_QUIET_REASONS.includes(draft.duplicateBlock?.reason)) {
@@ -3271,7 +3271,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           draft = await createDraftEstimate({
             intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
             propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
-            membershipSnapshot, priorQualifyingServices, origin,
+            membershipSnapshot, priorQualifyingServices, origin, quotePromised,
           });
         }
       }
