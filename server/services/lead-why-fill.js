@@ -80,6 +80,7 @@ const NOT_BOOKED_TAGS = new Set(['objection']);
 // A chunk is switch evidence only when one of its labels states a relationship
 // with a provider the caller had. Shopping labels alone ("comparison
 // shopping", "quote comparison") are not.
+const SHOPPING_TOPIC = /shopping|comparison|competitor pricing|second opinion|quote|estimate|bid/;
 const RELATIONSHIP_TOPIC = /^(current|previous|prior|existing|former|old|other pest|lawn) (pest )?provider$|^provider (dissatisfaction|switch(ing)?|cancellation)$|^switching providers?$|^replacement provider$|^service cancellation$/;
 
 // Each reason = labels that state it. The reason a lead gets is the one with
@@ -150,7 +151,12 @@ function topReason(rules, chunkList) {
   return best;
 }
 
-const rivalsIn = (chunkList) => [...new Set(chunkList.flatMap(labels)
+const isRelationship = (c) => labels(c).some((t) => RELATIONSHIP_TOPIC.test(t));
+const isShopping = (c) => labels(c).some((t) => SHOPPING_TOPIC.test(t));
+// A rival counts only from a chunk that itself states the relationship and is
+// not about shopping ("current provider" + "orkin"); a rival named in a quote
+// chunk elsewhere on the call is a competitor, not the old provider.
+const rivalsIn = (chunkList) => [...new Set(chunkList.filter((c) => isRelationship(c) && !isShopping(c)).flatMap(labels)
   .flatMap((t) => RIVALS.filter(([, re]) => re.test(t)).map(([name]) => name)))];
 
 // Switch evidence for one call: the caller's switch-tag chunks on a call where
@@ -161,7 +167,8 @@ function switchChunksByCall(callerChunks) {
   for (const c of callerChunks) byCall.set(c.call_log_id, [...(byCall.get(c.call_log_id) || []), c]);
   const out = [];
   for (const list of byCall.values()) {
-    if (list.some((c) => labels(c).some((t) => RELATIONSHIP_TOPIC.test(t)))) out.push(...list.filter((c) => SWITCH_TAGS.has(c.tag)));
+    // Shopping chunks never supply a reason: a quoted price is not why they left.
+    if (list.some(isRelationship)) out.push(...list.filter((c) => SWITCH_TAGS.has(c.tag) && !isShopping(c)));
   }
   return out;
 }
@@ -312,28 +319,11 @@ function notUnclaimedHold() {
   this.whereNull('ss.reservation_expires_at').orWhereNotNull('ss.customer_id');
 }
 
-// A visit booked by phone on the call: call-recording-processor.js records it as
-// an appointment_booked activity with metadata.scheduledServiceId and leaves the
-// lead's status and converted_at as they were. Same customer ownership check as
-// the admin card's links (a populated lead customer vetoes a dissenting visit).
-function phoneBookedVisit(conn, lead) {
-  return conn('scheduled_services as ss')
-    .whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES)
-    .where(notUnclaimedHold)
-    .whereExists(conn('lead_activities as la').select(conn.raw('1'))
-      .where('la.lead_id', lead.id)
-      .where('la.activity_type', 'appointment_booked')
-      .whereRaw("la.metadata->>'scheduledServiceId' = ss.id::text"))
-    .modify((q) => { if (lead.customer_id) q.where((o) => o.whereNull('ss.customer_id').orWhere('ss.customer_id', lead.customer_id)); })
-    .first('ss.id');
-}
-
 async function bookedLeadIds(conn, leads) {
   const out = new Set();
   for (const l of leads) {
     if (!LOST_STATUSES.has(l.status) || l.converted_at) continue; // only these can get a reason
-    const active = await leadLinkedVisits(conn, l).whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES).where(notUnclaimedHold).first('ss.id')
-      || await phoneBookedVisit(conn, l);
+    const active = await leadLinkedVisits(conn, l).whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES).where(notUnclaimedHold).first('ss.id');
     if (active) out.add(l.id);
   }
   return out;

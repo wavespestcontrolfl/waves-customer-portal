@@ -22,6 +22,14 @@ function leadLinkedVisits(conn, lead) {
           .where('la.activity_type', 'appointment_scheduled')
           .whereRaw("la.metadata->>'appointmentId' = ss.id::text"),
       ).orWhereExists(
+        // A phone booking: call-recording-processor.js records the visit as an
+        // appointment_booked activity keyed by metadata.scheduledServiceId.
+        conn('lead_activities as la')
+          .select(conn.raw('1'))
+          .where('la.lead_id', lead.id)
+          .where('la.activity_type', 'appointment_booked')
+          .whereRaw("la.metadata->>'scheduledServiceId' = ss.id::text"),
+      ).orWhereExists(
         conn('ad_service_attribution as asa')
           .select(conn.raw('1'))
           .where('asa.lead_id', lead.id)

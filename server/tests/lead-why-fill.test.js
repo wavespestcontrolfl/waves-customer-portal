@@ -61,6 +61,14 @@ describe('switch_reason labels', () => {
     expect(planLeadWhy(lead(), chunks)).toEqual({ previous_company: 'Orkin' });
   });
 
+  test('a rival quoted in a shopping chunk is not the old provider or the reason', () => {
+    const chunks = [
+      chunk('churn_signal', ['current provider', 'service gap']),
+      chunk('competitor_mention', ['orkin', 'quote comparison', 'monthly price']),
+    ];
+    expect(planLeadWhy(lead(), chunks)).toEqual({ switch_reason: 'no_show' });
+  });
+
   test('agent chunks are ignored', () => {
     expect(planLeadWhy(lead(), [switchChunk(['pricing'], { speaker: 'agent' })])).toEqual({});
   });
