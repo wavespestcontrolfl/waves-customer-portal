@@ -447,6 +447,14 @@ export class ApiClient {
     });
   }
 
+  // Step 2 of an email change: the 6-digit code mailed to the new address.
+  confirmCustomerEmail({ code }) {
+    return this.request('/customer/profile/confirm-email', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  }
+
   // `scope: 'saved'` asks for the saved-property list (GATE_APP_PROPERTY_SCOPE);
   // while the gate is off the server answers the profile list regardless.
   getAuthProperties({ scope } = {}) {

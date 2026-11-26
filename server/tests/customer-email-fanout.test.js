@@ -333,7 +333,9 @@ describe('propagateCustomerEmailChange', () => {
     const subUpdates = conn.__updates('newsletter_subscribers');
     expect(subUpdates).toHaveLength(1);
     expect(subUpdates[0].arg).toMatchObject({ customer_id: null, first_name: null, last_name: null });
-    expect(Object.keys(subUpdates[0].arg).sort()).toEqual(['customer_id', 'first_name', 'last_name', 'updated_at']);
+    // Also clears a pending quote-lead enrollment: confirming the still-valid link must not start a new_lead sequence.
+    expect(subUpdates[0].arg).toMatchObject({ quote_lead_automation_pending: false, quote_lead_id: null });
+    expect(Object.keys(subUpdates[0].arg).sort()).toEqual(['customer_id', 'first_name', 'last_name', 'quote_lead_automation_pending', 'quote_lead_id', 'updated_at']);
     // The unlink runs before the shared fan-out and is the ONLY newsletter write: no status, token or email change, no delete, no lock.
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && (c.op === 'del' || c.op === 'forUpdate'))).toBe(false);
     expect(conn.__updates('newsletter_send_deliveries')).toHaveLength(0);
@@ -341,6 +343,41 @@ describe('propagateCustomerEmailChange', () => {
     expect(result.leads).toBe(1);
     expect(result.unlinkedSubscribers).toBe(1);
     expect(conn.__updates('leads')[0].arg.email).toBe('chriswsample@example.com');
+  });
+
+  test('self-service, customer has a marketing opt-out: the old row first becomes an unsubscribed record, then is unlinked', async () => {
+    const conn = makeConn({
+      notification_prefs: { firstQueue: [{ customer_id: 'cust-1' }] },
+      newsletter_subscribers: { firstQueue: [null] },
+    });
+    await propagateSelfServiceEmailChange({ before: BEFORE, after: AFTER, reviewReasonCodes: ['customer_email_missing'] }, conn);
+    const subUpdates = conn.__updates('newsletter_subscribers');
+    expect(subUpdates).toHaveLength(2);
+    expect(subUpdates[0].arg).toMatchObject({ status: 'unsubscribed' });
+    expect(subUpdates[0].arg.unsubscribed_at).toBeInstanceOf(Date);
+    expect(Object.keys(subUpdates[0].arg).sort()).toEqual(['status', 'unsubscribed_at', 'updated_at']);
+    // Only a pending or active row is turned into an opt-out record.
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'whereIn'
+      && c.arg.col === 'status' && String(c.arg.vals) === 'pending,active')).toBe(true);
+    expect(subUpdates[1].arg).toMatchObject({ customer_id: null, quote_lead_automation_pending: false, quote_lead_id: null });
+    expect(subUpdates[1].arg.status).toBeUndefined();
+  });
+
+  test('self-service, no opt-out: the row keeps its status (a single unlink write)', async () => {
+    const conn = makeConn({ notification_prefs: { firstQueue: [null] }, newsletter_subscribers: { firstQueue: [null] } });
+    await propagateSelfServiceEmailChange({ before: BEFORE, after: AFTER, reviewReasonCodes: ['customer_email_missing'] }, conn);
+    const subUpdates = conn.__updates('newsletter_subscribers');
+    expect(subUpdates).toHaveLength(1);
+    expect(subUpdates[0].arg.status).toBeUndefined();
+  });
+
+  test('self-service: the opt-out test is the sender\'s own (marketing_offers, email_enabled, SMS-only channel)', async () => {
+    const conn = makeConn({ notification_prefs: { firstQueue: [null] }, newsletter_subscribers: { firstQueue: [null] } });
+    await propagateSelfServiceEmailChange({ before: BEFORE, after: AFTER, reviewReasonCodes: ['customer_email_missing'] }, conn);
+    const sql = conn.__calls.filter((c) => c.table === 'notification_prefs' && c.op === 'whereRaw').map((c) => c.arg.sql).join(' ');
+    expect(sql).toMatch(/marketing_offers = false/);
+    expect(sql).toMatch(/email_enabled = false/);
+    expect(sql).toMatch(/marketing_channel\)\) = 'sms'/);
   });
 
   test('newsletter: deletes the misspelled row when the corrected spelling already subscribes', async () => {

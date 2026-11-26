@@ -1,9 +1,11 @@
 /**
  * Customer profile edit (GATE_CUSTOMER_PROFILE_EDIT): the REAL customer-profile router runs against a stubbed
- * auth layer and db. Pins: gate off = 404 before any read, a contact session and a cancelled account are refused,
- * Joi validation, only the changed fields are written, the audit row carries field names (never values), and the
- * "account updated" notice goes to the OLD and the NEW address on an email change (one notice on a name change,
- * none when nothing changed). The real auth layer's contact allow-list is checked separately.
+ * auth layer, db and code service. Pins: gate off = 404 before any read, a contact session and a cancelled account
+ * are refused, Joi validation, names save in one step, an EMAIL change is two steps (PUT mails a code and writes
+ * nothing to customers or any fan-out; POST confirm-email judges the code and only then runs the locked commit),
+ * the quota counts saved changes AND code emails, the audit rows carry field names (never values), and the notices
+ * go to the OLD and the NEW address only after the confirm. The code service itself (expiry, wrong code, attempt
+ * cap, reuse) is pinned in customer-email-change-code.test.js; the real auth layer's allow-list is checked here.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'customer-profile-test-secret';
 
@@ -27,11 +29,13 @@ let mockUpdates;
 let mockOrder;
 let mockLockedWhere;
 let mockSavedInHour;
+let mockWhereIn;
 const mockTrxBuilder = (table) => {
   const b = {
     count: jest.fn(() => b),
     where: jest.fn((cond) => { if (!mockLockedWhere) mockLockedWhere = cond; return b; }),
     whereNull: jest.fn(() => b),
+    whereIn: jest.fn((col, vals) => { mockWhereIn.push({ table, col, vals }); return b; }),
     forUpdate: jest.fn(() => b),
     first: jest.fn(async () => (table === 'audit_log' ? { n: mockSavedInHour } : mockRow)),
     update: jest.fn(async (patch) => { mockOrder.push('update'); mockUpdates.push(patch); return 1; }),
@@ -52,6 +56,22 @@ jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockAudit = jest.fn(async () => 1);
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...a) => mockAudit(...a) }));
+const mockCode = {
+  issueRequest: jest.fn(),
+  markSent: jest.fn(async () => {}),
+  dropRequest: jest.fn(async () => {}),
+  checkCode: jest.fn(),
+  consume: jest.fn(async () => {}),
+  sendCode: jest.fn(async () => ({ messageId: 'm1' })),
+};
+jest.mock('../services/customer-email-change-code', () => ({
+  issueRequest: (...a) => mockCode.issueRequest(...a),
+  markSent: (...a) => mockCode.markSent(...a),
+  dropRequest: (...a) => mockCode.dropRequest(...a),
+  checkCode: (...a) => mockCode.checkCode(...a),
+  consume: (...a) => mockCode.consume(...a),
+  sendCode: (...a) => mockCode.sendCode(...a),
+}));
 const mockSend = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: (...a) => mockSend(...a) }));
 
@@ -86,6 +106,7 @@ beforeEach(() => {
   mockRow = { id: CUSTOMER_ID, active: true, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL };
   mockUpdates = [];
   mockOrder = [];
+  mockWhereIn = [];
   mockSavedInHour = 0;
   mockConflict.mockClear();
   mockConflict.mockResolvedValue(null);
@@ -97,6 +118,12 @@ beforeEach(() => {
   mockDb.transaction.mockClear();
   mockAudit.mockClear();
   mockSend.mockClear();
+  Object.values(mockCode).forEach((fn) => fn.mockReset());
+  mockCode.issueRequest.mockResolvedValue({ id: 'req-1', code: '123456', expiresInMinutes: 15 });
+  mockCode.sendCode.mockResolvedValue({ messageId: 'm1' });
+  mockCode.markSent.mockResolvedValue();
+  mockCode.dropRequest.mockResolvedValue();
+  mockCode.consume.mockResolvedValue();
 });
 afterAll(() => {
   if (savedGate === undefined) delete process.env.GATE_CUSTOMER_PROFILE_EDIT; else process.env.GATE_CUSTOMER_PROFILE_EDIT = savedGate;
@@ -110,33 +137,47 @@ async function put(body) {
   try { json = await res.json(); } catch { /* none */ }
   return { status: res.status, body: json || {} };
 }
+async function confirm(code) {
+  const res = await fetch(`${baseUrl}/api/customer/profile/confirm-email`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code }),
+  });
+  let json = null;
+  try { json = await res.json(); } catch { /* none */ }
+  return { status: res.status, body: json || {} };
+}
 const flush = () => new Promise((r) => setImmediate(r));
+
+const NEW_EMAIL = 'new.address@example.test';
+const okCheck = (email = NEW_EMAIL) => ({ outcome: 'ok', request: { id: 'req-1', new_email: email } });
+const savedAudits = () => mockAudit.mock.calls.map((c) => c[0].action);
 
 describe('PUT /api/customer/profile', () => {
   test.each([undefined, '', 'false', 'on', 'TRUE'])('gate %p is off: 404, no transaction, no email', async (value) => {
     if (value === undefined) delete process.env.GATE_CUSTOMER_PROFILE_EDIT; else process.env.GATE_CUSTOMER_PROFILE_EDIT = value;
-    const res = await put({ firstName: 'Sam' });
-    expect(res).toMatchObject({ status: 404, body: { enabled: false } });
+    expect(await put({ firstName: 'Sam' })).toMatchObject({ status: 404, body: { enabled: false } });
+    expect(await confirm('123456')).toMatchObject({ status: 404, body: { enabled: false } });
     expect(mockDb.transaction).not.toHaveBeenCalled();
     expect(mockSend).not.toHaveBeenCalled();
+    expect(mockCode.sendCode).not.toHaveBeenCalled();
   });
 
-  test('a contact session is refused 403 and nothing is read or sent', async () => {
+  test('a contact session is refused 403 on both steps and nothing is read or sent', async () => {
     mockSession.contact = { name: 'Pal Contact', phone: '9415550100' };
-    const res = await put({ firstName: 'Sam' });
-    expect(res).toMatchObject({ status: 403, body: { code: 'ACCOUNT_HOLDER_ONLY' } });
+    expect(await put({ firstName: 'Sam' })).toMatchObject({ status: 403, body: { code: 'ACCOUNT_HOLDER_ONLY' } });
+    expect(await confirm('123456')).toMatchObject({ status: 403, body: { code: 'ACCOUNT_HOLDER_ONLY' } });
     expect(mockDb.transaction).not.toHaveBeenCalled();
     expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('the real auth layer does not list this route for a contact session', () => {
-    const req = { method: 'PUT', baseUrl: '/api/customer/profile', path: '/' };
-    expect(auth._test.contactSessionRoute(req)).toBe(false);
+  test('the real auth layer does not list either route for a contact session', () => {
+    expect(auth._test.contactSessionRoute({ method: 'PUT', baseUrl: '/api/customer/profile', path: '/' })).toBe(false);
+    expect(auth._test.contactSessionRoute({ method: 'POST', baseUrl: '/api/customer/profile', path: '/confirm-email' })).toBe(false);
   });
 
-  test('a cancelled account is refused 403', async () => {
+  test('a cancelled account is refused 403 on both steps', async () => {
     mockSession.inactive = true;
     expect((await put({ firstName: 'Sam' })).status).toBe(403);
+    expect((await confirm('123456')).status).toBe(403);
     expect(mockDb.transaction).not.toHaveBeenCalled();
   });
 
@@ -148,80 +189,145 @@ describe('PUT /api/customer/profile', () => {
     ['name with markup', { firstName: '<b>Sam</b>' }],
     ['name over 50', { lastName: 'x'.repeat(51) }],
   ])('%s is a 400 and writes nothing', async (_label, body) => {
-    const res = await put(body);
-    expect(res.status).toBe(400);
+    expect((await put(body)).status).toBe(400);
     expect(mockDb.transaction).not.toHaveBeenCalled();
     expect(mockSend).not.toHaveBeenCalled();
+    expect(mockCode.issueRequest).not.toHaveBeenCalled();
   });
 
   test('phone in the body is ignored and never written', async () => {
     const res = await put({ firstName: 'Sam', phone: '9415550199' });
     expect(res.status).toBe(200);
-    expect(mockUpdates).toHaveLength(1);
     expect(Object.keys(mockUpdates[0]).sort()).toEqual(['first_name', 'updated_at']);
   });
 
-  test('email change: trimmed, lower-cased, saved, audited by field name, notices to the old AND the new address', async () => {
-    const res = await put({ email: '  New.Address@Example.test ' });
-    expect(res).toMatchObject({ status: 200, body: { profile: { firstName: 'Pat', lastName: 'Sample', email: 'new.address@example.test' }, changed: ['email'] } });
-    expect(mockUpdates).toEqual([{ email: 'new.address@example.test', updated_at: 'NOW' }]);
-    expect(mockAudit).toHaveBeenCalledTimes(1);
-    const audit = mockAudit.mock.calls[0][0];
-    expect(audit).toMatchObject({ actor_type: 'customer', actor_id: CUSTOMER_ID, action: 'customer.profile_edit', critical: true });
-    expect(audit.metadata).toEqual({ fields: ['email'], source: 'customer_portal' });
-    await flush();
-    expect(mockSend).toHaveBeenCalledTimes(2);
-    const [toOld, toNew] = mockSend.mock.calls.map((c) => c[0]);
-    // The old mailbox learns only that the address changed, never the replacement; the new mailbox never sees the old address.
-    expect(toOld.changedItems).toEqual([{ key: 'email', label: 'Email address' }]);
-    expect(JSON.stringify(toOld)).not.toContain('new.address@example.test');
-    expect(toNew.changedItems).toEqual([{ key: 'email', label: 'Email address', newValue: 'new.address@example.test' }]);
-    expect(JSON.stringify(toNew.changedItems)).not.toContain(OLD_EMAIL);
-    expect(toOld.contactOverride).toEqual({ email: OLD_EMAIL, name: '' });
-    expect(toOld.greetingName).toBe('there');
-    expect(toNew.greetingName).toBeUndefined();
-    expect(toNew.contactOverride).toEqual({ email: 'new.address@example.test', name: 'Pat' });
-    for (const call of [toOld, toNew]) expect(call).toMatchObject({ customerId: CUSTOMER_ID, actorCustomerId: CUSTOMER_ID, alwaysNotify: true });
-    expect(toOld.idempotencyKey).not.toBe(toNew.idempotencyKey);
+  describe('a new email: step 1 mails a code and changes NOTHING', () => {
+    test('writes nothing to customers, runs no fan-out, sends no notice; the code goes only to the NEW address', async () => {
+      const res = await put({ email: `  ${NEW_EMAIL.toUpperCase()} ` });
+      expect(res).toMatchObject({ status: 200, body: { changed: [], emailPending: { email: NEW_EMAIL, expiresInMinutes: 15 }, profile: { email: OLD_EMAIL } } });
+      expect(mockUpdates).toHaveLength(0);
+      expect(mockLockEmails).not.toHaveBeenCalled();
+      expect(mockConflict).not.toHaveBeenCalled();
+      expect(mockEmailFanout).not.toHaveBeenCalled();
+      expect(mockCode.issueRequest.mock.calls[0][1]).toEqual({ customerId: CUSTOMER_ID, newEmail: NEW_EMAIL });
+      expect(mockCode.sendCode).toHaveBeenCalledWith({ to: NEW_EMAIL, code: '123456' });
+      expect(mockCode.markSent).toHaveBeenCalledWith(mockDb, 'req-1');
+      await flush();
+      expect(mockSend).not.toHaveBeenCalled();
+      // The code never comes back to the app.
+      expect(JSON.stringify(res.body)).not.toContain('123456');
+    });
+
+    test('the audit row for the code carries no address and no code', async () => {
+      await put({ email: NEW_EMAIL });
+      expect(savedAudits()).toEqual(['customer.profile_email_code_sent']);
+      expect(JSON.stringify(mockAudit.mock.calls[0][0].metadata)).not.toMatch(/example|123456/);
+    });
+
+    test('the same address in another case is no change: no code, no audit', async () => {
+      const res = await put({ email: OLD_EMAIL.toUpperCase() });
+      expect(res).toMatchObject({ status: 200, body: { changed: [] } });
+      expect(res.body.emailPending).toBeUndefined();
+      expect(mockCode.issueRequest).not.toHaveBeenCalled();
+      expect(mockAudit).not.toHaveBeenCalled();
+    });
+
+    test('a name and an email together: the name saves now (with its notice), the email waits for its code', async () => {
+      const res = await put({ firstName: 'Sam', email: NEW_EMAIL });
+      expect(res).toMatchObject({ status: 200, body: { changed: ['firstName'], emailPending: { email: NEW_EMAIL } } });
+      expect(mockUpdates).toEqual([{ first_name: 'Sam', updated_at: 'NOW' }]);
+      expect(mockEmailFanout).not.toHaveBeenCalled();
+      expect(savedAudits().sort()).toEqual(['customer.profile_edit', 'customer.profile_email_code_sent']);
+      await flush();
+      expect(mockSend).toHaveBeenCalledTimes(1);
+      expect(mockSend.mock.calls[0][0].contactOverride.email).toBe(OLD_EMAIL);
+    });
+
+    test('a customer with no email on file asks for a code for the first address too', async () => {
+      mockRow.email = null;
+      const res = await put({ email: NEW_EMAIL });
+      expect(res.body.emailPending.email).toBe(NEW_EMAIL);
+    });
+
+    test('quota: code emails count with saved changes; 10 in the last hour refuses with 429 and sends nothing', async () => {
+      mockSavedInHour = 10;
+      const res = await put({ email: NEW_EMAIL });
+      expect(res).toMatchObject({ status: 429, body: { error: expect.stringContaining('Too many') } });
+      expect(mockCode.issueRequest).not.toHaveBeenCalled();
+      expect(mockCode.sendCode).not.toHaveBeenCalled();
+      expect(mockAudit).not.toHaveBeenCalled();
+      mockSavedInHour = 9;
+      expect((await put({ email: NEW_EMAIL })).status).toBe(200);
+    });
+
+    test('the quota query counts BOTH audit actions, from the audit table, inside the transaction', async () => {
+      await put({ email: NEW_EMAIL });
+      expect(mockWhereIn.filter((w) => w.table === 'audit_log')).toEqual([
+        { table: 'audit_log', col: 'action', vals: ['customer.profile_edit', 'customer.profile_email_code_sent'] },
+      ]);
+    });
+
+    test('a failed send drops the request and answers 502; nothing else changed', async () => {
+      mockCode.sendCode.mockRejectedValue(Object.assign(new Error('provider down'), { status: 503 }));
+      const res = await put({ email: NEW_EMAIL });
+      expect(res).toMatchObject({ status: 502, body: { code: 'code_send_failed' } });
+      expect(mockCode.dropRequest).toHaveBeenCalledWith(mockDb, 'req-1');
+      expect(mockCode.markSent).not.toHaveBeenCalled();
+      expect(mockUpdates).toHaveLength(0);
+    });
   });
 
-  test('name-only change: one notice, to the current address, naming old and new name', async () => {
-    const res = await put({ firstName: 'Sam', lastName: 'Sample', email: OLD_EMAIL.toUpperCase() });
+  test('a name-only change: one notice to the current address, names old and new', async () => {
+    const res = await put({ firstName: 'Sam', lastName: 'Sample' });
     expect(res).toMatchObject({ status: 200, body: { changed: ['firstName'] } });
     expect(mockUpdates).toEqual([{ first_name: 'Sam', updated_at: 'NOW' }]);
+    expect(mockCode.issueRequest).not.toHaveBeenCalled();
     await flush();
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(mockSend.mock.calls[0][0].contactOverride).toEqual({ email: OLD_EMAIL, name: 'Sam' });
     expect(mockSend.mock.calls[0][0].changedItems).toEqual([{ key: 'name', label: 'Name', oldValue: 'Pat Sample', newValue: 'Sam Sample' }]);
   });
 
-  test('a customer with no email on file who adds one gets one notice (no old address to tell)', async () => {
+  test('a name-only edit for a customer with no email on file saves and sends nothing', async () => {
     mockRow.email = null;
-    const res = await put({ email: 'first.address@example.test' });
-    expect(res.status).toBe(200);
-    await flush();
-    expect(mockSend).toHaveBeenCalledTimes(1);
-    expect(mockSend.mock.calls[0][0].contactOverride).toEqual({ email: 'first.address@example.test', name: 'Pat' });
-  });
-
-  test('a rename and an email change together: the old mailbox gets neither name, the new mailbox gets the new one', async () => {
-    await put({ firstName: 'Sam', email: 'new.address@example.test' });
-    await flush();
-    const [toOld, toNew] = mockSend.mock.calls.map((c) => c[0]);
-    expect(toOld).toMatchObject({ greetingName: 'there', contactOverride: { email: OLD_EMAIL, name: '' } });
-    expect(JSON.stringify(toOld)).not.toMatch(/Sam|Pat/);
-    expect(toNew.contactOverride).toEqual({ email: 'new.address@example.test', name: 'Sam' });
-  });
-
-  test('a profile that moved to another account after authenticate (locked row account differs from the session) is refused 403, nothing written', async () => {
-    mockRow.account_id = '99999999-9999-4999-8999-999999999999';
-    const res = await put({ firstName: 'Sam', email: 'new.address@example.test' });
-    expect(res.status).toBe(403);
-    expect(mockUpdates).toHaveLength(0);
-    expect(mockAudit).not.toHaveBeenCalled();
+    expect((await put({ firstName: 'Sam' })).status).toBe(200);
     expect(mockEmailFanout).not.toHaveBeenCalled();
     await flush();
     expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('name change fans out to open records with the locked before/after rows; order is lock, update, fan-out', async () => {
+    await put({ firstName: 'Sam' });
+    expect(mockLockedWhere).toEqual({ id: CUSTOMER_ID, active: true });
+    expect(mockNameFanout).toHaveBeenCalledTimes(1);
+    const [args] = mockNameFanout.mock.calls[0];
+    expect(args.before).toMatchObject({ first_name: 'Pat' });
+    expect(args.after).toMatchObject({ first_name: 'Sam', last_name: 'Sample' });
+  });
+
+  test('the name quota: 10 saved changes in the last hour refuses with 429; a no-op is never refused or counted', async () => {
+    mockSavedInHour = 10;
+    expect((await put({ firstName: 'Sam' })).status).toBe(429);
+    expect(mockUpdates).toHaveLength(0);
+    expect((await put({ firstName: 'Pat' })).status).toBe(200);
+    expect(mockAudit).not.toHaveBeenCalled();
+  });
+
+  test('a row cancelled after authenticate is refused 403 and nothing is sent', async () => {
+    mockRow = undefined;
+    expect((await put({ firstName: 'Sam', email: NEW_EMAIL })).status).toBe(403);
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockAudit).not.toHaveBeenCalled();
+    expect(mockCode.issueRequest).not.toHaveBeenCalled();
+  });
+
+  test('a profile that moved to another account after authenticate is refused 403 on both steps', async () => {
+    mockRow.account_id = '99999999-9999-4999-8999-999999999999';
+    expect((await put({ firstName: 'Sam', email: NEW_EMAIL })).status).toBe(403);
+    expect((await confirm('123456')).status).toBe(403);
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockCode.issueRequest).not.toHaveBeenCalled();
+    expect(mockCode.checkCode).not.toHaveBeenCalled();
   });
 
   test('a row whose account matches the session account is edited (session account differs from its own id)', async () => {
@@ -230,106 +336,115 @@ describe('PUT /api/customer/profile', () => {
     expect((await put({ firstName: 'Sam' })).status).toBe(200);
   });
 
-  test('a name-only edit for a customer with no email on file saves and sends nothing', async () => {
-    mockRow.email = null;
-    const res = await put({ firstName: 'Sam' });
-    expect(res).toMatchObject({ status: 200, body: { changed: ['firstName'] } });
-    expect(mockEmailFanout).not.toHaveBeenCalled();
-    await flush();
-    expect(mockSend).not.toHaveBeenCalled();
-  });
-
-  test('email change: locked read requires active, lock order is row then address key then write then fan-out', async () => {
-    await put({ email: 'new.address@example.test' });
-    expect(mockLockedWhere).toEqual({ id: CUSTOMER_ID, active: true });
-    expect(mockOrder).toEqual(['lock', 'update', 'emailFanout']);
-    expect(mockLockEmails.mock.calls[0][1]).toEqual({ email: 'new.address@example.test' });
-    const [args] = mockEmailFanout.mock.calls[0];
-    expect(args.before).toMatchObject({ email: OLD_EMAIL, first_name: 'Pat' });
-    expect(args.after).toMatchObject({ email: 'new.address@example.test', first_name: 'Pat' });
-    expect(args.reviewReasonCodes).toEqual(['customer_email_missing']);
-    expect(mockNameFanout).not.toHaveBeenCalled();
-  });
-
-  test('name change fans out to open records with the locked before/after rows', async () => {
-    await put({ firstName: 'Sam' });
-    expect(mockNameFanout).toHaveBeenCalledTimes(1);
-    const [args] = mockNameFanout.mock.calls[0];
-    expect(args.before).toMatchObject({ first_name: 'Pat' });
-    expect(args.after).toMatchObject({ first_name: 'Sam', last_name: 'Sample' });
-    expect(mockEmailFanout).not.toHaveBeenCalled();
-  });
-
-  test('a deferred DOI confirmation from the fan-out is sent after commit', async () => {
-    mockEmailFanout.mockResolvedValueOnce({ pendingConfirmation: { id: 'sub-1', email: 'new.address@example.test' } });
-    await put({ email: 'new.address@example.test' });
-    expect(mockResend).toHaveBeenCalledWith({ id: 'sub-1', email: 'new.address@example.test' });
-  });
-
-  test('a row cancelled after authenticate (no active row under the lock) is refused 403 and nothing is sent', async () => {
-    mockRow = undefined;
-    const res = await put({ email: 'new.address@example.test' });
-    expect(res.status).toBe(403);
-    expect(mockUpdates).toHaveLength(0);
-    expect(mockAudit).not.toHaveBeenCalled();
-    expect(mockEmailFanout).not.toHaveBeenCalled();
-    await flush();
-    expect(mockSend).not.toHaveBeenCalled();
-  });
-
   test('nothing changed: 200, no update, no audit row, no email', async () => {
     const res = await put({ firstName: 'Pat', lastName: 'Sample', email: OLD_EMAIL });
     expect(res).toMatchObject({ status: 200, body: { changed: [] } });
     expect(mockUpdates).toHaveLength(0);
     expect(mockAudit).not.toHaveBeenCalled();
     expect(mockLockEmails).not.toHaveBeenCalled();
-    expect(mockEmailFanout).not.toHaveBeenCalled();
     await flush();
     expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('a failing email send does not undo or fail the save', async () => {
+  test('a failing notice send does not undo or fail the save', async () => {
     mockSend.mockRejectedValue(new Error('provider down'));
-    const res = await put({ email: 'later.address@example.test' });
-    expect(res.status).toBe(200);
+    expect((await put({ firstName: 'Sam' })).status).toBe(200);
     expect(mockUpdates).toHaveLength(1);
     mockSend.mockResolvedValue({ ok: true });
   });
+});
 
-  test('the quota is counted from committed audit rows under the row lock: 10 in the last hour refuses with 429', async () => {
-    mockSavedInHour = 10;
-    const res = await put({ firstName: 'Sam' });
-    expect(res).toMatchObject({ status: 429, body: { error: expect.stringContaining('Too many') } });
+describe('POST /api/customer/profile/confirm-email', () => {
+  test.each(['', '12345', '1234567', 'abcdef', '12 456'])('code %p is a 400 before anything is read', async (code) => {
+    const res = await confirm(code);
+    expect(res.status).toBe(400);
+    expect(mockCode.checkCode).not.toHaveBeenCalled();
+  });
+
+  test('a right code runs the locked commit: row, address key, conflict check, update, fan-out, audit, then consume; notices to old and new', async () => {
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    mockSavedInHour = 10; // the quota was spent when the code was sent; the confirm itself is never refused by it
+    const res = await confirm('123456');
+    expect(res).toMatchObject({ status: 200, body: { changed: ['email'], profile: { email: NEW_EMAIL } } });
+    expect(mockLockedWhere).toEqual({ id: CUSTOMER_ID, active: true });
+    expect(mockOrder).toEqual(['lock', 'update', 'emailFanout']);
+    expect(mockLockEmails.mock.calls[0][1]).toEqual({ email: NEW_EMAIL });
+    expect(mockConflict.mock.calls[0][1]).toMatchObject({ customerId: CUSTOMER_ID, email: NEW_EMAIL });
+    expect(mockUpdates).toEqual([{ email: NEW_EMAIL, updated_at: 'NOW' }]);
+    const [args] = mockEmailFanout.mock.calls[0];
+    expect(args.before).toMatchObject({ email: OLD_EMAIL });
+    expect(args.after).toMatchObject({ email: NEW_EMAIL });
+    expect(args.reviewReasonCodes).toEqual(['customer_email_missing']);
+    expect(savedAudits()).toEqual(['customer.profile_edit']);
+    expect(mockAudit.mock.calls[0][0].metadata).toEqual({ fields: ['email'], source: 'customer_portal' });
+    expect(mockCode.consume).toHaveBeenCalledWith(expect.anything(), 'req-1');
+    await flush();
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    const [toOld, toNew] = mockSend.mock.calls.map((c) => c[0]);
+    expect(toOld).toMatchObject({ greetingName: 'there', contactOverride: { email: OLD_EMAIL, name: '' }, changedItems: [{ key: 'email', label: 'Email address' }] });
+    expect(JSON.stringify(toOld)).not.toContain(NEW_EMAIL);
+    expect(toNew.contactOverride).toEqual({ email: NEW_EMAIL, name: 'Pat' });
+    expect(toNew.changedItems).toEqual([{ key: 'email', label: 'Email address', newValue: NEW_EMAIL }]);
+    expect(toOld.idempotencyKey).not.toBe(toNew.idempotencyKey);
+  });
+
+  test('the address that gets written is the one the code was SENT to, never one in the confirm request', async () => {
+    mockCode.checkCode.mockResolvedValue(okCheck('sent.to@example.test'));
+    const res = await fetch(`${baseUrl}/api/customer/profile/confirm-email`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: '123456', email: 'attacker@example.test' }),
+    });
+    expect(res.status).toBe(200);
+    expect(mockUpdates).toEqual([{ email: 'sent.to@example.test', updated_at: 'NOW' }]);
+  });
+
+  test.each([
+    ['wrong', { outcome: 'wrong', attemptsLeft: 3 }, 400, 'code_wrong', { attemptsLeft: 3 }],
+    ['expired', { outcome: 'expired' }, 400, 'code_expired', {}],
+    ['missing (never asked, or already used)', { outcome: 'missing' }, 400, 'code_expired', {}],
+    ['too many attempts', { outcome: 'attempts' }, 429, 'code_attempts', {}],
+  ])('%s: refused, nothing written, no notice, and the transaction COMMITS (the attempt count must persist)', async (_l, check, status, code, extra) => {
+    mockCode.checkCode.mockResolvedValue(check);
+    const res = await confirm('123456');
+    expect(res).toMatchObject({ status, body: { code, ...extra } });
     expect(mockUpdates).toHaveLength(0);
+    expect(mockEmailFanout).not.toHaveBeenCalled();
     expect(mockAudit).not.toHaveBeenCalled();
+    expect(mockCode.consume).not.toHaveBeenCalled();
     await flush();
     expect(mockSend).not.toHaveBeenCalled();
-    mockSavedInHour = 9;
-    expect((await put({ firstName: 'Sam' })).status).toBe(200);
+    // The handler RETURNED (no throw), so the transaction callback resolved and a real transaction would commit.
+    await expect(mockDb.transaction.mock.results[0].value).resolves.toMatchObject({ refused: check });
   });
 
-  test('a no-op save is never refused by the quota and never counted (no audit row written)', async () => {
-    mockSavedInHour = 10;
-    expect((await put({ firstName: 'Pat' })).status).toBe(200);
-    expect(mockAudit).not.toHaveBeenCalled();
-  });
-
-  test('an address held by another account is refused 409, with no wording that says whose it is, and nothing is written', async () => {
+  test('an address another account holds: 409 with no wording about whose it is, the request is consumed, nothing is written', async () => {
+    mockCode.checkCode.mockResolvedValue(okCheck());
     mockConflict.mockResolvedValue({ id: 'other', account_id: 'other-account' });
-    const res = await put({ email: 'taken.address@example.test' });
+    const res = await confirm('123456');
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('email_unavailable');
     expect(res.body.error).not.toMatch(/another|account|customer/i);
-    expect(mockConflict.mock.calls[0][1]).toMatchObject({ customerId: CUSTOMER_ID, email: 'taken.address@example.test' });
     expect(mockUpdates).toHaveLength(0);
     expect(mockEmailFanout).not.toHaveBeenCalled();
+    expect(mockCode.consume).toHaveBeenCalledWith(expect.anything(), 'req-1');
     await flush();
     expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('the conflict check is skipped for a name-only edit', async () => {
-    await put({ firstName: 'Sam' });
-    expect(mockConflict).not.toHaveBeenCalled();
+  test('a deferred DOI confirmation from the fan-out is sent after commit', async () => {
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    mockEmailFanout.mockResolvedValueOnce({ pendingConfirmation: { id: 'sub-1', email: NEW_EMAIL } });
+    await confirm('123456');
+    expect(mockResend).toHaveBeenCalledWith({ id: 'sub-1', email: NEW_EMAIL });
   });
 
+  test('the code was for the address the customer already has: consumed, no change, no audit, no notice', async () => {
+    mockCode.checkCode.mockResolvedValue(okCheck(OLD_EMAIL));
+    const res = await confirm('123456');
+    expect(res).toMatchObject({ status: 200, body: { changed: [] } });
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockAudit).not.toHaveBeenCalled();
+    expect(mockCode.consume).toHaveBeenCalled();
+    await flush();
+    expect(mockSend).not.toHaveBeenCalled();
+  });
 });

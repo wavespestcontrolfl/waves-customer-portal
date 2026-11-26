@@ -10,8 +10,9 @@ import { CUSTOMER_SURFACE as SHELL } from '../../theme-customer';
 // the gate is on, and a contact login or a cancelled account never sees it
 // (the parent passes `enabled`). The phone number is the login and is not
 // editable here. After a save the parent's refreshCustomer re-reads /auth/me.
-// The server emails the customer about the change (an email change goes to
-// the old and the new address).
+// A name saves at once. A new email does NOT: the server mails a 6-digit code
+// to the new address and writes nothing until it is typed back here (step 2,
+// EmailCodeStep): Confirm, or Send a new code (the server limits how often).
 // =========================================================================
 
 const linkStyle = {
@@ -54,6 +55,32 @@ function profileEditAvailable(customer) {
   return customer?.profileEdit === true && customer?.cancelled !== true && customer?.actor?.kind !== 'contact';
 }
 
+const CODE_SHAPE = /^\d{6}$/;
+
+// Step 2 of an email change: type the code mailed to the new address. Wrong, expired and too-many-tries answers come
+// from the server with their own words; "Send a new code" asks again for the same address (limited server-side).
+function EmailCodeStep({ email, busy, error, onConfirm, onResend, onCancel }) {
+  const [code, setCode] = useState('');
+  const submit = (e) => {
+    e.preventDefault();
+    if (CODE_SHAPE.test(code.trim())) onConfirm(code.trim());
+  };
+  return (
+    <form data-testid="profile-code-form" noValidate onSubmit={submit} style={{ display: 'grid', gap: 10, marginTop: 10 }}>
+      <div style={{ fontSize: 16, color: SHELL.text }}>We sent a code to {email}. Type it here to confirm the new email. It expires in 15 minutes.</div>
+      <label style={labelStyle}>6-digit code
+        <input aria-label="Code" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} style={inputStyle} />
+      </label>
+      {error && <div role="alert" style={{ fontSize: 14, color: '#B42318' }}>{error}</div>}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <button type="submit" disabled={busy || !CODE_SHAPE.test(code)} data-testid="profile-code-confirm" style={{ ...saveStyle, opacity: busy || !CODE_SHAPE.test(code) ? 0.65 : 1 }}>{busy ? 'Checking' : 'Confirm'}</button>
+        <button type="button" disabled={busy} data-testid="profile-code-resend" onClick={() => { setCode(''); onResend(); }} style={cancelStyle}>Send a new code</button>
+        <button type="button" disabled={busy} onClick={onCancel} style={cancelStyle}>Cancel</button>
+      </div>
+    </form>
+  );
+}
+
 export default function ProfileEditCard({ customer, refreshCustomer }) {
   const [open, setOpen] = useState(false);
   const [opened, setOpened] = useState({ firstName: '', lastName: '', email: '' });
@@ -61,6 +88,8 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  // The address a code was mailed to, while step 2 of an email change is open.
+  const [pendingEmail, setPendingEmail] = useState('');
 
   if (!profileEditAvailable(customer)) return null;
 
@@ -74,6 +103,32 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
   };
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
+  const reload = async () => {
+    try { await refreshCustomer?.(); } catch { /* the save worked; the menu updates on the next load */ }
+  };
+
+  // Asks the server to save the edited fields. A name saves now; a new email answers `emailPending` and waits for its code.
+  const save = async (fields) => {
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api.updateCustomerProfile(fields);
+      const savedNames = Array.isArray(result?.changed) && result.changed.length > 0;
+      if (savedNames) await reload();
+      if (result?.emailPending?.email) {
+        setPendingEmail(result.emailPending.email);
+        setNotice(savedNames ? 'Name saved.' : '');
+      } else {
+        setNotice(savedNames ? 'Saved.' : 'No changes to save.');
+        setOpen(false);
+      }
+    } catch (err) {
+      setError(err?.message || 'We could not save that. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     if (busy) return;
@@ -81,19 +136,40 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
     if (!Object.keys(edited).length) { setNotice('No changes to save.'); setOpen(false); return; }
     const problem = fieldProblem(edited);
     if (problem) { setError(problem); return; }
+    await save(edited);
+  };
+
+  const confirmCode = async (code) => {
+    if (busy) return;
     setBusy(true);
     setError('');
     try {
-      const result = await api.updateCustomerProfile(edited);
-      try { await refreshCustomer?.(); } catch { /* the save worked; the menu updates on the next load */ }
-      setNotice(Array.isArray(result?.changed) && result.changed.length ? 'Saved.' : 'No changes to save.');
+      await api.confirmCustomerEmail({ code });
+      await reload();
+      setNotice('Saved.');
+      setPendingEmail('');
       setOpen(false);
     } catch (err) {
-      setError(err?.message || 'We could not save that. Please try again.');
+      setError(err?.message || 'We could not check that code. Please try again.');
     } finally {
       setBusy(false);
     }
   };
+
+  const closeCodeStep = () => { setPendingEmail(''); setError(''); setOpen(false); };
+
+  if (open && pendingEmail) {
+    return (
+      <EmailCodeStep
+        email={pendingEmail}
+        busy={busy}
+        error={error}
+        onConfirm={confirmCode}
+        onResend={() => save({ email: pendingEmail })}
+        onCancel={closeCodeStep}
+      />
+    );
+  }
 
   if (!open) {
     return (
@@ -115,7 +191,7 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
       <label style={labelStyle}>Email
         <input aria-label="Email" type="email" value={form.email} onChange={set('email')} maxLength={150} autoComplete="email" inputMode="email" style={inputStyle} />
       </label>
-      <div style={{ fontSize: 14, color: SHELL.muted }}>Your phone number is how you sign in, so it cannot be changed here.</div>
+      <div style={{ fontSize: 14, color: SHELL.muted }}>Your phone number is how you sign in, so it cannot be changed here. A new email address needs a code we send to it.</div>
       {error && <div role="alert" style={{ fontSize: 14, color: '#B42318' }}>{error}</div>}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         <button type="submit" disabled={busy} data-testid="profile-edit-save" style={{ ...saveStyle, opacity: busy ? 0.65 : 1 }}>{busy ? 'Saving' : 'Save'}</button>

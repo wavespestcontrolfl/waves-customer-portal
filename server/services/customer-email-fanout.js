@@ -1801,10 +1801,14 @@ async function backfillCustomerEmailInTrx(trx, { customerId, email, source = 'in
  * The email fan-out for an address the CUSTOMER typed themselves in the app (routes/customer-profile.js). The address
  * is not proven, so the newsletter gets ONE rule: the old address's subscriber row is UNLINKED from the customer and
  * nothing moves to the new address (the customer re-subscribes it).
- *   - The row keeps its status (an opt-out stays an opt-out), tokens and delivered links, so the old mailbox's own
- *     subscription and its unsubscribe and quiz links keep working. Nothing is rotated for this source.
- *   - customer_id, first_name and last_name are cleared, so a newsletter, a pending quote-lead confirmation or an
- *     automation can never again personalize or link that mailbox to this customer's record.
+ *   - The row keeps its tokens and delivered links, so the old mailbox's own subscription and its unsubscribe and
+ *     quiz links keep working. Nothing is rotated for this source. Its status is kept too, except one case: when the
+ *     customer has an effective marketing opt-out (the sender's opted_out_profiles test, held against the customer
+ *     profile and the linked row), a pending or active row becomes an unsubscribed record first, because unlinking
+ *     would otherwise drop that suppression and let the old address be mailed again.
+ *   - customer_id, first_name, last_name and any pending quote-lead enrollment (quote_lead_automation_pending,
+ *     quote_lead_id) are cleared, so a newsletter, a still-valid confirmation link or an automation can never again
+ *     personalize or link that mailbox to this customer's record.
  *   - The unlink runs BEFORE the shared fan-out, which only ever selects customer-linked subscriber rows, so every
  *     newsletter step in it (token rotation, merge, move, prior-target retarget) finds nothing and does nothing.
  *     It touches only the subscriber row, never its deliveries, so the webhook's delivery-then-subscriber lock order
@@ -1818,10 +1822,30 @@ async function propagateSelfServiceEmailChange({ before, after, source = 'custom
     || String((before && before.email) ?? '').trim().toLowerCase();
   let unlinked = 0;
   if (customerId && oldEmail) {
-    unlinked = await conn('newsletter_subscribers')
+    const atOldAddress = () => conn('newsletter_subscribers')
       .where({ customer_id: customerId })
-      .whereRaw('LOWER(email) = ?', [oldEmail])
-      .update({ customer_id: null, first_name: null, last_name: null, updated_at: new Date() });
+      .whereRaw('LOWER(email) = ?', [oldEmail]);
+    // An effective marketing opt-out (the sender's own test: opted_out_profiles in newsletter-sender.js) is held
+    // against the customer's profile and the linked row. Unlinking would drop that suppression, so the row becomes
+    // an opt-out record itself first: an opted-out address can never be mailed again by an edit.
+    const optedOut = await conn('notification_prefs')
+      .where({ customer_id: customerId })
+      .whereRaw("(marketing_offers = false OR email_enabled = false OR LOWER(TRIM(marketing_channel)) = 'sms')")
+      .first('customer_id');
+    const now = new Date();
+    if (optedOut) {
+      await atOldAddress().whereIn('status', ['pending', 'active']).update({ status: 'unsubscribed', unsubscribed_at: now, updated_at: now });
+    }
+    // Also drops a pending quote-lead enrollment: confirming the still-valid newsletter link must not start a
+    // new_lead sequence at the old address with this customer's lead.
+    unlinked = await atOldAddress().update({
+      customer_id: null,
+      first_name: null,
+      last_name: null,
+      quote_lead_automation_pending: false,
+      quote_lead_id: null,
+      updated_at: now,
+    });
   }
   const result = await propagateCustomerEmailChange({ before, after, source, ...(reviewReasonCodes ? { reviewReasonCodes } : {}) }, conn);
   return { ...result, unlinkedSubscribers: Number(unlinked) || 0 };

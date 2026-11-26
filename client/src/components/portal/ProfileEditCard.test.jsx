@@ -7,7 +7,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../../utils/api', () => ({ default: { updateCustomerProfile: vi.fn() } }));
+vi.mock('../../utils/api', () => ({ default: { updateCustomerProfile: vi.fn(), confirmCustomerEmail: vi.fn() } }));
 
 import api from '../../utils/api';
 import ProfileEditCard from './ProfileEditCard';
@@ -15,7 +15,7 @@ import ProfileEditCard from './ProfileEditCard';
 const customer = { profileEdit: true, firstName: 'Pat', lastName: 'Sample', email: 'pat.sample@example.test', phone: '9415550100' };
 const renderCard = (props = {}) => render(<ProfileEditCard customer={customer} refreshCustomer={vi.fn().mockResolvedValue(undefined)} {...props} />);
 
-beforeEach(() => { api.updateCustomerProfile.mockReset(); });
+beforeEach(() => { api.updateCustomerProfile.mockReset(); api.confirmCustomerEmail.mockReset(); });
 afterEach(cleanup);
 
 describe('ProfileEditCard', () => {
@@ -72,13 +72,90 @@ describe('ProfileEditCard', () => {
     await waitFor(() => expect(api.updateCustomerProfile).toHaveBeenCalledWith({ lastName: 'Example' }));
   });
 
-  it('sends the email when it was edited, trimmed', async () => {
-    api.updateCustomerProfile.mockResolvedValue({ changed: ['email'] });
-    renderCard();
-    fireEvent.click(screen.getByTestId('profile-edit-open'));
-    fireEvent.change(screen.getByLabelText('Email'), { target: { value: ' new.address@example.test ' } });
-    fireEvent.click(screen.getByTestId('profile-edit-save'));
-    await waitFor(() => expect(api.updateCustomerProfile).toHaveBeenCalledWith({ email: 'new.address@example.test' }));
+  describe('a new email takes two steps', () => {
+    const NEW = 'new.address@example.test';
+    const startEmailChange = async (extra = {}) => {
+      api.updateCustomerProfile.mockResolvedValue({ changed: [], emailPending: { email: NEW, expiresInMinutes: 15 }, ...extra });
+      const refreshCustomer = vi.fn().mockResolvedValue(undefined);
+      renderCard({ refreshCustomer });
+      fireEvent.click(screen.getByTestId('profile-edit-open'));
+      fireEvent.change(screen.getByLabelText('Email'), { target: { value: ` ${NEW} ` } });
+      fireEvent.click(screen.getByTestId('profile-edit-save'));
+      await screen.findByTestId('profile-code-form');
+      return refreshCustomer;
+    };
+
+    it('Save sends the trimmed email, then asks for the code mailed to it; the email is not saved yet', async () => {
+      const refreshCustomer = await startEmailChange();
+      expect(api.updateCustomerProfile).toHaveBeenCalledWith({ email: NEW });
+      expect(screen.getByTestId('profile-code-form')).toHaveTextContent(`We sent a code to ${NEW}`);
+      expect(screen.queryByTestId('profile-edit-form')).toBeNull();
+      expect(refreshCustomer).not.toHaveBeenCalled();
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('Confirm stays off until 6 digits are typed, strips non-digits, then confirms and re-reads /auth/me', async () => {
+      api.confirmCustomerEmail.mockResolvedValue({ changed: ['email'] });
+      const refreshCustomer = await startEmailChange();
+      const confirmBtn = screen.getByTestId('profile-code-confirm');
+      expect(confirmBtn).toBeDisabled();
+      fireEvent.change(screen.getByLabelText('Code'), { target: { value: '12a34 5' } });
+      expect(screen.getByLabelText('Code')).toHaveValue('12345');
+      expect(confirmBtn).toBeDisabled();
+      fireEvent.change(screen.getByLabelText('Code'), { target: { value: '123456' } });
+      fireEvent.click(confirmBtn);
+      await waitFor(() => expect(refreshCustomer).toHaveBeenCalledTimes(1));
+      expect(api.confirmCustomerEmail).toHaveBeenCalledWith({ code: '123456' });
+      expect(screen.queryByTestId('profile-code-form')).toBeNull();
+      expect(screen.getByRole('status')).toHaveTextContent(/^Saved\.$/);
+    });
+
+    it('a wrong code shows the server words and keeps the code step open', async () => {
+      api.confirmCustomerEmail.mockRejectedValue(new Error('That code is not right. Check the newest email and try again.'));
+      const refreshCustomer = await startEmailChange();
+      fireEvent.change(screen.getByLabelText('Code'), { target: { value: '000000' } });
+      fireEvent.click(screen.getByTestId('profile-code-confirm'));
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('not right'));
+      expect(screen.getByTestId('profile-code-form')).toBeInTheDocument();
+      expect(refreshCustomer).not.toHaveBeenCalled();
+    });
+
+    it('Send a new code asks the server again for the same address and clears the typed code', async () => {
+      await startEmailChange();
+      fireEvent.change(screen.getByLabelText('Code'), { target: { value: '123456' } });
+      fireEvent.click(screen.getByTestId('profile-code-resend'));
+      await waitFor(() => expect(api.updateCustomerProfile).toHaveBeenCalledTimes(2));
+      expect(api.updateCustomerProfile).toHaveBeenLastCalledWith({ email: NEW });
+      expect(screen.getByLabelText('Code')).toHaveValue('');
+    });
+
+    it('a resend the server limits shows its message and keeps the step open', async () => {
+      await startEmailChange();
+      api.updateCustomerProfile.mockRejectedValue(new Error('Too many profile changes. Please try again later.'));
+      fireEvent.click(screen.getByTestId('profile-code-resend'));
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Too many profile changes'));
+      expect(screen.getByTestId('profile-code-form')).toBeInTheDocument();
+    });
+
+    it('a name and a new email together: the name is saved and re-read at once, the email waits for its code', async () => {
+      api.updateCustomerProfile.mockResolvedValue({ changed: ['firstName'], emailPending: { email: NEW, expiresInMinutes: 15 } });
+      const refreshCustomer = vi.fn().mockResolvedValue(undefined);
+      renderCard({ refreshCustomer });
+      fireEvent.click(screen.getByTestId('profile-edit-open'));
+      fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Sam' } });
+      fireEvent.change(screen.getByLabelText('Email'), { target: { value: NEW } });
+      fireEvent.click(screen.getByTestId('profile-edit-save'));
+      await screen.findByTestId('profile-code-form');
+      expect(api.updateCustomerProfile).toHaveBeenCalledWith({ firstName: 'Sam', email: NEW });
+      expect(refreshCustomer).toHaveBeenCalledTimes(1);
+    });
+
+    it('Cancel closes the code step without confirming', async () => {
+      await startEmailChange();
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByTestId('profile-code-form')).toBeNull();
+      expect(api.confirmCustomerEmail).not.toHaveBeenCalled();
+    });
   });
 
   it('nothing edited: no request, says there is nothing to save', () => {
