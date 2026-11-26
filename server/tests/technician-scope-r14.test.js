@@ -342,7 +342,8 @@ describe('codex #5568 r16', () => {
   describe('visual note PATCH revalidates under row locks at the write', () => {
     test('locks the visit, then the note, re-judges scope + mutate rules, then updates in the same transaction', () => {
       const s = src('routes/visual-service-moments.js');
-      const r = s.slice(s.indexOf("router.patch('/visual-moments/:momentId'"), s.indexOf("router.delete('/visual-moments/:momentId'"));
+      const r = s.slice(s.indexOf('async function lockedMomentUpdate('), s.indexOf("router.delete('/visual-moments/:momentId'"));
+      expect(r).toMatch(/const \{ row, refusal \} = await lockedMomentUpdate\(req, moment, updates\);/);
       const txn = r.indexOf('await db.transaction(async (trx) => {');
       const jobLock = r.indexOf("trx('scheduled_services').where({ id: moment.job_id }).forUpdate().first()");
       const momentLock = r.indexOf('.forUpdate()', jobLock + 10);
@@ -358,8 +359,9 @@ describe('codex #5568 r16', () => {
 
     test('the OK-to-post mark from a tech checks the Visual Notes switch', () => {
       const s = src('routes/visual-service-moments.js');
-      const r = s.slice(s.indexOf("router.patch('/visual-moments/:momentId'"), s.indexOf("router.delete('/visual-moments/:momentId'"));
-      expect(r).toMatch(/Object\.keys\(youtubeUpdates\)\.length && req\.techRole !== 'admin'\s*&& !\(await isVisualServiceNotesEnabled\(req\.technicianId\)\)/);
+      expect(s).toMatch(/const youtube = await youtubeUpdatesForPatch\(req, moment\);\s*if \(youtube\.refusal\)/);
+      const h = s.slice(s.indexOf('async function youtubeUpdatesForPatch('), s.indexOf('async function lockedMomentUpdate('));
+      expect(h).toMatch(/Object\.keys\(updates\)\.length && req\.techRole !== 'admin'\s*&& !\(await isVisualServiceNotesEnabled\(req\.technicianId\)\)/);
     });
 
     test('a technician may read the weekly clip count, and only with GET', () => {
