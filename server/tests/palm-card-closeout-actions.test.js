@@ -56,7 +56,7 @@ describe('palm injection card', () => {
     const actions = buildCompletionActions({ lines: [...parseProtocolLines(visitOf(2).secondary, 'conditional')], products: PRODUCTS.filter((p) => p.id !== 'g4'), programKey: 'palm_injection', visit: visitOf(2) });
     expect(actions.map((a) => a.product?.id)).not.toContain('r10');
     // Its safety rules ride the card.
-    expect(full.procedure.safety.join(' ')).toMatch(/Never inject a palm whose fruit or nuts the family eats/);
+    expect(full.procedure.safety.join(' ')).toMatch(/Never inject a palm whose fruit or nuts anyone eats/);
   });
 
   test('a stage name beats the disease name, and both prevention names reach the palm program', () => {
@@ -68,18 +68,25 @@ describe('palm injection card', () => {
     expect([program('Palm Bronzing Prevention'), visit('Palm Bronzing Prevention')]).toEqual(['palm_injection', 4]);
     expect(visit('Lethal Bronzing Assessment')).toBe(1);
     expect(visit('Lethal Bronzing Follow Up')).toBe(3);
-    // A booked follow-up (it carries the source visit's name): the next 3-month lethal bronzing dose keeps the Arbor-OTC card; a
-    // follow-up of a plain injection is the re-inspection.
+    // A booked follow-up (it carries the source visit's name, on a date the tech picks) is the re-inspection, never a dose: the
+    // 3-month Arbor-OTC dose is its own scheduled visit.
     const { followupVisitMatch } = require('../services/protocol-matcher');
     const booked = (name) => followupVisitMatch(matchServiceProtocol(protocols, name), true).matchedVisit.visit;
-    expect(booked('Lethal Bronzing Preventive OTC Program')).toBe(4);
+    expect(booked('Lethal Bronzing Preventive OTC Program')).toBe(3);
     expect(booked('Palm Injection Service')).toBe(3);
   });
 
   test('the assessment tests before the first Arbor-OTC dose and screens out food palms', () => {
     const steps = visitOf(1).primary;
     expect(steps).toMatch(/No lethal bronzing dose until the palm tests negative/);
-    expect(steps).toMatch(/fruit the family eats/);
-    expect(protocols.palm_injection.safety_rules.join(' ')).toMatch(/Never inject a palm whose fruit or nuts the family eats/);
+    expect(steps).toMatch(/fruit or nuts anyone eats, sells or gives away/);
+    expect(protocols.palm_injection.safety_rules.join(' ')).toMatch(/Never inject a palm whose fruit or nuts anyone eats, sells or gives away/);
+    // Owner 2026-10-01 ("Mechanical labels only"): IMA-jet 10, TREE-äge and PALM-jet show the label line, never a worked-out dose.
+    for (const line of visitOf(2).secondary.split('\n').filter((l) => /IMA-jet 10|TREE-äge G4|PALM-jet Mg|Mn-Jet Fe/.test(l))) {
+      expect(line).toMatch(/Dose from the .*label's/);
+      expect(line).not.toMatch(/\d\s*(tsp|fl oz)/);
+    }
+    // Arbor-OTC: the label's trunk-width step is on both dose cards.
+    for (const n of [2, 4]) expect(`${visitOf(n).primary}\n${visitOf(n).secondary}`).toMatch(/thin or thick trunk moves the dose one size/);
   });
 });

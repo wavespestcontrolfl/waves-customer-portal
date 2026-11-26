@@ -215,8 +215,6 @@ const MATCH_RULES = [
     programKey: 'palm_injection',
     visit: 3,
     reason: 'palm_followup',
-    // A visit booked as a follow-up of a lethal bronzing dose is the next 3-month dose: it keeps the Arbor-OTC card (visit 4).
-    followupOf: ['palm_diagnosis', 'palm_injection_application', 'palm_followup'],
     // Only palm rules are read for a palm name, so the bare stage words are enough ("Lethal Bronzing Follow Up").
     terms: ['palm injection follow', 'palm injection follow up', 'palm injection recheck', 'palm follow', 'palm recheck', 'injection follow', 'follow up', 'followup', 'follow-up', 'recheck'],
   },
