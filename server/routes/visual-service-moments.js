@@ -263,20 +263,51 @@ router.patch('/visual-moments/:momentId', authStack, async (req, res, next) => {
     if (req.techRole === 'admin' && Object.prototype.hasOwnProperty.call(req.body || {}, 'customerCaption')) {
       updates.customer_caption = truncateText(req.body.customerCaption, 1500);
     }
-    Object.assign(updates, youtubeOkColumns({
+    const youtubeUpdates = youtubeOkColumns({
       mediaType: moment.media_type,
-      youtubeOk: req.body.youtubeOk,
+      youtubeOk: req.body?.youtubeOk,
       technicianId: req.technicianId,
-    }));
+    });
+    // A tech whose Visual Notes switch is off cannot set the mark (create and
+    // the weekly count check the same switch).
+    if (Object.keys(youtubeUpdates).length && req.techRole !== 'admin'
+      && !(await isVisualServiceNotesEnabled(req.technicianId))) {
+      return res.status(403).json({ error: 'Visual Notes are not enabled' });
+    }
+    Object.assign(updates, youtubeUpdates);
     if (Object.keys(updates).length === 0) {
       const [formatted] = await formatRows([moment], req.techRole === 'admin');
       return res.json({ moment: formatted });
     }
     updates.updated_at = db.fn.now();
-    const [row] = await db('visual_service_moments')
-      .where({ id: moment.id })
-      .update(updates)
-      .returning('*');
+    // Locked revalidation at the write (same pattern as create): a reassignment
+    // or an admin review landing after the unlocked checks above must not let
+    // the old technician's edit (or OK-to-post mark) land.
+    let row;
+    let refusal = null;
+    await db.transaction(async (trx) => {
+      // Visit first, then the note: the same order as create, so the two
+      // never wait on each other.
+      if (req.techRole !== 'admin') {
+        const lockedJob = await trx('scheduled_services').where({ id: moment.job_id }).forUpdate().first();
+        if (!lockedJob || !require('../services/technician-visit-scope').technicianVisitRowInScope(req, lockedJob)) {
+          refusal = { status: 403, error: 'Not assigned to this service' };
+          return;
+        }
+      }
+      const lockedMoment = await trx('visual_service_moments')
+        .where({ id: moment.id })
+        .whereNull('deleted_at')
+        .forUpdate()
+        .first();
+      const lockedAccess = canMutateMoment(req, lockedMoment);
+      if (!lockedAccess.ok) { refusal = lockedAccess; return; }
+      [row] = await trx('visual_service_moments')
+        .where({ id: moment.id })
+        .update(updates)
+        .returning('*');
+    });
+    if (refusal) return res.status(refusal.status).json({ error: refusal.error });
     if (moment.visibility_status === 'approved_customer') {
       await invalidateVisualMomentReportPdfCache(moment.job_id);
     }
