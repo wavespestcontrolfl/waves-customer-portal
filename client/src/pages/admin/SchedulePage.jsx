@@ -15360,6 +15360,8 @@ export function CompletionPanel({
       // The server reads the visit's account (bermuda removal) itself.
       if (service.id) params.set("scheduledServiceId", service.id);
     }
+    // The server checks whether this visit was booked as a follow-up (its name is a copy of the first visit's) and serves the follow-up card.
+    if (!isLawn && service.id) params.set("visitId", service.id);
     // Lawn and month-keyed programs (tree & shrub) pick the visit for the
     // appointment's month; the server ignores it for 'Any'-month programs.
     const serviceMonth = protocolMonthForService(service);

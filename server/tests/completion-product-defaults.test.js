@@ -222,6 +222,12 @@ describe('resolveCompletionDefaultProductNames isFollowup (Codex r3 P1, PR #5049
     expect(result.names).toEqual([]);
   });
 
+  test('a heat-only bed bug booking gets no prefilled spray products', () => {
+    const result = resolveCompletionDefaultProductNames({ protocols: require('../config/protocols.json'), serviceType: 'Bed Bug Heat Treatment' });
+    expect(result.matchedVisit).toEqual({ visit: 1, reason: 'bed_bug_heat_scope_review', matched: true });
+    expect(result.names).toEqual([]);
+  });
+
   test('without isFollowup the same service still resolves visit 1 as usual (regression)', () => {
     const result = resolveCompletionDefaultProductNames({ protocols, serviceType: 'Cockroach Control Service' });
     expect(result.programKey).toBe('cockroach');

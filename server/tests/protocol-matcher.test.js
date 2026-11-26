@@ -1,5 +1,5 @@
 const protocols = require('../config/protocols.json');
-const { matchServiceProtocol } = require('../services/protocol-matcher');
+const { matchServiceProtocol, followupVisitMatch } = require('../services/protocol-matcher');
 
 function match(serviceType) {
   const result = matchServiceProtocol(protocols, serviceType);
@@ -112,15 +112,16 @@ describe('protocol matcher specialty routing', () => {
       visit: 2,
       reason: 'bed_bug_treatment',
     });
+    // Waves does not sell heat: a heat or hybrid name gets the inspection / scope card (no spray prefill).
     expect(match('Bed Bug Heat Treatment')).toEqual({
       programKey: 'bed_bug',
-      visit: 2,
-      reason: 'bed_bug_treatment',
+      visit: 1,
+      reason: 'bed_bug_heat_scope_review',
     });
     expect(match('Bed Bug Hybrid Heat + Residual Program')).toEqual({
       programKey: 'bed_bug',
-      visit: 2,
-      reason: 'bed_bug_treatment',
+      visit: 1,
+      reason: 'bed_bug_heat_scope_review',
     });
   });
 
@@ -188,6 +189,28 @@ describe('protocol matcher specialty routing', () => {
     expect(match('Bed Bug Recheck')).toEqual({ programKey: 'bed_bug', visit: 4, reason: 'bed_bug_clearance' });
     expect(match('Bed Bug Treatment 3')).toEqual({ programKey: 'bed_bug', visit: 5, reason: 'bed_bug_third_treatment' });
     expect(match('Bed Bug Inspection')).toEqual({ programKey: 'bed_bug', visit: 1, reason: 'bed_bug_inspection' });
+  });
+
+  test('a heat or hybrid bed bug booking gets the inspection / scope card, never the spray card', () => {
+    for (const name of ['Bed Bug Heat Treatment', 'Bed Bug Heat', 'Heat Bed Bug Service', 'Bed Bug Hybrid Treatment']) {
+      expect(match(name)).toEqual({ programKey: 'bed_bug', visit: 1, reason: 'bed_bug_heat_scope_review' });
+    }
+    expect(protocols.bed_bug.visits.find((v) => v.visit === 1).completionDefaultProducts).toBeUndefined();
+  });
+
+  test('followupVisitMatch: a booked follow-up gets the program follow-up card', () => {
+    const followup = (name) => {
+      const result = followupVisitMatch(matchServiceProtocol(protocols, name), true);
+      return [result.programKey, result.matchedVisit.visit, result.reason];
+    };
+    expect(followup('Flea Control Service')).toEqual(['flea', 2, 'flea_followup']);
+    expect(followup('Bed Bug Treatment Service')).toEqual(['bed_bug', 3, 'bed_bug_followup']);
+    expect(followup('Cockroach Control Service')).toEqual(['cockroach', 3, 'cockroach_followup']);
+    // A program with no follow-up card keeps its match, and so does any visit that is not a follow-up.
+    expect(followup('Quarterly Pest Control')).toEqual(['pest', 1, 'general_pest']);
+    const first = matchServiceProtocol(protocols, 'Flea Control Service');
+    expect(followupVisitMatch(first, false)).toBe(first);
+    expect(followupVisitMatch(null, true)).toBeNull();
   });
 
   test('matches plural pest labels to the specialty pest visits', () => {

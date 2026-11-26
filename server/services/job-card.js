@@ -37,7 +37,7 @@ const contextAggregator = require('./context-aggregator');
 const { awayWatchCardLines } = require('./away-watch');
 
 const { redactAccessCodes } = contextAggregator;
-const { matchServiceProtocol, monthVisit } = require('./protocol-matcher');
+const { matchServiceProtocol, followupVisitMatch, monthVisit } = require('./protocol-matcher');
 const { stripPriceTokensFromText } = require('./protocol-reader');
 const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = require('../utils/mosquito-misting-system');
 const {
@@ -472,7 +472,7 @@ const ADDON_PROGRAMS = Object.freeze({
   // work. The web sweep applies no product (nonChemical); the five chemical
   // add-ons route to the `area_addon` protocol program by key, whatever
   // their category (lawn_care `keys` below; protocols.json area_addon).
-  pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest', nonChemical: ['area_addon_web_sweep'] },
+  pest_control: { any: ['pest', 'cockroach', 'flea', 'bed_bug', 'termite'], fallback: 'pest', nonChemical: ['area_addon_web_sweep'] },
   lawn_care: {
     any: ['lawn'],
     fallback: 'lawn',
@@ -507,7 +507,8 @@ const ADDON_PROGRAMS = Object.freeze({
     ],
   },
   tree_shrub: { any: ['tree_shrub', 'palm_injection'], fallback: 'tree_shrub' },
-  specialty: { any: ['bed_bug'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'pest', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
+  // flea_tick is the flea service ("Flea Control Service"): its own program since 2026-11-25. Ticks stay on the pest tick card.
+  specialty: { any: ['bed_bug', 'flea'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'flea', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
 });
 function addonProgramKey(category, name, protocols, serviceKey = null) {
   const rule = ADDON_PROGRAMS[category];
@@ -547,7 +548,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     .leftJoin('services as s', 'ss.service_id', 's.id')
     .where('ss.id', serviceId)
     .select(
-      'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes', 'ss.technician_id',
+      'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes', 'ss.technician_id', 'ss.followup_source_service_id',
       // The primary line's catalog identity (booking snapshot, else the live
       // row); null on legacy rows booked before the catalog link existed.
       dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
@@ -607,6 +608,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     serviceType: svc.service_type,
     serviceCategory: svc.service_category || null,
     serviceKey: svc.service_key || null,
+    // Booked as a follow-up of a finished visit: the card is the program's follow-up card, not the first visit's.
+    isFollowup: svc.followup_source_service_id != null,
     // What the estimate sold for an area add-on that IS this visit (null for any other visit).
     areaAddOnScope: soldScopeOf(svc.area_addon_scope),
     serviceLine,
@@ -1393,7 +1396,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       bermudaRequired: requiredNotes(planned.filter((item) => item.bermudaStep)),
     };
   }
-  return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey: identityKey || null, serviceKey: facts.serviceKey || null }), blocks: [] };
+  return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey: identityKey || null, serviceKey: facts.serviceKey || null, isFollowup: facts.isFollowup === true }), blocks: [] };
 }
 
 /**
@@ -1410,8 +1413,9 @@ function mistingSafetyField(program, effectiveProgramKey) {
   return { safety: program.safety_rules.map((rule) => String(rule)) };
 }
 
-function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { programKey = null, serviceKey = null } = {}) {
-  const match = matchServiceProtocol(protocols, serviceType, { serviceKey });
+// isFollowup: the visit was booked as a follow-up of a finished visit (it carries that visit's name), so it gets the program's follow-up card.
+function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { programKey = null, serviceKey = null, isFollowup } = {}) {
+  const match = followupVisitMatch(matchServiceProtocol(protocols, serviceType, { serviceKey }), isFollowup);
   const program = programKey ? (protocols?.[programKey] || null) : match?.program;
   const ruleVisit = !programKey || match?.programKey === programKey ? match?.matchedVisit : null;
   const visit = seasonalVisit(program, scheduledDate) || ruleVisit || program?.visits?.[0] || null;
@@ -2127,6 +2131,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
         .where('ss.id', serviceId)
         .select(
           'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
+          'ss.followup_source_service_id',
           // The primary line's catalog identity, by the card's own rule.
           dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
           dbh.raw('COALESCE(ss.service_key_snapshot, s.service_key) as service_key'),
@@ -2328,7 +2333,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   const lawnAddon = addons.find((a) => a.programKey === 'lawn')?.addon || null;
   const found = (line, owners = []) => ({ line, treatment, primaryIsLawn, lawnAddon, owners });
   const candidates = [
-    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null }] : []),
+    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null, isFollowup: svc.followup_source_service_id != null }] : []),
     ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),
   ];
   if (!candidates.length) return found(null);
@@ -2340,7 +2345,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // Every candidate whose lines name the product owns its rain rule (`owners`); the
   // first selected line governs the dose, else the first "if needed" one.
   const hits = candidates
-    .map((c) => ({ c, hit: resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null }).lines.find((l) => l.product.id === product.id) }))
+    .map((c) => ({ c, hit: resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null, isFollowup: c.isFollowup === true }).lines.find((l) => l.product.id === product.id) }))
     .filter(({ hit }) => hit);
   const owners = hits.map(({ c }) => ({ name: c.name, serviceKey: c.serviceKey || null }));
   const selected = hits.find(({ hit }) => hit.selected !== false);

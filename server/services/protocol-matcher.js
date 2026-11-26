@@ -28,20 +28,19 @@ const MATCH_RULES = [
     reason: 'bed_bug_followup',
     terms: ['bed bug follow', 'bed bug treatment 2', 'bed bug second treatment', 'second bed bug'],
   },
+  // Waves does not sell heat. A booking named heat or hybrid gets the inspection / scope card (no product
+  // prefilled), never the spray card: the office reviews the scope first.
+  {
+    programKey: 'bed_bug',
+    visit: 1,
+    reason: 'bed_bug_heat_scope_review',
+    terms: ['heat bed bug', 'hybrid bed bug', 'bed bug heat', 'bed bug hybrid'],
+  },
   {
     programKey: 'bed_bug',
     visit: 2,
     reason: 'bed_bug_treatment',
-    terms: [
-      'chemical bed bug',
-      'heat bed bug',
-      'hybrid bed bug',
-      'bed bug chemical',
-      'bed bug heat',
-      'bed bug heat treatment',
-      'bed bug hybrid',
-      'bed bug treatment',
-    ],
+    terms: ['chemical bed bug', 'bed bug chemical', 'bed bug treatment'],
   },
   {
     programKey: 'bed_bug',
@@ -329,10 +328,12 @@ function isPestPrimaryCompanion(normalized) {
   return /\bpest\b.*\brodent\b/.test(normalized) && !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(normalized);
 }
 
-// A flea job has its own card. "Flea & Tick" names a tick request too, and ticks stay on the pest tick card.
-function isFleaOnly(normalized) {
+// Names decided before the rodent, mosquito, palm and termite words are read: a pest visit that names a companion service stays pest, and
+// a flea job has its own card. "Flea & Tick" names a tick request too, and ticks stay on the pest tick card. Null: no decision here.
+function pestOrFleaProgram(normalized) {
+  if (isPestPrimaryCompanion(normalized)) return 'pest';
   const names = (token) => hasToken(normalized, token);
-  return (names('flea') || names('fleas')) && !names('tick') && !names('ticks');
+  return (names('flea') || names('fleas')) && !names('tick') && !names('ticks') ? 'flea' : null;
 }
 
 function programKeyForService(serviceType) {
@@ -345,8 +346,8 @@ function programKeyForService(serviceType) {
   if (normalized.includes('lawn') || normalized.includes('turf')) return 'lawn';
   if (normalized.includes('bed bug') || normalized.includes('bedbug')) return 'bed_bug';
   if (normalized.includes('cockroach') || normalized.includes('roach') || normalized.includes('palmetto bug')) return 'cockroach';
-  if (isPestPrimaryCompanion(normalized)) return 'pest';
-  if (isFleaOnly(normalized)) return 'flea';
+  const named = pestOrFleaProgram(normalized);
+  if (named) return named;
   if (
     hasToken(normalized, 'rodent') ||
     hasToken(normalized, 'rat') ||
@@ -479,8 +480,21 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
   };
 }
 
+// A follow-up booked from a finished visit copies that visit's name and service key, and is marked only by
+// scheduled_services.followup_source_service_id. Its name therefore matches the SOURCE visit's card. When the
+// program has a follow-up card (its one rule whose reason ends `_followup`), a follow-up booking gets that card.
+// Every surface that shows a visit's card or products applies this to its match: the job card, the completion
+// actions and the completion product defaults. A program with no follow-up rule keeps its match.
+function followupVisitMatch(match, isFollowup) {
+  if (!isFollowup || !match?.program) return match;
+  const rule = MATCH_RULES.find((entry) => entry.programKey === match.programKey && /_followup$/.test(entry.reason || ''));
+  const visit = rule ? findVisit(match.program, rule.visit) : null;
+  return visit ? { ...match, matchedVisit: visit, matched: true, reason: rule.reason } : match;
+}
+
 module.exports = {
   MATCH_RULES,
+  followupVisitMatch,
   matchServiceProtocol,
   monthVisit,
   programKeyForService,

@@ -39,7 +39,7 @@ const {
   settleCatchUpForVisit,
   normalizeOptionList,
 } = require('../services/waveguard-plan-engine');
-const { matchServiceProtocol } = require('../services/protocol-matcher');
+const { matchServiceProtocol, followupVisitMatch } = require('../services/protocol-matcher');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
 const { fertilizerSafetyRules } = require('../services/lawn-fertilizer-safety');
 const jobCard = require('../services/job-card');
@@ -1235,6 +1235,15 @@ router.get('/lawn/window', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// True when ?visitId= names a visit this viewer may see that was booked as a follow-up of a finished visit.
+async function visitIsBookedFollowup(req) {
+  const id = String(req.query.visitId || '');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return false;
+  const row = await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id }))
+    .first('followup_source_service_id');
+  return row?.followup_source_service_id != null;
+}
+
 // GET /api/admin/protocols/completion-actions — targeted completion chips
 // derived from the protocol program + matched product catalog rows.
 router.get('/completion-actions', async (req, res, next) => {
@@ -1278,8 +1287,12 @@ router.get('/completion-actions', async (req, res, next) => {
         ({ visit } = stepVisit ? await visitForPlan(db, stepVisit, roundsVisit, null, { track: program, trackKey: track }) : { visit });
       }
     } else {
-      // Raw month (see /match): an unusable value keeps the rule visit.
-      const matched = matchServiceProtocol(protocols, serviceType, { month: req.query.month || null });
+      // Raw month (see /match): an unusable value keeps the rule visit. `visitId` (the visit the form is open on) lets a booked
+      // follow-up get its program's follow-up card: its name is a copy of the first visit's.
+      const matched = followupVisitMatch(
+        matchServiceProtocol(protocols, serviceType, { month: req.query.month || null }),
+        await visitIsBookedFollowup(req),
+      );
       programKey = matched.programKey;
       program = matched.program;
       visit = matched.matchedVisit || program?.visits?.[0] || null;

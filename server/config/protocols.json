@@ -2331,6 +2331,7 @@
     "notes": [
       "Flea is two treatments, 14 days apart. There is no third treatment (owner ruling 2026-11-23). If fleas remain after treatment 2, confirm the pet got a vet flea product, look for wildlife or stray cats, then call the office.",
       "The growth regulator goes down once, at treatment 1. It lasts up to 7 months indoors, and its label allows no indoor repeat before 21 days, so treatment 2 at day 14 has none.",
+      "Same tank, by the labels: the growth regulator label says it \"may be combined with an EPA registered adulticide\" and \"No label dosage rates may be exceeded\". Its own mix is 1 fl oz per gallon sprayed at 1 gallon per 1,500 sq ft. In the Antapex tank (1 gallon per 1,000 sq ft) the card uses 0.67 fl oz per gallon: the same amount on the floor, never more. A tank with the growth regulator alone uses the label mix.",
       "Never fog a flea job. The treatment 2 adulticide label says \"DO NOT use this product as a fogger\", and the treatment 1 adulticide is labeled indoors for spot, crack-and-crevice and surface spray only.",
       "Use only the products on this card. Fleas are not on the label of the cockroach growth regulator mix, and the outdoor perimeter pyrethroid is labeled for fleas outdoors only."
     ],
@@ -2434,7 +2435,7 @@
         "visit": 1,
         "month": "Any",
         "primary": "Bed Bug Inspection / Scope\nInspect sleeping and resting areas, mattress seams, box spring, bed frame, headboard, baseboards, furniture seams, luggage zones, outlets, and adjacent rooms\nDocument live bugs, cast skins, eggs, fecal spotting, bites reported, rooms affected, prep status, and occupancy type\nGrade the job: standard (2 treatments) or heavy (3 treatments), using the heavy rule on this card",
-        "secondary": "Photograph evidence before quoting or treating\nSend prep instructions and confirm customer can comply\nPlace interceptor cups under each bed and sofa leg and note the count\nEscalate severe, multi-unit, or cluttered jobs for office review",
+        "secondary": "Photograph evidence before quoting or treating\nSend prep instructions and confirm customer can comply\nPlace interceptor cups under each bed and sofa leg and note the count\nEscalate severe, multi-unit, or cluttered jobs for office review\nA booking named heat or hybrid: Waves does not sell heat. Call the office to review the scope before any treatment",
         "material_cost": "inspection",
         "labor_cost": "inspection",
         "tiers": {

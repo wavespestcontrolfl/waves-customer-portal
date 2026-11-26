@@ -2189,6 +2189,25 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(tritek).toMatchObject({ amount: 1.28, amountMax: null, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false } });
   });
 
+  test('a flea service gets the flea card as the main service and as an add-on; a booked follow-up gets treatment 2', async () => {
+    const protocols = require('../config/protocols.json');
+    const catalog = [{ id: 'antapex', name: 'Atticus Antapex WSG' }, { id: 'tekko', name: 'Tekko Pro IGR' }, { id: 'fastcap', name: 'Onslaught Fastcap' }, { id: 'house', name: 'LESCO Crosscheck Plus' }];
+    const run = (facts) => jobCard.resolveVisitLines({ facts: { isLawn: false, scheduledDate: '2026-12-09', addons: [], ...facts }, protocols, catalog, dbh: () => ({}) });
+    const flea = { serviceType: 'Flea Control Service', serviceCategory: 'specialty', serviceKey: 'flea_tick' };
+    const first = await run(flea);
+    expect([first.procedure.name, first.visit.visit]).toEqual([protocols.flea.name, 1]);
+    expect(first.lines.map((l) => l.product.id)).toEqual(expect.arrayContaining(['antapex', 'tekko']));
+    expect(first.lines.map((l) => l.product.id)).not.toContain('house');
+    // The follow-up carries the first visit's name and key; it is marked only by followup_source_service_id (facts.isFollowup).
+    const second = await run({ ...flea, isFollowup: true });
+    expect(second.visit.visit).toBe(2);
+    expect(second.lines.map((l) => l.product.id)).not.toContain('tekko');
+    // As an add-on of a pest visit, the flea line is the flea card too, not general perimeter work.
+    const withAddon = await run({ serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', addons: [{ name: 'Flea Control Service', category: 'specialty', serviceKey: 'flea_tick' }] });
+    expect(withAddon.addons).toMatchObject([{ name: 'Flea Control Service', visit: { number: 1 }, note: null }]);
+    expect(withAddon.addons[0].products).toBeGreaterThanOrEqual(2);
+  });
+
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {
     const protocols = {
       pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }, { visit: 2, month: 'Any', primary: 'German roach cleanout — Advion Gel per label' }, { visit: 3, month: 'Any', primary: 'Non-repellent treatment for ghost or trailing ants\nAdvion Ant Gel per label' }, { visit: 4, month: 'Any', primary: 'Bifen IT broadcast per label' }] },
