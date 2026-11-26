@@ -167,6 +167,11 @@ describe('wetDayFrom: one rule for both graders', () => {
 describe('workHourChances', () => {
   test('nine work hours, null where the feed has no hour', () => {
     const hours = [{ startTime: '2026-11-25T09:00:00-05:00', rainChance: 80 }, { startTime: '2026-11-25T16:00:00-05:00', rainChance: 30.4 }];
-    expect(w.workHourChances(hours, '2026-11-25')).toEqual([null, 80, null, null, null, null, null, null, 30]);
+    expect(w.workHourChances(hours, '2026-11-25')).toEqual([null, 80, null, null, null, null, null, null, 30.4]);
+  });
+
+  test('stored as read, never rounded: 69.6 is below the 70 rule and 40.4 is not below 40', () => {
+    const hours = [{ startTime: '2026-11-25T08:00:00-05:00', rainChance: 69.6 }, { startTime: '2026-11-25T09:00:00-05:00', rainChance: 40.4 }, { startTime: '2026-11-25T10:00:00-05:00', rainChance: 39.5 }];
+    expect(w.workHourChances(hours, '2026-11-25').slice(0, 3)).toEqual([69.6, 40.4, 39.5]);
   });
 });

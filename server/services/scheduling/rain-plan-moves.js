@@ -1,16 +1,10 @@
 /**
- * What a rain day move would do to the visit's plan, and the visit spans old records lack, for the schedule rain record
- * (record only; nothing here moves or writes a visit). Owner 2026-11-26: a rain-out move of a recurring visit shifts the
+ * What a rain day move would do to the visit's plan, for the schedule rain record (record only; nothing here moves or
+ * writes a visit). Owner 2026-11-26: a rain-out move of a recurring visit shifts the
  * WHOLE PLAN (setting default whole_plan); any other visit moves alone. A lawn round moved 7 days or less inside its round
  * stays one visit (lawn-rounds.js datesMoveSeries, the rule the rebooker and rain-out use).
  */
 const { datesMoveSeries } = require('../lawn-rounds');
-const { dateOnlyString } = require('../../utils/date-only');
-
-const toMin = (hhmm) => {
-  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
-  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
-};
 
 /**
  * The recurrence columns datesMoveSeries reads, for the given service ids, keyed by id. A failed read THROWS, marked
@@ -50,23 +44,4 @@ function planMovesOf(visit, series, toDate) {
   return ids.length > 1 ? { plan_moves, plan_moves_by_service: byService } : { plan_moves };
 }
 
-/**
- * The stored span of visits an old record kept without one: id -> { date, start, end }, in ET minutes. `end` is the
- * visit's window_end, else its start plus estimated_duration_minutes, else null (the span is unknown). A failed read
- * throws: the score is retried, never graded on a guess.
- */
-async function loadVisitSpans(conn, ids) {
-  const rows = await conn('scheduled_services').whereIn('id', ids)
-    .select('id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
-  return new Map(rows.map((r) => {
-    const start = toMin(r.window_start);
-    const windowEnd = toMin(r.window_end);
-    const minutes = Number(r.estimated_duration_minutes);
-    let end = null;
-    if (start != null && windowEnd != null && windowEnd > start) end = windowEnd;
-    else if (start != null && Number.isFinite(minutes) && minutes > 0) end = start + minutes;
-    return [String(r.id), { date: String(dateOnlyString(r.scheduled_date) || ''), start, end }];
-  }));
-}
-
-module.exports = { loadSeriesRows, planMovesOf, loadVisitSpans };
+module.exports = { loadSeriesRows, planMovesOf };

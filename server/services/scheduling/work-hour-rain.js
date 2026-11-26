@@ -213,12 +213,13 @@ function spanWet(obs, point, startMin, endMin, afterHours) {
   return { wet, inches: t.inches, missing: t.missing };
 }
 
-/** The forecast's chance for each work hour of `day`, as a compact array (null = no reading). */
+/** The forecast's chance for each work hour of `day`, as a compact array (null = no reading). Stored as read, never rounded:
+ *  a replay compares these against the rule's thresholds (70, 40). */
 function workHourChances(hours, day) {
   return WORK_HOURS.map((h) => {
     const key = `${day}T${String(h).padStart(2, '0')}`;
     const hour = (hours || []).find((x) => String(x?.startTime || '').slice(0, 13) === key);
-    return hour && Number.isFinite(hour.rainChance) ? Math.round(hour.rainChance) : null;
+    return hour && Number.isFinite(hour.rainChance) ? hour.rainChance : null;
   });
 }
 

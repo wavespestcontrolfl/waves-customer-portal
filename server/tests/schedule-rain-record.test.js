@@ -515,45 +515,19 @@ describe('scoring against the measured rain in each visit\'s hours', () => {
     expect([score.visits.a.cutoff, score.visits.c.cutoff]).toEqual(['hit', 'false_alarm']);
   });
 
-  describe('a record from before spans were kept', () => {
-    const old = () => seeded({}, [{ id: 'a', start: '14:00', decision: 'reorder', to_start: '16:00' }]);
-    const spans = (rec) => jest.fn(async () => new Map(rec ? [['a', rec]] : []));
-    const score = async (loadSpans, plan = { VNC: [14], SRQ: [] }) => {
-      const conn = old();
-      const out = await run({ now: FRI, conn, fetchObs: fetchObs(plan), deps: deps([], { loadPoints: pointsWithoutE, loadSpans }) });
-      return { conn, out };
-    };
-
-    test('the span comes from the visit row: its window end, else its start plus its duration', async () => {
-      const a = await score(spans({ date: WED, start: 840, end: 900 }));
-      expect(daysOf(a.conn)[WED].score.visits.a).toMatchObject({ wet: true, cutoff: 'hit' });
-      // A 3-hour visit at 14:00 is still being rained on at 16:00; a 1-hour assumption plus 2 drying hours would end at 17:00.
-      const b = await score(spans({ date: WED, start: 840, end: 1020 }), { VNC: [], SRQ: [] });
-      expect(daysOf(b.conn)[WED].score.visits.a).toMatchObject({ wet: false, cutoff: 'false_alarm' });
-    });
-
-    test('no end, a moved visit or a missing row leaves the visit ungraded (null), never graded on an assumed hour, and never waits', async () => {
-      for (const rec of [{ date: WED, start: 840, end: null }, { date: '2026-11-26', start: 840, end: 900 }, { date: WED, start: 780, end: 900 }, null]) {
-        const { conn, out } = await score(spans(rec));
-        expect(out.scored).toEqual([WED]);
-        const day = daysOf(conn)[WED].score;
-        expect(day.visits.a).toMatchObject({ wet: null, inches: null, cutoff: null });
-        expect(day.partial).toBe(false);
-        expect(day.cutoff).toMatchObject({ unread: expect.any(Number) });
-      }
-    });
-
-    test('the visit read is asked only for visits with no span, and a failed read is retried, not guessed', async () => {
-      const fresh = seeded();
-      const never = jest.fn(async () => new Map());
-      await run({ now: FRI, conn: fresh, fetchObs: fetchObs({ VNC: [], SRQ: [] }), deps: deps([], { loadPoints: pointsWithoutE, loadSpans: never }) });
-      expect(never).not.toHaveBeenCalled();
-      const conn = old();
-      const bad = jest.fn(async () => { throw new Error('spans down'); });
-      const out = await run({ now: FRI, conn, fetchObs: fetchObs({ VNC: [], SRQ: [] }), deps: deps([], { loadPoints: pointsWithoutE, loadSpans: bad }) });
-      expect(out.scored).toEqual([]);
-      expect(out.problems[0]).toMatch(/scoring failed: spans down/);
-    });
+  test('a proposal with no stored span (a record from before spans were kept) is ungraded: null verdicts, final, never waits, never rebuilt', async () => {
+    const conn = seeded({}, [
+      { id: 'a', start: '14:00', decision: 'reorder', to_start: '16:00' },
+      { id: 'c', start: '14:00', span: [840, 900], decision: 'none', reason: 'no_dry_hour' },
+    ]);
+    // Rain at 14:00 on both visits' points: the legacy one is not graded on an assumed hour; the stored-span one is.
+    const out = await run({ now: FRI, conn, fetchObs: fetchObs({ VNC: [14], SRQ: [14] }), deps: deps([], { loadPoints: pointsWithoutE }) });
+    expect(out.scored).toEqual([WED]);
+    const { score } = daysOf(conn)[WED];
+    expect(score.partial).toBe(false);
+    expect(score.visits.a).toEqual({ inches: null, wet: null, cutoff: null, recheck: null });
+    expect(score.visits.c).toMatchObject({ wet: true, cutoff: 'miss' });
+    expect(score.cutoff).toEqual({ hit: 0, false_alarm: 0, miss: 1, ok: 0, unread: 1 });
   });
 
   test('an hour no gauge reported is unread, never dry: the day waits, and after 7 days the visits read decide, marked partial', async () => {

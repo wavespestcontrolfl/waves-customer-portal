@@ -63,7 +63,7 @@ const rainPass = require('../auto-dispatch/rain-pass');
 const rainMode = require('../ads/rain-mode');
 const workHours = require('./work-hour-rain');
 const { withCatalogKeys, RAIN_AFTER_HOURS } = require('./rain-fit');
-const { loadSeriesRows, planMovesOf, loadVisitSpans } = require('./rain-plan-moves');
+const { loadSeriesRows, planMovesOf } = require('./rain-plan-moves');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { ZONE_COORDS } = require('./forecast-zones');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
@@ -409,28 +409,19 @@ const FIELDS = ['cutoff', 'recheck'];
  * The rain in each visit's own hours (work-hour-rain.js spanWet: the visit's start through RAIN_AFTER_HOURS after its
  * end, at the nearest gauges to its point), measured once for EACH run's span: the cutoff and the recheck can hold
  * different spans for one visit (a stop re-timed between them), and each verdict is graded against its own. A visit stored
- * before the span was kept takes it from the visit row, else is ungraded. Visits with no point (moved away, row gone) are never read and
+ * before the span was kept is ungraded (null verdicts, final, never waits). Visits with no point (moved away, row gone) are never read and
  * never wait; a visit with a point and an unread hour is a gap. { measured: { cutoff: { id: ... }, recheck: ... }, gaps }.
  */
-async function measureVisits(row, obs, { loadPoints, loadSpans = loadVisitSpans, conn }) {
+async function measureVisits(row, obs, { loadPoints, conn }) {
   const all = FIELDS.flatMap((f) => (row[f]?.proposals || []).filter((p) => p.reason !== 'no_point').map((p) => ({ field: f, p })));
   const ids = [...new Set(all.map(({ p }) => p.id))];
   const points = ids.length ? await loadPoints(conn, ids) : new Map();
-  // A record from before spans were kept: the span comes from the visit row (its window end, else start plus duration) when
-  // that row is still the visit the record judged (same day, same start); else the visit is ungraded, never graded on a guess.
-  const oldIds = [...new Set(all.filter(({ p }) => !Array.isArray(p.span)).map(({ p }) => p.id))];
-  const stored = oldIds.length ? await loadSpans(conn, oldIds) : new Map();
-  const spanOf = (p) => {
-    if (Array.isArray(p.span)) return p.span;
-    const rec = stored.get(String(p.id));
-    const start = toMin(p.start);
-    return rec && rec.date === row.day && rec.start === start && rec.end > start ? [start, rec.end] : null;
-  };
   const measured = { cutoff: {}, recheck: {} };
   const gaps = [];
   for (const { field, p } of all) {
     const point = points.get(String(p.id));
-    const span = point ? spanOf(p) : null;
+    // A proposal with no stored span (a record from 11-24 or 11-25, before spans were kept) is ungraded: never rebuilt, never a guess.
+    const span = point && Array.isArray(p.span) ? p.span : null;
     if (!point || !span) { measured[field][p.id] = { wet: null, inches: null }; continue; }
     measured[field][p.id] = spanWetOf(obs, point, span);
     if (measured[field][p.id].wet == null) gaps.push(`${field}:${p.id}`);
@@ -575,7 +566,7 @@ async function recordScheduleRain({ now = new Date(), conn = db, read = getNwsHo
     }
     // Scoring is its own try: a failure there never drops the day's decision made above.
     try {
-      run.scored = await scorePastDays(days, now, { fetchObs, loadPoints: deps.loadPoints || rainPass.loadPoints, loadSpans: deps.loadSpans, conn });
+      run.scored = await scorePastDays(days, now, { fetchObs, loadPoints: deps.loadPoints || rainPass.loadPoints, conn });
     } catch (err) {
       problems.push(`scoring failed: ${err.message}`);
       run.error = `scoring failed: ${err.message}`;
