@@ -35,6 +35,7 @@ const {
 } = require('../estimate-automation-duplicates');
 const { LOOKUP_PALM_REVIEW_REASON } = require('./lookup-palm-review');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
+const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
 const { callAutoSendShadowVerdict } = require('./call-auto-send-shadow');
 const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS } = require('../pricing-engine/unit-band-pricing');
 const { sameStreetAddress } = require('./address-compare');
@@ -1018,7 +1019,7 @@ function commercialSuiteSizeNoteLines(suiteSize) {
   return lines;
 }
 
-function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call, returningSetupFeeWaiver }) {
+function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call, returningSetupFeeWaiver, oneTimeChoiceShown = false }) {
   const factLine = (label, fact) => {
     if (!fact) return `- ${label}: (unresolved)`;
     const rejected = (fact.rejected || []).map((r) => `rejected ${r.value} [${r.source}] — ${r.reason}`).join('; ');
@@ -1046,6 +1047,12 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
     ...commercialSuiteSizeNoteLines(propertyFacts?.commercialSuiteSize),
     '',
     `Totals: $${totals.monthly}/mo · $${totals.annual}/yr · $${totals.oneTime} one-time`,
+    // A both-options draft stores no one-time line: the page prices that
+    // choice from the plan's per-visit price, so the stored one-time total
+    // above is not the price the caller is offered.
+    oneTimeChoiceShown
+      ? 'One-time choice: offered beside the plan; the estimate page prices it from the plan\'s per-visit price (the one-time total above is stored charges only).'
+      : null,
     returningSetupFeeWaiver
       ? `Setup fee: waived, returning customer (last plan visit ${returningSetupFeeWaiver.lastCompletedVisitDate}, ${returningSetupFeeWaiver.gapDays} days ago; window ${returningSetupFeeWaiver.windowDays} days).`
       : null,
@@ -1089,6 +1096,25 @@ function callAutoSendShadowStamp({ origin, intent, propertyFacts, context, prior
     logger.warn(`[estimator-engine] call auto-send shadow verdict failed: ${shadowErr.message}`);
     return {};
   }
+}
+
+// The estimate shows the [Recurring | One-time] choice when the owner's
+// both-options rule priced the caller's one-time ask as the plan
+// (one-time-pest-both-options.js) AND the estimate page's own rule for that
+// choice passes on what was priced. The page computes the one-time amount
+// from the plan's per-visit price, the same way it does for a staff estimate
+// with "Offer one-time option" on, so no second price is stored here.
+function showsOneTimeChoice({ context, totals, engineInputs, engineResult }) {
+  if (!context?.oneTimeAskBothOptions) return false;
+  const refusal = validateEstimateDeliveryOptions({
+    showOneTimeOption: true,
+    onetimeTotal: totals?.oneTime,
+    monthlyTotal: totals?.monthly,
+    annualTotal: totals?.annual,
+    estimateData: { engineInputs, engineResult },
+  });
+  if (refusal) logger.info(`[estimator-engine] one-time choice not shown on a both-options draft: ${refusal}`);
+  return !refusal;
 }
 
 function resolveDraftCustomerPhone(intent, context) {
@@ -1224,7 +1250,6 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // transcript evidence, model/call ids) lives in estimate_data — the public
   // estimate endpoint returns the `notes` COLUMN to the customer, so it must
   // never carry internal review material.
-  const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call, returningSetupFeeWaiver });
   const customerPhone = resolveDraftCustomerPhone(intent, context);
   const autoSendShadowStamp = callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone, laneReasons });
   // priorQualifyingServices must NOT ride inside the stored engineInputs —
@@ -1233,6 +1258,8 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // combined-tier discount after the membership lapsed.
   const { priorQualifyingServices: _nestedPrior, ...unstampedEngineInputs } = engineInput || {};
   const storedEngineInputs = stampPestCurveVersion(unstampedEngineInputs, engineResult);
+  const oneTimeChoiceShown = showsOneTimeChoice({ context, totals, engineInputs: storedEngineInputs, engineResult });
+  const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call, returningSetupFeeWaiver, oneTimeChoiceShown });
 
   // EVERY key the duplicate guard below reads must be locked before the
   // read and stay locked through the insert. Locking only the sender while
@@ -1518,6 +1545,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       // estimator-engine authority): the explicit SERVER stamp the send gate
       // and the auto-send lane require.
       pricing_authority: 'SERVER',
+      ...(oneTimeChoiceShown ? { show_one_time_option: true } : {}),
       estimate_data: JSON.stringify({
         engineInputs: storedEngineInputs,
         engineResult,
