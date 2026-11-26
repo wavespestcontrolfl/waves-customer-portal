@@ -170,14 +170,49 @@ describe('one-time pest small job', () => {
     expect(otLine(full).price).toBeGreaterThanOrEqual(ONE_TIME.pest.floor);
   });
 
-  test('the one-time choice honors a staff manual discount on the small-job line (codex #8603 r1)', () => {
+  test('a small job with a staff discount cannot offer the one-time choice (codex #8603 r1 + pre-push)', () => {
     process.env[GATE] = 'true';
+    const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
     const small = generateEstimate({ ...inputFor(SMALL), services: { pest: { frequency: 'quarterly' }, oneTimePest: SMALL } });
-    const line = otLine(small);
-    line.manualFinalOneTime = 135;
-    const SHOWN = { show_one_time_option: true };
-    expect(oneTimeChoiceAmountForEstimate(SHOWN, { engineResult: small })).toBe(135);
-    expect(acceptedOneTimeChoiceListForEstimate(SHOWN, { engineResult: small })[0].price).toBe(135);
+    const ask = (engineResult) => validateEstimateDeliveryOptions({
+      showOneTimeOption: true, onetimeTotal: 150, monthlyTotal: 40, annualTotal: 480,
+      estimateData: { engineResult },
+    });
+    expect(ask(small)).toBeNull();
+    for (const discounted of [
+      { ...small, lineItems: small.lineItems.map((l) => (l.smallJob ? { ...l, manualFinalOneTime: 0 } : l)) },
+      { ...small, summary: { ...(small.summary || {}), manualDiscount: { type: 'FIXED', value: 20, amount: 20 } } },
+    ]) {
+      expect(ask(discounted)).toMatch(/small one-spot job with a discount/);
+    }
+  });
+
+  test('the price migration adds smallJobPrice once, keeps the other keys and an admin edit', async () => {
+    const migration = require('../models/migrations/20261126160000_onetime_pest_small_job_price');
+    const fakeKnex = (row) => {
+      const audits = [];
+      const k = (table) => ({
+        where(cond) { this.cond = cond; return this; },
+        async first() { return table === 'pricing_config' ? row.current : audits.find((a) => a.changed_by === this.cond.changed_by && a.reason === this.cond.reason); },
+        async update({ data }) { row.current = { ...row.current, data }; return 1; },
+        async insert(a) { audits.push(a); return [1]; },
+      });
+      k.schema = { hasTable: async () => true };
+      k.fn = { now: () => 'now' };
+      return { k, audits };
+    };
+    const row = { current: { config_key: 'onetime_pest', data: { floor: 199, multiplier: 2.2 } } };
+    const { k, audits } = fakeKnex(row);
+    await migration.up(k);
+    expect(JSON.parse(row.current.data)).toEqual({ floor: 199, multiplier: 2.2, smallJobPrice: 150 });
+    expect(audits).toHaveLength(1);
+    await migration.down(k);
+    expect(JSON.parse(row.current.data)).toEqual({ floor: 199, multiplier: 2.2 });
+    const edited = { current: { config_key: 'onetime_pest', data: { floor: 199, multiplier: 2.2, smallJobPrice: 140 } } };
+    const second = fakeKnex(edited);
+    await migration.up(second.k);
+    expect(edited.current.data).toEqual({ floor: 199, multiplier: 2.2, smallJobPrice: 140 });
+    expect(second.audits).toHaveLength(0);
   });
 
   test('a standalone small-job estimate keeps its one-spot name and scope through the legacy mapper (codex #8603 r1)', () => {
