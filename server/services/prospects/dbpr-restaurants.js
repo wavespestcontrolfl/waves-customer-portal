@@ -334,9 +334,9 @@ function violationsColumn(cells) {
 
 // A follow-up report lists each violation of the inspection with every visit's note, labelled, oldest first:
 // "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
-// A word that names a later visit, read compact and in any case: on a page with no visit labels, any such word means
-// the page's text speaks of a visit the labels do not tie to a date.
-const LATER_VISIT_WORD_RE = /follow\W{0,3}up|call\W{0,3}back|re\W{0,3}inspect/i;
+// A word that names a later visit, in any case, starting a word ("before inspection" is not one): the cell text has
+// its inline tags and invisible characters out already (htmlText), so a break inside the word cannot hide it.
+const LATER_VISIT_WORD_RE = /\b(?:follow\W{0,3}up|call\W{0,3}back|re\W{0,3}inspect)/i;
 const VISIT_NOTE_RE = /(?:-\s*)?From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
 // Any mention of a visit label, read by VISIT_NOTE_RE or not: any case, and any separator inside "follow-up",
 // "call back" or "re-inspection" (a dash of another kind). It reads the row's text compact, so a line break or a
@@ -487,7 +487,7 @@ function cannotPlaceInTime(entries, pageDate) {
   if (dates.some((date) => !isCalendarDay(date) || date <= pageDate)) return true;
   // With the labels that read taken out, any later-visit word left ("From follow-up:", "call back") is one that
   // does not read: on a labelled page or not.
-  return texts.some((text) => LATER_VISIT_WORD_RE.test(compact(text.replace(VISIT_NOTE_RE, ' '))));
+  return texts.some((text) => LATER_VISIT_WORD_RE.test(text.replace(VISIT_NOTE_RE, ' ')));
 }
 
 // Whether a YYYY-MM-DD string is a real calendar day ("2026-13-01" and "2026-02-30" are not).

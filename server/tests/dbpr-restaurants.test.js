@@ -302,6 +302,9 @@ describe('parseInspectionReport', () => {
     const labelled = '<tr><td>35A-02-8</td><td>Basic - From initial inspection : Live flies.</td></tr>';
     const empty = '<tr><td>22-01-4</td><td>From initial inspection : Floor dirty. - From follow-up inspection 2026-11-16:</td></tr>';
     expect(parse(reportPage(`${labelled}${empty}`), { violation35: 1 })).toBeNull();
+    // A word that only ends in a later-visit word ("before inspection") is not one.
+    expect(parse(reportPage(`${flies}<tr><td>22-01-4</td><td>Door repaired before inspection.</td></tr>`), { violation35: 1 })).not.toBeNull();
+    expect(parse(reportPage(`${flies}<tr><td>22-01-4</td><td>Seen at Call-Back.</td></tr>`), { violation35: 1 })).toBeNull();
     // On a labelled page too, a later-visit label that does not read gives no answer.
     expect(parse(reportPage('<tr><td>35A-02-8</td><td>From initial inspection: - From follow-up: Live flies.</td></tr>'), { violation35: 1 })).toBeNull();
     // A follow-up dated on a day that does not exist cannot be placed after the visit.
