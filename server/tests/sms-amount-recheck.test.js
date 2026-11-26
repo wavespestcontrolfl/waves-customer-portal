@@ -759,7 +759,9 @@ describe('outgoingAmountsStale - a staff-edited body keeps rechecking a copied p
   test('a greeting added around the copy does not skip the live recheck: stale once a visit was completed since drafting', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(3));
     await expect(run(`Hi Dana! ${LEFT}`)).resolves.toMatchObject({ stale: false });
+    // a colon (or anything else) before the retained sentence does not hide it
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(2));
+    await expect(run(`Here's what I found: ${LEFT}`)).resolves.toEqual({ stale: true, reason: 'payment_status_changed' });
     await expect(run(`Hi Dana! ${LEFT}`)).resolves.toEqual({ stale: true, reason: 'payment_status_changed' });
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(null));
     await expect(run(`Hi Dana! ${LEFT}`)).resolves.toMatchObject({ stale: true });

@@ -234,7 +234,8 @@ async function paymentStatusVerdict({ customerId, body, snapshot = null, inbound
 // added around it) is still a claim about live rows: re-render it ({ stale, reason } or null).
 async function retainedStaffFactStale({ customerId, text, snapshot, dbh }) {
   const authorized = Array.isArray(snapshot?.sentences) ? snapshot.sentences.filter((s) => typeof s === 'string') : [];
-  const retained = paymentStatus.copiedSentences(text, authorized).filter((t) => staffFactsFor([t]).length);
+  const flat = text.replace(/\s+/g, ' ').replace(/[\u2018\u2019]/g, "'");
+  const retained = authorized.filter((t) => staffFactsFor([t]).length && flat.includes(t)); // plain text: the AI-wording rules of copiedSentences are stricter than a staff edit
   if (!retained.length) return null;
   const live = await copiedSentencesStillRendered({ customerId, copied: retained, snapshot: snapshot || {}, ctx: null, dbh });
   return live.reason ? { stale: true, reason: live.reason } : null;

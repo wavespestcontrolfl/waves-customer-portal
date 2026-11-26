@@ -629,6 +629,7 @@ const isZelleTenderLine = (t) => ZELLE_WORD_RE.test(t) && sentenceFamily(t) == n
 const PLAN_SERVICES = [/\bpest/i, /\blawn/i, /\bmosquito/i, /\btermite/i, /\b(?:rodents?|rats?|mice|mouse)\b/i, /\b(?:trees?|shrubs?)\b/i, /\bbed ?bugs?/i, /\bflea/i, /\b(?:cock)?roach|\bpalmetto/i];
 // "how many ant treatments": a word before the visit noun that is no generic count word names a service the table may not know.
 const NAMED_SERVICE_ASK_RE = /\bhow many\s+(?!(?:prepaid|more|total|remaining|visits?|appointments?|applications?|treatments?|services?|times|do|did|are|is|have|has|i|we|of|my|our|the|plan|any|still)\b)[a-z-]+\s+(?:visits?|appointments?|applications?|treatments?|services?)\b/i;
+const NAMED_PLAN_ASK_RE = /\b(?:my|our|the)\s+(?!(?:prepaid|current|whole|entire|annual|yearly|monthly|quarterly|regular|same|new|old|existing|service|payment|waveguard|wave|pay|own|last|next|other|first)\b)[a-z-]+\s+plan\b/i;
 const FOR_SERVICE_ASK_RE = /\b(?:visits?|appointments?|applications?|treatments?|services?)\s+(?:for|of|on)\s+(?!(?:my|our|the|this|next|that|me|us|you|a|an|any|each|every|plan)\b)[a-z-]+/i;
 // A cadence the customer named ("monthly", "quarterly") must be in the plan's own label too: a quarterly plan's count never answers a monthly one.
 const PLAN_CADENCES = [/\bmonthly\b/i, /\bquarterly\b/i, /\bbi-?monthly\b/i, /\bweekly\b/i, /\bannual(?:ly)?\b/i];
@@ -636,7 +637,7 @@ function prepaidCountOffTarget(sentence, inbound) {
   const label = String(/^Your prepaid (.+) plan has /.exec(sentence)?.[1] || '');
   if (PLAN_CADENCES.some((cadence) => cadence.test(inbound) && !cadence.test(label))) return true;
   const asked = PLAN_SERVICES.filter((service) => service.test(inbound));
-  if (asked.length === 0) return NAMED_SERVICE_ASK_RE.test(inbound) || FOR_SERVICE_ASK_RE.test(inbound); // an unrecognized service name needs a person
+  if (asked.length === 0) return NAMED_SERVICE_ASK_RE.test(inbound) || FOR_SERVICE_ASK_RE.test(inbound) || NAMED_PLAN_ASK_RE.test(inbound); // an unrecognized service name needs a person
   return !asked.every((service) => service.test(label)); // naming two services ("Lawn Pest Control") needs a plan that names both
 }
 function copiesOffTarget(copied, inboundText, { today = null } = {}) {
@@ -715,7 +716,9 @@ const PLAN_WORD_RE = /\b(?:prepaid|my plan|my account|paid for|covered)\b/i;
 // ...nor is a question about money, or about time as the thing counted ("How much money is left on my prepaid plan?", "How many hours are left?";
 // but "How many visits do I have left this year?" counts visits).
 const MONEY_OR_TIME_ASK_RE = /\bhow much\b|\b(?:money|dollars?|credit|funds?|cash)\s+(?:is\s+|are\s+)?(?:left|remaining)\b|\$|\bhow many\s+(?:more\s+)?(?:hours?|minutes?|days?|weeks?|months?|years?)\b/i;
-const asksCount = (inbound) => COUNT_ASK_RE.test(String(inbound ?? '')) && !MONEY_OR_TIME_ASK_RE.test(String(inbound)) && !(SLOT_ASK_RE.test(String(inbound)) && !PLAN_WORD_RE.test(String(inbound)));
+const asksCountClause = (clause) => COUNT_ASK_RE.test(clause) && !MONEY_OR_TIME_ASK_RE.test(clause) && !(SLOT_ASK_RE.test(clause) && !PLAN_WORD_RE.test(clause));
+// (each clause on its own: "How many visits do I have left, and how much is renewal?" still asks the count)
+const asksCount = (inbound) => String(inbound ?? '').split(/[?.!;,]|\band\b|\bbut\b|\balso\b/i).some(asksCountClause);
 // A reply that answers an availability question with an open slot ("We have two appointments left on Friday.") is not a plan count: the same
 // exception the question side makes, and only when the reply carries a day or opening cue and names no plan.
 const SLOT_REPLY_CUE_RE = /\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|openings?|slots?|available|this week|next week)\b/i;

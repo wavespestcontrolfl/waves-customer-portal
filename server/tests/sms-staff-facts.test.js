@@ -89,6 +89,8 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(ask('Three.', 'How many visits do I have left this year?')).toBe(false);
     // a balance question beside the count question does not disable the count check
     expect(ask('Three.', 'How many visits do I have left and is there a balance?')).toBe(false);
+    expect(ask('Three.', 'How many visits do I have left, and how much is renewal?')).toBe(false);
+    expect(paymentStatus.checkPaymentStatusReply({ reply: LEFT, sentences, inboundText: 'How many visits do I have left, and how much is renewal?' }).ok).toBe(true);
     // an open-slot answer to an availability question is a scheduling reply, not a plan count
     expect(ask('We have two appointments left on Friday.', 'Do you have any appointments left for Friday?')).toBe(true);
     expect(ask('We can come Friday morning.', 'Do you have any appointments remaining on Friday?')).toBe(true);
@@ -125,6 +127,8 @@ describe('prepaid visits left (payment-status contract)', () => {
     expect(check(LAWN, 'How many cockroach treatments do I have left?')).toBe(false);
     // a service name the alias table does not know is held for a person, not answered with whichever plan was copied
     expect(check(LAWN, 'How many ant treatments do I have left?')).toBe(false);
+    expect(check(LAWN, 'How many visits do I have left on my ant plan?')).toBe(false);
+    expect(check(LEFT, 'How many visits do I have left on my prepaid plan?')).toBe(true);
     expect(check(LAWN, 'How many visits for ants do I have left?')).toBe(false);
     expect(check(LAWN, 'How many more visits do I have left?')).toBe(true);
     // two services named: only a plan that names both answers ("Lawn Pest Control" is turf service, not the pest plan)
