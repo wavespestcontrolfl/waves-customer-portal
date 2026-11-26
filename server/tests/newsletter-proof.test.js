@@ -438,6 +438,24 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
+  test('an APPROVED reply to a proof whose token was cleared (migration 20261126150100) finds no send: nothing is queued or dispatched', async () => {
+    const { sendsChain } = wireDb({ sends: { first: undefined } });
+    expect(await maybeHandleProofApproval(APPROVAL_EMAIL)).toBe(false);
+    expect(sendsChain.where).toHaveBeenCalledWith({ proof_token: 'ab12cd34' });
+    expect(sendsChain.update).not.toHaveBeenCalled();
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  test('a weekly send with its token but no calendar link is refused, never dispatched immediately', async () => {
+    const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT }, calendar: { first: undefined } });
+    expect(await maybeHandleProofApproval(APPROVAL_EMAIL)).toBe(true);
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      errors: [expect.stringContaining('linked calendar')],
+    }));
+    expect(sendsChain.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
   test('not ours: subject without a proof token', async () => {
     wireDb();
     expect(await maybeHandleProofApproval({ ...APPROVAL_EMAIL, subject: 'Re: invoice' })).toBe(false);

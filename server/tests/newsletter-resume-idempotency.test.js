@@ -1160,7 +1160,8 @@ describe('resumeCampaign — preconditions', () => {
     expect(sendUpdate).toBeNull();
   });
 
-  test('a promoted legacy flagship with no audience phase is refused on resume, as a typed flagship is (it could reach the whole list)', async () => {
+  test('a promoted legacy flagship with no audience phase and NO delivery rows is still a first send: refused on resume (it could reach the whole list)', async () => {
+    let sendUpdate = null;
     db.mockImplementation((table) => {
       if (table === 'newsletter_sends') {
         return chain({
@@ -1168,10 +1169,50 @@ describe('resumeCampaign — preconditions', () => {
             id: 's', status: 'failed', newsletter_type: null, audience_phase: null, subject: 'Weekend events',
             html_body: '<p>Events.</p>', text_body: 'Events.', event_ids: [],
           },
+          onUpdate: (payload) => { sendUpdate = payload; },
         });
       }
-      if (table === 'newsletter_send_deliveries') return chain({ count: 1 });
+      if (table === 'newsletter_send_deliveries') return chain({ count: 0 });
       if (table === 'newsletter_calendar') return chain({ first: { id: 'cal-1' } });
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE', audienceRefusal: true });
+    // nothing was claimed or sent: at most the refusal's own return-to-draft write
+    expect(sendUpdate === null || sendUpdate.status === 'draft').toBe(true);
+  });
+
+  test.each([
+    ['typed flagship', 'local-weekly-fresh-events'],
+    ['promoted legacy flagship (type NULL, calendar-linked)', null],
+  ])('a partially delivered %s with no audience phase (sent before the first-readers step) may resume its existing rows: it passes the audience check', async (_label, type) => {
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({
+          first: {
+            id: 's', status: 'failed', newsletter_type: type, audience_phase: null, subject: 'Weekend events',
+            // copy that fails the claim scan: reaching VALIDATION_FAILED proves the audience check passed
+            html_body: '<p>Tickets are $20 at the door.</p>', text_body: 'Tickets are $20 at the door.', event_ids: [],
+          },
+        });
+      }
+      if (table === 'newsletter_send_deliveries') return chain({ count: 3 });
+      if (table === 'newsletter_calendar') return chain({ first: { id: 'cal-1' } });
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+
+  test('delivery rows do not excuse a bad phase on resume: a warm issue with no list is still refused', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({
+          first: {
+            id: 's', status: 'sent', sent_at: new Date('2026-05-01T10:00:00Z'), newsletter_type: 'local-weekly-fresh-events',
+            audience_phase: 'warm', segment_filter: null, subject: 'Weekend events', html_body: '<p>Events.</p>', text_body: 'Events.', event_ids: [],
+          },
+        });
+      }
+      if (table === 'newsletter_send_deliveries') return chain({ count: 3 });
       throw new Error(`unexpected ${table}`);
     });
     await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE', audienceRefusal: true });

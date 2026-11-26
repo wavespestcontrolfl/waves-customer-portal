@@ -27,12 +27,14 @@ const FLAGSHIP = {
   text_body: 'Weekend events',
 };
 
-function fetchOnly(send = FLAGSHIP) {
+// `ledger`: the delivery row a partially delivered send has, or undefined for none.
+function fetchOnly(send = FLAGSHIP, { ledger } = {}) {
   const chain = {
     where: jest.fn(() => chain),
     first: jest.fn(async () => send),
   };
-  db.mockImplementation(() => chain);
+  const ledgerChain = { where: jest.fn(() => ledgerChain), first: jest.fn(async () => ledger) };
+  db.mockImplementation((table) => (table === 'newsletter_send_deliveries' ? ledgerChain : chain));
 }
 
 describe('sendCampaign flagship final gates', () => {
@@ -104,7 +106,8 @@ describe('sendCampaign flagship final gates', () => {
       jest.useFakeTimers().setSystemTime(new Date('2026-07-23T10:00:00Z'));
       fetchOnly({ ...FLAGSHIP, ...fields });
       await expect(sendCampaign('send-legacy', { force: true })).rejects.toMatchObject({ code, audienceRefusal: true });
-      expect(db).toHaveBeenCalledTimes(1);
+      // the fetch, plus the ledger read a weekly issue with no phase makes
+      expect(db).toHaveBeenCalledTimes(fields.audience_phase === null ? 2 : 1);
     });
 
     test('a calendar-linked send with no type needs its audience phase too (it cannot reach the whole list)', async () => {
@@ -113,6 +116,28 @@ describe('sendCampaign flagship final gates', () => {
       await expect(sendCampaign('send-legacy', { force: true })).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE', audienceRefusal: true });
       // a linked NULL-type send with a warm phase but no list is refused as well
       fetchOnly({ ...FLAGSHIP, newsletter_type: null, audience_phase: 'warm', segment_filter: null });
+      await expect(sendCampaign('send-legacy', { force: true })).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE' });
+    });
+
+    test('a legacy weekly issue with delivery rows (sent before the step) may finish: it mails only its existing rows', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-07-23T10:00:00Z'));
+      for (const type of ['local-weekly-fresh-events', null]) {
+        fetchOnly({ ...FLAGSHIP, newsletter_type: type, audience_phase: null }, { ledger: { id: 'delivery-1' } });
+        mockValidateSelection.mockResolvedValueOnce({ valid: false, errors: ['lineup'], flagship: true });
+        // past the audience check, into the lineup gate
+        await expect(sendCampaign('send-legacy', { force: true })).rejects.toMatchObject({ code: 'EVENT_SELECTION_INVALID' });
+      }
+    });
+
+    test('a legacy weekly issue with no delivery rows is still a first send and is refused', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-07-23T10:00:00Z'));
+      fetchOnly({ ...FLAGSHIP, audience_phase: null }, { ledger: undefined });
+      await expect(sendCampaign('send-legacy', { force: true })).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE', audienceRefusal: true });
+    });
+
+    test('delivery rows do not excuse a bad phase: a warm issue with no list is refused', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-07-23T10:00:00Z'));
+      fetchOnly({ ...FLAGSHIP, audience_phase: 'warm', segment_filter: null }, { ledger: { id: 'delivery-1' } });
       await expect(sendCampaign('send-legacy', { force: true })).rejects.toMatchObject({ code: 'UNPLANNED_AUDIENCE' });
     });
 

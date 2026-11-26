@@ -643,9 +643,13 @@ function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerIds, ad
 // no phase (a draft older than the step) would mail the whole list, and a warm issue must carry
 // its own list, so both stop here until the next draft is built.
 // `flagship` is true for a send with no type that the flagship calendar links (isFlagshipSend).
-function weeklyAudienceRefusal(send, refused, flagship) {
+// `legacyPartial` is true when the send already has delivery rows: an issue delivered before the
+// first-readers step has no phase, and its Resume mails only those existing rows (never the
+// segment), so it may finish. A first send or a zero-ledger retry still needs its phase.
+function weeklyAudienceRefusal(send, refused, flagship, legacyPartial) {
   if (send.newsletter_type !== FLAGSHIP_TYPE_KEY && !flagship) return null;
   const phase = send.audience_phase;
+  if (!phase && legacyPartial) return null;
   const holdout = send.segment_filter?.holdout;
   if (phase !== PHASE_WARM && phase !== 'all') {
     return refused('UNPLANNED_AUDIENCE', 'a weekly issue goes out only with its audience phase recorded (first readers or everyone), and this one has none');
@@ -672,7 +676,7 @@ function weeklyAudienceRefusal(send, refused, flagship) {
 // - a planned audience without a usable reader list or without a
 //   well-formed address key for every reader on it: the batches would skip
 //   everyone, and the issue would end 'sent' to nobody.
-function audienceRefusal(send, { flagship = false } = {}) {
+function audienceRefusal(send, { flagship = false, legacyPartial = false } = {}) {
   const filter = send.segment_filter;
   const refused = (code, message) => Object.assign(new Error(message), { code, audienceRefusal: true });
   if (filter?.holdout != null && !sendHoldout(filter)) {
@@ -681,7 +685,7 @@ function audienceRefusal(send, { flagship = false } = {}) {
   if (send.newsletter_type === PEST_INSIDER_TYPE && filter?.holdout !== 'pest-insider') {
     return refused('UNPLANNED_AUDIENCE', 'a Waves Pest Insider issue goes only to its planned readers, and this one has no plan');
   }
-  const weeklyRefusal = weeklyAudienceRefusal(send, refused, flagship);
+  const weeklyRefusal = weeklyAudienceRefusal(send, refused, flagship, legacyPartial);
   if (weeklyRefusal) return weeklyRefusal;
   const plan = sendHoldout(filter);
   if (plan) {
@@ -953,7 +957,11 @@ async function sendCampaign(sendId, opts = {}) {
   // A send whose audience this server cannot honor stops here on every path,
   // before any claim work (audienceRefusal). A send with no type that the flagship calendar
   // links is a flagship here too (isFlagshipSend), so it needs its audience phase like one.
-  const refusal = audienceRefusal(send, { flagship: send.newsletter_type === null && await isFlagshipSend(send) });
+  const flagship = send.newsletter_type === null && await isFlagshipSend(send);
+  // Read only for a weekly issue with no phase: a legacy partial send (it has delivery rows) may resume.
+  const legacyPartial = (flagship || send.newsletter_type === FLAGSHIP_TYPE_KEY) && !send.audience_phase
+    && Boolean(await db('newsletter_send_deliveries').where({ send_id: send.id }).first('id'));
+  const refusal = audienceRefusal(send, { flagship, legacyPartial });
   if (refusal) throw refusal;
 
   // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
@@ -1761,7 +1769,7 @@ async function prepareResumeCampaign(sendId) {
   // same lease-guarded transitions below return a zero-ledger campaign to
   // draft or release a stale claim, so a refused campaign is never stuck in
   // 'sending'.
-  const refusal = audienceRefusal(send, { flagship: legacyFlagship });
+  const refusal = audienceRefusal(send, { flagship: legacyFlagship, legacyPartial: totalDeliveries > 0 });
   let errors = refusal ? [refusal.message] : [];
   if (!refusal && typedSend) {
     const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
