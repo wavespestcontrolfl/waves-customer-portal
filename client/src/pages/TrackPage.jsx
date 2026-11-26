@@ -895,16 +895,6 @@ function NoShowCard({ data }) {
         We weren't able to complete your {data.service?.type?.toLowerCase() || 'service'}
         {when ? ` on ${when}` : ' today'}. Call or text us and our office will help find an available time.
       </div>
-      {/* Self-serve rebook only when the server offers one (the tracker never
-          mints a reschedule token, so nothing is built from the URL here). */}
-      {data.visitChange?.action?.kind === 'portal_visits' && data.visitChange.action.href ? (
-        <a
-          href={data.visitChange.action.href}
-          data-glass-accent=""
-          data-glass-size="primary"
-          style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
-        >{data.visitChange.action.label || 'Open Visits'}</a>
-      ) : null}
       <OfficeActions />
     </Card>
   );

@@ -722,7 +722,7 @@ export default function SecureAppointmentPage() {
             ? 'This Auto Pay setup link has expired or Auto Pay is already set up. Text or call us for a fresh link — we’re happy to help.'
             : <>This appointment doesn&rsquo;t need a card on file anymore. If anything changed, text or call us — we&rsquo;re happy to help.</>}
         </PublicStateCard>
-        {handoffMode ? null : <BackToAccountButton />}
+        <BackToAccountButton />
       </Shell>
     );
   }
@@ -756,8 +756,8 @@ export default function SecureAppointmentPage() {
           ) : null}
           {data ? <VisitSummary data={data} /> : null}
           {handoffMode ? null : <ContactRow />}
-          {/* Native app + signed in only; the locked shell hides it too. */}
-          {handoffMode ? null : <BackToAccountButton />}
+          {/* Native app + signed in only; the locked (hand-off) shell hides it. */}
+          <BackToAccountButton />
         </Card>
       </Shell>
     );

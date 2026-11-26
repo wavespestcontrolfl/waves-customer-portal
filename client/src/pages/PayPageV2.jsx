@@ -95,8 +95,6 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
-import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
-import { canSaveNative, saveUrlNative } from '../native/nativeFile';
 import { hasSessionToken } from '../native/platform';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
@@ -811,8 +809,8 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
           invoice number in the memo.
         </PayFaqItem>
         <PayFaqItem question="How do I pay from my bank automatically?">
-          Future visits can be billed to a bank account kept on file. Call or email
-          billing@wavespestcontrol.com and we’ll set it up with you.
+          Check “Save this bank account” when you pay by bank, or add one anytime in the Waves app
+          under Billing, Auto Pay. Or call or email billing@wavespestcontrol.com and we’ll set it up.
         </PayFaqItem>
         <PayFaqItem question="Can I prepay for the year?">
           Yes — a year of pest or lawn service can be paid up front. Call us to set it up. If you
@@ -3048,16 +3046,6 @@ export default function PayPageV2() {
                       href={`${API_BASE}/pay/${token}/attachments/${attachment.id}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      onClick={(e) => {
-                        // In the app a _blank link opens a webview with no way
-                        // back: save through the share sheet instead (F-046).
-                        // A binary without the plugins keeps the plain link.
-                        if (canSaveNative()) {
-                          e.preventDefault();
-                          saveUrlNative(`${API_BASE}/pay/${token}/attachments/${attachment.id}`, attachment.fileName)
-                            .catch(() => showCustomerAlert('Could not save the attachment. Please try again.'));
-                        }
-                      }}
                       data-glass="chip" data-glass-pill=""
                       style={{
                         minHeight: 44,
