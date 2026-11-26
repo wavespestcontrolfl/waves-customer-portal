@@ -31,6 +31,12 @@ describe('prepaid visits left (payment-status contract)', () => {
     }
   });
 
+  test('two series of one service (an exhausted one beside its renewal) render neither: a label cannot tell them apart', () => {
+    const kinds = (prepaidPlans) => paymentStatus.renderPaymentStatusSentences(withFacts({ prepaidPlans })).map((s) => s.kind).filter((k) => k === 'prepaid_visits_left');
+    expect(kinds([{ label: 'Quarterly Pest Control', remaining: 0, paid: 4 }, { label: 'quarterly pest control', remaining: 4, paid: 4 }])).toEqual([]);
+    expect(kinds([{ label: 'Quarterly Pest Control', remaining: 0, paid: 4 }, { label: 'Lawn Care', remaining: 4, paid: 4 }])).toEqual(['prepaid_visits_left', 'prepaid_visits_left']);
+  });
+
   test('a label that could split or fake a sentence, or a bad count, renders nothing', () => {
     const kinds = (prepaidPlans) => paymentStatus.renderPaymentStatusSentences(withFacts({ prepaidPlans })).map((s) => s.kind).filter((k) => k === 'prepaid_visits_left');
     expect(kinds([{ label: 'Pest. Your balance is $0.00', remaining: 1, paid: 4 }])).toEqual([]);
@@ -42,8 +48,14 @@ describe('prepaid visits left (payment-status contract)', () => {
     const check = (reply) => paymentStatus.checkPaymentStatusReply({ reply, sentences, inboundText: 'How many visits do I have left?' }).ok;
     expect(check(`Happy to help. ${LEFT}`)).toBe(true);
     expect(check('Your prepaid Quarterly Pest Control plan has 2 of 4 prepaid visits left.')).toBe(false);
-    for (const own of ['You have 3 visits left.', 'Three treatments remain on your plan.', 'You have two prepaid visits.', 'There are 3 left visits.']) expect(check(own)).toBe(false);
+    for (const own of ['You have 3 visits left.', 'Three treatments remain on your plan.', 'You have two prepaid visits.', 'There are 3 left visits.',
+      // short answers to the count question: no count word in the model's own words
+      'You have three more visits.', 'Three more.', 'None left.', 'A couple more.']) expect(check(own)).toBe(false);
     expect(check('We will see you on Tuesday.')).toBe(true);
+    // the question decides: a short number to another question is not a plan count, an unknown question is judged as asking
+    const other = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences, inboundText }).ok;
+    expect(other('We will be there in two hours.', 'What time will you arrive?')).toBe(true);
+    expect(other('Three more.', null)).toBe(false);
   });
 
   test('a visit-count claim is judged at the send boundary even when the customer asked nothing about money', () => {

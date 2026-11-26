@@ -349,22 +349,24 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
   }
 }
 
-// The soonest booked visit that ANY visit-prep guide covers, with its guide key: { key, visit } or null. The same eligibility the senders
-// apply (upcomingFamilyVisits: the family keywords and exclusions, the 'upcoming' page state, the ET date), asked once per guide and
-// merged soonest first (date, window, id), so the texting AI's PREP GUIDE (sms-staff-facts) never reads a visit the senders would not
-// prep. A guide already assigned to the visit (prep_template_key naming a live visit guide) wins over the family that found it; a
-// how-to guide never matches. THROWS on a lookup error.
+// The soonest booked visit whose prep guide the system has ASSIGNED, with that guide's key: { key, visit } or null. Eligibility is the
+// senders' own (upcomingFamilyVisits: the family keywords and exclusions, the 'upcoming' page state, the ET date), asked once per guide
+// family over the next few visits and merged soonest first (date, window, id), so the texting AI's PREP GUIDE (sms-staff-facts) never
+// reads a visit the senders would not prep. A service-name match alone is not enough ("Quarterly Pest Control" is also an exterior-only
+// plan): only a visit whose prep_template_key already names a live visit guide counts, the guide the prep lane chose for it. A how-to
+// guide never matches. THROWS on a lookup error.
+const GUIDE_VISITS_PER_FAMILY = 3;
 const sortKey = (visit) => [dateOnlyString(visit.scheduled_date), String(visit.window_start || ''), String(visit.id).padStart(12, '0')].join('|');
 async function nextGuideVisit(customerId) {
+  const visitGuides = Object.entries(PREP_CONFIG).filter(([, config]) => !config.guide && config.serviceKeywords?.length);
   let best = null;
-  for (const [key, config] of Object.entries(PREP_CONFIG)) {
-    if (config.guide || !config.serviceKeywords?.length) continue;
-    const [visit] = await upcomingFamilyVisits([customerId], config, 1);
-    if (visit && (!best || sortKey(visit) < sortKey(best.visit))) best = { key, visit };
+  for (const [, config] of visitGuides) {
+    for (const visit of await upcomingFamilyVisits([customerId], config, GUIDE_VISITS_PER_FAMILY)) {
+      const assigned = visitGuides.find(([, c]) => c.emailTemplateKey === visit.prep_template_key);
+      if (assigned && (!best || sortKey(visit) < sortKey(best.visit))) best = { key: assigned[0], visit };
+    }
   }
-  if (!best) return null;
-  const assigned = Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === best.visit.prep_template_key);
-  return { key: assigned ? assigned[0] : best.key, visit: best.visit };
+  return best;
 }
 
 async function nextUpcomingVisits(customerId, config) {

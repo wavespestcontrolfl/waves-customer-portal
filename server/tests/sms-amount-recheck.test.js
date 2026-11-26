@@ -723,15 +723,21 @@ describe('paymentStatusSendBlockReason - the prepaid visits left sentence', () =
     expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith({ id: 'c1' }, { includeSmsStaffFacts: true });
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ label: 'Quarterly Pest Control', remaining: 2, paid: 4 }]));
     await expect(run(LEFT)).resolves.toBe('payment_status_changed');
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(null));
+    // a plan lookup that succeeded and no longer finds the plan is a change; one that FAILED (null) is an outage, retryable
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([]));
     await expect(run(LEFT)).resolves.toBe('payment_status_changed');
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(null));
+    await expect(run(LEFT)).resolves.toBe('payment_status_recheck_failed');
   });
 
   test('a count in the model\'s own words is unauthorized with no billing read, snapshot or not', async () => {
-    for (const body of ['You have 3 visits left.', 'Three treatments remain.', `${LEFT} You have 2 visits remaining after this one.`]) {
+    for (const body of ['You have 3 visits left.', 'Three treatments remain.', 'You have three more visits.', `${LEFT} You have 2 visits remaining after this one.`]) {
       expect({ body, r: await run(body) }).toEqual({ body, r: 'payment_status_unauthorized' });
     }
     await expect(run('You have 3 visits left.', { snapshot: null })).resolves.toBe('payment_status_unauthorized');
+    // a bare number answers the count question only when the customer asked it
+    await expect(run('Three more.', { inboundMessage: 'How many visits do I have left?' })).resolves.toBe('payment_status_unauthorized');
+    await expect(run('Three more.', { inboundMessage: 'Can you come at 3?' })).resolves.toBeNull();
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   });
 });

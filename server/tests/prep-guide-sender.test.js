@@ -1019,27 +1019,33 @@ describe('sendPrepToCustomer', () => {
     };
     const day = (n) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
 
-    test('the soonest booked visit any guide covers wins, with that guide', async () => {
+    test('the soonest visit with an ASSIGNED guide wins, with that guide; a name match alone is not enough', async () => {
       const { nextGuideVisit } = require('../services/prep-guide-sender');
       visitsFor([
-        liveVisit({ id: 'svc-pest', service_type: 'Quarterly Pest Control', scheduled_date: day(9) }),
-        liveVisit({ id: 'svc-flea', service_type: 'Flea Treatment', scheduled_date: day(3) }),
-        liveVisit({ id: 'svc-lawn', service_type: 'Lawn Care', scheduled_date: day(5) }),
+        liveVisit({ id: 'svc-pest', service_type: 'Quarterly Pest Control', scheduled_date: day(9), prep_template_key: 'prep.interior_pest' }),
+        liveVisit({ id: 'svc-flea', service_type: 'Flea Treatment', scheduled_date: day(3), prep_template_key: 'prep.flea' }),
+        liveVisit({ id: 'svc-lawn', service_type: 'Lawn Care', scheduled_date: day(5), prep_template_key: 'prep.lawn' }),
+        // sooner than all of them, but no guide chosen for it (an exterior-only plan is also named "Pest Control")
+        liveVisit({ id: 'svc-bare', service_type: 'Pest Control', scheduled_date: day(1), prep_template_key: null }),
       ]);
       expect(await nextGuideVisit('cust-1')).toMatchObject({ key: 'flea', visit: { id: 'svc-flea' } });
+      visitsFor([liveVisit({ id: 'svc-bare', service_type: 'Quarterly Pest Control', scheduled_date: day(1) })]);
+      expect(await nextGuideVisit('cust-1')).toBeNull();
     });
 
-    test('a guide already assigned to the visit wins over the family that found it; a visit underway is skipped', async () => {
+    test('the assigned guide names the key even when another family found the visit; a how-to key and a visit underway never count', async () => {
       const { nextGuideVisit } = require('../services/prep-guide-sender');
       visitsFor([liveVisit({ id: 'svc-1', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: 'prep.cockroach' })]);
       expect(await nextGuideVisit('cust-1')).toMatchObject({ key: 'cockroach', visit: { id: 'svc-1' } });
-      visitsFor([liveVisit({ id: 'svc-2', service_type: 'Pest Control', status: 'en_route' })]);
+      visitsFor([liveVisit({ id: 'svc-2', service_type: 'Pest Control', scheduled_date: day(2), prep_template_key: 'prep.sprinkler_timer' })]);
+      expect(await nextGuideVisit('cust-1')).toBeNull();
+      visitsFor([liveVisit({ id: 'svc-3', service_type: 'Pest Control', status: 'en_route', prep_template_key: 'prep.interior_pest' })]);
       expect(await nextGuideVisit('cust-1')).toBeNull();
     });
 
     test('no covered visit is null; a lookup error throws (the caller fails soft)', async () => {
       const { nextGuideVisit } = require('../services/prep-guide-sender');
-      visitsFor([liveVisit({ service_type: 'Tree & Shrub' })]);
+      visitsFor([liveVisit({ service_type: 'Tree & Shrub', prep_template_key: 'prep.lawn' })]);
       expect(await nextGuideVisit('cust-1')).toBeNull();
       visitLookupError = new Error('down');
       await expect(nextGuideVisit('cust-1')).rejects.toThrow('down');
