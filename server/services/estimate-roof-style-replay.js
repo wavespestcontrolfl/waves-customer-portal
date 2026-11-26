@@ -66,4 +66,23 @@ function invalidBarrelEaveFtError() {
   return err;
 }
 
-module.exports = { roofStyleReplaySignal, roofStyleRowFields, parseBarrelEaveFt, invalidBarrelEaveFtError };
+// Does this stored estimate pick a barrel tile roof for an exclusion with no eave footage entered? The send guard reads
+// it for a draft NEVER issued, so a draft saved before the barrel hold existed (no quote-required flag on its rows) is
+// held like a new one until the footage is entered. Reads every stored input carrier plus the rows' own marker.
+function estimateHasUnmeasuredBarrelExclusion(estData) {
+  const root = estData && typeof estData === 'object' ? estData : null;
+  if (!root) return false;
+  const carriers = [root.engineInputs, root.inputs, root.engineInput, root.result?.inputs, root.engineResult?.inputs];
+  for (const carrier of carriers) {
+    const services = carrier && typeof carrier === 'object' ? carrier.services : null;
+    const exclusion = services && typeof services === 'object' ? (services.exclusion || services.rodentExclusion) : null;
+    if (exclusion && typeof exclusion === 'object' && exclusion.roofStyle === 'barrel_tile'
+      && !(parseBarrelEaveFt(exclusion.barrelEaveFt) > 0)) return true;
+  }
+  const rows = [root.result?.lineItems, root.engineResult?.lineItems, root.lineItems].filter(Array.isArray).flat();
+  return rows.some((row) => row && row.barrelClosureNeedsMeasurement === true);
+}
+
+module.exports = {
+  roofStyleReplaySignal, roofStyleRowFields, parseBarrelEaveFt, invalidBarrelEaveFtError, estimateHasUnmeasuredBarrelExclusion,
+};

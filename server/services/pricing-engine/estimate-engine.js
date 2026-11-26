@@ -971,8 +971,8 @@ function roofStyleInputs(exclusion, input) {
     roofStyle: style,
     barrelEaveFt,
     ...(frozen ? { frozenTileMultiplier: frozen.multiplier, frozenBarrelPerFt: frozen.perFt, frozenBarrelMinimum: frozen.minimum } : {}),
-    // A stored estimate re-priced after it was sent keeps the terms it was sent with: no new barrel hold on replay
-    // (a quote not yet sent, replayed as a draft, still gets the hold).
+    // A stored estimate re-priced as sold keeps the terms it was sent with: no new barrel hold on replay. A draft never
+    // issued is held at send time from its stored roof pick (assertEstimateSendable), so replay cannot send it unheld.
     ...(replay ? { legacyBarrelUnmeasured: true } : {}),
   };
 }
