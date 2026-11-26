@@ -4,7 +4,7 @@ import { calculateEstimate } from "./estimateEngine";
 // The browser fallback never stamps the 2026-11-26 specialty rule (pricingMetadata.legacySpecialty1126): it does not mirror the
 // $349 added bed bug room, the $85 per added mosquito acre above 2 acres or the wasp / yellow jacket levels, so a fallback save with
 // any of these rows is refused by the server (409, reload) and priced there (admin-estimate-persistence
-// assertSpecialtyRuleStampForClientPayload).
+// assertSpecialtyClientFallbackSave).
 const home = (overrides = {}) => ({
   homeSqFt: 1500, stories: "1", lotSqFt: 10000, propertyType: "Single Family", isAfterHours: false, isRecurringCustomer: false,
   ...overrides,

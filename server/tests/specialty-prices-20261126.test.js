@@ -563,93 +563,126 @@ describe('legacySpecialty1126: one stamp for the three rules', () => {
   });
 });
 
-describe('the fallback save: the specialty stamp (admin-estimate-persistence)', () => {
-  const { assertSpecialtyRuleStampForClientPayload: save } = require('../services/admin-estimate-persistence');
-  const rows = () => ({
-    results: { mq: [{ pv: 117, v: 9, ann: 1053, mo: 87.75, n: 'Seasonal Mosquito Program (9 visits)' }, { pv: 103, v: 12, ann: 1236, mo: 103, n: 'Monthly' }] },
-    oneTime: { items: [], specItems: [{ name: 'Bed Bug Chemical', price: 1026, det: '2 rooms, 2 visits' }, { name: 'Wasp/Bee', price: 150, det: 'Standalone removal' }] },
+describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot price (admin-estimate-persistence)', () => {
+  const { assertSpecialtyClientFallbackSave: assertFallback, resolveServerAuthoritativePricing } = require('../services/admin-estimate-persistence');
+  const NOW = () => new Date('2026-11-26T12:00:00Z');
+  // The browser's real output shape: pest + a wasp keeps the $0 on-program row only in the full specItems list at the result root.
+  const waspRow = (price = 0) => ({ name: 'Wasp/Bee', price, det: price ? 'Standalone removal' : 'Included on Quarterly program', ...(price ? {} : { onProg: true }) });
+  const browser = ({ wasp = 0, stingTier = '1', mq = false, bed = false, meta = {}, drop = [] } = {}) => ({
+    inputs: { svcPest: true, svcWasp: true, stingTier, stingSpecies: 'PAPER_WASP', stingRemoval: 'NONE', lotSqFt: 10000, lotSizeMeasured: true },
+    result: {
+      recurring: { discount: 0, ...(drop.includes('pestProgramFloorApplied') ? {} : { pestProgramFloorApplied: false }) },
+      results: { pest: { pa: 112, apps: 4, ann: 448, mo: 37.33 }, ...(mq ? { mq: [{ pv: 117, v: 9, ann: 1053, mo: 87.75 }, { pv: 103, v: 12, ann: 1236, mo: 103 }] } : {}) },
+      oneTime: { items: [], specItems: wasp ? [waspRow(wasp)] : [] },
+      specItems: [waspRow(wasp), ...(bed ? [{ name: 'Bed Bug Chemical', price: 1026, det: '2 rooms, 2 visits' }] : [])],
+      pricingMetadata: { ...meta },
+    },
   });
-  const payload = (meta = {}, extra = {}) => ({ result: { recurring: { discount: 0, pestProgramFloorApplied: false }, ...rows(), pricingMetadata: { ...meta }, ...extra } });
+  const throws409 = (data, opts) => {
+    let error = null;
+    try { assertFallback(data, opts); } catch (err) { error = err; }
+    expect(error && error.statusCode).toBe(409);
+  };
+  const price = (data, stored = null, recompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' })) => resolveServerAuthoritativePricing({
+    estimateData: data, clientPreview: { monthlyTotal: 37.33, annualTotal: 448, onetimeTotal: 0 }, quoteRequired: false, now: NOW, recompute, storedEstimateData: stored,
+  });
 
-  test('newly priced bed bug, mosquito or wasp rows need the false stamp; a browser that predates the rule is refused', () => {
-    expect(() => save(payload({ legacySpecialty1126: false }))).not.toThrow();
-    for (const meta of [{}, { legacySpecialty1126: true }]) {
-      expect(() => save(payload(meta))).toThrow(/out of date/);
-      try { save(payload(meta)); } catch (err) { expect(err.statusCode).toBe(409); }
+  test('any bed bug, mosquito or wasp row in a save the server cannot price is refused, whatever stamp it posts', () => {
+    for (const meta of [{}, { legacySpecialty1126: false }, { legacySpecialty1126: true }]) {
+      throws409(browser({ wasp: 150, meta }));            // a new priced wasp row, with a posted false stamp or none
+      throws409(browser({ mq: true, meta }));              // mosquito rows
+      throws409(browser({ bed: true, meta }));             // bed bug row
+      throws409(browser({ meta }));                        // the $0 on-program wasp row only
     }
-    // Each kind alone is gated.
-    const only = (rowsOnly) => ({ result: { recurring: { discount: 0, pestProgramFloorApplied: false }, ...rowsOnly, pricingMetadata: {} } });
-    expect(() => save(only({ results: { mq: rows().results.mq } }))).toThrow(/out of date/);
-    expect(() => save(only({ oneTime: { items: [], specItems: [rows().oneTime.specItems[0]] } }))).toThrow(/out of date/);
-    expect(() => save(only({ oneTime: { items: [], specItems: [rows().oneTime.specItems[1]] } }))).toThrow(/out of date/);
+    // Rows alone, with no browser-only shape around them, are checked too.
+    throws409({ result: { results: { mq: [{ pv: 117, v: 9 }] }, oneTime: { items: [] }, pricingMetadata: { legacySpecialty1126: false } } });
+    throws409({ result: { lineItems: [{ service: 'stinging_insect', price: 275 }], pricingMetadata: { legacySpecialty1126: false } } });
   });
 
-  test('the browser\'s real output shape: pest + a tier-2 wasp keeps the $0 on-program row only in the full specItems list, and the save is refused', () => {
-    // calculateEstimate returns specItems (the full list, onProg rows included) at the result root; oneTime.specItems drops them.
-    const pestAndWasp = () => ({ result: {
-      recurring: { discount: 0, pestProgramFloorApplied: false },
-      results: { pest: { pa: 112, apps: 4, ann: 448, mo: 37.33, label: 'Quarterly' } },
-      oneTime: { items: [], specItems: [] },
-      specItems: [{ name: 'Wasp/Bee', price: 0, det: 'Included on Quarterly program', onProg: true }],
-      pricingMetadata: {},
-    } });
-    expect(() => save(pestAndWasp())).toThrow(/out of date/);
-    try { save(pestAndWasp()); } catch (err) { expect(err.statusCode).toBe(409); }
-    // The browser never sends the stamp, so even a payload with a forged-true stamp is not a new-rule save.
-    const legacyStamped = pestAndWasp();
-    legacyStamped.result.pricingMetadata.legacySpecialty1126 = true;
-    expect(() => save(legacyStamped)).toThrow(/out of date/);
-    // The same rows exactly as the stored estimate has them keep the stored stamp (an old quote re-saved elsewhere).
-    const stored = pestAndWasp();
-    stored.result.pricingMetadata.legacySpecialty1126 = true;
-    const resave = pestAndWasp();
-    expect(() => save(resave, { storedEstimateData: stored })).not.toThrow();
-    expect(resave.result.pricingMetadata.legacySpecialty1126).toBe(true);
-  });
-
-  test('a 3-acre mosquito client save on an unmeasured lot is refused too; the server keeps its unverified-area hold', () => {
-    const mosquitoOnly = { result: { recurring: { discount: 0, pestProgramFloorApplied: false }, results: { mq: rows().results.mq }, oneTime: { items: [] }, pricingMetadata: {} } };
-    expect(() => save(mosquitoOnly)).toThrow(/out of date/);
-    // The server pricer is the one that holds an unmeasured lot, at the flat price, with the unverified-area reason.
-    const unmeasured = priceMosquito({ lotSqFt: 3 * ACRE, footprint: 2000, homeSqFt: 2000, stories: 1, features: {} }, { tier: 'seasonal9', lotSizeMeasured: false });
-    expect(unmeasured.manualReviewReasons).toContain('mosquito_treatable_area_unverified');
-    expect(unmeasured.perVisit).toBe(117);
+  test('a 3-acre mosquito client save on an unmeasured lot is refused; the server keeps its unverified-area hold at the flat price', () => {
+    const unmeasured = browser({ mq: true });
+    unmeasured.inputs.lotSqFt = 3 * ACRE;
+    unmeasured.inputs.lotSizeMeasured = false;
+    throws409(unmeasured);
+    const held = priceMosquito({ lotSqFt: 3 * ACRE, footprint: 2000, homeSqFt: 2000, stories: 1, features: {} }, { tier: 'seasonal9', lotSizeMeasured: false });
+    expect(held.manualReviewReasons).toContain('mosquito_treatable_area_unverified');
+    expect(held.perVisit).toBe(117);
     const line = lineOf(generateEstimate(HOME({ lotSqFt: 3 * ACRE, lotSizeMeasured: false, services: { mosquito: { tier: 'seasonal9' } } })), 'mosquito');
     expect(line.manualReviewReasons).toContain('mosquito_treatable_area_unverified');
   });
 
-  test('a payload with none of the three rows, or not from the browser fallback, is not gated', () => {
-    expect(() => save({ result: { recurring: { discount: 0, pestProgramFloorApplied: false }, results: {}, oneTime: { items: [] }, pricingMetadata: {} } })).not.toThrow();
-    expect(() => save({ result: { recurring: { discount: 0 }, ...rows(), pricingMetadata: {} } })).not.toThrow();
+  test('a payload missing pestProgramFloorApplied (or any recurring block) is still checked', () => {
+    throws409(browser({ wasp: 150, meta: { legacySpecialty1126: false }, drop: ['pestProgramFloorApplied'] }));
+    const noRecurring = browser({ wasp: 150, meta: { legacySpecialty1126: false } });
+    delete noRecurring.result.recurring;
+    throws409(noRecurring);
   });
 
-  test('unchanged rows keep the TRUSTED stored stamp: an old browser re-saves an old quote, and a forged false is overwritten', () => {
-    const stored = payload({ legacySpecialty1126: true });
-    const resave = payload({});
-    expect(() => save(resave, { storedEstimateData: stored })).not.toThrow();
-    expect(resave.result.pricingMetadata.legacySpecialty1126).toBe(true);
-    const forged = payload({ legacySpecialty1126: false });
-    expect(() => save(forged, { storedEstimateData: stored })).not.toThrow();
-    expect(forged.result.pricingMetadata.legacySpecialty1126).toBe(true);
-    // A stored quote with no stamp anywhere (priced rows = legacy) is stamped legacy; the browser's false is dropped.
-    const unstamped = payload({ legacySpecialty1126: false });
-    expect(() => save(unstamped, { storedEstimateData: payload({}) })).not.toThrow();
-    expect(unstamped.result.pricingMetadata.legacySpecialty1126).toBe(true);
-    // Key order of the stored rows does not matter.
-    const reordered = payload({});
-    reordered.result.results.mq = reordered.result.results.mq.map((row) => Object.fromEntries(Object.entries(row).reverse()));
-    expect(() => save(reordered, { storedEstimateData: stored })).not.toThrow();
+  test('a payload with none of the three rows is not touched', () => {
+    expect(() => assertFallback({ result: { recurring: { discount: 0, pestProgramFloorApplied: false }, results: { pest: { pa: 112 } }, oneTime: { items: [] }, specItems: [], pricingMetadata: {} } })).not.toThrow();
   });
 
-  test('a repriced row (a room added) is a new price: it needs the false stamp again', () => {
-    const stored = payload({ legacySpecialty1126: true });
-    const changed = payload({});
-    changed.result.oneTime.specItems[0].price = 1375;
-    expect(() => save(changed, { storedEstimateData: stored })).toThrow(/out of date/);
-    const stamped = payload({ legacySpecialty1126: false });
-    stamped.result.oneTime.specItems[0].price = 1375;
-    expect(() => save(stamped, { storedEstimateData: stored })).not.toThrow();
-    expect(stamped.result.pricingMetadata.legacySpecialty1126).toBe(false);
+  test('tier 1 -> tier 2 with the same $0 on-program wasp row is a changed price input and is refused', () => {
+    const stored = browser({ stingTier: '1', meta: { legacySpecialty1126: true } });
+    // The rows are byte-for-byte the same ($0, included on the plan); only the wasp tier the engine would price changed.
+    const changed = browser({ stingTier: '2', meta: { legacySpecialty1126: false } });
+    expect(changed.result.specItems).toEqual(stored.result.specItems);
+    throws409(changed, { storedEstimateData: stored });
+    // Each other pricing input is part of the same comparison.
+    for (const [key, value] of [['stingRemoval', 'SMALL'], ['stingSpecies', 'YJ_GROUND'], ['lotSqFt', 130680], ['lotSizeMeasured', false]]) {
+      const edited = browser({ stingTier: '1' });
+      edited.inputs[key] = value;
+      throws409(edited, { storedEstimateData: stored });
+    }
+    const rooms = browser({ bed: true });
+    rooms.inputs.bedbugRooms = 2;
+    const roomsStored = browser({ bed: true });
+    roomsStored.inputs.bedbugRooms = 3;
+    throws409(rooms, { storedEstimateData: roomsStored });
+  });
+
+  test('an unchanged resave keeps the STORED stamp and price, never the browser\'s (an old browser sends none, a forged one false)', () => {
+    const stored = browser({ wasp: 150, bed: true, mq: true, meta: { legacySpecialty1126: true } });
+    for (const posted of [{}, { legacySpecialty1126: false }]) {
+      const resave = browser({ wasp: 150, bed: true, mq: true, meta: posted });
+      expect(() => assertFallback(resave, { storedEstimateData: stored })).not.toThrow();
+      expect(resave.result.pricingMetadata.legacySpecialty1126).toBe(true);
+      expect(resave.result.oneTime.specItems[0].price).toBe(150);
+    }
+    // A stored estimate with no stamp anywhere (priced rows = legacy) is stamped legacy; a stored new-rule stamp is kept.
+    const unstamped = browser({ wasp: 150 });
+    expect(() => assertFallback(browser({ wasp: 150, meta: { legacySpecialty1126: false } }), { storedEstimateData: unstamped })).not.toThrow();
+    const storedNew = browser({ wasp: 275, meta: { legacySpecialty1126: false } });
+    const resaveNew = browser({ wasp: 275, meta: {} });
+    expect(() => assertFallback(resaveNew, { storedEstimateData: storedNew })).not.toThrow();
+    expect(resaveNew.result.pricingMetadata.legacySpecialty1126).toBe(false);
+    // Key order of the stored rows does not matter; a repriced row does.
+    const reordered = browser({ wasp: 150, bed: true, mq: true });
+    reordered.result.specItems = reordered.result.specItems.map((row) => Object.fromEntries(Object.entries(row).reverse()));
+    expect(() => assertFallback(reordered, { storedEstimateData: stored })).not.toThrow();
+    const repriced = browser({ wasp: 150, bed: true, mq: true });
+    repriced.result.specItems[1].price = 1375;
+    throws409(repriced, { storedEstimateData: stored });
+  });
+
+  test('the check sits on the CLIENT_FALLBACK decision: a new row on an engine error or with no replayable input is refused, an unchanged resave is persisted as before, and a server price is untouched', async () => {
+    const stored = browser({ wasp: 150, meta: { legacySpecialty1126: true } });
+    for (const reason of ['NO_INPUTS', 'ENGINE_ERROR']) {
+      const recompute = async () => ({ recomputed: false, reason, ...(reason === 'ENGINE_ERROR' ? { error: new Error('down') } : {}) });
+      await expect(price(browser({ wasp: 275, meta: { legacySpecialty1126: false } }), stored, recompute)).rejects.toMatchObject({ statusCode: 409 });
+      await expect(price(browser({ wasp: 275, meta: { legacySpecialty1126: false } }), null, recompute)).rejects.toMatchObject({ statusCode: 409 });
+      const out = await price(browser({ wasp: 150 }), stored, recompute);
+      expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
+    }
+    // A refused save commits nothing, so the route's engine-error bell never rings: the error-level log line is still written.
+    const logger = require('../services/logger');
+    logger.error.mockClear();
+    await expect(price(browser({ wasp: 275 }), null, async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('down') }))).rejects.toMatchObject({ statusCode: 409 });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('reason=ENGINE_ERROR'));
+    // The server priced it: no refusal, the server answer stands.
+    const priced = await price(browser({ wasp: 275 }), stored, async () => ({
+      recomputed: true, serverResult: {}, serverTotals: { monthlyTotal: 37.33, annualTotal: 448, onetimeTotal: 275 }, rawEngineResult: {},
+    }));
+    expect(priced.audit.pricing_authority).toBe('SERVER');
   });
 });
-
