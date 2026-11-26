@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useVisiblePageRefresh from "../../../hooks/useVisiblePageRefresh";
 import { adminFetch } from "../../../utils/admin-fetch";
+import { isBuyerViewPayload } from "./buyer-view-shape";
 
 // Operations go first. Four workers publish results individually, so a slow
 // analytics endpoint cannot hold today's actions behind a Promise.all wave.
@@ -52,7 +53,7 @@ const REQUIRED_SHAPE = {
   funnel: (value) => isRecord(value.funnel),
   officeCost: (value) => Array.isArray(value.months),
   opsMetrics: (value) => isRecord(value.errors),
-  buyerView: (value) => isRecord(value.revenue) && isRecord(value.officeCost),
+  buyerView: isBuyerViewPayload,
   aging: (value) => isRecord(value.aging),
   reviewTrend: (value) => Array.isArray(value.trend),
 };

@@ -191,6 +191,30 @@ postgres('buyer view (live Postgres)', () => {
       });
     });
 
+    it('plan revenue is judged on each visit\'s own date: a recurring-series visit counts without a tier, a visit after the customer churned or before they started does not', async () => {
+      const other = await technician({ role: 'technician' });
+      // Offboarded: tier cleared, churned 2026-10-10. Their series visit on 10-02 stays plan revenue; a one-off after does not.
+      const left = await customer({ waveguard_tier: null, member_since: '2024-01-01', churned_at: '2026-10-10' });
+      await visit(left, '2026-10-02', { revenue: 50, technician_id: other }, { is_recurring: true });
+      await visit(left, '2026-10-20', { revenue: 7, technician_id: other });
+      // Still tiered but churned 2026-10-10: before the churn date counts, after does not.
+      const churned = await customer({ waveguard_tier: 'Gold', member_since: '2024-01-01', churned_at: '2026-10-10' });
+      await visit(churned, '2026-10-05', { revenue: 100, technician_id: other });
+      await visit(churned, '2026-10-20', { revenue: 9, technician_id: other });
+      // Started 2026-10-15: a visit before that is not plan revenue yet, one after is.
+      const started = await customer({ waveguard_tier: 'Silver', member_since: '2026-10-15' });
+      await visit(started, '2026-10-05', { revenue: 11, technician_id: other });
+      await visit(started, '2026-10-20', { revenue: 30, technician_id: other });
+      // A prepay-term visit counts with no tier at all; a one-time customer's plain visit does not.
+      const term = await trx('annual_prepay_terms').insert({ customer_id: left, prepay_amount: 100, term_start: '2026-06-01', term_end: '2027-05-31', status: 'active' }).returning('id');
+      const prepaid = await customer({ waveguard_tier: null, member_since: '2024-01-01' });
+      await visit(prepaid, '2026-10-12', { revenue: 20, technician_id: other }, { annual_prepay_term_id: term[0].id || term[0] });
+      await visit(await customer({ waveguard_tier: 'One-Time' }), '2026-10-13', { revenue: 500, technician_id: other });
+      const result = await cols.recurringRevenue(trx, '2026-10-01', '2026-10-31', NOW);
+      expect(result.recurring_revenue).toBe(50 + 100 + 30 + 20);
+      expect(result.recurring_mature_revenue).toBe(50 + 100 + 20); // started 2026-10-15 is not a mature plan
+    });
+
     it('stores field time, the books margin, SDE and owner-paid profit with the owner\'s allowances taken out', async () => {
       await seedMonth();
       const row = await snapshot.computeMonthSnapshot('2026-10', trx);
@@ -201,6 +225,7 @@ postgres('buyer view (live Postgres)', () => {
       expect(row.sde).toBe(ebitda);
       expect(row.owner_paid_profit).toBe(Math.round((ebitda - 300 - 45.75) * 100) / 100);
       expect(row.cash_revenue).toBe(5000);
+      expect(row.book_gross_profit).toBe(Math.round((pnl.grossProfit - 45.75) * 100) / 100);
       expect(row.book_gross_margin_pct).toBe(Math.round(((pnl.grossProfit - 45.75) / 5000) * 10000) / 100);
       expect(pnl.cogs.materials).toBe(1000); // supplies are the cost of goods
       expect(row).toMatchObject({ recurring_revenue: 600, recurring_mature_revenue: 400, autopay_renewing_share: 0.6667, prepaid_owed: 0 });
@@ -269,6 +294,14 @@ postgres('buyer view (live Postgres)', () => {
       expect(await cols.prepaidOwed(trx, '2026-05-31')).toBe(0); // before the term started
     });
 
+    it('money collected before the term starts is owed from the collection date: an October payment for a November term', async () => {
+      const termId = await term({ term_start: '2026-11-01', term_end: '2027-10-31' }, { paid_at: '2026-10-20T15:00:00Z' });
+      expect(await cols.prepaidOwed(trx, '2026-10-31')).toBe(1200); // collected, no visit done yet
+      expect(await cols.prepaidOwed(trx, '2026-10-19')).toBe(0); // not collected yet
+      await termVisit(termId, '2026-11-10');
+      expect(await cols.prepaidOwed(trx, '2026-11-30')).toBe(900);
+    });
+
     it('only paid coverage counts: unpaid, paid after month end, expired and cancelled terms are left out; a fully used term owes 0', async () => {
       await term({ status: 'payment_pending' }, { status: 'sent', paid_at: null });
       await term({}, { paid_at: '2026-11-05T15:00:00Z' }); // paid after October ended
@@ -302,6 +335,25 @@ postgres('buyer view (live Postgres)', () => {
       expect(result.windows).toEqual({ latest: { start: '2025-11-01', end: '2026-10-31' }, earlier: { start: '2024-11-01', end: '2025-10-31' } });
     });
 
+    it('a customer who cancelled and had their tier cleared still counts in what was paid earlier: two equal customers, one leaves, is 50%', async () => {
+      const stays = await member();
+      const leaves = await member();
+      for (const id of [stays, leaves]) await visit(id, '2025-03-01', { revenue: 1000 }, { is_recurring: true });
+      await visit(stays, '2026-03-01', { revenue: 1000 }, { is_recurring: true });
+      // Offboarding clears the tier and the rate and stamps the churn date; nothing is paid after it.
+      await trx('customers').where({ id: leaves }).update({ waveguard_tier: null, monthly_rate: null, churned_at: '2025-12-15' });
+      expect(await view.planRevenueKept(trx, NOW)).toMatchObject({ customers: 2, thenRevenue: 2000, keptRevenue: 1000, pct: 50 });
+    });
+
+    it('a tiered customer\'s earlier visits count when the visit has no series marker, as of the visit date; a tier-less customer with no marker never was a plan', async () => {
+      const tiered = await member();
+      await visit(tiered, '2025-03-01', { revenue: 1000 });
+      await visit(tiered, '2026-03-01', { revenue: 500 });
+      const never = await customer({ waveguard_tier: null, member_since: '2023-01-01' });
+      await visit(never, '2025-03-01', { revenue: 900 });
+      expect(await view.planRevenueKept(trx, NOW)).toMatchObject({ customers: 1, thenRevenue: 1000, keptRevenue: 500, pct: 50 });
+    });
+
     it('no plan members that old is blank, not 0% or 100%', async () => {
       await customer({ waveguard_tier: 'Gold', member_since: '2026-01-01' });
       expect(await view.planRevenueKept(trx, NOW)).toMatchObject({ pct: null, customers: 0, thenRevenue: 0 });
@@ -322,11 +374,11 @@ postgres('buyer view (live Postgres)', () => {
       const rows = await trx('information_schema.columns')
         .whereIn('table_name', ['monthly_financial_snapshots', 'company_financials'])
         .whereIn('column_name', [
-          'book_gross_margin_pct', 'owner_field_hours', 'owner_field_allowance', 'owner_paid_profit', 'sde', 'recurring_revenue',
+          'book_gross_profit', 'book_gross_margin_pct', 'owner_field_hours', 'owner_field_allowance', 'owner_paid_profit', 'sde', 'recurring_revenue',
           'recurring_mature_revenue', 'prepaid_owed', 'autopay_renewing_share', 'owner_field_hourly_rate',
         ])
         .select('column_name', 'data_type', 'numeric_precision', 'numeric_scale', 'is_nullable');
-      expect(rows).toHaveLength(10);
+      expect(rows).toHaveLength(11);
       expect(rows.every((r) => r.data_type === 'numeric' && r.is_nullable === 'YES')).toBe(true);
       const byName = Object.fromEntries(rows.map((r) => [r.column_name, [r.numeric_precision, r.numeric_scale]]));
       expect(byName.owner_field_hourly_rate).toEqual([8, 2]);

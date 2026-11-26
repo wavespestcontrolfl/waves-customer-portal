@@ -10,9 +10,8 @@
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { monthOffset, monthWindow } = require('./monthly-financial-snapshot');
-const { MEMBERSHIP_TIER_SQL } = require('./billing-lane');
 const { excludeInternalTestCustomers } = require('./mrr-breakdown');
-const { ownerForSnapshot, ownerFieldMinutes } = require('./monthly-snapshot-buyer-columns');
+const { ownerForSnapshot, ownerFieldMinutes, PLAN_START_SQL, PLAN_VISIT_SQL } = require('./monthly-snapshot-buyer-columns');
 
 const WINDOW_MONTHS = 12;
 const HOURS_WEEKS = 12;
@@ -94,23 +93,29 @@ function recurringMetric({ window }) {
     matureShareOfRevenue: pctOf(mature.total, total.total),
     recurringRevenue: round2(recurring.total),
     monthsCounted: recurring.months,
-    basis: 'Visit revenue from plan members (a real WaveGuard tier, test accounts left out) over all completed-visit revenue, '
-      + 'same 12 months. "Mature" = plans at least 12 months old at the start of the month. Visit revenue is job-costing\'s '
+    basis: 'Visit revenue from plan customers over all completed-visit revenue, same 12 months. A visit is plan revenue when it belongs '
+      + 'to a recurring series or an annual-prepay term, or when the customer held a real WaveGuard tier and had started and not yet '
+      + 'churned on the visit date (test accounts left out). "Mature" = plans at least 12 months old at the start of the month. Visit revenue is job-costing\'s '
       + 'figure for each visit (annual-prepay visits at their prepay share), not cash.',
   };
 }
 
 function grossMarginMetric({ window }) {
-  const book = weightedPercent(window, 'book_gross_margin_pct', 'cash_revenue');
+  // Book margin is total book gross profit (dollars) over total cash revenue of the same months, so a month with no or
+  // negative revenue still carries its profit or loss and never drops out of the year.
+  const profit = sumColumn(window, 'book_gross_profit');
+  const revenue = sumColumn(window.filter((r) => r.book_gross_profit != null), 'cash_revenue');
   const perJob = weightedPercent(window, 'gross_margin_pct', 'completed_job_revenue');
   return {
-    bookPct: book.pct,
-    bookMonthsCounted: book.months,
+    bookPct: pctOf(profit.total, revenue.total),
+    bookGrossProfit: round2(profit.total),
+    bookMonthsCounted: profit.months,
     perJobAtStandardPct: perJob.pct,
     perJobMonthsCounted: perJob.months,
     basis: 'From the books: cash revenue less cost-of-goods expenses (supplies, materials, chemicals), less pay-run wages when the '
-      + 'P&L counts them, less the owner\'s field wage. Per job, at standard minutes: completed-visit revenue less job costs where '
-      + 'on-site time is the standard 25 minutes for pest and 20 for lawn plus drive (the dashboard tile\'s formula).',
+      + 'P&L counts them, less the owner\'s field wage; total over the months, divided by their total revenue. Per job, at standard '
+      + 'minutes: completed-visit revenue less job costs where on-site time is the standard 25 minutes for pest and 20 for lawn '
+      + 'plus drive (the dashboard tile\'s formula).',
   };
 }
 
@@ -156,26 +161,31 @@ function keptWindows(now) {
 }
 
 /**
- * Plan revenue kept: members who had been on a plan since before the earlier 12-month window; what each paid in the
- * earlier 12 months (visit revenue), against what each pays in the latest 12 closed months, capped at the earlier amount,
- * so a price rise or an add-on never offsets a loss. A customer who left pays 0. Pays: sum of capped / sum of earlier.
+ * Plan revenue kept: customers who were on a plan in the earlier 12 closed months (a visit that was plan revenue on its own
+ * date, PLAN_VISIT_SQL, so a customer whose tier was cleared when they left still counts) and had been customers since before
+ * that window; what each paid in the earlier 12 months (visit revenue), against what each pays in the latest 12 closed months,
+ * capped at the earlier amount, so a price rise or an add-on never offsets a loss. A customer who left pays 0.
+ * Pays: sum of capped / sum of earlier.
  */
 async function planRevenueKept(db, now) {
   const { current, then } = keptWindows(now);
+  const inEarlier = 'sr.service_date BETWEEN ?::date AND ?::date';
   const per = db('service_records as sr')
     .join('customers as c', 'c.id', 'sr.customer_id')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .whereBetween('sr.service_date', [then.start, current.end])
     .whereNotNull('sr.revenue')
-    .whereRaw(MEMBERSHIP_TIER_SQL)
-    .whereRaw("COALESCE(c.member_since, (c.created_at AT TIME ZONE 'America/New_York')::date) <= ?::date", [then.start])
+    .whereRaw(`${PLAN_START_SQL} <= ?::date`, [then.start])
     .modify(excludeInternalTestCustomers(db))
     .groupBy('sr.customer_id')
     .select(
       'sr.customer_id',
-      db.raw('SUM(sr.revenue) FILTER (WHERE sr.service_date BETWEEN ?::date AND ?::date) AS then_revenue', [then.start, then.end]),
+      db.raw(`SUM(sr.revenue) FILTER (WHERE ${inEarlier}) AS then_revenue`, [then.start, then.end]),
       db.raw('SUM(sr.revenue) FILTER (WHERE sr.service_date BETWEEN ?::date AND ?::date) AS now_revenue', [current.start, current.end]),
+      db.raw(`BOOL_OR(${PLAN_VISIT_SQL} AND ${inEarlier}) AS plan_then`, [then.start, then.end]),
     );
   const row = await db.from(per.as('per'))
+    .where('per.plan_then', true)
     .where('per.then_revenue', '>', 0)
     .select(
       db.raw('COUNT(*)::int AS customers'),
@@ -190,9 +200,10 @@ async function planRevenueKept(db, now) {
     thenRevenue: round2(thenTotal),
     keptRevenue: round2(row && row.kept_total),
     windows: { earlier: then, latest: current },
-    basis: 'Plan members of at least 24 months: what each paid in the 12 months ending '
-      + `${then.end}, against what each paid in the 12 months ending ${current.end}, never counting more than the earlier amount. `
-      + 'Visit revenue per customer; a customer who left counts as 0 now. Blank until the business has plan members that old.',
+    basis: 'Customers who were on a plan in the 12 months ending '
+      + `${then.end} and customers for at least a year before that: what each paid then, against what each paid in the 12 months ending `
+      + `${current.end}, never counting more than the earlier amount. Visit revenue per customer; a customer who left counts as 0 now. `
+      + 'Blank until there are plan customers that old.',
   };
 }
 

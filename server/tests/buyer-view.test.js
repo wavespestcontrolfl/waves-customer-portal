@@ -11,7 +11,7 @@ const view = require('../services/buyer-view');
 // A stored row; months are 'YYYY-MM-01'. Month 1 = 2025-01 ... month 24 = 2026-12 for compactness.
 const monthKey = (n) => `${2025 + Math.floor((n - 1) / 12)}-${String(((n - 1) % 12) + 1).padStart(2, '0')}-01`;
 const row = (n, fields = {}) => ({
-  month: monthKey(n), cash_revenue: 1000, completed_job_revenue: 1200, gross_margin_pct: 50, book_gross_margin_pct: 40,
+  month: monthKey(n), cash_revenue: 1000, completed_job_revenue: 1200, gross_margin_pct: 50, book_gross_margin_pct: 40, book_gross_profit: 400,
   office_cost: 100, paid_stops: 10, owner_allowance: 0, owner_field_allowance: 0, owner_paid_profit: 200, sde: 300,
   recurring_revenue: 600, recurring_mature_revenue: 300, ...fields,
 });
@@ -60,10 +60,25 @@ describe('the other tiles', () => {
     expect(view.recurringMetric(view.splitWindows(rows))).toMatchObject({ share: 50, monthsCounted: 6 });
   });
 
-  test('gross margin: book margin weighted by cash revenue, per-job margin weighted by completed-visit revenue', () => {
-    const rows = run(1, 12, (n) => (n === 1 ? { cash_revenue: 3000, book_gross_margin_pct: 20, completed_job_revenue: 2000, gross_margin_pct: 60 } : {}));
-    // book: (600 + 11 x 400) / 14000 = 35.7 ; per job: (1200 + 11 x 600) / 15200 = 51.3
-    expect(view.grossMarginMetric(view.splitWindows(rows))).toMatchObject({ bookPct: 35.7, perJobAtStandardPct: 51.3, bookMonthsCounted: 12 });
+  test('gross margin: book margin is total book profit over total revenue; per-job margin is weighted by completed-visit revenue', () => {
+    const rows = run(1, 12, (n) => (n === 1 ? { cash_revenue: 3000, book_gross_profit: 600, completed_job_revenue: 2000, gross_margin_pct: 60 } : {}));
+    // book: (600 + 11 x 400) / (3000 + 11 x 1000) = 35.7 ; per job: (1200 + 11 x 600) / 15200 = 51.3
+    expect(view.grossMarginMetric(view.splitWindows(rows))).toMatchObject({ bookPct: 35.7, bookGrossProfit: 5000, perJobAtStandardPct: 51.3, bookMonthsCounted: 12 });
+  });
+
+  test('a month with no revenue (no percent that month) or a loss still counts in the year, so the margin is not flattered', () => {
+    const rows = run(1, 12, (n) => {
+      if (n === 1) return { cash_revenue: 0, book_gross_margin_pct: null, book_gross_profit: -300 }; // costs, no revenue
+      if (n === 2) return { cash_revenue: -50, book_gross_margin_pct: null, book_gross_profit: -50 }; // a refund month
+      return {};
+    });
+    // (-300 - 50 + 10 x 400) / (0 - 50 + 10 x 1000) = 36.7 ; dropping the two months would read 40
+    expect(view.grossMarginMetric(view.splitWindows(rows))).toMatchObject({ bookPct: 36.7, bookGrossProfit: 3650, bookMonthsCounted: 12 });
+  });
+
+  test('a month stored before book profit existed is left out and counted', () => {
+    const rows = run(1, 12, (n) => (n <= 3 ? { book_gross_profit: null, book_gross_margin_pct: null } : {}));
+    expect(view.grossMarginMetric(view.splitWindows(rows))).toMatchObject({ bookPct: 40, bookMonthsCounted: 9 });
   });
 
   test('owner-paid profit margin and SDE; months without a figure drop out and the owner-pay months are counted', () => {

@@ -2,6 +2,7 @@ import { fmtMoney, fmtMoneyCompact } from "../../../components/dashboard/charts"
 import DashboardFeed from "./DashboardFeed";
 import FormulaNote from "./FormulaNote";
 import { KpiGrid, KpiTile } from "./KpiTile";
+import { isBuyerViewPayload } from "./buyer-view-shape";
 
 // Buyer view (/admin/dashboard/buyer-view): the six numbers a buyer of the business asks about, over the newest 12
 // stored months. A figure that is blank on the server (no data, or a part of the year not stored yet) shows a dash,
@@ -34,7 +35,7 @@ function tiles(data, arDays) {
       label: "Plan revenue kept",
       value: kept ? pct(kept.pct) : dash,
       sub: kept
-        ? (kept.pct == null ? "needs plan members over 24 months old" : `${kept.customers} plans from 12 months ago, price rises not counted`)
+        ? (kept.pct == null ? "needs plan customers over 24 months old" : `${kept.customers} plans from 12 months ago, price rises not counted`)
         : "unavailable",
     },
     {
@@ -76,7 +77,7 @@ function BasisList({ data }) {
 }
 
 export default function BuyerViewRow({ data, pending, onRetry, arDays = null }) {
-  const ready = !!data && !data.error && !!data.revenue;
+  const ready = isBuyerViewPayload(data);
   return (
     <section aria-label="Buyer view" className="mb-6">
       <div className="flex items-baseline justify-between gap-3 pb-1.5 border-b border-hairline border-zinc-200 mb-3">

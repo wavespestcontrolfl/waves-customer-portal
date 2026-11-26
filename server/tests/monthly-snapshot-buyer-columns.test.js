@@ -69,21 +69,23 @@ describe('ebitdaOf and profitColumns', () => {
 
   test('owner-paid profit is EBITDA less the office and field allowances; SDE is EBITDA before them', () => {
     expect(cols.profitColumns({ pnl, officeAllowance: 100, field: { allowance: 160, onPayroll: false }, cashRevenue: 10000 }))
-      .toEqual({ book_gross_margin_pct: 58.4, owner_paid_profit: 1000, sde: 1260 });
+      .toEqual({ book_gross_profit: 5840, book_gross_margin_pct: 58.4, owner_paid_profit: 1000, sde: 1260 });
   });
 
   test('a paycheck covering the owner leaves all three blank, because the paycheck would have to be added back', () => {
     expect(cols.profitColumns({ pnl, officeAllowance: 100, field: { allowance: 0, onPayroll: true }, cashRevenue: 10000 }))
-      .toEqual({ book_gross_margin_pct: null, owner_paid_profit: null, sde: null });
+      .toEqual({ book_gross_profit: null, book_gross_margin_pct: null, owner_paid_profit: null, sde: null });
   });
 
   test('an owner that cannot be resolved while a rate is set leaves margin and profit blank but keeps SDE', () => {
     expect(cols.profitColumns({ pnl, officeAllowance: 0, field: { allowance: null, onPayroll: false }, cashRevenue: 10000 }))
-      .toEqual({ book_gross_margin_pct: null, owner_paid_profit: null, sde: 1260 });
+      .toEqual({ book_gross_profit: null, book_gross_margin_pct: null, owner_paid_profit: null, sde: 1260 });
   });
 
   test('no revenue gives no margin, never a divide by zero', () => {
-    expect(cols.profitColumns({ pnl, officeAllowance: 0, field: { allowance: 0, onPayroll: false }, cashRevenue: 0 }).book_gross_margin_pct).toBeNull();
+    const noRevenue = cols.profitColumns({ pnl, officeAllowance: 0, field: { allowance: 0, onPayroll: false }, cashRevenue: 0 });
+    expect(noRevenue.book_gross_margin_pct).toBeNull();
+    expect(noRevenue.book_gross_profit).toBe(6000); // the dollars are still stored, for the year's total
   });
 });
 
@@ -150,11 +152,12 @@ describe('migration 20261126120000', () => {
     return { knex, added, dropped, updates };
   }
 
-  test('adds the field wage and the nine snapshot columns, all nullable decimals, and seeds the owner\'s $25 once', async () => {
+  test('adds the field wage and the ten snapshot columns, all nullable decimals, and seeds the owner\'s $25 once', async () => {
     const { knex, added, updates } = makeKnex();
     await migration.up(knex);
     expect(added).toEqual([
       'company_financials.owner_field_hourly_rate 8,2',
+      'monthly_financial_snapshots.book_gross_profit 12,2',
       'monthly_financial_snapshots.book_gross_margin_pct 7,2',
       'monthly_financial_snapshots.owner_field_hours 8,2',
       'monthly_financial_snapshots.owner_field_allowance 12,2',
@@ -189,7 +192,7 @@ describe('migration 20261126120000', () => {
     ];
     const { knex, dropped } = makeKnex(all);
     await migration.down(knex);
-    expect(dropped).toHaveLength(10);
+    expect(dropped).toHaveLength(11);
     expect(dropped[dropped.length - 1]).toBe('company_financials.owner_field_hourly_rate');
   });
 });

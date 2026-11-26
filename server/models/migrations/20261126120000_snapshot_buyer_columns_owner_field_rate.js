@@ -9,6 +9,7 @@
  *
  * monthly_financial_snapshots (all nullable: NULL = the row was written before the column existed, or the figure could not
  * be worked out that month; the dashboard says which). Written by services/monthly-financial-snapshot.js.
+ *   book_gross_profit       numeric(12,2) the dollars behind the percent (a period's margin is total profit over total revenue)
  *   book_gross_margin_pct   numeric(7,2)  P&L basis: (revenue - COGS categories - pay-run wages - owner field allowance) / revenue
  *   owner_field_hours       numeric(8,2)  the owner's completed stops x job-costing standard minutes, in hours
  *   owner_field_allowance   numeric(12,2) owner_field_hours x owner_field_hourly_rate, rounded once to cents (0 = not counted)
@@ -33,6 +34,7 @@ const OWNER_FIELD_RATE_DOLLARS = 25;
 const SETTINGS_COLUMNS = [['owner_field_hourly_rate', 8, 2]];
 
 const SNAPSHOT_COLUMNS = [
+  ['book_gross_profit', 12, 2],
   ['book_gross_margin_pct', 7, 2],
   ['owner_field_hours', 8, 2],
   ['owner_field_allowance', 12, 2],

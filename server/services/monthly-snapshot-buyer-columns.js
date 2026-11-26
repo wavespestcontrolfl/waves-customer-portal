@@ -93,13 +93,16 @@ function ebitdaOf(pnl) {
   return round2(num(pnl.netIncome) + num((pnl.deductions || {}).depreciation) + addedBack);
 }
 
-/** Profit figures of a month; all three are null when a paycheck covers the owner (the paycheck would have to be added back). */
+/** Profit figures of a month; all four are null when a paycheck covers the owner (the paycheck would have to be added back). */
 function profitColumns({ pnl, officeAllowance, field, cashRevenue }) {
-  const empty = { book_gross_margin_pct: null, owner_paid_profit: null, sde: null };
+  const empty = { book_gross_profit: null, book_gross_margin_pct: null, owner_paid_profit: null, sde: null };
   if (field.onPayroll) return empty;
   const sde = ebitdaOf(pnl);
   if (field.allowance == null) return { ...empty, sde };
   return {
+    // Dollars are stored beside the percent so a period's margin is total profit over total revenue: a month with no or
+    // negative revenue has no percent but still has a profit (or loss) that belongs in the period.
+    book_gross_profit: round2(num(pnl.grossProfit) - field.allowance),
     book_gross_margin_pct: cashRevenue > 0 ? round2(((num(pnl.grossProfit) - field.allowance) / cashRevenue) * 100) : null,
     owner_paid_profit: round2(sde - officeAllowance - field.allowance),
     sde,
@@ -107,7 +110,23 @@ function profitColumns({ pnl, officeAllowance, field, cashRevenue }) {
 }
 
 /**
- * Visit revenue of plan members in the window, with the part from members at least 12 months old at the window start
+ * Is this visit plan revenue, as of the visit's own date? Needs service_records `sr`, a LEFT JOIN of scheduled_services
+ * `ss` and customers `c`. Yes when the visit carries a plan marker (it belongs to a recurring series or to an annual-prepay
+ * term: facts of the visit that no later change to the customer undoes), or the customer holds a real WaveGuard tier
+ * (billing-lane MEMBERSHIP_TIER_SQL) and, on that date, had started (member_since, else created) and had not yet churned
+ * (customers.churned_at). Offboarding clears the tier, so the markers and the churn date are what keep a departed
+ * customer's earlier plan visits counted. No cancel date exists for a customer whose tier was cleared without churned_at,
+ * so those are kept only through the visit markers.
+ */
+const PLAN_START_SQL = "COALESCE(c.member_since, (c.created_at AT TIME ZONE 'America/New_York')::date)";
+const PLAN_VISIT_SQL = `(
+  ss.is_recurring IS TRUE OR ss.recurring_parent_id IS NOT NULL OR ss.annual_prepay_term_id IS NOT NULL
+  OR (${MEMBERSHIP_TIER_SQL}
+      AND ${PLAN_START_SQL} <= sr.service_date
+      AND (c.churned_at IS NULL OR sr.service_date <= c.churned_at)))`;
+
+/**
+ * Visit revenue of plan members in the window (PLAN_VISIT_SQL), with the part from members at least 12 months old at the window start
  * and the part from customers on chargeable autopay (as of now: no history of a customer's payment method is kept).
  * Same revenue basis as the snapshot's completed_job_revenue, so recurring_revenue is a slice of it.
  */
@@ -115,15 +134,15 @@ async function recurringRevenue(db, startDate, endDate, now) {
   const autopay = autopayActivePredicate(now);
   const row = await db('service_records as sr')
     .join('customers as c', 'c.id', 'sr.customer_id')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .whereBetween('sr.service_date', [startDate, endDate])
     .whereNotNull('sr.revenue')
-    .whereRaw(MEMBERSHIP_TIER_SQL)
+    .whereRaw(PLAN_VISIT_SQL)
     .modify(excludeInternalTestCustomers(db))
     .select(
       db.raw('COALESCE(SUM(sr.revenue), 0)::text AS recurring'),
       db.raw(
-        `COALESCE(SUM(sr.revenue) FILTER (WHERE COALESCE(c.member_since, (c.created_at AT TIME ZONE 'America/New_York')::date)
-          <= (?::date - make_interval(months => ?))), 0)::text AS mature`,
+        `COALESCE(SUM(sr.revenue) FILTER (WHERE ${PLAN_START_SQL} <= (?::date - make_interval(months => ?))), 0)::text AS mature`,
         [startDate, MATURE_PLAN_MONTHS],
       ),
       db.raw(`COALESCE(SUM(sr.revenue) FILTER (WHERE ${autopay.sql}), 0)::text AS autopay`, [autopay.binding]),
@@ -139,8 +158,9 @@ async function recurringRevenue(db, startDate, endDate, now) {
 
 /**
  * Annual-prepay money collected and not yet earned at month end: for each term with paid coverage (coveredTermsAsOf with
- * no date: a paid status, an invoice not void or refunded, a payment not fully refunded) whose window holds the month's
- * last day and whose invoice was paid by then, the prepay amount less the revenue of its visits completed by then.
+ * no date: a paid status, an invoice not void or refunded, a payment not fully refunded) that was paid by the month's last
+ * day (the collection date, so an October payment for a term that starts in November is owed at October's end) and has not
+ * ended by then, the prepay amount less the revenue of its visits completed by then.
  * A visit's revenue is its prepay share (job-costing rule 1), so the difference is the share of visits still to do.
  * This is NOT the dashboard's "Deposits on Hand" (the retired estimate-deposit ledger, a different pool of money).
  * Coverage status is read as of today: a term that was later cancelled or refunded is not counted for older months.
@@ -149,7 +169,6 @@ async function prepaidOwed(db, endDate) {
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
   const row = await coveredTermsAsOf(db, null)
     .where('t.prepay_amount', '>', 0)
-    .where('t.term_start', '<=', endDate)
     .where('t.term_end', '>=', endDate)
     .whereRaw("COALESCE((i.paid_at AT TIME ZONE 'America/New_York')::date, (t.created_at AT TIME ZONE 'America/New_York')::date) <= ?::date", [endDate])
     .select(db.raw(
@@ -181,6 +200,8 @@ async function buyerColumns(db, { startDate, endDate, financials, pnl, officeAll
 }
 
 module.exports = {
+  PLAN_VISIT_SQL,
+  PLAN_START_SQL,
   timeAllowance,
   ownerForSnapshot,
   ownerFieldMinutes,

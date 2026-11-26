@@ -67,6 +67,21 @@ describe("BuyerViewRow", () => {
     expect(screen.queryByText("0%")).not.toBeInTheDocument();
   });
 
+  test.each(["months", "revenue", "recurring", "planRevenueKept", "grossMargin", "ownerProfit", "officeCost"])(
+    "a response missing %s shows the unavailable state and reads nothing from it", (missing) => {
+      const data = { ...DATA };
+      delete data[missing];
+      render(<BuyerViewRow data={data} pending={false} />);
+      expect(screen.getByText("buyer view is unavailable.")).toBeInTheDocument();
+      expect(screen.queryByText("Recurring share")).not.toBeInTheDocument();
+    },
+  );
+
+  test("the old minimal shape {revenue, officeCost} is unavailable, not a crash", () => {
+    render(<BuyerViewRow data={{ revenue: {}, officeCost: {} }} pending={false} />);
+    expect(screen.getByText("buyer view is unavailable.")).toBeInTheDocument();
+  });
+
   test("a failed plan-revenue-kept query is that tile only", () => {
     render(<BuyerViewRow data={{ ...DATA, planRevenueKept: { error: "unavailable" } }} />);
     expect(screen.getByText("unavailable")).toBeInTheDocument();

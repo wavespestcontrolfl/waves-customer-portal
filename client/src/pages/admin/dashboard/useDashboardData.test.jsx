@@ -21,7 +21,7 @@ const response = (path) => {
   if (path.endsWith('/review-trend')) return { path, trend: [] };
   if (path.includes('/office-cost-per-stop')) return { path, months: [] };
   if (path.includes('/ops-buyer-metrics')) return { path, errors: {} };
-  if (path.endsWith('/buyer-view')) return { path, revenue: {}, officeCost: {} };
+  if (path.endsWith('/buyer-view')) return { path, months: {}, revenue: {}, recurring: {}, planRevenueKept: {}, grossMargin: {}, ownerProfit: {}, officeCost: {} };
   return { path };
 };
 const settle = async () => { await act(async () => {}); };
@@ -59,6 +59,14 @@ describe('dashboard request recovery', () => {
     expect(result.current.values.today.completed).toBe(1);
     expect(result.current.pending.funnel).toBe(true);
     expect(result.current.pending.staleVisits).toBe(false);
+  });
+
+  it('treats a buyer view missing any container the row reads as unavailable, never as data', async () => {
+    adminFetch.mockImplementation(async (path) => path.endsWith('/buyer-view') ? { revenue: {}, officeCost: {} } : response(path));
+    const { result } = renderHook(() => useDashboardData('today', 'period=mtd'));
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(result.current.values.buyerView).toBeNull();
+    expect(result.current.errors.buyerView).toBeTruthy();
   });
 
   it('loads only Today and shared metrics until another mobile tab is opened', async () => {
