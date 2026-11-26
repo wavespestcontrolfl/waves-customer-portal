@@ -1,16 +1,16 @@
 /**
  * Alert clear-up agent against a real, fully migrated Postgres: the timeline readers use the repo's own predicates (staff-contact.js,
  * email-customer-link.js, call-commitments.js, admin-alert-relevance.js), and only a real database proves their SQL and columns.
- * Self-skips without ALERT_CLEAR_TEST_DATABASE_URL, e.g.
+ * Runs in CI's database jobs (DATABASE_URL); self-skips without it. Locally, e.g.
  *   ALERT_CLEAR_TEST_DATABASE_URL=postgresql://user@localhost:5432/waves_test npx jest server/tests/alert-clear-agent-postgres.test.js
  * Every row the file inserts carries its own random ids and is deleted again; nothing else in the database is read or changed.
  */
 const { randomUUID } = require('crypto');
 
-const connection = process.env.ALERT_CLEAR_TEST_DATABASE_URL;
-if (connection) process.env.DATABASE_URL = connection;
+if (process.env.ALERT_CLEAR_TEST_DATABASE_URL) process.env.DATABASE_URL = process.env.ALERT_CLEAR_TEST_DATABASE_URL;
+const SKIP = !process.env.DATABASE_URL;
 process.env.GATE_ALERT_CLEAR_AGENT = 'shadow';
-const postgres = connection ? describe : describe.skip;
+const postgres = SKIP ? describe.skip : describe;
 jest.setTimeout(60000);
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
