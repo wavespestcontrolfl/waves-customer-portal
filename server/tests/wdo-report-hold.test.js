@@ -2273,6 +2273,59 @@ describe('audit fixes', () => {
     });
   });
 
+  describe('audit round 26', () => {
+    test('P0: a third-party payer assigned after arming stops the homeowner pay-link email and text', async () => {
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const token = (updates.projects || []).find((u) => u.delivery_status === 'sending').delivery_claim_token;
+      await ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0].withProviderHandoff(jest.fn());
+      const opts = require('../services/billing-channel-email-authority').dispatchUnderBillingEmailAuthority.mock.calls.at(-1)[0];
+      const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'admin_project_report_with_invoice')[0];
+      const world = () => mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token, report_token: null }), invoice: invoiceRow({ status: 'sending' }) });
+      world();
+      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1', paymentTerms: 'due_on_receipt' });
+      expect(await opts.preSendCheck({ database: db })).toMatchObject({ ok: false, code: 'INVOICE_PAYER_BILLED' });
+      world();
+      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1', paymentTerms: 'due_on_receipt' });
+      const dispatch = jest.fn();
+      expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'RECIPIENT_CHANGED' }));
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('a bounced or dropped report email moves the key, so the next attempt can send a fresh copy', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'bounced' });
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect((updates.projects || []).some((u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks'))).toBe(true);
+    });
+
+    test('a staff release judges missing details on the claimed row: no override reason, no send', async () => {
+      // the inspection date was cleared after the screen read (and the report re-signed)
+      const undatedSigned = () => wdoProject({
+        report_hold_status: 'held', project_date: null,
+        wdo_signature: JSON.stringify({ image: PNG_DATA_URL, signer_name: 'Adam B', content_hash: expectedContentHash(FINDINGS, null) }),
+      });
+      mockTables({ project: undatedSigned(), invoice: invoiceRow({ status: 'paid' }) });
+      const result = await releaseHeldProjectReport('project-1', { source: 'manual_send', readinessOverride: false });
+      expect(result.released).toBe(false);
+      expect(result.reason).toMatch(/Missing details/);
+      expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+      // with a reason given, the same row sends
+      mockTables({ project: undatedSigned(), invoice: invoiceRow({ status: 'paid' }) });
+      expect((await releaseHeldProjectReport('project-1', { source: 'manual_send', readinessOverride: true })).released).toBe(true);
+    });
+
+    test('the release and the visit history link commit together: a failed visit write records no release', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held', service_record_id: 'sr-1', report_token: 'tok-1' }), invoice: invoiceRow({ status: 'paid' }) });
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'service_records'
+        ? chain({ update: jest.fn(async () => { throw new Error('connection reset'); }) })
+        : base(table)));
+      const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(result.released).toBe(false);
+    });
+  });
+
   describe('advisor redesign phase 4: a crashed release is handed back wherever its claim is cleared', () => {
     test('an edit that clears a crashed claim also gives a releasing report back to held', () => {
       const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
