@@ -49,6 +49,8 @@ describe('callAutoSendShadowVerdict', () => {
     ['current_customer_reprice_pending', (i) => { i.priorQualifyingServices = ['pest_control']; }],
     ['low_confidence', (i) => { i.intent.confidence = 'low'; }],
     ['third_party_payer', (i) => { i.intent.constraint_flags = [{ flag: 'landlord_pays', note: 'realty company covers it' }]; }],
+    ['third_party_payer', (i) => { i.context.extraction.secondary_contacts = [{ role: 'landlord', is_billing_party: true }]; }],
+    ['no_contact', (i) => { i.context.extraction.caller = { ani_cannot_text: true }; }],
     // A caller ID exists, but the draft resolved no storable phone.
     ['no_contact', (i) => { i.draftPhone = null; }],
   ])('holds with %s', (reason, mutate) => {
@@ -68,6 +70,17 @@ describe('callAutoSendShadowVerdict', () => {
   test('a v2 extraction promise counts, and an email alone is a contact', () => {
     expect(verdict((i) => { i.context.extraction = { service_request: { quote_promised: true } }; }).verdict).toBe('would_send');
     expect(verdict((i) => { i.draftPhone = null; i.context.customer = { email: 'a@example.com' }; }).verdict).toBe('would_send');
+  });
+
+  test('a promise in either original extraction counts, and only a valid v2 speaks', () => {
+    const v1Only = (i) => { i.context.extraction = { service_request: {} }; i.context.call = { ai_extraction: JSON.stringify({ quote_promised: true }) }; };
+    expect(verdict(v1Only).verdict).toBe('would_send');
+    const invalidV2 = (i) => { i.context.extraction = {}; i.context.call = { v2_extraction_status: 'invalid', ai_extraction_enriched: { service_request: { quote_promised: true } } }; };
+    expect(verdict(invalidV2).reasons).toContain('quote_not_promised');
+  });
+
+  test('a landlord named for access only is not a payer', () => {
+    expect(verdict((i) => { i.intent.constraint_flags = [{ flag: 'landlord_approval_needed', note: 'landlord must OK access' }]; }).verdict).toBe('would_send');
   });
 
   test('a draft priced only by the bedroom band is not a home size miss', () => {

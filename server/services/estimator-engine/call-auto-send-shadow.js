@@ -39,7 +39,11 @@ const SHADOW_VERSION = 1;
 
 const YARD_CHANGED_RE = /new[_ -]?sod|re[_ -]?sod|sod[_ -]?(install|replac)|pool[_ -]?(build|construction|install)|construction|re[_ -]?grad|yard[_ -]?(changed|torn|redone)|new[_ -]?landscap/i;
 const LAWN_DECLINE_RE = /dying|dead[_ -]?(grass|lawn|sod|patch)|declin|brown[_ -]?patch|fungus|disease|diagnos/i;
-const THIRD_PARTY_PAYER_RE = /landlord|property[_ -]?manag|realty|realtor|third[_ -]?party[_ -]?pay|owner[_ -]?pays|hoa[_ -]?pays/i;
+// Free-text fallback for a payer other than the caller. It needs a payer AND
+// payment words: "landlord must approve access" alone is not a payer.
+const PAYER_WORDS = '(?:landlord|property[_ -]?manag\\w*|realty|realtor|hoa|home[_ -]?owner|owner)';
+const PAY_WORDS = '(?:pay\\w*|bill\\w*|invoice\\w*|cover\\w*)';
+const THIRD_PARTY_PAYER_RE = new RegExp(`third[_ -]?party[_ -]?pay|${PAYER_WORDS}[^|]{0,40}${PAY_WORDS}|${PAY_WORDS}[^|]{0,40}${PAYER_WORDS}`, 'i');
 
 function positive(value) {
   const n = Number(value);
@@ -57,10 +61,39 @@ function bookedOnCall(extraction) {
   return extraction?.appointment_confirmed === true || extraction?.scheduling?.status === 'confirmed';
 }
 
-// The agent committed on the call to send a quote. Same two shapes as the
-// call processor's resolveCallQuoteSignals (v1 flat, v2 service_request).
-function quotePromisedOnCall(extraction) {
-  return extraction?.quote_promised === true || extraction?.service_request?.quote_promised === true;
+function parseMaybeJson(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+// BOTH original extractions of the call. context.extraction holds only the
+// selected one, and the call processor decides a promise from either
+// (resolveCallQuoteSignals), so the shadow reads the same two. Only a VALID
+// v2 payload may speak (an invalid one is audit data).
+function callExtractions(context) {
+  const call = context?.call || {};
+  const v1 = parseMaybeJson(call.ai_extraction);
+  const v2 = call.v2_extraction_status === 'valid' ? parseMaybeJson(call.ai_extraction_enriched) : null;
+  return [v1, v2, context?.extraction].filter((x) => x && typeof x === 'object');
+}
+
+// The agent committed on the call to send a quote (v1 flat, v2 service_request).
+function quotePromisedOnCall(extractions) {
+  return extractions.some((x) => x.quote_promised === true || x.service_request?.quote_promised === true);
+}
+
+// A contact slot the extraction marked as the paying party.
+function billingPartyNamed(extractions) {
+  return extractions.some((x) => Object.entries(x)
+    .filter(([key]) => /contact/i.test(key))
+    .flatMap(([, value]) => (Array.isArray(value) ? value : [value]))
+    .some((c) => c && c.is_billing_party === true));
+}
+
+// The caller said this line cannot receive texts.
+function callerCannotText(extractions) {
+  return extractions.some((x) => x.caller?.ani_cannot_text === true);
 }
 
 function homeSizeFound(propertyFacts) {
@@ -70,18 +103,19 @@ function homeSizeFound(propertyFacts) {
 
 // The contact the draft row actually stores: the resolved draft phone (a
 // blocked caller ID or a short callback number resolves to none) or a
-// post-quarantine email.
+// post-quarantine email. A line the caller said cannot get texts does not
+// count as a phone.
 function hasContact(f) {
   const { context } = f;
   const hasEmail = !!((context?.leadIsForThisCall && context?.lead?.email)
     || (!context?.customerPhoneAmbiguous && context?.customer?.email));
-  return !!f.draftPhone || hasEmail;
+  return (!!f.draftPhone && !callerCannotText(f.extractions)) || hasEmail;
 }
 
 // One row per owner hold rule: [reason, predicate over the gathered facts].
 const HOLD_RULES = [
   ['booked_on_call', (f) => bookedOnCall(f.context?.extraction)],
-  ['quote_not_promised', (f) => !quotePromisedOnCall(f.context?.extraction)],
+  ['quote_not_promised', (f) => !quotePromisedOnCall(f.extractions)],
   ['termite_hold', (f) => f.serviceKeys.some((k) => /termite|wdo/i.test(k)) || /termite|wdo|swarmer/i.test(f.flags)],
   ['commercial_hold', (f) => f.intent.is_commercial === true || f.intent.category === 'COMMERCIAL'],
   ['home_size_not_found', (f) => f.homeSizeDrivesPrice !== false && !homeSizeFound(f.propertyFacts)],
@@ -95,7 +129,7 @@ const HOLD_RULES = [
   ['low_confidence', (f) => f.intent.confidence === 'low'],
   ['yard_changed_book_assessment', (f) => f.hasLawn && YARD_CHANGED_RE.test(f.flags)],
   ['lawn_declining_book_assessment', (f) => f.hasLawn && LAWN_DECLINE_RE.test(f.flags)],
-  ['third_party_payer', (f) => THIRD_PARTY_PAYER_RE.test(f.flags)],
+  ['third_party_payer', (f) => billingPartyNamed(f.extractions) || THIRD_PARTY_PAYER_RE.test(f.flags)],
   ['no_contact', (f) => !hasContact(f)],
 ];
 
@@ -115,6 +149,7 @@ function callAutoSendShadowVerdict({
   const facts = {
     intent, propertyFacts, context, priorQualifyingServices, serviceKeys,
     draftPhone, homeSizeDrivesPrice, pricedLineNeedsReview,
+    extractions: callExtractions(context),
     flags: flagText(intent),
     hasLawn: serviceKeys.some((k) => /lawn/i.test(k)),
   };

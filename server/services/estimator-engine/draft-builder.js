@@ -730,6 +730,13 @@ function scopeRedVerdict(propertyFacts, guardrailsOn) {
   };
 }
 
+// A line with a real price on it (monthly, annual or one-time).
+function lineCarriesMoney(l) {
+  return !!(Number(l.monthlyAfterDiscount ?? l.monthly)
+    || Number(l.annualAfterDiscount ?? l.annual)
+    || Number(l.priceAfterDiscount ?? l.price ?? l.total));
+}
+
 // ── Lane classification ───────────────────────────────────────
 function classifyLane({ intent, propertyFacts, engineResult, engineInput = null, totals, comps, calibration, context }) {
   const reasons = [];
@@ -765,10 +772,7 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // RED only when NO line carries money at all — a priced-but-custom-quote
   // line (oversize lawn) still deserves a provisional yellow draft; that is
   // exactly what the PROVISIONAL flag below surfaces for the operator.
-  const carriesMoney = (l) => Number(l.monthlyAfterDiscount ?? l.monthly)
-    || Number(l.annualAfterDiscount ?? l.annual)
-    || Number(l.priceAfterDiscount ?? l.price ?? l.total);
-  const moneyLines = lines.filter(carriesMoney);
+  const moneyLines = lines.filter(lineCarriesMoney);
 
   if (!lines.length) {
     return { lane: LANES.RED, reasons: ['pricing engine produced no line items for the selected services'] };
@@ -1064,7 +1068,9 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
 // verdict must never cost the draft itself.
 function callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone }) {
   try {
-    const lines = engineResult?.lineItems || [];
+    // Only lines that carry money: an unpriced manual item is the "partial
+    // draft" case, which the owner ruled is not a hold.
+    const lines = (engineResult?.lineItems || []).filter(lineCarriesMoney);
     const autoSendShadow = callAutoSendShadowVerdict({
       origin, intent, propertyFacts, context, priorQualifyingServices,
       draftPhone: customerPhone,
