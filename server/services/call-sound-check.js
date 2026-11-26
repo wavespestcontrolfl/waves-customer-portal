@@ -10,12 +10,14 @@
  *
  * Every listen is a paid Gemini call (MODELS.ROUTES.callSoundCheck, `hear` below), so the job is built around its
  * spend:
- *   - a call gets ONE record, written while it has none, and so one attempt: a failed listen is not tried again
- *     (the one exception sent nothing: with no Gemini key the claim is taken back and the tick stops);
- *   - the call is CLAIMED before the model is asked, and the claim holds the attempt's worst cost (`reserved_usd`),
- *     so a process that dies mid-call can neither ask again nor drop spend from the day's total;
- *   - the ET day stops at DAILY_CAP_USD: a call is claimed only while the day's total plus its own worst cost fits;
- *   - a model with no usable llm_model_prices row makes no call, because the cap could not be kept.
+ *   - a recording gets ONE record, written while it has none, and so one attempt: a failed listen is not tried
+ *     again (the one exception sent nothing: with no Gemini key the claim is taken back and the tick stops). A
+ *     recording swapped onto the call later is a new recording and gets its own record;
+ *   - the call is CLAIMED before the model is asked, and the claim reserves the attempt's worst cost in
+ *     call_sound_check_spend, so a process that dies mid-call can neither ask again nor drop spend from the day;
+ *   - the ET day stops at DAILY_CAP_USD: a call is claimed only while the day's total in call_sound_check_spend plus
+ *     its own worst cost fits. That table outlives the call row (a call marked spam is deleted);
+ *   - a model with no usable llm_model_prices row, or no audio input rate, makes no call: the cap could not be kept.
  * Every dollar figure here is an ESTIMATE from the portal's price table (services/llm-cost.js), not Google's bill.
  *
  * Never sent: an internal call (voice-agent sandbox, tech voice line), a call flagged for card data, a call still in
@@ -34,6 +36,8 @@ const { scrubPansDetailed } = require('../utils/pan-scrub');
 const { etDateString } = require('../utils/datetime-et');
 
 const METADATA_KEY = 'sound_check';
+// One row per claim: what it reserved and what it cost. The cap sums this table, which outlives a deleted call row.
+const SPEND = 'call_sound_check_spend';
 const PROMPT_VERSION = 'sound-check-v1';
 // The top of the range the owner approved (2026-11-25: $0.33 to $0.83 a day). A constant on purpose: raising the
 // spend is a code change with the owner's yes, never a variable.
@@ -192,24 +196,26 @@ function attemptCostUsd(price, usage, reserved) {
 // that rate was stored, or the feed does not say what audio costs, and either way the cap could read low.
 async function priceOfModel(conn, model) {
   const price = llmCost.priceFor((await llmCost.loadPrices(conn)).map, model);
-  if (!price || price.audioInput == null) return null;
+  // A long-prompt tier with no audio rate would bill its audio at its text rate, which may read low.
+  if (!price || price.audioInput == null || (price.tiers || []).some((t) => t.audioInput == null)) return null;
   return Number.isFinite(worstCaseUsd(price, MAX_SECONDS)) ? price : null;
 }
 
-// The ET day's spend so far: what finished attempts cost plus what unfinished claims reserved.
-async function daySpendUsd(conn, day, now) {
-  const since = new Date(now.getTime() - (LOOKBACK_HOURS + 24) * 60 * 60 * 1000);
-  const row = await whereNotSandboxCall(conn('call_log'))
-    .where('created_at', '>=', since)
-    .whereRaw("metadata->:key->>'day' = :day", { key: METADATA_KEY, day })
-    .select(conn.raw("COALESCE(SUM(COALESCE((metadata->:key->>'spent_usd')::numeric, 0) + COALESCE((metadata->:key->>'reserved_usd')::numeric, 0)), 0) AS total", { key: METADATA_KEY }))
-    .first();
+// The ET day's spend so far: what settled attempts cost plus what unsettled claims reserved.
+async function daySpendUsd(conn, day) {
+  const row = await conn(SPEND).where({ day }).select(conn.raw('COALESCE(SUM(COALESCE(spent_usd, reserved_usd)), 0) AS total')).first();
   return Number(row?.total) || 0;
 }
 
-// No record yet. Only an object can take one: the merge in recordPatch would turn any other jsonb value into an
-// array, and a call whose record cannot be read back would be claimed, and paid for, on every tick.
-const whereNoRecord = (qb) => qb.whereRaw("jsonb_typeof(COALESCE(metadata, '{}'::jsonb)) = 'object' AND metadata->:key IS NULL", { key: METADATA_KEY });
+// No record yet, or only a record of a recording the call no longer has (an adopted or replaced recording keeps the
+// call's metadata, and the old audio's note does not describe the new audio). Only an object can take a record: the
+// merge in recordPatch would turn any other jsonb value into an array, and a call whose record cannot be read back
+// would be claimed, and paid for, on every tick.
+const whereNoRecord = (qb) => qb.whereRaw(
+  "jsonb_typeof(COALESCE(metadata, '{}'::jsonb)) = 'object'"
+  + " AND (metadata->:key IS NULL OR (metadata->:key->>'recording_url') <> recording_url)",
+  { key: METADATA_KEY },
+);
 const recordPatch = (conn, record) => conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [METADATA_KEY]: record })]);
 
 // A processed, recorded, ordinary call from the last two days with no record, oldest first.
@@ -227,7 +233,8 @@ function candidates(conn, now) {
     .select('id', 'recording_url', 'recording_duration_seconds', 'duration_seconds');
 }
 
-// A call's first and only record, written while it has none: two writers cannot both record, or both claim, a call.
+// A call's first and only record for its recording, written while it has none: two writers cannot both record, or
+// both claim, a call. Every record names the recording it is about.
 // A claim (`status: 'started'`) also repeats what must still be true of the call before its audio is sent.
 async function writeFirstRecord(conn, call, record) {
   const query = whereNoRecord(conn('call_log').where({ id: call.id }));
@@ -237,24 +244,39 @@ async function writeFirstRecord(conn, call, record) {
       .whereNull('processing_token')
       .whereRaw(NOT_CARD_FLAGGED_SQL);
   }
-  return (await query.update({ metadata: recordPatch(conn, record) })) > 0;
+  return (await query.update({ metadata: recordPatch(conn, { ...record, recording_url: call.recording_url }) })) > 0;
+}
+
+// Claim the call and reserve its worst cost in one transaction. Returns the spend row's id, or null when the claim
+// was lost (another writer, or the call changed).
+async function claimCall(conn, call, claim) {
+  return conn.transaction(async (trx) => {
+    if (!(await writeFirstRecord(trx, call, claim))) return null;
+    const [row] = await trx(SPEND).insert({ call_id: call.id, day: claim.day, reserved_usd: claim.reserved_usd }).returning('id');
+    return row?.id ?? row;
+  });
 }
 
 // Ask the model about a claimed call and put the outcome in place of the claim.
 async function listen(conn, call, audio, claim, price) {
   const heard = await hear(audio);
-  const claimed = () => conn('call_log').where({ id: call.id }).whereRaw("metadata->:key->>'status' = 'started'", { key: METADATA_KEY });
+  // The claim on this recording: a recording swapped in during the model call is not the audio that was heard.
+  const claimed = () => conn('call_log').where({ id: call.id, recording_url: call.recording_url })
+    .whereRaw("metadata->:key->>'status' = 'started'", { key: METADATA_KEY });
   if (heard.reason === 'no_key') {
     // Nothing was sent, so nothing is owed and the call keeps its turn. No call after it could be sent either.
     await claimed().update({ metadata: conn.raw('metadata - ?::text', [METADATA_KEY]) });
+    await conn(SPEND).where({ id: claim.spendId }).del();
     throw new Error('no Gemini API key: no recording was sent');
   }
   const outcome = heard.note
     ? { status: 'done', note: heard.note, model: heard.model, prompt_version: PROMPT_VERSION, usage: heard.usage }
     : { status: 'failed', reason: heard.reason };
-  const record = { ...outcome, spent_usd: round6(attemptCostUsd(price, heard.usage, claim.reserved_usd)), day: claim.day, at: claim.at };
+  const spent = round6(attemptCostUsd(price, heard.usage, claim.reserved_usd));
+  // The spend is settled whatever happens to the call row: Google billed the attempt either way.
+  await conn(SPEND).where({ id: claim.spendId }).update({ spent_usd: spent, settled_at: conn.fn.now() });
+  const record = { ...outcome, spent_usd: spent, day: claim.day, at: claim.at, recording_url: call.recording_url };
   const saved = await claimed().update({ metadata: recordPatch(conn, record) });
-  // The claim, with its reserve, is then still on the call, so the day's total covers this attempt.
   if (!saved) logger.warn(`[call-sound-check] outcome not saved for call ${call.id}: its claim was gone after the model call`);
   return outcome.status;
 }
@@ -267,7 +289,7 @@ async function listen(conn, call, audio, claim, price) {
 async function dayNow(conn, clock) {
   const at = clock();
   const day = etDateString(at);
-  return { day, at: at.toISOString(), room: DAILY_CAP_USD - (await daySpendUsd(conn, day, at)) };
+  return { day, at: at.toISOString(), room: DAILY_CAP_USD - (await daySpendUsd(conn, day)) };
 }
 
 async function checkOne(conn, call, ctx) {
@@ -301,8 +323,9 @@ async function checkOne(conn, call, ctx) {
   if (reserved > now.room) return 'capped';
 
   const claim = { status: 'started', reserved_usd: round6(reserved), day: now.day, at: now.at };
-  if (!(await writeFirstRecord(conn, call, claim))) return 'skipped';
-  return listen(conn, call, audio, claim, ctx.price);
+  const spendId = await claimCall(conn, call, claim);
+  if (spendId == null) return 'skipped';
+  return listen(conn, call, audio, { ...claim, spendId }, ctx.price);
 }
 
 /**

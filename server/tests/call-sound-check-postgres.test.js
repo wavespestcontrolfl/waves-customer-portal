@@ -39,7 +39,7 @@ const USAGE_COST = 0.0198; // (4,500 x $3 + 120 x $15 + 300 x $15) per 1M tokens
 // What the model adapter hands back for a good listen.
 const answer = (extra = {}) => ({ ok: true, json: ANSWER, model: 'listening-model', usage: USAGE, ...extra });
 const TALLY = { done: 0, failed: 0, skipped: 0, capped: 0 };
-const record = (fields) => ({ day: DAY, at: NOW.toISOString(), ...fields });
+const record = (fields) => ({ day: DAY, at: NOW.toISOString(), recording_url: expect.stringMatching(/^https:\/\/api\.twilio\.com\//), ...fields });
 // The model's answer for the test (llm.dispatch), and the download and the MP3 length read the job is run with.
 const fakes = ({ dispatch = async () => answer(), ...over } = {}) => {
   llm.dispatch.mockReset().mockImplementation(dispatch);
@@ -137,7 +137,10 @@ postgres('call sound check (live Postgres)', () => {
   };
   const metadataOf = async (id) => (await trx('call_log').where({ id }).first('metadata')).metadata;
   const recordOf = async (id) => (await metadataOf(id))?.[KEY];
-  const spentToday = (usd) => insertCall({ metadata: { [KEY]: { status: 'done', spent_usd: usd, day: DAY } } });
+  const SPEND = 'call_sound_check_spend';
+  // An earlier attempt of the day, settled, on a call row that no longer exists.
+  const spentToday = (usd, day = DAY) => trx(SPEND).insert({ call_id: randomUUID(), day, reserved_usd: usd, spent_usd: usd });
+  const spendRows = () => trx(SPEND).orderBy('id').select('call_id', trx.raw('day::text AS day'), trx.raw('reserved_usd::float AS reserved_usd'), trx.raw('spent_usd::float AS spent_usd'));
   const run = (f, now = NOW) => soundCheck.runCallSoundCheck({ conn: trx, now, ...f });
 
   test("a listen saves the note, the model, the usage and its cost beside the call's other metadata, once", async () => {
@@ -277,19 +280,20 @@ postgres('call sound check (live Postgres)', () => {
     await insertCall({ created_at: new Date(before.getTime() - HOUR) });
     await insertCall({ created_at: new Date(before.getTime() - HOUR / 2) });
     // the 15th has no room left; the 16th has spent nothing
-    await insertCall({ created_at: new Date(before.getTime() - 2 * HOUR), metadata: { [KEY]: { status: 'done', spent_usd: soundCheck.DAILY_CAP_USD, day: '2027-01-15' } } });
+    await spentToday(soundCheck.DAILY_CAP_USD, '2027-01-15');
     const clock = jest.fn().mockReturnValueOnce(before).mockReturnValue(after);
     const f = fakes();
     const tally = await soundCheck.runCallSoundCheck({ conn: trx, clock, ...f });
     expect(tally).toEqual({ ...TALLY, done: 2 });
     const days = (await trx('call_log').whereRaw("metadata->:key->>'status' = 'done'", { key: KEY }).select(trx.raw("metadata->:key->>'day' AS day", { key: KEY }))).map((r) => r.day).sort();
-    expect(days).toEqual(['2027-01-15', '2027-01-16', '2027-01-16']);
+    expect(days).toEqual(['2027-01-16', '2027-01-16']);
+    expect((await spendRows()).map((r) => r.day)).toEqual(['2027-01-15', '2027-01-16', '2027-01-16']);
   });
 
   test('the day stops at the cap: a call that does not fit is left alone, and the next ET day has room', async () => {
     // $0.76 so far today, $0.26 of it an unfinished claim. The call's worst cost is about $0.077; the cap is $0.83.
     await spentToday(0.5);
-    await insertCall({ metadata: { [KEY]: { status: 'started', reserved_usd: 0.26, day: DAY } } });
+    await trx(SPEND).insert({ call_id: await insertCall({ metadata: { [KEY]: { status: 'started', reserved_usd: 0.26, day: DAY } } }), day: DAY, reserved_usd: 0.26 });
     const id = await insertCall();
     const f = fakes();
     expect(await run(f)).toEqual({ ...TALLY, capped: 1 });
@@ -334,7 +338,7 @@ postgres('call sound check (live Postgres)', () => {
     const id = await insertCall(call);
     const f = fakes(Object.fromEntries(Object.entries(fake).map(([name, fn]) => [name, jest.fn(fn)])));
     expect(await run(f)).toEqual({ ...TALLY, skipped: 1 });
-    expect(await recordOf(id)).toEqual(record({ status: 'skipped', reason }));
+    expect(await recordOf(id)).toEqual(record({ status: 'skipped', reason, recording_url: (await trx('call_log').where({ id }).first('recording_url')).recording_url }));
     expect(f.download).toHaveBeenCalledTimes(downloads);
     expect(await run(f)).toEqual(TALLY);
     expect(llm.dispatch).not.toHaveBeenCalled();
@@ -372,6 +376,47 @@ postgres('call sound check (live Postgres)', () => {
     await run(f);
     expect(await recordOf(id)).toEqual(OTHER);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('outcome not saved'));
+  });
+
+  test('spend outlives the call row: a heard call deleted as spam still counts toward the day', async () => {
+    const first = await insertCall({ created_at: ago(2) });
+    const f = fakes();
+    expect(await run(f)).toEqual({ ...TALLY, done: 1 });
+    expect(await spendRows()).toEqual([{ call_id: first, day: DAY, reserved_usd: reserveFor(120), spent_usd: USAGE_COST }]);
+    await trx('call_log').where({ id: first }).del();
+    await spentToday(soundCheck.DAILY_CAP_USD - USAGE_COST - reserveFor(120) / 2);
+    const second = await insertCall();
+    expect(await run(f)).toEqual({ ...TALLY, capped: 1 });
+    expect(await recordOf(second)).toBeUndefined();
+  });
+
+  test('a recording swapped in during the listen keeps no note of the old audio, and is heard on its own', async () => {
+    const id = await insertCall();
+    const swapped = 'https://api.twilio.com/2010-04-01/Accounts/ACfixture/Recordings/REswapped.mp3';
+    const f = fakes({ dispatch: jest.fn()
+      .mockImplementationOnce(async () => { await trx('call_log').where({ id }).update({ recording_url: swapped }); return answer(); })
+      .mockImplementation(async () => answer()) });
+    await run(f);
+    expect(await recordOf(id)).toEqual(expect.objectContaining({ status: 'started' }));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('outcome not saved'));
+    // the old audio's attempt is still owed; the new recording is a new candidate
+    expect(await run(f)).toEqual({ ...TALLY, done: 1 });
+    expect(await recordOf(id)).toEqual(expect.objectContaining({ status: 'done', recording_url: swapped }));
+    expect((await spendRows()).map((r) => r.spent_usd)).toEqual([USAGE_COST, USAGE_COST]);
+  });
+
+  test('a note of a recording the call no longer has makes the call a candidate again', async () => {
+    const id = await insertCall({ metadata: { [KEY]: { status: 'done', recording_url: 'https://api.twilio.com/2010-04-01/Recordings/REold.mp3' } } });
+    expect(await run(fakes())).toEqual({ ...TALLY, done: 1 });
+    expect(await recordOf(id)).toEqual(expect.objectContaining({ status: 'done', note: expect.any(Object) }));
+  });
+
+  test('a long-prompt tier with no audio rate makes no call', async () => {
+    await trx('llm_model_prices').where({ model_key: MODEL_KEY }).update({
+      pricing_tiers: JSON.stringify([{ min_prompt_tokens: 200000, input_per_mtok: 6, output_per_mtok: 22.5, audio_input_per_mtok: null }]),
+    });
+    await insertCall();
+    await expect(run(fakes())).rejects.toThrow(/no usable price/);
   });
 
   test('an old http:// Twilio URL is fetched over https', async () => {
