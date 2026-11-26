@@ -187,7 +187,7 @@ async function downloadCalendarIcs(path, fileName = 'Waves_Visit.ics') {
   // '/api' (default '/api', or a full cross-origin API URL), so splice.
   const abs = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
   const r = await fetch(abs);
-  if (!r.ok) throw Object.assign(new Error(`Calendar download failed (${r.status})`), { status: r.status });
+  if (!r.ok) throw new Error(`Calendar download failed (${r.status})`);
   const blob = await r.blob();
   if (await saveBlobNative(blob, fileName)) return;
   const blobUrl = URL.createObjectURL(blob);
@@ -325,37 +325,6 @@ const calendarLinkStillLive = (svc) => {
   const endsAt = calendarLinkEndsAt(svc);
   return !!endsAt && endsAt.getTime() >= Date.now();
 };
-
-// "Add to Calendar" for any upcoming visit. The file is the server's tokenized
-// .ics, which makes a day-only visit an ALL-DAY event with no arrival hour (owner
-// ruling: visit promises are day-only). The server nulls calendarUrl for every
-// visit it would refuse a file for, so no button shows then.
-function AddToCalendarButton({ visit, style }) {
-  // Re-render just after the server deadline, so an idle page stops offering a file the route now refuses. The
-  // server serves the file while the deadline is >= now (inclusive), so the timer fires 1 ms past it, never at it.
-  // `tick` re-arms the timer when the delay saturates the setTimeout ceiling.
-  const [tick, setTick] = useState(0);
-  // The shown deadline can run past the server's real cutoff (a day-only visit's deadline is end of day, so no hour is
-  // exposed). So the tap is what proves the file is still served: a refusal hides the button and says so.
-  const [refused, setRefused] = useState(false);
-  const deadline = calendarLinkEndsAt(visit)?.getTime();
-  useEffect(() => {
-    const ms = deadline - Date.now() + 1;
-    if (!(ms > 0)) return undefined;
-    const timer = setTimeout(() => setTick((t) => t + 1), Math.min(ms, 2147483647));
-    return () => clearTimeout(timer);
-  }, [deadline, tick]);
-  if (refused || !visit?.calendarUrl || !calendarLinkStillLive(visit)) return null;
-  return (
-    <button type="button" onClick={() => {
-      downloadCalendarIcs(visit.calendarUrl).catch((err) => {
-        const gone = err?.status === 404 || err?.status === 410;
-        setRefused(gone);
-        showCustomerAlert(gone ? 'Calendar file is no longer available.' : 'Could not download the calendar file. Please try again.');
-      });
-    }} data-glass-accent="" style={style}>Add to Calendar</button>
-  );
-}
 
 
 // ---------------------------------------------------------------------------
@@ -3073,6 +3042,23 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
   const nextScopeStale = scopeEchoMismatch(nextRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (nextScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [nextScopeStale, onSavedScopeUnavailable]);
   const nextService = nextScopeStale ? null : (nextRead.data?.next || null);
+  // The Add-to-Calendar button hides itself once the arrival window closes,
+  // but an idle dashboard never rerenders to notice. Fire a one-shot timer at
+  // the deadline so the button disappears on its own (codex #3249 r4 P2).
+  const [calendarWindowTick, setCalendarWindowTick] = useState(0);
+  useEffect(() => {
+    const endsAt = calendarLinkEndsAt(nextService);
+    if (!nextService?.calendarUrl || !endsAt) return undefined;
+    const ms = endsAt.getTime() - Date.now();
+    if (ms <= 0) return undefined;
+    // setTimeout saturates past ~24.8 days; the window is hours away, but
+    // clamp so a far-future visit can't wrap to an immediate fire.
+    const timer = setTimeout(() => setCalendarWindowTick(t => t + 1), Math.min(ms, 2147483647));
+    return () => clearTimeout(timer);
+    // calendarWindowTick is a dependency ON PURPOSE: when the delay saturates
+    // the setTimeout ceiling the timer fires early, and without re-running
+    // here it would never be rescheduled toward the real deadline (codex r5).
+  }, [nextService, calendarWindowTick]);
   const nextServiceStatus = nextRead.error ? 'error' : nextRead.data ? 'ready' : 'loading';
   const [confirmingVisit, setConfirmingVisit] = useState(false);
   // Visit prep photos, app entry (GATE_VISIT_PREP_PHOTOS): the sheet mounts
@@ -3347,7 +3333,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
   const billingSub = balancePending
     ? 'Checking...'
     : balanceError
-      ? 'Tap to retry'
+      ? 'Tap to view'
       : hasBalance ? `$${currentBalance.toFixed(2)} due` : (annualPrepayLabel || 'All current');
   // Only advertise a reward the server confirms — while loading, on error,
   // or when the program reports zero, a hardcoded $25 would promise money
@@ -3517,9 +3503,20 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
                   Server nulls calendarUrl for every case the route would 404
                   (gate dark, pre-token row, no window, window elapsed), so no
                   fallback needed here. */}
-              {/* The shared button re-checks the server deadline on its own timer, so an idle
-                  dashboard drops it when the window closes (same rule as the Visits tab). */}
-              <AddToCalendarButton visit={nextService} style={{ ...dashboardSecondaryButton, position: 'relative' }} />
+              {/* The dashboard fetches the next visit once, so a page left
+                  open past the arrival window would keep a calendarUrl the
+                  .ics route now 404s. Re-check the window client-side on each
+                  render against the same 2-hour promise (codex r3 P2). */}
+              {nextService.calendarUrl && calendarLinkStillLive(nextService) && (
+                <button type="button" onClick={() => {
+                  downloadCalendarIcs(nextService.calendarUrl).catch(() => {
+                    showCustomerAlert('Could not download the calendar file. Please try again.');
+                  });
+                }} data-glass-accent="" style={{
+                  ...dashboardSecondaryButton,
+                  position: 'relative',
+                }}>Add to Calendar</button>
+              )}
               {/* GATE_VISIT_PREP_PHOTOS (dark): shown only when the server's
                   own eligibility says this visit currently takes photos —
                   the same rule the appointment page's own block uses. */}
@@ -6070,13 +6067,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             {renderConfirmBtn(s, false)}
             {!readOnlyVisits && (
-              <>
-                <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-                  ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
-                  fontSize: 14, position: 'relative',
-                }}>Reschedule</a>
-                <AddToCalendarButton visit={s} style={{ ...secondaryButton, padding: '10px 14px', flex: 1, fontSize: 14, position: 'relative' }} />
-              </>
+              <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+                ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
+                fontSize: 14, position: 'relative',
+              }}>Reschedule</a>
             )}
           </div>
         </div>
@@ -6126,13 +6120,10 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           {renderConfirmBtn(s, true)}
           {/* C4: no Reschedule mutation control for a cancelled or contact session. */}
           {!readOnlyVisits && (
-            <>
-              <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-                ...secondaryButton, padding: '9px 14px', textDecoration: 'none',
-                fontSize: 14, position: 'relative',
-              }}>Reschedule</a>
-              <AddToCalendarButton visit={s} style={{ ...secondaryButton, padding: '9px 14px', fontSize: 14, position: 'relative' }} />
-            </>
+            <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+              ...secondaryButton, padding: '9px 14px', textDecoration: 'none',
+              fontSize: 14, position: 'relative',
+            }}>Reschedule</a>
           )}
         </div>
       </div>

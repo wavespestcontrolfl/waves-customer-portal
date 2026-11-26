@@ -2,10 +2,10 @@
 // Customer-app fixes of 2026-11-26: real request status near the top of Home, retry on the
 // money and schedule dead ends, tappable arrival-checklist rows and
 // a Reschedule button on a missed visit, "You're offline" on a failed save, "View report" on a
-// completed visit with no "N/A" tile, and Add to Calendar on every upcoming visit.
+// completed visit with no "N/A" tile.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const native = vi.hoisted(() => ({ enabled: false }));
@@ -29,7 +29,7 @@ vi.mock('../utils/api', () => {
 
 import api from '../utils/api';
 import CustomerDialogHost from '../components/brand/CustomerDialogHost';
-import { DashboardTab, MyRequestsCard, ScheduleTab, ServiceTracker, ServicesTab } from './PortalPage';
+import { DashboardTab, MyRequestsCard, ServiceTracker, ServicesTab } from './PortalPage';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -138,6 +138,8 @@ describe('fix 5: money and schedule dead ends on Home retry', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /^Billing/ }).find((b) => !/unavailable/.test(b.textContent)));
     expect(onSwitchTab).toHaveBeenCalledWith('billing');
     expect(api.getBalance).toHaveBeenCalledTimes(1);
+    // Retry wording sits on the one control that retries, the tile.
+    expect(screen.getAllByText('Tap to retry')).toHaveLength(1);
   });
 
   it('gives the failed schedule card a Try again button that reads the next visit again', async () => {
@@ -277,93 +279,5 @@ describe('fix 9: visits', () => {
     expect(screen.queryByRole('button', { name: 'Download' })).not.toBeInTheDocument();
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
     expect(open).not.toHaveBeenCalled();
-  });
-
-  it('gives every upcoming visit the server calendar file as Add to Calendar (all-day when the visit is day-only)', async () => {
-    const live = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    api.getSchedule.mockResolvedValue({ upcoming: [
-      { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: live },
-      { id: 'b', date: futureDate, serviceType: 'Lawn Care', status: 'confirmed', calendarUrl: '/api/appointments/tok-b/calendar.ics', calendarExpiresAt: live },
-      { id: 'c', date: futureDate, serviceType: 'Mosquito', status: 'confirmed', calendarUrl: null, calendarExpiresAt: null },
-    ] });
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: false, status: 404 });
-    render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
-    await screen.findByText('Lawn Care');
-    const buttons = screen.getAllByRole('button', { name: 'Add to Calendar' });
-    expect(buttons).toHaveLength(2);
-    fireEvent.click(buttons[1]);
-    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
-    expect(String(fetchSpy.mock.calls[0][0])).toMatch(/calendar\.ics$/);
-  });
-
-  it('hides the button and says so when the server refuses the calendar file on tap', async () => {
-    const live = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    api.getSchedule.mockResolvedValue({ upcoming: [
-      { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: live },
-    ] });
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValue({ ok: false, status: 404 });
-    render(<><CustomerDialogHost /><ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} /></>);
-    fireEvent.click(await screen.findByRole('button', { name: 'Add to Calendar' }));
-    expect(await screen.findByText('Calendar file is no longer available.')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Add to Calendar' })).not.toBeInTheDocument();
-  });
-
-  it('keeps the button after a network failure and offers a retry message', async () => {
-    const live = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    api.getSchedule.mockResolvedValue({ upcoming: [
-      { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: live },
-    ] });
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Failed to fetch'));
-    render(<><CustomerDialogHost /><ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} /></>);
-    fireEvent.click(await screen.findByRole('button', { name: 'Add to Calendar' }));
-    expect(await screen.findByText('Could not download the calendar file. Please try again.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Add to Calendar' })).toBeInTheDocument();
-  });
-
-  it('removes Add to Calendar at the server deadline while the Visits tab stays open', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      const soon = new Date(Date.now() + 5000).toISOString();
-      api.getSchedule.mockResolvedValue({ upcoming: [
-        { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: soon },
-      ] });
-      render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
-      await screen.findByRole('button', { name: 'Add to Calendar' });
-      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
-      expect(screen.queryByRole('button', { name: 'Add to Calendar' })).not.toBeInTheDocument();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('keeps Add to Calendar through the inclusive deadline and drops it 1 ms after, on Home and on Visits', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: false });
-    try {
-      const deadline = new Date(Date.now() + 3000).toISOString();
-      const visit = { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: deadline };
-      api.getSchedule.mockResolvedValue({ upcoming: [visit] });
-      api.getNextService.mockResolvedValue({ next: visit });
-      render(<><ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} /><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></>);
-      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
-      expect(screen.getAllByRole('button', { name: 'Add to Calendar' })).toHaveLength(2);
-      await act(async () => { await vi.advanceTimersByTimeAsync(2990); });
-      // Now is exactly the deadline: the server still serves the file.
-      expect(screen.getAllByRole('button', { name: 'Add to Calendar' })).toHaveLength(2);
-      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-      expect(screen.queryByRole('button', { name: 'Add to Calendar' })).not.toBeInTheDocument();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('hides Add to Calendar once the server window has closed', async () => {
-    const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    api.getSchedule.mockResolvedValue({ upcoming: [
-      { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: past },
-    ] });
-    render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
-    await screen.findByText('Pest Control');
-    expect(screen.queryByRole('button', { name: 'Add to Calendar' })).not.toBeInTheDocument();
   });
 });
