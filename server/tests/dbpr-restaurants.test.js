@@ -293,6 +293,15 @@ describe('namesFirstVisit', () => {
 });
 
 describe('parseInspectionReport', () => {
+  test('a follow-up note dated on or before the page\'s visit date gives no answer: that visit was not the first', () => {
+    const cited = (date) => `<tr><td>35A-02-8</td><td>Basic - From initial inspection : Live roaches. - From follow-up inspection ${date}: Still seen.</td></tr>`;
+    expect(parse(reportPage(cited('2026-11-16'), '11/16/2026'), { violation35: 1 })).toBeNull();
+    expect(parse(reportPage(cited('2026-11-10'), '11/16/2026'), { violation35: 1 })).toBeNull();
+    expect(parse(reportPage(cited('2026-11-20'), '11/16/2026'), { violation35: 1 })).toEqual({
+      pestEvidence: true,
+      findings: [{ code: '35A-02-8', text: 'Basic From initial inspection : Live roaches. - From follow-up inspection 2026-11-20: Still seen.' }],
+    });
+  });
   test('a merged cell in the inspection table, the violations table or a head row gives no answer; one outside them does not', () => {
     const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>Live roaches.</td></tr>';
     const answer = { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Live roaches.' }] };

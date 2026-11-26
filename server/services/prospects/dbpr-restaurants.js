@@ -520,6 +520,14 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   // A follow-up report (any violations row labelled with its visit) ties each row to a visit, so an unlabelled 35 row
   // on it cannot be tied to one. A 35 row whose text shows no word (only a joiner, say) cannot answer either.
   const followUp = entries.some((entry) => !visitNotes(entry.parts.join(' ')).routine);
+  // A follow-up note dated on or before the page's own visit says that visit was not the first: the page and the file
+  // disagree, and the page cannot answer for the first visit.
+  const pageDate = parseUsDate(visits[0].date);
+  const laterNoteFirst = entries.some((entry) => {
+    const notes = visitNotes(entry.parts.join(' ')).notes || [];
+    return notes.some((note) => note.date !== null && note.date <= pageDate);
+  });
+  if (laterNoteFirst) return null;
   if (unreadable || rows35.some((row) => row.notes.unreadable || !hasWord(row.text) || (followUp && row.notes.routine))) return null;
   // The read visit's own 35 rows: every row of a routine report; on a follow-up report, those with the initial note.
   const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => note.date === null));
