@@ -151,7 +151,7 @@ describe('authored commercial proposal page', () => {
   });
 });
 
-// GATE_COMMERCIAL_FIRST_VISIT: /data's cta.commercialFirstVisit. Signed, the agreement card becomes the first-visit
+// /data's cta.commercialFirstVisit. Signed, the agreement card becomes the first-visit
 // picker and What happens next points at it; once booked (the proposal is then accepted), the accepted card shows the
 // visit date.
 describe('commercial first visit on the proposal page', () => {

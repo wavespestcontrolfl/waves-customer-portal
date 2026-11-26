@@ -203,8 +203,8 @@ describe('ContractSignPage "Back to your estimate" (Florida consumer notice)', (
     expect(queryByText(BACK)).toBeNull();
   });
 
-  // GATE_COMMERCIAL_FIRST_VISIT: the server marks a commercial agreement issued from the proposal page only while the
-  // gate is on, because the first visit is picked back on the estimate page.
+  // The server marks a commercial agreement issued from the proposal page, because the first visit is picked back on
+  // the estimate page.
   it('after signing a commercial agreement the server marked, the button goes back to pick the first visit', async () => {
     const { getByRole, back } = await signContract({ ...NOTICE, documentTemplateKey: 'service_agreement.commercial_pest', title: 'Commercial Pest Service Agreement' });
     fireEvent.click(getByRole('button', { name: BACK }));

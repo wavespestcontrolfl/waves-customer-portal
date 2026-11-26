@@ -84,8 +84,8 @@ function ContractBodyText({ text }) {
 }
 
 // A Florida consumer notice opened from the estimate page (the server marks it
-// fromEstimate) offers the way back, when this tab has a page to go back to. The commercial agreement is marked only
-// while GATE_COMMERCIAL_FIRST_VISIT is on: the first visit is picked back on the proposal page.
+// fromEstimate) offers the way back, when this tab has a page to go back to. The commercial agreement is marked too:
+// the first visit is picked back on the proposal page.
 const FROM_ESTIMATE_TEMPLATE_KEYS = new Set([
   'consumer_notice.fdacs_13692',
   'service_agreement.commercial_pest',
