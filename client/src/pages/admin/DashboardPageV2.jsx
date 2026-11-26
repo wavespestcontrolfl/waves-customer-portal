@@ -98,7 +98,7 @@ export default function DashboardPageV2() {
   const {
     data, kpis, compare, salesCapture, funnel, aging, mrrTrend, cohort, capAlloc,
     callsBySource, leadsBySource, channelMix, leadFunnel, channelRoi, serviceLines, mix,
-    revenueByCity, reviewTrend, today, billing, alerts, kpiHistory, ebitda, officeCost,
+    revenueByCity, reviewTrend, today, billing, alerts, kpiHistory, ebitda, officeCost, opsMetrics,
     mrrBridge, revenueOverview, churnReasons, staleVisits,
   } = values;
   const kpiTargets = useMemo(() => Object.fromEntries(
@@ -261,6 +261,7 @@ export default function DashboardPageV2() {
           mix={mix}
           ebitda={ebitda}
           officeCost={officeCost}
+          opsMetrics={opsMetrics}
           revenueOverview={revenueOverview}
           isMobile={isMobile}
           {...kpiStripProps}

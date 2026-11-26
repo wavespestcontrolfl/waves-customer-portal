@@ -99,3 +99,33 @@ describe('no needs-a-person notice for a preferred_day conflict', () => {
     expect(bucket.size).toBe(0);
   });
 });
+
+// Customer blackout (owner 2026-11-26 "move away", replay audit): a visit inside the do-not-come dates the office set
+// on the customer's profile is in conflict after a closed day, and a person hears about it when it cannot move.
+describe('customer_blackout conflict (current-conflict.js)', () => {
+  const OFF = { blackout_start: '2026-08-01', blackout_end: '2026-08-04', preferred_day: 'wednesday', mowing_days: null };
+  test('inside the blackout dates: in conflict, ahead of an overlap and the saved day; outside or none: no blackout conflict', async () => {
+    rebooker.probeMoveConflicts.mockResolvedValue({
+      rows: [{ id: 'o1', customer_id: 'c2', technician_id: 't1', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }],
+    });
+    expect(await currentConflict(SERVICE, CTX(OFF))).toEqual({ kind: 'customer_blackout', date: MON, start: '2026-08-01', end: '2026-08-04' });
+    rebooker.probeMoveConflicts.mockResolvedValue({ rows: [] });
+    expect(await currentConflict({ ...SERVICE, scheduled_date: WED }, CTX(OFF))).toBeNull();
+    expect(await currentConflict(SERVICE, CTX({ ...OFF, blackout_end: null }))).toMatchObject({ kind: 'preferred_day' });
+  });
+
+  test('a closed day comes first', async () => {
+    blackout.isBlackoutDate.mockResolvedValue(true);
+    expect(await currentConflict(SERVICE, CTX(OFF))).toEqual({ kind: 'closed_day', date: MON });
+  });
+
+  test('not silent: standingConflict keeps it and collectUnmoved raises the blackout wording', async () => {
+    db.mockImplementation(tableDb({ scheduled_services: { first: { ...SERVICE, status: 'confirmed' } } }));
+    const seen = { service: SERVICE, ctx: CTX(OFF) };
+    expect(await standingConflict(seen, 's1')).toMatchObject({ conflict: { kind: 'customer_blackout' } });
+    const notice = require('../services/auto-dispatch/needs-person-notice');
+    const bucket = new Map();
+    notice.collectUnmoved(bucket, { id: 'v1', scheduled_date: MON }, 'NO_VALID_SLOT', { kind: 'customer_blackout', date: MON });
+    expect([...bucket.values()][0]).toMatchObject({ problem: 'customer_blackout', kind: 'no_slot' });
+  });
+});

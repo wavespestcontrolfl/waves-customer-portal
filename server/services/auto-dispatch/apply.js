@@ -292,15 +292,15 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination
 // job_applications row behind a booked interview (`interview:<id>`), which
 // blocks their update or delete (r4). A mowing day (mowing-days.js) takes FOR
 // SHARE on the customer's property_preferences row, so the saved mowing and
-// preferred days cannot change before the move commits. A preferred_day
-// conflict takes the same row lock.
+// preferred days cannot change before the move commits. A preferred_day or an
+// customer_blackout conflict takes the same row lock.
 const INTERVIEW_ID = /^interview:(.+)$/;
 async function fenceSourceConflict(trx, sourceConflict, service) {
   if (sourceConflict.kind === 'closed_day') {
     await require('../scheduling/blackout-dates').lockClosureState(trx);
     return;
   }
-  if (sourceConflict.kind === 'mowing_day' || sourceConflict.kind === 'preferred_day') {
+  if (sourceConflict.kind === 'mowing_day' || sourceConflict.kind === 'preferred_day' || sourceConflict.kind === 'customer_blackout') {
     await trx('property_preferences').where('customer_id', service.customer_id).forShare().select('id');
     return;
   }
@@ -333,13 +333,13 @@ async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, c
     if (coveredBy(still, fenced)) { check.heldBy = trx; return; }
     fenced = still;
   }
-  throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day, a mowing day or off the saved day');
+  throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day, inside the customer\'s blackout dates, on a mowing day or off the saved day');
 }
 
 // Every row the re-read conflict rests on is already held by the fence.
 function coveredBy(still, fenced) {
   if (still.kind !== fenced.kind) return false;
-  // A closed day, a mowing day or a saved day is held whole by its fence.
+  // A closed day, away dates, a mowing day or a saved day is held whole by its fence.
   if (still.kind !== 'overlap') return true;
   const held = new Set((fenced.with || []).map(String));
   return (still.with || []).every((id) => held.has(String(id)));

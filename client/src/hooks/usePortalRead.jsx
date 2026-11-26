@@ -1,15 +1,47 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useBiometricLock } from '../components/BiometricGate';
 import { isNativeApp } from '../native/platform';
+import { SAVED_READ_KEYS, clearHomeReadsFor, clearSavedHomeFor, readHomeReads, storedHomeIdentity, writeHomeRead } from '../lib/homeSnapshot';
 
 const PortalReadContext = createContext(null);
 export const READ_TIMEOUT_MS = 15000;
 const RESUME_REFRESH_MS = 1000;
 
-// Scoped to the mounted, authenticated property. Nothing is written to browser
-// storage: logout, a different session, or a property change drops these reads.
-export function PortalReadProvider({ enabled, children }) {
-  const cache = useRef(new Map()).current;
+// The cache a provider starts with: the saved home reads for this login and
+// property as unverified entries, or empty.
+function hydrateSavedReads(identity, property) {
+  const cache = new Map();
+  if (!identity || !property) return cache;
+  for (const [key, saved] of Object.entries(readHomeReads(identity, property))) {
+    cache.set(key, { data: saved.data, updatedAt: saved.updatedAt, loading: false, pending: false, verified: false, error: '' });
+  }
+  return cache;
+}
+
+// Scoped to the mounted, authenticated property: logout, a different session, or
+// a property change drops these reads. Browser storage rule (owner 2026-11-25,
+// "the app opens to a real screen in about 1 second on weak signal"): ONLY the
+// 'next-visit' and 'latest-service' reads are saved to localStorage, cut down to
+// what the saved visit card prints (lib/homeSnapshot SAVED_READ_KEYS), under the
+// login identity + property they were read for, and hydrated at mount as
+// unverified (the `saved` card shows until a refresh succeeds). Any eviction
+// deletes the saved reads; an access denial (401/403) deletes the saved account
+// too. Every other read stays in memory only.
+export function PortalReadProvider({ enabled, persistIdentity = null, persistProperty = null, children }) {
+  const cacheRef = useRef(null);
+  if (cacheRef.current === null) cacheRef.current = hydrateSavedReads(enabled ? persistIdentity : null, persistProperty);
+  const cache = cacheRef.current;
+  const persistRef = useRef({ identity: persistIdentity, property: persistProperty });
+  persistRef.current = { identity: enabled ? persistIdentity : null, property: persistProperty };
+  // The login stored in this browser when a read starts; its answer is saved
+  // only if that login is still this provider's login (a late response after a
+  // login change writes nothing, see writeHomeRead).
+  const readStamp = useCallback(() => storedHomeIdentity(), []);
+  const persistRead = useCallback((key, entry, stamp) => {
+    const { identity, property } = persistRef.current;
+    if (stamp !== identity) return;
+    writeHomeRead(identity, property, key, entry.data, entry.updatedAt);
+  }, []);
   const readers = useRef(new Set()).current;
   const invalidationReaders = useRef(new Map()).current;
   const invalidationEpoch = useRef(0);
@@ -51,7 +83,15 @@ export function PortalReadProvider({ enabled, children }) {
     };
   }, [invalidationEpochIsCurrent, invalidationReaders]);
 
-  const evict = useCallback(({ key, clearAll = false, message } = {}) => {
+  const evict = useCallback(({ key, clearAll = false, message, denied = false, identity } = {}) => {
+    // The disk copy goes with the memory copy, also when the reader unmounted;
+    // an access denial deletes the saved account as well, so an offline
+    // relaunch adopts nothing the server just refused. Only the entries of the
+    // login the request belonged to: a denial that lands after another login
+    // has saved its own must not erase those.
+    const diskIdentity = identity === undefined ? persistRef.current.identity : identity;
+    if (denied) clearSavedHomeFor(diskIdentity);
+    else if (clearAll || SAVED_READ_KEYS.includes(key)) clearHomeReadsFor(diskIdentity);
     let targets;
     if (clearAll) {
       cache.clear();
@@ -147,9 +187,11 @@ export function PortalReadProvider({ enabled, children }) {
     online,
     refreshing,
     refresh,
+    persistRead,
+    readStamp,
   }), [
     enabled, cache, evict, getInvalidationEpoch, invalidationEpochIsCurrent,
-    register, registerInvalidation, online, refreshing, refresh,
+    register, registerInvalidation, online, refreshing, refresh, persistRead, readStamp,
   ]);
   return <PortalReadContext.Provider value={value}>{children}</PortalReadContext.Provider>;
 }
@@ -173,6 +215,8 @@ export default function usePortalRead(key, load) {
     invalidationEpochIsCurrent = null,
     register = null,
     registerInvalidation = null,
+    persistRead,
+    readStamp,
   } = portal?.enabled ? portal : {};
   const offline = portal?.enabled && !portal.online;
   const loadRef = useRef(load);
@@ -209,6 +253,7 @@ export default function usePortalRead(key, load) {
   const refresh = useCallback(async ({ preserveVerified = false } = {}) => {
     const attempt = ++sequence.current;
     const attemptEpoch = getInvalidationEpoch?.(key);
+    const stamp = readStamp?.();
     // Background reads preserve a healthy view so they do not collapse scroll
     // or remove focused inputs. Manual retries, offline/error/remounted-cache
     // states remain unverified until success; 401/403 still clear cache below.
@@ -224,7 +269,7 @@ export default function usePortalRead(key, load) {
     const clearDeniedRead = (error) => {
       const denied = portalReadAuthorizationDenied(error);
       if (denied) {
-        if (providerEvict) providerEvict({ clearAll: true, message: error?.message });
+        if (providerEvict) providerEvict({ clearAll: true, message: error?.message, denied: true, identity: stamp });
         else cache?.clear();
       }
       return denied;
@@ -264,6 +309,7 @@ export default function usePortalRead(key, load) {
       if (sequence.current !== attempt || (invalidationEpochIsCurrent && !invalidationEpochIsCurrent(key, attemptEpoch))) return;
       const next = { data, updatedAt: Date.now(), loading: false, pending: false, verified: navigator.onLine !== false, error: '' };
       cache?.set(key, next);
+      persistRead?.(key, next, stamp);
       setState(next);
     } catch (error) {
       // An explicit access denial must not leave cached customer details behind.
@@ -284,7 +330,7 @@ export default function usePortalRead(key, load) {
     } finally {
       clearTimeout(timer);
     }
-  }, [cache, getInvalidationEpoch, invalidationEpochIsCurrent, key, providerEvict]);
+  }, [cache, getInvalidationEpoch, invalidationEpochIsCurrent, key, persistRead, providerEvict, readStamp]);
 
   useEffect(() => registerInvalidation?.(
     key,
@@ -304,9 +350,10 @@ export default function usePortalRead(key, load) {
       if (previous.data === undefined) return previous;
       const next = { ...previous, data: change(previous.data), error: '', loading: false, pending: false, verified: navigator.onLine !== false, updatedAt: Date.now() };
       cache?.set(key, next);
+      persistRead?.(key, next, readStamp?.());
       return next;
     });
-  }, [cache, key]);
+  }, [cache, key, persistRead, readStamp]);
 
   const invalidate = useCallback((message = 'Could not update this information.', { clearAll = false } = {}) => {
     // Scope/auth conflicts are stronger than an ordinary failed refresh: the

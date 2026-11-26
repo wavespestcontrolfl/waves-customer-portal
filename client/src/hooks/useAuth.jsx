@@ -3,6 +3,7 @@ import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 import { clearNativeBadge } from '../native/nativeBadge';
 import { endVisitCards } from '../native/visitCard';
+import { clearSavedHome, homeIdentityKey, readHomeSnapshot, snapshotEligible, writeHomeSnapshot } from '../lib/homeSnapshot';
 
 const AuthContext = createContext(null);
 
@@ -87,6 +88,20 @@ export function tokenPropertyId(token) {
   } catch {
     return null;
   }
+}
+
+// The server rejected the session itself (not an outage or a 5xx).
+function isSessionDenial(err) {
+  return err?.status === 401 || err?.status === 403 || !!err?.sessionExpired;
+}
+
+// Which login a token belongs to: customer, session family, property and actor.
+// A /auth/me answer is published only while the token in use and the token in
+// storage still carry the login that asked (loadCustomer).
+function loginKey(token) {
+  const customerId = tokenCustomerId(token);
+  if (customerId === null || !token) return null;
+  return [customerId, tokenSessionIdentity(token)?.sessionId ?? '', tokenPropertyId(token) ?? '', tokenContactKey(token) ?? ''].join('|');
 }
 
 // Same ASYMMETRIC semantics as api.js sameRequestSession: only the OLD
@@ -175,6 +190,18 @@ export function AuthProvider({ children }) {
     setSelectedProperty(null);
   };
   const [loading, setLoading] = useState(true);
+  // The customer on screen is the saved home screen (lib/homeSnapshot), not yet
+  // confirmed by /auth/me: no money, no payment actions, an "Updating…" note.
+  // Flips false when a fresh load lands or the session ends.
+  const [customerSaved, setCustomerSaved] = useState(false);
+  const customerSavedRef = useRef(false);
+  customerSavedRef.current = customerSaved;
+  // Delete the saved home screen and stop showing it. Every identity or
+  // session boundary below calls this; refs and setters only, so stable.
+  const dropSavedHome = useCallback(() => {
+    clearSavedHome();
+    setCustomerSaved(false);
+  }, []);
   const [error, setError] = useState(null);
   const retryTimer = useRef(null);
   // Property-list reads race: loadCustomer's read, refreshProperties (the
@@ -204,8 +231,22 @@ export function AuthProvider({ children }) {
     const token = localStorage.getItem('waves_token');
     if (token) {
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
+      // Weak signal: paint the last saved home screen at once when it belongs
+      // to THIS login (same customer, session family, property, actor; under
+      // 30 days old). It is part of this mount's epoch: loadCustomer below
+      // replaces it, or a 401/403 deletes it and signs out.
+      const saved = readHomeSnapshot(token);
+      if (saved) {
+        customerRef.current = saved.customer;
+        freshMeRef.current = false;
+        setCustomer(saved.customer);
+        adoptPropertyPayload(saved.properties);
+        setCustomerSaved(true);
+        setLoading(false);
+      }
       loadCustomer();
     } else {
+      clearSavedHome();
       void clearNativeBadge();
       setLoading(false);
     }
@@ -261,11 +302,94 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
+  // The session is DEAD (a 401/403 from the server): every other in-flight auth
+  // response must be discarded too, or its later success would adopt tokens /
+  // repaint the customer and undo this sign-out.
+  const denySession = useCallback(() => {
+    setSessionEpoch(++sessionEpochRef.current);
+    api.clearTokens();
+    dropSavedHome();
+    customerRef.current = null;
+    setCustomer(null);
+    setProperties([]);
+    setPropertiesError(null);
+    setLoading(false);
+  }, [dropSavedHome]);
+
+  // Another tab signed out (the stored token is gone): same end state, with
+  // the property scope and error cleared too.
+  const endSessionLocally = useCallback(() => {
+    setSessionEpoch(++sessionEpochRef.current);
+    api.clearTokens();
+    dropSavedHome();
+    customerRef.current = null;
+    setCustomer(null);
+    setProperties([]);
+    resetPropertyScope();
+    setPropertiesError(null);
+    setError(null);
+    setLoading(false);
+  }, [dropSavedHome]);
+
+  // The held tabs open only once the saved selection is reconciled by the
+  // property read that WON (adopted it, or ran the fresh /auth/me fallback)
+  // AND the fresh /auth/me has landed. Until then customerSaved stays up.
+  const freshMeRef = useRef(false);
+  const releaseSavedHold = useCallback(() => {
+    if (freshMeRef.current) setCustomerSaved(false);
+  }, []);
+
+  // A moved login (another tab's login adopted into api.token, or published to
+  // storage) discards an answer, ends everything still in flight and loads
+  // again under the current login. loadCustomerRef breaks the cycle with
+  // loadCustomer, which uses this too.
+  const loadCustomerRef = useRef(null);
+  const restartUnderCurrentLogin = useCallback(() => {
+    const stored = localStorage.getItem('waves_token');
+    if (stored && loginKey(stored) !== loginKey(api.token)) api.adoptTokens(stored, localStorage.getItem('waves_refresh_token'));
+    setSessionEpoch(++sessionEpochRef.current);
+    dropSavedHome();
+    customerRef.current = null;
+    setCustomer(null);
+    setProperties([]);
+    resetPropertyScope();
+    setPropertiesError(null);
+    setLoading(true);
+    loadCustomerRef.current();
+  }, [dropSavedHome]);
+
+  // Every auth read (loadCustomer, refreshProperties) starts one of these
+  // BEFORE its request leaves, and asks it before applying ANY outcome: an
+  // answer, a failure, or a session denial. It is true when the outcome must
+  // be dropped: the session epoch moved (a load for the new epoch is already
+  // running), the stored token was removed (a sign-out in another tab whose
+  // storage event has not run), or the login that asked is no longer the one
+  // in use or in storage (then the current login loads again). A denial for a
+  // replaced login therefore never clears the new login's credentials.
+  const startRequestGuard = useCallback(() => {
+    const epoch = sessionEpochRef.current;
+    const requestLogin = loginKey(api.token);
+    return () => {
+      if (sessionEpochRef.current !== epoch) return true;
+      if (api.token && !localStorage.getItem('waves_token')) {
+        endSessionLocally();
+        return true;
+      }
+      const stored = localStorage.getItem('waves_token');
+      if (loginKey(api.token) === requestLogin && !(stored && loginKey(stored) !== requestLogin)) return false;
+      restartUnderCurrentLogin();
+      return true;
+    };
+  }, [endSessionLocally, restartUnderCurrentLogin]);
+
   const loadCustomer = useCallback(async (attempt) => {
     // `refreshCustomer` gets used as an event handler, so `attempt` may be
     // anything — only our own retry chain passes a number.
     const n = Number.isFinite(Number(attempt)) ? Number(attempt) : 0;
-    const epoch = sessionEpochRef.current;
+    // Who this request is for, captured before it leaves: the saved screen is
+    // written only if the same login still holds the token afterwards.
+    const requestIdentity = homeIdentityKey(api.token);
+    const superseded = startRequestGuard();
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -275,20 +399,27 @@ export function AuthProvider({ children }) {
       // The session changed while this response was in flight (logout,
       // property switch, cross-tab adoption) — a load for the NEW epoch is
       // already running; applying this one would paint a stale identity.
-      if (sessionEpochRef.current !== epoch) return;
+      if (superseded()) return;
       // Cancelled accounts and contact sessions never mount the bell,
       // including on a fresh launch (sessionMountsBell).
       if (!sessionMountsBell(data)) void clearNativeBadge();
       customerRef.current = data;
+      freshMeRef.current = true;
       setCustomer(data);
+      // A cancelled or contact session has a narrower screen that is never
+      // saved: drop the saved account AND the saved home reads.
+      if (!snapshotEligible(data)) clearSavedHome();
       const propertyReadSeq = ++propertyReadSeqRef.current;
       try {
         const propertyData = await api.getAuthProperties({ scope: 'saved' });
-        if (sessionEpochRef.current !== epoch) return;
+        if (superseded()) return;
         // Superseded by a newer list read: that read owns the selection.
         if (propertyReadSeqRef.current === propertyReadSeq) {
           adoptPropertyPayload(propertyData);
           setPropertiesError(null);
+          // Save this account for the next weak-signal start (money stripped).
+          writeHomeSnapshot({ token: api.token, requestIdentity, me: data, propertyPayload: propertyData });
+          releaseSavedHold();
         }
       } catch (propertyErr) {
         // Same staleness rule as the success path: if the session changed
@@ -296,7 +427,13 @@ export function AuthProvider({ children }) {
         // DEAD session — falling through would drop the loading screen
         // (setLoading(false) below) while the previous customer's state is
         // still rendered under the new token.
-        if (sessionEpochRef.current !== epoch) return;
+        if (superseded()) return;
+        // The server DENIED the session (not an outage): same cleanup as a
+        // /auth/me 401, before any transient fallback.
+        if (isSessionDenial(propertyErr)) {
+          denySession();
+          return;
+        }
         // A newer list read is in flight or has landed: it owns the
         // selection and the error state; this stale failure changes nothing.
         if (propertyReadSeqRef.current === propertyReadSeq) {
@@ -306,6 +443,7 @@ export function AuthProvider({ children }) {
           // single property, and surface a retry in the account menu.
           console.error('Failed to load service properties:', propertyErr);
           setPropertiesError('Other service properties are temporarily unavailable.');
+          releaseSavedHold();
         }
       }
       setError(null);
@@ -319,22 +457,14 @@ export function AuthProvider({ children }) {
       // A stale failure must act on NOTHING: in particular, a 401 for a
       // token that has since been replaced would clear the NEW session's
       // credentials.
-      if (sessionEpochRef.current !== epoch) return;
+      if (superseded()) return;
+      // A failure for a login that has since been replaced says nothing about
+      // the current one (a 401 must not clear its credentials).
       console.error('Failed to load customer:', err);
       // Only a real auth rejection invalidates the session — a network drop
       // or server 5xx on launch must not wipe a valid 30-day login.
-      if (err?.status === 401 || err?.status === 403 || err?.sessionExpired) {
-        // The session is DEAD — every other in-flight auth response
-        // (a concurrent property switch, another load) must be discarded
-        // too, or its later success would adopt tokens / repaint the
-        // customer and undo this sign-out.
-        setSessionEpoch(++sessionEpochRef.current);
-        api.clearTokens();
-        customerRef.current = null;
-        setCustomer(null);
-        setProperties([]);
-        setPropertiesError(null);
-        setLoading(false);
+      if (isSessionDenial(err)) {
+        denySession();
         return;
       }
       // Transient failure: keep the session check PENDING instead of letting
@@ -355,7 +485,8 @@ export function AuthProvider({ children }) {
       return;
     }
     setLoading(false);
-  }, []);
+  }, [dropSavedHome, denySession, releaseSavedHold, startRequestGuard]);
+  loadCustomerRef.current = loadCustomer;
 
   // Cross-tab session sync. Logout in tab A only clears tab B's localStorage —
   // tab B's in-memory api.token kept working until its next 401. React to the
@@ -374,15 +505,7 @@ export function AuthProvider({ children }) {
         retryTimer.current = null;
       }
       if (!token) {
-        setSessionEpoch(++sessionEpochRef.current);
-        api.clearTokens();
-        customerRef.current = null;
-        setCustomer(null);
-        setProperties([]);
-        resetPropertyScope();
-        setPropertiesError(null);
-        setError(null);
-        setLoading(false);
+        endSessionLocally();
         return;
       }
       const nextId = tokenCustomerId(token);
@@ -405,7 +528,11 @@ export function AuthProvider({ children }) {
       // BEFORE the switch must not land afterwards and paint the previous
       // selection — so it counts as an identity transition for the epoch.
       const propertyChanged = tokenPropertyId(api.token) !== tokenPropertyId(token);
-      if (familyChanged || propertyChanged) setSessionEpoch(++sessionEpochRef.current);
+      if (familyChanged || propertyChanged) {
+        setSessionEpoch(++sessionEpochRef.current);
+        // The saved home screen is bound to the old session family.
+        clearSavedHome();
+      }
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (propertyChanged && !identityChanged) {
         // The previous selection is gone the moment the token changes, and
@@ -417,15 +544,20 @@ export function AuthProvider({ children }) {
         // honored (/auth/me propertyScope, then the list), and its retry
         // branch keeps the shell pending on failure.
         setSelectedProperty(null);
+        dropSavedHome();
         customerRef.current = null;
         setCustomer(null);
         setLoading(true);
       }
-      if (identityChanged) {
+      // A new session family for the same customer replaces the family the
+      // SAVED screen was loaded under: do not keep it up while the new load
+      // stalls offline (same go-pending pattern as an identity change).
+      if (identityChanged || (familyChanged && customerSavedRef.current)) {
         // The token now points at a DIFFERENT customer — the old one must not
         // keep rendering (and firing actions) against it while loadCustomer
         // is in flight or retrying. Same go-pending pattern as switchProperty;
         // a same-customer refresh skips this so working tabs don't flash.
+        dropSavedHome();
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
@@ -438,7 +570,7 @@ export function AuthProvider({ children }) {
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
-  }, [loadCustomer]);
+  }, [loadCustomer, dropSavedHome, endSessionLocally]);
 
   const sendCode = async (phone) => {
     setError(null);
@@ -463,6 +595,7 @@ export function AuthProvider({ children }) {
       if (sessionEpochRef.current !== epoch) return false;
       setSessionEpoch(++sessionEpochRef.current);
       api.setTokens(data.token, data.refreshToken);
+      dropSavedHome();
       resetPropertyScope();
       setProperties(data.properties || []);
       setPropertiesError(null);
@@ -482,6 +615,9 @@ export function AuthProvider({ children }) {
     // — without this, a delayed switch response re-writes tokens after
     // sign-out and walks the user back into the portal.
     setSessionEpoch(++sessionEpochRef.current);
+    // The saved home screen goes now, not when the bounded native cleanup
+    // below finally clears the tokens.
+    dropSavedHome();
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -538,24 +674,48 @@ export function AuthProvider({ children }) {
     // Same staleness rule as loadCustomer: a response (or failure) that
     // started under a superseded session must not overwrite the new
     // session's property list or surface its error.
-    const epoch = sessionEpochRef.current;
+    const superseded = startRequestGuard();
+    const requestIdentity = homeIdentityKey(api.token);
     const seq = ++propertyReadSeqRef.current;
     try {
       const data = await api.getAuthProperties({ scope: 'saved' });
-      if (sessionEpochRef.current !== epoch) return false;
+      if (superseded()) return false;
       // Superseded by a newer list read (uncapped codex r1s P1): a delayed
       // response must not restore a house a newer read already retired.
       if (propertyReadSeqRef.current !== seq) return false;
       adoptPropertyPayload(data);
       setPropertiesError(null);
+      // This read won: it reconciles the saved selection too, and the saved
+      // account follows it (the same identity-checked writer as the load), so
+      // an offline relaunch never adopts a list this read just replaced.
+      if (freshMeRef.current && customerRef.current) {
+        writeHomeSnapshot({ token: api.token, requestIdentity, me: customerRef.current, propertyPayload: data });
+      }
+      releaseSavedHold();
       return true;
     } catch (err) {
-      if (sessionEpochRef.current !== epoch || propertyReadSeqRef.current !== seq) return false;
+      if (superseded()) return false;
+      // The server DENIED the session (not an outage): same cleanup as a
+      // /auth/me 401, for any read of the session (winning or not), and before
+      // the transient fallback below can release the saved-account hold.
+      if (isSessionDenial(err)) {
+        denySession();
+        return false;
+      }
+      if (propertyReadSeqRef.current !== seq) return false;
       console.error('Failed to reload service properties:', err);
       setPropertiesError('Other service properties are temporarily unavailable.');
+      // While the saved screen is still waiting to be reconciled, a winning
+      // failure over a fresh /auth/me runs the same fallback the load would
+      // have, so the hold is not stuck behind a read the newer one replaced.
+      // An ordinary later failure keeps the last successful selection.
+      if (customerSavedRef.current && freshMeRef.current && customerRef.current) {
+        adoptScopeFromMe(customerRef.current);
+        releaseSavedHold();
+      }
       return false;
     }
-  }, []);
+  }, [releaseSavedHold, adoptScopeFromMe, denySession, startRequestGuard]);
 
   // target: a profile id (string — every shipped caller) or a saved-property
   // pair { customerId, propertyId } (GATE_APP_PROPERTY_SCOPE). A same-profile
@@ -575,6 +735,8 @@ export function AuthProvider({ children }) {
       if (sessionEpochRef.current !== epoch) return false;
       setSessionEpoch(++sessionEpochRef.current);
       api.setTokens(data.token, data.refreshToken);
+      // A different property is a different saved screen.
+      dropSavedHome();
       // Re-point this device's push subscription at the newly selected
       // customer — otherwise pushes keep flowing to the previous property.
       // (The subscription follows the customer ROW; a same-profile saved-
@@ -616,6 +778,7 @@ export function AuthProvider({ children }) {
       propertyScope,
       selectedProperty,
       loading,
+      customerSaved,
       error,
       isAuthenticated: !!customer,
       // Contact session (GATE_CONTACT_LOGIN): an on-location contact signed

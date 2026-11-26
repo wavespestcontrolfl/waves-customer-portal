@@ -899,12 +899,12 @@ function clauseIsLabelClaim(input) {
  * still makes a label-context timing or clearance claim. Label timing is
  * given only by copying a LABEL FACTS sentence, so nothing else may claim it.
  */
-function hasUngroundedLabelClaim(strippedText) {
+function hasUngroundedLabelClaim(strippedText, bankSentences = null) {
   if (overCap(strippedText, MAX_REPLY_CHARS)) return true;
   const text = canonText(strippedText).toLowerCase();
   // The clause rules are English: another language's timing words are held outright.
   // (a verbatim COMPANY FACTS sentence is owner-approved English, however few function words it has)
-  if (nonEnglishTimingWords(text) || hasUnsupportedLanguage(markCompanySentences(canonText(strippedText)))) return true;
+  if (nonEnglishTimingWords(text) || hasUnsupportedLanguage(markCompanySentences(canonText(strippedText), bankSentences))) return true;
   // The reply as a whole is about label timing when it copied a sentence or
   // mentions drying, rain, pets or a stay-off anywhere.
   const replyContext = /labelsentence/.test(text) || LABEL_CONTEXT_RE.test(text);
@@ -1412,25 +1412,83 @@ const isCompanyLine = (sentence) => sentence === 'companyline';
 // each sentence of the reply is judged on its own.
 const isCompanySentence = (sentence) => sentence === 'companysentence';
 let companySentenceCache = null;
+// The copyable sentences of one fact line: each sentence, and for a "Label: text" sentence its text too.
+function copyableSentencesOf(fact) {
+  const out = [];
+  for (const sentence of fact.split(/(?<=[.!?])\s+/)) {
+    out.push(sentence);
+    const text = /^[A-Z][^:.]{0,40}:\s+(.+)$/.exec(sentence);
+    if (text) out.push(text[1]);
+  }
+  return out;
+}
 function companyFactSentences() {
   if (!companySentenceCache) {
     const facts = require('./sms-company-facts').COMPANY_FACTS;
     const out = new Set();
-    for (const fact of facts) {
-      for (const sentence of fact.split(/(?<=[.!?])\s+/)) {
-        out.add(sentence);
-        const text = /^[A-Z][^:.]{0,40}:\s+(.+)$/.exec(sentence);
-        if (text) out.add(text[1]);
-      }
-    }
+    for (const fact of facts) for (const sentence of copyableSentencesOf(fact)) out.add(sentence);
     companySentenceCache = [...out].filter((sentence) => !COMPANY_RAIN_LINE_TEXT_RE.test(sentence));
   }
   return companySentenceCache;
 }
-// the copyable company sentences of `canon` (canonText output) replaced by a marker, longest first
-function markCompanySentences(canon) {
+// Bank sentences (owner-approved lines of company-facts-bank, read from a draft's OWN stored block or its send-time snapshot) are GENERAL
+// company sentences only. A bank sentence never authorizes a label, re-entry, rainfast or timing answer (AGENTS.md: that guidance is
+// LABEL FACTS only): a sentence that is a question, carries answer force ("Absolutely.", "Yes."), a clearance, a duration or clock time, or
+// any label-context word (rain, dry, pets, wait ...) is not copyable here, and only whole sentences or whole lines count, never a piece
+// after a colon. Anything that is not a plain bounded string without a digit is dropped too: the bank states no amount.
+const BANK_SENTENCE_MAX = 400;
+const BANK_SENTENCES_MAX = 80;
+// One sentence of a bank line, on its own. The language screens run HERE, before a copy is ever masked: a bank line may be written in
+// another language, and the unsupported-language timing words ("trocken") are seen only by hasUnsupportedLanguage, which reads a masked
+// copy as one inert marker.
+// Answer force is read like the reply guard reads a reply: on the sentence, on every clause of it, and on each with the friendly ends
+// (greeting, thanks, apology) peeled off, so "Thanks, absolutely." and "Hello, yes." carry their answer past no screen.
+function carriesAnswerForce(text) {
+  const clauses = text.split(/\s*[,;:]\s*|\s+[-\u2013\u2014]+\s+/).filter((c) => c.trim());
+  return [text, ...clauses].some((part) => hasAnswerForce(part) || hasAnswerForce(peelFriendlyEnds(part)));
+}
+function isNeutralBankPiece(piece) {
+  const text = canonText(piece).toLowerCase();
+  return !/\?/.test(text) && !carriesAnswerForce(text) && !LABEL_CONTEXT_RE.test(text) && !hasDuration(text) && !hasClockTime(text)
+    && !CLEARANCE_ANY_RE.test(text) && !RAINFAST_RE.test(text) && !UNTIL_DRY_HOLD_RE.test(text)
+    && !looksNonEnglish(piece) && !hasUnsupportedLanguage(piece) && !nonEnglishTimingWords(text);
+}
+// A unit (a sentence, or a whole line) is neutral only when EVERY sentence in it passes on its own: "We service docks. Absolutely." is not,
+// because the answer word reads as an answer only at the start of its own sentence.
+const isNeutralBankSentence = (unit) => String(unit).split(/(?<=[.!?])\s+/).filter((piece) => piece.trim()).every(isNeutralBankPiece);
+function cleanBankSentences(list) {
+  if (!Array.isArray(list)) return [];
+  const out = new Set();
+  for (const sentence of list) {
+    if (typeof sentence === 'string' && sentence.trim() && sentence.length <= BANK_SENTENCE_MAX && !/\p{N}/u.test(sentence)
+      && !COMPANY_RAIN_LINE_TEXT_RE.test(sentence) && isNeutralBankSentence(sentence)) out.add(sentence);
+    if (out.size >= BANK_SENTENCES_MAX) break;
+  }
+  return [...out];
+}
+// The copyable units of one bank line: the whole line and each of its sentences (no "Label: text" piece).
+const bankUnitsOf = (line) => [line, ...line.split(/(?<=[.!?])\s+/)];
+/**
+ * The copyable bank sentences of a stored facts block: the 'MORE COMPANY FACTS' section found by exact structure, and only lines whose
+ * text the owner approved by `opts.at`, the draft's build time (sms-company-facts bankFactLinesFrom: a section forged from customer profile text grounds nothing).
+ * [] when the block has none. The words of a bank line are NOT added to the English lexicon: it is process-wide, and a stored draft's
+ * vocabulary must not change other customers' language checks (a copy is marked out of the reply before the language check reads it).
+ */
+function bankSentencesFromBlock(factsBlock, opts) {
+  const lines = require('./sms-company-facts').bankFactLinesFrom(factsBlock, opts);
+  return lines.length ? cleanBankSentences(lines.flatMap(bankUnitsOf)) : [];
+}
+// The bank sentences a reply copies whole (what a draft's snapshot carries to its send-time recheck).
+function bankSentencesCopiedIn(reply, bankSentences) {
+  const canon = canonText(reply);
+  return cleanBankSentences(bankSentences).filter((sentence) => completeCopies(canon, sentence).length > 0);
+}
+// the copyable company sentences of `canon` (canonText output) replaced by a marker, longest first; `bankSentences`: the draft's own bank sentences
+function markCompanySentences(canon, bankSentences = null) {
   let out = canon;
-  for (const sentence of [...companyFactSentences()].sort((a, b) => b.length - a.length)) {
+  const extra = bankSentences && bankSentences.length ? cleanBankSentences(bankSentences) : [];
+  const all = extra.length ? [...new Set([...companyFactSentences(), ...extra])] : companyFactSentences();
+  for (const sentence of [...all].sort((a, b) => b.length - a.length)) {
     for (const { start, end } of completeCopies(out, sentence).reverse()) out = `${out.slice(0, start)} ; companysentence ; ${out.slice(end)}`;
   }
   return out;
@@ -1512,8 +1570,8 @@ function isClarificationQuestion(sentence) {
 
 // The non-question sentences of a stripped reply (stripLabelSentences output, sanctioned idiom swapped out),
 // with the COMPANY FACTS rain line pre-marked for a rain question.
-function replySentences(strippedText, asked) {
-  const text = markCompanySentences(canonText(strippedText)).toLowerCase();
+function replySentences(strippedText, asked, bankSentences = null) {
+  const text = markCompanySentences(canonText(strippedText), bankSentences).toLowerCase();
   const parts = (asked.includes('rain') ? text.replace(COMPANY_RAIN_LINE_RE, ' . companyline . ') : text).split(/([!?\n;]+|\.(?!\d))/);
   const out = [];
   for (let i = 0; i < parts.length; i += 2) {
@@ -1528,13 +1586,13 @@ function replySentences(strippedText, asked) {
  * sentence that is not an allowed type. With `asked` === null (the question is unknown: no snapshot, no
  * stored inbound) only an answer-shaped sentence that is not a hand-off / sanctioned / company line is held.
  */
-function answersAskedLabelQuestion(strippedText, asked) {
+function answersAskedLabelQuestion(strippedText, asked, bankSentences = null) {
   if (overCap(strippedText, MAX_REPLY_CHARS)) return true;
   if (asked === null) {
-    return replySentences(strippedText, ['rain']).some((sentence) => hasAnswerForce(sentence.replace(WAIT_ALLOWED_RE, ' ')) && !CONTENT_SENTENCE_TYPES.slice(0, 5).some((allowed) => allowed(peelFriendlyEnds(sentence))));
+    return replySentences(strippedText, ['rain'], bankSentences).some((sentence) => hasAnswerForce(sentence.replace(WAIT_ALLOWED_RE, ' ')) && !CONTENT_SENTENCE_TYPES.slice(0, 5).some((allowed) => allowed(peelFriendlyEnds(sentence))));
   }
   if (!Array.isArray(asked) || !asked.length) return false;
-  const sentences = replySentences(strippedText, asked);
+  const sentences = replySentences(strippedText, asked, bankSentences);
   if (sentences.some((sentence) => !isAllowedSentence(sentence))) return true;
   return copiesDoNotAnswerAskedKinds(sentences, asked);
 }
@@ -1569,10 +1627,10 @@ function stripHandoffDeadlines(text) {
 }
 const isHandoffBase = (base) => isDeferral(peelFriendlyEnds(base)) || /^(?:.*\s)?sanctioned_idiom\b[^.]*\bconfirms?\s+(?:the\s+|your\s+)?timing$/.test(base);
 
-function replyClaimsUngroundedLabelTiming(body, sectionText, asked = []) {
+function replyClaimsUngroundedLabelTiming(body, sectionText, asked = [], bankSentences = null) {
   if (overCap(body, MAX_REPLY_CHARS)) return true;
   const stripped = stripLabelSentences(stripHandoffDeadlines(sanctionSafeOnceDry(body)), sectionText);
-  return hasUngroundedLabelClaim(stripped) || answersAskedLabelQuestion(stripped, asked);
+  return hasUngroundedLabelClaim(stripped, bankSentences) || answersAskedLabelQuestion(stripped, asked, bankSentences);
 }
 
 // ---- Send-time recheck ---------------------------------------------------
@@ -1616,7 +1674,7 @@ function askedForSend(snapshot, inbound) {
 
 async function labelFactsSendBlockReason({ snapshot, body, inbound, conn = db, today } = {}) {
   const sentences = snapshot && Array.isArray(snapshot.sentences) ? snapshot.sentences : [];
-  if (replyClaimsUngroundedLabelTiming(body, sentences.map((s) => `- ${s}`).join('\n'), askedForSend(snapshot, inbound))) return 'label_facts_unauthorized_claim';
+  if (replyClaimsUngroundedLabelTiming(body, sentences.map((s) => `- ${s}`).join('\n'), askedForSend(snapshot, inbound), snapshot && snapshot.bank_sentences)) return 'label_facts_unauthorized_claim';
   const present = sentences.filter((s) => copiesSentence(body, s));
   if (!present.length) return null;
   if (!snapshot.customer_id) return 'label_facts_recheck_no_customer';
@@ -1820,6 +1878,8 @@ module.exports = {
   groundedLineKinds,
   stripLabelSentences,
   hasUngroundedLabelClaim,
+  bankSentencesFromBlock,
+  bankSentencesCopiedIn,
   labelFactsSnapshotFor,
   labelFactsSendBlockReason,
   inboundRefersToOtherVisit,

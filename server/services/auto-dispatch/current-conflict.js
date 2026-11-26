@@ -23,6 +23,9 @@
  *               (techScopedConfirmActive), a row assigned to a different
  *               technician (owner 2026-10-03: only the same technician or an
  *               unassigned row counts);
+ *   customer_blackout  after a closed day: the visit's date is inside the
+ *               customer's blackout dates (owner 2026-11-26 "move away"). Raises the
+ *               needs-a-person notice when no slot fits.
  *   mowing_day  only when
  *               neither of the above applies: a unit with a Lawn Care Service
  *               visit sits on the customer's mowing day or a day next to it
@@ -206,8 +209,25 @@ async function preferredDayConflict(service, conn, dateStr) {
   return { kind: 'preferred_day', date: dateStr, preferred_days: days };
 }
 
+// CUSTOMER BLACKOUT (owner 2026-11-26 "move away", replay audit): the office
+// set do-not-come dates on the customer's profile
+// (property_preferences.blackout_start/end; not Away Watch, where service goes
+// on) and the visit's date is inside them. Before this they only filtered
+// destination slots, so a visit booked before the dates were set stayed with
+// no notice. Read here
+// for the same reason as the saved day. A person hears about it when no slot
+// fits (index.js standingConflict, needs-person-notice.js).
+async function customerBlackoutConflict(service, conn, dateStr) {
+  const row = await conn('property_preferences').where('customer_id', service.customer_id).first('blackout_start', 'blackout_end');
+  const { normalizePreferences } = require('./preferences');
+  const off = normalizePreferences(row, service.service_type).blackout;
+  if (!off || !(dateStr >= off.start && dateStr <= off.end)) return null;
+  return { kind: 'customer_blackout', date: dateStr, start: off.start, end: off.end };
+}
+
 /**
  * The visit's conflict, or null. `{ kind: 'closed_day', date }`,
+ * `{ kind: 'customer_blackout', date, start, end }`,
  * `{ kind: 'overlap', date, with: [row ids] }` or
  * `{ kind: 'mowing_day', date, mowing_days: ['Mon', ...] }` or
  * `{ kind: 'preferred_day', date, preferred_days: [3] }` — ids and codes only.
@@ -222,6 +242,8 @@ async function currentConflict(service, ctx, excludeIds) {
   // fails and the run says so) instead of reading "open" and leaving the
   // visit on a closed day unseen (Codex #6207 r12 P2).
   if (await isBlackoutDate(dateStr, ctx.db, { strict: true })) return { kind: 'closed_day', date: dateStr };
+  const blackout = await customerBlackoutConflict(service, ctx.db, dateStr);
+  if (blackout) return blackout;
   const unitIds = excludeIds || new Set([String(service.id)]);
   const ids = await overlappingStopIds(service, ctx, unitIds, dateStr);
   if (ids.length) return { kind: 'overlap', date: dateStr, with: ids };
@@ -230,4 +252,4 @@ async function currentConflict(service, ctx, excludeIds) {
 
 // isOtherStop and samePlaceIdsAt are also the plan writers' taken-hour rule
 // (scheduling/plan-taken-hour.js).
-module.exports = { currentConflict, isOtherStop, samePlace, samePlaceIdsAt, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds, mowingDayConflict, preferredDayConflict } };
+module.exports = { currentConflict, isOtherStop, samePlace, samePlaceIdsAt, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds, mowingDayConflict, preferredDayConflict, customerBlackoutConflict } };
