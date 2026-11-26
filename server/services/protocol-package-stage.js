@@ -17,17 +17,28 @@
 //
 // It is true only when all of these hold:
 //   - the visit is finite (recurring_ongoing === false); an open-ended series uses the same link;
-//   - the visit's program is one sold as a package (PACKAGE_PROGRAMS). A finite series of any other program (a seasonal
-//     mosquito plan, a cancelled quarterly pest plan) repeats one card;
-//   - an earlier visit of the series is finite, the same program, a treatment (not an inspection or a scope review: the cards
-//     the program's follow-up rule replaces), dated before this visit, and not called off. With a cancelled or skipped first
-//     visit, the next one is the first treatment in fact, and the one after it is a later visit again.
+//   - the visit is a package service (isPackageService): by its catalog key when it has one, else by its name's program. A
+//     finite series of anything else (a seasonal mosquito plan, a cancelled quarterly pest plan, an exterior roach knockdown,
+//     which has no follow-up) repeats one card;
+//   - an earlier visit of the series is finite, a package service of the same program, a treatment (not an inspection or a
+//     scope review: the cards the program's follow-up rule replaces), dated before this visit, and not called off. With a
+//     cancelled or skipped first visit, the next one is the first treatment in fact, and the one after it is a later visit
+//     again. The series' first row is read the same way: moved to a date after a later row, it is the later visit.
 // A read error is thrown, not answered: the caller's own error path shows no card or no defaults, never the first-treatment
 // card on an unknown stage.
 
 const { MATCH_RULES, matchServiceProtocol } = require('./protocol-matcher');
 
+const { PACKAGE_FOLLOWUP_SERVICE_KEYS } = require('./package-followup-booking');
+
 const PACKAGE_PROGRAMS = new Set(['cockroach', 'flea', 'bed_bug']);
+// The catalog services sold as a package of treatments: the two-treatment set the booking side auto-books a visit 2 for
+// (package-followup-booking.js), and the German cockroach cleanouts the cockroach visit contract lists beside them
+// (visit-facts-contract.js). A known key outside this set is not a package, whatever its program: the exterior roach
+// knockdown (pest_initial_palmetto_knockdown) is a cockroach card with no follow-up.
+const PACKAGE_SERVICE_KEYS = new Set([...PACKAGE_FOLLOWUP_SERVICE_KEYS, 'german_roach', 'german_roach_initial']);
+// A row booked before the catalog link has no key: its name decides, and the exterior knockdown card is still not a package.
+const NO_FOLLOWUP_CARDS = new Set(['american_roach_exterior']);
 // An earlier visit in one of these states happened or is still planned.
 const VISIT_STANDS = new Set(['pending', 'confirmed', 'en_route', 'on_site', 'completed', 'complete']);
 
@@ -36,8 +47,18 @@ function dayOf(value) {
   return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
 }
 
+function keyOf(row) {
+  return row.service_key_snapshot || row.catalog_service_key || null;
+}
+
 function cardOf(row, protocols) {
-  return matchServiceProtocol(protocols, row.service_type, { serviceKey: row.service_key_snapshot || row.catalog_service_key || null });
+  return matchServiceProtocol(protocols, row.service_type, { serviceKey: keyOf(row) });
+}
+
+function isPackageService(row, card) {
+  if (!PACKAGE_PROGRAMS.has(card.programKey)) return false;
+  const key = keyOf(row);
+  return key ? PACKAGE_SERVICE_KEYS.has(String(key)) : !NO_FOLLOWUP_CARDS.has(card.reason);
 }
 
 // Whether a card of the program is a treatment a later visit follows: the cards its follow-up rule replaces (followupOf), the
@@ -50,19 +71,20 @@ function isTreatmentCard(programKey, reason) {
 
 // visit: { id, recurring_parent_id, recurring_ongoing }.
 async function isLaterPackageVisit(dbh, visit, { protocols = null } = {}) {
-  const parentId = visit?.recurring_parent_id;
-  if (!dbh || !parentId || visit.id == null || visit.recurring_ongoing !== false) return false;
-  if (String(visit.id) === String(parentId)) return false;
+  if (!dbh || visit?.id == null || visit.recurring_ongoing !== false) return false;
+  // The series is keyed by its first row: this visit's parent, or this visit itself when it is that first row.
+  const seriesId = visit.recurring_parent_id || visit.id;
   const rows = await dbh('scheduled_services as ps')
     .leftJoin('services as sv', 'ps.service_id', 'sv.id')
-    .where(function series() { this.where('ps.id', parentId).orWhere('ps.recurring_parent_id', parentId); })
+    .where(function series() { this.where('ps.id', seriesId).orWhere('ps.recurring_parent_id', seriesId); })
     .select('ps.id', 'ps.status', 'ps.scheduled_date', 'ps.service_type', 'ps.recurring_ongoing', 'ps.service_key_snapshot', 'sv.service_key as catalog_service_key');
   const series = Array.isArray(rows) ? rows : [];
+  if (series.length < 2) return false;
   const self = series.find((row) => String(row.id) === String(visit.id));
   if (!self || self.recurring_ongoing !== false) return false;
   const protocolSet = protocols || require('../config/protocols.json');
-  const program = cardOf(self, protocolSet).programKey;
-  if (!PACKAGE_PROGRAMS.has(program)) return false;
+  const ownCard = cardOf(self, protocolSet);
+  if (!isPackageService(self, ownCard)) return false;
   const ownDay = dayOf(self.scheduled_date);
   if (!ownDay) return false;
   return series.some((row) => {
@@ -71,8 +93,8 @@ async function isLaterPackageVisit(dbh, visit, { protocols = null } = {}) {
     const day = dayOf(row.scheduled_date);
     if (!day || day >= ownDay) return false;
     const card = cardOf(row, protocolSet);
-    return card.programKey === program && isTreatmentCard(program, card.reason);
+    return card.programKey === ownCard.programKey && isPackageService(row, card) && isTreatmentCard(card.programKey, card.reason);
   });
 }
 
-module.exports = { isLaterPackageVisit, PACKAGE_PROGRAMS };
+module.exports = { isLaterPackageVisit, PACKAGE_PROGRAMS, PACKAGE_SERVICE_KEYS };

@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../models/db');
 const adminProtocolsRouter = require('../routes/admin-protocols');
-const { isLaterPackageVisit } = require('../services/protocol-package-stage');
+const { isLaterPackageVisit, PACKAGE_SERVICE_KEYS } = require('../services/protocol-package-stage');
 
 const PARENT = '11111111-1111-4111-8111-111111111111';
 const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
@@ -71,13 +71,41 @@ describe('isLaterPackageVisit', () => {
     expect(await later([row(generic), self(generic)])).toBe(false);
   });
 
-  test('a visit with no parent link, no id, or in an open-ended series is never read', async () => {
-    for (const visit of [link({ recurring_parent_id: null }), link({ recurring_ongoing: true }), link({ recurring_ongoing: null }), link({ id: PARENT }), link({ id: null }), null]) {
+  test('a visit with no id, or in an open-ended series, is never read', async () => {
+    for (const visit of [link({ recurring_ongoing: true }), link({ recurring_ongoing: null }), link({ id: null }), null]) {
       const dbh = stageDb({ series: [row(), self()] });
       expect(await isLaterPackageVisit(dbh, visit)).toBe(false);
       expect(dbh.calls).toEqual([]);
     }
     expect(await isLaterPackageVisit(null, link())).toBe(false);
+  });
+
+  test('the first row of the series is read too: moved after a later row, it is the later visit', async () => {
+    // Staff moved the first row to Dec 20; the linked row on Dec 15 is now the first treatment.
+    const series = [row({ status: 'pending', scheduled_date: '2026-12-20' }), self({ status: 'completed' })];
+    expect(await later(series, link())).toBe(false);
+    expect(await later(series, { id: PARENT, recurring_parent_id: null, recurring_ongoing: false })).toBe(true);
+    // In date order the first row stays the first treatment, and a one-time visit with no series is nothing.
+    expect(await later([row(), self()], { id: PARENT, recurring_parent_id: null, recurring_ongoing: false })).toBe(false);
+    expect(await later([row()], { id: PARENT, recurring_parent_id: null, recurring_ongoing: false })).toBe(false);
+  });
+
+  test('a known catalog key outside the package set is not a package, whatever its card', async () => {
+    // The exterior roach knockdown is a cockroach card with no follow-up.
+    const knockdown = { service_type: 'Initial Native Roach Knockdown Service', service_key_snapshot: 'pest_initial_palmetto_knockdown' };
+    expect(await later([row(knockdown), self(knockdown)])).toBe(false);
+    // The same service booked before the catalog link (no key): its card says so.
+    const legacyKnockdown = { ...knockdown, service_key_snapshot: null };
+    expect(await later([row(legacyKnockdown), self(legacyKnockdown)])).toBe(false);
+    // A package visit after a knockdown is still its first treatment.
+    expect(await later([row(knockdown), self()])).toBe(false);
+    // Every package key counts.
+    for (const key of PACKAGE_SERVICE_KEYS) {
+      const name = { flea_tick: 'Flea Control Service', bed_bug_treatment: 'Bed Bug Treatment Service' }[key] || 'Cockroach Treatment Service';
+      const visit = { service_type: name, service_key_snapshot: key };
+      expect([key, await later([row(visit), self(visit)])]).toEqual([key, true]);
+    }
+    expect([...PACKAGE_SERVICE_KEYS].sort()).toEqual(['bed_bug_treatment', 'cockroach_control', 'flea_tick', 'german_roach', 'german_roach_initial', 'vehicle_german_roach']);
   });
 
   test('a finite series of another program repeats one card', async () => {
