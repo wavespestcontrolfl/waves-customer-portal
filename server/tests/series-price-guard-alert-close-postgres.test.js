@@ -1,0 +1,404 @@
+/**
+ * The cancelled-root plan price bell (services/series-price-guards.js) closes
+ * itself only when the guard's own extension later ADDS the occurrence it had
+ * refused, at a price a paid visit of the series backs. Real Postgres: the
+ * notification queries, the invoice baseline, the commit fence. Fixtures are fake.
+ */
+process.env.GATE_SERIES_PRICE_GUARDS = 'true';
+const SKIP = !process.env.DATABASE_URL;
+const maybeDescribe = SKIP ? describe.skip : describe;
+
+const DATE = '2031-03-04';
+const OTHER_DATE = '2031-06-03';
+
+maybeDescribe('series price bell closes itself (live Postgres)', () => {
+  let db;
+  let guards;
+  const made = { notifications: [], invoices: [], scheduled_services: [], customers: [] };
+
+  beforeAll(() => {
+    // A disposable CI database or this worktree's private QA database only: the suite writes and deletes rows.
+    const url = new URL(process.env.DATABASE_URL);
+    // CI's own database (tests.yml: CI=true, localhost, waves_test); a plain localhost URL is not enough.
+    const localCI = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    db = require('../models/db');
+    guards = require('../services/series-price-guards');
+  });
+  afterAll(async () => {
+    if (db && made.notifications.length) await db('audit_log').where({ resource_type: 'notification' }).whereIn('resource_id', made.notifications).del();
+    for (const table of ['notifications', 'invoices', 'scheduled_services', 'customers']) {
+      if (db && made[table].length) await db(table).whereIn('id', made[table]).del();
+    }
+    await db?.destroy();
+  }, 120000);
+
+  const insert = async (table, row) => {
+    const [r] = await db(table).insert(row).returning('*');
+    made[table].push(r.id);
+    return r;
+  };
+
+  // A cancelled root, a completed child whose own paid invoice is `paid`, and the open bell.
+  async function series({ paid = 117, refusedDate = DATE, bellExtra = {} } = {}) {
+    const customer = await insert('customers', { first_name: 'Closer', last_name: 'Example', phone: `+1555555${Math.floor(1000 + Math.random() * 8999)}` });
+    const root = await insert('scheduled_services', {
+      customer_id: customer.id, scheduled_date: '2030-01-01', service_type: 'Quarterly Pest Control', status: 'cancelled',
+      is_recurring: true, recurring_pattern: 'quarterly', estimated_price: 333.45,
+    });
+    if (paid != null) {
+      const visit = await insert('scheduled_services', {
+        customer_id: customer.id, scheduled_date: '2030-04-01', service_type: 'Quarterly Pest Control', status: 'completed',
+        is_recurring: true, recurring_pattern: 'quarterly', recurring_parent_id: root.id, estimated_price: paid,
+      });
+      await insert('invoices', {
+        customer_id: customer.id, scheduled_service_id: visit.id, status: 'paid', token: `tok-${visit.id}`, invoice_number: `SPG-${String(visit.id).slice(0, 8)}-${Date.now() % 1e6}`, total: paid, tax_amount: 0,
+        line_items: JSON.stringify([{ client_id: `scheduled_${visit.id}_primary`, amount: paid, description: 'Service' }]),
+      });
+    }
+    const bell = await insert('notifications', {
+      recipient_type: 'admin', category: 'billing', title: 'Schedule - check a plan price',
+      metadata: JSON.stringify({ dedupeKey: `series-price-guard:cancelled-root:${root.id}`, kind: 'cancelled_root', seriesRootId: root.id, ...(refusedDate ? { refusedDate } : {}), ...bellExtra }),
+    });
+    const child = await insert('scheduled_services', {
+      customer_id: customer.id, scheduled_date: DATE, service_type: 'Quarterly Pest Control', status: 'pending',
+      is_recurring: true, recurring_pattern: 'quarterly', recurring_parent_id: root.id, estimated_price: 117,
+    });
+    return { customer, root, bell, child };
+  }
+  const run = (s, { childDate = DATE, price = 117, commit = true, childId, after } = {}) => db.transaction(async (trx) => {
+    const parent = await trx('scheduled_services').where({ id: s.root.id }).first();
+    const closed = await guards.closeRefusedPriceAlertAfterInsert(trx, {
+      parent, parentId: s.root.id, child: { estimated_price: price, service_type: 'Quarterly Pest Control' },
+      childDate, childId: childId || s.child.id,
+    });
+    if (after) await after(trx);
+    if (!commit) throw Object.assign(new Error('rollback'), { rolledBack: true, closed });
+    return closed;
+  });
+  const get = (id) => db('notifications').where({ id }).first();
+
+  test('the same occurrence added at a price the last paid visit backs closes the bell', async () => {
+    const s = await series();
+    expect(await run(s)).toBe(true);
+    const row = await get(s.bell.id);
+    expect(row.done_at).not.toBeNull();
+    expect(row.done_by).toBe('series-price-guard');
+    expect(row.resolution).toMatch(/last paid visit backs/);
+  });
+
+  test('a different date proves nothing: the bell stays open', async () => {
+    const s = await series({ refusedDate: OTHER_DATE });
+    expect(await run(s)).toBe(false);
+    expect((await get(s.bell.id)).done_at).toBeNull();
+  });
+
+  test('a bell with no recorded refused date (raised before it existed) stays open', async () => {
+    const s = await series({ refusedDate: null });
+    expect(await run(s)).toBe(false);
+    expect((await get(s.bell.id)).done_at).toBeNull();
+  });
+
+  test('the price the last paid visit does not back (over 125%) stays open', async () => {
+    const s = await series();
+    expect(await run(s, { price: 333.45 })).toBe(false);
+    expect((await get(s.bell.id)).done_at).toBeNull();
+  });
+
+  test('no paid visit to back the price stays open', async () => {
+    const s = await series({ paid: null });
+    expect(await run(s)).toBe(false);
+    expect((await get(s.bell.id)).done_at).toBeNull();
+  });
+
+  test('an unpriced occurrence stays open', async () => {
+    const s = await series();
+    expect(await run(s, { price: null })).toBe(false);
+    expect((await get(s.bell.id)).done_at).toBeNull();
+  });
+
+  test('a child the prepay coverage stamped after insert stays open', async () => {
+    const s = await series();
+    await db('scheduled_services').where({ id: s.child.id }).update({ prepaid_method: 'cash', prepaid_amount: 117 });
+    expect(await run(s)).toBe(false);
+    expect((await get(s.bell.id)).done_at).toBeNull();
+  });
+
+  test('the close is inside the extension transaction: a rolled-back extension (the top-up dry run) undoes it', async () => {
+    const s = await series();
+    let inside;
+    await expect(run(s, { commit: false, after: async (trx) => { inside = (await trx('notifications').where({ id: s.bell.id }).first()).done_by; } }))
+      .rejects.toMatchObject({ rolledBack: true, closed: true });
+    expect(inside).toBe('series-price-guard');
+    expect((await get(s.bell.id)).done_at).toBeNull();
+  });
+
+  test('a close that fails runs in a savepoint: logged, the bell stays open, the transaction goes on', async () => {
+    const s = await series();
+    let later;
+    // A child id that is not a uuid makes the prepay probe fail inside the close.
+    expect(await run(s, { childId: 'not-a-uuid', after: async (trx) => { later = (await trx('scheduled_services').where({ id: s.root.id }).first('id')).id; } })).toBe(false);
+    expect(later).toBe(s.root.id);
+    expect((await get(s.bell.id)).done_at).toBeNull();
+  });
+
+  test('another series\' bell for the same date is not touched', async () => {
+    const mine = await series();
+    const other = await series();
+    expect(await run(mine)).toBe(true);
+    expect((await get(other.bell.id)).done_at).toBeNull();
+  });
+
+  describe('a bell closed before the visit was added (openToCloser: the system takes ownership once)', () => {
+    const person = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
+    const closedAt = () => new Date(Date.now() - 3600000);
+    const takenOver = async (s, closeColumns, { expectClosed = true } = {}) => {
+      const at = closedAt();
+      await db('notifications').where({ id: s.bell.id }).update({ done_at: at, ...closeColumns });
+      expect(await run(s)).toBe(expectClosed);
+      const row = await get(s.bell.id);
+      return { row, at };
+    };
+
+    test('closed by the quiet 72-hour fall-off: ours now, first close time kept, our resolution replaces its text', async () => {
+      const s = await series();
+      const { row, at } = await takenOver(s, { done_by: 'quiet-72h', resolution: 'No new activity for 3 days' });
+      expect(row.done_by).toBe('series-price-guard');
+      expect(row.done_at.getTime()).toBe(at.getTime());
+      expect(row.resolution).toMatch(/last paid visit backs/);
+    });
+
+    test('a person\'s Done with no resolution: ours now, first close time kept', async () => {
+      const s = await series();
+      const { row, at } = await takenOver(s, { done_by: person, resolution: null });
+      expect(row.done_by).toBe('series-price-guard');
+      expect(row.done_at.getTime()).toBe(at.getTime());
+      expect(row.resolution).toMatch(/last paid visit backs/);
+    });
+
+    test('a person\'s Done with a resolution: the system takes ownership, their words and close time stand', async () => {
+      const s = await series();
+      const { row, at } = await takenOver(s, { done_by: person, resolution: 'Checked by hand' });
+      expect(row.done_by).toBe('series-price-guard');
+      expect(row.done_at.getTime()).toBe(at.getTime());
+      expect(row.resolution).toBe('Checked by hand');
+    });
+
+    test('a bell another system component closed is left alone', async () => {
+      const s = await series();
+      const { row, at } = await takenOver(s, { done_by: 'relevance', resolution: 'Moved on' }, { expectClosed: false });
+      expect([row.done_by, row.resolution, row.done_at.getTime()]).toEqual(['relevance', 'Moved on', at.getTime()]);
+    });
+
+    test('a closed bell still needs the same proof: a price the last paid visit does not back leaves it as it was', async () => {
+      const s = await series();
+      const at = closedAt();
+      await db('notifications').where({ id: s.bell.id }).update({ done_at: at, done_by: 'quiet-72h', resolution: 'No new activity for 3 days' });
+      expect(await run(s, { price: 333.45 })).toBe(false);
+      expect((await get(s.bell.id)).done_by).toBe('quiet-72h');
+    });
+  });
+
+  describe('the refusal bell is written inside the refusal\'s own transaction', () => {
+    const verdict = { skip: true, kind: 'cancelled_root', price: 333.45, lastPaid: 117 };
+    const openBells = (s) => db('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`series-price-guard:cancelled-root:${s.root.id}`]).whereNull('done_at');
+    const refuse = (s, { commit = true, after } = {}) => db.transaction(async (trx) => {
+      await guards.raiseExtensionPriceAlertInTransaction(trx, verdict, {
+        parent: { customer_id: s.customer.id }, parentId: s.root.id, childDate: DATE, serviceLabel: 'Quarterly Pest Control',
+      });
+      if (after) await after(trx);
+      if (!commit) throw new Error('dry-run rollback');
+    });
+
+    // No bell row to start: the series has had no refusal yet.
+    async function bare() {
+      const s = await series({ refusedDate: null });
+      await db('notifications').where({ id: s.bell.id }).del();
+      return s;
+    }
+
+    test('a refusal then a corrected retry that adds the same date: no open bell remains (a late bell cannot appear)', async () => {
+      const s = await bare();
+      let insideRefusal;
+      await refuse(s, { after: async (trx) => { insideRefusal = (await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`series-price-guard:cancelled-root:${s.root.id}`])).length; } });
+      expect(insideRefusal).toBe(1);
+      // Committed with the refusal: the retry finds the bell and closes it.
+      const bells = await openBells(s);
+      expect(bells).toHaveLength(1);
+      made.notifications.push(bells[0].id);
+      expect(bells[0].metadata.refusedDate).toBe(DATE);
+      expect(await run(s)).toBe(true);
+      expect(await openBells(s)).toHaveLength(0);
+      // Nothing is written after the fact: still none a moment later.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await openBells(s)).toHaveLength(0);
+    });
+
+    test('a rolled-back refusal (the top-up dry run) leaves no bell', async () => {
+      const s = await bare();
+      await expect(refuse(s, { commit: false })).rejects.toThrow('dry-run rollback');
+      expect(await openBells(s)).toHaveLength(0);
+    });
+
+    test('a bell write that fails is logged and does not abort the transaction', async () => {
+      const s = await bare();
+      let later;
+      await db.transaction(async (trx) => {
+        await guards.raiseExtensionPriceAlertInTransaction(trx, verdict, {
+          parent: null, parentId: s.root.id, childDate: DATE, serviceLabel: 'Quarterly Pest Control',
+        });
+        later = (await trx('scheduled_services').where({ id: s.root.id }).first('id')).id;
+      });
+      expect(later).toBe(s.root.id);
+      expect(await openBells(s)).toHaveLength(0);
+    });
+  });
+
+  describe('a person\'s Done between the standing-row probe and the refresh', () => {
+    const NotificationService = () => require('../services/notification-service');
+    const verdict = { skip: true, kind: 'cancelled_root', price: 333.45, lastPaid: 117 };
+    const openBells = (rootId) => db('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`series-price-guard:cancelled-root:${rootId}`]).whereNull('done_at');
+
+    test('the raise asks for the open-only refresh', async () => {
+      const s = await series({ refusedDate: null });
+      const spy = jest.spyOn(NotificationService(), 'notifyAdmin');
+      try {
+        await guards.raiseExtensionPriceAlert(verdict, { parent: { customer_id: s.customer.id }, parentId: s.root.id, childDate: DATE, serviceLabel: 'Quarterly Pest Control' });
+        expect(spy.mock.calls[0][3]).toMatchObject({ refreshOnDedupe: true, refreshOnlyOpen: true, dedupeOpenOnly: true, dedupeVersion: DATE });
+      } finally { spy.mockRestore(); }
+    });
+
+    test('Done lands after the probe: the refresh does not write the new date onto the closed row; one open bell has it', async () => {
+      const s = await series({ refusedDate: null });
+      const key = `series-price-guard:cancelled-root:${s.root.id}`;
+      const person = '0b1f6c1e-3c64-4f8e-9d7a-5a2f3e9b1c10';
+      // standingRefresh runs after the standing row was read and before it is rewritten: close it right there.
+      const doneInBetween = async () => {
+        await db('notifications').where({ id: s.bell.id }).update({ done_at: new Date(), done_by: person, resolution: 'Checked' });
+        return null;
+      };
+      const result = await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: OTHER_DATE,
+        ringOnRefresh: () => false, standingRefresh: doneInBetween,
+        metadata: { kind: 'cancelled_root', seriesRootId: s.root.id, refusedDate: OTHER_DATE },
+      });
+      expect(result.deduped).toBe(false);
+      made.notifications.push(result.id);
+      const closed = await get(s.bell.id);
+      expect([closed.done_by, closed.metadata.refusedDate]).toEqual([person, undefined]);
+      const open = await openBells(s.root.id);
+      expect(open).toHaveLength(1);
+      expect(open[0].id).toBe(result.id);
+      expect(open[0].metadata.refusedDate).toBe(OTHER_DATE);
+    });
+
+    test('a Send to Claude stamp and note written after the probe survive the refresh', async () => {
+      const s = await series({ refusedDate: DATE });
+      const key = `series-price-guard:cancelled-root:${s.root.id}`;
+      const sent = { feed: 'activity', who: 'claude', severity: 'needs-you', claudeQueue: 'sent-to-claude', sentToClaude: { at: '2031-03-01T12:00:00Z', note: 'Check the plan price first' } };
+      // standingRefresh runs after the standing row was read and before it is rewritten: the stamp lands right there.
+      const handoffInBetween = async () => {
+        await db('notifications').where({ id: s.bell.id }).update({ metadata: db.raw("metadata || ?::jsonb", [JSON.stringify(sent)]) });
+        return null;
+      };
+      const result = await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: OTHER_DATE,
+        ringOnRefresh: () => false, standingRefresh: handoffInBetween,
+        metadata: { kind: 'cancelled_root', seriesRootId: s.root.id, refusedDate: OTHER_DATE, who: 'person', severity: 'needs-you' },
+      });
+      expect(result.deduped).toBe(true);
+      const row = await get(s.bell.id);
+      expect(row.metadata).toMatchObject({ ...sent, refusedDate: OTHER_DATE, dedupeVersion: OTHER_DATE });
+      expect(row.done_at).toBeNull();
+    });
+
+    test('an Undo of Send to Claude between the probe and the lock is not reversed', async () => {
+      const sent = { feed: 'activity', who: 'claude', severity: 'needs-you', claudeQueue: 'sent-to-claude', sentToClaude: { at: '2031-03-01T12:00:00Z' } };
+      const s = await series({ refusedDate: DATE, bellExtra: sent });
+      const key = `series-price-guard:cancelled-root:${s.root.id}`;
+      // The probe sees the row sent to Claude; the owner's Undo lands right after it (standingRefresh), before the lock.
+      const undoInBetween = async () => {
+        await db('notifications').where({ id: s.bell.id }).update({
+          metadata: db.raw("(metadata - 'claudeQueue' - 'sentToClaude') || '{\"who\":\"person\",\"feed\":\"bell\"}'::jsonb"),
+        });
+        return null;
+      };
+      await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: OTHER_DATE,
+        ringOnRefresh: () => false, standingRefresh: undoInBetween,
+        metadata: { kind: 'cancelled_root', seriesRootId: s.root.id, refusedDate: OTHER_DATE, who: 'person', severity: 'needs-you' },
+      });
+      const row = await get(s.bell.id);
+      expect(row.metadata.refusedDate).toBe(OTHER_DATE);
+      expect(row.metadata.claudeQueue).toBeUndefined();
+      expect(row.metadata.sentToClaude).toBeUndefined();
+      expect(row.metadata.who).toBe('person');
+    });
+
+    test('without the option the old write stands (other callers are unchanged)', async () => {
+      const s = await series({ refusedDate: null });
+      const key = `series-price-guard:cancelled-root:${s.root.id}`;
+      const doneInBetween = async () => {
+        await db('notifications').where({ id: s.bell.id }).update({ done_at: new Date(), done_by: 'someone' });
+        return null;
+      };
+      const result = await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, dedupeVersion: OTHER_DATE,
+        ringOnRefresh: () => false, standingRefresh: doneInBetween,
+        metadata: { kind: 'cancelled_root', refusedDate: OTHER_DATE },
+      });
+      expect(result.deduped).toBe(true);
+      expect(await openBells(s.root.id)).toHaveLength(0);
+    });
+  });
+
+  describe('the refused date on the standing bell', () => {
+    const verdict = { skip: true, kind: 'cancelled_root', price: 333.45, lastPaid: 117 };
+    const ctx = (s, childDate) => ({ parent: { customer_id: s.customer.id }, parentId: s.root.id, childDate, serviceLabel: 'Quarterly Pest Control' });
+    const openBells = (s) => db('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`series-price-guard:cancelled-root:${s.root.id}`]).whereNull('done_at');
+
+    test('a refusal on a later date moves the open bell\'s text and refused date together; no second bell, no ring', async () => {
+      const s = await series({ refusedDate: null });
+      await guards.raiseExtensionPriceAlert(verdict, ctx(s, DATE));
+      const bells = await openBells(s);
+      expect(bells).toHaveLength(1);
+      expect(bells[0].id).toBe(s.bell.id);
+      expect(bells[0].metadata.refusedDate).toBe(DATE);
+      const readAt = bells[0].read_at;
+      await guards.raiseExtensionPriceAlert(verdict, ctx(s, OTHER_DATE));
+      const after = await openBells(s);
+      expect(after).toHaveLength(1);
+      expect(after[0].metadata.refusedDate).toBe(OTHER_DATE);
+      expect(after[0].metadata.dedupeVersion).toBe(OTHER_DATE);
+      // Text and date move together; quiet: no ring (read state and created_at stay), no second row.
+      expect(after[0].body).toMatch(/Jun 3/);
+      expect(after[0].read_at).toEqual(readAt);
+      expect(after[0].created_at).toEqual(bells[0].created_at);
+      expect(after[0].done_at).toBeNull();
+    });
+
+    test('the same refusal again changes nothing', async () => {
+      const s = await series({ refusedDate: null });
+      await guards.raiseExtensionPriceAlert(verdict, ctx(s, DATE));
+      const before = await get(s.bell.id);
+      await guards.raiseExtensionPriceAlert(verdict, ctx(s, DATE));
+      expect(await get(s.bell.id)).toEqual(before);
+    });
+
+    test('a fresh bell carries the refused date; a closed bell is never stamped', async () => {
+      const s = await series({ refusedDate: null });
+      await db('notifications').where({ id: s.bell.id }).update({ done_at: new Date(), done_by: 'someone' });
+      await guards.raiseExtensionPriceAlert(verdict, ctx(s, DATE));
+      expect((await get(s.bell.id)).metadata.refusedDate).toBeUndefined();
+      const fresh = await openBells(s);
+      expect(fresh).toHaveLength(1);
+      made.notifications.push(fresh[0].id);
+      expect(fresh[0].metadata.refusedDate).toBe(DATE);
+    });
+  });
+});
