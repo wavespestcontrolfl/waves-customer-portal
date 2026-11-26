@@ -35,6 +35,7 @@ const {
 } = require('../estimate-automation-duplicates');
 const { LOOKUP_PALM_REVIEW_REASON } = require('./lookup-palm-review');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
+const { callAutoSendShadowVerdict } = require('./call-auto-send-shadow');
 const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS } = require('../pricing-engine/unit-band-pricing');
 const { sameStreetAddress } = require('./address-compare');
 const { scopeUnresolvedVerdict, businessReviewReasons } = require('./business-scope-engine');
@@ -729,6 +730,13 @@ function scopeRedVerdict(propertyFacts, guardrailsOn) {
   };
 }
 
+// A line with a real price on it (monthly, annual or one-time).
+function lineCarriesMoney(l) {
+  return !!(Number(l.monthlyAfterDiscount ?? l.monthly)
+    || Number(l.annualAfterDiscount ?? l.annual)
+    || Number(l.priceAfterDiscount ?? l.price ?? l.total));
+}
+
 // ── Lane classification ───────────────────────────────────────
 function classifyLane({ intent, propertyFacts, engineResult, engineInput = null, totals, comps, calibration, context }) {
   const reasons = [];
@@ -764,10 +772,7 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // RED only when NO line carries money at all — a priced-but-custom-quote
   // line (oversize lawn) still deserves a provisional yellow draft; that is
   // exactly what the PROVISIONAL flag below surfaces for the operator.
-  const carriesMoney = (l) => Number(l.monthlyAfterDiscount ?? l.monthly)
-    || Number(l.annualAfterDiscount ?? l.annual)
-    || Number(l.priceAfterDiscount ?? l.price ?? l.total);
-  const moneyLines = lines.filter(carriesMoney);
+  const moneyLines = lines.filter(lineCarriesMoney);
 
   if (!lines.length) {
     return { lane: LANES.RED, reasons: ['pricing engine produced no line items for the selected services'] };
@@ -1056,6 +1061,25 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
 // (blocked/anonymous caller who dictated a callback number); when the two
 // disagree, classifyLane parks the draft in yellow with the composer's
 // number quoted so the operator applies it deliberately.
+// Watch-only verdict of the call auto-send rule, as the stamp spread into
+// estimate_data.estimatorEngine ({} when there is none). It is handed the
+// lane's own review reasons, so the shadow cannot grade a price more kindly
+// than the lane does. Fail-soft: a shadow verdict must never cost the draft.
+function callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone, laneReasons }) {
+  try {
+    const moneyLines = (engineResult?.lineItems || []).filter(lineCarriesMoney);
+    const autoSendShadow = callAutoSendShadowVerdict({
+      origin, intent, propertyFacts, context, priorQualifyingServices, laneReasons,
+      draftPhone: customerPhone,
+      homeSizeDrivesPrice: moneyLines.some((l) => l.pricingBasis !== UNIT_BAND_PRICING_BASIS),
+    });
+    return autoSendShadow ? { autoSendShadow } : {};
+  } catch (shadowErr) {
+    logger.warn(`[estimator-engine] call auto-send shadow verdict failed: ${shadowErr.message}`);
+    return {};
+  }
+}
+
 function resolveDraftCustomerPhone(intent, context) {
   const validPhone = (v) => String(v || '').replace(/\D/g, '').length >= 10;
   return (validPhone(context?.phone) ? context.phone : null)
@@ -1191,6 +1215,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // never carry internal review material.
   const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call });
   const customerPhone = resolveDraftCustomerPhone(intent, context);
+  const autoSendShadowStamp = callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone, laneReasons });
   // priorQualifyingServices must NOT ride inside the stored engineInputs —
   // the public reconcile path clears only the TOP-LEVEL key on stale
   // membership snapshots, and a nested copy would keep replaying the
@@ -1539,6 +1564,9 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           calibration,
           composer: { model: model || null, confidence: intent.confidence },
           reviewNotes,
+          // Watch-only verdict of the call auto-send rule (owner 2026-11-25
+          // *build*, step 1). Review data only: nothing reads it to send.
+          ...autoSendShadowStamp,
         },
       }),
       address: intent.address,
