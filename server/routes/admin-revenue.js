@@ -211,11 +211,13 @@ const OVH_FIELDS = {
   ovhVehicleFixed: 'ovh_vehicle_fixed',
   ovhOtherGa: 'ovh_other_ga',
 };
-// Owner office-time allowance inputs (services/monthly-financial-snapshot.js).
+// Owner office-time allowance inputs (services/monthly-financial-snapshot.js): the column and its largest value,
+// numeric(6,2) and numeric(8,2). The Settings form (SettingsPage.jsx OWNER_OFFICE_FIELDS_UI) mirrors these limits.
 const OWNER_OFFICE_FIELDS = {
-  ownerOfficeHoursPerMonth: 'owner_office_hours_per_month',
-  ownerOfficeHourlyRate: 'owner_office_hourly_rate',
+  ownerOfficeHoursPerMonth: { col: 'owner_office_hours_per_month', max: 9999.99 },
+  ownerOfficeHourlyRate: { col: 'owner_office_hourly_rate', max: 999999.99 },
 };
+const OWNER_OFFICE_NUMBER = /^\d+(\.\d{1,2})?$/;
 
 // DATE cell → 'YYYY-MM-DD' via LOCAL getters (node-postgres parses DATE
 // columns to local-midnight Dates; toISOString/String() would drift or fail).
@@ -240,6 +242,23 @@ function applyNullableNumbers(row, body, fields) {
   return { touched };
 }
 
+// The owner-time fields, strictly: null clears; otherwise the value is read as written (a number or a string)
+// and must be plain digits with at most two decimals, from 0 to the column's largest value. A numeric prefix
+// like "12oops", an exponent, a third decimal or a value too big for the column is refused here (a 400), never
+// coerced and never left for the database to fail on (a 500).
+function applyOwnerOfficeTime(row, body) {
+  for (const [key, { col, max }] of Object.entries(OWNER_OFFICE_FIELDS)) {
+    if (body[key] === undefined) continue;
+    if (body[key] === null) { row[col] = null; continue; }
+    const text = ['number', 'string'].includes(typeof body[key]) ? String(body[key]).trim() : '';
+    if (!OWNER_OFFICE_NUMBER.test(text) || Number(text) > max) {
+      return { error: `${key} must be a number from 0 to ${max} with at most two decimals (or null to clear)` };
+    }
+    row[col] = Number(text);
+  }
+  return {};
+}
+
 function buildSettingsRow(latest, body, todayStr, now = new Date()) {
   // Carry EVERY prior value forward (minus row identity/bookkeeping), then
   // overlay only the fields this request explicitly sent.
@@ -258,7 +277,7 @@ function buildSettingsRow(latest, body, todayStr, now = new Date()) {
   const overhead = applyNullableNumbers(row, body, OVH_FIELDS);
   if (overhead.error) return { error: overhead.error };
   if (overhead.touched) row.overhead_entered_at = now;
-  const ownerTime = applyNullableNumbers(row, body, OWNER_OFFICE_FIELDS);
+  const ownerTime = applyOwnerOfficeTime(row, body);
   if (ownerTime.error) return { error: ownerTime.error };
 
   // Vehicle deduction method election (Schedule C line 9) — server-owned

@@ -61,12 +61,17 @@ function monthOffset(now, offset) {
   return etMonthStart(now, offset);
 }
 
-/** Owner office-time allowance for a month: hours x hourly rate. Null or 0 on either input = not counted (0). */
+/**
+ * Owner office-time allowance for a month: hours x hourly rate, in dollars. Null or 0 on either input = not
+ * counted (0). Both inputs are exact to two decimals (numeric(6,2), numeric(8,2)), so the product is taken on
+ * integers, hundredths of an hour x cents, and rounded once, to whole cents: 2.50 h x $21.29 = 53.225 -> 53.23.
+ * (A float product followed by a float round can land a cent off.)
+ */
 function ownerAllowance(financials) {
-  const hours = num(financials && financials.owner_office_hours_per_month);
-  const rate = num(financials && financials.owner_office_hourly_rate);
-  if (hours <= 0 || rate <= 0) return 0;
-  return round2(hours * rate);
+  const hundredthsOfAnHour = Math.round(num(financials && financials.owner_office_hours_per_month) * 100);
+  const rateCents = Math.round(num(financials && financials.owner_office_hourly_rate) * 100);
+  if (hundredthsOfAnHour <= 0 || rateCents <= 0) return 0;
+  return Math.round((hundredthsOfAnHour * rateCents) / 100) / 100;
 }
 
 /** office_cost / paid_stops, or null when there are no stops. */
@@ -184,46 +189,56 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
   };
 }
 
-/** Compute and store one month (one row per month: a re-run replaces it). Returns the stored values. */
-async function upsertMonthSnapshot(month, db = require('../models/db'), computedAt = new Date()) {
-  const snapshot = await computeMonthSnapshot(month, db);
-  await db('monthly_financial_snapshots')
+// REPEATABLE READ: every read of one snapshot (the ledger, visits, settings and buildPnlReport's Stripe amounts
+// and sync watermark) sees one database state. Under the default READ COMMITTED a Stripe sync that finished between
+// buildPnlReport's reads could leave pre-sync amounts stored beside a watermark that says the ledger is complete.
+const SNAPSHOT_ISOLATION = { isolationLevel: 'repeatable read' };
+
+/** Compute and store one month on `trx` (already a snapshot transaction): one row per month, a re-run replaces it. */
+async function writeMonthSnapshot(month, trx, computedAt) {
+  const snapshot = await computeMonthSnapshot(month, trx);
+  await trx('monthly_financial_snapshots')
     .insert({ ...snapshot, computed_at: computedAt })
     .onConflict('month')
     .merge();
   return snapshot;
 }
 
+/** Compute and store one month in its own REPEATABLE READ transaction. Returns the stored values. */
+async function upsertMonthSnapshot(month, db = require('../models/db'), computedAt = new Date()) {
+  return db.transaction((trx) => writeMonthSnapshot(month, trx, computedAt), SNAPSHOT_ISOLATION);
+}
+
 /**
- * Does last month still need this month's run? True when its row is missing, was written before this month's
- * run window opened (the 2nd, 00:00 ET: a backfill or an older run, so the month before it was not refreshed
- * with it), or says its P&L figures were not complete (the balance ledger had not synced past month end).
+ * Does the pair still need this month's run? True when EITHER month's row is missing, was written before this
+ * month's run window opened (the 2nd, 00:00 ET: a backfill or an older run), or says its P&L figures were not
+ * complete (the balance ledger had not synced past month end). Both months are judged: a one-month backfill can
+ * make last month look fresh while the month before is missing or stale.
  */
-async function lastMonthNeedsRun(db, last, now) {
-  const row = await db('monthly_financial_snapshots').where({ month: last }).first('computed_at', 'pnl_complete');
-  if (!row) return true;
-  if (row.pnl_complete === false) return true;
+async function pairNeedsRun(db, months, now) {
+  const rows = await db('monthly_financial_snapshots').whereIn('month', months).select('month', 'computed_at', 'pnl_complete');
+  if (rows.length < months.length) return true;
   const runOpened = parseETDateTime(`${etMonthStart(now).slice(0, 8)}02T00:00`);
-  return !row.computed_at || new Date(row.computed_at) < runOpened;
+  return rows.some((row) => row.pnl_complete === false || !row.computed_at || new Date(row.computed_at) < runOpened);
 }
 
 /**
  * The monthly job body. On the 2nd it writes last month and re-writes the month before it (late ledger entries),
- * both in ONE transaction: if either write fails neither row changes, so last month stays missing (or stale) and a
- * catch-up run on days 3 to 7 does the whole pair again. With catchUp it does nothing unless lastMonthNeedsRun.
+ * both in ONE REPEATABLE READ transaction: if either write fails neither row changes, so the pair stays missing (or
+ * stale) and a catch-up run on days 3 to 7 does the whole pair again. With catchUp it does nothing unless
+ * pairNeedsRun.
  */
 async function runMonthlyFinancialSnapshots({ now = new Date(), catchUp = false, db = require('../models/db') } = {}) {
-  const last = monthOffset(now, -1);
-  const beforeLast = monthOffset(now, -2);
-  if (catchUp && !(await lastMonthNeedsRun(db, last, now))) return { skipped: 'already_written', months: [] };
+  const months = [monthOffset(now, -1), monthOffset(now, -2)];
+  if (catchUp && !(await pairNeedsRun(db, months, now))) return { skipped: 'already_written', months: [] };
   const written = await db.transaction(async (trx) => {
     const done = [];
-    for (const month of [last, beforeLast]) {
-      await upsertMonthSnapshot(month, trx, now);
+    for (const month of months) {
+      await writeMonthSnapshot(month, trx, now);
       done.push(month);
     }
     return done;
-  });
+  }, SNAPSHOT_ISOLATION);
   logger.info(`[monthly-financial-snapshot] wrote ${written.join(', ')}`);
   return { skipped: null, months: written };
 }
