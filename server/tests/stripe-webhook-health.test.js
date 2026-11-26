@@ -70,7 +70,7 @@ function ledgerRow(overrides = {}) {
 
 function baseOpts(overrides = {}) {
   return {
-    raiseAlert: jest.fn(async () => ({ rang: true })),
+    raiseAlert: jest.fn(async () => ({ id: 'n1', deduped: false, rang: true })),
     clearAlert: jest.fn(async () => 0),
     loadLedgerFailures: jest.fn(async () => ({ total: 0, rows: [] })),
     loadLedgerEventIds: jest.fn(async () => new Set()),
@@ -219,7 +219,7 @@ describe('runStripeWebhookHealthCheck', () => {
 
   test('a standing problem that did not ring is reported as unchanged, not as a new alert', async () => {
     const opts = baseOpts({
-      raiseAlert: jest.fn(async () => ({ rang: false })),
+      raiseAlert: jest.fn(async () => ({ id: 'n1', deduped: true, rang: false })),
       loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
     });
     const result = await runStripeWebhookHealthCheck(opts);
@@ -303,6 +303,27 @@ describe('runStripeWebhookHealthCheck', () => {
     });
     const result = await runStripeWebhookHealthCheck(opts);
     expect(result).toMatchObject({ raised: false, error: true, count: 1 });
+  });
+
+  test('a write the alert writer swallowed (null) reports error, not raised', async () => {
+    const opts = baseOpts({
+      raiseAlert: jest.fn(async () => ({ rang: true })),
+      loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
+    });
+    const result = await runStripeWebhookHealthCheck(opts);
+    expect(result).toMatchObject({ raised: false, error: true, count: 1 });
+  });
+
+  test('a long ledger backlog never cuts the note that says a check broke', async () => {
+    const rows = Array.from({ length: 10 }, (_, i) => ledgerRow({ id: `evt_dead_${i}`, event_type: `payment_intent.succeeded.${'x'.repeat(150)}` }));
+    const opts = baseOpts({
+      loadLedgerFailures: jest.fn(async () => ({ total: 40, rows })),
+      stripeOpsTools: { getStripeWebhookFailures: jest.fn(async () => { throw new Error('Stripe API returned HTTP 500'); }) },
+    });
+    await runStripeWebhookHealthCheck(opts);
+    const { detail } = raised(opts);
+    expect(detail).toContain('Stripe-side delivery check itself FAILED');
+    expect(detail).toMatch(/Summary: 40 unresolved ledger events/);
   });
 
   test('kill switch raises nothing but reports what it would have raised', async () => {

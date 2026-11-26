@@ -105,7 +105,7 @@ describe('runKnowledgeGapsWeekly', () => {
   beforeEach(() => {
     process.env = { ...env };
     delete process.env.KNOWLEDGE_GAPS_WEEKLY;
-    raiseAlert = jest.fn(async () => ({ id: 'n1' }));
+    raiseAlert = jest.fn(async () => ({ id: 'n1', deduped: false }));
   });
   afterAll(() => { process.env = env; });
 
@@ -132,6 +132,16 @@ describe('runKnowledgeGapsWeekly', () => {
   test('a failed write reports an error, so the next catch-up tick retries the same week', async () => {
     raiseAlert = jest.fn(async () => { throw new Error('boom'); });
     expect(await run()).toMatchObject({ raised: false, error: true });
+  });
+
+  test('a write the alert writer swallowed (null) is an error, not a raise', async () => {
+    raiseAlert = jest.fn(async () => null);
+    expect(await run()).toEqual({ raised: false, error: true, gaps: 1 });
+  });
+
+  test('a catch-up tick that dedupes onto this week\'s row still counts as raised', async () => {
+    raiseAlert = jest.fn(async () => ({ id: 'n1', deduped: true }));
+    expect(await run()).toEqual({ raised: true, gaps: 1 });
   });
 
   test('a failed query writes nothing', async () => {

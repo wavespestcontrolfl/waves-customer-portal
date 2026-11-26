@@ -182,6 +182,23 @@ function composeWebhookHealthAlert({ ledger, stripeSide, stripeCheckError, ledge
   }
 
   const detailLines = [];
+  // Check failures go FIRST: the detail is cut at DETAIL_MAX_CHARS, and a long event backlog must never
+  // push out the note that says which check broke.
+  if (stripeCheckError || ledgerCheckError) {
+    // When a broken check is the ONLY finding, say so explicitly — zero
+    // findings from a check that couldn't run is UNKNOWN, not healthy.
+    if (ledgerTotal === 0 && stripeTotal === 0 && stripeUnreconciled === 0) {
+      detailLines.push(`Zero findings do NOT mean healthy: a health check could not complete, so ${ledgerCheckError ? 'webhook health status is UNKNOWN' : 'Stripe-side delivery status is UNKNOWN'} until verified.`);
+    }
+    if (ledgerCheckError) {
+      detailLines.push(`NOTE: the LEDGER health query itself FAILED (${ledgerCheckError}) — query stripe_webhook_events manually (error set, or unprocessed past the stale-claim window).`);
+    }
+    if (stripeCheckError) {
+      detailLines.push(`NOTE: the Stripe-side delivery check itself FAILED (${stripeCheckError}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.`);
+    }
+  }
+  // Section counts up front too, so a cut detail still names every kind of finding.
+  detailLines.push(`Summary: ${ledgerTotal} unresolved ledger event${plural(ledgerTotal)}; ${stripeTotal} possible Stripe-side failure${plural(stripeTotal)}${stripeUnreconciled > 0 ? `; ${stripeUnreconciled} unreconciled beyond the scan cap` : ''}.`, '');
   if (ledgerTotal > 0) {
     detailLines.push(
       `${ledgerTotal} unresolved event${plural(ledgerTotal)} in stripe_webhook_events with an error or an abandoned claim (no time window — an unresolved event stays on this alert until fixed). Stripe retries for ~72h; after that the row is a dead letter and the 90-day purge will erase it silently.`,
@@ -201,19 +218,6 @@ function composeWebhookHealthAlert({ ledger, stripeSide, stripeCheckError, ledge
     );
   }
 
-  if (stripeCheckError || ledgerCheckError) {
-    // When a broken check is the ONLY finding, say so explicitly — zero
-    // findings from a check that couldn't run is UNKNOWN, not healthy.
-    if (ledgerTotal === 0 && stripeTotal === 0 && stripeUnreconciled === 0) {
-      detailLines.push(`Zero findings do NOT mean healthy: a health check could not complete, so ${ledgerCheckError ? 'webhook health status is UNKNOWN' : 'Stripe-side delivery status is UNKNOWN'} until verified.`);
-    }
-    if (ledgerCheckError) {
-      detailLines.push('', `NOTE: the LEDGER health query itself FAILED (${ledgerCheckError}) — query stripe_webhook_events manually (error set, or unprocessed past the stale-claim window).`);
-    }
-    if (stripeCheckError) {
-      detailLines.push('', `NOTE: the Stripe-side delivery check itself FAILED (${stripeCheckError}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.`);
-    }
-  }
   detailLines.push('', 'Replay/retry from the Stripe dashboard: https://dashboard.stripe.com/webhooks');
 
   // What the row is about, for the ring decision: a new event or a newly broken check rings; the same set does not.
@@ -243,6 +247,11 @@ function composeWebhookHealthAlert({ ledger, stripeSide, stripeCheckError, ledge
     stripeFailureCount: stripeTotal,
     stripeUnreconciledCount: stripeUnreconciled,
   };
+}
+
+// True when the admin-alert writer actually wrote, deduped or deliberately suppressed the row.
+function writeLanded(result) {
+  return !!result && (typeof result.deduped === 'boolean' || result.suppressed === true);
 }
 
 // A refresh rings only when a new event or a newly broken check joins the set or the total grows. (A comeback
@@ -396,7 +405,13 @@ async function runStripeWebhookHealthCheck(opts = {}) {
   let outcome;
   try {
     const result = await (opts.raiseAlert || raiseAlert)(composed);
-    outcome = result?.rang === false ? 'unchanged' : 'raised';
+    // The writer returns null on a failed write (the reopen wrapper spreads it to { rang: true }); every real
+    // outcome carries a boolean deduped or suppressed.
+    if (!writeLanded(result)) {
+      logger.error('[stripe-webhook-health] alert write failed (no row written)');
+      return { raised: false, error: true, ...composed, ...checkErrors };
+    }
+    outcome = result.rang === false ? 'unchanged' : 'raised';
   } catch (err) {
     logger.error(`[stripe-webhook-health] alert failed (${err.code || err.name || 'error'})`);
     return { raised: false, error: true, ...composed, ...checkErrors };

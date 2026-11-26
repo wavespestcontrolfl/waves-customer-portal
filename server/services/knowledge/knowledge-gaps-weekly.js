@@ -167,7 +167,13 @@ async function runKnowledgeGapsWeekly(opts = {}) {
   if (!composed) return { skipped: 'nothing_found', gaps: 0 };
 
   try {
-    await (opts.raiseAlert || raiseAlert)(composed, reportWindow(now).end);
+    const result = await (opts.raiseAlert || raiseAlert)(composed, reportWindow(now).end);
+    // raiseAdminAlert passes the writer's null (a failed write) through without throwing; every real outcome
+    // (written, deduped onto this week's row, deliberately suppressed) carries deduped or suppressed.
+    if (!result || (typeof result.deduped !== 'boolean' && result.suppressed !== true)) {
+      logger.error('[knowledge-gaps-weekly] alert write failed (no row written)');
+      return { raised: false, error: true, gaps: composed.gaps };
+    }
   } catch (err) {
     logger.error(`[knowledge-gaps-weekly] alert failed (${err.code || err.name || 'error'})`);
     return { raised: false, error: true, gaps: composed.gaps };
