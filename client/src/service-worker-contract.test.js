@@ -28,6 +28,8 @@ function fakeCache() {
       const url = asRequest(key).url;
       if (this.putGate) { const gate = this.putGate(url); if (gate) await gate; }
       if (this.failPut && this.failPut(url)) { const e = new Error('Quota exceeded'); e.name = 'QuotaExceededError'; throw e; }
+      // The real put reads the whole body before it stores: a stalled one hangs here.
+      if (response.body && response.body.gate) await response.body.gate;
       store.set(url, response);
     },
     async delete(key) { if (this.deleteGate) await this.deleteGate; return store.delete(asRequest(key).url); },
@@ -56,12 +58,24 @@ class FakeResponse {
     if (this.bodyUsed) throw new TypeError('Response body is already used');
     return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate, url: this.url, redirected: this.redirected });
   }
-  async text() { if (this.gate) await this.gate; this.bodyUsed = true; return String(this.body); }
+  async text() {
+    if (this.gate) await this.gate;
+    // A body that sends its headers and then never ends (see StalledBody).
+    if (this.body && this.body.gate) await this.body.gate;
+    this.bodyUsed = true;
+    return this.body instanceof ArrayBuffer ? new TextDecoder().decode(this.body) : String(this.body);
+  }
+  async arrayBuffer() { return new TextEncoder().encode(await this.text()).buffer; }
   async json() { return JSON.parse(await this.text()); }
 }
 // A response whose body read is parked on a promise the test releases.
 class GatedResponse extends FakeResponse {
   constructor(body, init = {}) { super(body, init); this.gate = init.gate; }
+}
+// A body the test parks on a promise. Used as `body`, it stalls whoever reads it.
+class StalledBody {
+  constructor(gate = new Promise(() => {})) { this.gate = gate; }
+  toString() { return 'stalled body'; }
 }
 const fakeResponse = (body, ok = true) => new FakeResponse(body, { status: ok ? 200 : 500 });
 const gatedResponse = (body, gate) => new GatedResponse(body, { gate });
@@ -2140,5 +2154,374 @@ describe('service-worker slow page loads', () => {
       expect(bodyOf(await nav.promise)).toBe(networkHtml); // the marked load refreshed the saved copy
       next.release();
     });
+  });
+});
+
+describe('service-worker saved-first customer copy', () => {
+  const HOUR = 60 * 60 * 1000;
+  const CUSTOMER_SHELL_URL = '/__waves/customer-shell';
+  const OLD = ['/assets/index-OLD.js'];
+  const NEW = ['/assets/index-NEW.js'];
+  const OLD_FILES = ['/assets/index-OLD.js', '/assets/Portal-OLD.js'];
+  const NEW_FILES = ['/assets/index-NEW.js', '/assets/Portal-NEW.js'];
+  const savedHtml = shellHtml(OLD);
+  const networkHtml = shellHtml(NEW);
+  afterEach(() => { vi.useRealTimers(); });
+
+  // The new build's answers, with the network held until the test releases
+  // it. `customerList` is what /customer-build-assets.json says (null: 404).
+  function gatedNetwork({ customerList = NEW_FILES, failFile = null } = {}) {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const serve = async (request) => {
+      if (request.mode === 'navigate') { await gate; return fakeResponse(networkHtml); }
+      if (request.url.includes('/build-assets.json')) return fakeResponse(JSON.stringify([...NEW_FILES, '/assets/Other-NEW.js']));
+      if (request.url.includes('/customer-build-assets.json')) return customerList ? fakeResponse(JSON.stringify(customerList)) : fakeResponse('', false);
+      if (failFile && request.url.endsWith(failFile)) return fakeResponse('gone', false);
+      return fakeResponse(`asset:${request.url}`);
+    };
+    return { release, serve };
+  }
+  // The customer copy as a commit stores it. `savedAt` null: no stamp;
+  // `files` null: no file list; `cached`: which of the files are in the cache.
+  async function start({ savedAt = 0, files = OLD_FILES, cached = OLD_FILES, network = {} } = {}) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const cache = fakeCache();
+    const headers = {};
+    if (savedAt !== null) headers['x-waves-saved-at'] = String(Date.now() - savedAt);
+    if (files) headers['x-waves-copy-files'] = files.join(',');
+    await cache.put('/', fakeResponse(savedHtml));
+    await cache.put(CUSTOMER_SHELL_URL, new FakeResponse(savedHtml, { headers }));
+    for (const file of cached) await cache.put(file, fakeResponse(`old:${file}`));
+    const worker = loadWorker(cache);
+    const net = gatedNetwork(network);
+    worker.setFetch(net.serve);
+    const load = (pathname = '/', options = {}) => {
+      const state = { done: false };
+      state.promise = worker.dispatchFetch(pathname, { mode: 'navigate', settle: false, ...options })
+        .then(result => { state.done = true; return result; });
+      return state;
+    };
+    return { cache, worker, net, load };
+  }
+  const bodyOf = (result) => result.response.body;
+  // The page opens before 3 s: the saved-first rule, not the slow-network one.
+  async function servedFirst(nav) {
+    await vi.advanceTimersByTimeAsync(10);
+    return nav.done;
+  }
+
+  it('serves a young, whole copy before the network answers, with no slow-network timer', async () => {
+    const { net, load } = await start({ savedAt: 2 * HOUR });
+    const nav = load();
+    expect(await servedFirst(nav)).toBe(true);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    expect(vi.getTimerCount()).toBe(0);
+    net.release();
+    await result.settled();
+  });
+
+  it('saves the new build in the background, so the next open serves it first', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    const nav = load();
+    expect(await servedFirst(nav)).toBe(true);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    net.release();
+    await result.settled();
+    const copy = await cache.match(CUSTOMER_SHELL_URL);
+    expect(await copy.text()).toBe(networkHtml);
+    expect(Number(copy.headers.get('x-waves-saved-at'))).toBe(Date.now());
+    expect(copy.headers.get('x-waves-copy-files')).toBe(NEW_FILES.join(','));
+    // The new build's customer chunk is cached, tagged with that build.
+    expect(await cachedAssets(cache)).toEqual(expect.arrayContaining(NEW_FILES));
+    expect(claimIds(await cache.match('/assets/Portal-NEW.js'))).toContain(worker.buildIdOf(NEW));
+    // A file outside the customer list (another page of the build) is not fetched.
+    expect(await cache.match('/assets/Other-NEW.js')).toBeUndefined();
+    // The next open: the new copy, before the network answers.
+    const next = load();
+    expect(await servedFirst(next)).toBe(true);
+    expect(bodyOf(await next.promise)).toBe(networkHtml);
+  });
+
+  it('keeps the saved build live while the page runs it, and the served build\'s files through the prune', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    const nav = load();
+    const result = await nav.promise;
+    net.release();
+    await result.settled();
+    await worker.dispatchFetch('/assets/Lazy-XYZ.js');
+    expect(claimIds(await cache.match('/assets/Lazy-XYZ.js'))[0]).toBe(worker.buildIdOf(OLD));
+    expect(await cache.match('/assets/Portal-OLD.js')).toBeTruthy();
+  });
+
+  it('keeps a copy\'s listed files through a prune even when the build has no file list and lost its tags', async () => {
+    const { cache, worker } = await start({ savedAt: HOUR });
+    const stray = fakeResponse('x');
+    stray.headers.set('x-waves-build', 'zzzzzzzzzzzzzzzz');
+    await cache.put('/assets/Portal-OLD.js', stray);
+    await worker.pruneStaleAssets(cache, ['aaaaaaaaaaaaaaaa']);
+    expect(await cache.match('/assets/Portal-OLD.js')).toBeTruthy();
+  });
+
+  it.each([
+    ['too old (25 h)', { savedAt: 25 * HOUR }],
+    ['saved in the future', { savedAt: -HOUR }],
+    ['unstamped', { savedAt: null }],
+    ['without a file list', { files: null }],
+    ['missing one of its chunks', { cached: ['/assets/index-OLD.js'] }],
+    ['listing files that omit its own entry file', { files: ['/assets/Portal-OLD.js'] }],
+  ])('takes the slow-network path for a copy %s', async (_name, options) => {
+    const { net, load } = await start({ savedAt: HOUR, ...options });
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(nav.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    net.release();
+    await result.settled();
+  });
+
+  it('serves a copy just inside 24 h first', async () => {
+    const { load } = await start({ savedAt: 24 * HOUR - 1000 });
+    expect(await servedFirst(load())).toBe(true);
+  });
+
+  it('answers a fast network page with the network page when the copy is not young', async () => {
+    const { net, load } = await start({ savedAt: 25 * HOUR });
+    net.release();
+    expect(bodyOf(await load().promise)).toBe(networkHtml);
+  });
+
+  it('never serves the copy first to a network-only load, a heal reload', async () => {
+    const { net, load } = await start({ savedAt: HOUR });
+    const nav = load('/?tab=visits&waves-network=1');
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    net.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it.each([
+    '/admin/dispatch',
+    '/tech',
+    `/report/${'e'.repeat(32)}`,
+    `/pay/${'c'.repeat(32)}`,
+    '/dashboard',
+  ])('leaves %s to the network, which is not a customer screen', async (path) => {
+    const { net, load } = await start({ savedAt: HOUR });
+    const nav = load(path);
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    net.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it('leaves a form post to the network', async () => {
+    const { net, load } = await start({ savedAt: HOUR });
+    const nav = load('/', { method: 'POST' });
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    net.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it.each(['/login', '/?tab=billing'])('serves the copy first on the customer screen %s', async (path) => {
+    const { load } = await start({ savedAt: HOUR });
+    expect(await servedFirst(load(path))).toBe(true);
+  });
+
+  it('stamps the copy the install stores, with its customer files', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const cache = fakeCache();
+    const worker = loadWorker(cache);
+    const net = gatedNetwork();
+    net.release();
+    // The install asks for '/' with no request mode.
+    worker.setFetch(async (request) => net.serve(request.url === '/' ? { ...request, mode: 'navigate' } : request));
+    await worker.dispatchInstall();
+    const copy = await cache.match(CUSTOMER_SHELL_URL);
+    expect(await copy.text()).toBe(networkHtml);
+    expect(Number(copy.headers.get('x-waves-saved-at'))).toBe(Date.now());
+    expect(copy.headers.get('x-waves-copy-files')).toBe(NEW_FILES.join(','));
+    // The install fetches no chunk beyond the shell's own files, so it is never slowed by them.
+    expect(await cache.match('/assets/Portal-NEW.js')).toBeUndefined();
+  });
+
+  it('stamps a copy with no file list when the build publishes none, so it is never served first', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR, network: { customerList: null } });
+    net.release();
+    await (await load('/?waves-network=1').promise).settled();
+    const copy = await cache.match(CUSTOMER_SHELL_URL);
+    expect(await copy.text()).toBe(networkHtml);
+    expect(copy.headers.get('x-waves-copy-files')).toBeNull();
+    worker.setFetch(gatedNetwork().serve);
+    const next = load();
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(next.done).toBe(false);
+  });
+
+  it('refuses a customer list that does not name the shell\'s own files', async () => {
+    const { cache, net, load } = await start({ savedAt: HOUR, network: { customerList: ['/assets/Portal-NEW.js'] } });
+    net.release();
+    await (await load('/?waves-network=1').promise).settled();
+    expect((await cache.match(CUSTOMER_SHELL_URL)).headers.get('x-waves-copy-files')).toBeNull();
+  });
+
+  it('keeps serving the slow-network copy while a chunk of the new build failed, and a later refresh completes it', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR, network: { failFile: 'Portal-NEW.js' } });
+    net.release();
+    await (await load('/?waves-network=1').promise).settled();
+    // The new copy is committed, but one chunk is missing: not served first.
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(networkHtml);
+    expect(await cache.match('/assets/Portal-NEW.js')).toBeUndefined();
+    const still = gatedNetwork({ failFile: 'Portal-NEW.js' });
+    worker.setFetch(still.serve);
+    const blocked = load();
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(blocked.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    still.release();
+    await (await blocked.promise).settled();
+    // The signal is back: the next refresh fetches only what is missing.
+    const healthy = gatedNetwork();
+    healthy.release();
+    worker.setFetch(healthy.serve);
+    await (await load('/?waves-network=1').promise).settled();
+    expect(await cache.match('/assets/Portal-NEW.js')).toBeTruthy();
+    expect(await servedFirst(load())).toBe(true);
+  });
+
+  it('answers with a ready network page while the cache check is still reading', async () => {
+    const { cache, net, load } = await start({ savedAt: HOUR });
+    let releaseCache;
+    cache.matchGate = new Promise(resolve => { releaseCache = resolve; });
+    net.release();
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(nav.done).toBe(true);
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+    releaseCache();
+  });
+
+  it('counts the 3 s deadline from the start of the navigation, not from the end of a slow cache check', async () => {
+    const { cache, net, load } = await start({ savedAt: null });
+    let releaseCache;
+    cache.matchGate = new Promise(resolve => { releaseCache = resolve; });
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(2000);
+    releaseCache();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(nav.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    net.release();
+    await result.settled();
+  });
+
+  it('releases the shell-refresh lock before the chunk warm, so a hung chunk fetch holds back no install', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    worker.setFetch(async (request) => (request.url.endsWith('Portal-NEW.js') ? new Promise(() => {}) : net.serve(request)));
+    net.release();
+    const nav = await load('/?waves-network=1').promise;
+    const settled = nav.settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    // The new copy is committed; the warm of Portal-NEW.js is still hanging.
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(networkHtml);
+    // An install takes the same lock: it finishes while the warm hangs.
+    worker.setFetch(async (request) => (request.url.endsWith('Portal-NEW.js') ? new Promise(() => {}) : net.serve(request.url === '/' ? { ...request, mode: 'navigate' } : request)));
+    await worker.dispatchInstall();
+    // Each warm fetch ends at its own limit, and the event's work then settles.
+    await vi.advanceTimersByTimeAsync(20000);
+    await settled;
+    expect(await cache.match('/assets/Portal-NEW.js')).toBeUndefined();
+  });
+
+  it('writes no chunk for a build the customer copy has moved past', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    let releaseChunk;
+    const chunkGate = new Promise(resolve => { releaseChunk = resolve; });
+    worker.setFetch(async (request) => {
+      if (request.url.endsWith('Portal-NEW.js')) { await chunkGate; return fakeResponse('late chunk'); }
+      return net.serve(request);
+    });
+    net.release();
+    const settled = (await load('/?waves-network=1').promise).settled();
+    await vi.advanceTimersByTimeAsync(10);
+    // A newer build's copy lands while the old build's chunk is still on its way.
+    await cache.put(CUSTOMER_SHELL_URL, new FakeResponse(shellHtml(['/assets/index-NEWER.js']), { headers: { 'x-waves-saved-at': String(Date.now()) } }));
+    releaseChunk();
+    await settled;
+    expect(await cache.match('/assets/Portal-NEW.js')).toBeUndefined();
+  });
+
+  it('reads a chunk body under its deadline before the write lock, so a body that stalls after its headers blocks no write', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    worker.setFetch(async (request) => (request.url.endsWith('Portal-NEW.js')
+      ? new FakeResponse(new StalledBody(), { status: 200 })
+      : net.serve(request)));
+    net.release();
+    const settled = (await load('/?waves-network=1').promise).settled();
+    await vi.advanceTimersByTimeAsync(1000);
+    // The asset-write lock is free while the body is still stalled: a prune runs.
+    let pruned = false;
+    worker.pruneStaleAssets(cache, [worker.buildIdOf(NEW)]).then(() => { pruned = true; });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(pruned).toBe(true);
+    await vi.advanceTimersByTimeAsync(20000);
+    await settled;
+    expect(await cache.match('/assets/Portal-NEW.js')).toBeUndefined();
+  });
+
+  it('stores a chunk that arrives in time with its status, headers and a build tag', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR });
+    worker.setFetch(async (request) => (request.url.endsWith('Portal-NEW.js')
+      ? new FakeResponse('portal code', { status: 200, headers: { 'content-type': 'text/javascript' } })
+      : net.serve(request)));
+    net.release();
+    await (await load('/?waves-network=1').promise).settled();
+    const stored = await cache.match('/assets/Portal-NEW.js');
+    expect(await stored.text()).toBe('portal code');
+    expect(stored.status).toBe(200);
+    expect(stored.headers.get('content-type')).toBe('text/javascript');
+    expect(claimIds(stored)).toContain(worker.buildIdOf(NEW));
+  });
+
+  describe('the customer file list read', () => {
+    const stalls = {
+      'headers that never arrive': () => new Promise(() => {}),
+      'a body that never ends': () => new FakeResponse(new StalledBody(), { status: 200 }),
+    };
+    it.each(Object.keys(stalls))('ends at 5 s with %s: the copy is stored with no list and no chunk is fetched', async (name) => {
+      const { cache, worker, net, load } = await start({ savedAt: HOUR });
+      const fetched = [];
+      worker.setFetch(async (request) => {
+        fetched.push(request.url);
+        return request.url.includes('/customer-build-assets.json') ? stalls[name]() : net.serve(request);
+      });
+      net.release();
+      const settled = (await load('/?waves-network=1').promise).settled();
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(savedHtml);
+      await vi.advanceTimersByTimeAsync(1);
+      await settled;
+      const copy = await cache.match(CUSTOMER_SHELL_URL);
+      expect(await copy.text()).toBe(networkHtml);
+      expect(copy.headers.get('x-waves-copy-files')).toBeNull();
+      expect(fetched.some(url => url.endsWith('Portal-NEW.js'))).toBe(false);
+    });
+  });
+
+  it('does not fetch a chunk it already holds, and only claims it for the new build', async () => {
+    const { cache, worker, net, load } = await start({ savedAt: HOUR, cached: [...OLD_FILES, '/assets/Portal-NEW.js'] });
+    const fetched = [];
+    worker.setFetch(async (request) => { fetched.push(request.url); return net.serve(request); });
+    net.release();
+    await (await load('/?waves-network=1').promise).settled();
+    expect(fetched.filter(url => url.endsWith('Portal-NEW.js'))).toEqual([]);
+    expect(claimIds(await cache.match('/assets/Portal-NEW.js'))).toContain(worker.buildIdOf(NEW));
   });
 });
