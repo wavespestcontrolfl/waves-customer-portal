@@ -1707,6 +1707,16 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(shellHtml(['/assets/index-BBB.js']));
   });
 
+  it('takes its install marker back when the customer copy write fails', async () => {
+    const cache = fakeCache();
+    const { dispatchInstall, setFetch } = loadWorker(cache);
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    cache.failPut = (url) => url === 'https://portal.test/__waves/customer-shell';
+    await expect(dispatchInstall()).rejects.toThrow(/Quota/);
+    expect(await cache.match('/__waves/install-commit')).toBeUndefined();
+    expect(await cache.match('/')).toBeUndefined();
+  });
+
   it('removes a first customer copy when its generation rolls back', async () => {
     const cache = fakeCache();
     const { dispatchInstall, setFetch } = loadWorker(cache);
@@ -1913,13 +1923,16 @@ describe('service-worker slow page loads', () => {
     expect(bodyOf(await load().promise)).toBe(savedHtml);
   });
 
-  it('starts no timer for a non-GET page load', async () => {
-    const { network, load } = await start();
+  it('starts no timer for a non-GET page load, and never saves its answer as the customer copy', async () => {
+    const { cache, network, load } = await start();
     const nav = load('/', { method: 'POST' });
     await vi.advanceTimersByTimeAsync(20000);
     expect(nav.done).toBe(false);
     network.release();
-    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(networkHtml);
+    await result.settled();
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(savedHtml);
   });
 
   it.each(['/login', '/?tab=billing'])('serves the saved copy at 3 s for the customer screen %s', async (path) => {

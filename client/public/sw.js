@@ -492,7 +492,15 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     // previous one back (or removes the key when there was none), so it
     // never names a build whose new assets the rollback deletes.
     const previousCustomerShell = customerShell ? await cache.match(CUSTOMER_SHELL_URL) : null;
+    // The install's marker too: a later failure of the same commit (the
+    // customer copy) must not leave a marker for an install that did not
+    // commit, or the active worker would drop valid refreshes behind it.
+    const previousMark = supersedable ? null : await cache.match(INSTALL_MARK_URL);
     const restorePreviousShell = async () => {
+      if (!supersedable) {
+        if (previousMark) await cache.put(INSTALL_MARK_URL, previousMark.clone()).catch(() => {});
+        else await cache.delete(INSTALL_MARK_URL).catch(() => {});
+      }
       if (previousShell) await putShell(cache, previousShell.clone(), previousBuildId).catch(() => {});
       else await dropShell(cache).catch(() => {});
       if (!customerShell) return;
@@ -956,7 +964,7 @@ self.addEventListener('fetch', event => {
     // Registered here, in the handler's own turn: the background work must
     // outlive a response sent before the network answers, and waitUntil can
     // throw once respondWith has settled.
-    event.waitUntil(refreshShellAfterNavigation(attempt, choice, navSeq, startedAt, isSavedCopyPath(url.pathname)));
+    event.waitUntil(refreshShellAfterNavigation(attempt, choice, navSeq, startedAt, customer));
     event.respondWith(answerNavigation(event.request, attempt, { customer, networkOnly }, decide, navSeq));
     return;
   }
