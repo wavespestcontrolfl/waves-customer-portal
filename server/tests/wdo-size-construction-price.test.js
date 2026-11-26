@@ -579,6 +579,64 @@ describe('a value a person types in is trusted; a machine reading is not', () =>
   });
 });
 
+describe('MIXED construction moves no termite, pest or inspection-time price (it reads as wood frame, as county "frame stucco" did)', () => {
+  const { deriveModifiers } = require('../services/pricing-engine/modifiers');
+  const { normalizeCountyConstruction } = require('../services/property-lookup/ai-property-lookup')._private;
+  const { calcConstructionModifier, calcTermiteConstructionMult, calcWDOTimeMult } = require('../routes/property-lookup-v2')._private;
+  const MAIN = 'WOOD_FRAME'; // what a county "FRAME STUCCO" read as on main
+
+  test('a county FRAME STUCCO home reads MIXED, and every consumer prices MIXED exactly as it priced WOOD_FRAME', () => {
+    expect(normalizeCountyConstruction('FRAME STUCCO')).toBe('MIXED');
+    expect(deriveModifiers({ constructionMaterial: 'MIXED' }).termiteConstructionMult).toBe(deriveModifiers({ constructionMaterial: MAIN }).termiteConstructionMult);
+    expect(deriveModifiers({ constructionMaterial: 'MIXED' }).wdoConstructionMult).toBe(1.15);
+    expect(calcTermiteConstructionMult('MIXED')).toBe(calcTermiteConstructionMult(MAIN));
+    expect(calcConstructionModifier('MIXED')).toBe(calcConstructionModifier(MAIN));
+    expect(calcWDOTimeMult('MIXED', 'SLAB')).toBe(calcWDOTimeMult(MAIN, 'SLAB'));
+    expect(calcTermiteConstructionMult(MAIN)).toBe(1.25);
+    // The estimator's termite notes also treat it as wood frame.
+    const notes = (material) => deriveModifiers({ constructionMaterial: material }).notes;
+    expect(JSON.stringify(notes('MIXED') ?? '')).toBe(JSON.stringify(notes(MAIN) ?? ''));
+  });
+
+  test('the engine prices the same termite bait quote for MIXED and WOOD_FRAME homes', () => {
+    const quote = (constructionMaterial) => generateEstimate(baseInput({ homeSqFt: 2400, footprintSqFt: 2400, constructionMaterial, services: { termite: {} } }));
+    const termiteLines = (est) => est.lineItems.filter((li) => /termite/.test(li.service));
+    expect(termiteLines(quote('WOOD_FRAME')).length).toBeGreaterThan(0);
+    expect(termiteLines(quote('MIXED'))).toEqual(termiteLines(quote('WOOD_FRAME')));
+  });
+});
+
+describe('a wrong-premise lookup makes machine readings untrusted; a person typing still wins', () => {
+  const { structuralTrustVerdicts } = require('../services/lookup-confidence');
+  const COUNTY = { sourceType: 'county', fieldVerify: false };
+  const trustedProfile = { constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', constructionTrusted: true, foundationTrusted: true, fieldEvidence: { constructionMaterial: COUNTY, foundationType: COUNTY } };
+  const wrongPremise = [{ field: 'address', reason: 'geocoder snapped to a different parcel', priority: 'HIGH' }];
+
+  test('the address wrong-premise flag distrusts stamped and evidenced machine readings', () => {
+    expect(structuralTrustVerdicts(trustedProfile)).toEqual({ constructionTrusted: true, foundationTrusted: true });
+    expect(structuralTrustVerdicts({ ...trustedProfile, fieldVerifyFlags: wrongPremise })).toEqual({ constructionTrusted: false, foundationTrusted: false });
+    // Operational risk flags on the same field are not distrust (a wood-frame note is a risk notice, not a doubt).
+    expect(structuralTrustVerdicts({ ...trustedProfile, fieldVerifyFlags: [{ field: 'constructionMaterial', reason: 'Wood frame construction' }] }))
+      .toEqual({ constructionTrusted: true, foundationTrusted: true });
+  });
+
+  test('a manually typed field still wins over the wrong-premise flag; the other field stays untrusted', () => {
+    expect(structuralTrustVerdicts({ ...trustedProfile, fieldVerifyFlags: wrongPremise, _manualFields: ['constructionMaterial'] }))
+      .toEqual({ constructionTrusted: true, foundationTrusted: false });
+  });
+
+  test('through the translator: a wrong-premise wood frame prices block + the note; typed in, it prices frame', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const translate = (extra) => translateV2CallToV1Input({ homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St', ...trustedProfile, fieldVerifyFlags: wrongPremise, ...extra }, ['WDO'], { urgency: 'ROUTINE' });
+    const machine = wdoLine(generateEstimate(translate({})));
+    expect(machine.price).toBe(175);
+    expect(staffNote(machine)).toBeTruthy();
+    const typed = wdoLine(generateEstimate(translate({ _manualFields: ['constructionMaterial'] })));
+    expect(typed.price).toBe(200);
+    expect(staffNote(typed)).toBeUndefined();
+  });
+});
+
 describe('one shared normalizer at every entry', () => {
   const { normalizeCountyConstruction } = require('../services/property-lookup/ai-property-lookup')._private;
   const { normalizeConstruction, normalizeFoundation } = require('../services/pricing-engine/structural-facts');

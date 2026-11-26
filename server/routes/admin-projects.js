@@ -96,7 +96,7 @@ const { acquireScheduledMintLockChain, TERMINAL_INVOICE_STATUSES } = require('..
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { recordAuditEvent } = require('../services/audit-log');
-const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('../services/wdo-inspection-fee');
+const { resolveWdoInspectionFee, wdoFeeIsExplicitZero, wdoFeeNeedsEntry, seedWdoFeeFromVisit } = require('../services/wdo-inspection-fee');
 const { wdoReportHoldLive, isEnabled } = require('../config/feature-gates');
 const { invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
 const { isReportHeld, REPORT_UNSHARED_SQL, reportLinkShared } = require('../services/project-report-hold');
@@ -2028,8 +2028,18 @@ router.post('/', async (req, res, next) => {
     // Cue + recorded-value write scrub for the customer-facing free text —
     // no filings can exist yet, so the fee set is the incoming findings
     // resolved against the flat default (codex #2817).
+    // A WDO inspection created from a visit carries that visit's own accepted WDO line (net of discounts, even beside a billable add-on)
+    // as its fee. When the line cannot be isolated the fee stays blank and bills exactly as before (the flat default).
+    let createFindings = findings;
+    if (project_type === 'wdo_inspection' && linkedScheduledServiceId) {
+      const typed = normalizeFindings(findings) || {};
+      if (wdoFeeNeedsEntry(typed)) {
+        const seededFee = await seedWdoFeeFromVisit(db, linkedScheduledServiceId);
+        if (seededFee != null) createFindings = { ...typed, inspection_fee: String(seededFee) };
+      }
+    }
     const createFeeValues = projectTypeHasInternalFindingKeys(project_type)
-      ? projectRecordedFeeValues({ findings: findings || {} })
+      ? projectRecordedFeeValues({ findings: createFindings || {} })
       : [];
     let row;
     try {
@@ -2043,7 +2053,7 @@ router.post('/', async (req, res, next) => {
         // as recommendations, clamped to the varchar(200) column since the
         // scrub can lengthen text (codex #2817)
         title: title ? redactProjectTitleForWrite(title, project_type, createFeeValues) : null,
-        findings: findings || null,
+        findings: createFindings || null,
         // inspection fee must never be customer-facing — sanitized on WRITE
         // (durable for new rows; migration 20260717000001 cleaned legacy rows
         // at rest, codex #2817). Type-gated: only WDO carries the internal

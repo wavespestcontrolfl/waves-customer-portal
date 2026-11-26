@@ -4506,6 +4506,7 @@ function calcPestAgeModifier(yearBuilt) {
  */
 function calcConstructionModifier(material) {
   switch (material) {
+    case 'MIXED':       // wood + masonry reads as wood frame, as it did before the shared normalizer
     case 'WOOD_FRAME': return 12;  // More pest entry, more treatment time
     case 'CBS': return 0;          // Standard SWFL, baseline
     case 'BRICK': return -3;       // Slightly better sealed
@@ -4521,6 +4522,7 @@ function calcConstructionModifier(material) {
  */
 function calcTermiteConstructionMult(material) {
   switch (material) {
+    case 'MIXED':
     case 'WOOD_FRAME': return 1.25;  // 25% more — higher risk, more treatment area
     case 'CBS': return 1.0;          // Standard SWFL baseline
     case 'BRICK': return 0.95;       // Slightly less susceptible
@@ -4551,7 +4553,7 @@ function calcFoundationTermiteAdj(foundation) {
  */
 function calcWDOTimeMult(material, foundation) {
   let mult = 1.0;
-  if (material === 'WOOD_FRAME') mult += 0.20;     // More areas to inspect
+  if (material === 'WOOD_FRAME' || material === 'MIXED') mult += 0.20;     // More areas to inspect
   if (foundation === 'CRAWLSPACE') mult += 0.30;   // Crawlspace adds 30% time
   if (foundation === 'RAISED') mult += 0.25;        // Under-building inspection
   return Math.round(mult * 100) / 100;
@@ -5137,7 +5139,7 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // Don't flag as a warning — many homeowners use LLCs
 
   // Wood frame construction
-  if (rc?.constructionMaterial === 'WOOD_FRAME' ||
+  if (['WOOD_FRAME', 'MIXED'].includes(rc?.constructionMaterial) ||
       ai?.constructionVisible === 'WOOD_FRAME') {
     flags.push({
       field: 'constructionMaterial',
@@ -6935,6 +6937,9 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildSatelliteUrlSet = buildSatelliteUrlSet;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
+  calcConstructionModifier,
+  calcTermiteConstructionMult,
+  calcWDOTimeMult,
   applyCommercialSuiteSize,
   commercialSuiteSizeStampIsFresh,
   listingSizeVerifyFlag,
