@@ -273,7 +273,7 @@ const {
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor, normalizePreSlabTermiticideProduct,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching, priceAreaAddOnList, assertAreaAddOnHostVisit,
-  pricePlugging, pluggingAreaRequiredLine, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
+  pricePlugging, pluggingAreaRequiredLine, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee, barrelMeasurementHold,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   resolvePalmCount,
@@ -971,6 +971,9 @@ function roofStyleInputs(exclusion, input) {
     roofStyle: style,
     barrelEaveFt,
     ...(frozen ? { frozenTileMultiplier: frozen.multiplier, frozenBarrelPerFt: frozen.perFt, frozenBarrelMinimum: frozen.minimum } : {}),
+    // A stored estimate re-priced after it was sent keeps the terms it was sent with: no new barrel hold on replay
+    // (a quote not yet sent, replayed as a draft, still gets the hold).
+    ...(replay ? { legacyBarrelUnmeasured: true } : {}),
   };
 }
 
@@ -2482,7 +2485,10 @@ function generateEstimate(input) {
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
       });
-      lineItems.push(result);
+      // The legacy-shaped exclusion takes a barrel pick too: the same hold when no eave footage was entered.
+      const barrelUnmeasured = roofStyle?.roofStyle === 'barrel_tile' && !(roofStyle.barrelEaveFt > 0)
+        && roofStyle.legacyBarrelUnmeasured !== true;
+      lineItems.push(barrelUnmeasured ? { ...result, ...barrelMeasurementHold({ legacyShape: true }) } : result);
     }
   }
 
@@ -2619,7 +2625,8 @@ function generateEstimate(input) {
       );
     }
     const result = priceRodentGuarantee(guaranteeOpts);
-    if (result.eligible) lineItems.push(result);
+    // A held exclusion (barrel footage pending) is not warranty eligible, so no separate guarantee is added either.
+    if (result.eligible && exclusionResult?.warrantyEligible !== false) lineItems.push(result);
   }
 
   // ── Spec-version services (v2 missing-services spec, Apr 2026) ──

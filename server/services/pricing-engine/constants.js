@@ -1337,30 +1337,9 @@ const RODENT = {
     standardPrice: r(350),
     base: r(350),
     floor: r(350),
-    ceilingBeforeCustom: r(795),
     includedFollowUps: 1,
     additionalCheckPrice: r(95),
     activeWindowDays: null,
-    homeSizeAdjustments: [
-      { maxSqFt: 1200,     adjustment: -r(25) },
-      { maxSqFt: 2500,     adjustment: 0 },
-      { maxSqFt: 4000,     adjustment: r(50) },
-      { maxSqFt: 6000,     adjustment: r(95) },
-      { maxSqFt: Infinity, adjustment: r(150), customRecommended: true },
-    ],
-    lotAdjustments: [
-      { maxLotSqFt: 10000,    adjustment: 0 },
-      { maxLotSqFt: 20000,    adjustment: r(35) },
-      { maxLotSqFt: 43560,    adjustment: r(75) },     // 1 acre
-      { maxLotSqFt: Infinity, adjustment: r(125), customRecommended: true },
-    ],
-    pressureAdjustments: {
-      light:    -r(25),
-      normal:    0,
-      moderate:  r(35),
-      heavy:     r(75),
-      severe:    r(150),
-    },
     emergencyMultiplier: 1.20,           // OR fixed surcharge, whichever is greater
     emergencyMinimumSurcharge: r(75),
     invoiceDescriptions: {

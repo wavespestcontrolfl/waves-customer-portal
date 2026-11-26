@@ -512,7 +512,15 @@ describe('the confirmed roof style prices only the V2 model; legacy pricers read
       })).lineItems.find((li) => li.service === 'exclusion');
       for (const roofType of ['shingle', 'tile']) {
         const base = legacy(roofType, {});
-        for (const style of ['shingle', 'flat_tile', 'barrel_tile', 'metal', 'other']) expect(legacy(roofType, pick(style))).toEqual(base);
+        for (const style of ['shingle', 'flat_tile', 'barrel_tile', 'metal', 'other']) {
+          const line = legacy(roofType, pick(style));
+          if (style !== 'barrel_tile') { expect(line).toEqual(base); continue; }
+          // A barrel pick with no eave footage prices the same line but is held for review (2026-11-26).
+          expect(line.requiresCustomQuote).toBe(true);
+          const holdKeys = ['quoteRequired', 'requiresCustomQuote', 'customQuoteReason', 'requiresManualReview', 'manualReviewReasons', 'warrantyEligible', 'priceOverridable'];
+          const withoutHold = (row) => Object.fromEntries(Object.entries(row).filter(([key]) => !holdKeys.includes(key)));
+          expect(withoutHold(line)).toEqual(withoutHold(base));
+        }
       }
       expect(legacy('tile', {}).price).toBeGreaterThan(legacy('shingle', {}).price);
     });

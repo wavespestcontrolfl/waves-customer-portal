@@ -9762,16 +9762,25 @@ function priceWasp(property = {}, options = {}) {
     addFlat('confinedSpace', safeTierIndex + 1 >= 3 ? cfg.addons.confinedSpace[1] : cfg.addons.confinedSpace[0]);
   }
 
+  const removalKey = normalizeToken(options.removalType ?? options.removal ?? 'NONE');
+  const removalPrice = cfg.removal?.[removalKey] || 0;
+
+  // URGENT wins over same-day when both are set, and the urgent multiplier covers the base AND the removal
+  // add-on (owner 2026-11-26, "fix all seven"). Before, same-day (or SOON) took the flat fee even with URGENT
+  // set, and the multiplier ran before the removal price was added, so removal escaped the urgent increase.
+  // No quote path calls priceWasp today, so no stored price depends on the old order.
   const urgency = normalizeToken(options.urgency ?? 'ROUTINE').toUpperCase();
-  if (options.sameDay === true || urgency === 'SOON') addFlat('sameDay', cfg.addons.sameDay);
-  else if (options.urgent === true || urgency === 'URGENT') {
-    basePrice = Math.round(basePrice * cfg.addons.urgent);
+  const urgentSelected = options.urgent === true || urgency === 'URGENT';
+  const sameDaySelected = options.sameDay === true || urgency === 'SOON';
+  if (urgentSelected) {
+    // Removal rides inside the multiplied figure, then comes back out so the subtotal below still adds it once.
+    basePrice = Math.round((basePrice + removalPrice) * cfg.addons.urgent) - removalPrice;
     addOns.push({ name: 'urgent', multiplier: cfg.addons.urgent });
+  } else if (sameDaySelected) {
+    addFlat('sameDay', cfg.addons.sameDay);
   }
   if (options.afterHours === true) addFlat('afterHours', cfg.addons.afterHours);
 
-  const removalKey = normalizeToken(options.removalType ?? options.removal ?? 'NONE');
-  const removalPrice = cfg.removal?.[removalKey] || 0;
   if (removalPrice > 0) addOns.push({ name: `removal_${removalKey}`, amount: removalPrice });
 
   const hasRecurringPest = !!(options.hasRecurringPest ?? property.hasRecurringPest);
@@ -10067,6 +10076,22 @@ function exclusionMinimumRowText(wholeHome, floor) {
   };
 }
 
+// The hold for a barrel tile roof with no eave footage: the existing quote-required flags, which the staff send and the
+// lead auto-send both refuse, and no warranty until the footage is entered. One shape for the V2 rows and the
+// legacy-shaped exclusion (estimate-engine), so no exclusion shape can send an unmeasured barrel quote.
+function barrelMeasurementHold({ legacyShape = false } = {}) {
+  return {
+    quoteRequired: true,
+    requiresCustomQuote: true,
+    customQuoteReason: 'barrel_eave_footage_required',
+    requiresManualReview: true,
+    manualReviewReasons: [legacyShape
+      ? 'Barrel tile roof: switch this quote to the per-point exclusion and enter the eave footage before it is sent.'
+      : 'Barrel tile roof: enter the eave footage before this quote is sent.'],
+    warrantyEligible: false,
+  };
+}
+
 // ============================================================
 // RODENT EXCLUSION V2 (unified mesh-point + bird-box + linear-mesh)
 // ============================================================
@@ -10153,9 +10178,24 @@ function priceRodentExclusionV2(options = {}) {
 
   const totalItems = stdPts + advPts + stdBoxes + tileBoxes + custBoxes;
 
+  // Barrel tile picked with no eave footage: the closure has no price yet, so the quote is parked with the
+  // existing quote-required flags (the staff send and the lead auto-send both refuse them) until the footage
+  // is entered, and it carries no re-entry guarantee until then (owner 2026-11-26, "fix all seven"). A stored
+  // estimate replayed after it was sent (options.legacyBarrelUnmeasured) keeps the terms it was sent with.
+  const barrelNeedsMeasurement = !!(roof && roof.barrel && roof.eaveFt <= 0);
+  const barrelHold = barrelNeedsMeasurement && options.legacyBarrelUnmeasured !== true;
+  const barrelHoldFields = barrelHold
+    ? {
+      ...barrelMeasurementHold(),
+      // A held whole-home seal advertises no included guarantee until the footage is entered.
+      ...(wholeHome ? { includesReentryGuarantee: false, reentryGuaranteeMonths: undefined } : {}),
+    }
+    : {};
+
   const guaranteeFields = {
     ...wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLinearMeshLF),
     ...roofStyleFields(roof),
+    ...barrelHoldFields,
   };
 
   const parts = [];
@@ -10317,7 +10357,7 @@ function priceRodentExclusionV2(options = {}) {
     exclusionCompleted: total > 0,
     ...guaranteeFields,
     // Barrel tile picked with no measured eave: no closure line, and the tool says it needs a measurement.
-    ...(roof && roof.barrel && roof.eaveFt <= 0 ? { barrelClosureNeedsMeasurement: true } : {}),
+    ...(barrelNeedsMeasurement ? { barrelClosureNeedsMeasurement: true } : {}),
   };
 }
 
@@ -10670,6 +10710,7 @@ function applyRodentBundle(componentTotal, bundle) {
 
 module.exports = {
   assertFinitePriceFields,
+  barrelMeasurementHold,
   calcBermudaRemovalAnnualCost,
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,

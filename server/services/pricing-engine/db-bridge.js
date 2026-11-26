@@ -1813,27 +1813,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       // overlaid from that row below, so copy and invoice never drift.
       if (t.emergency_multiplier != null) constants.RODENT.trapping.emergencyMultiplier = Number(t.emergency_multiplier);
       if (t.emergency_minimum_surcharge != null) constants.RODENT.trapping.emergencyMinimumSurcharge = r(t.emergency_minimum_surcharge);
-      if (Array.isArray(t.home_size_adjustments)) {
-        constants.RODENT.trapping.homeSizeAdjustments = t.home_size_adjustments.map(b => ({
-          maxSqFt: b.max_sqft === null || b.max_sqft === 'Infinity' ? Infinity : Number(b.max_sqft),
-          adjustment: b.adjustment >= 0 ? r(b.adjustment) : -r(Math.abs(b.adjustment)),
-          customRecommended: !!b.custom_recommended,
-        }));
-      }
-      if (Array.isArray(t.lot_adjustments)) {
-        constants.RODENT.trapping.lotAdjustments = t.lot_adjustments.map(b => ({
-          maxLotSqFt: b.max_lot_sqft === null || b.max_lot_sqft === 'Infinity' ? Infinity : Number(b.max_lot_sqft),
-          adjustment: b.adjustment >= 0 ? r(b.adjustment) : -r(Math.abs(b.adjustment)),
-          customRecommended: !!b.custom_recommended,
-        }));
-      }
-      if (t.pressure_adjustments && typeof t.pressure_adjustments === 'object') {
-        for (const [key, val] of Object.entries(t.pressure_adjustments)) {
-          if (constants.RODENT.trapping.pressureAdjustments[key] !== undefined) {
-            constants.RODENT.trapping.pressureAdjustments[key] = val >= 0 ? r(val) : -r(Math.abs(val));
-          }
-        }
-      }
+      // home_size_adjustments / lot_adjustments / pressure_adjustments are deliberately not read: the flat $350
+      // Standard price has no size, lot or pressure bands (migration 20260826000001 removed them from the row).
     }
 
     if (config.rodent_trap_only_retainer) {
