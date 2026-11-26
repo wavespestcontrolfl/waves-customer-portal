@@ -1580,12 +1580,13 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   // route rings the admin bell for ENGINE_ERROR only after the save's
   // transaction committed, never from a dryRun preflight (pre-push codex P1).
   // The server could not price this save, so the browser's price stands: it may not carry a bed bug, mosquito or wasp row (the browser
-  // mirrors none of those rules) unless it is an unchanged resave of the stored estimate. A staff revision that the server CAN price
-  // re-prices on the CURRENT rules by design (owner 2026-09-26 ruling, the same decision as #8626, #8631 and the pest price PR): the
-  // stored stamps are not wired into that path, so a delivered wasp quote revised by staff goes $250 -> $275. A customer replay of
-  // the sent quote (replaySavedPricingKnobs) keeps the sent price. The refusal sits AFTER the log lines above: a refused save commits
-  // nothing, so the route's engine-error bell never rings, and the error-level line is then the only trace of a broken engine.
-  assertSpecialtyClientFallbackSave(estimateData, { storedEstimateData });
+  // mirrors none of those rules), and its rule stamp is the server's. A staff revision that the server CAN price re-prices on the
+  // CURRENT rules by design (owner 2026-09-26 ruling, the same decision as #8626, #8631 and the pest price PR): the stored stamps are
+  // not wired into that path, so a delivered wasp quote revised by staff goes $250 -> $275. A customer replay of the sent quote
+  // (replaySavedPricingKnobs) keeps the sent price. Both sit AFTER the log lines above: a refused save commits nothing, so the
+  // route's engine-error bell never rings, and the error-level line is then the only trace of a broken engine.
+  assertSpecialtyClientFallbackSave(estimateData);
+  stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData });
   // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
   // totals already say (returningWaiverForUnpricedSave). A result priced without the fee by the rule (a fresh
   // preview, or a reopened estimate's stored result), for a customer the rule no longer waives, would store
@@ -2081,73 +2082,57 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
 
 // Specialty prices (2026-11-26 evening: bed bug added rooms, mosquito above 2 acres, wasp level; new quotes only). A save the server
 // could not price (the CLIENT_FALLBACK authority: no replayable engine input, or an engine error) keeps the BROWSER's price, and the
-// browser mirrors none of these rules (the $349 rooms, the $85 acres, the wasp levels). So such a save that holds ANY bed bug, mosquito
-// or wasp row (priced, or $0 on a recurring pest program) is refused (409, reload and let the server price it), whatever stamp it
-// posts, unless it is a byte-for-byte unchanged resave: the same rows AND the same specialty pricing inputs as the trusted stored
-// estimate. An unchanged resave keeps the stored price and the STORED stamp (an older browser sends none, a forged one could send
-// false). The check sits where the pricing authority is decided, not behind any browser-shape test.
-const SPECIALTY_ROW_NAME = /^(bed[ _]?bug|wasp|stinging)/i;
-const SPECIALTY_SERVICE_KEYS = new Set(['bed_bug', 'mosquito', 'stinging_insect', 'stinging_insect_v2']);
-function specialtyRowsSignature(estimateData) {
-  const root = estimateResultRoot(estimateData);
-  const results = root?.results && typeof root.results === 'object' ? root.results : {};
-  const listOf = (value) => (Array.isArray(value) ? value : []);
-  const rows = [
-    ...listOf(root?.oneTime?.items), ...listOf(root?.oneTime?.specItems),
-    // The browser's full specialty list keeps the $0 on-program rows (a wasp included with a recurring pest plan) that the one-time
-    // list drops.
-    ...listOf(root?.specItems), ...listOf(results.oneTime), ...listOf(root?.lineItems), ...listOf(root?.recurring?.services),
-  ].filter((item) => item && typeof item === 'object'
-    && (SPECIALTY_ROW_NAME.test(String(item.name || '')) || SPECIALTY_SERVICE_KEYS.has(String(item.service || ''))
-      || /^mosquito$/i.test(String(item.name || item.service || ''))))
-    .map((item) => Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'legacySpecialty1126')));
-  const mosquito = listOf(results.mq).length > 0 ? results.mq : null;
-  return { mosquito, rows, any: !!mosquito || rows.length > 0 };
+// browser mirrors none of these rules (the $349 rooms, the $85 acres, the wasp levels). So such a save is refused (409, reload and
+// let the server price it) when it holds ANY bed bug, recurring mosquito or wasp row: priced or $0, in any result container or
+// shape, whatever stamp it posts, and whether or not it changed (no unchanged-resave exception, so nothing to compare). The check
+// sits where the pricing authority is decided, not behind any browser-shape test.
+const SPECIALTY_ROW_SERVICE = /^(bed_bug(_chemical|_heat)?|mosquito|stinging(_insect)?(_v2)?)$/;
+// A row the browser or the mapper names without a service key: Wasp/Bee, Stinging Insect, Bed Bug Chemical, Mosquito (Silver). The
+// misting plan and the one-time mosquito visit are other services, untouched by these rules.
+const SPECIALTY_ROW_NAME = /^(bed[ _]?bug|wasp|hornet|yellow ?jacket|stinging|mosquito(?! misting))/i;
+const SPECIALTY_SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$/;
+const isSpecialtyRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+// True when the saved blob holds one of the three anywhere outside its input carriers: a one-time or specialty item, a recurring
+// row, an engine line, or the browser's mosquito tier rows (results.mq), in `result`, `engineResult`, the bare data or the send snapshot.
+function saveHoldsSpecialtyRow(estimateData) {
+  const seen = new Set();
+  const walk = (node) => {
+    if (!node || typeof node !== 'object' || seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some(walk);
+    if (SPECIALTY_ROW_SERVICE.test(String(node.service || '')) || SPECIALTY_ROW_NAME.test(String(node.name || ''))) return true;
+    return Object.entries(node).some(([key, value]) => {
+      if (SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key)) return false;
+      if (key === 'results' && isSpecialtyRecord(value) && Array.isArray(value.mq) && value.mq.length > 0) return true;
+      return walk(value);
+    });
+  };
+  return walk(estimateData);
 }
 
-// The inputs that decide these three prices, from every carrier the replay and the editor read (the browser form's `inputs`, the
-// engine inputs and request, the container's inputs): the wasp tier, species and removal, the bed bug rooms, severity, prep, method,
-// heat scope and equipment, the mosquito program, the lot size and whether it is measured, and the services asked for.
-const SPECIALTY_INPUT_KEY = /^(sting|bedbug|svcWasp$|svcBedbug$|svcMosquito$|mosquito|lotSqFt$|lotSizeMeasured$|homeSqFt$|footprint|stories$|urgency$|afterHours$|isAfterHours$|propertyType$)/i;
-function specialtyInputsSignature(estimateData) {
-  const data = estimateData && typeof estimateData === 'object' ? estimateData : {};
-  const container = (() => { try { return require('./estimate-result-container').storedEstimateContainer(data) || null; } catch { return null; } })();
-  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
-  const pick = (carrier) => {
-    if (!carrier || typeof carrier !== 'object') return null;
-    const out = Object.fromEntries(Object.entries(carrier).filter(([key]) => SPECIALTY_INPUT_KEY.test(key)));
-    const services = carrier.services && typeof carrier.services === 'object' ? carrier.services : null;
-    if (services) {
-      out.services = Object.fromEntries(Object.entries(services)
-        .filter(([key]) => /^(sting|bedBug|mosquito|wasp)/i.test(key)));
-    }
-    return out;
-  };
-  return {
-    inputs: pick(data.inputs), engineInputs: pick(data.engineInputs), engineInput: pick(data.engineInput),
-    containerInputs: pick(container && container.inputs), requestProfile: pick(request && request.profile), requestOptions: pick(request && request.options),
-    requestInputs: pick(request && request.inputs),
-    selectedServices: request && Array.isArray(request.selectedServices)
-      ? request.selectedServices.filter((key) => /^(BEDBUG|MOSQUITO|STING)/i.test(String(key || ''))) : null,
-  };
+function assertSpecialtyClientFallbackSave(estimateData) {
+  if (!isSpecialtyRecord(estimateData) || !saveHoldsSpecialtyRow(estimateData)) return;
+  throw errorWithStatus('This estimate has a bed bug, mosquito or wasp price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
 }
-
-function assertSpecialtyClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
-  const root = estimateResultRoot(estimateData);
-  if (!root || typeof root !== 'object') return;
-  const submitted = specialtyRowsSignature(estimateData);
-  if (!submitted.any) return;
-  if (storedEstimateData) {
-    const stored = specialtyRowsSignature(storedEstimateData);
-    if (isDeepStrictEqual({ ...submitted, any: undefined }, { ...stored, any: undefined })
-      && isDeepStrictEqual(specialtyInputsSignature(estimateData), specialtyInputsSignature(storedEstimateData))) {
-      const flag = require('./estimate-floor-signal-replay').savedLegacySpecialty1126Signal(storedEstimateData).legacySpecialty1126;
-      if (typeof flag === 'boolean') root.pricingMetadata = { ...(root.pricingMetadata || {}), legacySpecialty1126: flag };
-      else if (root.pricingMetadata) delete root.pricingMetadata.legacySpecialty1126;
-      return;
+// The rule evidence of a browser-priced save is the server's, never the browser's: a revision keeps the stored estimate's stamp and
+// its per-service list (a quote sold before the rule stays on it), a first save is new. A save that passed the check above holds
+// none of the three rows, so either is true to its prices. Written on every result container, so the reader finds it whichever
+// one it picks.
+function stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (!isSpecialtyRecord(estimateData)) return;
+  const replay = require('./estimate-floor-signal-replay');
+  const legacy = !!storedEstimateData && replay.savedLegacySpecialty1126Signal(storedEstimateData).legacySpecialty1126 === true;
+  const current = storedEstimateData ? replay.savedSpecialty1126CurrentServices(storedEstimateData) : [];
+  const containers = [estimateData.result, estimateData.engineResult].filter(isSpecialtyRecord);
+  for (const container of containers.length ? containers : [estimateData]) {
+    const metadata = { ...(isSpecialtyRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacySpecialty1126: legacy };
+    if (legacy && current.length) metadata.specialty1126CurrentServices = current; else delete metadata.specialty1126CurrentServices;
+    container.pricingMetadata = metadata;
+    if (isSpecialtyRecord(container.routingMetadata)) {
+      const { legacySpecialty1126: _flag, specialty1126CurrentServices: _list, ...rest } = container.routingMetadata;
+      container.routingMetadata = rest;
     }
   }
-  throw errorWithStatus('This estimate has a bed bug, mosquito or wasp price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
 }
 
 // Client-priced saves can't server-recompute (the legacy builder ships no
@@ -2397,7 +2382,7 @@ async function resolveEstimateWritePayload({
     areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId }),
     returningVisitHistory,
     returningAnswerHeld,
-    // The trusted stored estimate of a revision: an unchanged resave of its specialty rows keeps its price and stamp when the server cannot price.
+    // Revise only: the stored estimate, whose specialty rule stamp a save the server cannot price keeps.
     storedEstimateData,
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
@@ -4237,6 +4222,7 @@ module.exports = {
   detectUnlinkedMemberAddress,
   assertLivePestBaseForClientPayload,
   assertSpecialtyClientFallbackSave,
+  stampSpecialtyOnClientFallbackSave,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   assertNoDarkTermiteRentalPayload,

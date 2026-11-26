@@ -564,7 +564,9 @@ describe('legacySpecialty1126: one stamp for the three rules', () => {
 });
 
 describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot price (admin-estimate-persistence)', () => {
-  const { assertSpecialtyClientFallbackSave: assertFallback, resolveServerAuthoritativePricing } = require('../services/admin-estimate-persistence');
+  const {
+    assertSpecialtyClientFallbackSave: assertFallback, stampSpecialtyOnClientFallbackSave: stampFallback, resolveServerAuthoritativePricing,
+  } = require('../services/admin-estimate-persistence');
   const NOW = () => new Date('2026-11-26T12:00:00Z');
   // The browser's real output shape: pest + a wasp keeps the $0 on-program row only in the full specItems list at the result root.
   const waspRow = (price = 0) => ({ name: 'Wasp/Bee', price, det: price ? 'Standalone removal' : 'Included on Quarterly program', ...(price ? {} : { onProg: true }) });
@@ -578,10 +580,22 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
       pricingMetadata: { ...meta },
     },
   });
-  const throws409 = (data, opts) => {
+  // The same browser save with none of the three services on it.
+  const plain = (meta = {}) => ({
+    inputs: { svcPest: true, lotSqFt: 10000, lotSizeMeasured: true },
+    result: {
+      recurring: { discount: 0, pestProgramFloorApplied: false, services: [{ name: 'Pest (Quarterly)', service: 'pest_control', mo: 37.33 }] },
+      results: { pest: { pa: 112, apps: 4, ann: 448, mo: 37.33 } },
+      oneTime: { items: [], specItems: [] },
+      specItems: [],
+      pricingMetadata: { ...meta },
+    },
+  });
+  const throws409 = (data) => {
     let error = null;
-    try { assertFallback(data, opts); } catch (err) { error = err; }
+    try { assertFallback(data); } catch (err) { error = err; }
     expect(error && error.statusCode).toBe(409);
+    expect(error.message).toMatch(/bed bug, mosquito or wasp price the browser cannot set.*reload the page and regenerate/);
   };
   const price = (data, stored = null, recompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' })) => resolveServerAuthoritativePricing({
     estimateData: data, clientPreview: { monthlyTotal: 37.33, annualTotal: 448, onetimeTotal: 0 }, quoteRequired: false, now: NOW, recompute, storedEstimateData: stored,
@@ -597,6 +611,22 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
     // Rows alone, with no browser-only shape around them, are checked too.
     throws409({ result: { results: { mq: [{ pv: 117, v: 9 }] }, oneTime: { items: [] }, pricingMetadata: { legacySpecialty1126: false } } });
     throws409({ result: { lineItems: [{ service: 'stinging_insect', price: 275 }], pricingMetadata: { legacySpecialty1126: false } } });
+  });
+
+  test('a row is found in every container and shape persistence and the readers use', () => {
+    // engineResult is the only priced container (a quote-wizard or agent-draft row).
+    throws409({ engineResult: { lineItems: [{ service: 'stinging_insect', price: 275 }] } });
+    throws409({ result: { results: {} }, engineResult: { lineItems: [{ service: 'bed_bug', price: 1026 }] } });
+    // The nested recurring rows the billable totals are summed from.
+    throws409({ result: { results: { recurring: { services: [{ name: 'Mosquito (Silver)', mo: 87.75 }] } } } });
+    throws409({ result: { recurring: { services: [{ name: 'Mosquito', service: 'mosquito', mo: 87.75 }] } } });
+    // The one-time lists, the top-level specialty list, the bare data, and the names the mapper and the engine give the rows.
+    throws409({ result: { oneTime: { items: [{ name: 'Stinging Insect', price: 275 }] } } });
+    throws409({ result: { oneTime: { specItems: [{ name: 'Bed Bug (Chemical)', price: 1026 }] } } });
+    throws409({ result: { specItems: [{ name: 'Yellow Jacket Nest', price: 350 }] } });
+    throws409({ specItems: [{ name: 'Wasp/Bee', price: 150 }] });
+    throws409({ result: { lineItems: [{ service: 'stinging_insect_v2', price: 275 }] } });
+    throws409({ result: { quoteRequiredItems: [{ service: 'bed_bug', reason: 'manual' }] } });
   });
 
   test('a 3-acre mosquito client save on an unmeasured lot is refused; the server keeps its unverified-area hold at the flat price', () => {
@@ -618,61 +648,76 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
     throws409(noRecurring);
   });
 
-  test('a payload with none of the three rows is not touched', () => {
-    expect(() => assertFallback({ result: { recurring: { discount: 0, pestProgramFloorApplied: false }, results: { pest: { pa: 112 } }, oneTime: { items: [] }, specItems: [], pricingMetadata: {} } })).not.toThrow();
+  test('a save with none of the three rows is not refused: other services, a request in the inputs, misting and the one-time mosquito visit', () => {
+    expect(() => assertFallback(plain())).not.toThrow();
+    // A request for one of the three in the inputs is not a priced row.
+    expect(() => assertFallback({
+      ...plain(), inputs: { svcWasp: true, stingTier: '2', svcMosquito: true, bedbugRooms: 3 },
+      engineInputs: { services: { stinging: { tier: 2 }, mosquito: { tier: 'seasonal9' }, bedBug: { rooms: 3 } } },
+      engineRequest: { selectedServices: ['STING', 'MOSQUITO', 'BEDBUG'] },
+    })).not.toThrow();
+    // The misting plan and the one-time mosquito visit are other services: these rules do not price them.
+    expect(() => assertFallback({ result: { recurring: { services: [{ name: 'Mosquito Misting Service Plan', service: 'mosquito_misting', mo: 99 }] } } })).not.toThrow();
+    expect(() => assertFallback({ result: { oneTime: { items: [{ name: 'One-Time Mosquito', service: 'one_time_mosquito', price: 199 }] } } })).not.toThrow();
   });
 
-  test('tier 1 -> tier 2 with the same $0 on-program wasp row is a changed price input and is refused', () => {
-    const stored = browser({ stingTier: '1', meta: { legacySpecialty1126: true } });
-    // The rows are byte-for-byte the same ($0, included on the plan); only the wasp tier the engine would price changed.
-    const changed = browser({ stingTier: '2', meta: { legacySpecialty1126: false } });
-    expect(changed.result.specItems).toEqual(stored.result.specItems);
-    throws409(changed, { storedEstimateData: stored });
-    // Each other pricing input is part of the same comparison.
-    for (const [key, value] of [['stingRemoval', 'SMALL'], ['stingSpecies', 'YJ_GROUND'], ['lotSqFt', 130680], ['lotSizeMeasured', false]]) {
-      const edited = browser({ stingTier: '1' });
-      edited.inputs[key] = value;
-      throws409(edited, { storedEstimateData: stored });
-    }
-    const rooms = browser({ bed: true });
-    rooms.inputs.bedbugRooms = 2;
-    const roomsStored = browser({ bed: true });
-    roomsStored.inputs.bedbugRooms = 3;
-    throws409(rooms, { storedEstimateData: roomsStored });
-  });
-
-  test('an unchanged resave keeps the STORED stamp and price, never the browser\'s (an old browser sends none, a forged one false)', () => {
+  test('there is no unchanged-resave exception: the same rows, inputs and totals as the stored estimate are refused too', async () => {
     const stored = browser({ wasp: 150, bed: true, mq: true, meta: { legacySpecialty1126: true } });
-    for (const posted of [{}, { legacySpecialty1126: false }]) {
-      const resave = browser({ wasp: 150, bed: true, mq: true, meta: posted });
-      expect(() => assertFallback(resave, { storedEstimateData: stored })).not.toThrow();
-      expect(resave.result.pricingMetadata.legacySpecialty1126).toBe(true);
-      expect(resave.result.oneTime.specItems[0].price).toBe(150);
-    }
-    // A stored estimate with no stamp anywhere (priced rows = legacy) is stamped legacy; a stored new-rule stamp is kept.
-    const unstamped = browser({ wasp: 150 });
-    expect(() => assertFallback(browser({ wasp: 150, meta: { legacySpecialty1126: false } }), { storedEstimateData: unstamped })).not.toThrow();
-    const storedNew = browser({ wasp: 275, meta: { legacySpecialty1126: false } });
-    const resaveNew = browser({ wasp: 275, meta: {} });
-    expect(() => assertFallback(resaveNew, { storedEstimateData: storedNew })).not.toThrow();
-    expect(resaveNew.result.pricingMetadata.legacySpecialty1126).toBe(false);
-    // Key order of the stored rows does not matter; a repriced row does.
-    const reordered = browser({ wasp: 150, bed: true, mq: true });
-    reordered.result.specItems = reordered.result.specItems.map((row) => Object.fromEntries(Object.entries(row).reverse()));
-    expect(() => assertFallback(reordered, { storedEstimateData: stored })).not.toThrow();
-    const repriced = browser({ wasp: 150, bed: true, mq: true });
-    repriced.result.specItems[1].price = 1375;
-    throws409(repriced, { storedEstimateData: stored });
+    throws409(JSON.parse(JSON.stringify(stored)));
+    await expect(price(JSON.parse(JSON.stringify(stored)), stored)).rejects.toMatchObject({ statusCode: 409 });
+    // So no posted total, line stamp or changed input can ride an "unchanged" row past the server.
+    const total = browser({ wasp: 275, meta: { legacySpecialty1126: true } });
+    total.result.oneTime.total = 250;
+    await expect(price(total, browser({ wasp: 275, meta: { legacySpecialty1126: true } }))).rejects.toMatchObject({ statusCode: 409 });
+    const trees = browser({ mq: true });
+    trees.inputs.treeDensity = 'HEAVY';
+    await expect(price(trees, browser({ mq: true }))).rejects.toMatchObject({ statusCode: 409 });
   });
 
-  test('the check sits on the CLIENT_FALLBACK decision: a new row on an engine error or with no replayable input is refused, an unchanged resave is persisted as before, and a server price is untouched', async () => {
+  test('the rule evidence of a browser-priced save is the server\'s: a first save is new, a revision keeps the stored estimate\'s stamp and list', () => {
+    const replay = require('../services/estimate-floor-signal-replay');
+    const stamped = (data, stored) => { stampFallback(data, { storedEstimateData: stored }); return data; };
+    // A first save: new, whatever the browser posted (an old browser posts nothing, a forged one could post true or a list).
+    for (const meta of [{}, { legacySpecialty1126: true }, { legacySpecialty1126: false, specialty1126CurrentServices: ['stinging_insect'] }]) {
+      expect(stamped(plain(meta), null).result.pricingMetadata).toEqual({ legacySpecialty1126: false });
+    }
+    // A revision of a quote sold before the rule stays on it, with the stored per-service list and nothing the browser posted.
+    const legacyStored = browser({ wasp: 250, meta: { legacySpecialty1126: true, specialty1126CurrentServices: ['mosquito'] } });
+    const revised = stamped(plain({ legacySpecialty1126: false, specialty1126CurrentServices: ['stinging_insect', 'bed_bug'] }), legacyStored);
+    expect(revised.result.pricingMetadata).toEqual({ legacySpecialty1126: true, specialty1126CurrentServices: ['mosquito'] });
+    expect(replay.savedLegacySpecialty1126Signal(revised).legacySpecialty1126).toBe(true);
+    expect(replay.savedSpecialty1126CurrentServices(revised)).toEqual(['mosquito']);
+    // A stored estimate priced with no stamp is one sold before the rule; one with nothing priced pins nothing (the save is new).
+    expect(stamped(plain({ legacySpecialty1126: false }), browser({ wasp: 250 })).result.pricingMetadata.legacySpecialty1126).toBe(true);
+    expect(stamped(plain({ legacySpecialty1126: true }), { result: { results: {} } }).result.pricingMetadata).toEqual({ legacySpecialty1126: false });
+    // A revision of a new quote stays new.
+    expect(stamped(plain({ legacySpecialty1126: true }), browser({ wasp: 275, meta: { legacySpecialty1126: false } })).result.pricingMetadata)
+      .toEqual({ legacySpecialty1126: false });
+    // Every result container gets it (routing metadata loses its copy), so the reader finds it whichever one it picks.
+    const both = { ...plain(), engineResult: { lineItems: [{ service: 'pest_control', price: 112 }], routingMetadata: { legacySpecialty1126: true, lane: 'x' } } };
+    stampFallback(both, {});
+    expect(both.result.pricingMetadata).toEqual({ legacySpecialty1126: false });
+    expect(both.engineResult.pricingMetadata).toEqual({ legacySpecialty1126: false });
+    expect(both.engineResult.routingMetadata).toEqual({ lane: 'x' });
+    const bare = { results: { pest: { pa: 112 } }, pricingMetadata: { legacySpecialty1126: true } };
+    stampFallback(bare, {});
+    expect(replay.savedLegacySpecialty1126Signal(bare).legacySpecialty1126).toBe(false);
+  });
+
+  test('both sit on the CLIENT_FALLBACK decision: refused on an engine error or with no replayable input, stamped when it passes, and a server price is untouched', async () => {
     const stored = browser({ wasp: 150, meta: { legacySpecialty1126: true } });
     for (const reason of ['NO_INPUTS', 'ENGINE_ERROR']) {
       const recompute = async () => ({ recomputed: false, reason, ...(reason === 'ENGINE_ERROR' ? { error: new Error('down') } : {}) });
       await expect(price(browser({ wasp: 275, meta: { legacySpecialty1126: false } }), stored, recompute)).rejects.toMatchObject({ statusCode: 409 });
       await expect(price(browser({ wasp: 275, meta: { legacySpecialty1126: false } }), null, recompute)).rejects.toMatchObject({ statusCode: 409 });
-      const out = await price(browser({ wasp: 150 }), stored, recompute);
+      // A save with none of the three is persisted as before, on the stored estimate's rule.
+      const kept = plain({ legacySpecialty1126: false });
+      const out = await price(kept, stored, recompute);
       expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
+      expect(kept.result.pricingMetadata.legacySpecialty1126).toBe(true);
+      const first = plain({ legacySpecialty1126: true });
+      await price(first, null, recompute);
+      expect(first.result.pricingMetadata.legacySpecialty1126).toBe(false);
     }
     // A refused save commits nothing, so the route's engine-error bell never rings: the error-level log line is still written.
     const logger = require('../services/logger');
