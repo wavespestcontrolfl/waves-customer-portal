@@ -2762,9 +2762,16 @@ async function lockProjectForPhotoMutation(project, trx, what = 'the photo chang
     const claimedAtMs = locked?.updated_at ? new Date(locked.updated_at).getTime() : Date.now();
     const ageMs = Date.now() - claimedAtMs;
     if (!(ageMs > 10 * 60 * 1000)) sendInProgress();
+    // A crashed release gives the report back to the sweep in the same write (as the stale-claim recovery does), so
+    // the edit does not keep it 'releasing' for another 10 minutes.
+    const cols = await trx('projects').columnInfo();
     await trx('projects').where({ id: project.id }).update({
       delivery_status: 'failed',
       delivery_claim_token: null,
+      ...(cols.report_hold_status ? {
+        report_hold_status: db.raw("CASE WHEN report_hold_status = 'releasing' THEN 'held' ELSE report_hold_status END"),
+        report_hold_locked_at: db.raw("CASE WHEN report_hold_status = 'releasing' THEN NULL ELSE report_hold_locked_at END"),
+      } : {}),
       updated_at: db.fn.now(),
     });
   }
@@ -4988,12 +4995,8 @@ router.post('/:id/mark-sent-outside', requireAdmin, async (req, res, next) => {
         .whereNotNull('wdo_signature')
         .whereNull('sent_at')
         .whereNull('sent_outside_portal_at');
-      // Not while a held report is being sent: the paid release, or a manual Send report holding a live claim
-      // (a claim past the 10-minute takeover window is a crashed send and does not block).
-      if (hasHoldColumns) {
-        query.whereRaw("coalesce(report_hold_status, '') <> 'releasing'")
-          .whereRaw("NOT (coalesce(report_hold_status, '') = 'held' AND delivery_status IS NOT DISTINCT FROM 'sending' AND updated_at > now() - interval '10 minutes')");
-      }
+      // Not while a held report is being sent (the release, automatic or by staff, is its one sender).
+      if (hasHoldColumns) query.whereRaw("coalesce(report_hold_status, '') <> 'releasing'");
       const rows = await query
         .update({
           sent_outside_portal_at: db.fn.now(),

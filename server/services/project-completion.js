@@ -164,10 +164,10 @@ async function closeoutReportLink(trx, project, customer) {
   return { held: false, token, reportPath: await projectReportPathForProject(trx, { ...project, report_token: token }, customer) };
 }
 
-// A held report's send that holds the delivery claim now: the release (releasing) or a manual Send report (held +
-// 'sending'), within the claim's 10-minute takeover window.
+// A held report's release (automatic or by staff, its one sender) holding the delivery claim now, within the claim's
+// 10-minute takeover window.
 function heldSendInFlight(project) {
-  return isReportHeld(project) && String(project.delivery_status || '') === 'sending'
+  return project.report_hold_status === 'releasing' && String(project.delivery_status || '') === 'sending'
     && Date.now() - new Date(project.updated_at || 0).getTime() < 10 * 60 * 1000;
 }
 

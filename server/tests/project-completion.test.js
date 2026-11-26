@@ -685,7 +685,8 @@ describe('heldSendInFlight: a closeout waits while a held report is being sent',
   const stale = new Date(Date.now() - 11 * 60 * 1000).toISOString();
   test.each([
     ['the paid release holds the claim', { report_hold_status: 'releasing', delivery_status: 'sending', updated_at: fresh }, true],
-    ['a manual Send report of a held report holds the claim', { report_hold_status: 'held', delivery_status: 'sending', updated_at: fresh }, true],
+    ['a staff Send report runs the release too', { report_hold_status: 'releasing', delivery_status: 'sending', updated_at: fresh }, true],
+    ['a held report with a crashed plain claim (no send can run on it)', { report_hold_status: 'held', delivery_status: 'sending', updated_at: fresh }, false],
     ['a crashed claim past the takeover window', { report_hold_status: 'releasing', delivery_status: 'sending', updated_at: stale }, false],
     ['a held report with no send running', { report_hold_status: 'held', delivery_status: null, updated_at: fresh }, false],
     ['an ordinary send of a report that is not held', { report_hold_status: null, delivery_status: 'sending', updated_at: fresh }, false],

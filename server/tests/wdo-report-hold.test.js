@@ -2063,6 +2063,15 @@ describe('audit fixes', () => {
     });
   });
 
+  describe('advisor redesign phase 4: a crashed release is handed back wherever its claim is cleared', () => {
+    test('an edit that clears a crashed claim also gives a releasing report back to held', () => {
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
+      const fn = source.slice(source.indexOf('async function lockProjectForPhotoMutation('), source.indexOf('async function flagWdoSignatureStaleForPhotos('));
+      expect(fn).toContain("report_hold_status: db.raw(\"CASE WHEN report_hold_status = 'releasing' THEN 'held' ELSE report_hold_status END\")");
+      expect(fn).toContain("report_hold_locked_at: db.raw(\"CASE WHEN report_hold_status = 'releasing' THEN NULL ELSE report_hold_locked_at END\")");
+    });
+  });
+
   describe('advisor redesign phase 2: the link goes live only once the email is accepted', () => {
     const { resolveProjectPortalAttachment } = require('../services/project-completion');
 
