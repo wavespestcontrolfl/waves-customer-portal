@@ -365,6 +365,5 @@ module.exports = {
   savedLegacyPricingRulesSignal,
   savedLegacyTwoStoryRoofSignal,
   freezeSnapshotRuleStamps,
-  storedRequestsExclusion,
   savedFloorReplaySignals,
 };

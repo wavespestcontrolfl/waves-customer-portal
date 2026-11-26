@@ -10,13 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // The send-snapshot builder's pricing bundle build is captured (the test reads the estimate data it is handed).
 jest.mock('../routes/estimate-public', () => {
   const actual = jest.requireActual('../routes/estimate-public');
-  // A bundle priced the way the link prices an inputs-only draft: its stored inputs replayed on the rules the data carries.
-  actual.buildPricingBundle = jest.fn(async (estimate) => {
-    const { generateEstimate: generate } = require('../services/pricing-engine');
-    const priced = generate(actual.extractEngineInputs(estimate.estimate_data));
-    const total = priced.lineItems.filter((line) => line.service === 'rodent_exclusion').reduce((sum, line) => sum + (Number(line.price) || 0), 0);
-    return { oneTimeBreakdown: { total } };
-  });
+  actual.buildPricingBundle = jest.fn(async () => ({ captured: true }));
   return actual;
 });
 
@@ -274,76 +268,6 @@ describe('replay: the estimate-level rule stamp decides the factor', () => {
     expect(first.snapshot.legacyTwoStoryRoof).toBe(false);
     const route = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
     expect(route.match(/issuedBefore: estimateIssuedBeforeSend\((estimate|sibling)\)/g)).toHaveLength(3);
-  });
-
-  test('a never-issued draft with no pricing evidence is held unless the first-send bundle matches the stored total', async () => {
-    const { assertTwoStoryRoofPriceReviewed, assertTwoStoryRoofBundleMatchesStored, twoStoryRoofReviewNeeded, stampTwoStoryRoofRuleInClaim } = require('../routes/admin-estimates');
-    const HELD = 'TWO_STORY_ROOF_PRICE_STALE';
-    const row = (data, extra = {}) => ({
-      id: 'est-1', token: 'tok', status: 'draft', sent_at: null, viewed_at: null, onetime_total: 600, estimate_data: data, ...extra,
-    });
-    const verdict = async (data, extra, deps = {}) => {
-      const r = row(data, extra);
-      try { await assertTwoStoryRoofPriceReviewed(r, { loadRow: async () => r, ...deps }); return null; } catch (err) { return err.code; }
-    };
-    // Inputs only, two stories, 4 advanced points: the link prices $780 on the current rule, so a stored $600 is held.
-    expect(await verdict({ engineInputs: REQUEST() })).toBe(HELD);
-    expect(await verdict(JSON.stringify({ engineInputs: REQUEST() }))).toBe(HELD);
-    // A draft saved at $780 (staff reviewed the current price) sends; a cent off holds.
-    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: 780 })).toBeNull();
-    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: '780.00' })).toBeNull();
-    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: 780.01 })).toBe(HELD);
-    // Drafts saved under inputs alone, under the other carrier names, are read the way the link reads them.
-    expect(await verdict({ inputs: REQUEST() })).toBe(HELD);
-    expect(await verdict({ inputs: REQUEST() }, { onetime_total: 780 })).toBeNull();
-    // Conflicting carriers: the request says two stories and 4 advanced points, the stored inputs say one story. The link
-    // prices the inputs ($600), so a stored $780 is held and a stored $600 is not (the link is the source of truth).
-    const conflicting = {
-      engineRequest: { profile: { homeSqFt: 2000, lotSqFt: 10000, stories: 2, propertyType: 'single_family' }, selectedServices: ['EXCLUSION'], options: { exclAdvancedWireMesh: 4, exclWaiveInspection: true } },
-      engineInputs: baseInput({ stories: 1, services: { exclusion: { pricingVersion: 'v2', ...ADV_ONLY } } }),
-    };
-    expect(await verdict(conflicting, { onetime_total: 780 })).toBe(HELD);
-    expect(await verdict(conflicting, { onetime_total: 600 })).toBeNull();
-    // Fail closed: a bundle that throws, one that carries an error, one with no one-time total, a missing stored total, a missing row.
-    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: 780 }, { buildSnapshot: async () => { throw new Error('bundle failed'); } })).toBe(HELD);
-    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: 780 }, { buildSnapshot: async () => ({ sendSnapshot: { pricingBundleError: 'x', pricingBundle: { oneTimeBreakdown: { total: 780 } } } }) })).toBe(HELD);
-    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: 780 }, { buildSnapshot: async () => ({ sendSnapshot: { pricingBundle: {} } }) })).toBe(HELD);
-    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: null })).toBe(HELD);
-    await expect(assertTwoStoryRoofBundleMatchesStored('gone', { loadRow: async () => null })).rejects.toMatchObject({ code: HELD });
-    // Not affected: one story (bundle equals the stored $600), no exclusion asked, a draft with priced rows or a stamp, an authored
-    // proposal, and an estimate already issued.
-    expect(await verdict({ engineInputs: baseInput({ stories: 1, services: { exclusion: { pricingVersion: 'v2', ...ADV_ONLY } } }) })).toBeNull();
-    expect(await verdict({ engineInputs: baseInput({ stories: 2, services: { flea: {} } }) })).toBeNull();
-    expect(twoStoryRoofReviewNeeded(row(freshQuote()))).toBe(false);
-    expect(twoStoryRoofReviewNeeded(row(preChangeQuote()))).toBe(false);
-    expect(twoStoryRoofReviewNeeded(row({ engineInputs: REQUEST(), proposal: { enabled: true } }))).toBe(false);
-    expect(twoStoryRoofReviewNeeded(row({ engineInputs: REQUEST() }, { sent_at: '2026-11-20T15:00:00Z', status: 'sent' }))).toBe(false);
-    expect(twoStoryRoofReviewNeeded(row({ engineInputs: REQUEST() }))).toBe(true);
-    // A grouped sibling as the preflight query returns it (projection with onetime_total and viewed_at): a matching one passes,
-    // so the group is not blocked.
-    const sibling = { id: 'sib-1', status: 'draft', sent_at: null, viewed_at: null, scheduled_at: null, onetime_total: 780, pricing_authority: 'SERVER', price_locked_at: null, estimate_data: { engineInputs: REQUEST() } };
-    await expect(assertTwoStoryRoofPriceReviewed(sibling, { loadRow: async () => ({ ...sibling, token: 'tok' }) })).resolves.toBeUndefined();
-    await expect(assertTwoStoryRoofPriceReviewed({ ...sibling, onetime_total: 600 }, { loadRow: async () => ({ ...sibling, onetime_total: 600 }) })).rejects.toMatchObject({ code: HELD });
-    // The claim stage writes the current-rule stamp in its own transaction (a fake trx stands in for the database).
-    const written = [];
-    const trxFor = (stored) => Object.assign((table) => ({
-      where: () => ({ forUpdate: () => ({ first: async () => stored }), update: async (patch) => { written.push(patch); } }),
-    }), { fn: { now: () => 'NOW()' } });
-    expect(await stampTwoStoryRoofRuleInClaim(trxFor(row({ engineInputs: REQUEST() }, { status: 'sending' })), 'est-1')).toBe(true);
-    expect(JSON.parse(written[0].estimate_data).sendSnapshot).toEqual({ legacyTwoStoryRoof: false });
-    expect(await stampTwoStoryRoofRuleInClaim(trxFor(row({ engineInputs: REQUEST() }, { sent_at: '2026-11-20T15:00:00Z', status: 'sending' })), 'est-1')).toBe(false);
-    expect(await stampTwoStoryRoofRuleInClaim(trxFor(row(freshQuote(), { status: 'sending' })), 'est-1')).toBe(false);
-    expect(written).toHaveLength(1);
-    // Wiring: the stamp rides the claim transaction for the anchor and every claimed sibling; the real bundle is compared before any
-    // provider call, and a refusal takes the stamp back, frees the group claims and throws.
-    const route = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
-    expect(route).toContain("for (const id of [estimate.id, ...claimedGroupSiblings.map((sibling) => sibling.id)]) {");
-    expect(route).toContain('if (await stampTwoStoryRoofRuleInClaim(trx, id)) twoStoryStamped.push(id);');
-    expect(route).toContain('for (const id of twoStoryStamped) await assertTwoStoryRoofBundleMatchesStored(id);');
-    expect(route).toContain('await revertTwoStoryRoofRuleStamp(twoStoryStamped);');
-    expect(route.indexOf('await assertTwoStoryRoofBundleMatchesStored(id);')).toBeLessThan(route.indexOf('// Intent stamp BEFORE any provider call'));
-    expect(route).toContain("'viewed_at', 'scheduled_at', 'onetime_total'");
-    expect(route).not.toContain('estimateTwoStoryPriceUnreviewed');
   });
 
   test('the bundle drop freezes every rule stamp from its own evidence, not just one', () => {

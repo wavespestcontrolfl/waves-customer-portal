@@ -542,7 +542,7 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
         .whereRaw("estimate_data->'addressUnverified' = 'true'::jsonb")
         .whereRaw("(status <> 'expired' OR ((sent_at IS NOT NULL OR viewed_at IS NOT NULL) AND COALESCE(disposition, '') <> 'expired_unsent'))")));
   if (forUpdate) query = query.forUpdate();
-  const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data', 'sent_at', 'viewed_at', 'scheduled_at', 'onetime_total');
+  const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data', 'sent_at', 'scheduled_at');
   for (const sibling of siblings) {
     if (sendAt && ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired'].includes(sibling.status)) {
       assertBidSendDate(sibling, sendAt);
@@ -559,7 +559,6 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
         && require('../services/estimate-roof-style-replay').estimateHasUnmeasuredBarrelExclusion(siblingData)) {
         return { sibling, statusCode: 409, code: 'BARREL_EAVE_FOOTAGE_REQUIRED' };
       }
-      try { await assertTwoStoryRoofPriceReviewed(sibling); } catch (err) { return { sibling, statusCode: 409, code: err.code || 'TWO_STORY_ROOF_PRICE_STALE' }; }
     }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
     // time — schedule and immediate alike — so the operator hears it now,
@@ -660,77 +659,6 @@ function palmCountGateFor(row, carriedCount) {
   const cleared = ['scheduled', 'sending'].includes(String(row.status || ''));
   const confirmedPalmCount = carriedCount ?? (cleared ? scheduledSendReceipt(row)?.scheduleReview?.confirmedPalmCount : null);
   return { confirmedPalmCount, palmCountCleared: cleared && confirmedPalmCount == null };
-}
-
-// Two-story roof-point rule (rodent exclusion, 2026-11-26) and a draft saved before it. A never-issued draft with no pricing
-// evidence (no priced rows, no rule stamp) that still asks for an exclusion was reviewed at a stored total, but the link prices
-// from the first-send bundle on the CURRENT rule. One source of truth settles it: the send claim stamps the current rule
-// (legacyTwoStoryRoof: false) on the stored draft in the claim's own transaction, builds the real first-send bundle (the exact
-// function the link serves) before any provider call, and compares its one-time total with the stored total the email renders,
-// to the cent. A mismatch, a bundle that fails to build, or a missing stored total rolls the claim back and refuses the send
-// (409 TWO_STORY_ROOF_PRICE_STALE): staff regenerate and save, which writes the stamp with the price.
-function twoStoryRoofReviewNeeded(row) {
-  const data = parseEstimateData(row?.estimate_data || row?.estimateData);
-  if (!data || data.proposal?.enabled === true || !estimateNeverIssued(row)) return false;
-  const replay = require('../services/estimate-floor-signal-replay');
-  return replay.savedLegacyTwoStoryRoofSignal(data).legacyTwoStoryRoof === undefined && replay.storedRequestsExclusion(data);
-}
-
-function twoStoryRoofHold(why) {
-  return Object.assign(new Error(`This draft was saved before the two-story roof rule (${why}). Open it in the estimate tool, generate it again and save, then send.`), { statusCode: 409, code: 'TWO_STORY_ROOF_PRICE_STALE' });
-}
-
-// Builds the real first-send bundle for the row (re-read in full) and compares its one-time total with the stored total.
-// stamp: apply the current-rule stamp in memory (a check before the claim has written it).
-async function assertTwoStoryRoofBundleMatchesStored(id, { stamp = false, loadRow, buildSnapshot } = {}) {
-  const cents = (value) => Math.round(Number(value) * 100);
-  const full = await (loadRow ? loadRow(id) : db('estimates').where({ id }).first());
-  if (!full) throw twoStoryRoofHold('the estimate could not be read');
-  const stored = full.onetime_total ?? full.onetimeTotal;
-  if (stored == null || stored === '' || !Number.isFinite(cents(stored))) throw twoStoryRoofHold('no stored total to compare');
-  let row = full;
-  if (stamp) {
-    const data = parseEstimateData(full.estimate_data) || {};
-    row = { ...full, estimate_data: { ...data, sendSnapshot: { ...(data.sendSnapshot || {}), legacyTwoStoryRoof: false } } };
-  }
-  let snapshot;
-  try {
-    snapshot = await (buildSnapshot || buildEstimateSendSnapshot)(row, () => new Date(), { delivered: false, issuedBefore: false });
-  } catch { throw twoStoryRoofHold('its price could not be checked'); }
-  const bundle = snapshot?.sendSnapshot?.pricingBundle;
-  if (!bundle || snapshot.sendSnapshot.pricingBundleError) throw twoStoryRoofHold('its price could not be checked');
-  const priced = bundle.oneTimeBreakdown?.total ?? bundle.anchorOneTimePrice;
-  if (priced == null || !Number.isFinite(cents(priced))) throw twoStoryRoofHold('its price could not be checked');
-  if (cents(priced) !== cents(stored)) throw twoStoryRoofHold('its price now differs');
-}
-
-// Pre-claim check for the schedule route, the send preview and the group preflight (the claim itself checks again).
-async function assertTwoStoryRoofPriceReviewed(row, deps = {}) {
-  if (!twoStoryRoofReviewNeeded(row)) return;
-  await assertTwoStoryRoofBundleMatchesStored(row.id, { stamp: true, ...deps });
-}
-
-// In the send claim's transaction: write the current-rule stamp on a draft that needs the review, so the delivered price and
-// every later bundle failure, retry or replay read the same rule. Returns whether it stamped.
-async function stampTwoStoryRoofRuleInClaim(trx, id) {
-  const row = await trx('estimates').where({ id }).forUpdate().first();
-  if (!row || !twoStoryRoofReviewNeeded(row)) return false;
-  const data = parseEstimateData(row.estimate_data) || {};
-  data.sendSnapshot = { ...(data.sendSnapshot || {}), legacyTwoStoryRoof: false };
-  await trx('estimates').where({ id }).update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
-  return true;
-}
-
-// A refused first send takes its stamp back, so a retry (or the next send) is checked again.
-async function revertTwoStoryRoofRuleStamp(ids = []) {
-  if (!ids.length) return;
-  await db('estimates').whereIn('id', ids).update({
-    estimate_data: db.raw(
-      `CASE WHEN (COALESCE(estimate_data->'sendSnapshot', '{}'::jsonb) - 'legacyTwoStoryRoof') = '{}'::jsonb
-         THEN COALESCE(estimate_data, '{}'::jsonb) - 'sendSnapshot'
-         ELSE jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{sendSnapshot}', COALESCE(estimate_data->'sendSnapshot', '{}'::jsonb) - 'legacyTwoStoryRoof', true) END`,
-    ),
-  });
 }
 
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ...palmCountGate } = {}) {
@@ -1776,7 +1704,6 @@ async function sendPreviewHandler(req, res, next) {
     const preview = await buildEstimateSendPreview(estimate);
     try {
       assertEstimateSendable(estimate, { palmCountCleared: true });
-      await assertTwoStoryRoofPriceReviewed(estimate);
     } catch (err) {
       preview.blockReason = err.message;
       preview.requiresEngineReview = err.code === 'ENGINE_REVIEW_REQUIRED';
@@ -1838,7 +1765,6 @@ async function sendEstimateHandler(req, res, next) {
       reviewedMessages = preview.messages;
     }
     assertEstimateSendable(estimate, { engineReviewAcknowledged, confirmedPalmCount });
-    await assertTwoStoryRoofPriceReviewed(estimate);
     // A typed satellite palm count passed on this pre-read row (it equals
     // confirmedPalmCount). Pin it (pre-push audit P1): the claims below check
     // it against the row they claim, and a schedule records it for the cron
@@ -3156,8 +3082,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         options.reviewedMessages,
         async () => (await db('estimates').where({ id: estimate.id }).first()) || estimate,
       );
-    // Rows whose two-story rule stamp this claim wrote (see assertTwoStoryRoofBundleMatchesStored).
-    const twoStoryStamped = [];
     const invalidatedNow = await db.transaction(async (trx) => {
       // Group advisory lock BEFORE any row lock when siblings are claimed
       // below (pre-push audit P1 after r42): two grouped sends / extensions
@@ -3260,10 +3184,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             throw Object.assign(new Error('sibling delivery claim unavailable'), { code: 'SIBLING_CLAIM_UNAVAILABLE' });
           }
         }
-        // The two-story rule stamp rides the claim (same transaction), for the anchor and every sibling this send publishes.
-        for (const id of [estimate.id, ...claimedGroupSiblings.map((sibling) => sibling.id)]) {
-          if (await stampTwoStoryRoofRuleInClaim(trx, id)) twoStoryStamped.push(id);
-        }
       }
       return null;
     }).catch((claimErr) => {
@@ -3289,20 +3209,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           : 'This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
       err.statusCode = 409;
       throw err;
-    }
-    // The real first-send bundle against the stored total, BEFORE any provider call: a mismatch or a failed build gives the
-    // claim back and refuses the send.
-    if (twoStoryStamped.length) {
-      try {
-        for (const id of twoStoryStamped) await assertTwoStoryRoofBundleMatchesStored(id);
-      } catch (holdErr) {
-        await revertTwoStoryRoofRuleStamp(twoStoryStamped);
-        await db('estimates')
-          .where({ id: estimate.id, status: 'sending' })
-          .update({ status: 'send_failed', last_send_error: 'TWO_STORY_ROOF_PRICE_STALE', updated_at: db.fn.now() });
-        await releaseGroupSiblingClaims(claimedGroupSiblings);
-        throw holdErr;
-      }
     }
   }
   // Park-to-claim gap (pre-push codex P1): the public service-mix route can
@@ -6966,10 +6872,6 @@ module.exports = router;
 // one. Lazy-required by services to avoid load-order cycles.
 module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;
 module.exports.estimateIssuedBeforeSend = estimateIssuedBeforeSend;
-module.exports.assertTwoStoryRoofPriceReviewed = assertTwoStoryRoofPriceReviewed;
-module.exports.assertTwoStoryRoofBundleMatchesStored = assertTwoStoryRoofBundleMatchesStored;
-module.exports.twoStoryRoofReviewNeeded = twoStoryRoofReviewNeeded;
-module.exports.stampTwoStoryRoofRuleInClaim = stampTwoStoryRoofRuleInClaim;
 module.exports.applyLeadServiceForSend = applyLeadServiceForSend;
 module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
 module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;
