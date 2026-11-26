@@ -306,7 +306,7 @@ const hasWord = (text) => /[A-Za-z0-9]/.test(text);
 // The type is tested compact, so a line break or a character a browser draws as nothing inside a word ("Callba<br>ck")
 // cannot hide a callback. Joined words can only add a match ("Structure Inspection"), which gives no answer.
 function namesFirstVisit(inspectionType) {
-  return typeof inspectionType === 'string' && inspectionType.trim() !== ''
+  return typeof inspectionType === 'string' && hasWord(inspectionType)
     && !CALLBACK_TYPE_RE.test(compact(inspectionType));
 }
 
