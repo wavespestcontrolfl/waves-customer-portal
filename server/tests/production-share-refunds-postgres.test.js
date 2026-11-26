@@ -920,6 +920,63 @@ postgres('production share refunds', () => {
     });
   });
 
+  describe('round six: consumed credit stays locked, a finalized week is frozen, combined anchors', () => {
+    it('a stop whose credit paid off a take-back on a $0-share check is already paid when its date moves to the next week', async () => {
+      const world = await paidWorld('lock');
+      await refundOn(world, '30.00');
+      // From week 2 the bar is $900 a shift: a $500.00 stop earns no share, but its credit is consumed by the take-back.
+      await trx('production_share_settings').insert({ technician_id: world.id, from_week: W2, rate_bps: 1500, bar_type: 'per_shift', bar_cents: 90000, callback_stop_value_cents: 9500 });
+      const moved = await stop(world.id, W2, '500.00', world.customerId);
+      const open = await preview(world.id, W2);
+      await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 100000, signals: open.takeBackToSet[0].newSignals });
+      const { done } = await finalWeek(W2);
+      const check2 = byName(done, 'Sample Alpha');
+      expect(check2.productionShareCents).toBe(0);
+      expect(check2.productionShare).toMatchObject({ creditedCents: 0, refundTakeBackCents: 50000 });
+      // The completion date is corrected into week 3: the same $500.00 must not pay off the rest of the debt a second time.
+      await trx('scheduled_services').where({ id: moved }).update({ completed_at: `${W3}T16:00:00Z`, scheduled_date: W3 });
+      await stop(world.id, W3, '800.00', world.customerId);
+      const shown = await preview(world.id, W3);
+      expect(rowOf(shown, moved)).toMatchObject({ kind: 'already_paid', creditCents: 0 });
+      // Only the $800.00 stop carries week 3: it takes the remaining $500.00 of the $1,000.00 answer once.
+      expect(shown.takeBacks).toEqual([expect.objectContaining({ cents: 50000 })]);
+      expect(shown.creditedCents).toBe(30000);
+    });
+
+    it('reopening a finalized week shows what it froze: takeBacks, credited production and share, not the owner\'s answer of now', async () => {
+      const world = await paidWorld('frozen2');
+      await refundOn(world, '30.00');
+      const open = await week(world, W2, '500.00');
+      await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 30000, signals: open.takeBackToSet[0].newSignals });
+      const { done } = await finalWeek(W2);
+      const paid = byName(done, 'Sample Alpha');
+      // The owner lowers the total to $100.00 afterwards.
+      expect((await takeBack({ checkId: world.checkId, visitId: world.visit, cents: 10000, signals: open.takeBackToSet[0].newSignals })).status).toBe(200);
+      const reopened = await preview(world.id, W2);
+      expect(reopened.takeBacks).toEqual([expect.objectContaining({ cents: 30000, sourceCheckId: world.checkId })]);
+      expect(reopened).toMatchObject({ refundTakeBackCents: 30000, creditedCents: paid.productionShare.creditedCents, shareCents: paid.productionShareCents });
+      // The next week gives the $200.00 back.
+      await stop(world.id, W3, '100.00', world.customerId);
+      expect((await preview(world.id, W3)).takeBacks).toEqual([expect.objectContaining({ cents: -20000 })]);
+    });
+
+    it('finds a pre-settlement combined marker by combined_anchor_invoice_id after the invoice intent binding is cleared', async () => {
+      const id = await tech('Sample Alpha');
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '100.00', { scheduled_service_id: visit, stripe_payment_intent_id: 'pi_anchor' });
+      const marker = await paymentOf(customerId, {
+        stripe_payment_intent_id: 'pi_anchor', stripe_charge_id: 'ch_anchor', status: 'refunded', refund_amount: '100.00',
+        description: 'Combined balance charge fully refunded before settlement (marker)',
+        metadata: JSON.stringify({ combined_payment: true, pre_settlement: true, source: 'combined_pay_webhook', combined_anchor_invoice_id: invoiceId }),
+      });
+      expect((await signals([visit])).get(visit)).toEqual([`pay:${marker}:10000:refunded`]);
+      // The invoice's own PaymentIntent binding is cleared (or replaced): only the anchor key ties the marker to it.
+      await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null, stripe_charge_id: null });
+      expect((await signals([visit])).get(visit)).toEqual([`pay:${marker}:10000:refunded`]);
+    });
+  });
+
   describe('a parked refund the bank bounced is not a refund signal', () => {
     it('skips a parked refund whose id is fenced as failed, and keeps a reconciled one', async () => {
       const id = await tech('Sample Alpha');

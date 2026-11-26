@@ -66,10 +66,14 @@ const metadataInvoiceId = (meta) => {
   return found || null;
 };
 
-// SQL: the payment `p` names the invoice `invoiceRef` (an id expression) in any of those metadata keys.
-const paymentNamesInvoiceSql = (alias, invoiceRef) => `(${PAYMENT_INVOICE_METADATA_KEYS.map((key) => `${alias}.metadata ->> '${key}' = ${invoiceRef}::text`).join(' OR ')})`;
+// The pre-settlement marker rows the combined-charge webhook writes (a refund or dispute that arrived before the charge settled) name the
+// invoice the combined charge was anchored to here. findInvoiceForPayment does not read this key, so it is not in the list above.
+const COMBINED_ANCHOR_INVOICE_KEY = 'combined_anchor_invoice_id';
+
+// SQL: the payment `p` names the invoice `invoiceRef` (an id expression) in any of those metadata keys, or as the anchor of a combined marker.
+const paymentNamesInvoiceSql = (alias, invoiceRef) => `(${[...PAYMENT_INVOICE_METADATA_KEYS, COMBINED_ANCHOR_INVOICE_KEY].map((key) => `${alias}.metadata ->> '${key}' = ${invoiceRef}::text`).join(' OR ')})`;
 
 module.exports = {
-  PAYMENT_INVOICE_METADATA_KEYS, metadataInvoiceId, paymentNamesInvoiceSql,
+  PAYMENT_INVOICE_METADATA_KEYS, COMBINED_ANCHOR_INVOICE_KEY, metadataInvoiceId, paymentNamesInvoiceSql,
   AUTO_MINT_RE, namedIn, COLLECTED_DEPOSITS, UUID_RE, VOIDED_INVOICE, invoiceLines, depositApplications, depositReversal, showsFullRefund, paymentRefundShownSql,
 };
