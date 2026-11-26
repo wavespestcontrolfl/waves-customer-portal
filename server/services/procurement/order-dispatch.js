@@ -696,11 +696,13 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
   const transitioned = await conn.transaction(async (trx) => {
     let rowPatch = patch;
     let reopen = false;
-    if (staleBefore) {
-      // Stale recovery: the request's status is read HERE, under the ledger →
-      // request locks (the scan's snapshot is unlocked): received by an older
-      // pod meanwhile ⇒ the park carries landedAfterReceive so every
-      // live-order guard keeps the possibly-placed order live (Codex r30 P1).
+    if (postSubmit) {
+      // Every post-submit park (stale recovery, an ambiguous submit, a placed
+      // order whose record failed): the order exists or may, so the request's
+      // status is read HERE, under the ledger → request locks (the claim's
+      // and the scan's snapshots are unlocked): received by an older pod
+      // meanwhile ⇒ the park carries landedAfterReceive so every live-order
+      // guard keeps the possibly-placed order live (Codex r30 P1).
       await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id');
       const fresh = await trx('product_restock_requests').where({ id: request.id }).forUpdate().first('status');
       if (fresh?.status === 'received') rowPatch = { ...patch, evidence: JSON.stringify({ ...JSON.parse(patch.evidence), landedAfterReceive: new Date().toISOString() }) };
@@ -708,7 +710,7 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
       // have gone out, and a cancelled request can be neither received nor
       // revoked (both refuse) while the live-order guard blocks a
       // replacement — restore it to ordered, as a late placement does
-      // (Codex r31 P1).
+      // (Codex r31 P1). A pre-submit park leaves the request alone: no order.
       if (fresh?.status === 'cancelled') { reopen = true; rowPatch = { ...rowPatch, evidence: JSON.stringify({ ...JSON.parse(rowPatch.evidence), reopenedFromCancelledAt: new Date().toISOString() }) }; }
     }
     const transition = trx('vendor_orders').where({ id: ledger.id, status: 'placing' });
