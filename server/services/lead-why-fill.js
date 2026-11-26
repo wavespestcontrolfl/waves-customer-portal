@@ -11,28 +11,32 @@
  *   not_booked_reason — why the lead did not book (NOT_BOOKED_RULES).
  *
  * Rules (owner ruling 2026-11-25, option A):
- *   - Only NULL fields are filled; the job never overwrites a set value. There
- *     is no office editor for these fields (option B, not picked); the
- *     migration comment that mentions office edits predates that ruling.
- *     Each UPDATE re-checks the field is NULL, the lead is live, and its
- *     status and customer link are the ones the reason was computed from.
+ *   - The job OWNS the three fields: each run recomputes them from current
+ *     evidence and writes only what changed (a value can be cleared). Late
+ *     call mining, a later booking or a status change therefore self-correct
+ *     on the next run instead of being frozen. There is no office editor for
+ *     these fields (option B, not picked); the migration comment that
+ *     mentions office edits predates that ruling. Each UPDATE re-checks that
+ *     the lead is live and that its status, converted_at and customer link
+ *     are the ones the values were computed from.
  *   - switch_reason / previous_company read caller speech only, on calls that
  *     carry competitor_mention / churn_signal / complaint chunks about a prior
  *     provider. Two different rivals named on one lead = ambiguous = left NULL.
- *   - not_booked_reason only for lost / unresponsive leads (never an open
- *     lead, never a converted one); no_response only when the status is
- *     'unresponsive' and no other not-booked reason fits.
+ *   - not_booked_reason only for lost / unresponsive leads that are not
+ *     converted and whose customer has no active visit booked since the lead
+ *     (an assessment booking keeps the status and leaves converted_at NULL).
+ *     no_response only when the status is 'unresponsive', no other reason
+ *     fits, and no linked call from the last 3 days is still waiting to be
+ *     mined.
  *   - Each call feeds at most one lead: explicit owners (sid / metadata stamp)
  *     win, conflicting owners are skipped, and the same-customer window is a
  *     fallback only when exactly one live lead of that customer fits.
  *   - Leads of customers who already existed before the lead are skipped:
  *     they are not prospects switching providers.
- *   - why_filled_at is stamped only on a run that wrote at least one field.
+ *   - why_filled_at is stamped in the same UPDATE as any changed field.
  *   - Idempotent; bounded by LOOKBACK_DAYS and MAX_LEADS_PER_RUN. Each run
  *     scans least-recently-checked leads first (why_checked_at), so a capped
  *     run never starves older leads in the window.
- *   - A call explicitly owned by one lead (sid or metadata stamp) never feeds
- *     another lead through the same-customer window fallback.
  *
  * Rule lists are ported from the research scripts of 2026-11-23 (switch
  * themes, objection themes, rival name patterns); the order of each list is
@@ -42,6 +46,7 @@
  */
 
 const db = require('../models/db');
+const { DEFAULT_EXCLUDE_STATUSES } = require('./scheduling/occupancy');
 const logger = require('./logger');
 
 const LOOKBACK_DAYS = 120;
@@ -52,6 +57,9 @@ const MAX_LEADS_PER_RUN = 2000;
 const CALL_WINDOW_BEFORE_DAYS = 2;
 const CALL_WINDOW_AFTER_DAYS = 14;
 const EXISTING_CUSTOMER_MARGIN_DAYS = 1;
+// A linked call this recent that the miner has not stamped yet may still add
+// evidence, so no_response waits for it.
+const MINING_GRACE_DAYS = 3;
 const DAY_MS = 86400000;
 
 // Statuses that never get a not-booked reason (booked, junk, or not a lead).
@@ -85,7 +93,8 @@ const SWITCH_RULES = [
 const NOT_BOOKED_RULES = [
   ['spouse', /talk to (my|her|his)|husband|wife|spouse|partner|landlord|\bhoa\b|property manager|think about it|run it by/],
   ['one_visit', /one[- ]time|just once|single (visit|treatment|service)|one visit|just the one/],
-  ['no_plan', /commit|contract|recurring|quarterly|annual|prepay|pay (up ?front|in advance|for the (year|whole))|subscription|membership|(don'?t|do not|not) want (a |any )?plan|\bplan\b/],
+  // Needs words that turn the plan down: "the quarterly plan is too expensive" is a price objection.
+  ['no_plan', /(don'?t|do not|not|no|never) (want|interested in|looking for|need|sign(ing)? up for|do) (a |any |the |to )?(plan|contract|commitment|commit|recurring|quarterly|annual|subscription|membership|ongoing)|(don'?t|do not|won'?t|not going to|can'?t) (want to )?(commit|sign (a |any )?contract|prepay|pay (up ?front|in advance))|no (contracts?|commitments?|plans?)\b/],
   ['wants_a_look', /in[- ]person|come out (and|to) (look|see|take)|look at (it|the)|take a look|see it first|inspect|walk ?through|before (i|we) (commit|decide|agree)/],
   ['price', /price|pricing|cost|expensive|afford|budget|cheaper|too much|\$|dollar/],
   ['timing', /not right now|next (month|week)|\blater\b|not ready|\bwait|after (the )?(holiday|summer|season)|timing|out of town|busy|schedul/],
@@ -141,43 +150,40 @@ function aboutPriorProvider(c) {
   return PRIOR_PROVIDER_RE.test(text) || RIVAL_USE.some(([, re]) => re.test(text));
 }
 
+const sameValue = (a, b) => (isBlank(a) ? null : String(a)) === (isBlank(b) ? null : String(b));
+
 /**
- * Decide what to fill for one lead. Pure: lead row + its linked chunks in,
- * a patch (only for currently-empty fields) out. Never returns a key whose
- * lead value is already set.
+ * Recompute the three fields for one lead. Pure: lead row + its linked chunks
+ * + facts in, a patch of ONLY the fields whose value changed out (a field can
+ * change to null). facts: { booked, miningPending }.
  */
-function planLeadWhy(lead, chunks, now = new Date()) {
-  const patch = {};
+function planLeadWhy(lead, chunks, facts = {}) {
   const callerChunks = (chunks || []).filter((c) => c.speaker === 'caller');
+  const next = { previous_company: null, switch_reason: null, not_booked_reason: null };
 
   const switchChunks = callerChunks.filter(aboutPriorProvider);
   if (switchChunks.length) {
     const text = joinText(switchChunks);
-    if (isBlank(lead.switch_reason)) {
-      const reason = firstRule(SWITCH_RULES, text);
-      if (reason) patch.switch_reason = reason;
-    }
-    if (isBlank(lead.previous_company)) {
-      const named = RIVAL_USE.filter(([, re]) => re.test(text)).map(([name]) => name);
-      if (named.length === 1) patch.previous_company = named[0];
-    }
+    next.switch_reason = firstRule(SWITCH_RULES, text);
+    const named = RIVAL_USE.filter(([, re]) => re.test(text)).map(([name]) => name);
+    if (named.length === 1) next.previous_company = named[0];
   }
 
-  // Only a lead whose status says it did not book (lost / unresponsive) gets a
-  // not-booked reason. An open lead may have booked an assessment or a visit
-  // without a status change, so it is never guessed. converted_at survives a
-  // reopen of a won lead, so a converted lead never gets one either.
-  if (isBlank(lead.not_booked_reason) && !lead.converted_at && LOST_STATUSES.has(lead.status)) {
-    const reason = firstRule(NOT_BOOKED_RULES, joinText(callerChunks.filter((c) => NOT_BOOKED_TAGS.has(c.tag))))
-      || (lead.status === 'unresponsive' ? 'no_response' : null);
-    if (reason) patch.not_booked_reason = reason;
+  // Only a lead whose status says it did not book (lost / unresponsive), that
+  // never converted and has no visit booked since, gets a not-booked reason.
+  if (!lead.converted_at && !facts.booked && LOST_STATUSES.has(lead.status)) {
+    next.not_booked_reason = firstRule(NOT_BOOKED_RULES, joinText(callerChunks.filter((c) => NOT_BOOKED_TAGS.has(c.tag))))
+      || (lead.status === 'unresponsive' && !facts.miningPending ? 'no_response' : null);
   }
+
+  const patch = {};
+  for (const [key, value] of Object.entries(next)) if (!sameValue(lead[key], value)) patch[key] = value;
   return patch;
 }
 
 const asUuidList = (rows, key) => [...new Set(rows.map((r) => r[key]).filter(Boolean))];
 
-const CALL_COLS = (conn) => ['id', 'customer_id', 'created_at', 'twilio_call_sid', 'call_sid',
+const CALL_COLS = (conn) => ['id', 'customer_id', 'created_at', 'twilio_call_sid', 'call_sid', 'research_mined_at',
   conn.raw("metadata->>'lead_id' AS stamp_lead_id"), conn.raw("metadata->>'relay_lead_id' AS stamp_relay_lead_id")];
 
 // Candidate calls for a page of leads: by the lead's sid, by the lead_id stamp
@@ -234,7 +240,7 @@ async function assignCalls(conn, leads, calls) {
   return owner;
 }
 
-async function loadChunksByLead(conn, leads) {
+async function loadChunksByLead(conn, leads, now) {
   const byLead = new Map(leads.map((l) => [l.id, new Set()]));
   const calls = new Map(); // call_log id -> row
   const candidates = await candidateCalls(conn, leads);
@@ -252,8 +258,29 @@ async function loadChunksByLead(conn, leads) {
     for (const c of chunks) chunksByCall.set(c.call_log_id, [...(chunksByCall.get(c.call_log_id) || []), c]);
   }
   const out = new Map();
-  for (const [leadId, set] of byLead) out.set(leadId, [...set].flatMap((cid) => chunksByCall.get(cid) || []));
+  for (const [leadId, set] of byLead) {
+    const ids = [...set];
+    out.set(leadId, {
+      chunks: ids.flatMap((cid) => chunksByCall.get(cid) || []),
+      miningPending: ids.some((cid) => {
+        const c = calls.get(cid);
+        return !c.research_mined_at && now - new Date(c.created_at) < MINING_GRACE_DAYS * DAY_MS;
+      }),
+    });
+  }
   return out;
+}
+
+// Leads whose customer has an active visit (any type, an assessment included)
+// created since the lead: booked, so never "not booked".
+async function bookedLeadIds(conn, leads) {
+  const customerIds = asUuidList(leads, 'customer_id');
+  if (!customerIds.length) return new Set();
+  const rows = await conn('scheduled_services').whereIn('customer_id', customerIds)
+    .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
+    .select('customer_id', 'created_at');
+  return new Set(leads.filter((l) => rows.some((r) => r.customer_id === l.customer_id
+    && new Date(r.created_at) >= new Date(l.created_at) - EXISTING_CUSTOMER_MARGIN_DAYS * DAY_MS)).map((l) => l.id));
 }
 
 // Customers that existed before the lead are not prospects: skip their leads.
@@ -268,48 +295,44 @@ async function existingCustomerLeadIds(conn, leads) {
     .map((l) => l.id));
 }
 
+// Write only the changed fields, and only while the lead is still live and its
+// status, converted_at and customer link are the ones the values came from.
+async function writeLeadWhy(conn, lead, patch, now) {
+  const q = conn('leads').where({ id: lead.id }).whereNull('deleted_at');
+  for (const col of ['status', 'customer_id', 'converted_at']) {
+    if (lead[col] == null) q.whereNull(col); else q.where(col, lead[col]);
+  }
+  return q.update({ ...patch, why_filled_at: now });
+}
+
 async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_PER_RUN } = {}) {
   const cutoff = new Date(now - LOOKBACK_DAYS * DAY_MS);
-  const stats = { scanned: 0, filled: 0, fields: 0 };
+  const stats = { scanned: 0, changed: 0, fields: 0 };
 
   while (stats.scanned < maxLeads) {
-    const q = conn('leads')
+    const leads = await conn('leads')
       .whereNull('deleted_at')
       .where('created_at', '>=', cutoff)
       .where((w) => w.whereNull('status').orWhere('status', '<>', 'duplicate'))
-      .where((w) => w.whereNull('previous_company').orWhereNull('switch_reason').orWhereNull('not_booked_reason'))
       .where((w) => w.whereNull('why_checked_at').orWhere('why_checked_at', '<', now))
       .orderByRaw('why_checked_at ASC NULLS FIRST, created_at DESC, id DESC')
       .limit(Math.min(PAGE_SIZE, maxLeads - stats.scanned))
       .select('id', 'status', 'converted_at', 'created_at', 'customer_id', 'twilio_call_sid', 'previous_company', 'switch_reason', 'not_booked_reason');
-    const leads = await q;
     if (!leads.length) break;
     stats.scanned += leads.length;
 
     const existing = await existingCustomerLeadIds(conn, leads);
     const candidates = leads.filter((l) => !existing.has(l.id));
-    const chunksByLead = candidates.length ? await loadChunksByLead(conn, candidates) : new Map();
+    const evidence = candidates.length ? await loadChunksByLead(conn, candidates, now) : new Map();
+    const booked = await bookedLeadIds(conn, candidates);
 
     for (const lead of candidates) {
-      const patch = planLeadWhy(lead, chunksByLead.get(lead.id) || [], now);
-      const keys = Object.keys(patch);
-      if (!keys.length) continue;
-      // Guard each field against a concurrent office edit: write only if still NULL.
-      let wrote = 0;
-      for (const key of keys) {
-        // Write only if the field is still empty, the lead is not deleted, and its
-        // status is the one the reason was computed from (a booking in between wins).
-        // why_filled_at rides in the same update, so it never lags its field.
-        const q = conn('leads').where({ id: lead.id }).whereNull(key).whereNull('deleted_at');
-        if (lead.status == null) q.whereNull('status'); else q.where('status', lead.status);
-        if (key === 'not_booked_reason') q.whereNull('converted_at');
-        // The evidence came through this customer link; a relinked lead is skipped.
-        if (lead.customer_id == null) q.whereNull('customer_id'); else q.where('customer_id', lead.customer_id);
-        wrote += await q.update({ [key]: patch[key], why_filled_at: now });
-      }
-      if (wrote) {
-        stats.filled += 1;
-        stats.fields += wrote;
+      const ev = evidence.get(lead.id) || { chunks: [], miningPending: false };
+      const patch = planLeadWhy(lead, ev.chunks, { booked: booked.has(lead.id), miningPending: ev.miningPending });
+      if (!Object.keys(patch).length) continue;
+      if (await writeLeadWhy(conn, lead, patch, now)) {
+        stats.changed += 1;
+        stats.fields += Object.keys(patch).length;
       }
     }
     // Stamp the page as examined so this run moves on and the next run starts
@@ -317,7 +340,7 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
     await conn('leads').whereIn('id', leads.map((l) => l.id)).update({ why_checked_at: now });
     if (leads.length < PAGE_SIZE) break;
   }
-  logger.info(`[lead-why-fill] scanned=${stats.scanned} leads_filled=${stats.filled} fields=${stats.fields}`);
+  logger.info(`[lead-why-fill] scanned=${stats.scanned} leads_changed=${stats.changed} fields=${stats.fields}`);
   return stats;
 }
 

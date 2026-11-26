@@ -87,6 +87,9 @@ describe('prior-provider evidence (Codex #8521)', () => {
     const c = chunk('competitor_mention', 'We had Orkin. They called back and raised the price');
     expect(planLeadWhy(lead(), [c], NOW).switch_reason).toBe('price_creep');
   });
+  test('a plan named in a price objection is a price reason, not no_plan', () => {
+    expect(planLeadWhy(lead({ status: 'lost' }), [chunk('objection', 'The quarterly plan is too expensive')]).not_booked_reason).toBe('price');
+  });
   test('a converted lead gets no not-booked reason after a reopen', () => {
     const l = lead({ status: 'lost', converted_at: daysAgo(5) });
     expect(planLeadWhy(l, [chunk('objection', 'That is too much for us')], NOW).not_booked_reason).toBeUndefined();
@@ -149,20 +152,27 @@ describe('not_booked_reason rules', () => {
   });
 });
 
-describe('never overwrite an office-set value', () => {
+describe('the job owns the fields: nightly recompute (Codex #8521)', () => {
   const chunks = [switchChunk('We were with Orkin and they raised the price on us'), chunk('objection', 'too expensive')];
-  test('set fields are absent from the patch; empty ones are filled', () => {
-    const l = lead({ switch_reason: 'contract', previous_company: 'Hughes', not_booked_reason: 'spouse' });
-    expect(planLeadWhy(l, chunks, NOW)).toEqual({});
-    const partial = planLeadWhy(lead({ status: 'lost', switch_reason: 'contract' }), chunks, NOW);
-    expect(partial).toEqual({ previous_company: 'Orkin', not_booked_reason: 'price' });
+  test('only changed fields are in the patch; a stale value is replaced or cleared', () => {
+    const l = lead({ status: 'lost', switch_reason: 'price_creep', previous_company: 'Orkin', not_booked_reason: 'price' });
+    expect(planLeadWhy(l, chunks)).toEqual({});
+    expect(planLeadWhy({ ...l, switch_reason: 'contract' }, chunks)).toEqual({ switch_reason: 'price_creep' });
+    // the lead was booked since: the not-booked reason is cleared
+    expect(planLeadWhy(l, chunks, { booked: true })).toEqual({ not_booked_reason: null });
   });
-  test('a blank string counts as empty, a real value never does', () => {
-    expect(planLeadWhy(lead({ switch_reason: '  ' }), chunks, NOW).switch_reason).toBe('price_creep');
-    expect(planLeadWhy(lead({ status: 'unresponsive', not_booked_reason: 'timing' }), [], NOW)).toEqual({});
+  test('no_response waits while a recent linked call is still unmined', () => {
+    const l = lead({ status: 'unresponsive' });
+    expect(planLeadWhy(l, [], { miningPending: true })).toEqual({});
+    expect(planLeadWhy(l, [])).toEqual({ not_booked_reason: 'no_response' });
+    // a later mined objection replaces no_response
+    expect(planLeadWhy({ ...l, not_booked_reason: 'no_response' }, [chunk('objection', 'too expensive')])).toEqual({ not_booked_reason: 'price' });
+  });
+  test('a blank string counts as empty', () => {
+    expect(planLeadWhy(lead({ switch_reason: '  ' }), chunks).switch_reason).toBe('price_creep');
   });
   test('is idempotent: re-planning on a filled lead returns nothing', () => {
-    const first = planLeadWhy(lead(), chunks, NOW);
-    expect(planLeadWhy(lead(first), chunks, NOW)).toEqual({});
+    const first = planLeadWhy(lead(), chunks);
+    expect(planLeadWhy(lead(first), chunks)).toEqual({});
   });
 });
