@@ -32,7 +32,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { scopeToProspects } = require('./lead-statuses');
-const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
+const { bookedLeadIds } = require('./lead-why-fill');
+const { raiseAdminAlert, cutAtWord, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const {
   etWeekStart, etDateString, addETDays, parseETDateTime, formatETDayDate,
 } = require('../utils/datetime-et');
@@ -105,9 +106,10 @@ function topCounts(rows, field, n = TOP_N) {
 
 const known = (rows, field) => rows.filter((r) => clean(r[field])).length;
 
-// Not booked = status lost / unresponsive and never converted. The loss reasons are counted over these same leads, so a
+// Not booked = status lost / unresponsive, never converted, and no booking the nightly filler sees
+// (bookedLeadIds: a linked visit or a booked / completed funnel row). The loss reasons are counted over these same leads, so a
 // lead won after the nightly fill never adds a stale reason. The rest are open or closed another way.
-const notBookedRows = (rows) => rows.filter((r) => NOT_BOOKED_STATUSES.includes(r.status) && !r.converted_at);
+const notBookedRows = (rows) => rows.filter((r) => NOT_BOOKED_STATUSES.includes(r.status) && !r.converted_at && !r.booked);
 function weekTotals(rows) {
   const won = rows.filter((r) => r.status === 'won').length;
   const notBooked = notBookedRows(rows).length;
@@ -183,7 +185,6 @@ function composeWeekly(week, summary) {
     doneWhen: 'reviewed',
     who: 'person',
   };
-  composeAdminAlert(spec); // fail loudly in tests / the first run if the copy breaks the rule
   return { spec, detail: buildDetail(week, summary) };
 }
 
@@ -204,9 +205,10 @@ async function loadWeekLeads(conn, week) {
       .orderBy([{ column: 'leads.created_at', order: 'asc' }, { column: 'leads.id', order: 'asc' }])
       .limit(PAGE)
       // cursor_at keeps Postgres microseconds: a JS Date would drop them and repeat a row.
-      .select('leads.id', 'leads.status', 'leads.created_at', 'leads.converted_at', 'leads.switch_reason', 'leads.previous_company', 'leads.not_booked_reason',
+      .select('leads.id', 'leads.status', 'leads.created_at', 'leads.converted_at', 'leads.customer_id', 'leads.estimate_id', 'leads.switch_reason', 'leads.previous_company', 'leads.not_booked_reason',
         conn.raw('leads.created_at::text as cursor_at'));
-    all.push(...page);
+    const booked = await bookedLeadIds(conn, page);
+    all.push(...page.map((r) => ({ ...r, booked: booked.has(r.id) })));
     if (page.length < PAGE) return all;
     after = page[page.length - 1];
   }

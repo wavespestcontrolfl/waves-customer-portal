@@ -9,6 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(), _private: {}, safeErrorSummary: jest.fn(() => 'err') }));
 jest.mock('../services/admin-alert-episodes', () => ({ openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn() }));
 jest.mock('../services/call-commitments', () => ({ listOpenCommitments: jest.fn() }));
+jest.mock('../services/lead-why-fill', () => ({ ...jest.requireActual('../services/lead-why-fill'), bookedLeadIds: jest.fn(async () => new Set()) }));
 
 const { notifyAdmin } = require('../services/notification-service');
 const episodes = require('../services/admin-alert-episodes');
@@ -75,6 +76,10 @@ describe('counts', () => {
   test('a won lead with a stale not-booked reason is still a win, never both', () => {
     const s = summarizeWeek([lead('W', { status: 'won', not_booked_reason: 'price' })], []);
     expect(s).toMatchObject({ won: 1, notBooked: 0, notBookedKnown: 0, notBookedReasons: [] });
+  });
+  test('a lost lead with a booking the filler sees is not counted as not booked', () => {
+    const s = summarizeWeek([lead('B', { status: 'unresponsive', booked: true })], []);
+    expect(s).toMatchObject({ notBooked: 0 });
   });
   test('a lost lead that converted is not counted as not booked', () => {
     const s = summarizeWeek([lead('C', { status: 'lost', converted_at: '2026-11-19T15:00:00Z', not_booked_reason: 'price' })], []);
