@@ -315,6 +315,29 @@ maybeDescribe('series price bell closes itself (live Postgres)', () => {
       expect(row.done_at).toBeNull();
     });
 
+    test('an Undo of Send to Claude between the probe and the lock is not reversed', async () => {
+      const sent = { feed: 'activity', who: 'claude', severity: 'needs-you', claudeQueue: 'sent-to-claude', sentToClaude: { at: '2031-03-01T12:00:00Z' } };
+      const s = await series({ refusedDate: DATE, bellExtra: sent });
+      const key = `series-price-guard:cancelled-root:${s.root.id}`;
+      // The probe sees the row sent to Claude; the owner's Undo lands right after it (standingRefresh), before the lock.
+      const undoInBetween = async () => {
+        await db('notifications').where({ id: s.bell.id }).update({
+          metadata: db.raw("(metadata - 'claudeQueue' - 'sentToClaude') || '{\"who\":\"person\",\"feed\":\"bell\"}'::jsonb"),
+        });
+        return null;
+      };
+      await NotificationService().notifyAdmin('billing', 'Schedule - check a plan price', 'Not added: the Jun 3 visit.', {
+        bell: true, dedupeKey: key, dedupeOpenOnly: true, refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: OTHER_DATE,
+        ringOnRefresh: () => false, standingRefresh: undoInBetween,
+        metadata: { kind: 'cancelled_root', seriesRootId: s.root.id, refusedDate: OTHER_DATE, who: 'person', severity: 'needs-you' },
+      });
+      const row = await get(s.bell.id);
+      expect(row.metadata.refusedDate).toBe(OTHER_DATE);
+      expect(row.metadata.claudeQueue).toBeUndefined();
+      expect(row.metadata.sentToClaude).toBeUndefined();
+      expect(row.metadata.who).toBe('person');
+    });
+
     test('without the option the old write stands (other callers are unchanged)', async () => {
       const s = await series({ refusedDate: null });
       const key = `series-price-guard:cancelled-root:${s.root.id}`;

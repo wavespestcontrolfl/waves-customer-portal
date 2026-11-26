@@ -32,8 +32,6 @@ const logger = require('./logger');
 const safeErrorSummary = (err) => require('./notification-service').safeErrorSummary(err);
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 
-// Child price may exceed the last paid amount by at most this ratio.
-const OVER_LAST_PAID_RATIO = 1.25;
 // done_by of the cancelled-root alert this module closes itself.
 const CLOSED_BY = 'series-price-guard';
 
@@ -122,7 +120,8 @@ async function extensionPriceFacts(conn, { parent, parentId, child }) {
   if (!price || child?.is_callback || isAlwaysFreeServiceType(child?.service_type)) return null;
   if (await seriesCarriesPrepayTerm(conn, parentId, parent)) return null;
   const lastPaid = await lastPaidSeriesVisitAmount(conn, parentId);
-  const over = lastPaid != null && Math.round(price * 100) > Math.round(lastPaid * OVER_LAST_PAID_RATIO * 100);
+  // Integer cents, exactly: over the ceiling when price * 4 > lastPaid * 5 (125%), no rounded ratio.
+  const over = lastPaid != null && Math.round(price * 100) * 4 > Math.round(lastPaid * 100) * 5;
   return { price, lastPaid, over };
 }
 
@@ -336,7 +335,6 @@ async function raiseUnbilledCompletionAlert(svc) {
 }
 
 module.exports = {
-  OVER_LAST_PAID_RATIO,
   seriesPriceGuardsLive,
   comparableVisitAmount,
   lastPaidSeriesVisitAmount,

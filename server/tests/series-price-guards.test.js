@@ -128,6 +128,12 @@ describe('extensionPriceVerdict', () => {
     await expect(guards.extensionPriceVerdict(lastPaidConn(100), { parent: live, parentId: 'r', child: child(125.01) }))
       .resolves.toMatchObject({ kind: 'over_last_paid' });
   });
+  test('the ceiling is exact cents: 100.00 -> 125.00 passes; 100.02 -> 125.03 is over (125.025 would have rounded up)', async () => {
+    await expect(guards.extensionPriceVerdict(lastPaidConn(100), { parent: live, parentId: 'r', child: child(125) })).resolves.toBeNull();
+    await expect(guards.extensionPriceVerdict(lastPaidConn(100.02), { parent: live, parentId: 'r', child: child(125.02) })).resolves.toBeNull();
+    await expect(guards.extensionPriceVerdict(lastPaidConn(100.02), { parent: live, parentId: 'r', child: child(125.03) }))
+      .resolves.toMatchObject({ kind: 'over_last_paid' });
+  });
   test('live root with no paid visit: no verdict', async () => {
     await expect(guards.extensionPriceVerdict(lastPaidConn(null), { parent: live, parentId: 'r', child: child(500) })).resolves.toBeNull();
   });

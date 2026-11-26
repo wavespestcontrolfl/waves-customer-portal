@@ -538,12 +538,13 @@ function createPlainAdmin(service, { category, title, body, createOpts, ringGate
 
 // refreshOnlyOpen: the standing row as it stands now, locked, with the metadata to merge onto it. The rewrite
 // replaces the metadata, so it must be built from this read, not the probe's: a "Send to Claude" stamp or note
-// written after the probe survives. null when a person closed the row since the probe.
-async function lockOpenStandingRow(trx, existing, useMeta) {
+// written after the probe survives, and an Undo of one is not reversed: keepSentToClaude runs exactly once, on the
+// ORIGINAL emission metadata against this locked row. null when a person closed the row since the probe.
+async function lockOpenStandingRow(trx, existing, emissionMeta) {
   const current = await trx('notifications').where({ id: existing.id }).forUpdate().first();
   if (!current || current.done_at != null) return null;
   const existingMeta = typeof current.metadata === 'string' ? JSON.parse(current.metadata) : (current.metadata || {});
-  return { existing: current, existingMeta, useMeta: keepSentToClaude(current, existingMeta, useMeta) };
+  return { existing: current, existingMeta, useMeta: keepSentToClaude(current, existingMeta, emissionMeta) };
 }
 
 // notifyAdmin's refresh of a standing keyed row (the refreshOnDedupe branch): decides the ring, merges the
@@ -553,7 +554,7 @@ async function lockOpenStandingRow(trx, existing, useMeta) {
 // returns null and the caller inserts a fresh one, as it does when no standing row exists.
 async function refreshStandingRow(trx, ctx) {
   const { adjusted, ringOnRefresh, bumpOnRefresh, refreshOnlyOpen } = ctx;
-  const row = refreshOnlyOpen ? await lockOpenStandingRow(trx, ctx.existing, ctx.useMeta) : ctx;
+  const row = refreshOnlyOpen ? await lockOpenStandingRow(trx, ctx.existing, ctx.emissionMeta) : ctx;
   if (!row) return null;
   const { existing, existingMeta, useMeta } = row;
   const { nextTitle, nextBody, nextDetail, nextLink, detailChanged, sameText } = ctx;
@@ -796,7 +797,8 @@ const NotificationService = {
             ? await standingRefresh(existing, existingMeta) : null;
           // A row the owner sent to Claude stays in Claude's queue while it is open: this
           // emission still updates its text, never its routing (admin-alert-routing.js keepSentToClaude).
-          const useMeta = keepSentToClaude(existing, existingMeta, adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata);
+          const emissionMeta = adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata;
+          const useMeta = keepSentToClaude(existing, existingMeta, emissionMeta);
           const useDetail = adjusted && 'detail' in adjusted ? adjusted.detail : createOpts.detail;
           // Compared and stored in create()'s admin form (emoji-stripped +
           // brevity-cut), or a difference the guard itself introduces (an
@@ -843,7 +845,7 @@ const NotificationService = {
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(useMeta[k] ?? null));
           if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, refreshQuietClosed })) {
             const refreshedStanding = await refreshStandingRow(trx, {
-              existing, existingMeta, useMeta, adjusted, ringOnRefresh, bumpOnRefresh, refreshOnlyOpen,
+              existing, existingMeta, useMeta, emissionMeta, adjusted, ringOnRefresh, bumpOnRefresh, refreshOnlyOpen,
               nextTitle, nextBody, nextDetail, nextLink, detailChanged, sameText,
             });
             if (refreshedStanding) return refreshedStanding;
