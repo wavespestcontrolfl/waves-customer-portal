@@ -277,6 +277,20 @@ jest.setTimeout(120000);
       expect(total).toBeGreaterThan(2000);
     });
 
+    test('a timing claim that only exists across two lines blocks the approve of the second', async () => {
+      const first = await live('We service the alpha zone on request.');
+      const second = await draft('We service the bravo zone on request.');
+      const spy = jest.spyOn(require('../services/sms-shadow-drafter'), 'hasBannedCustomerCopy')
+        .mockImplementation((text, o) => !!(o && o.rainTimeGuard) && /alpha/.test(text) && /bravo/.test(text));
+      try {
+        await expect(approve(second.id)).rejects.toMatchObject({ detail: { blocks: ['section_banned_copy'] } });
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await row(first.id)).status).toBe('approved');
+      expect((await row(second.id)).status).toBe('draft');
+    });
+
     test('the bank holds at most 20 approved lines', async () => {
       for (let i = 0; i < Bank.MAX_ACTIVE_FACTS; i += 1) await live();
       const d = await draft();

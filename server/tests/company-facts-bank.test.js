@@ -44,6 +44,12 @@ describe('hard blocks', () => {
     ['a thousands price per visit', 'Plans are 1,200 per visit.', 'price_amount'],
     ['a decimal price per month', 'Plans are 12.50/mo.', 'price_amount'],
     ['a plain price a month', 'Plans are 1200 a month.', 'price_amount'],
+    ['a price in words per month', 'Plans are forty-nine a month.', 'price_amount'],
+    ['a price in words per visit', 'The service is ninety-nine per visit.', 'price_amount'],
+    ['a price in words after a price word', 'The service costs forty nine.', 'price_amount'],
+    ['a hundred after a price word', 'Plans start at a hundred.', 'price_amount'],
+    ['hundreds in words', 'The fee is two hundred fifty.', 'price_amount'],
+    ['a thousand after a price word', 'Starting from a thousand.', 'price_amount'],
     ['a rate word and a number', 'Our rate is 75 for a quarterly visit.', 'price_amount'],
     ['four lowercase sentences', 'we serve parrish. we serve ruskin. we serve wimauma. we serve palmetto.', 'too_many_sentences'],
     ['another currency symbol', 'The initial application is \u20AC50.', 'dollar_amount'],
@@ -120,6 +126,15 @@ describe('hard blocks', () => {
     'Lots start at 1,000 square feet.',
     'Lots start at 1,000 sq ft.',
     'Only 1,200 customers are covered.',
+    'We make three visits a year.',
+    'We return every ninety days.',
+    'We cover one acre lots.',
+    'Just one tech comes out.',
+    'Only three visits are needed.',
+    'We service twenty zones.',
+    'Our crew has fifteen techs.',
+    'The visit takes twenty minutes.',
+    'We cover a hundred acres.',
     'We come back every 90 days for a quarterly visit.',
   ])('not a price: %s', (text) => {
     expect(blocksOf(text)).not.toContain('price_amount');
@@ -343,6 +358,37 @@ describe('snapshot', () => {
       ownerEvent(rows[4], { detail: null }),
     ];
     expect((await Bank._test.loadVerifiedFacts(fakeDb(rows, [], events))).map((f) => f.id)).toEqual([rows[0].id]);
+  });
+
+  test('the timing guard also runs across line boundaries (adjacent pairs), and never sees text over the 2,000-character SMS limit', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const timingCalls = [];
+    const spy = jest.spyOn(drafter, 'hasBannedCustomerCopy').mockImplementation((text, opts) => {
+      if (opts && opts.rainTimeGuard) {
+        timingCalls.push(text.length);
+        return /alpha/.test(text) && /bravo/.test(text); // a claim that only exists when the two lines sit together
+      }
+      return false;
+    });
+    try {
+      const alpha = approved(1, 'We service the alpha zone.');
+      const bravo = approved(2, 'We service the bravo zone.');
+      const filler = Array.from({ length: 20 }, (_, i) => approved(3 + (i % 6), `${'We service the zone beside the park number '.repeat(3)}${i}.`, { id: `00000000-0000-4000-8000-0000000002${String(i).padStart(2, '0')}` }));
+      expect((await Bank._test.loadVerifiedFacts(fakeDb([alpha]))).map((f) => f.id)).toEqual([alpha.id]);
+      expect(await Bank._test.loadVerifiedFacts(fakeDb([alpha, bravo]))).toEqual([]);
+      // Not adjacent, but the whole section fits the limit, so the joined section is checked too.
+      expect(Bank._test.sectionHasBannedCopy(['We service the alpha zone.', 'We cover it.', 'We service the bravo zone.'])).toBe(true);
+      expect(Bank._test.sectionHasBannedCopy(['We service the alpha zone.', 'We service the bravo zone.'])).toBe(true);
+      timingCalls.length = 0;
+      const long = ['We service the alpha zone.', ...filler.map((f) => f.fact_text), 'We service the bravo zone.'];
+      expect(long.join(' ').length).toBeGreaterThan(2000);
+      // Over the limit: only adjacent pairs are checked, so the two far-apart lines are not caught together (and no oversized text is sent).
+      expect(Bank._test.sectionHasBannedCopy(long)).toBe(false);
+      expect(timingCalls.length).toBeGreaterThan(0);
+      expect(Math.max(...timingCalls)).toBeLessThanOrEqual(2000);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('"We use safe pesticides" written around the service is dropped at load', async () => {
