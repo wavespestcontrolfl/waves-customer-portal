@@ -433,6 +433,11 @@ describe('a save the server cannot price: no building above 5,500 sq ft (admin-e
     refused(browser(128), { storedEstimateData: stored });
     // A size the stored estimate holds decides even when the save names a smaller one.
     refused(browser(126, { inputs: { homeSqFt: 5000, stories: '1' } }), { storedEstimateData: stored });
+    // The posted shape never skips the stored size: the revise route takes any object, a list included.
+    for (const posted of [[], [browser(128)], null, undefined, 'text']) refused(posted, { storedEstimateData: stored });
+    // A list is read for its own sizes too.
+    refused([browser(128, { inputs: { homeSqFt: 10000, stories: '1' } })]);
+    passes([browser(128, { inputs: { homeSqFt: 5000, stories: '1' } })], { storedEstimateData: browser(128) });
     passes(browser(128), { storedEstimateData: browser(128) });
     passes(browser(128));
   });

@@ -89,13 +89,14 @@ function countyMeasurements(lookup) {
   // 5,500 sq ft table every 1,000 sq ft of footprint is priced (owner 2026-11-26), so a two-story 8,000 sq ft home read as one
   // floor was quoted for twice its footprint. Only a count the estimator itself prices as a looked-up fact is carried (the same
   // grader, draft-builder storiesSourceForPricing): the AI fallback's estimate is not. The count must also name its evidence
-  // (storyCountHasEvidence) and carry no verify flag of the lookup's own. A count outside 1 to 3 is no count. A count that
-  // fails any of these is left out; the county home and lot sizes stand.
+  // (storyCountHasEvidence) and carry no verify flag of the lookup's own. The record's RAW value is read (the facts above hold it
+  // after Number(), which turns [2] into 2 and true into 1): a count outside 1 to 3, or one that is not a number, is no count. A
+  // count that fails any of these is left out; the county home and lot sizes stand.
   const { storiesSourceForPricing, storyCountHasEvidence } = require('./estimator-engine/draft-builder');
   const { statedStoryCount } = require('./voice-agent/story-count');
   const storiesKnown = storiesSourceForPricing(facts) === 'lookup' && storyCountHasEvidence(propertyRecord)
     && lookupDimensionIsTrustworthy(lookup.enriched, 'stories');
-  const stories = storiesKnown ? statedStoryCount(facts.stories) : null;
+  const stories = storiesKnown ? statedStoryCount(propertyRecord.stories) : null;
   return { homeSqFt, lotSqFt, ...(stories ? { stories } : {}), source: MEASUREMENTS_SOURCE };
 }
 

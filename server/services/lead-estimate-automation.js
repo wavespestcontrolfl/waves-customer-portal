@@ -349,9 +349,12 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   // level); 12, true, [2] or text is no count. Pest prices on the footprint (living area over the stories). Above the 5,500 sq ft
   // table that sets the price, so a big home with no known count is not priced as one floor: storiesSource 'default' puts the
   // engine's own stories_estimated review on the line and the draft waits for a person (the phone price tool asks the caller).
+  // Only a draft that prices a footprint pest line (recurring or one-time pest) takes the mark. Termite bait reads the same source
+  // for a staff note, and this module parks a draft on any line note, so a bait-only draft is left as it was.
   const { statedStoryCount } = require('./voice-agent/story-count');
   const stories = [body.stories, customer.stories, county?.stories].map(statedStoryCount).find((count) => count !== null) || null;
-  const storiesUnknownAboveTable = !stories && (homeSqFt || 0) > Number(require('./pricing-engine/constants').PEST.aboveTableStartSqFt);
+  const storiesUnknownAboveTable = !stories && !!(services.pest || services.oneTimePest)
+    && (homeSqFt || 0) > Number(require('./pricing-engine/constants').PEST.aboveTableStartSqFt);
   const review = [];
   if (!homeSqFt || !lotSqFt) review.push(DEFAULTED_REVIEW);
   if (homeSizeAboveLimit) review.push(HOME_SIZE_ABOVE_LIMIT_REASON);

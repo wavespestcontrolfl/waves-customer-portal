@@ -108,11 +108,13 @@ describe('county sizes a lead draft may use', () => {
     expect(countyMeasurements(lookupOf(countyRecord({
       squareFootage: 8000, stories: 2, _storiesEvidence: { basis: 'direct', confidence: 'high', sourceUrl: 'https://example.com/parcel', sourceType: 'county' },
     })))).toMatchObject({ stories: 2 });
-    // A count outside 1 to 3 is no count (a 12-story "home" is another building's record); a split level is kept.
-    for (const stories of [12, 4, 0.5]) {
+    // A count outside 1 to 3 is no count (a 12-story "home" is another building's record); a split level is kept. The record's
+    // raw value is read: [2] and true are not counts, though Number() turns them into 2 and 1.
+    for (const stories of [12, 4, 0.5, [2], true, '2 stories', {}]) {
       expect(countyMeasurements(lookupOf(bigHome({ stories, _fieldEvidence: countyStories })))).toEqual(sizesOnly);
     }
     expect(countyMeasurements(lookupOf(bigHome({ stories: 1.5, _fieldEvidence: countyStories })))).toMatchObject({ stories: 1.5 });
+    expect(countyMeasurements(lookupOf(bigHome({ stories: '2', _fieldEvidence: countyStories })))).toMatchObject({ stories: 2 });
   });
 
   test('only an address with no unit, in any position, describes one house', () => {
@@ -260,6 +262,17 @@ describe('the draft builder\'s cache read', () => {
     expect(small.automation.engineInput).not.toHaveProperty('storiesSource');
     expect(small.quoteRequired).toBe(false);
     expect(pest(small).perApp).toBe(128);
+    // A draft with no pest line takes no mark: termite bait reads the same source for a staff note, and any line note parks a
+    // lead draft, so a bait-only draft for the same big home would otherwise save zero totals. It prices as before.
+    const baitLead = readyLead({ body: { homeSqFt: 8000, lotSqFt: 12000 } });
+    baitLead.intake.serviceInterest = 'Termite bait monitoring';
+    baitLead.readiness = evaluateLeadEstimateAutomationReadiness({ intake: baitLead.intake, customer: {}, body: baitLead.body, phone: '+19415550142' });
+    const baitOnly = await buildAutomatedLeadDraftEstimate(baitLead);
+    expect(Object.keys(baitOnly.automation.services)).toEqual(['termite']);
+    expect(baitOnly.automation.engineInput).toMatchObject({ homeSqFt: 8000, stories: 1 });
+    expect(baitOnly.automation.engineInput).not.toHaveProperty('storiesSource');
+    expect(baitOnly.automation).toMatchObject({ status: 'generated', quoteRequired: false });
+    expect(baitOnly.annual).toBeGreaterThan(0);
   });
 
   test('a story count is a number from 1 to 3 or it is no count: junk never clears the big-home hold or shrinks the footprint', async () => {

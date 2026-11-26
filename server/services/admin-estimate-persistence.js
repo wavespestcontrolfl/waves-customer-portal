@@ -2132,9 +2132,9 @@ function savedPestFootprints(estimateData) {
 }
 
 function assertPestAboveTableClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
-  if (!isPlainRecord(estimateData)) return;
   // The stored estimate's size counts beside the posted one (revise only): a save that drops or shrinks its size fields is still
-  // read at the size the server already holds.
+  // read at the size the server already holds. Both are read whatever shape was posted (a list, or no blob at all), so the posted
+  // shape can never skip the stored size.
   const footprints = [...savedPestFootprints(estimateData), ...savedPestFootprints(storedEstimateData)];
   if (!footprints.some((footprint) => footprint > Number(pricingEngine.constants.PEST.aboveTableStartSqFt))) return;
   throw errorWithStatus('The server could not price this estimate, and a browser price is not accepted for a building above 5,500 sq ft (pest keeps rising with the size there) — reload the page and regenerate the estimate so the server prices it.', 409);
