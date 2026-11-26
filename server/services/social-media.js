@@ -179,7 +179,7 @@ async function openShareProgress({ title, description, normalizedLink, guid, sou
     // By URL, then by feed GUID (the RSS dedupe knows a post by either).
     // A cut-off live row first (by URL, then GUID), before any reusable
     // failed or dry-run row, so a newer dry run never hides a live attempt.
-    const byGuid = guid && guid !== normalizedLink;
+    const byGuid = !!guid;
     let earlier = null;
     for (const statuses of [[SHARE_PROGRESS_STATUS], ['failed', 'dry_run']]) {
       earlier = (await findShareProgressRow('source_url', normalizedLink, statuses))
@@ -195,7 +195,9 @@ async function openShareProgress({ title, description, normalizedLink, guid, sou
       await db('social_media_posts').where('id', earlier.id).update({
         status: SHARE_PROGRESS_STATUS,
         source_url: normalizedLink,
-        ...(guid ? { source_guid: guid } : {}),
+        // A URL-only caller (shareUrlOnce passes the URL as its GUID) keeps
+        // the feed's own GUID on the row.
+        ...(guid && guid !== normalizedLink ? { source_guid: guid } : {}),
         ...(earlier.status === 'dry_run' ? { platforms_posted: JSON.stringify([]) } : {}),
       });
       if (done.size) logger.warn(`[social] resuming a cut-off share of ${normalizedLink}: already on ${[...done.keys()].join(', ')}`);
@@ -244,7 +246,7 @@ async function recordShareProgress(progress, platformResults, posting = null) {
 async function markSitePosting(progress, platformResults, posting) {
   if (!progress.rowId) return true;
   if (await recordShareProgress(progress, platformResults, posting)) return true;
-  platformResults.push({ ...posting, success: false, error: 'Share record not saved; this site retries next run' });
+  platformResults.push({ ...posting, success: false, error: 'Share record not saved; site skipped so it cannot post twice' });
   return false;
 }
 
@@ -3001,8 +3003,9 @@ const SocialMediaService = {
           : null;
         const existing = existingByUrl || existingByGuid;
 
-        if (existing && SOCIAL_FLAGS.dryRun && existing.status === SHARE_PROGRESS_STATUS) {
-          // A dry run never overwrites a cut-off live share's saved results.
+        if (existing && SOCIAL_FLAGS.dryRun && [SHARE_PROGRESS_STATUS, 'failed'].includes(existing.status)) {
+          // A dry run never overwrites a live share's saved results (a failed
+          // row can still hold an in-flight mark).
         } else if (existing) {
           await db('social_media_posts').where('id', existing.id).update(updateCols);
         } else {
