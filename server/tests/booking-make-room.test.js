@@ -1559,3 +1559,102 @@ describe('later days (GATE_MAKE_ROOM_LATER_DAYS)', () => {
     });
   });
 });
+
+// GATE_TECH_SHIFT_HOURS (D4): the new visit and every stop it moves stay inside the technician's shift that day.
+describe('technician shift hours', () => {
+  const { verifyMakeRoomHour, _internals } = require('../services/scheduling/booking-make-room');
+  const shiftDeps = (shift, extra = {}) => Object.assign(makeDeps(), {
+    shiftHoursOn: () => true,
+    loadTechShifts: jest.fn(async () => jest.fn((techId, date) => (techId === TECH && date === DAY ? shift : null))),
+  }, extra);
+  const hours = (startHour, endHour) => ({ startMin: startHour * 60, endMin: endHour * 60, source: 'roster' });
+  const at9 = (report) => report.passed.find((hour) => hour.start === '09:00');
+  const prove = (deps, extra = {}) => verifyMakeRoomHour({
+    conn: jest.fn(), date: DAY, startMin: 9 * 60, techId: TECH, durationMinutes: 60, point: NEW_PIN, estimateId: 'est-1',
+    admit: (slot) => slot.date === DAY, placement: PAGE_PLACES, now: NOW, deps, ...extra,
+  });
+
+  test('a chain whose last stop ends at the shift end passes; the shifts are read once, with the check\'s clock', async () => {
+    const deps = shiftDeps(hours(8, 13));
+    const { report } = await check({ deps });
+    expect(moves(at9(report))).toEqual(['visit-b 09:00->10:00', 'visit-c 10:00->11:00', 'visit-d 11:00->12:00']);
+    expect(deps.loadTechShifts).toHaveBeenCalledTimes(1);
+    expect(deps.loadTechShifts).toHaveBeenCalledWith(expect.anything(), { now: NOW });
+    const proofDeps = shiftDeps(hours(8, 13));
+    expect((await prove(proofDeps)).moves).toHaveLength(3);
+    expect(proofDeps.loadTechShifts).toHaveBeenCalledWith(expect.anything(), { now: NOW });
+  });
+
+  test('a moved stop that would end after the shift end refuses the hour, in the finder and in the hold\'s proof', async () => {
+    const shift = { startMin: 8 * 60, endMin: 12 * 60 + 59, source: 'roster' };
+    const { report } = await check({ deps: shiftDeps(shift) });
+    expect(at9(report)).toBeUndefined();
+    expect(report.byReason.past_shift_end).toBeGreaterThan(0);
+    expect(await prove(shiftDeps(shift))).toEqual({ reason: 'past_shift_end' });
+  });
+
+  test('the new visit itself must start and end inside the shift', async () => {
+    const early = { startMin: 9 * 60 + 1, endMin: 17 * 60, source: 'roster' };
+    const { report } = await check({ deps: shiftDeps(early) });
+    expect(at9(report)).toBeUndefined();
+    expect(report.byReason.outside_shift).toBeGreaterThan(0);
+    expect(await prove(shiftDeps(early))).toEqual({ reason: 'outside_shift' });
+    // A shift that starts at the visit's own start holds it.
+    expect((await prove(shiftDeps(hours(9, 17)))).moves).toHaveLength(3);
+    // The new visit ends after the shift end: refused before any stop is looked at.
+    expect(await prove(shiftDeps({ startMin: 8 * 60, endMin: 9 * 60 + 59, source: 'roster' }))).toEqual({ reason: 'outside_shift' });
+  });
+
+  test('a technician with no set hours, or another technician\'s or day\'s shift, changes nothing', async () => {
+    const none = shiftDeps(null);
+    const { report } = await check({ deps: none });
+    expect(moves(at9(report))).toHaveLength(3);
+    const asked = await none.loadTechShifts.mock.results[0].value;
+    expect(asked).toHaveBeenCalledWith(TECH, DAY);
+    const other = shiftDeps(null, { loadTechShifts: jest.fn(async () => (techId, date) => (techId === TECH && date === DAY ? null : hours(8, 9))) });
+    expect(moves(at9((await check({ deps: other })).report))).toHaveLength(3);
+  });
+
+  test('gate off: the shifts are not read and the answer is the one without them', async () => {
+    const off = shiftDeps(hours(8, 9), { shiftHoursOn: () => false });
+    const { report } = await check({ deps: off });
+    expect(off.loadTechShifts).not.toHaveBeenCalled();
+    expect(report.passed).toEqual((await check()).report.passed);
+    expect((await prove(shiftDeps(hours(8, 9), { shiftHoursOn: () => false }))).moves).toHaveLength(3);
+    // A value that is not exactly true is off.
+    const truthy = shiftDeps(hours(8, 9), { shiftHoursOn: () => 'true' });
+    await check({ deps: truthy });
+    expect(truthy.loadTechShifts).not.toHaveBeenCalled();
+  });
+
+  test('a failed read of the shifts offers nothing and fails the proof', async () => {
+    const failing = () => shiftDeps(null, { loadTechShifts: jest.fn(async () => { throw new Error('synthetic read failure'); }) });
+    const { report } = await check({ deps: failing() });
+    expect(report.passed).toEqual([]);
+    expect(report.error).toMatch(/synthetic read failure/);
+    expect(await prove(failing())).toEqual({ reason: 'error' });
+  });
+
+  test('a read of the shifts that outlasts the budget times the check out', async () => {
+    const slow = shiftDeps(null, { loadTechShifts: jest.fn(() => new Promise(() => {})) });
+    const { report } = await check({ deps: slow, budgetMs: 40, lingerMs: 1 });
+    expect(report.timedOut).toBe(true);
+    expect(report.passed).toEqual([]);
+    expect(await prove(shiftDeps(null, { loadTechShifts: jest.fn(() => new Promise(() => {})) }), { budgetMs: 40 })).toEqual({ reason: 'timed_out' });
+  });
+
+  test('buildChain: the shift end is exact, and the day close is still named first', () => {
+    const own = exampleDay();
+    const ask = (shiftEndMin, closeMin = 17 * 60) => _internals.buildChain(own, { startMin: 9 * 60, durationMin: 60, closeMin, shiftEndMin });
+    expect(ask(13 * 60).moves).toHaveLength(3);
+    expect(ask(13 * 60 - 1)).toEqual({ reason: 'past_shift_end' });
+    expect(ask(null).moves).toHaveLength(3);
+    expect(ask(12 * 60, 12 * 60)).toEqual({ reason: 'past_day_close' });
+  });
+
+  test('the real dependencies are the gate reader and the shift loader', () => {
+    const deps = _internals.defaultDeps();
+    expect(deps.shiftHoursOn).toBe(require('../config/feature-gates').techShiftHoursLive);
+    expect(deps.loadTechShifts).toBe(require('../services/technician-eligibility').loadTechShifts);
+  });
+});
