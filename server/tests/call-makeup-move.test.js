@@ -1,4 +1,4 @@
-// Make-up move (GATE_CALL_MAKEUP_MOVE): a recurring visit that was MISSED and
+// Make-up move: a recurring visit that was MISSED and
 // then agreed to a new time on a call is MOVED, never booked a second time.
 // The decision sits at the booking transaction's fresh insert, so the pure
 // planner judges the booking's own row; then the booking-transaction check,
@@ -746,7 +746,7 @@ describe('processor wiring', () => {
     }
     const insert = source.indexOf('.insert(insertData)', hook);
     expect(insert).toBeGreaterThan(hook);
-    const block = source.slice(source.lastIndexOf('if (makeupGateOn) {', hook), insert);
+    const block = source.slice(source.lastIndexOf('if (makeupMoveInPlay) {', hook), insert);
     expect(block).toContain("if (makeup.action !== 'skip') return { __makeup: makeup };");
     expect(block).toContain('followUpPlanned: Boolean(callFollowUpPlan), reService: isReServiceCatalogRow(callBookingCatalogRow)');
     expect(block).toContain('callbackHold: callbackNumberNeededHoldActive');
@@ -765,8 +765,8 @@ describe('processor wiring', () => {
     expect(block).toContain('appointmentResult = await settleMakeup(');
   });
 
-  test('the reprocess check runs behind the gate, after every earlier veto, before the booking branch', () => {
-    const gate = source.indexOf("const makeupGateOn = isEnabled('callMakeupMove') && !v2RoutingBlocked && !legacyGeoVeto");
+  test('the reprocess check runs after every earlier veto, before the booking branch', () => {
+    const gate = source.indexOf("const makeupMoveInPlay = !v2RoutingBlocked && !legacyGeoVeto");
     expect(gate).toBeGreaterThan(-1);
     const prior = source.indexOf('makeup.priorCallMakeupDecision(db, {', gate);
     const chainStart = source.indexOf('    if (v2RoutingBlocked) {', gate);
@@ -791,21 +791,6 @@ describe('processor wiring', () => {
     expect(block).not.toContain('scheduledServiceId');
     expect(block).not.toMatch(/insert\(/);
     expect(source).toMatch(/const heldReasons = new Set\(\[[^\]]*'makeup_move_applied'\]\)/);
-  });
-
-  test('gate off: dark unless GATE_CALL_MAKEUP_MOVE is exactly true, read in one place', () => {
-    const read = (value) => {
-      const saved = process.env.GATE_CALL_MAKEUP_MOVE;
-      if (value === undefined) delete process.env.GATE_CALL_MAKEUP_MOVE; else process.env.GATE_CALL_MAKEUP_MOVE = value;
-      let gate;
-      jest.isolateModules(() => { gate = jest.requireActual('../config/feature-gates').gates.callMakeupMove; });
-      if (saved === undefined) delete process.env.GATE_CALL_MAKEUP_MOVE; else process.env.GATE_CALL_MAKEUP_MOVE = saved;
-      return gate;
-    };
-    expect(read(undefined)).toBe(false);
-    expect(read('1')).toBe(false);
-    expect(read('true')).toBe(true);
-    expect(source.match(/isEnabled\('callMakeupMove'\)/g)).toHaveLength(1);
   });
 
   test('the commitment tracker accepts the make-up move as proof the promised visit was kept', () => {

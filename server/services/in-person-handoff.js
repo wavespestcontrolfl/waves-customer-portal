@@ -53,13 +53,13 @@ async function linkedEstimateFor(visitId, conn = db) {
 }
 
 // Mirrors the online accept's applicability check (estimate-public.js): the Florida
-// notice applies while the gate is live and the estimate needs it (a termite or WDO
+// notice applies when the estimate needs it (a termite or WDO
 // line) and the customer has no signed notice on file. Independent of the
 // cancel-anytime acceptance terms, which exclude exactly those estimates. An
 // unreadable state shows nothing (the notice is informational here; it is signed
 // on its own page).
 async function consumerNoticeApplies(estimate) {
-  if (!estimate || !featureGates.estimateConsumerNoticeLive()) return false;
+  if (!estimate) return false;
   try {
     return await require('./estimate-consumer-notice').consumerNoticeBlocksAccept(estimate);
   } catch (err) {

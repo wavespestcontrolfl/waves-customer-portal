@@ -171,7 +171,7 @@ describe('TimeTrackingPage payroll deep-link resolution', () => {
   });
 });
 
-describe('TimeTrackingPage pay stubs deep-link resolution (GATE_TECH_PAY_STUBS)', () => {
+describe('TimeTrackingPage pay stubs deep-link resolution', () => {
   it('opens for any role once its request says ready, waits while pending, and falls back when off (Timesheet for an admin, Dashboard for a technician)', () => {
     expect(resolveStaffTab('pay-stubs', 'technician', false, 'ready')).toBe('pay-stubs');
     expect(resolveStaffTab('pay-stubs', 'admin', false, 'ready')).toBe('pay-stubs');

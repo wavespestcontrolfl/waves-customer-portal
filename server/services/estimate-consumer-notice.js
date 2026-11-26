@@ -1,6 +1,6 @@
 // ============================================================
 // estimate-consumer-notice.js — the Florida consumer notice on the estimate page
-// (GATE_ESTIMATE_CONSUMER_NOTICE, owner decision 2026-10-25).
+// (owner decision 2026-10-25).
 //
 // Rule 5E-14.105(1), F.A.C. (eff. 4-29-2025): before a treatment for a wood-
 // destroying organism the licensee must obtain the property owner's signed
@@ -131,10 +131,11 @@ function todayUs() {
 // check the commercial agreement issuer runs): true = the estimate is no longer open for online signing.
 // `quoteRefusalFor(lockedEstimate)` is the accept's refusal for a quote it will not take (the estimate page passes the
 // staff-changed plan quote check): a `{ code, message }` answers that 409 and nothing is issued.
-// `source`, `actorType` and `gateLive` default to the estimate page; the Mark accepted send passes its own.
+// `source` and `actorType` default to the estimate page; the Mark accepted send passes its own, and its own `gateLive`
+// (its kill switch, read again after the locks).
 async function ensureEstimateConsumerNotice({
   estimate, req = {}, conn = db, blockedFor = async () => false, quoteRefusalFor = () => null,
-  source = SNAPSHOT_SOURCE, actorType = 'customer', gateLive = () => require('../config/feature-gates').estimateConsumerNoticeLive(),
+  source = SNAPSHOT_SOURCE, actorType = 'customer', gateLive = () => true,
 }) {
   if (!estimate.customer_id) return refusal(409, 'no_account', CALL_US);
   const { renderDocumentTemplate, buildCustomerDocumentContext, lockActiveVersionForIssue, jsonb } = require('./document-template-library');

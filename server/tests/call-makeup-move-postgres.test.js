@@ -1,4 +1,4 @@
-// Make-up move (GATE_CALL_MAKEUP_MOVE) on a real Postgres (CI's DB-gated step,
+// Make-up move on a real Postgres (CI's DB-gated step,
 // DATABASE_URL): the queries the mocked suite (call-makeup-move.test.js)
 // cannot check. The booking transaction's check finds the missed visit, a
 // settled no-show or a move after the call changes the answer, the reprocess

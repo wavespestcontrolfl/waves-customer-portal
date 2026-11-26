@@ -37,7 +37,6 @@ postgres('technician pay stubs', () => {
   let otherTechId;
   let w4Id;
   let otherW4Id;
-  const OLD = process.env.GATE_TECH_PAY_STUBS;
 
   // A check in the given status: insert as a draft (the protect trigger lets a draft change), then move
   // the check and its run to the final status.
@@ -77,7 +76,6 @@ postgres('technician pay stubs', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_TECH_PAY_STUBS = 'true';
     trx = await database.transaction();
     mockConnection = trx;
     techId = randomUUID();
@@ -93,7 +91,6 @@ postgres('technician pay stubs', () => {
   });
   afterEach(async () => {
     await trx.rollback();
-    if (OLD === undefined) delete process.env.GATE_TECH_PAY_STUBS; else process.env.GATE_TECH_PAY_STUBS = OLD;
   });
   afterAll(async () => {
     if (server) await new Promise((resolve) => server.close(resolve));
@@ -141,17 +138,5 @@ postgres('technician pay stubs', () => {
       expect(result.status).toBe(404);
       expect(result.body).toEqual({ error: 'Pay stub not found.' });
     }
-  });
-
-  it('answers 404 before any query while the gate is off', async () => {
-    const id = await addCheck('2026-09-21', '2026-10-02');
-    delete process.env.GATE_TECH_PAY_STUBS;
-    const spy = jest.fn();
-    const saved = mockConnection;
-    mockConnection = Object.assign((...args) => { spy(); return saved(...args); }, saved);
-    expect((await api('/checks')).status).toBe(404);
-    expect((await api(`/checks/${id}/stub`)).status).toBe(404);
-    expect(spy).not.toHaveBeenCalled();
-    mockConnection = saved;
   });
 });

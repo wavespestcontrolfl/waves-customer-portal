@@ -81,7 +81,6 @@ jest.mock('../config/feature-gates', () => ({
   // The PDF render pass reads both misting layout gates (GATE_MISTING_LAYOUT_DESIGNER); off here.
   mosquitoMistingLive: () => false,
   mistingLayoutDesignerLive: () => false,
-  estimateConsumerNoticeLive: () => false,
   estimateApprovePreferredTimeLive: () => false,
 }));
 

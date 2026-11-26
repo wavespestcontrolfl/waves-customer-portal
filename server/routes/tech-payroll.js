@@ -1,5 +1,5 @@
 /**
- * A technician's own pay stubs (payroll item 7), dark behind GATE_TECH_PAY_STUBS.
+ * A technician's own pay stubs (payroll item 7).
  *
  * GET /checks            { checks }: the caller's own checks from FINALIZED, not-voided pay runs,
  *                        newest pay date first (at most 60).
@@ -10,23 +10,17 @@
  * own pay. Both routes scope by the AUTHENTICATED technician id (req.technicianId), never a
  * client-sent id. Another person's check, a draft or voided pay run, and a bad id all answer 404, so
  * ids cannot be probed. An admin sees only their own stubs here; pay runs, W-4s, other people's
- * checks, employer taxes and tax forms stay on /api/admin/payroll. Off answers 404 { enabled: false }
- * after the staff login check and before any pay query. Responses are no-store.
+ * checks, employer taxes and tax forms stay on /api/admin/payroll. Responses are no-store.
  */
 const express = require('express');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { techPayStubsLive } = require('../config/feature-gates');
 const payrollRuns = require('../services/payroll-runs');
 
 const router = express.Router();
 
-// The staff login first: no route here answers anyone without it (the public-route allowlist test), then the gate.
+// The staff login first: no route here answers anyone without it (the public-route allowlist test).
 router.use(adminAuthenticate, requireTechOrAdmin);
-router.use((req, res, next) => {
-  if (!(typeof techPayStubsLive === 'function' && techPayStubsLive())) return res.status(404).json({ enabled: false });
-  return next();
-});
 router.use((req, res, next) => { res.set('Cache-Control', 'private, no-store'); next(); });
 
 function fail(res, what, err) {
