@@ -61,9 +61,10 @@ describe('card lines that carry a label rate for their own pest', () => {
     expect(lineFor('cockroach', 1)).toMatchObject({ declaredRate: { lo: 2, hi: 2, unit: 'fl_oz' }, labelUseRate: true, selected: true });
     const flea = lineFor('flea', 1);
     expect(flea).toMatchObject({ declaredRate: { lo: 0.66, hi: 0.66, unit: 'fl_oz' }, labelUseRate: true });
-    // Another registration: the flea card keeps its own tank rate (weaker than the catalog's 1), never the catalog band.
+    // Another registration takes no rate from the flea card on either surface: the job card and the close-out both keep that
+    // product's own catalog rate (the label rate belongs to EPA 53883-335 alone).
     const other = _test.linesFromLineMeta(protocols.flea.visits.find((visit) => visit.visit === 1), [{ ...TEKKO, epa_reg_number: null }]).find((line) => line.product.id === 't');
-    expect(other.declaredRate).toEqual({ lo: 0.66, hi: 0.66, unit: 'fl_oz' });
+    expect(other.declaredRate).toBeUndefined();
     expect(other.labelUseRate).toBeUndefined();
   });
 

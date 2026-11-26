@@ -3072,10 +3072,6 @@
               "Tekko Pro IGR"
             ],
             "completionApplicationMethod": "spot_treatment",
-            "tankRatePerGallon": {
-              "amount": 0.66,
-              "unit": "fl_oz"
-            },
             "labelRatePerGallon": {
               "amount": 0.66,
               "unit": "fl_oz",
