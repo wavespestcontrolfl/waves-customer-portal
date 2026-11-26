@@ -28,6 +28,14 @@ describe('hard blocks', () => {
   test.each([
     ['a dollar amount', 'The setup visit is $99.', 'dollar_amount'],
     ['dollars in words', 'It costs fifty dollars.', 'dollar_amount'],
+    ['USD before the number', 'The initial application is USD 99.', 'dollar_amount'],
+    ['USD after the number', 'The initial application is 99 USD.', 'dollar_amount'],
+    ['USD run into the number', 'The initial application is usd99.', 'dollar_amount'],
+    ['digits and dollars', 'The initial application is 50 dollars.', 'dollar_amount'],
+    ['a dollar sign and a space', 'The initial application is $ 50.', 'dollar_amount'],
+    ['US$', 'The initial application is US$50.', 'dollar_amount'],
+    ['US dollars', 'The initial application is 50 US dollars.', 'dollar_amount'],
+    ['another currency symbol', 'The initial application is \u20AC50.', 'dollar_amount'],
     ['a percent', 'We take 10% off for members.', 'percent'],
     ['a product name', 'We apply Zorbex Pro 4L along the foundation.', 'product_brand'],
     ['a product first word', 'We apply Zorbex along the foundation.', 'product_brand'],
@@ -177,6 +185,26 @@ describe('snapshot', () => {
     expect(logged).toContain('hash_mismatch');
     expect(logged).not.toContain('$99');
     expect(logged).not.toContain('Zorbex');
+  });
+
+  test('a row with warning words and no acknowledgement is dropped at load; an acknowledged one is kept', async () => {
+    const warn = 'We can reschedule a visit from the customer portal.';
+    const rows = [
+      approved(1, CLEAN),
+      approved(2, warn, { warnings_acknowledged: false }),
+      approved(3, 'A person at the office handles every cancel request.', { warnings_acknowledged: 'true' }),
+      approved(4, 'We can also reschedule a visit by text message.', { warnings_acknowledged: true }),
+    ];
+    const facts = await Bank._test.loadVerifiedFacts(fakeDb(rows));
+    expect(facts.map((f) => f.id)).toEqual([rows[0].id, rows[3].id]);
+    expect(JSON.stringify(logger.error.mock.calls)).toContain('warnings_not_acknowledged');
+  });
+
+  test('the refresh return value never carries expired facts, also after a failed read', async () => {
+    await Bank.refreshBankFacts({ dbi: fakeDb([approved(1, CLEAN)]), now: () => T0 });
+    const failing = () => { throw Object.assign(new Error('db down'), { code: 'ECONNREFUSED' }); };
+    expect(await Bank.refreshBankFacts({ dbi: failing, now: () => T0 + 60_000 })).toHaveLength(1);
+    expect(await Bank.refreshBankFacts({ dbi: failing, now: () => T0 + Bank.STALE_MS + 1 })).toEqual([]);
   });
 
   test('keeps at most 20 lines', async () => {

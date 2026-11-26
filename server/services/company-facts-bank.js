@@ -66,7 +66,8 @@ const PHONE_RE = /(?:\+?1[-.\s]?)?\(?\b\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|\b\d{3
 const EMAIL_RE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
 const LINK_RE = /\bhttps?:|\bwww\.|\b[a-z0-9-]+\.(?:com|net|org|io|co|us|gov|edu|info|biz|app|ly|me)\b/i;
 const HANDLE_RE = /(?:^|\s)[@#]\w+/;
-const MONEY_RE = /\$|\b(?:dollars?|bucks|cents?)\b/i;
+// Any currency symbol, a USD code before or after a number ("USD 99", "99 USD", "usd99"), or an amount written in words.
+const MONEY_RE = /[$€£¥]|(?<![a-z])usd(?![a-z])|\b(?:dollars?|bucks|cents?)\b/i;
 const PERCENT_RE = /%|\bper ?cent\b/i;
 const LINE_BREAK_RE = /[\r\n\u2028\u2029]/;
 const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+(?=[A-Z0-9"'(])/;
@@ -127,10 +128,12 @@ function mentionsProduct(text, tokens) {
  * hasBannedCustomerCopy from the SMS drafter, loaded on first use, WITH the label-timing guard (rainTimeGuard) and no
  * label evidence: rainfast, re-entry and drying times reach a customer only as visit-specific LABEL FACTS (AGENTS.md), never
  * as a standing company line. Fails closed: a guard that cannot load bans the text.
+ * `timing: false` is for the whole-section check only: the timing guard also holds any reply over the 2,000-character SMS reply limit,
+ * which is not a limit of the bank (each line is already checked alone, at most 400 characters; the bank holds 20 lines).
  */
-function hasBannedCopy(text) {
+function hasBannedCopy(text, { timing = true } = {}) {
   try {
-    return require('./sms-shadow-drafter').hasBannedCustomerCopy(text, { rainTimeGuard: true, labelFactsText: '' }) !== false;
+    return require('./sms-shadow-drafter').hasBannedCustomerCopy(text, timing ? { rainTimeGuard: true, labelFactsText: '' } : {}) !== false;
   } catch {
     return true;
   }
@@ -375,7 +378,7 @@ async function approveChecks(trx, row, { acknowledgeWarnings }) {
   const check = checkFactText(row.fact_text, ctx);
   const others = await approvedTextsExcept(trx, row.supersedes_id);
   if (others.length >= MAX_ACTIVE_FACTS) check.blocks.push('bank_full');
-  if (!check.blocks.length && hasBannedCopy(renderBankFactsLines([...others, { text: row.fact_text }]))) check.blocks.push('section_banned_copy');
+  if (!check.blocks.length && hasBannedCopy(renderBankFactsLines([...others, { text: row.fact_text }]), { timing: false })) check.blocks.push('section_banned_copy');
   if (check.blocks.length) throw new FactError('BLOCKED', 422, { blocks: check.blocks, warnings: check.warnings.map((w) => w.code) });
   if (check.warnings.length && !acknowledgeWarnings) {
     throw new FactError('WARNINGS_NOT_ACKNOWLEDGED', 409, { warnings: check.warnings });
@@ -386,7 +389,8 @@ async function approveChecks(trx, row, { acknowledgeWarnings }) {
 async function retireSuperseded(trx, row, actor) {
   if (!row.supersedes_id) return null;
   const old = await lockFact(trx, row.supersedes_id);
-  if (old.status !== 'approved') return null;
+  // The original was retired after this replacement was drafted: approving it would publish a stale replacement as a standalone line.
+  if (old.status !== 'approved') throw new FactError('ORIGINAL_NOT_APPROVED', 409, { originalId: old.id });
   await trx('company_facts').where({ id: old.id }).update({
     status: 'retired', retired_by: actor.id || null, retired_at: trx.fn.now(), retire_reason: 'superseded', updated_at: trx.fn.now(),
   });
@@ -485,6 +489,12 @@ let appliedRead = 0; // the newest-started read whose result is in `state`
 let refreshTimer = null;
 let lastDropKey = '';
 
+function loadDropReason(check, shaOk, unacknowledged) {
+  if (!shaOk) return 'hash_mismatch';
+  if (check.blocks.length) return check.blocks.join('+');
+  return unacknowledged ? 'warnings_not_acknowledged' : 'bank_full';
+}
+
 /** The approved rows that still pass every hard block, in approval order, at most MAX_ACTIVE_FACTS. */
 async function loadVerifiedFacts(dbi) {
   const rows = await dbi('company_facts').where({ status: 'approved' }).orderBy([{ column: 'approved_at', order: 'asc' }, { column: 'id', order: 'asc' }]).select('*');
@@ -495,8 +505,10 @@ async function loadVerifiedFacts(dbi) {
   for (const row of rows) {
     const check = checkFactText(row.fact_text, { ...base, bankKeys: seen });
     const shaOk = row.text_sha256 === sha256(String(row.fact_text || '').trim());
-    if (check.blocks.length || !shaOk || kept.length >= MAX_ACTIVE_FACTS) {
-      dropped.push(`${row.id}:${shaOk ? (check.blocks.join('+') || 'bank_full') : 'hash_mismatch'}`);
+    // Warning words need the owner's tick; a row without it (written around the service, or newly matched by a widened screen) is not served.
+    const unacknowledged = check.warnings.length > 0 && row.warnings_acknowledged !== true;
+    if (check.blocks.length || !shaOk || unacknowledged || kept.length >= MAX_ACTIVE_FACTS) {
+      dropped.push(`${row.id}:${loadDropReason(check, shaOk, unacknowledged)}`);
       continue;
     }
     seen.add(normalise(row.fact_text));
@@ -527,7 +539,8 @@ async function refreshBankFacts({ dbi = db, now = Date.now } = {}) {
   } catch (err) {
     logger.warn(`[company-facts-bank] snapshot refresh failed (code ${err?.code || 'unknown'}); keeping the last copy until it goes stale`);
   }
-  return state.facts;
+  // Through the age-checked getter: a failed read must not hand a caller a copy past its five minutes.
+  return getApprovedBankFacts({ now: now() });
 }
 
 /** The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS. */

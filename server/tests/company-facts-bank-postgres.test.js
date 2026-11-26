@@ -131,6 +131,14 @@ jest.setTimeout(120000);
       await expect(approve(d.id)).resolves.toMatchObject({ status: 'approved' });
     });
 
+    test('a replacement whose original was retired meanwhile is refused (ORIGINAL_NOT_APPROVED) and stays a draft', async () => {
+      const a = await live();
+      const next = await Bank.editFact(a.id, { factText: line(' replacement') }, admin, opts());
+      await Bank.retireFact(a.id, { reason: 'policy withdrawn' }, admin, opts());
+      await expect(approve(next.id)).rejects.toMatchObject({ code: 'ORIGINAL_NOT_APPROVED', status: 409 });
+      expect((await row(next.id)).status).toBe('draft');
+    });
+
     test('a non-owner cannot approve: the draft stays a draft', async () => {
       const d = await draft();
       await expect(approve(d.id, {}, admin)).rejects.toMatchObject({ code: 'OWNER_ONLY' });
@@ -216,6 +224,18 @@ jest.setTimeout(120000);
     test('a standing rainfast or re-entry time is blocked, as it is for the code lines', async () => {
       const d = await draft('Our treatment is rainfast after two hours.');
       await expect(approve(d.id)).rejects.toMatchObject({ detail: { blocks: expect.arrayContaining(['banned_copy']) } });
+    });
+
+    test('a bank over 2,000 characters in all still approves: the SMS reply limit is not the bank limit', async () => {
+      // Six lines of about 350 characters, each well inside its own 400.
+      const long = (i) => `We service zone ${i} ${'and the neighbors beside it '.repeat(12)}on request.`.slice(0, 350).replace(/\s+\S*$/, '.');
+      for (let i = 0; i < 6; i += 1) {
+        const text = long(i + 100);
+        expect(text.length).toBeGreaterThan(300);
+        await live(text);
+      }
+      const total = (await root('company_facts').where({ status: 'approved' }).select('fact_text')).reduce((sum, r) => sum + r.fact_text.length, 0);
+      expect(total).toBeGreaterThan(2000);
     });
 
     test('the bank holds at most 20 approved lines', async () => {
