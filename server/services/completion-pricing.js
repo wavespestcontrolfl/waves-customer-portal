@@ -352,7 +352,8 @@ function engineListCents(raw, item, rate, amount) {
   const visits = visitCount(raw);
   const listAnnual = money(item.annualBeforeDiscount);
   const netAnnual = money(item.annualAfterDiscount);
-  if (!visits || visitCount(item) !== visits || !(listAnnual > 0) || netAnnual === null) return null;
+  // A staff change saved on the engine line (manualFinalAnnual other than its tier annual) is part of the saving.
+  if (!visits || visitCount(item) !== visits || !(listAnnual > 0) || netAnnual === null || staffAdjustedRow(item)) return null;
   const cents = (value) => Math.round(value * 100);
   // The per-visit list price the engine saved (perApp, or perVisit on a mosquito line), when each saved one is the
   // annual's share under either rounding at a half cent; with none saved, the share in whole cents. A saved figure

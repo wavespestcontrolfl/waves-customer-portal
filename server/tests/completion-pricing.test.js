@@ -191,6 +191,8 @@ describe('completion estimate evidence', () => {
     expect(quote(fourVisits, silver([engineFour(150.2)]))).toEqual([135.07, 135.07, []]);
     expect(quote(fourVisits, silver([{ ...engineFour(undefined), perVisit: 150.2 }]))).toEqual([135.07, 135.07, []]);
     expect(quote(fourVisits, silver([{ ...engineFour(150.07), perVisit: 150.07 }]))).toEqual([150.07, 135.07, [['WaveGuard Silver', 15, 10, true]]]);
+    // Staff moved the engine line's own price: part of the saving is theirs.
+    expect(quote(lawnRow(), silver([engineLawn({ manualFinalAnnual: 900 })]))).toEqual(oneLine);
     // The row saved another annual than its net: not the net-only shape.
     expect(quote(lawnRow({ annual: 1068 }), silver())).toEqual(oneLine);
     // A list-price row that saved $150.07 for that same annual (a float divide) still proves the tier at $135.07.
