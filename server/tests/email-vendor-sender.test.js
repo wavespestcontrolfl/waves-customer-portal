@@ -79,7 +79,7 @@ describe('isVendorWeUse', () => {
     const calls = mockTables({ priorEmail: { id: 'e0' } });
     expect(await isVendorWeUse({ id: 'e9', from_address: 'Promo <promo@news.supplier.example>' })).toBe(true);
     expect(calls.emails[0][2]).toEqual(['%@supplier.example', '%@supplier.example>', '%.supplier.example', '%.supplier.example>']);
-    expect(calls.emails).toContainEqual(['whereIn', 'classification', ['vendor_invoice', 'vendor_communication']]);
+    expect(calls.emails).toContainEqual(['whereIn', 'classification', ['vendor', 'vendor_invoice', 'vendor_communication']]);
     expect(calls.emails).toContainEqual(['orWhere', 'auto_action', 'like', 'expense\\_%']);
     expect(calls.emails).toContainEqual(['orWhere', 'auto_action', 'like', 'invoice\\_%']);
     expect(calls.emails).toContainEqual(['whereNot', 'id', 'e9']);
@@ -90,7 +90,7 @@ describe('isVendorWeUse', () => {
     expect(await isVendorWeUse({ id: 'e9', from_address: 'Seller <seller@gmail.com>' })).toBe(true);
     expect(calls.vendor_email_domains).toContainEqual(['whereIn', 'domain', ['seller@gmail.com']]);
     expect(calls.vendor_email_domains.some((c) => c[0] === 'orWhere')).toBe(false);
-    expect(calls.emails[0]).toEqual(['whereRaw', '(lower(from_address) = ? OR strpos(lower(from_address), ?) > 0)', ['seller@gmail.com', '<seller@gmail.com>']]);
+    expect(calls.emails[0]).toEqual(['whereRaw', '(lower(from_address) = ? OR right(lower(from_address), ?) = ?)', ['seller@gmail.com', 18, '<seller@gmail.com>']]);
   });
 
   test('strict mode (spam block) keeps the domain scope on a vendor-owned domain but needs a live booked expense', async () => {
@@ -114,7 +114,7 @@ describe('isVendorWeUse', () => {
     const calls = mockTables({ priorEmail: null });
     expect(await isVendorWeUse({ id: 2, from_address: 'other-merchant@billtrust.com' })).toBe(false);
     expect(calls.vendor_email_domains).toContainEqual(['whereIn', 'domain', ['other-merchant@billtrust.com']]);
-    expect(calls.emails[0][2]).toEqual(['other-merchant@billtrust.com', '<other-merchant@billtrust.com>']);
+    expect(calls.emails[0][2]).toEqual(['other-merchant@billtrust.com', 30, '<other-merchant@billtrust.com>']);
   });
 
   test('strict mode rethrows a failed lookup so the deferred block retries', async () => {

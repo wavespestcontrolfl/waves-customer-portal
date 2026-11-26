@@ -17,7 +17,8 @@ const KEEP_PROMO_DOMAINS = ['anthropic.com', 'claude.com', 'openai.com', 'siteon
 // a vendor there.
 const BILLING_PLATFORM_DOMAINS = ['billtrust.com', 'stripe.com'];
 
-const VENDOR_CLASSIFICATIONS = ['vendor_invoice', 'vendor_communication'];
+// 'vendor' is what email-sync persists for a registry match.
+const VENDOR_CLASSIFICATIONS = ['vendor', 'vendor_invoice', 'vendor_communication'];
 
 // The bare lowercase mailbox, or ''. A display form ("Name <a@x.com>") uses
 // the address inside the LAST angle brackets, never an address-like display
@@ -68,9 +69,11 @@ async function registryHasSender(mailbox, reg, shared) {
 async function historyHasSender(email, mailbox, reg, shared, strict) {
   const q = db('emails');
   if (shared) {
-    // Exact mailbox, bare or display form ("Name <a@x.com>"). strpos, not
-    // LIKE: no character in the mailbox can act as a wildcard.
-    q.whereRaw('(lower(from_address) = ? OR strpos(lower(from_address), ?) > 0)', [mailbox, `<${mailbox}>`]);
+    // Exact mailbox, bare or display form: the value must END with
+    // "<mailbox>" (the real address; a quoted display name never ends the
+    // field). right(), not LIKE: no character can act as a wildcard.
+    const tail = `<${mailbox}>`;
+    q.whereRaw('(lower(from_address) = ? OR right(lower(from_address), ?) = ?)', [mailbox, tail.length, tail]);
   } else {
     q.whereRaw(
       '(lower(from_address) LIKE ? OR lower(from_address) LIKE ? OR lower(from_address) LIKE ? OR lower(from_address) LIKE ?)',
