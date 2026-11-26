@@ -212,8 +212,8 @@ const personAnsweredCallIn = (record) => record.direction === 'inbound' && recor
 // callback-card attempt also needs its customer leg completed >= 60 s, the
 // bar call-commitments.js sets for one (cardLegSql): its leg result comes
 // from a later webhook, so a missing one proves nothing yet.
-const personCallBackFor = (record) => personCallBack(record)
-  && (!record.card_attempt || (record.customer_leg_status === 'completed' && Number(record.customer_leg_seconds) >= 60));
+const cardLegReached = (record) => !record.card_attempt || (record.customer_leg_status === 'completed' && Number(record.customer_leg_seconds) >= 60);
+const personCallBackFor = (record) => personCallBack(record) && cardLegReached(record);
 // The keys a payments row names its invoice by, as the Stripe webhook's
 // findInvoiceForPayment reads them: a dispute stamps dispute_invoice_id
 // before it clears the invoice's PaymentIntent, and a won dispute restores
@@ -970,12 +970,17 @@ function customerWitness(record, commitment, records = []) {
       // automated notice; a staff promise, any text written after it.
       && (commitment.kind !== 'other' || (writtenAfterAsk(record, commitment) && (staffPromise(commitment) || operatorReply(record)))),
     // A call in that a person answered answers a text call-back ask only.
-    // For one, a call back that reached the customer (personCallBackFor) counts
-    // whatever the staff leg's length: the helper has its own leg checks.
-    call: () => (record.direction === 'inbound' ? textCallbackAsk(commitment) && personAnsweredCallIn(record)
-      : record.status === 'completed' && (Number(record.duration_seconds) >= 60 || (textCallbackAsk(commitment) && personCallBackFor(record)))
+    // For one, a call back that reached the customer (personCallBackFor)
+    // counts whatever the staff leg's length, and a callback-card attempt
+    // counts only once its customer leg completed (cardLegReached), for the
+    // model too.
+    call: () => {
+      if (record.direction === 'inbound') return textCallbackAsk(commitment) && personAnsweredCallIn(record);
+      if (record.status !== 'completed') return false;
+      if (textCallbackAsk(commitment)) return cardLegReached(record) && (Number(record.duration_seconds) >= 60 || personCallBack(record));
       // A general ask takes only a call back that reached the customer.
-      && (commitment.kind !== 'other' || personCallBack(record))),
+      return Number(record.duration_seconds) >= 60 && (commitment.kind !== 'other' || personCallBack(record));
+    },
     // The candidate query already restricts this to a person-sent Gmail row
     // (personSentFilter), after the request (received_at > after) and
     // resolved to THIS customer (emailCustomerLink) — nothing further

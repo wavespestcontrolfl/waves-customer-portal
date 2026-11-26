@@ -2996,11 +2996,13 @@ postgres('SMS commitments on PostgreSQL', () => {
 
     test('a callback-card attempt closes the ask only once its customer leg completed for 60 s', async () => {
       const after = await callbackAsk();
-      dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
       const card = await outboundCall(after, { source: 'admin-callback', metadata: { callback_policy: 'card' } });
+      // Before the customer leg's result arrives, not even the model may cite it.
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `call:${card.id}`, quote: 'Talked it through with the customer.' } });
       const now = new Date(after.getTime() + 120000);
       expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ fulfilled: 0 });
       expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+      expect((await mockPg('call_commitments').first()).sms_context.fulfillment_check).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
       await mockPg('call_log').where({ id: card.id }).update({ metadata: { callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 75 } } });
       await mockPg('system_settings').where({ key: 'sms_operations.fulfillment_cursor' }).del();
       expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 60000) })).toMatchObject({ fulfilled: 1 });
