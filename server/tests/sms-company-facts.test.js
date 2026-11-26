@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers41_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers41_n+e');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers45_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers45_n+e');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -115,7 +115,7 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
       'Arrival windows are two hours and start on the hour.',
       'WaveGuard tiers (Bronze, Silver, Gold, Platinum) depend on how many qualifying recurring services a customer has.',
     ]) expect(section).toContain(`\n- ${line}\n`);
-    expect(COMPANY_FACTS).toHaveLength(26);
+    expect(COMPANY_FACTS).toHaveLength(29);
   });
   test('aftercare lines (owner-delegated 2026-10-09) are in the section, word for word, and promise no visit', () => {
     const section = renderCompanyFactsSection();
@@ -464,15 +464,52 @@ describe('gratitude qualification pins the company facts source', () => {
 
 // Codex #6197 r1 P0: a block drafted before a facts change keeps its OLD company render.
 // The readers of stored blocks must still recognize it; the sealed contract must not.
+describe('standing answers (owner 2026-11-23 / 2026-11-25 "all rec")', () => {
+  const ADDED = [
+    'Yes, we offer emergency service day or night.',
+    'The ant products we use inside are labeled for indoor ant treatment, including kitchens and pantries.',
+    'We don\'t service in-wall tube systems, and that\'s on purpose. They push spray into the walls inside your home. We\'d rather treat the outside of the house thoroughly and fix the moisture problems that draw pests in, without spraying inside your walls.',
+  ];
+  test('the three lines are appended, in order, word for word, and pass the wording screens', () => {
+    expect(COMPANY_FACTS.slice(26)).toEqual(ADDED);
+    for (const line of ADDED) {
+      expect(hasBannedCustomerCopy(line)).toBeFalsy();
+      expect(line).not.toMatch(/\bsafe\b|\$\d|\d+ ?(?:minutes?|hours?)/i);
+    }
+  });
+  test('left out on purpose: the on-the-way text (not every visit gets it) and re-entry answers (only a label sentence may make them)', () => {
+    const section = renderCompanyFactsSection();
+    expect(section).not.toMatch(/on the way|on his way|heads-up text/i);
+    expect(section).not.toMatch(/keep people and pets|you can go in/i);
+  });
+  test('a block drafted under the 41 to 44 render (a prefix of today\'s render) is recognized as that earlier render only', () => {
+    const facts = require('../services/sms-company-facts');
+    const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
+    const [today, prior] = facts.knownCompanyFactsRenders();
+    const tail = 'BILLING:\n- balance: none\n';
+    const head = 'UPCOMING SERVICES:\n- none\n';
+    // today's block: exact current, and no earlier render claims it
+    expect(facts.hasExactCompanyFacts(`${head}${today}${LABEL_FACTS_NONE_SECTION}${tail}`)).toBe(true);
+    expect(facts.hasExactCompanyFacts(`${head}${prior}${LABEL_FACTS_NONE_SECTION}${tail}`)).toBe(false);
+    // the earlier block still ends its pre-BILLING text with a known render, so the readers of stored blocks keep working
+    expect(facts.exactLabelFactsSection(`${head}${prior}${LABEL_FACTS_NONE_SECTION}${tail}`)).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ""));
+    // the rebase swaps the 41 to 44 render for today's; today's block is not rebased
+    expect(facts.rebaseCompanyFactsToCurrent(`${head}${prior}${LABEL_FACTS_NONE_SECTION}${tail}`)).toBe(`${head}${today}${LABEL_FACTS_NONE_SECTION}${tail}`);
+    expect(facts.rebaseCompanyFactsToCurrent(`${head}${today}${LABEL_FACTS_NONE_SECTION}${tail}`)).toBeNull();
+  });
+});
+
+// Codex #6197 r1 P0 (below): earlier renders in stored blocks.
 describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
   const facts = require('../services/sms-company-facts');
   const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
   const { exactLabelFactsSection: labelSectionOf } = facts;
-  const holidaysRender = facts.knownCompanyFactsRenders()[1]; // the 26-line render with the old holidays line 6 only (prompts 25 to 28 and 37 to 40), until 2026-11-24
-  const holdRender = facts.knownCompanyFactsRenders()[2]; // the 26-line render of the seven-place hold (prompts 33 to 36), live 2026-11-23 for hours
-  const serviceAreaRender = facts.knownCompanyFactsRenders()[3]; // the 26-line render of the six-place hold (prompts 29 to 32)
-  const oldRender = facts.knownCompanyFactsRenders()[4]; // the 19-line render live from 2026-10-09 to 2026-10-22
-  const oldestRender = facts.knownCompanyFactsRenders()[5]; // the 16-line render of 2026-10-03
+  const beforeStandingAnswersRender = facts.knownCompanyFactsRenders()[1]; // the 26-line render live 2026-11-24 to 2026-11-25 (prompts 41 to 44): today's wording, five lines fewer
+  const holidaysRender = facts.knownCompanyFactsRenders()[2]; // the 26-line render with the old holidays line 6 only (prompts 25 to 28 and 37 to 40), until 2026-11-24
+  const holdRender = facts.knownCompanyFactsRenders()[3]; // the 26-line render of the seven-place hold (prompts 33 to 36), live 2026-11-23 for hours
+  const serviceAreaRender = facts.knownCompanyFactsRenders()[4]; // the 26-line render of the six-place hold (prompts 29 to 32)
+  const oldRender = facts.knownCompanyFactsRenders()[5]; // the 19-line render live from 2026-10-09 to 2026-10-22
+  const oldestRender = facts.knownCompanyFactsRenders()[6]; // the 16-line render of 2026-10-03
   // per-customer head long enough that the company section would not fit a raw 6,000-char prefix
   const head = `CUSTOMER: synthetic\n${Array.from({ length: 110 }, (_, n) => `SERVICE HISTORY ${n}: Quarterly Pest completed`).join('\n')}\n`;
   const tail = 'BILLING:\n- balance: none\nRECENT PHONE CALLS:\n- 2026-10-01: caller was told the tech arrives Thursday\nRECENT SMS THREAD:\n[CUSTOMER] THREAD_SENTINEL';
@@ -504,12 +541,16 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
       expect(hold).not.toContain('accept cards at the visit, never cash');
       expect(hold).not.toContain('include an interior spray as well as the exterior');
       // two lines differ from today's render: the service-area line 22 and the holidays line 6
-      expect(facts.renderCompanyFactsSection().split('\n').filter((l, i) => l !== hold.split('\n')[i])).toHaveLength(2);
+      expect(facts.renderCompanyFactsSection().split('\n').slice(0, 27).filter((l, i) => l !== hold.split('\n')[i])).toHaveLength(2);
       expect(hold).toContain('We work Sundays and holidays, same as any other day.');
     }
     // the render before the holidays change differs from today's in the holidays line 6 only
     expect(holidaysRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(26);
-    expect(facts.renderCompanyFactsSection().split('\n').filter((l, i) => l !== holidaysRender.split('\n')[i])).toHaveLength(1);
+    expect(facts.renderCompanyFactsSection().split('\n').slice(0, 27).filter((l, i) => l !== holidaysRender.split('\n')[i])).toHaveLength(1);
+    // the render live until the standing answers were added is the first 26 lines of today's list, word for word
+    expect(beforeStandingAnswersRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(26);
+    expect(facts.renderCompanyFactsSection().startsWith(beforeStandingAnswersRender.replace(/\n$/, '\n'))).toBe(true);
+    expect(beforeStandingAnswersRender).not.toContain('emergency and overnight');
     expect(holidaysRender).toContain('We work Sundays and holidays, same as any other day.');
     expect(holidaysRender).toContain('Charlotte County except Punta Gorda');
     expect(facts.renderCompanyFactsSection()).not.toContain('same as any other day');
@@ -666,7 +707,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
       // a staff-edited body goes out
       expect(retiredCompanyFactBlock({ decision: row, outgoingBody: `${body} Please confirm.` })).toBeNull();
     }
-    for (const v of ['41_n', '42_n', '43_n', '44_n', '42_n+c', '41_n+e', '44_n+bcelmvA']) {
+    for (const v of ['41_n', '42_n', '43_n', '44_n', '45_n', '48_n', '42_n+c', '41_n+e', '44_n+bcelmvA', '48_n+bcelmvA']) {
       expect(retiredCompanyFactBlock({ decision: { prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body }, outgoingBody: body })).toBeNull();
     }
     // older than the answer book is still refused
@@ -739,7 +780,9 @@ describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
     const [today, ...earlier] = knownCompanyFactsRenders();
     expect(earlier.length).toBeGreaterThan(0);
     // keyed on the recorded render: the messages never matter ("December 25?" / "Yes" is as stale as "Christmas?")
-    for (const render of earlier) {
+    // earlier[0] is the render live 2026-11-24 to 2026-11-25 (prompts 41 to 44): it has the closed-holidays line, so it is not retired
+    expect(carriesRetiredHolidayLine(block(earlier[0]))).toBe(false);
+    for (const render of earlier.slice(1)) {
       expect(carriesRetiredHolidayLine(block(render))).toBe(true);
       expect(carriesRetiredHolidayLine(block(render, '[CUSTOMER] December 25?\n[STAFF] Yes'))).toBe(true);
     }
@@ -749,16 +792,19 @@ describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
     expect(carriesRetiredHolidayLine('no billing line')).toBe(false);
     expect(carriesRetiredHolidayLine(null)).toBe(false);
     // the line each prior render is built with is the one RETIRED_COMPANY_FACT_LINES keeps
-    for (const render of earlier) expect(render).toContain(cf.RETIRED_COMPANY_FACT_LINES[6]);
+    for (const render of earlier.slice(1)) expect(render).toContain(cf.RETIRED_COMPANY_FACT_LINES[6]);
     expect(today).not.toContain(cf.RETIRED_COMPANY_FACT_LINES[6]);
     // the service-area gate is separate: the render live until the holidays change (prompts 25 to 28, 37 to 40) had today's service-area line
     expect(carriesRetiredServiceAreaLine(block(earlier[0]))).toBe(false);
-    for (const render of earlier.slice(1)) expect(carriesRetiredServiceAreaLine(block(render))).toBe(true);
+    expect(carriesRetiredServiceAreaLine(block(earlier[1]))).toBe(false);
+    for (const render of earlier.slice(2)) expect(carriesRetiredServiceAreaLine(block(render))).toBe(true);
     expect(carriesRetiredServiceAreaLine(block(today))).toBe(false);
   });
   test('the retired topics are those of the block\'s own render: the 26-line render keeps payment and inside-spray exchanges', () => {
     const block = (render) => `UPCOMING SERVICES:\n- none\n${render}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n`;
-    const [, wasLive26, hold7, hold6, nineteen, sixteen] = [null, ...knownCompanyFactsRenders().slice(1)];
+    const [, beforeStanding, wasLive26, hold7, hold6, nineteen, sixteen] = [null, ...knownCompanyFactsRenders().slice(1)];
+    // the 41 to 44 render carries no retired line, and it is a prefix of today's render: no topic is retired for it
+    expect(cf.retiredTopicReForBlock(block(beforeStanding))).toBeNull();
     // both 26-line hold renders (seven places, six places) keep today's payment and inside-spray lines
     for (const render of [hold7, hold6]) {
       const re26 = cf.retiredTopicReForBlock(block(render));
