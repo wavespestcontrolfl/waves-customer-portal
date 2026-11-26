@@ -88,10 +88,6 @@ describe('opt-out key: ONE shared rule (contract)', () => {
     // allowed but its SMS/email announcement is not (in-hook audit on
     // #3391 round 9).
     'estimate-extension.js',
-    // The email_template_automation lifecycle: marker + direct emit, and
-    // execution-time re-judgement of every estimate-entity run.
-    'estimate-expiration.js',
-    'email-template-automation-executor.js',
   ])('%s imports the shared rule and keeps no local copy of the key check', (file) => {
     const source = read(`../services/${file}`);
     expect(source).toMatch(/require\('\.\/estimate-comms-eligibility'\)/);

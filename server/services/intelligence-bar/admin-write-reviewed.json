@@ -477,11 +477,6 @@
     },
     {
       "method": "PUT",
-      "endpoint": "/admin/email-templates/automations/:key",
-      "reason": "Publishing an automation: sets the template, the send rules and the published stamp."
-    },
-    {
-      "method": "PUT",
       "endpoint": "/admin/csr/follow-up-tasks/:id",
       "reason": "Completing a task stamps action_verified; a task state change, not a field edit; not on the owner list."
     },

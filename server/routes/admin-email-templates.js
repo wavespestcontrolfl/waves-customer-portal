@@ -5,8 +5,6 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const sendgrid = require('../services/sendgrid-mail');
 const EmailTemplates = require('../services/email-template-library');
-const AutomationExecutor = require('../services/email-template-automation-executor');
-const { isEnabled } = require('../config/feature-gates');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
@@ -18,11 +16,8 @@ const AUDIENCES = new Set(['customer', 'lead', 'subscriber', 'internal_user']);
 const PRIORITIES = new Set(['critical', 'normal', 'bulk']);
 const SENSITIVITIES = new Set(['normal', 'financial', 'account', 'health_safety', 'property_sensitive']);
 const SUPPRESSION_TYPES = new Set(['unsubscribe', 'bounce', 'spam_complaint', 'manual', 'do_not_email']);
-const AUTOMATION_STATUSES = new Set(['draft', 'active', 'paused', 'archived']);
 const TEMPLATE_STATUSES = new Set(['draft', 'active', 'paused', 'archived']);
-const HARD_DELETE_AUTOMATION_STATUSES = new Set(['draft', 'archived']);
 const HARD_DELETE_TEMPLATE_STATUSES = new Set(['draft', 'archived']);
-const OPEN_AUTOMATION_RUN_STATUSES = ['queued', 'scheduled', 'retry_scheduled'];
 const STREAMS = new Set([
   'transactional_required',
   'service_operational',
@@ -102,23 +97,6 @@ const PROTECTED_EMAIL_TEMPLATE_KEYS = new Set([
   'prep.rodent',
   'prep.sprinkler_timer',
   'prep.termite',
-  'project.report_ready',
-  'service.report_ready',
-  'welcome.new_recurring',
-]);
-const PROTECTED_EMAIL_AUTOMATION_KEYS = new Set([
-  'estimate.delivery',
-  'estimate.expiring_notice',
-  'estimate.extension_notice',
-  'estimate.unviewed_followup',
-  'estimate.viewed_followup',
-  'invoice.receipt',
-  'invoice.sent',
-  'payment.failed',
-  'prep.bed_bug',
-  'prep.bed_bug_heat',
-  'prep.cockroach',
-  'prep.flea',
   'project.report_ready',
   'service.report_ready',
   'welcome.new_recurring',
@@ -229,22 +207,6 @@ function canHardDeleteTemplate(template) {
   return !templateHardDeleteBlocker(template);
 }
 
-function automationHardDeleteBlocker(automation) {
-  if (!automation) return null;
-  if (PROTECTED_EMAIL_AUTOMATION_KEYS.has(automation.automation_key)) {
-    return 'automation is protected from hard delete';
-  }
-  const status = cleanString(automation.status, 'draft').toLowerCase();
-  if (!HARD_DELETE_AUTOMATION_STATUSES.has(status)) {
-    return 'automation must be draft or archived before hard delete';
-  }
-  return null;
-}
-
-function canHardDeleteAutomation(automation) {
-  return !automationHardDeleteBlocker(automation);
-}
-
 async function loadFixtureById(id) {
   return db('email_template_fixtures as f')
     .join('email_templates as t', 't.id', 'f.template_id')
@@ -287,176 +249,9 @@ function requireJsonObject(value, field = 'payload') {
   throw badRequest(`${field} must be a JSON object`);
 }
 
-function automationJsonInput(body, camelKey, snakeKey, existingValue, fallback, field) {
-  if (hasBodyField(body, camelKey, snakeKey)) {
-    return requireJsonObject(bodyField(body, camelKey, snakeKey), field);
-  }
-  return parseJsonObject(existingValue, fallback);
-}
-
 function percent(numerator, denominator) {
   if (!denominator) return 0;
   return Math.round((Number(numerator || 0) / Number(denominator || 1)) * 1000) / 10;
-}
-
-function cleanNumber(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function normalizeAutomationInput(body, existing = {}) {
-  const suppressionGroupProvided = hasBodyField(body, 'suppressionGroupKey', 'suppression_group_key');
-  const suppressionGroupValue = bodyField(body, 'suppressionGroupKey', 'suppression_group_key');
-  const suppressionGroupKey = suppressionGroupProvided
-    ? (cleanString(suppressionGroupValue, '') || null)
-    : (existing.suppression_group_key || null);
-  return {
-    name: cleanString(body.name, existing.name),
-    description: body.description !== undefined ? cleanString(body.description, '') : existing.description,
-    trigger_event_key: cleanString(body.triggerEventKey ?? body.trigger_event_key, existing.trigger_event_key),
-    trigger_description: body.triggerDescription !== undefined || body.trigger_description !== undefined
-      ? cleanString(body.triggerDescription ?? body.trigger_description, '')
-      : existing.trigger_description,
-    template_key: cleanString(body.templateKey ?? body.template_key, existing.template_key),
-    delay_minutes: Math.max(0, Math.round(cleanNumber(body.delayMinutes ?? body.delay_minutes, existing.delay_minutes || 0))),
-    audience: assertOneOf(body.audience ?? existing.audience, AUDIENCES, 'audience', existing.audience || 'customer'),
-    status: assertOneOf(body.status ?? existing.status, AUTOMATION_STATUSES, 'status', existing.status || 'draft'),
-    suppression_group_key: suppressionGroupKey,
-    legal_classification: assertOneOf(
-      body.legalClassification ?? body.legal_classification ?? existing.legal_classification,
-      LEGAL_CLASSIFICATIONS,
-      'legalClassification',
-      existing.legal_classification || 'transactional_relationship',
-    ),
-    frequency_cap: cleanString(body.frequencyCap ?? body.frequency_cap, existing.frequency_cap || 'once_per_entity'),
-    idempotency_key_template: cleanString(body.idempotencyKeyTemplate ?? body.idempotency_key_template, existing.idempotency_key_template || ''),
-    conditions: JSON.stringify(automationJsonInput(body, 'conditions', 'conditions', existing.conditions, {}, 'conditions')),
-    exit_conditions: JSON.stringify(automationJsonInput(body, 'exitConditions', 'exit_conditions', existing.exit_conditions, {}, 'exitConditions')),
-    retry_policy: JSON.stringify(automationJsonInput(body, 'retryPolicy', 'retry_policy', existing.retry_policy, { max_attempts: 2, backoff_minutes: [15, 60] }, 'retryPolicy')),
-    quiet_hours: JSON.stringify(automationJsonInput(body, 'quietHours', 'quiet_hours', existing.quiet_hours, { enabled: false }, 'quietHours')),
-    timezone: cleanString(body.timezone, existing.timezone || 'America/New_York'),
-    owner: cleanString(body.owner, existing.owner || 'operations'),
-    dry_run_notes: body.dryRunNotes !== undefined || body.dry_run_notes !== undefined
-      ? cleanString(body.dryRunNotes ?? body.dry_run_notes, '')
-      : existing.dry_run_notes,
-  };
-}
-
-function asJson(value, fallback = {}) {
-  return parseJsonObject(value, fallback);
-}
-
-async function tableInfo(table) {
-  const exists = await db.schema.hasTable(table);
-  if (!exists) return null;
-  return db(table).columnInfo();
-}
-
-async function countRows(query) {
-  const row = await query.count('* as count').first();
-  return Number(row?.count || 0);
-}
-
-async function dryRunAutomation(row) {
-  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  const templateKey = row.template_key;
-  const result = {
-    window_days: 30,
-    since,
-    candidate_count: 0,
-    source: 'email_messages',
-    notes: row.dry_run_notes || 'Uses recent send history when no source table can be evaluated safely.',
-  };
-
-  const countsFromHistory = async () => {
-    result.source = 'email_messages';
-    result.candidate_count = await countRows(db('email_messages').where({ template_key: templateKey }).where('created_at', '>=', since));
-    return result;
-  };
-
-  if (templateKey.startsWith('estimate.')) {
-    const cols = await tableInfo('estimates');
-    if (!cols) return countsFromHistory();
-    let q = db('estimates');
-    if (cols.created_at) q = q.where('created_at', '>=', since);
-    if (cols.status) q = q.whereNotIn('status', ['accepted', 'expired', 'archived', 'declined', 'cancelled']);
-    if (templateKey === 'estimate.unviewed_followup' && cols.viewed_at) q = q.whereNull('viewed_at');
-    if (templateKey === 'estimate.viewed_followup' && cols.viewed_at) q = q.whereNotNull('viewed_at');
-    if (templateKey === 'estimate.expiring_notice' && cols.expires_at) {
-      q = q.where('expires_at', '<=', new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)).where('expires_at', '>=', new Date());
-    }
-    if (templateKey === 'estimate.extension_notice' && cols.renewal_count) q = q.where('renewal_count', '>', 0);
-    result.source = 'estimates';
-    result.candidate_count = await countRows(q);
-    return result;
-  }
-
-  if (templateKey.startsWith('invoice.')) {
-    const cols = await tableInfo('invoices');
-    if (!cols) return countsFromHistory();
-    let q = db('invoices');
-    if (cols.created_at) q = q.where('created_at', '>=', since);
-    if (cols.status && templateKey === 'invoice.sent') q = q.whereIn('status', ['open', 'sent', 'unpaid']);
-    if (cols.status && templateKey === 'invoice.receipt') q = q.where('status', 'paid');
-    result.source = 'invoices';
-    result.candidate_count = await countRows(q);
-    return result;
-  }
-
-  if (templateKey === 'payment.failed') {
-    const cols = await tableInfo('payments');
-    if (!cols) return countsFromHistory();
-    let q = db('payments');
-    if (cols.created_at) q = q.where('created_at', '>=', since);
-    if (cols.status) q = q.where('status', 'failed');
-    result.source = 'payments';
-    result.candidate_count = await countRows(q);
-    return result;
-  }
-
-  if (templateKey === 'service.report_ready') {
-    const cols = await tableInfo('service_records');
-    if (!cols) return countsFromHistory();
-    let q = db('service_records');
-    if (cols.created_at) q = q.where('created_at', '>=', since);
-    if (cols.status) q = q.where('status', 'completed');
-    result.source = 'service_records';
-    result.candidate_count = await countRows(q);
-    return result;
-  }
-
-  if (templateKey === 'prep.bed_bug' || templateKey === 'prep.cockroach' || templateKey === 'prep.flea') {
-    const cols = await tableInfo('scheduled_services');
-    if (!cols) return countsFromHistory();
-    let q = db('scheduled_services');
-    if (cols.scheduled_date) q = q.where('scheduled_date', '>=', new Date());
-    if (cols.status) q = q.whereNotIn('status', ['cancelled', 'completed']);
-    if (cols.service_type) {
-      q = templateKey === 'prep.bed_bug'
-        ? q.where('service_type', 'ilike', '%bed bug%')
-        : templateKey === 'prep.flea'
-          ? q.where('service_type', 'ilike', '%flea%')
-          : q.where((builder) => builder.where('service_type', 'ilike', '%cockroach%').orWhere('service_type', 'ilike', '%roach%'));
-    }
-    result.source = 'scheduled_services';
-    result.candidate_count = await countRows(q);
-    return result;
-  }
-
-  if (templateKey === 'welcome.new_recurring') {
-    const cols = await tableInfo('customers');
-    if (!cols) return countsFromHistory();
-    let q = db('customers');
-    if (cols.created_at) q = q.where('created_at', '>=', since);
-    if (cols.active) q = q.where({ active: true });
-    // Archived (soft-deleted) customers keep active=true — scope on deleted_at like whereLiveCustomer (services/customer-stages.js).
-    if (cols.deleted_at) q = q.whereNull('deleted_at');
-    result.source = 'customers';
-    result.candidate_count = await countRows(q);
-    return result;
-  }
-
-  return countsFromHistory();
 }
 
 // GET /api/admin/email-templates
@@ -824,224 +619,6 @@ router.get('/deliverability', async (req, res, next) => {
         count: Number(r.count || 0),
       })),
     });
-  } catch (err) { next(err); }
-});
-
-// GET /api/admin/email-templates/automations
-router.get('/automations', async (req, res, next) => {
-  try {
-    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const rows = await db('email_template_automations as a')
-      .leftJoin('email_templates as t', 't.template_key', 'a.template_key')
-      .leftJoin('email_template_versions as v', 'v.id', 't.active_version_id')
-      .select(
-        'a.*',
-        't.name as template_name',
-        't.mode as template_mode',
-        't.status as template_status',
-        't.active_version_id as active_version_id',
-        'v.version_number as active_version_number',
-      )
-      .orderBy('a.status', 'asc')
-      .orderBy('a.trigger_event_key', 'asc')
-      .orderBy('a.name', 'asc');
-    const sendRows = await db('email_messages')
-      .select('template_key')
-      .where('created_at', '>=', since)
-      .count('* as count')
-      .groupBy('template_key');
-    const sendMap = Object.fromEntries(sendRows.map((r) => [r.template_key, Number(r.count || 0)]));
-    // Shadow rollout volume (pre-live fix): shadow mode creates NO
-    // email_messages row, so send_count_30d stays 0 for the whole shadow
-    // period. would_send / would_block come from the automation run ledger
-    // instead — one count per run whose preflight logged that outcome — so
-    // readiness is measurable at any volume (the run-history endpoint is
-    // capped at 100 rows). Grouped by automation_key (a template can be
-    // shared by several automations).
-    const shadowRows = await db('email_template_automation_run_events as e')
-      .join('email_template_automation_runs as r', 'r.id', 'e.run_id')
-      .select('r.automation_key', 'e.event_type')
-      .countDistinct('e.run_id as count')
-      .whereIn('e.event_type', ['would_send', 'would_block'])
-      .where('e.created_at', '>=', since)
-      // Shadow-ORIGIN runs only: a live-origin run that comes due after a
-      // rollback to shadow logs would_send/would_block too, but it is a
-      // dropped live send, not rollout evidence (codex #5418 r2). A promotion
-      // advances origin_mode to 'live', so this also drops promoted runs.
-      .whereRaw("r.context->>'origin_mode' = 'shadow'")
-      // Shadow-period evidence only: once a live attempt promotes the run
-      // (a LATER promoted_from_shadow event) it is a live run, so it stops
-      // counting here and the three badges (would_send / would_block /
-      // send_count) never double-count one run.
-      .whereNotExists(function notPromotedSince() {
-        this.select(db.raw('1'))
-          .from('email_template_automation_run_events as p')
-          .whereRaw('p.run_id = e.run_id')
-          .where('p.event_type', 'promoted_from_shadow')
-          .whereRaw('p.created_at > e.created_at');
-      })
-      .groupBy('r.automation_key', 'e.event_type');
-    const shadowMap = {};
-    for (const r of shadowRows) {
-      shadowMap[r.automation_key] = shadowMap[r.automation_key] || { would_send: 0, would_block: 0 };
-      shadowMap[r.automation_key][r.event_type] = Number(r.count || 0);
-    }
-    res.json({
-      automations: rows.map((row) => ({
-        ...row,
-        conditions: asJson(row.conditions),
-        exit_conditions: asJson(row.exit_conditions),
-        retry_policy: asJson(row.retry_policy),
-        quiet_hours: asJson(row.quiet_hours),
-        send_count_30d: sendMap[row.template_key] || 0,
-        would_send_30d: shadowMap[row.automation_key]?.would_send || 0,
-        would_block_30d: shadowMap[row.automation_key]?.would_block || 0,
-        can_delete: canHardDeleteAutomation(row),
-      })),
-    });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/email-templates/automations/trigger
-router.post('/automations/trigger', async (req, res, next) => {
-  try {
-    const triggerEventKey = cleanString(req.body.triggerEventKey ?? req.body.trigger_event_key);
-    if (!triggerEventKey) return res.status(400).json({ error: 'triggerEventKey is required' });
-    if (!isEnabled('emailTemplateAutomations')) {
-      return res.status(403).json({ error: 'Email template automations are disabled' });
-    }
-    const result = await AutomationExecutor.processTrigger({
-      triggerEventKey,
-      triggerEventId: req.body.triggerEventId ?? req.body.trigger_event_id,
-      automationKey: req.body.automationKey ?? req.body.automation_key,
-      entityType: req.body.entityType ?? req.body.entity_type,
-      entityId: req.body.entityId ?? req.body.entity_id,
-      payload: parseJsonObject(req.body.payload),
-      recipient: parseJsonObject(req.body.recipient),
-      executeImmediately: req.body.executeImmediately !== false && req.body.execute_immediately !== false,
-    });
-    res.json(result);
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    next(err);
-  }
-});
-
-// POST /api/admin/email-templates/automations/runs/process-due
-router.post('/automations/runs/process-due', async (req, res, next) => {
-  try {
-    if (!isEnabled('emailTemplateAutomations')) {
-      return res.status(403).json({ error: 'Email template automations are disabled' });
-    }
-    // preview=true returns the due runs without sending, so the UI can confirm
-    // the recipient list before firing the batch.
-    const preview = req.body.preview === true;
-    const runIds = Array.isArray(req.body.runIds) ? req.body.runIds : null;
-    // A real send over HTTP must name the previewed runs — this endpoint can
-    // never fire the whole due batch unattended. The scheduler's full-batch run
-    // goes through the in-process executor call, not this route.
-    if (!preview && (!runIds || runIds.length === 0)) {
-      return res.status(400).json({ error: 'Preview and confirm first: runIds is required to send.' });
-    }
-    const result = await AutomationExecutor.processDueRuns({
-      limit: req.body.limit,
-      preview,
-      runIds,
-    });
-    res.json(result);
-  } catch (err) { next(err); }
-});
-
-// GET /api/admin/email-templates/automations/:key/runs
-router.get('/automations/:key/runs', async (req, res, next) => {
-  try {
-    const runs = await AutomationExecutor.listRuns({
-      automationKey: req.params.key,
-      limit: req.query.limit,
-    });
-    res.json({ runs });
-  } catch (err) { next(err); }
-});
-
-// GET /api/admin/email-templates/automations/:key
-router.get('/automations/:key', async (req, res, next) => {
-  try {
-    const row = await db('email_template_automations').where({ automation_key: req.params.key }).first();
-    if (!row) return res.status(404).json({ error: 'automation not found' });
-    res.json({
-      automation: {
-        ...row,
-        conditions: asJson(row.conditions),
-        exit_conditions: asJson(row.exit_conditions),
-        retry_policy: asJson(row.retry_policy),
-        quiet_hours: asJson(row.quiet_hours),
-      },
-    });
-  } catch (err) { next(err); }
-});
-
-// PUT /api/admin/email-templates/automations/:key
-router.put('/automations/:key', async (req, res, next) => {
-  try {
-    const existing = await db('email_template_automations').where({ automation_key: req.params.key }).first();
-    if (!existing) return res.status(404).json({ error: 'automation not found' });
-    const input = normalizeAutomationInput(req.body, existing);
-    const template = await db('email_templates').where({ template_key: input.template_key }).first();
-    if (!template) return res.status(400).json({ error: 'templateKey must reference an existing email template' });
-    if (input.suppression_group_key) {
-      const group = await db('email_preference_groups').where({ key: input.suppression_group_key }).first();
-      if (!group) return res.status(400).json({ error: 'unknown suppression group' });
-    }
-    const [automation] = await db('email_template_automations').where({ id: existing.id }).update({
-      ...input,
-      last_published_by: req.technicianId || null,
-      last_published_at: new Date(),
-      updated_at: new Date(),
-    }).returning('*');
-    res.json({ automation });
-  } catch (err) {
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    next(err);
-  }
-});
-
-// DELETE /api/admin/email-templates/automations/:key
-router.delete('/automations/:key', async (req, res, next) => {
-  try {
-    const result = await db.transaction(async (trx) => {
-      const existing = await trx('email_template_automations')
-        .where({ automation_key: req.params.key })
-        .first();
-      if (!existing) return null;
-      const hardDeleteBlocker = automationHardDeleteBlocker(existing);
-      if (hardDeleteBlocker) return { error: hardDeleteBlocker };
-
-      const now = new Date();
-      const skippedRuns = await trx('email_template_automation_runs')
-        .where({ automation_id: existing.id })
-        .whereIn('status', OPEN_AUTOMATION_RUN_STATUSES)
-        .update({
-          status: 'skipped',
-          exit_reason: 'automation deleted by admin',
-          completed_at: now,
-          updated_at: now,
-        });
-      await trx('email_template_automations').where({ id: existing.id }).del();
-      return { skipped_runs: Number(skippedRuns || 0) };
-    });
-    if (!result) return res.status(404).json({ error: 'automation not found' });
-    if (result.error) return res.status(409).json({ error: result.error });
-    res.json({ deleted: true, skipped_runs: result.skipped_runs });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/email-templates/automations/:key/dry-run
-router.post('/automations/:key/dry-run', async (req, res, next) => {
-  try {
-    const row = await db('email_template_automations').where({ automation_key: req.params.key }).first();
-    if (!row) return res.status(404).json({ error: 'automation not found' });
-    const dryRun = await dryRunAutomation(row);
-    res.json({ dryRun });
   } catch (err) { next(err); }
 });
 

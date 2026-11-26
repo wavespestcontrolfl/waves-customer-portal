@@ -22,9 +22,7 @@ function fallbackEvent(eventKey) {
   };
 }
 
-function eventStatus(emailAutomations, smsTemplates) {
-  if (emailAutomations.length && smsTemplates.length) return 'paired';
-  if (emailAutomations.length) return 'email_only';
+function eventStatus(smsTemplates) {
   if (smsTemplates.length) return 'sms_only';
   return 'unmapped';
 }
@@ -44,35 +42,7 @@ router.get('/', async (req, res, next) => {
     const catalogMap = asCatalogMap();
     const eventKeys = new Set(catalog.map((event) => event.event_key));
 
-    const hasEmailAutomations = await tableExists('email_template_automations');
     const hasSmsTrigger = await hasColumn('sms_templates', 'trigger_event_key');
-
-    let emailRows = [];
-    if (hasEmailAutomations) {
-      emailRows = await db('email_template_automations as a')
-        .leftJoin('email_templates as t', 't.template_key', 'a.template_key')
-        .leftJoin('email_template_versions as v', 'v.id', 't.active_version_id')
-        .select(
-          'a.automation_key',
-          'a.template_key',
-          'a.trigger_event_key',
-          'a.status',
-          'a.audience',
-          'a.frequency_cap',
-          'a.delay_minutes',
-          't.name as template_name',
-          't.active_version_id as active_version_id',
-          'v.version_number as active_version_number',
-          'v.status as version_status',
-          'v.subject as subject',
-          'v.preview_text as preview_text',
-        )
-        .orderBy('a.trigger_event_key', 'asc')
-        .orderBy('a.name', 'asc');
-      emailRows.forEach((row) => {
-        if (row.trigger_event_key) eventKeys.add(row.trigger_event_key);
-      });
-    }
 
     let mappedSmsRows = [];
     let unmappedSmsRows = [];
@@ -97,13 +67,6 @@ router.get('/', async (req, res, next) => {
         .orderBy('sort_order');
     }
 
-    const emailsByEvent = new Map();
-    for (const row of emailRows) {
-      if (!row.trigger_event_key) continue;
-      if (!emailsByEvent.has(row.trigger_event_key)) emailsByEvent.set(row.trigger_event_key, []);
-      emailsByEvent.get(row.trigger_event_key).push(row);
-    }
-
     const smsByEvent = new Map();
     for (const row of mappedSmsRows) {
       if (!row.trigger_event_key) continue;
@@ -118,12 +81,10 @@ router.get('/', async (req, res, next) => {
 
     const events = orderedKeys.map((eventKey) => {
       const meta = catalogMap.get(eventKey) || fallbackEvent(eventKey);
-      const emailAutomations = emailsByEvent.get(eventKey) || [];
       const smsTemplates = smsByEvent.get(eventKey) || [];
       return {
         ...meta,
-        status: eventStatus(emailAutomations, smsTemplates),
-        email_automations: emailAutomations,
+        status: eventStatus(smsTemplates),
         sms_templates: smsTemplates,
       };
     });
@@ -137,21 +98,7 @@ router.get('/', async (req, res, next) => {
       source: '',
       channels_expected: ['sms'],
       status: unmappedSmsRows.length ? 'sms_only' : 'unmapped',
-      email_automations: [],
       sms_templates: unmappedSmsRows,
-    });
-
-    events.push({
-      event_key: '__email_only__',
-      name: 'Channel-only - Email',
-      audience: null,
-      description: 'Reserved for email templates without an automation event.',
-      fires_when: '',
-      source: '',
-      channels_expected: ['email'],
-      status: 'unmapped',
-      email_automations: [],
-      sms_templates: [],
     });
 
     res.json({ events, catalog });

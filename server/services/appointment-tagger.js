@@ -6,10 +6,9 @@ const { dispatchWithFallback } = require('./llm/call');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
 const { sendNewRecurringWelcome, isNewRecurringSignupCandidate } = require('./new-recurring-welcome-sms');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
-const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
+const { isEnabled } = require('../config/feature-gates');
+const { dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
-const { portalUrl } = require('../utils/portal-url');
 const { isBedBugHeatServiceType } = require('../utils/bed-bug-heat-service');
 
 // Structured-output contract for the AI WDO pre-inspection brief (llm/call.js
@@ -29,23 +28,21 @@ const WDO_BRIEF_SCHEMA = {
   },
 };
 
-// Pest types whose booking triggers an automatic prep guide email
-// (email_template_automations, appointment.booked trigger).
+// Pest types that carry a prep guide (the tokened /prep/:token page).
 const PREP_AUTOMATION_BY_PEST_TYPE = Object.freeze({
   cockroach: 'prep.cockroach',
   bed_bug: 'prep.bed_bug',
   // Heat and hybrid bed bug jobs get their own prep sheet (the chemical
   // guide is chemical-only, owner ruling 2026-09-24). Not in
   // TREATMENT_AUTOMATION_BY_PEST_TYPE below: that sequence's step 0 is the
-  // chemical guide, so a heat job takes the transactional prep email only.
+  // chemical guide, so a heat job gets no sequence enrollment.
   bed_bug_heat: 'prep.bed_bug_heat',
   flea: 'prep.flea',
 });
 
 // Pest types whose FIRST-TIME booking also auto-enrolls the customer in the
 // matching Automations-tab sequence (automation_templates — the SendGrid
-// runner sends steps per their delays). Separate stack from the transactional
-// prep guide above. Wire a pest by adding its template key here; the
+// runner sends steps per their delays). Wire a pest by adding its template key here; the
 // treatmentAutomationEnroll gate stays the single kill switch. german_roach
 // bookings route through pestType 'cockroach' (onServiceScheduled), so they
 // enroll the cockroach sequence too.
@@ -330,8 +327,7 @@ class AppointmentTagger {
     }
   }
 
-  // Pest prep — email prep guide (prep.cockroach / prep.bed_bug / prep.flea
-  // automations) plus a treatment-prep SMS. First-time treatments only (owner
+  // Pest prep — email prep guide (the treatment sequence) plus a treatment-prep SMS. First-time treatments only (owner
   // directive 2026-07-06): a follow-up booking in the same infestation series
   // must not re-send "let's get started" prep messaging.
   //
@@ -350,19 +346,17 @@ class AppointmentTagger {
     // Exactly ONE guide email per first-time booking (owner directive
     // 2026-07-11: two is overkill). For sequence-wired pests with the gate on,
     // the Automations-tab sequence IS that email — its step-0 carries the prep
-    // guide, editable in the tab — so the transactional prep.<pest> email is
-    // skipped and the SMS legs key off the enrollment instead. Gate off (or an
-    // unwired pest) runs the transactional lane unchanged, so unsetting
-    // GATE_TREATMENT_AUTOMATION_ENROLL reverts to the proven prep email.
+    // guide, editable in the tab — and the SMS legs key off the enrollment.
     //
     // The companion SMS copy asserts "we emailed your treatment guide" — only
     // send it when the guide email actually queued (either source). When the
     // email was skipped solely because there's no email on file, fall back to
     // the self-contained prep text instead. Codex review 2026-07-06.
     const sequenceWired = !!TREATMENT_AUTOMATION_BY_PEST_TYPE[pestType] && isEnabled('treatmentAutomationEnroll');
-    const emailResult = sequenceWired
-      ? await this.enrollTreatmentSequence(service, pestType)
-      : await this.triggerPrepEmailGuide(service, pestType);
+    // No sequence wired (or the gate off): no guide email is sent, so no prep
+    // SMS goes either.
+    if (!sequenceWired) return;
+    const emailResult = await this.enrollTreatmentSequence(service, pestType);
     let smsVariant;
     if (emailResult.queued) {
       smsVariant = 'companion';
@@ -508,15 +502,13 @@ class AppointmentTagger {
   }
 
   // Automations-tab sequence enrollment — for wired pests with the gate on,
-  // this REPLACES triggerPrepEmailGuide as the guide-email source (one email
-  // per booking; the sequence's step-0 carries the prep guide, editable in the
-  // tab). Returns the same { queued, reason } contract so triggerPestPrep's
-  // SMS logic (companion on queued / standalone on no_email / silence
-  // otherwise) works identically for both sources.
+  // the guide-email source (one email per booking; the sequence's step-0
+  // carries the prep guide, editable in the tab). Returns { queued, reason }
+  // so triggerPestPrep's SMS logic (companion on queued / standalone on
+  // no_email / silence otherwise) can key off it.
   // Guards, in order:
   //   • upcoming open visits only — regenerate-brief replays onServiceScheduled
-  //     for past/cancelled jobs too (same terminal/past rule as the
-  //     transactional path); first-time-only is checked by the caller;
+  //     for past/cancelled jobs too; first-time-only is checked by the caller;
   //   • once EVER per customer+template from this hook: enrollCustomer alone
   //     only no-ops while an enrollment is ACTIVE, so a replay after the
   //     sequence completed would reactivate and re-send — skip when any prior
@@ -526,7 +518,7 @@ class AppointmentTagger {
   // then primary. Sequences are SendGrid emails, so a phone-only customer
   // reports 'no_email' — but only while the sequence is actually sendable
   // (template enabled + real step content); a paused/empty sequence silences
-  // BOTH channels, same kill-switch parity the transactional path has.
+  // BOTH channels.
   async enrollTreatmentSequence(service, pestType) {
     const templateKey = TREATMENT_AUTOMATION_BY_PEST_TYPE[pestType] || null;
     if (!templateKey) return { queued: false, reason: 'no_automation' };
@@ -616,7 +608,7 @@ class AppointmentTagger {
         return { queued: false, reason: 'not_queued' };
       });
       if (outcome?.queued) {
-        // Sequence-lane parity with the transactional lane: mint the
+        // Mint the
         // visit's public prep token now (outside the lock transaction — the
         // lock holder must not pin a second pooled connection). The
         // automation-runner stamps prep_sent_at on this row when the
@@ -641,8 +633,7 @@ class AppointmentTagger {
   // accepts a contentful step anywhere in the sequence, but the runner starts
   // at step 0 — a later-step-only sequence would make the companion text
   // promise a guide email that isn't what sends (or nothing sends soon).
-  // Mirrors isPrepAutomationActive for the transactional path — the
-  // standalone no-email SMS must respect the same pause as the email channel.
+  // The standalone no-email SMS must respect the same pause as the email channel.
   // Fails CLOSED.
   async isTreatmentSequenceSendable(templateKey) {
     try {
@@ -655,145 +646,6 @@ class AppointmentTagger {
       return !!(firstStep && (String(firstStep.html_body || '').trim() || String(firstStep.text_body || '').trim()));
     } catch (err) {
       logger.warn(`[appointment-tagger] sequence sendable-check failed for ${templateKey}: ${err.message}`);
-      return false;
-    }
-  }
-
-  // Emit the appointment.booked trigger for the matching prep automation
-  // (email_template_automations). The run is queued and sent by the
-  // every-minute automation scheduler tick — not inline — so appointment
-  // creation stays fast and sends get the executor's retry policy. The
-  // automation's own conditions (service_type_contains) and exit checks
-  // (appointment.cancelled, re-evaluated against the live row at send time)
-  // still apply, and the once-per-appointment idempotency key makes re-runs
-  // of onServiceScheduled (e.g. regenerate-brief) safe.
-  // Returns { queued, reason }. queued is true only when the prep-guide email
-  // automation was queued — the companion SMS copy depends on it. reason lets
-  // triggerPestPrep tell the "no email on file" case (fall back to the
-  // self-contained prep SMS, since the visit is still upcoming/open by the
-  // time that check is reached) apart from the gate/terminal/past/dedupe cases
-  // (send nothing).
-  async triggerPrepEmailGuide(service, pestType) {
-    const automationKey = PREP_AUTOMATION_BY_PEST_TYPE[pestType] || null;
-    if (!automationKey) return { queued: false, reason: 'no_automation' };
-    // Shadow must never change a LIVE send: this function's caller
-    // (triggerPestPrep) reads queued:true as "the email side is handled,
-    // send the companion SMS that references it" — in shadow the queued
-    // run finalizes 'shadow' (the guide email never actually goes out), so
-    // treating shadow as queueable here would leave the SMS promising an
-    // email that never arrives. Only 'live' queues; shadow behaves exactly
-    // like off (codex/coordinator finding on #5154).
-    if (emailTemplateAutomationsMode() !== 'live') return { queued: false, reason: 'gate_off' };
-
-    // Upcoming open visits only: regenerate-brief re-runs onServiceScheduled
-    // for past/closed appointments too, and "prepare for your treatment"
-    // must never land after the visit. The automation's exit conditions
-    // (appointment.closed / appointment.past) re-check this against the live
-    // row at send time for queued runs.
-    const status = String(service.status || '').toLowerCase();
-    if (PREP_TERMINAL_STATUSES.has(status)) return { queued: false, reason: 'terminal' };
-    const serviceDateStr = dateOnlyString(service.scheduled_date);
-    if (!serviceDateStr || serviceDateStr < etDateString()) return { queued: false, reason: 'past' };
-
-    try {
-      // Route like the other prep/project emails: service contact first (the
-      // on-site person who actually does the prep), then primary contact.
-      const { resolveProjectEmailRecipientForSend } = require('./project-email');
-      const customer = service.customer_id
-        ? await db('customers').where({ id: service.customer_id }).first()
-        : null;
-      const recipient = customer
-        ? await resolveProjectEmailRecipientForSend(customer)
-        : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim(), role: 'primary' };
-      if (!recipient.email) {
-        logger.info(`[appointment-tagger] No valid email on file; ${automationKey} prep email skipped for service ${service.id}`);
-        // The no-email standalone-SMS fallback fires on reason:'no_email'. But
-        // this check runs BEFORE processTrigger, so a disabled/inactive
-        // automation is not yet observed — an email-capable customer would get
-        // zero executor results (no SMS), so a phone-only customer must be held
-        // to the same pause. Only advertise 'no_email' when the automation is
-        // actually active; otherwise report 'not_queued' so no standalone sends.
-        const active = await this.isPrepAutomationActive(automationKey);
-        return { queued: false, reason: active ? 'no_email' : 'not_queued' };
-      }
-      const firstName = String(recipient.name || '').trim().split(/\s+/)[0]
-        || String(service.first_name || '').trim()
-        || 'there';
-
-      const executor = require('./email-template-automation-executor');
-      // Tokened public prep page (2026-07-14 audit): the guide email's CTA
-      // must land on the durable, printable /prep/:token page — not the
-      // login-gated portal visits tab. Mint fails soft: a token hiccup
-      // degrades the CTA back to the portal link rather than blocking the
-      // send.
-      const portalVisitsUrl = portalUrl('/?tab=visits');
-      let prepUrl = portalVisitsUrl;
-      try {
-        const { ensureServicePrepToken } = require('./project-email');
-        prepUrl = portalUrl(`/prep/${await ensureServicePrepToken(service.id, automationKey)}`);
-      } catch (tokenErr) {
-        logger.warn(`[appointment-tagger] prep token mint failed for service ${service.id}: ${tokenErr.message}`);
-      }
-      const trigger = await executor.processTrigger({
-        triggerEventKey: 'appointment.booked',
-        triggerEventId: `appointment_booked:${service.id}`,
-        automationKey,
-        entityType: 'scheduled_service',
-        entityId: service.id,
-        // `role`: whose address this is (an on-location contact's, or not) —
-        // the run's dispatch-time contact recheck reads the stamp back
-        // (codex #6363 r10 P1).
-        recipient: { email: recipient.email, type: 'customer', id: service.customer_id || '', role: recipient.role || '' },
-        payload: {
-          scheduled_service_id: service.id,
-          customer_id: service.customer_id || '',
-          customer_email: recipient.email,
-          first_name: firstName,
-          service_type: service.service_type || '',
-          project_type: this.classifyAppointmentType(service.service_type).label,
-          service_date: formatDisplayDate(service.scheduled_date, { fallback: '' }),
-          service_date_ymd: serviceDateStr,
-          property_address: [service.address_line1, service.city, service.zip].filter(Boolean).join(', '),
-          prep_url: prepUrl,
-          customer_portal_url: portalVisitsUrl,
-        },
-        executeImmediately: false,
-      });
-      // "Queued" means a NEW run was created and not condition-skipped —
-      // an inactive automation (zero results), an idempotency dedupe
-      // (re-run of the same appointment), or a skipped run means no guide
-      // email is coming, so the companion SMS that references it must not send.
-      // These are NOT the "no email on file" case, so no standalone fallback
-      // either — a disabled automation or a re-run should stay silent.
-      // No prep_sent_at stamp here: "queued" is not "delivered" — the
-      // executor stamps it (markServicePrepSent) when the run actually
-      // reaches 'sent', so the tracker never links a guide that a later
-      // skip/suppress/failure kept from the customer.
-      const queued = (trigger?.results || []).some(
-        (r) => !r.deduped && String(r.run?.status || '') !== 'skipped',
-      );
-      return { queued, reason: queued ? 'queued' : 'not_queued' };
-    } catch (err) {
-      logger.error(`[appointment-tagger] Prep email automation failed for service ${service.id}: ${err.message}`);
-      return { queued: false, reason: 'error' };
-    }
-  }
-
-  // True only when the prep automation for this key is live. Matches the
-  // executor's own selector (email_template_automations, trigger
-  // appointment.booked, status 'active') so the standalone-SMS fallback
-  // respects the same per-prep pause the email path already honors. Fails
-  // CLOSED — if we can't confirm the automation is active, don't send (the
-  // email path fails closed on the same lookup error too, so both channels
-  // stay silent together and the kill switch is never bypassed on a hiccup).
-  async isPrepAutomationActive(automationKey) {
-    try {
-      const row = await db('email_template_automations')
-        .where({ automation_key: automationKey, trigger_event_key: 'appointment.booked', status: 'active' })
-        .first('id');
-      return !!row;
-    } catch (err) {
-      logger.warn(`[appointment-tagger] prep automation active-check failed for ${automationKey}: ${err.message}`);
       return false;
     }
   }
