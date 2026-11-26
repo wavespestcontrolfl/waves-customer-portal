@@ -13,7 +13,8 @@
 //     band is weaker keeps its band;
 //   - a row with another or no registration number gets no rate at all (labelRateHeld): neither the card's, which is not
 //     verified for that product, nor the catalog's stronger one. The tank calculator withholds the dose and the close-out
-//     starts the rate blank.
+//     starts the rate blank. The same holds for a row whose catalog rate cannot be compared with the card's (not per
+//     gallon in the card's unit, or not a plain number or band).
 
 function normalizeEpa(value) {
   return String(value == null ? '' : value).toLowerCase().replace(/\s+/g, '');
@@ -53,20 +54,31 @@ function labelUseRate(meta, product) {
   return { amount, unit: String(declared.unit) };
 }
 
-// True when a weaker-mix line resolved to a row with another or no registration number: no rate is given for it.
+// Why a weaker-mix line gives this row no rate at all, or null: 'registration' (another or no EPA number) or 'catalog_rate'
+// (the row's catalog rate cannot be compared with the card's).
 function labelRateHeld(meta, product) {
   const declared = meta?.labelRatePerGallon;
-  return declared?.weakerMix === true && !sameRegistration(declared, product);
+  if (declared?.weakerMix !== true) return null;
+  if (!sameRegistration(declared, product)) return 'registration';
+  return catalogPerGallonTop(product, declared.unit) == null ? 'catalog_rate' : null;
+}
+
+// The reason the tank search shows for a held line.
+function labelRateHoldText(meta, product) {
+  const held = labelRateHeld(meta, product);
+  if (!held) return null;
+  return held === 'registration'
+    ? `The card's rate is for EPA ${meta.labelRatePerGallon.epa}. This product's registration number is not that one: read the bottle's label before mixing`
+    : "This product's catalog rate cannot be checked against the card's rate: read the bottle's label before mixing";
 }
 
 // The completion form reads its per-gallon prefill and its review ceiling from the catalog's default_rate band
 // (client/src/lib/product-rate-prefill.js). For a line with a label rate, both become that rate, but only when the
 // catalog keeps the band in the same per-gallon unit ("fl_oz/gal"); any other unit is left unchanged.
 function completionRateFields(meta, product) {
-  // A held weaker-mix line starts blank, with no ceiling, so the tech reads the bottle and enters what went out.
-  if (labelRateHeld(meta, product)) {
-    return catalogUnit(product) === `${String(meta.labelRatePerGallon.unit).toLowerCase()}/gal` ? { defaultRate: '', labelUseRate: true } : null;
-  }
+  // A held weaker-mix line starts blank, with no ceiling and whatever the catalog unit, so the tech reads the bottle and enters
+  // what went out. The client clears the row's per-1,000 rate too (protocol-completion-defaults.js labelUseProduct).
+  if (labelRateHeld(meta, product)) return { defaultRate: '', labelUseRate: true };
   const rate = labelUseRate(meta, product);
   if (!rate) return null;
   if (catalogUnit(product) !== `${rate.unit.toLowerCase()}/gal`) return null;
@@ -76,4 +88,4 @@ function completionRateFields(meta, product) {
   return { defaultRate: meta.sharedRate ? '' : String(rate.amount), labelUseRate: true };
 }
 
-module.exports = { labelUseRate, labelRateHeld, completionRateFields, normalizeEpa };
+module.exports = { labelUseRate, labelRateHeld, labelRateHoldText, completionRateFields, normalizeEpa };

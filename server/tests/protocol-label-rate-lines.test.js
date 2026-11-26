@@ -80,12 +80,19 @@ describe('card lines that carry a label rate for their own pest', () => {
       expect(other.labelUseRate).toBeUndefined();
       expect(other).toMatchObject({ labelRateRefused: true, labelHold: expect.stringContaining('53883-335') });
     }
-    // The right registration with a weaker catalog band (or one that cannot be read) keeps the catalog: no card rate, no hold.
-    for (const band of ['0.5', '0.25-0.5', '1/2']) {
+    // The right registration with a weaker catalog band keeps the catalog: no card rate, no hold.
+    for (const band of ['0.5', '0.25-0.5']) {
       const weakerRow = _test.linesFromLineMeta(fleaCard, [{ ...TEKKO, default_rate: band }]).find((line) => line.product.id === 't');
       expect(weakerRow.labelUseRate).toBeUndefined();
       expect(weakerRow.declaredRate).toBeUndefined();
       expect(weakerRow.labelHold).toBeUndefined();
+    }
+    // A catalog rate that cannot be compared with the card's (not a plain number or band, or another unit) is held too: "1/2"
+    // would read as 1 in the close-out form.
+    for (const row of [{ default_rate: '1/2' }, { default_unit: 'oz/gal' }, { default_unit: 'fl_oz/1000sf' }]) {
+      const unread = _test.linesFromLineMeta(fleaCard, [{ ...TEKKO, ...row }]).find((line) => line.product.id === 't');
+      expect(unread.declaredRate).toBeUndefined();
+      expect(unread).toMatchObject({ labelRateRefused: true, labelHold: expect.stringContaining('cannot be checked') });
     }
   });
 
@@ -170,6 +177,10 @@ describe('the completion form gets the cockroach label rate', () => {
     const weakerBand = await run({ ...TEKKO, default_rate: '0.5' }, 'Flea Treatment', 'flea_tick');
     expect(weakerBand.defaultRate).toBe('0.5');
     expect(weakerBand.labelUseRate).toBeUndefined();
+    // A catalog rate that cannot be compared starts blank too, whatever its unit.
+    for (const row of [{ default_rate: '1/2' }, { default_unit: 'oz/gal' }, { epa_reg_number: null, default_unit: 'fl_oz/1000sf' }]) {
+      expect(await run({ ...TEKKO, ...row }, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '', labelUseRate: true });
+    }
     // Every other label-rate line keeps its card rate as the ceiling: PolyZone on the mosquito card is 1.1, though its catalog band
     // reaches 1.5.
     const polyzone = { id: 't', name: 'Suspend Polyzone', active: true, default_rate: '0.25-1.5', default_unit: 'fl_oz/gal', epa_reg_number: '101563-143' };
@@ -247,6 +258,26 @@ describe('the tank calculator on a visit with two Tekko Pro cards', () => {
     expect(result.amount).toBeNull();
     // The hold names each service's own rate, so the tech can mix a tank for each.
     expect(result.reason).toBe('Tekko Pro IGR has a different rate on each service on this visit: German Roach Cleanout 2 fl oz per gallon; Flea Treatment 0.66 fl oz per gallon. Mix a separate tank for each');
+  });
+
+  test('a held flea line holds the dose whichever service is the visit and whichever the add-on', async () => {
+    const other = [{ ...TEKKO, epa_reg_number: '53883-444', category: 'insecticide', label_verified_at: '2026-11-01' }];
+    // A mosquito visit (its card mixes Tekko Pro at the catalog's 1) with a flea add-on.
+    tables.scheduled_services = [{ ...visit, service_type: 'Mosquito Barrier Treatment', service_key: 'mosquito_barrier' }];
+    tables.scheduled_service_addons = [{ service_name: 'Flea Treatment', category: 'pest_control', service_key: 'flea_tick' }];
+    tables.products_catalog = other;
+    const mosquitoFirst = await mix();
+    expect(mosquitoFirst.amount).toBeNull();
+    expect(mosquitoFirst.reason).toContain('53883-335');
+    // The flea visit with a mosquito add-on.
+    tables.scheduled_services = [{ ...visit, service_type: 'Flea Treatment', service_key: 'flea_tick' }];
+    tables.scheduled_service_addons = [{ service_name: 'Mosquito Barrier Treatment', category: 'mosquito', service_key: 'mosquito_barrier' }];
+    const fleaFirst = await mix();
+    expect(fleaFirst.amount).toBeNull();
+    expect(fleaFirst.reason).toContain('53883-335');
+    // The card's registration on the same two visits: no hold from the flea line.
+    tables.products_catalog = [{ ...TEKKO, category: 'insecticide', label_verified_at: '2026-11-01' }];
+    expect((await mix()).reason || '').not.toContain('53883-335');
   });
 
   test('an unverified label withholds with its own reason, never the per-service rates', async () => {
