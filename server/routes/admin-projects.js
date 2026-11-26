@@ -4258,9 +4258,6 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep', a
         ? await revertToHeld('invoice_not_settled', { countAttempt: false, unmintToken: link.mintedToken })
         : await revertToHeld(`Report email failed: ${sent.channels.email.error || 'unknown'}`, {
           unmintToken: link.mintedToken && !sent.channels.email.uncertain,
-          // A kept link may be in the customer's inbox: it shows the filing this email carried (never live findings
-          // edited later), without the report being recorded as delivered.
-          possiblySentFiling: sent.channels.email.uncertain ? pdf.wdoFiling : null,
         });
       return { ...reverted, channels: sent.channels };
     }
@@ -4326,7 +4323,7 @@ async function claimHeldReportForRelease(projectId) {
 // `countAttempt: false` is for "not due yet" (invoice not settled).
 function makeHeldReverter({ project, claim, ctx, source }) {
   const hold = require('../services/project-report-hold');
-  return async function revertToHeld(reason, { countAttempt = true, unmintToken = false, possiblySentFiling = null } = {}) {
+  return async function revertToHeld(reason, { countAttempt = true, unmintToken = false } = {}) {
     const { attemptsSoFar, previousDeliveryStatus, ownClaim } = claim;
     const nextAttempts = countAttempt ? attemptsSoFar + 1 : attemptsSoFar;
     const delayMinutes = countAttempt ? hold.reportHoldBackoffMinutes(nextAttempts) : 2;
@@ -4341,7 +4338,6 @@ function makeHeldReverter({ project, claim, ctx, source }) {
       delivery_status: previousDeliveryStatus,
       delivery_claim_token: null,
       ...(unmintToken ? { report_token: null } : {}),
-      ...(possiblySentFiling ? { delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ possibly_sent_filing: possiblySentFiling })]) } : {}),
       updated_at: db.fn.now(),
     }).catch((err) => logger.warn(`[projects] hold revert failed for ${project.id}: ${err.message}`));
     if (countAttempt && reverted) await ringReleaseFailedOnce({ hold, project, customer: ctx.customer, reason, attemptsSoFar, source });
@@ -4632,6 +4628,8 @@ function heldUnknownOutcomeMessage(staffSend) {
 // checked with the customer, moves the counter first: a new copy.
 async function heldReportEmailKey({ refreshed, invoice, wdoFiling, recipientEmail, ownClaim, staffSend }) {
   const recipientHash = crypto.createHash('sha1').update(String(recipientEmail).toLowerCase()).digest('hex').slice(0, 12);
+  // ...and the link it carries: a link taken back after a refusal before dispatch and minted again is a different email.
+  const linkHash = crypto.createHash('sha1').update(String(refreshed.report_token || '')).digest('hex').slice(0, 8);
   const stored = typeof refreshed.delivery_channels === 'string' ? safeJsonParse(refreshed.delivery_channels) : refreshed.delivery_channels;
   const newCopyApproved = staffSend && stored?.release_email_unknown === true;
   if (newCopyApproved) {
@@ -4641,7 +4639,7 @@ async function heldReportEmailKey({ refreshed, invoice, wdoFiling, recipientEmai
   }
   const blocks = (Number(stored?.release_email_blocks) || 0) + (newCopyApproved ? 1 : 0);
   const invoicePart = String(invoice.id).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40);
-  return `project.report_ready:${refreshed.id}:hold_release:${invoicePart}:${filingKeyPart(wdoFiling)}:${recipientHash}${blocks ? `:b${blocks}` : ''}`;
+  return `project.report_ready:${refreshed.id}:hold_release:${invoicePart}:${filingKeyPart(wdoFiling)}:${recipientHash}:${linkHash}${blocks ? `:b${blocks}` : ''}`;
 }
 
 // What the report email's result means, and the mark it leaves on the row:
@@ -5658,9 +5656,10 @@ async function ringUncertainInvoiceEmailBell({ hold, delivered, channels, projec
   if (!(hold.active && delivered && channels.email?.uncertain)) return;
   await reportHold.raiseInvoiceEmailUncertainBell({ project, customer, reason: channels.email.error });
   // A release that committed before the raise closed its bells before this one existed: the report is out, so this
-  // bell is stale. (A release after this read closes it itself.)
+  // bell is stale. Only a finished release closes it here: a release still in flight may fail back to held, and its own
+  // finalize closes the bell when it succeeds.
   const now = await db('projects').where({ id: project.id }).first('report_hold_status').catch(() => null);
-  if (now && now.report_hold_status !== 'held') await reportHold.closeInvoiceEmailBell(project.id);
+  if (now?.report_hold_status === 'released') await reportHold.closeInvoiceEmailBell(project.id);
 }
 
 // Only an accepted email stamps email_sent_at. (An unknown outcome on a held send parks the invoice instead.)

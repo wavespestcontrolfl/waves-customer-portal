@@ -2132,6 +2132,13 @@ describe('audit fixes', () => {
       await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor()); });
       expect(raise).toHaveBeenCalledTimes(1);
       expect(close).toHaveBeenCalledWith('project-1');
+      // a release still in flight (it may fail back to held) leaves the bell open: its own finalize closes it
+      raise.mockImplementation(async () => { mockTables({ project: wdoProject({ report_hold_status: 'releasing' }) }); });
+      close.mockClear();
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'timeout', deliveryOutcome: 'uncertain' });
+      mockTables();
+      await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor()); });
+      expect(close).not.toHaveBeenCalled();
       raise.mockRestore();
       close.mockRestore();
     });
@@ -2326,31 +2333,42 @@ describe('audit fixes', () => {
       }
     });
 
-    test('a report email of unknown outcome binds the kept link to the filing that email carried', async () => {
-      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'email send held by provider_retry_ambiguous' });
-      let { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) });
-      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
-      const kept = (updates.projects || []).find((u) => u.report_hold_status === 'held');
-      expect(String(kept.delivery_channels?.sql || '')).toContain('jsonb');
-      expect(JSON.parse(kept.delivery_channels.bindings[0]).possibly_sent_filing).toEqual(expect.objectContaining({ s3_key: expect.any(String) }));
-      // a definite failure records no such filing
-      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'rejected', blocked: true });
-      ({ updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) }));
-      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
-      expect((updates.projects || []).find((u) => u.report_hold_status === 'held')).not.toHaveProperty('delivery_channels');
-    });
-
-    test('the report viewer and its PDF serve the possibly-sent filing when nothing is recorded as sent', () => {
+    test('the report viewer and its PDF serve the signed filing a held release saved before its email', () => {
       const { servedWdoFiling } = require('../routes/reports-public');
-      const possible = { s3_key: 'wdo/possible.pdf', findings: { a: 1 } };
-      expect(servedWdoFiling({ wdo_sent_filings: [], delivery_channels: { possibly_sent_filing: possible } })).toEqual(possible);
-      expect(servedWdoFiling({ wdo_sent_filings: null, delivery_channels: JSON.stringify({ possibly_sent_filing: possible }) })).toEqual(possible);
+      const saved = { s3_key: 'wdo/release.pdf', findings: { a: 1 } };
+      // the email may have arrived (a crash after the handoff, or an unknown outcome) with nothing recorded as sent
+      expect(servedWdoFiling({ wdo_sent_filings: [], delivery_channels: { release_filing: saved } })).toEqual(saved);
+      expect(servedWdoFiling({ wdo_sent_filings: null, delivery_channels: JSON.stringify({ release_filing: saved }) })).toEqual(saved);
       // a filing recorded as sent always wins
       const sent = { s3_key: 'wdo/sent.pdf' };
-      expect(servedWdoFiling({ wdo_sent_filings: JSON.stringify([sent]), delivery_channels: { possibly_sent_filing: possible } })).toEqual(sent);
+      expect(servedWdoFiling({ wdo_sent_filings: JSON.stringify([sent]), delivery_channels: { release_filing: saved } })).toEqual(sent);
       expect(servedWdoFiling({ wdo_sent_filings: null, delivery_channels: null })).toBeNull();
       const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
       expect(source.match(/const lastFiling = servedWdoFiling\(project\);/g)).toHaveLength(2);
+    });
+
+    test('the filing is saved before the report email goes out', async () => {
+      const order = [];
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) });
+      const realUpdate = updates;
+      ProjectEmail.sendProjectReportReady.mockImplementationOnce(async () => {
+        order.push(['email', (realUpdate.projects || []).some((u) => String(JSON.stringify(u.delivery_channels?.bindings || '')).includes('release_filing'))]);
+        return { ok: true, messageId: 'm1' };
+      });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(order).toEqual([['email', true]]);
+    });
+
+    test('a link taken back and minted again gets a new report email key', async () => {
+      const keyFor = async (token) => {
+        ProjectEmail.sendProjectReportReady.mockClear();
+        mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: token }), invoice: invoiceRow({ status: 'paid' }) });
+        await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+        return ProjectEmail.sendProjectReportReady.mock.calls[0][0].idempotencyKey;
+      };
+      const a = await keyFor('a'.repeat(32));
+      expect(await keyFor('a'.repeat(32))).toBe(a);
+      expect(await keyFor('c'.repeat(32))).not.toBe(a);
     });
 
     test('the draft payer lookup runs on the open transaction', () => {
@@ -2706,7 +2724,7 @@ describe('audit fixes', () => {
       const calls = ProjectEmail.sendProjectReportReady.mock.calls.map(([args]) => args);
       expect(calls[0].recipient.email).toBe('holder@example.com');
       const hashOf = (email) => require('crypto').createHash('sha1').update(email).digest('hex').slice(0, 12);
-      expect(calls[0].idempotencyKey.endsWith(hashOf('holder@example.com'))).toBe(true);
+      expect(calls[0].idempotencyKey).toContain(`:${hashOf('holder@example.com')}:`);
       // the holder is named on the filing and already has the report: no second copy to them
       expect(calls.slice(1).map((c) => c.recipient.email)).toEqual(['closing@abctitle.com']);
     });
@@ -2865,7 +2883,7 @@ describe('audit fixes, round 2', () => {
       const email = ProjectEmail.sendProjectReportReady.mock.calls[0][0];
       expect(Buffer.from(email.attachments[0].content, 'base64').toString()).toBe('archived-bytes');
       // the sweep's own key for this invoice, filing and recipient: the provider dedupes the sweep's earlier email
-      expect(email.idempotencyKey).toMatch(/^project\.report_ready:project-1:hold_release:inv-1:[0-9a-f]{8}:[0-9a-f]{12}$/);
+      expect(email.idempotencyKey).toMatch(/^project\.report_ready:project-1:hold_release:inv-1:[0-9a-f]{8}:[0-9a-f]{12}:[0-9a-f]{8}$/);
     });
 
     test('a manual Send report of a held report texts through the release marker: a takeover after the sweep texted sends no second text', async () => {
@@ -2931,7 +2949,7 @@ describe('audit fixes, round 2', () => {
       expect(buildWdoReportPDFBuffer).toHaveBeenCalledTimes(1);
       expect(mockS3Send).toHaveBeenCalledTimes(1); // the new put
       const key = ProjectEmail.sendProjectReportReady.mock.calls[0][0].idempotencyKey;
-      expect(key).toMatch(/hold_release:inv-1:[0-9a-f]{8}:[0-9a-f]{12}$/);
+      expect(key).toMatch(/hold_release:inv-1:[0-9a-f]{8}:[0-9a-f]{12}:[0-9a-f]{8}$/);
     });
 
     test.each([

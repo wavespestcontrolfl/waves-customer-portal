@@ -813,8 +813,10 @@ async function buildServiceReportV1ResponseData(service, token, {
   };
 }
 
-// The FDACS filing a WDO report link shows: the last one emailed, else the one a held release emailed with an unknown
-// outcome (its link may be in the customer's inbox, so it shows that signed filing, never findings edited later).
+// The FDACS filing a WDO report link shows: the last one emailed, else (a report held until paid, whose release email
+// may have gone out with no outcome recorded yet: a crash after the provider accepted it, or an unknown outcome) the
+// signed filing that release saved BEFORE its email. Never live findings edited later. A held release's link exists
+// only while that email may have reached the customer: a proven non-send takes the link back.
 function servedWdoFiling(project) {
   const parse = (v) => {
     if (typeof v !== 'string') return v;
@@ -822,7 +824,7 @@ function servedWdoFiling(project) {
   };
   const filings = parse(project.wdo_sent_filings);
   if (Array.isArray(filings) && filings.length) return filings[filings.length - 1];
-  return parse(project.delivery_channels)?.possibly_sent_filing || null;
+  return parse(project.delivery_channels)?.release_filing || null;
 }
 
 async function findProjectByReportSegment(segment) {
