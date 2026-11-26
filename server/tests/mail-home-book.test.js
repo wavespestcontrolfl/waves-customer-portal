@@ -403,7 +403,7 @@ describe('bookHome', () => {
     expect(booking.createSelfBooking).not.toHaveBeenCalled();
   });
 
-  test('a disclosed setup fee is frozen into the draft as the wizard freezes it (estimate_data.setupFeeQuote); no fee writes none', async () => {
+  test('a disclosed setup fee is frozen into the draft as the wizard freezes it (estimate_data.setupFeeQuote); no fee freezes an explicit zero', async () => {
     mockRow = row({ price_setup_fee: '99.00' });
     const input = { ...INPUT(), price: { annual: 627, setupFee: 99 } };
     quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 627, priceSetupFee: 99, priceDigest: 'd' });
@@ -419,7 +419,7 @@ describe('bookHome', () => {
     quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 627, priceSetupFee: 0, priceDigest: 'd' });
     quote.judge.mockReturnValue({ price: { annual: 627, setupFee: 0, digest: 'd' } });
     expect((await bookHome(TOKEN, INPUT(), deps)).status).toBe(200);
-    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN) });
+    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN), setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } });
   });
 
   test('the booking carries a commit guard that re-reads the gates and the locked prospect row inside its transaction', async () => {
@@ -668,7 +668,7 @@ describe('bookHome', () => {
     // The draft is marked as the quote-wizard draft /book accepts, with the postcard lead source.
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({ source: 'quote_wizard', lead_source: 'mail_new_home', lead_source_detail: 'new_home_postcard' });
-    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN) });
+    expect(JSON.parse(updates[0].estimate_data.bindings[0])).toEqual({ mailProspectId: 'prospect-1', mailShownKey: draftIdFor('prospect-1', validContact(INPUT()), SHOWN), setupFeeQuote: { amount: 0, kind: 'waveguard_membership' } });
 
     expect(booking.createSelfBooking).toHaveBeenCalledTimes(1);
     const payload = booking.createSelfBooking.mock.calls[0][0];

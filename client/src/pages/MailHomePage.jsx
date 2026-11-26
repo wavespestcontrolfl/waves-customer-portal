@@ -202,7 +202,7 @@ function BookedTerms({ lower }) {
     <>
       {lower.annual ? (
         <p data-testid="booked-price" style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
-          Your price is now {formatMoney(perApplication(lower.annual))} per application.
+          Your price is now {formatMoney(lower.annual)} a year.
         </p>
       ) : null}
       {lower.setupFee != null ? (
