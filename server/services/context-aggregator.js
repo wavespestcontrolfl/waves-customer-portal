@@ -255,10 +255,11 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
 // Texting AI facts (owner 2026-11-25): the prepaid visits left and the prep guide of the BOOKED visit's service (sms-staff-facts). Counts
 // and published template text only (never technician or visit notes); each read fails soft to null. OPT IN (`includeSmsStaffFacts`):
 // only the texting AI's draft, the unanswered-text fingerprint (true: all of them) and the send-time payment recheck (an object naming just the
-// facts a copied sentence needs) ask for them, every other caller skips the reads and the keys. Only for GATE_SMS_REAL_ANSWERS drafts, and never in a frozen replay (asOf): these read today's rows, never an
-// earlier day's.
+// facts a copied sentence needs) ask for them, every other caller skips the reads and the keys. The drafting callers pass the GATE_SMS_REAL_ANSWERS gate as the opt-in (a new
+// draft needs it); the send-time recheck asks regardless, so a reviewed card keeps its live recheck after a gate rollback. Never in a frozen
+// replay (asOf): these read today's rows, never an earlier day's.
 async function loadSmsStaffFacts({ customer, asOfDate, optedIn }) {
-  if (!optedIn || asOfDate || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { prepaidPlans: null, prepGuide: null };
+  if (!optedIn || asOfDate) return { prepaidPlans: null, prepGuide: null };
   const want = optedIn === true ? { prepaid: true, guide: true } : optedIn; // true = all of them; an object names the ones a caller needs
   const staffFacts = require('./sms-staff-facts');
   const [prepaidPlans, prepGuide] = await Promise.all([

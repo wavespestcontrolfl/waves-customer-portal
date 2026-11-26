@@ -23,9 +23,12 @@ const hashWith = async (extra) => {
   return factsFingerprintFor({ id: 'c1' }, AT, dbh);
 };
 
-test('the context is read WITH the staff facts', async () => {
+test('the context is read WITH the staff facts, as the drafter does: only while real answers are on', async () => {
   await hashWith({});
   expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1' }), expect.objectContaining({ includeSmsStaffFacts: true }));
+  delete process.env[GATE];
+  await hashWith({});
+  expect(ContextAggregator.getContextForCustomer).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'c1' }), expect.objectContaining({ includeSmsStaffFacts: false }));
 });
 
 test('a change to the prepaid visits left or to the prep guide changes the hash', async () => {

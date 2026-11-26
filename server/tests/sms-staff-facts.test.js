@@ -46,16 +46,40 @@ describe('prepaid visits left (payment-status contract)', () => {
   test('a reply holds when it states a visit count outside a verbatim copy, in any wording', () => {
     const sentences = paymentStatus.renderPaymentStatusSentences(withFacts());
     const check = (reply) => paymentStatus.checkPaymentStatusReply({ reply, sentences, inboundText: 'How many visits do I have left?' }).ok;
-    expect(check(`Happy to help. ${LEFT}`)).toBe(true);
+    expect(check(`Hi Dana, ${LEFT}`)).toBe(true);
     expect(check('Your prepaid Quarterly Pest Control plan has 2 of 4 prepaid visits left.')).toBe(false);
     for (const own of ['You have 3 visits left.', 'Three treatments remain on your plan.', 'You have two prepaid visits.', 'There are 3 left visits.',
       // short answers to the count question: no count word in the model's own words
-      'You have three more visits.', 'Three more.', 'None left.', 'A couple more.', 'Three.', '3.', 'Just two!', 'Happy to help. Four']) expect(check(own)).toBe(false);
-    expect(check('We will see you on Tuesday.')).toBe(true);
+      'You have three more visits.', 'Three more.', 'None left.', 'A couple more.', 'Three.', '3.', 'Just two!', 'Happy to help. Four', 'You have three.']) expect(check(own)).toBe(false);
+    // (the question asked for the count, so even true text beside the copy is held: the copy answers alone)
+    expect(check('We will see you on Tuesday.')).toBe(false);
     // the question decides: a short number to another question is not a plan count, an unknown question is judged as asking
     const other = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences, inboundText }).ok;
     expect(other('We will be there in two hours.', 'What time will you arrive?')).toBe(true);
+    expect(other('We will see you on Tuesday.', 'When is my next visit?')).toBe(true);
     expect(other('Three more.', null)).toBe(false);
+  });
+
+  test('a count question is answered by the copy alone: nothing else, in any words', () => {
+    const sentences = paymentStatus.renderPaymentStatusSentences(withFacts());
+    const ask = (reply, inboundText = 'How many visits are left?') => paymentStatus.checkPaymentStatusReply({ reply, sentences, inboundText }).ok;
+    expect(ask(LEFT)).toBe(true);
+    expect(ask(`Hi Dana, ${LEFT} Thanks for reaching out!`)).toBe(true);
+    for (const own of ['You have three.', 'A couple left, I think.', `${LEFT} Your next visit is Tuesday.`, 'Your plan is almost used up.']) expect(ask(own)).toBe(false);
+    // a package or cadence question is not a question about the customer's own count: the published answer stands
+    for (const q of ['How many visits are included in the cockroach treatment?', 'How many times a year do you treat for pests?']) expect(ask('We include two visits in that package.', q)).toBe(true);
+  });
+
+  test('a copied count answers the plan the customer named, never another plan\'s', () => {
+    const sentences = paymentStatus.renderPaymentStatusSentences(withFacts({ prepaidPlans: [{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }, { label: 'Lawn Care', remaining: 1, paid: 4 }] }));
+    const LAWN = 'Your prepaid Lawn Care plan has 1 of 4 prepaid visits left.';
+    const check = (reply, inboundText) => paymentStatus.checkPaymentStatusReply({ reply, sentences, inboundText }).ok;
+    expect(check(LEFT, 'How many pest control visits do I have left?')).toBe(true);
+    expect(check(LAWN, 'How many pest control visits do I have left?')).toBe(false);
+    expect(check(LAWN, 'How many lawn visits do I have left?')).toBe(true);
+    expect(check(`${LEFT} ${LAWN}`, 'How many pest control visits do I have left?')).toBe(false);
+    // no service named: either plan's sentence may answer
+    expect(check(LAWN, 'How many visits do I have left?')).toBe(true);
   });
 
   test('a visit-count claim is judged at the send boundary even when the customer asked nothing about money', () => {
@@ -145,6 +169,18 @@ describe('sms-staff-facts loaders', () => {
     expect(guide.sentences).toEqual([
       'Vacuum every carpet before we arrive.',
       'Wash all pet bedding on the hottest cycle the fabric allows.',
+    ]);
+  });
+
+  test('the steps that tell the customer what to do come before the background, each in the guide\'s own order', async () => {
+    const background = { type: 'list', items: ['Fleas live in carpets, pet bedding and cracks in the floor.', 'The flea life cycle has four stages from egg to adult.', 'Vacuum every carpet before we arrive.', 'Do not mop for two days after treatment.', 'Wash all pet bedding on the hottest cycle.'] };
+    const { guide } = await loadWith({ key: 'flea', visit: {} }, { activeVersion: { blocks: [background] } });
+    expect(guide.sentences).toEqual([
+      'Vacuum every carpet before we arrive.',
+      'Do not mop for two days after treatment.',
+      'Wash all pet bedding on the hottest cycle.',
+      'Fleas live in carpets, pet bedding and cracks in the floor.',
+      'The flea life cycle has four stages from egg to adult.',
     ]);
   });
 

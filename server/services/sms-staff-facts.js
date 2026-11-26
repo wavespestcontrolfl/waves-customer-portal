@@ -41,6 +41,11 @@ function proseOfBlocks(blocks) {
   return parts;
 }
 
+// A guide opens with background (what the service is, how fleas live); the drafter keeps only the first few sentences, so the ones that TELL
+// the customer what to do ("Vacuum ...", "Keep pets ...", "Do not ...") come first, each group in the guide's own order.
+const ACTION_RE = /^(?:please |be sure to |make sure (?:you |to )?)?(?:vacuum|wash|launder|move|clear|remove|keep|bring|unlock|empty|store|cover|mow|turn|shut|secure|wipe|put|open|leave|take|place|pick|clean|dispose|dry|water|trim|rake|stack|lift|unplug|set|avoid|coordinate|do not|don't|plan|have|check|close|lock|gather|collect|run|sweep|mop)\b/i;
+const actionableFirst = (sentences) => [...sentences.filter((s) => ACTION_RE.test(s)), ...sentences.filter((s) => !ACTION_RE.test(s))];
+
 /**
  * The prep guide of the customer's booked visit: the soonest upcoming visit a guide covers, chosen by the prep senders' own eligibility
  * (prep-guide-sender.nextGuideVisit: one helper for the senders and for this lookup, so a visit the senders would not prep is never
@@ -71,7 +76,7 @@ async function loadPrepGuideFacts(customerId, { db } = {}) {
         sentences.push(sentence);
       }
     }
-    return sentences.length ? { key, label: config.label, sentences } : null;
+    return sentences.length ? { key, label: config.label, sentences: actionableFirst(sentences) } : null;
   } catch (err) {
     logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}${key ? ` (guide ${key})` : ''}: ${err.message}`);
     return null;

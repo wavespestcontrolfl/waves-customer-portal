@@ -624,6 +624,14 @@ const sentenceTender = (t) => (/ card payment\b/.test(t) ? 'card' : / ACH paymen
 const RECEIPT_STATUS_ASK_RE = /\b(?:receiv\w*|got|get|gotten|post(?:ed)?|clear(?:ed)?|process(?:ed)?|land(?:ed)?|arriv\w*|show(?:s|ed|ing)? up)\b[^.?!]{0,40}\b(?:payments?|transfers?|zelle|money|funds?|it|that)\b|\b(?:payments?|transfers?|zelle|money|funds?)\b[^.?!]{0,40}\b(?:receiv\w*|post(?:ed)?|clear(?:ed)?|process(?:ed)?|land(?:ed)?|arriv\w*|show(?:s|ed|ing)? up|go(?:ne)? through|went through)\b/i;
 const inboundAsksPaymentStatus = (inbound) => inboundIsGenericStatusQuestion(inbound) || RECEIPT_SCOPE_RE.test(inbound) || RECEIPT_STATUS_ASK_RE.test(inbound);
 const isZelleTenderLine = (t) => ZELLE_WORD_RE.test(t) && sentenceFamily(t) == null;
+// A prepaid-plan sentence answers the service the customer named: when the message names a service ("pest", "lawn", ...) and the plan's own
+// label names none of them, it is another plan's count, and a person answers.
+const PLAN_SERVICE_WORDS = ['pest', 'lawn', 'mosquito', 'termite', 'rodent', 'tree', 'shrub', 'bed bug', 'flea', 'roach'];
+function prepaidCountOffTarget(sentence, inbound) {
+  const label = String(/^Your prepaid (.+) plan has /.exec(sentence)?.[1] || '').toLowerCase();
+  const asked = PLAN_SERVICE_WORDS.filter((word) => new RegExp(`\\b${word}`, 'i').test(inbound));
+  return asked.length > 0 && !asked.some((word) => label.includes(word));
+}
 function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
   if (!inbound || !copied.length) return false;
@@ -648,6 +656,7 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const statusAsked = inboundAsksPaymentStatus(inbound);
   return copied.some((sentence) => {
     const t = String(sentence);
+    if (SHAPES.prepaid_visits_left.test(t)) return prepaidCountOffTarget(t, inbound);
     // a Zelle offer / unavailability line answers a question about Zelle, or a GENERIC how-to-pay question - never a receipt question
     // (round 75) or a question about another way to pay ("Can I pay by check?", round 78)
     if (isZelleTenderLine(t) && (statusAsked || !(ZELLE_WORD_RE.test(inbound) || inboundIsGenericHowToPay(inbound)))) return true;
@@ -684,11 +693,17 @@ const COUNT_NUM = '(?:\\d{1,3}|zero|one|two|three|four|five|six|seven|eight|nine
 const PREPAID_COUNT_RE = new RegExp(`\\b(?:visits?|applications?|treatments?)\\s+(?:are\\s+|is\\s+)?(?:still\\s+)?(?:left|remaining|remain)\\b|\\b(?:left|remaining)\\s+(?:prepaid\\s+)?(?:visits?|applications?|treatments?)\\b|\\bprepaid\\s+(?:\\w+\\s+)?(?:visits?|applications?|treatments?)\\b|\\b${COUNT_NUM}\\s+more\\s+(?:visits?|applications?|treatments?)\\b`, 'i');
 // ...and a short answer to a question that ASKS for the count ("Three more.", "Three.", "3.", "None left.") carries no
 // count word in its own words either. The question decides: an unknown customer message counts as asking (unknown is scoped).
-const COUNT_ASK_RE = /\b(?:how many|number of)\b[^.?!]{0,40}\b(?:visits?|applications?|treatments?|services?|times)\b|\b(?:visits?|applications?|treatments?)\b[^.?!]{0,30}\b(?:left|remaining|remain|prepaid|paid for|covered)\b|\b(?:left|remaining)\b[^.?!]{0,20}\b(?:visits?|applications?|treatments?)\b/i;
+const COUNT_ASK_RE = /\b(?:how many|number of)\b[^.?!]{0,40}\b(?:visits?|applications?|treatments?|services?|times)\b[^.?!]{0,40}\b(?:left|remaining|remain|prepaid|paid|used|more|(?:do|did|have|has) (?:i|we)\b|(?:i|we) (?:have|get|got))|\b(?:visits?|applications?|treatments?)\b[^.?!]{0,30}\b(?:left|remaining|remain)\b|\b(?:left|remaining)\b[^.?!]{0,20}\b(?:visits?|applications?|treatments?)\b|\bmy prepaid\b/i;
 const COUNT_ANSWER_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:more|left|remaining|total|(?:\\w+\\s+)?(?:visits?|applications?|treatments?|services?|times))\\b|\\b(?:no|none|nothing)\\s+(?:more|left|remaining)\\b|(?:^|[.!?]\\s+)(?:(?:about|just|only)\\s+)?${COUNT_NUM}\\s*(?:[.!?]|$)`, 'i');
+// A question that asks for the count is answered by the rendered sentence ALONE: once the copies are removed only inert text (a greeting,
+// thanks) may remain, whatever words an invented count would use ("You have three.", "Three.", "a couple left"). With the question unknown,
+// the count words themselves are the detector.
 const claimsPrepaidCount = (text, inboundText = null) => {
   const body = String(text ?? '');
-  return PREPAID_COUNT_RE.test(body) || ((inboundText == null || COUNT_ASK_RE.test(String(inboundText))) && COUNT_ANSWER_RE.test(body));
+  if (PREPAID_COUNT_RE.test(body)) return true;
+  if (inboundText == null) return COUNT_ANSWER_RE.test(body);
+  // (a digit-only clause reads as inert, so any digit counts as text here)
+  return COUNT_ASK_RE.test(String(inboundText)) && (!remainderIsInert(body) || /\d/.test(body));
 };
 function remainderHasMoney(remainder, inboundText = null) {
   const text = String(remainder ?? '');

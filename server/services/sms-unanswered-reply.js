@@ -150,7 +150,7 @@ async function factsFingerprintFor(customer, at, dbh = db) {
   if (!row) return null;
   const ContextAggregator = require('./context-aggregator');
   const { buildFactsBlock } = require('./sms-shadow-drafter');
-  const context = await ContextAggregator.getContextForCustomer(row, { includeLiveEta: false, includeVisitLoops: true, includeSmsStaffFacts: true });
+  const context = await ContextAggregator.getContextForCustomer(row, { includeLiveEta: false, includeVisitLoops: true, includeSmsStaffFacts: require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS') });
   const block = buildFactsBlock(context, { now: at });
   return require('node:crypto').createHash('sha256').update(String(block)).digest('hex');
 }

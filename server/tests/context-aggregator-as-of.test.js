@@ -144,15 +144,20 @@ describe('getContextForCustomer texting AI staff facts', () => {
     expect(staffFacts.loadPrepGuideFacts).not.toHaveBeenCalled();
   });
 
-  test('every other caller (no opt-in), a frozen replay and a gate-off context read none of it', async () => {
+  test('every other caller (no opt-in, or the drafter\'s gate off) and a frozen replay read none of it', async () => {
     const plain = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
     expect(plain.prepaidPlans).toBeNull();
     expect(plain.prepGuide).toBeNull();
+    const gateOff = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: false });
+    expect(gateOff.prepGuide).toBeNull();
     const replay = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true, asOf: ASOF });
     expect(replay.prepaidPlans).toBeNull();
-    delete process.env.GATE_SMS_REAL_ANSWERS;
-    const off = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true });
-    expect(off.prepGuide).toBeNull();
     expect(reads()).toBe(0);
+  });
+
+  test('the send-time recheck still reads them after the drafting gate is rolled back', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: { prepaid: true } });
+    expect(context.prepaidPlans).toHaveLength(1);
   });
 });
