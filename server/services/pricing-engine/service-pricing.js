@@ -4893,8 +4893,10 @@ function priceMosquito(property, options = {}) {
   // without a parcel). An unmeasured lot (lotSizeMeasured:false) is not a size: the unverified-area hold below speaks for it.
   const lotSqFtUsed = Math.max(Number(property.lotSqFt) || 0, areaResolution.mosquitoTreatableSqFt || 0);
   const lotAbove2Acres = options.lotSizeMeasured !== false && lotSqFtUsed > MOSQUITO_LOT_ABOVE_2_ACRES_SQFT;
-  // A lot at the record cap is a truncated size (4.59 acres or more): hand price, as a quote priced before the rule.
-  const lotAtRecordCap = lotAbove2Acres && lotSqFtUsed === MOSQUITO_RECORD_LOT_CAP_SQFT;
+  // A lot at the record cap is a truncated size (4.59 acres or more): hand price, as a quote priced before the rule. The gross
+  // parcel is checked on its own: a larger treatable area beside a parcel at the cap does not make the parcel's real size known.
+  const lotAtRecordCap = lotAbove2Acres
+    && (Number(property.lotSqFt) === MOSQUITO_RECORD_LOT_CAP_SQFT || lotSqFtUsed === MOSQUITO_RECORD_LOT_CAP_SQFT);
   const legacyHandPrice = options.legacySpecialty1126 === true || lotAtRecordCap;
   // The acres past the second (pro-rated), priced for a new quote; zero for a lot at or under 2 acres and for a legacy quote.
   const addedAcres = lotAbove2Acres && !legacyHandPrice

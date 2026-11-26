@@ -431,8 +431,11 @@ function expectMosquito({ homeSqFt, stories = 1, lotSqFt, propertyType = 'single
   // model's own answer for the SAME home on exactly 2 acres (its own hardscape, treatable area and pressure), plus $85 a visit for
   // each acre past the second (pro-rated), the monthly program at its ratio to seasonal at 2 acres (seasonal 9-visit at the default
   // pressure: 2 ac $117, 3 ac $202, 4 ac $287). A quote made before this keeps the flat price.
+  // A lot of exactly 200,000 sq ft is the property-record cap ("4.59 acres or more", not a size): the engine keeps the flat price
+  // and the hand-price hold for it, so no added acre is charged there. A larger number (typed or tech-verified) is priced.
   const lotUsedSqFt = Math.max(lotSqFt, treatable);
-  if (lotUsedSqFt > 87120) {
+  const lotAtRecordCap = lotSqFt === 200000 || lotUsedSqFt === 200000;
+  if (lotUsedSqFt > 87120 && !lotAtRecordCap) {
     const args = { homeSqFt, stories, propertyType, features, stationCount, dunkCount };
     const twoSeasonal = expectMosquito({ ...args, lotSqFt: Math.min(lotSqFt, 87120), program: 'seasonal9' }).perVisit;
     const twoProgram = expectMosquito({ ...args, lotSqFt: Math.min(lotSqFt, 87120), program }).perVisit;
@@ -985,7 +988,8 @@ function runMosquitoMatrix() {
   // maxSqFt and the next band's first foot; 43,560 / 60,000 are extra samples (codex r15 P2).
   const edges = [...new Set(constants.MOSQUITO.lotCategories.filter((c) => Number.isFinite(c.maxSqFt)).flatMap((c) => [c.maxSqFt, c.maxSqFt + 1])), 43560, 60000].sort((a, b) => a - b);
   // choose lots so treatable lands near edges: treatable = lot - 2000 - hardscape(lot)
-  const lots = new Set([3000, 5000, 8000, 10500, 12000, 15000, 20000, 25000, 35000, 40000, 45000, 60000, 90000]);
+  // 90,000 to 250,000 are above 2 acres (priced per added acre); 200,000 is the property-record cap (flat price, hand-price hold).
+  const lots = new Set([3000, 5000, 8000, 10500, 12000, 15000, 20000, 25000, 35000, 40000, 45000, 60000, 90000, 130680, 199999, 200000, 200001, 250000]);
   for (const lot of [...lots].sort((a, b) => a - b)) {
     for (const program of ['seasonal9', 'monthly12']) {
       const exp = expectMosquito({ homeSqFt: 2000, lotSqFt: lot, program });

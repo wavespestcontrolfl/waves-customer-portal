@@ -651,6 +651,70 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
     throws409({ result: { name: 'Mosquito Misting Service Plan', service: 'mosquito_misting', recurring: { services: [{ name: 'Seasonal Mosquito Control', service: 'mosquito_seasonal', mo: 87.75 }] } } });
   });
 
+  test('a row known only by another identity field is found: every string a row holds is read, and the key it sits under', () => {
+    // The fields the public page's readers also accept (serviceKey, service_key, key, displayName, a type, a title, a detail line),
+    // each as the ONLY thing that names the row: no name, no label, no mq list.
+    throws409({ result: { recurring: { services: [{ serviceKey: 'mosquito_seasonal', mo: 87.75, ann: 1053 }] } } });
+    throws409({ result: { recurring: { services: [{ service_key: 'mosquito_monthly', mo: 103 }] } } });
+    throws409({ result: { recurring: { services: [{ key: 'mosquito', mo: 87.75 }] } } });
+    throws409({ result: { recurring: { services: [{ displayName: 'Seasonal Mosquito Control', mo: 87.75 }] } } });
+    throws409({ engineResult: { lineItems: [{ catalogServiceKey: 'bed_bug_chemical', price: 1026 }] } });
+    throws409({ result: { oneTime: { items: [{ title: 'Hornet nest removal', price: 350 }] } } });
+    throws409({ result: { oneTime: { items: [{ service_type: 'Stinging Insect Treatment', amount: 275 }] } } });
+    throws409({ result: { oneTime: { items: [{ kind: 'wasp', price: 275 }] } } });
+    throws409({ result: { oneTime: { items: [{ price: 275, det: 'Yellow jacket nest in the ground' }] } } });
+    throws409({ sendSnapshot: { pricingBundle: { frequencies: [{ serviceKey: 'mosquito_seasonal', monthly: 87.75 }] } } });
+    // A row keyed by its service in a container, with no string on it at all.
+    throws409({ result: { results: { mosquito: { pv: 117, v: 9 } } } });
+    throws409({ result: { results: { bedBug: { price: 1026, rooms: 2 } } } });
+    throws409({ result: { oneTime: { stinging_insect: { price: 275 } } } });
+    throws409({ result: { results: { wasp: [{ price: 275 }] } } });
+    throws409({ result: { totals: { mosquitoAnnual: 1053 } } });
+    // An empty or switched-off block under such a key is not a row.
+    const empty = plain();
+    Object.assign(empty.result.results, { mosquito: null, mq: [], bedBug: {}, wasp: false, stingingInsect: 0, hornetNests: '' });
+    expect(() => assertFallback(empty)).not.toThrow();
+  });
+
+  test('a real browser estimate: with none of the three services the save passes, with any of them it is refused', () => {
+    const path = require('path');
+    const clientPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
+    const bundle = require('esbuild').buildSync({
+      stdin: { contents: fs.readFileSync(clientPath, 'utf8'), resolveDir: path.dirname(clientPath), sourcefile: clientPath, loader: 'js' },
+      bundle: true, format: 'cjs', write: false, platform: 'node', logLevel: 'silent',
+    }).outputFiles[0].text;
+    const client = { exports: {} };
+    new Function('module', 'exports', 'require', bundle)(client, client.exports, require);
+    const form = (extra) => ({
+      homeSqFt: 2000, stories: '1', lotSqFt: 10000, propertyType: 'Single Family', shrubDensity: 'MODERATE', landscapeComplexity: 'MODERATE',
+      treeDensity: 'MODERATE', isAfterHours: false, isRecurringCustomer: false, urgency: 'NONE', ...extra,
+    });
+    // The page posts its form inputs beside the browser's result; that is the save the server refuses or keeps.
+    const save = (extra) => { const inputs = form(extra); return { inputs, result: client.exports.calculateEstimate(inputs) }; };
+    // Pest only: a real priced plan, and none of the words anywhere in the result, so the save is kept.
+    const pest = save({ svcPest: true, pestFreq: 4 });
+    expect(pest.result.results.pest.pa).toBeGreaterThan(0);
+    expect(() => assertFallback(pest)).not.toThrow();
+    // Asking for one of the three in the form is in the inputs only until the browser prices a row.
+    expect(pest.inputs.svcPest).toBe(true);
+    // Each of the three, as the browser really builds it.
+    const mosquito = save({ svcMosquito: true });
+    expect(mosquito.result.results.mq.length).toBeGreaterThan(0);
+    throws409(mosquito);
+    const bed = save({ svcBedbug: true, bedbugMethod: 'CHEMICAL', bedbugSeverity: 'light', bedbugPrepStatus: 'ready', bedbugOccupancyType: 'singleFamily', bedbugRooms: 2 });
+    expect(bed.result.oneTime.specItems.some((item) => item.name === 'Bed Bug Chemical')).toBe(true);
+    throws409(bed);
+    const wasp = save({ svcWasp: true });
+    expect(wasp.result.oneTime.specItems.some((item) => item.name === 'Wasp/Bee')).toBe(true);
+    throws409(wasp);
+    // A wasp included on the pest program is a $0 row in the full list: refused too (the server sets its level).
+    throws409(save({ svcPest: true, pestFreq: 4, svcWasp: true }));
+    // The one-time mosquito visit is named for mosquito: refused as well (no product is left out by its label).
+    const oneTime = save({ svcOnetimeMosquito: true });
+    expect(oneTime.result.oneTime.items.some((item) => item.name === 'OT Mosquito')).toBe(true);
+    throws409(oneTime);
+  });
+
   test('a 3-acre mosquito client save on an unmeasured lot is refused; the server keeps its unverified-area hold at the flat price', () => {
     const unmeasured = browser({ mq: true });
     unmeasured.inputs.lotSqFt = 3 * ACRE;
@@ -670,7 +734,7 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
     throws409(noRecurring);
   });
 
-  test('a save with none of the three rows is not refused: other services, a request in the inputs, misting and the one-time mosquito visit', () => {
+  test('a save with none of the three rows is not refused: other services, and a request that sits in the inputs only', () => {
     expect(() => assertFallback(plain())).not.toThrow();
     // A request for one of the three in the inputs is not a priced row.
     expect(() => assertFallback({
@@ -678,11 +742,18 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
       engineInputs: { services: { stinging: { tier: 2 }, mosquito: { tier: 'seasonal9' }, bedBug: { rooms: 3 } } },
       engineRequest: { selectedServices: ['STING', 'MOSQUITO', 'BEDBUG'] },
     })).not.toThrow();
-    // The misting plan and the one-time mosquito visit are other services: these rules do not price them.
-    expect(() => assertFallback({ result: { recurring: { services: [{ name: 'Mosquito Misting Service Plan', service: 'mosquito_misting', mo: 99 }] } } })).not.toThrow();
-    expect(() => assertFallback({ result: { oneTime: { items: [{ name: 'One-Time Mosquito', service: 'one_time_mosquito', price: 199 }] } } })).not.toThrow();
-    expect(() => assertFallback({ result: { oneTime: { items: [{ name: 'OT Mosquito', price: 199 }, { service: 'mosquito_one_time', price: 199 }] } } })).not.toThrow();
-    expect(() => assertFallback({ result: { lineItems: [{ service: 'mosquito_misting_installation', price: 2400 }, { service: 'mosquito_misting_refill', price: 120 }] } })).not.toThrow();
+  });
+
+  test('no product is left out by its label: the misting system and the one-time mosquito visit are refused too', () => {
+    // On a save the server could not price, a row cannot prove which mosquito product it is. A label that exempted a row would hide one.
+    throws409({ result: { recurring: { services: [{ name: 'Mosquito Misting Service Plan', service: 'mosquito_misting', mo: 99 }] } } });
+    throws409({ result: { oneTime: { items: [{ name: 'One-Time Mosquito', service: 'one_time_mosquito', price: 199 }] } } });
+    throws409({ result: { oneTime: { items: [{ name: 'OT Mosquito', price: 199 }] } } });
+    throws409({ result: { oneTime: { items: [{ service: 'mosquito_one_time', price: 199 }] } } });
+    throws409({ result: { lineItems: [{ service: 'mosquito_misting_installation', price: 2400 }] } });
+    throws409({ result: { lineItems: [{ service: 'mosquito_misting_refill', price: 120 }] } });
+    // A recurring row that borrows the other product's words is refused like any other.
+    throws409({ result: { recurring: { services: [{ name: 'Seasonal Mosquito Control (one-time setup included)', service: 'mosquito_seasonal', mo: 87.75 }] } } });
   });
 
   test('there is no unchanged-resave exception: the same rows, inputs and totals as the stored estimate are refused too', async () => {

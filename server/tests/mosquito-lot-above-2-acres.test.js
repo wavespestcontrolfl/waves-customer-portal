@@ -213,6 +213,24 @@ describe('recurring mosquito at the 200,000 sq ft record cap: hand price for a n
     expect(treatable.mosquitoLotAtRecordCap).toBe(true);
   });
 
+  test('a parcel at the cap beside a larger treatable area is still an unknown size: the hold stays, no added acre is charged', () => {
+    // The parcel is checked on its own. 210,000 sq ft of treatable area does not say how large a 200,000-capped parcel really is.
+    for (const mosquitoTreatableSqFt of [210000, 250000, 150000]) {
+      const mixed = fresh(200000, { mosquitoTreatableSqFt });
+      expect(mixed.manualReviewReasons[0]).toBe(REASON);
+      expect(mixed.requiresManualReview).toBe(true);
+      expect(mixed.mosquitoLotAtRecordCap).toBe(true);
+      expect(mixed.mosquitoAddedAcres).toBeUndefined();
+      // The price is the flat one a quote made before the rule has for the same inputs.
+      expect(mixed.perVisit).toBe(fresh(200000, { mosquitoTreatableSqFt, ...LEGACY }).perVisit);
+    }
+    // The same treatable area beside a real parcel size is priced by the rule.
+    const real = fresh(250000, { mosquitoTreatableSqFt: 210000 });
+    expect(real.mosquitoLotAtRecordCap).toBeUndefined();
+    expect(real.manualReviewReasons).not.toContain(REASON);
+    expect(real.mosquitoAddedAcres).toBeCloseTo((250000 - 87120) / ACRE, 3);
+  });
+
   test('one square foot either side of the cap, and a typed 10 acres, are real sizes: priced at $85 per added acre', () => {
     const twoAcres = fresh(87120).perVisit;
     expect(twoAcres).toBe(117);

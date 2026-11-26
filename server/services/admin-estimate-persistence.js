@@ -2083,35 +2083,33 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
 // Specialty prices (2026-11-26 evening: bed bug added rooms, mosquito above 2 acres, wasp level; new quotes only). A save the server
 // could not price (the CLIENT_FALLBACK authority: no replayable engine input, or an engine error) keeps the BROWSER's price, and the
 // browser mirrors none of these rules (the $349 rooms, the $85 acres, the wasp levels). So such a save is refused (409, reload and
-// let the server price it) when it holds ANY bed bug, recurring mosquito or wasp row: priced or $0, in any result container or
-// shape, whatever stamp it posts, and whether or not it changed (no unchanged-resave exception, so nothing to compare). The check
-// sits where the pricing authority is decided, not behind any browser-shape test.
-// A row is one of the three when ITS OWN service key, name or label says bed bug, wasp, hornet, yellow jacket, stinging or mosquito:
-// every key and name the catalog, the mapper and the browser use (mosquito, mosquito_seasonal, mosquito_monthly, Seasonal Mosquito
-// Control, Mosquito (Seasonal Mosquito Program (9 visits)), commercial_mosquito, bed_bug_heat, Wasp/Bee, stinging_insect_v2). The
-// words are searched, not listed, so a new alias is caught the day it appears. Two other products share the word mosquito and are
-// named here: the misting system and the one-time mosquito visit, which none of the three rules prices. The test reads one row at
-// a time, so a marker on a container hides nothing under it.
-const SPECIALTY_ROW_WORDS = /bed[ _-]?bug|wasp|hornet|yellow[ _-]?jacket|stinging/i;
-const MOSQUITO_OTHER_PRODUCT = /mist|one[ _-]?time|\bot\b/i;
+// let the server price it) when it NAMES bed bug, mosquito, wasp, hornet, yellow jacket or a stinging insect anywhere outside its
+// inputs: priced or $0, in any result container or shape, whatever stamp it posts, and whether or not it changed (no
+// unchanged-resave exception, so nothing to compare). The check sits where the pricing authority is decided, not behind any
+// browser-shape test.
+const SPECIALTY_ROW_WORDS = /bed[ _-]?bug|mosquito|wasp|hornet|yellow[ _-]?jacket|stinging/i;
 const SPECIALTY_SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$/;
 const isSpecialtyRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
-const isSpecialtyRow = (node) => {
-  const text = [node.service, node.name, node.label, node.n].filter((value) => typeof value === 'string').join(' ');
-  return SPECIALTY_ROW_WORDS.test(text) || (/mosquito/i.test(text) && !MOSQUITO_OTHER_PRODUCT.test(text));
-};
-// True when the saved blob holds one of the three anywhere outside its input carriers: a one-time or specialty item, a recurring
-// row, an engine line, or the browser's mosquito tier rows (an `mq` list), in `result`, `engineResult`, the bare data or the send snapshot.
+// True when the saved blob names one of the three anywhere outside its input carriers, in `result`, `engineResult`, the bare data or
+// the send snapshot. A row is known by whatever names it: its service key or its name under ANY field (service, serviceKey,
+// service_key, key, name, label, displayName, title, n, a detail line), or the key it sits under (a results.mosquito block, a bedBug
+// item, the browser's `mq` tier rows). So every string is read, and every key with something under it: there is no list of identity
+// fields or row shapes to keep complete. No product is left out by its label either (the misting system and the one-time mosquito
+// visit are refused too): on this branch the server verified nothing, so a row cannot prove what it is. A real browser estimate
+// with none of the three services holds none of these words (specialty-prices-20261126.test.js prices one and checks).
+const specialtyKeyHoldsSomething = (value) => (value && typeof value === 'object'
+  ? Object.keys(value).length > 0
+  : value !== null && value !== undefined && value !== false && value !== 0 && value !== '');
 function saveHoldsSpecialtyRow(estimateData) {
   const seen = new Set();
   const walk = (node) => {
+    if (typeof node === 'string') return SPECIALTY_ROW_WORDS.test(node);
     if (!node || typeof node !== 'object' || seen.has(node)) return false;
     seen.add(node);
     if (Array.isArray(node)) return node.some(walk);
-    if (isSpecialtyRow(node)) return true;
     return Object.entries(node).some(([key, value]) => {
       if (SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key)) return false;
-      if (key === 'mq' && Array.isArray(value) && value.length > 0) return true;
+      if ((key === 'mq' || SPECIALTY_ROW_WORDS.test(key)) && specialtyKeyHoldsSomething(value)) return true;
       return walk(value);
     });
   };
