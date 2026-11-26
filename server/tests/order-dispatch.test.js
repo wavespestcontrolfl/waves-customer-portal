@@ -954,9 +954,10 @@ test('an adapter without a vendor-confirmed pre-submit total never auto-places: 
 // may already be in when the alert rings (in production, or not paid yet). So the check leads the
 // alert the reader sees (headline and why), not only its detail, whatever the park's reason.
 describe('a pre-submit park for a vendor that is never auto-ordered sends staff to the vendor account first', () => {
-  const HEADLINE = 'Inventory — order Yard sign sticker if none is on order';
-  const WHY = 'No order was sent; check the vendor account first, order by hand only if none is in, then mark it ordered.';
-  const NEXT = / The restock request stays open — check the Sticker Mule account first: if an order of this item is already in, mark the request ordered; if not, order manually, then mark it ordered\.$/;
+  const HEADLINE = 'Inventory — order Yard sign sticker if not yet on order';
+  const WHY = 'No order was sent; check the vendor account first, then order by hand only what is not already on order.';
+  // The request's own quantity is named: an order already in for fewer stickers does not cover it.
+  const NEXT = / The restock request stays open — check the Sticker Mule account first: if an order already in covers this request in full \(500 each\), mark the request ordered; if not, order what is missing by hand, then mark it ordered\.$/;
   const history = (overrides = {}) => mockAdapter({ preSubmitTotal: 'history', ...overrides });
   const alert = () => { const [, headline, why, opts] = notify.mock.calls[0]; return { headline, why, detail: opts.detail }; };
   const expectAccountCheck = () => {
@@ -1002,7 +1003,7 @@ describe('a pre-submit park for a vendor that is never auto-ordered sends staff 
   test('a long product name is cut; the condition stays in the headline', async () => {
     mockState.product = { ...sticker, name: 'Termite notice sticker pack of ten' };
     await run(history());
-    expect(alert().headline).toBe('Inventory — order Termite notice… if none is on order');
+    expect(alert().headline).toBe('Inventory — order Termite notice… if not yet on order');
     expect(alert().headline.length).toBeLessThanOrEqual(60);
   });
 

@@ -509,7 +509,7 @@ async function findDispatchable(conn = db) {
 // headline and why are one short line each, chosen from the kind of bell the title and body name.
 // The words of parkBellText's account check, read back out of a persisted bell's body by
 // bellAlertParts (as 'Do NOT re-order' is), so the headline carries the check too.
-const ACCOUNT_CHECK = 'account first: if an order of this item is already in';
+const ACCOUNT_CHECK = 'account first: if an order already in covers this request in full';
 function bellAlertParts({ title, body, productName }) {
   const named = (templates) => fitAction('Inventory', productName, templates);
   const text = String(title || '');
@@ -525,8 +525,8 @@ function bellAlertParts({ title, body, productName }) {
     // check leads the alert itself — the detail alone would leave the headline at "order by hand".
     if (String(body || '').includes(ACCOUNT_CHECK)) {
       return {
-        action: named([(n) => `order ${n} by hand if none is on order`, (n) => `order ${n} if none is on order`]),
-        why: 'No order was sent; check the vendor account first, order by hand only if none is in, then mark it ordered.',
+        action: named([(n) => `order ${n} by hand if not yet on order`, (n) => `order ${n} if not yet on order`]),
+        why: 'No order was sent; check the vendor account first, then order by hand only what is not already on order.',
         doneWhen: 'restock_request_ordered',
       };
     }
@@ -679,9 +679,11 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
   // dispatcher never places for (checkAccountFirst) gets ALL its orders by hand, on an account the
   // portal does not read: one may already be in (in production, or not paid yet), and "order
   // manually" alone could buy it twice. Every pre-submit park of such a vendor says so, whatever
-  // its reason — a failed lookup included.
+  // its reason — a failed lookup included. The request's own quantity is named: an order already
+  // in for fewer does not cover it.
+  const needed = [request?.requested_quantity, request?.unit].filter((part) => part != null && part !== '').join(' ');
   const next = checkAccountFirst
-    ? `check the ${vendor.name} ${ACCOUNT_CHECK}, mark the request ordered; if not, order manually, then mark it ordered.`
+    ? `check the ${vendor.name} ${ACCOUNT_CHECK}${needed ? ` (${needed})` : ''}, mark the request ordered; if not, order what is missing by hand, then mark it ordered.`
     : 'order manually, then mark it ordered.';
   return { title, body: `${message} The restock request stays open — ${next}` };
 }
