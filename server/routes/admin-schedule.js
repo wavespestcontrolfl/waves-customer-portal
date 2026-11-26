@@ -13,6 +13,7 @@ const logger = require('../services/logger');
 const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
 const mistingRefill = require('../services/misting-refill');
+const { oneTimePestBookingPrice } = require('../services/one-time-pest-booking-price');
 const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG_KEY: MISTING_REFILL_KEY } = require('../utils/mosquito-misting-system');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
@@ -3176,6 +3177,48 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
       ? computed
       : (Number.isFinite(catalogBase) && catalogBase > 0 ? Math.round(catalogBase * 100) / 100 : null);
     res.json({ price, source: computed != null ? 'engine_default' : (price != null ? 'catalog_base' : null) });
+  } catch (err) { next(err); }
+});
+
+// Which property does the one-time pest hint price? The create path's own rule (callBookingGuardPropertyId: the chosen
+// property, else the linked estimate's property_id, else none = the customer's primary), plus one more case it cannot
+// settle: a linked estimate with NO property_id that quotes an address. That address is the primary only when it
+// matches (estimateQuotesCustomerAddress); otherwise it must name exactly ONE of the customer's saved properties.
+// { unsure: true } when the home cannot be told: the hint then shows nothing, never a guess.
+async function oneTimePestHintProperty({ customerId, propertyId, estimateId }) {
+  const chosen = await callBookingGuardPropertyId(db, {
+    bookingProperty: propertyId ? { property_id: propertyId } : null,
+    linkedEstimateId: estimateId || null,
+  });
+  if (chosen || propertyId || !estimateId) return { propertyId: chosen || null };
+  const estimate = await db('estimates').where({ id: estimateId }).first('address', 'customer_id');
+  if (!estimate) return { unsure: true };
+  if (estimate.customer_id && String(estimate.customer_id) !== String(customerId)) return { unsure: true };
+  const { estimateQuotesCustomerAddress } = require('../services/estimate-property-linkage');
+  const customer = await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+  if (!customer || estimateQuotesCustomerAddress(estimate.address, customer)) return { propertyId: null };
+  const saved = await db('customer_properties').where({ customer_id: customerId, active: true }).select('id', 'address_line1', 'address_line2', 'city', 'zip');
+  const matches = (Array.isArray(saved) ? saved : []).filter((row) => estimateQuotesCustomerAddress(estimate.address, row));
+  return matches.length === 1 ? { propertyId: matches[0].id } : { unsure: true };
+}
+
+// GET /one-time-pest-quote?customerId=&propertyId=&estimateId= — the system's one-time pest price for the home the visit
+// is booked at, for the create-appointment modal's hint under a one-time pest line (owner 2026-11-26 "say the one time price
+// when asked"). READ ONLY: it changes no booking, line price or invoice, and answers { price: null } when the engine has no
+// clean price (no home size on file, commercial records, no fresh settings). The property is the one the booking uses: the
+// chosen one, else the linked estimate's (callBookingGuardPropertyId, the create path's own rule), else the customer's
+// primary. requireAdmin, like the mosquito quote above.
+router.get('/one-time-pest-quote', requireAdmin, async (req, res, next) => {
+  try {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const customerId = String(req.query.customerId || '').trim();
+    if (!uuid.test(customerId)) throw httpError(400, 'customerId must be a valid customer id');
+    const propertyId = req.query.propertyId == null ? '' : String(req.query.propertyId).trim();
+    const estimateId = req.query.estimateId == null ? '' : String(req.query.estimateId).trim();
+    if (propertyId && !uuid.test(propertyId)) throw httpError(400, 'propertyId must be a valid property id');
+    if (estimateId && !uuid.test(estimateId)) throw httpError(400, 'estimateId must be a valid estimate id');
+    const home = await oneTimePestHintProperty({ customerId, propertyId, estimateId });
+    res.json({ price: home.unsure ? null : await oneTimePestBookingPrice(customerId, { propertyId: home.propertyId || null }) });
   } catch (err) { next(err); }
 });
 
