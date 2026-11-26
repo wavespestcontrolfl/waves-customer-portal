@@ -75,7 +75,7 @@ describe('Completed visits report preview', () => {
       </PortalReadProvider>
     );
     fireEvent.click(await screen.findByText('Quarterly Pest Control'));
-    fireEvent.click(await screen.findByRole('button', { name: /Download/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /View report/ }));
     expect(await screen.findByRole('dialog', { name: /Visit Report/ })).toBeInTheDocument();
     await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
 
@@ -92,7 +92,7 @@ describe('Completed visits report preview', () => {
       </PortalReadProvider>
     );
     fireEvent.click(await screen.findByText('Quarterly Pest Control'));
-    fireEvent.click(await screen.findByRole('button', { name: /Download/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /View report/ }));
     await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
     view.unmount();
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:completed-report');
@@ -109,7 +109,7 @@ describe('Completed visits report preview', () => {
       </PortalReadProvider>
     );
     fireEvent.click(await screen.findByText('Quarterly Pest Control'));
-    fireEvent.click(await screen.findByRole('button', { name: /Download/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /View report/ }));
     await waitFor(() => expect(api.fetchRaw).toHaveBeenCalled());
     view.unmount();
     await act(async () => {

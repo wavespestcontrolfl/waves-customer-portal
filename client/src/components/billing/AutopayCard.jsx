@@ -653,7 +653,10 @@ export default function AutopayCard({
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('pause')}>Pause payments</button>
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('card')}>Change payment method</button>
-              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('day')}>Change billing day</button>
+              {/* The billing day is a monthly-charge setting; per-application, prepaid and per-visit plans have no charge day. */}
+              {!nonMonthlyBilling && (
+                <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('day')}>Change billing day</button>
+              )}
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={toggleAutopay}>Turn off</button>
             </div>
           )}

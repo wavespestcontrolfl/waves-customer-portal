@@ -166,6 +166,16 @@ async function downloadPublicPdf(path, fileName = 'Waves_Receipt.pdf') {
   URL.revokeObjectURL(blobUrl);
 }
 
+// A save that fails with the phone offline says so, instead of "please try again"
+// (which sends the customer tapping again on a dead connection). Used at the
+// network-failure points of the save actions below, NOT inside showCustomerAlert,
+// which also carries validation messages. navigator.onLine can read true on a bad
+// signal, so the generic text stays the fallback.
+const OFFLINE_SAVE_MESSAGE = "You're offline. Try again when you have signal.";
+function whenOffline(message) {
+  return typeof navigator !== 'undefined' && navigator.onLine === false ? OFFLINE_SAVE_MESSAGE : message;
+}
+
 // The visit .ics is a PUBLIC token endpoint (no Bearer needed), but it shares
 // two traps with downloadAuthedPdf: a root-relative href misses a configured
 // VITE_API_URL origin, and in the Capacitor shell a programmatic <a download>
@@ -315,6 +325,21 @@ const calendarLinkStillLive = (svc) => {
   const endsAt = calendarLinkEndsAt(svc);
   return !!endsAt && endsAt.getTime() >= Date.now();
 };
+
+// "Add to Calendar" for any upcoming visit. The file is the server's tokenized
+// .ics, which makes a day-only visit an ALL-DAY event with no arrival hour (owner
+// ruling: visit promises are day-only). The server nulls calendarUrl for every
+// visit it would refuse a file for, so no button shows then.
+function AddToCalendarButton({ visit, style }) {
+  if (!visit?.calendarUrl || !calendarLinkStillLive(visit)) return null;
+  return (
+    <button type="button" onClick={() => {
+      downloadCalendarIcs(visit.calendarUrl).catch(() => {
+        showCustomerAlert('Could not download the calendar file. Please try again.');
+      });
+    }} data-glass-accent="" style={style}>Add to Calendar</button>
+  );
+}
 
 
 // ---------------------------------------------------------------------------
@@ -1616,7 +1641,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
       } else if (err?.status === 409) {
         setInitError('stale');
       } else {
-        setStepError(err?.message || 'Could not hold that time — please try again.');
+        setStepError(whenOffline(err?.message || 'Could not hold that time — please try again.'));
       }
     } finally {
       setReserving(false);
@@ -1727,7 +1752,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
       } else if (err?.status === 409) {
         setInitError('stale');
       } else {
-        setStepError(err?.message || 'Could not confirm — please try again or call (941) 297-5749.');
+        setStepError(whenOffline(err?.message || 'Could not confirm — please try again or call (941) 297-5749.'));
       }
     } finally {
       setConfirming(false);
@@ -2898,6 +2923,12 @@ function AccountUpdatingNotice() {
     <section data-glass="card" role="status" style={{ padding: 20, marginBottom: 16, borderRadius: 14, color: B.glassNavy }}>
       <h2 style={{ fontSize: 20, margin: '0 0 8px' }}>Updating…</h2>
       <p style={{ fontSize: 16, lineHeight: 1.5, margin: 0 }}>We are loading your latest account details. Your plan, billing and settings will open as soon as they arrive.</p>
+      {/* Plain tel: and sms: links make no request, so this screen's no-read, no-write rule holds.
+          A phone call works where data does not. */}
+      <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+        <a href="tel:+19412975749" data-glass-accent="" style={{ ...PORTAL_SECONDARY_ACTION, flex: 1, minHeight: 44, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>Call Waves</a>
+        <a href="sms:+19412975749" data-glass-accent="" data-glass-size="primary" style={{ ...PORTAL_PRIMARY_ACTION, flex: 1, minHeight: 44, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>Text Waves</a>
+      </div>
     </section>
   );
 }
@@ -2996,7 +3027,7 @@ function rememberPetNameAskDone(customerId) {
   } catch { /* storage unavailable: the card hides for this visit to Home only */ }
 }
 
-function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
+function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, onOpenAccess, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
   const dashboardSavedScope = properties.some((p) => p.key);
@@ -3066,6 +3097,19 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
+  // One read for the first load and for "Tap to retry" on the Home balance tile.
+  const loadBalance = useCallback(() => {
+    setBalanceStatus('loading');
+    api.getBalance()
+      .then(d => {
+        setBalance(d);
+        setBalanceStatus('ready');
+      })
+      .catch(err => {
+        console.error(err);
+        setBalanceStatus('error');
+      });
+  }, []);
   // The selected house's last visit (server-scoped; a no-op off the gate).
   const lastRead = usePortalRead('latest-service', () => api.getServices({ limit: 1, propertyScoped: 1 }));
   // The read echoes the selection it was scoped to; a mismatch (the selected
@@ -3177,15 +3221,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
         console.error(err);
         setStatsStatus('error');
       });
-    api.getBalance()
-      .then(d => {
-        setBalance(d);
-        setBalanceStatus('ready');
-      })
-      .catch(err => {
-        console.error(err);
-        setBalanceStatus('error');
-      });
+    loadBalance();
     api.getGoogleReviewCard().then(d => {
       // A card served under another house than Home shows (the echo
       // disagrees with the entry) is not asked — the selection is re-read
@@ -3234,7 +3270,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
     api.getNewsletterPosts()
       .then((d) => setNewsletterPosts((d?.posts || []).filter((p) => p.link).slice(0, 6)))
       .catch(() => {});
-  }, []);
+  }, [loadBalance]);
 
   // position:relative lets the glass specular pseudo-elements anchor to each
   // card; inert without the glass theme mounted (no offsets, no stacking context).
@@ -3306,12 +3342,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
   const balanceValue = balancePending
     ? '...'
     : balanceError
-      ? 'Call us'
+      ? 'Tap to retry'
       : `$${currentBalance.toFixed(2)}`;
   const billingSub = balancePending
     ? 'Checking...'
     : balanceError
-      ? 'Tap to view'
+      ? 'Tap to retry'
       : hasBalance ? `$${currentBalance.toFixed(2)} due` : (annualPrepayLabel || 'All current');
   // Only advertise a reward the server confirms — while loading, on error,
   // or when the program reports zero, a hardcoded $25 would promise money
@@ -3322,7 +3358,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Text us', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
-    { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
+    { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: balanceError ? loadBalance : () => onSwitchTab?.('billing') },
     { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${Number.isInteger(referralReward) ? referralReward : referralReward.toFixed(2)} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
   return (
@@ -3332,7 +3368,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
           on the day of service, where the tech is matters more than the
           greeting. ServiceTracker renders null on every other day, so
           non-service-day layout is unchanged. */}
-      <ServiceTracker currentEntry={dashboardEntry} savedScope={dashboardSavedScope} selectedProperty={selectedProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} />
+      <ServiceTracker currentEntry={dashboardEntry} savedScope={dashboardSavedScope} selectedProperty={selectedProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} onOpenAccess={onOpenAccess} onOpenPets={onOpenPets} onReschedule={() => onSwitchTab?.('request')} />
 
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
@@ -3381,7 +3417,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
           {/* Same glass chip as the quick actions — the opaque #FFF7ED panel
               read as a peach block over the hero. The amber label carries
               the "due" signal. */}
-          <button type="button" data-glass="chip" onClick={() => onSwitchTab?.('billing')} style={{
+          <button type="button" data-glass="chip" onClick={balanceError ? loadBalance : () => onSwitchTab?.('billing')} style={{
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
@@ -3452,7 +3488,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
                     await nextRead.refresh();
                   } catch (err) {
                     console.error(err);
-                    showCustomerAlert('Could not confirm this visit. Please try again.');
+                    showCustomerAlert(whenOffline('Could not confirm this visit. Please try again.'));
                   } finally {
                     setConfirmingVisit(false);
                   }
@@ -3518,6 +3554,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
               {nextServiceStatus === 'loading'
                 ? 'Checking your upcoming visits...'
                 : 'We could not load your schedule right now.'}
+              {nextServiceStatus === 'error' && (
+                <div style={{ marginTop: 12 }}>
+                  <button type="button" onClick={() => { void nextRead.refresh(); }} data-glass-accent="" style={dashboardSecondaryButton}>Try again</button>
+                </div>
+              )}
             </div>
           )}
         </section>}
@@ -3593,6 +3634,10 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
           </button>
         ))}
       </div>
+
+      {/* Open requests sit right under the shortcuts, above the social, blog
+          and newsletter rows. The card renders nothing when none are open. */}
+      <MyRequestsCard focusRequestId={focusRequestId} />
 
       {mistingSystem && <MistingSystemCard system={mistingSystem} cardStyle={card} muted={muted} />}
 
@@ -3887,8 +3932,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
           </div>
         </section>
       )}
-
-      <MyRequestsCard focusRequestId={focusRequestId} />
     </div>
   );
 }
@@ -4224,9 +4267,8 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   };
   const isCompletedVisit = (s) => s.status === 'completed' && visitDay(s);
   const thisYearVisits = new Set(thisYearServices.filter(isCompletedVisit).map(visitDay)).size;
-  // WaveGuard memberships don't account for an hourly/per-visit time figure in the
-  // customer portal — the average visit duration is intentionally not tallied (reads as zero).
-  const avgMinutes = 0;
+  // No average-visit-time tile: the portal does not tally visit duration, and a tile
+  // that always read "N/A" looked broken.
 
   // --- Monthly grouping ---
   const grouped = {};
@@ -4281,14 +4323,13 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
         <div style={{ marginTop: 4, fontSize: 16, color: B.grayDark, lineHeight: 1.55 }}>
           Service reports and photos from completed visits.
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)', gap: 10, marginTop: 18 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(3, 1fr)', gap: 10, marginTop: 18 }}>
           {[
             { val: thisYearVisits, label: `${currentYear} visits` },
             { val: totalProducts, label: 'Products applied' },
             { val: uniqueTechs, label: 'Technicians' },
-            { val: avgMinutes > 0 ? `${avgMinutes} min` : 'N/A', label: 'Avg visit' },
-          ].map((stat) => (
-            <div key={stat.label} style={{ padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', minHeight: compact ? 0 : 70 }}>
+          ].map((stat, i) => (
+            <div key={stat.label} style={{ padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', minHeight: compact ? 0 : 70, ...(compact && i === 2 ? { gridColumn: '1 / -1' } : {}) }}>
               <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, lineHeight: 1.1 }}>{stat.val}</div>
               <div style={{ marginTop: 5, fontSize: 14, color: muted, fontWeight: 700 }}>{stat.label}</div>
             </div>
@@ -4436,7 +4477,14 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
                         if (!s.reportUrl || s.isProjectCompletion) return null;
                         try { const u = new URL(s.reportUrl, window.location.origin); u.searchParams.set('mode', 'static'); return u.toString(); } catch { return null; }
                       })();
-                      const download = () => {
+                      // Bearer-only fallback endpoint — a bare anchor opened
+                      // a raw 401 JSON page, so download through authed fetch.
+                      const savePdf = () => {
+                        downloadAuthedPdf(api.getServiceReportUrl(s.id), fileName).catch(() => {
+                          showCustomerAlert('Could not download this report. Please try again.');
+                        });
+                      };
+                      const viewReport = () => {
                         const authedUrl = api.getServiceReportUrl(s.id);
                         if (isNativeApp()) {
                           // Capacitor shell: target=_blank strands the SPA
@@ -4445,13 +4493,16 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
                           if (s.reportUrl) { openPagePreview({ id: s.id, title: reportTitle, fileName, pdfUrl: pdfPath }, s.reportUrl); return; }
                           if (nativePlatform() !== 'android') { openPdfPreview({ id: s.id, title: reportTitle, fileName, pdfUrl: authedUrl }, authedUrl); return; }
                         }
-                        if (s.isProjectCompletion) { window.open(s.reportUrl, '_blank', 'noopener'); return; }
-                        // Bearer-only fallback endpoint — a bare anchor opened
-                        // a raw 401 JSON page, so download through authed fetch.
-                        downloadAuthedPdf(authedUrl, fileName).catch(() => {
-                          showCustomerAlert('Could not download this report. Please try again.');
-                        });
+                        if (s.reportUrl) { window.open(s.reportUrl, '_blank', 'noopener'); return; }
+                        savePdf();
                       };
+                      // The primary button opens the full report (photos, recap, treatment
+                      // map). The app shows it in its own overlay; the web opens the report
+                      // page. A visit with no report page on the web can only save the PDF,
+                      // so that button keeps the "Download" label. A web visit with a page
+                      // gets both: View report, plus a PDF button.
+                      const opensReport = Boolean(s.reportUrl) || (isNativeApp() && nativePlatform() !== 'android');
+                      const showPdfButton = canDownload && !s.isProjectCompletion && !isNativeApp() && Boolean(s.reportUrl);
                       const actionStyle = { ...PORTAL_SECONDARY_ACTION, minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, position: 'relative' };
                       return (
                         <div id={reportPanelId} style={{ borderTop: '1px solid #E7E2D7', padding: compact ? 14 : 18, background: subtle }}>
@@ -4478,16 +4529,21 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
                               <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 70, background: 'linear-gradient(180deg, rgba(255,255,255,0) 0%, #fff 100%)', pointerEvents: 'none' }} />
                             </div>
                             {(canShare || canDownload) && (
-                              <div style={{ padding: 14, borderTop: '1px solid #E7E2D7', display: 'grid', gridTemplateColumns: canShare && canDownload ? '1fr 1fr' : '1fr', gap: 10 }}>
+                              <div style={{ padding: 14, borderTop: '1px solid #E7E2D7', display: 'grid', gridTemplateColumns: `repeat(${[canShare, canDownload, showPdfButton].filter(Boolean).length}, minmax(0, 1fr))`, gap: 10 }}>
                                 {canShare && (
                                   <button type="button" data-glass-accent="" onClick={() => shareLink(s.reportUrl, reportTitle)} style={actionStyle}>
                                     <Icon name="share" size={16} strokeWidth={2} /> Share
                                   </button>
                                 )}
                                 {canDownload && (
-                                  <button type="button" data-glass-accent="" onClick={download} style={actionStyle}>
+                                  <button type="button" data-glass-accent="" onClick={viewReport} style={actionStyle}>
                                     {/* Project completion reports are HTML routes — no file to save (GH codex P2). */}
-                                    <Icon name="document" size={16} strokeWidth={2} /> {s.isProjectCompletion ? 'Open' : 'Download'}
+                                    <Icon name="document" size={16} strokeWidth={2} /> {opensReport ? 'View report' : 'Download'}
+                                  </button>
+                                )}
+                                {showPdfButton && (
+                                  <button type="button" data-glass-accent="" onClick={savePdf} style={actionStyle}>
+                                    <Icon name="download" size={16} strokeWidth={2} /> Download
                                   </button>
                                 )}
                               </div>
@@ -5200,7 +5256,7 @@ function useContactNotificationPrefs() {
       setData(await api.updateContactNotificationPrefs(needsConsent ? { ...patch, consentAttested: true } : patch));
     } catch (err) {
       setData(before);
-      showCustomerAlert(err?.message || 'Could not update your notifications. Please try again.');
+      showCustomerAlert(whenOffline(err?.message || 'Could not update your notifications. Please try again.'));
       console.error(err);
     }
   };
@@ -5214,7 +5270,7 @@ function useContactNotificationPrefs() {
       setData(await api.updateContactNotificationPrefs({ consentAttested: true }));
     } catch (err) {
       setConsentChecked(false);
-      showCustomerAlert(err?.message || 'Could not record your consent. Please try again.');
+      showCustomerAlert(whenOffline(err?.message || 'Could not record your consent. Please try again.'));
       console.error(err);
     }
   });
@@ -5556,7 +5612,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       await api.updateNotificationPrefs({ [key]: newVal });
     } catch (err) {
       setPrefs(prev => ({ ...prev, [key]: !newVal }));
-      showCustomerAlert('Could not update notification preferences. Please try again.');
+      showCustomerAlert(whenOffline('Could not update notification preferences. Please try again.'));
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [key]: false }));
@@ -5584,7 +5640,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       }
     } catch (err) {
       setPrefs(prev => ({ ...prev, ...previous }));
-      showCustomerAlert('Could not update delivery preference. Please try again.');
+      showCustomerAlert(whenOffline('Could not update delivery preference. Please try again.'));
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, ...Object.fromEntries(lockKeys.map(key => [key, false])) }));
@@ -5600,7 +5656,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       setPrefs((previous) => ({ ...previous, ...Object.fromEntries(keys.map((key) => [key, result.preferences?.[key] ?? changes[key]])) }));
       app.refresh();
     } catch (err) {
-      showCustomerAlert(err.message || 'Could not save app preferences. Please try again.');
+      showCustomerAlert(whenOffline(err.message || 'Could not save app preferences. Please try again.'));
     } finally { setPrefsLocked((previous) => ({ ...previous, ...Object.fromEntries(keys.map((key) => [key, false])) })); }
   };
 
@@ -5643,7 +5699,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           ? { ...p, preferences: { ...(p.preferences || {}), [key]: current } }
           : p
       )));
-      showCustomerAlert('Could not update notification preferences. Please try again.');
+      showCustomerAlert(whenOffline('Could not update notification preferences. Please try again.'));
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [lockKey]: false }));
@@ -5728,7 +5784,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           : p
       )));
     } catch (err) {
-      showCustomerAlert('Could not save the on-location contacts. Please try again.');
+      showCustomerAlert(whenOffline('Could not save the on-location contacts. Please try again.'));
       console.error(err);
     } finally {
       setPrefsLocked(prev => ({ ...prev, [lockKey]: false }));
@@ -6034,6 +6090,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 fontSize: 14, position: 'relative',
               }}>Reschedule</a>
             )}
+            {!readOnlyVisits && <AddToCalendarButton visit={s} style={{ ...secondaryButton, padding: '10px 14px', flex: 1, fontSize: 14, position: 'relative' }} />}
           </div>
         </div>
       </div>
@@ -6087,6 +6144,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               fontSize: 14, position: 'relative',
             }}>Reschedule</a>
           )}
+          {!readOnlyVisits && <AddToCalendarButton visit={s} style={{ ...secondaryButton, padding: '9px 14px', fontSize: 14, position: 'relative' }} />}
         </div>
       </div>
     </div>
@@ -6799,6 +6857,23 @@ function BillingChannelSelect({ field, channels, usable, saving, onChange }) {
 // views, so the root stays the same <div> across them.
 const BILLING_COLUMN = { display: 'flex', flexDirection: 'column', gap: 16 };
 
+// "Are my payments current?" answered in one plain line: shown when the balance is zero and
+// the payment history already loaded on this tab has a paid row. A bank payment still in
+// flight is named too. Returns null when there is nothing true to say.
+function paidUpSummary(currentBalance, payments, formatMoney) {
+  if (!(Number(currentBalance) <= 0) || !Array.isArray(payments)) return null;
+  const kept = (p) => Math.max(0, (p.amount || 0) - (p.refundAmount || 0));
+  const dayOf = (p) => { const d = parseDate(p.date); return Number.isNaN(d.getTime()) ? null : d; };
+  const last = payments
+    .filter((p) => p.status === 'paid' && kept(p) > 0 && dayOf(p))
+    .sort((a, b) => dayOf(b) - dayOf(a))[0];
+  if (!last) return null;
+  const when = dayOf(last).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const inFlight = payments.find((p) => p.status === 'processing' && (p.amount || 0) > 0);
+  const base = `You're paid up. Last payment ${formatMoney(kept(last))} on ${when}.`;
+  return inFlight ? `${base} A payment of ${formatMoney(inFlight.amount)} is still processing.` : base;
+}
+
 function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, openAddCard = false, onSwitchTab = null }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
@@ -6840,7 +6915,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
       if (typeof refreshCustomer === 'function') await refreshCustomer();
     } catch {
       setAutoApplyCredit(!next);
-      showCustomerAlert('Could not save your credit preference. Please try again.');
+      showCustomerAlert(whenOffline('Could not save your credit preference. Please try again.'));
     } finally {
       setAutoApplyCreditBusy(false);
     }
@@ -7747,6 +7822,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
   const balanceTone = B.glassNavy;
+  const paidUpLine = loading || loadError || !balance ? null : paidUpSummary(currentBalance, payments, money);
   // Open-invoice pay links (GATE_PORTAL_PAY_NOW; server includes them only
   // while the gate is on). Each entry carries the invoice's existing
   // tokenized /pay URL — the same checkout the SMS/email links open — so
@@ -7958,6 +8034,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
             <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
               {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
             </div>
+            {paidUpLine && (
+              <div style={{ marginTop: 8, fontSize: 14, color: B.glassNavy, fontWeight: 700, lineHeight: 1.4 }}>{paidUpLine}</div>
+            )}
             {primaryOpenInvoice && (
               <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
                 <a href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, width: '100%', boxSizing: 'border-box' }} data-glass-accent="">
@@ -9065,7 +9144,7 @@ function ServicePrefsSection() {
       if (d && d.preferences) setPrefs(d.preferences);
     } catch (e) {
       setPrefs(prev);
-      setError('Could not save. Please try again.');
+      setError(whenOffline('Could not save. Please try again.'));
     } finally {
       setBusy(null);
     }
@@ -10058,6 +10137,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
       <ServicePrefsSection />
 
       <PropertySection
+        id="access"
         title="Access"
         icon="key"
         summary={accessReady ? 'Technician access details are on file.' : 'Add gate or parking details before the next visit.'}
@@ -11667,7 +11747,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
       await api.createRequest?.({ category: 'add_service', subject, description });
       if (seq === planStartSeq.current) setRequested(true);
     } catch (err) {
-      showCustomerAlert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+      showCustomerAlert(whenOffline(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`));
     } finally {
       setRequesting(false);
     }
@@ -12065,7 +12145,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
       await api.createRequest?.({ category, subject, description });
       setRequested(true);
     } catch (err) {
-      showCustomerAlert(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
+      showCustomerAlert(whenOffline(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`));
     } finally {
       setRequesting(false);
     }
@@ -13975,7 +14055,45 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
   );
 }
 
-function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
+// One "Before your tech arrives" row. A warning row that has somewhere to go
+// (add the gate code, set the pet plan) is a button that opens My Property at that section.
+function TrackerChecklistRow({ item }) {
+  const rowStyle = {
+    display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6,
+    borderLeft: item.ok ? 'none' : `2px solid ${B.orange}`,
+    paddingLeft: item.ok ? 0 : 8,
+  };
+  const body = (
+    <>
+      <Icon name={item.icon} size={16} strokeWidth={1.75} style={{ flexShrink: 0 }} />
+      <span style={{ fontSize: 14, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.textBody : B.navy, lineHeight: 1.4 }}>{item.text}</span>
+    </>
+  );
+  if (item.ok || typeof item.onTap !== 'function') return <div style={rowStyle}>{body}</div>;
+  return (
+    <button type="button" onClick={item.onTap} style={{
+      ...rowStyle, width: '100%', minHeight: 44, boxSizing: 'border-box', background: 'none',
+      borderTop: 0, borderRight: 0, borderBottom: 0, cursor: 'pointer', textAlign: 'left', font: 'inherit',
+    }}>
+      {body}
+      <Icon name="chevronRight" size={16} strokeWidth={2} style={{ flexShrink: 0, marginLeft: 'auto' }} />
+    </button>
+  );
+}
+
+// A missed or cancelled visit says "Reschedule any time", so it carries the button. The tracker
+// read has no reschedule link of its own: use one if the data ever has it, otherwise open the
+// request flow (the same one the Home "Request" shortcut opens).
+function TrackerRescheduleButton({ tracker, onReschedule }) {
+  const style = { ...PORTAL_PRIMARY_ACTION, width: '100%', minHeight: 48, marginTop: 16, boxSizing: 'border-box', textDecoration: 'none', textTransform: 'none' };
+  if (tracker?.rescheduleUrl) {
+    return <a href={tracker.rescheduleUrl} data-glass-accent="" data-glass-size="primary" style={style}>Reschedule</a>;
+  }
+  if (typeof onReschedule !== 'function') return null;
+  return <button type="button" onClick={onReschedule} data-glass-accent="" data-glass-size="primary" style={style}>Reschedule</button>;
+}
+
+function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null, onOpenAccess = null, onOpenPets = null, onReschedule = null }) {
   const [tracker, setTracker] = useState(null);
   const trackerRef = useRef(null);
   trackerRef.current = tracker;
@@ -14391,6 +14509,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
             <div style={{ fontSize: 16, color: B.textBody, marginTop: 8 }}>
               We weren't able to complete your {svcType.toLowerCase()} today. Reschedule any time and we'll find a slot that works for you.
             </div>
+            <TrackerRescheduleButton tracker={tracker} onReschedule={onReschedule} />
           </>
         )}
 
@@ -14407,6 +14526,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
             <div style={{ fontSize: 16, color: B.textBody, marginTop: 8 }}>
               No service was performed. Reschedule any time and we&apos;ll get you back on the calendar.
             </div>
+            <TrackerRescheduleButton tracker={tracker} onReschedule={onReschedule} />
           </>
         )}
 
@@ -14521,11 +14641,11 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
             ...(profileFactsApply ? [
               propertyPrefs?.neighborhoodGateCode || propertyPrefs?.propertyGateCode
                 ? { icon: 'checkCircle', text: 'Gate code on file', ok: true }
-                : { icon: 'warning', text: 'No gate code on file', ok: false },
+                : { icon: 'warning', text: 'No gate code on file', ok: false, onTap: onOpenAccess },
             ] : []),
             profileFactsApply && propertyPrefs?.petCount > 0 && (propertyPrefs?.petsSecuredPlan || propertyPrefs?.petSecuredPlan)
               ? { icon: 'checkCircle', text: `Pet plan: ${petPlanShort}`, ok: true }
-              : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false },
+              : { icon: 'warning', text: 'Secure pets before tech arrives', ok: false, onTap: onOpenPets },
             { icon: 'unlock', text: 'Ensure gates are unlocked', ok: true },
             ...(isLawn ? [
               { icon: 'droplet', text: 'Turn off irrigation 24hrs before', ok: true },
@@ -14543,14 +14663,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
               { icon: 'home', text: 'Clear access to garage/attic', ok: true },
             ] : []),
           ].map((item, i) => (
-            <div key={i} style={{
-              display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6,
-              borderLeft: item.ok ? 'none' : `2px solid ${B.orange}`,
-              paddingLeft: item.ok ? 0 : 8,
-            }}>
-              <Icon name={item.icon} size={16} strokeWidth={1.75} style={{ flexShrink: 0 }} />
-              <span style={{ fontSize: 14, fontWeight: item.ok ? 400 : 600, color: item.ok ? B.textBody : B.navy, lineHeight: 1.4 }}>{item.text}</span>
-            </div>
+            <TrackerChecklistRow key={i} item={item} />
           ))}
         </div>
       )}
@@ -14848,7 +14961,7 @@ function ReferTab({ customer, onSwitchTab }) {
       );
       fetchData({ silent: true });
     } catch (err) {
-      flash(err?.message || 'Could not submit your referral. Please try again.', 'error');
+      flash(whenOffline(err?.message || 'Could not submit your referral. Please try again.'), 'error');
     } finally {
       setSubmitting(false);
     }
@@ -15014,7 +15127,7 @@ function ReferTab({ customer, onSwitchTab }) {
       setEmailForm({ name: '', email: '' });
       flash(`Your referral email to ${friendName.split(/\s+/)[0]} is on the way!`);
     } catch (err) {
-      flash(err?.message || 'Could not send the referral email. Please try again.', 'error');
+      flash(whenOffline(err?.message || 'Could not send the referral email. Please try again.'), 'error');
     } finally {
       setEmailSubmitting(false);
     }
@@ -16901,7 +17014,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       // The selection went stale between open and submit: re-read the list so
       // the overlay names the house the server will actually bind to.
       if (err?.code === 'property_selection_stale' && onSavedScopeUnavailable) onSavedScopeUnavailable();
-      setSubmitError(err?.message || 'Could not submit the request. Please try again or call Waves at (941) 297-5749.');
+      setSubmitError(whenOffline(err?.message || 'Could not submit the request. Please try again or call Waves at (941) 297-5749.'));
     } finally {
       setSubmitting(false);
     }
@@ -17550,6 +17663,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 // =========================================================================
 // MY REQUESTS CARD — recent receipts and the exact request opened from App
 // =========================================================================
+// The pill shows the office's real status on every Home visit, not only when the
+// customer opened the request from a notification. An unknown value reads "Received".
+const REQUEST_STATUS_LABELS = { new: 'Received', acknowledged: 'Acknowledged', scheduled: 'Scheduled', resolved: 'Resolved' };
+function requestStatusLabel(status) {
+  return REQUEST_STATUS_LABELS[status] || 'Received';
+}
+
 function MyRequestsCard({ focusRequestId } = {}) {
   const cardRef = useRef(null);
   const [requests, setRequests] = useState([]);
@@ -17657,7 +17777,7 @@ function MyRequestsCard({ focusRequestId } = {}) {
                   color: B.glassNavy,
                   border: '1px solid #E7E2D7',
                   whiteSpace: 'nowrap',
-                }}>{focusRequestId ? ({ new: 'Received', acknowledged: 'Acknowledged', scheduled: 'Scheduled', resolved: 'Resolved' }[r.status] || 'Received') : 'Received'}</span>
+                }}>{requestStatusLabel(r.status)}</span>
               </div>
               {r.urgency === 'urgent' && (
                 <div style={{ marginTop: 8, fontSize: 14, color: B.red, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -19009,7 +19129,7 @@ export default function PortalPage() {
       // UI audit F0314: switchProperty stores the failure on AuthContext.error,
       // which nothing on this page renders — the "Switching" label just
       // vanished and the menu stayed on the old property.
-      showCustomerAlert('We could not switch to that property just now. Please try again.');
+      showCustomerAlert(whenOffline('We could not switch to that property just now. Please try again.'));
     }
   };
   // The header address is the selected entry's. A selection whose entry is
@@ -19581,7 +19701,7 @@ export default function PortalPage() {
         )}
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && !contactSession && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
-        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} onOpenPets={() => navigate('/?tab=property#pets')} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} onOpenPets={() => navigate('/?tab=property#pets')} onOpenAccess={() => navigate('/?tab=property#access')} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} messagesEnabled={messagesGate.enabled} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);

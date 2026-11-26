@@ -98,7 +98,7 @@ describe('open service reports', () => {
     api.getServices.mockResolvedValueOnce(visits).mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }));
     render(<PortalReadProvider enabled><PortalRefreshArea><ServicesTab /></PortalRefreshArea></PortalReadProvider>);
     fireEvent.click(await screen.findByRole('button', { name: /Fixture treatment/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Download', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'View report', exact: true }));
     const frame = screen.getByRole('dialog').querySelector('iframe');
     expect(frame).not.toBeNull();
     if (transition === 'offline') {
