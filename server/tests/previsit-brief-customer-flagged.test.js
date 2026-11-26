@@ -22,6 +22,7 @@ jest.mock('../services/llm/call', () => ({
 const mockVisitPrepPhotosLive = jest.fn();
 jest.mock('../config/feature-gates', () => ({
   visitPrepPhotosLive: (...args) => mockVisitPrepPhotosLive(...args),
+  visitAccessCardsLive: () => false,
 }));
 
 const mockCustomerFlaggedFacts = jest.fn();

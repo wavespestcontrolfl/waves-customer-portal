@@ -304,7 +304,7 @@
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
  *   GATE_CALL_INCIDENTS=true (correction loop for calls: the nightly 04:10 ET job turns each self-audit field disagreement into an ai_incidents row, confirmed only when a second model on the other provider from the auditor's, reading the call blind, reaches the auditor's answer and both readers' excerpts are in the transcript (unknown auditor provider or a truncated call stays a lead); Sunday 04:50 fix proposals for calls; services/call-incidents.js. Adds about one fast-tier OpenAI call per finding; shadow data only, no customer sends; honoured only while GATE_CALL_SELF_AUDIT is on; ships DARK, read at call time via callIncidentsLive(); unset = off)
  *   GATE_CALL_SOUND_CHECK=true (owner 2026-11-25 "both", the sound check on every new call: every 5 minutes the portal sends the recording of each newly processed call (20 seconds to 30 minutes long, at most 48 hours old) to Gemini 4 Neon. The model LISTENS and notes the caller's mood at the start and at the end, whether the caller was upset, how many times staff talked over the caller, whether staff sounded rushed, and any risky claim staff made (safety, organic or natural, a guarantee, a promised result, a price, what a service includes, licensing). Notes only, saved on the call (call_log.metadata.sound_check): no bell, no text, nothing a customer sees. It has a gate because each listen is a paid Gemini API call, an estimated 1 to 4 cents a call. The job stops for the ET day at $0.83, the top of the range the owner approved ($0.33 to $0.83 a day, $10 to $25 a month). A call gets one attempt: a failed listen is not tried again. The job makes no call when the model has no price row. A call flagged for card data and a call on an internal test line are never sent. Strict `=== 'true'`, read at run time by server/services/call-sound-check.js via callSoundCheckLive(); dark by default; off (kill: unset) = no download, no model call, no write.)
- *   GATE_VISIT_ACCESS_FLAGS=shadow (visit access and safety flags, shadow leg: the hourly :34 sweep 05:34 to 19:34 ET puts visit_access.v1, six yes/no reads, to the typed-decision providers for today's and tomorrow's open visits and records the answers in decision_reviews under subject_type scheduled_services; services/typed-decisions/visit-access-shadow.js; codes never leave: the state says only whether codes are on file and every text is redacted; nothing is shown to a technician, written to a visit or sent; honoured only while GATE_TYPED_DECISIONS is live; ships DARK, read at call time via visitAccessShadowLive(); unset or any other value = off)
+ *   GATE_VISIT_ACCESS_FLAGS=shadow|on (visit access and safety flags: the hourly :34 sweep 05:34 to 19:34 ET puts visit_access.v1, six yes/no reads, to the typed-decision providers for today's and tomorrow's open visits and records the answers in decision_reviews under subject_type scheduled_services; services/typed-decisions/visit-access-shadow.js; codes never leave: the state says only whether codes are on file and every text is redacted; shadow = the sweep only, nothing is shown to a technician; on = the same sweep AND the technician's Visit Brief shows the flags with a Right / Wrong tap stored as one row in visit_access_verdicts (services/visit-access-flags.js; review rows and labels untouched; cards read the providers' current answers kept on visit_access_states.answers, and evidence counts only for the customer in visit_access_states.customer_id, the visit's current one); the tap writes no visit and sends nothing, except the tap that creates a Right on a dog flag with no pets on file saves one pet_details line; honoured only while GATE_TYPED_DECISIONS is live; ships DARK, read at call time via visitAccessSweepLive() and visitAccessCardsLive(); unset or any other value = off)
  *   GATE_TYPED_DECISIONS_CLEF=true (the same decision packages put to Cloudflare Clef on Workers AI as a second provider, ROUTES.typedDecisionClef, model MODEL_CLOUDFLARE_CLEF default clef-flash; askPackage(..., { provider: 'cloudflare' }); honoured only while GATE_TYPED_DECISIONS is live; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsClefLive(); unset = off)
  *   GATE_PREPAY_MINT_PRICE_HOLD=shadow|true (stamp-time price check for every annual prepay, not only a /secure pick: a new term records each covered visit's price when it is created (activity_log annual_prepay_mint_visit_prices); `true` = a visit whose price changed since then is not stamped as covered, bills normally and raises the existing 'repriced visit left uncovered' office alert; `shadow` = the price is recorded and a would-hold is only logged. Termite annual plans are left out. Off = byte-identical to today: nothing recorded, nothing read. Canonical CALL-TIME reader prepayMintPriceHoldMode(). Kill switch: unset.)
  *   GATE_PHOTO_PRIVACY=shadow (photo privacy check, Clef second wave idea 3: each technician social post's photo is put to Cloudflare Clef as photo_privacy.v1 (face, person, readable address text, license plate, child, pet) AFTER the post is published and logged, and the answers land in decision_reviews for labeling; services/typed-decisions/photo-privacy-shadow.js. SHADOW ONLY: nothing is held, changed or shown to the technician; `shadow` is the only value honoured (anything else = off) and only while GATE_TYPED_DECISIONS_CLEF is live; ships DARK, read at call time via photoPrivacyMode(); unset = off)
@@ -1125,10 +1125,10 @@ const gates = {
   // enforces: with GATE_TYPED_DECISIONS off the lane is dark whatever this
   // variable says, and the status must not read as enabled (Codex r1 on #5557).
   typedDecisionsClef: gateEnvValue('GATE_TYPED_DECISIONS') && gateEnvValue('GATE_TYPED_DECISIONS_CLEF'),
-  // Visit access and safety flags, shadow leg (Clef second wave idea 5):
-  // ships DARK. CALL-TIME reader is visitAccessShadowLive() below; this entry
-  // is for logGateStatus only and carries the reader's prerequisite.
-  visitAccessFlags: gateEnvValue('GATE_TYPED_DECISIONS') && String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase() === 'shadow',
+  // Visit access and safety flags (Clef second wave idea 5): ships DARK.
+  // CALL-TIME readers are visitAccessSweepLive() / visitAccessCardsLive()
+  // below; this entry is for logGateStatus only and carries their prerequisite.
+  visitAccessFlags: gateEnvValue('GATE_TYPED_DECISIONS') && ['shadow', 'on'].includes(String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase()),
   // Stamp-time price check for every annual prepay mint: ships DARK. CALL-TIME
   // reader is prepayMintPriceHoldMode() below ('shadow' or 'true'); this entry
   // is for logGateStatus only.
@@ -6184,14 +6184,21 @@ function typedDecisionsClefLive() {
   return typedDecisionsLive() && gateEnvValue('GATE_TYPED_DECISIONS_CLEF');
 }
 
-// GATE_VISIT_ACCESS_FLAGS read at CALL time — ships DARK, live only when it
-// is exactly 'shadow' AND GATE_TYPED_DECISIONS is live (the sweep's answers
-// are decision_reviews rows). Off, the visit-access sweep
-// (typed-decisions/visit-access-shadow.js) returns before any read or
-// provider call; unset is the kill, no redeploy. Shadow is the only mode this
-// gate has: nothing reaches a technician's card yet.
-function visitAccessShadowLive() {
-  return typedDecisionsLive() && String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase() === 'shadow';
+// GATE_VISIT_ACCESS_FLAGS read at CALL time — ships DARK, both values need
+// GATE_TYPED_DECISIONS live (the sweep's answers are decision_reviews rows).
+// 'shadow' and 'on' run the visit-access sweep
+// (typed-decisions/visit-access-shadow.js); off, it returns before any read
+// or provider call. Only 'on' shows the flags to a technician and takes their
+// Right / Wrong tap (visitAccessCardsLive); 'shadow' shows nothing. Unset or
+// any other value is the kill, no redeploy.
+function visitAccessValue() {
+  return typedDecisionsLive() ? String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase() : '';
+}
+function visitAccessSweepLive() {
+  return ['shadow', 'on'].includes(visitAccessValue());
+}
+function visitAccessCardsLive() {
+  return visitAccessValue() === 'on';
 }
 
 // GATE_PHOTO_PRIVACY read at CALL time: 'shadow' while the variable says
@@ -8514,7 +8521,8 @@ function callSoundCheckLive() {
 // GATE_CALL_SOUND_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.callSoundCheckLive = callSoundCheckLive;
 module.exports.typedDecisionsClefLive = typedDecisionsClefLive;
-module.exports.visitAccessShadowLive = visitAccessShadowLive;
+module.exports.visitAccessSweepLive = visitAccessSweepLive;
+module.exports.visitAccessCardsLive = visitAccessCardsLive;
 module.exports.photoPrivacyMode = photoPrivacyMode;
 module.exports.askWavesJevCheckMode = askWavesJevCheckMode;
 module.exports.lawnJevTimingCheckMode = lawnJevTimingCheckMode;

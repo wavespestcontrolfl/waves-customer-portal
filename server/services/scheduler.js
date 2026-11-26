@@ -5901,7 +5901,7 @@ function initScheduledJobs() {
         // Retention runs whatever the gate says: stored states are dropped on
         // schedule even after the shadow is switched off.
         await VisitAccess.pruneVisitAccessStates();
-        if (!require('../config/feature-gates').visitAccessShadowLive()) return;
+        if (!require('../config/feature-gates').visitAccessSweepLive()) return;
         const result = await VisitAccess.runVisitAccessSweep();
         logger.info(`Visit access shadow done: ${result.recorded} recorded, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.failed} failed of ${result.considered}`);
       });
