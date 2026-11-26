@@ -6,14 +6,23 @@ const PAGE_SIZE = 25;
 const listPath = (status, cursor) => `/admin/company-facts?status=${status}&limit=${PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
 const EMPTY = { facts: [], nextCursor: null, ownerActions: false };
 
+// Adds a page to what is loaded, once per fact id: a row already shown (a card kept for its open editor) stays in its place with the
+// newer data, so its editor keeps its state and the card is never listed twice.
+function mergeById(shown, incoming) {
+  const fresh = new Map(incoming.map((fact) => [fact.id, fact]));
+  const merged = shown.map((fact) => fresh.get(fact.id) || fact);
+  const have = new Set(shown.map((fact) => fact.id));
+  return [...merged, ...incoming.filter((fact) => !have.has(fact.id))];
+}
+
 // Reads `pages` pages of one status, following nextCursor. Returns everything read, the cursor after it and the viewer flag.
 async function readPages(status, pages) {
-  const facts = [];
+  let facts = [];
   let cursor = null;
   let ownerActions = false;
   for (let read = 0; read < pages; read += 1) {
     const body = await adminFetch(listPath(status, cursor));
-    facts.push(...(body.facts || []));
+    facts = mergeById(facts, body.facts || []);
     ownerActions = body.viewer?.ownerActions === true;
     cursor = body.nextCursor || null;
     if (!cursor) break;
@@ -77,7 +86,7 @@ export default function useFactList(status, isEditing = () => false) {
       const body = await adminFetch(listPath(status, page.nextCursor));
       if (mine === token.current) {
         pagesLoaded.current += 1;
-        setPage((prev) => ({ ...prev, facts: [...prev.facts, ...(body.facts || [])], nextCursor: body.nextCursor || null }));
+        setPage((prev) => ({ ...prev, facts: mergeById(prev.facts, body.facts || []), nextCursor: body.nextCursor || null }));
       }
     } catch (requestError) {
       if (mine === token.current) setError(errorMessage(requestError, "More facts could not be loaded."));

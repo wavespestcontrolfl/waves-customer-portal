@@ -21,7 +21,10 @@ export default function HowItWillRead({ facts }) {
     return () => { live = false; };
   }, [signature, attempt]);
 
-  const left = preview ? facts.length - preview.count : 0;
+  // From the preview's own read only: it names the approved rows it looked at and kept, so a fact retired between this and the list never
+  // counts as a failed check. The topics come from the list when it has the row.
+  const leftOut = preview?.leftOut || [];
+  const topicOf = (id) => facts.find((fact) => fact.id === id)?.topic;
   return (
     <Card className="mb-4">
       <CardHeader>
@@ -37,9 +40,9 @@ export default function HowItWillRead({ facts }) {
           <pre aria-label="How the approved facts will read" className="m-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xs bg-zinc-50 p-3 text-ui-body text-ink-primary">{preview.lines}</pre>
         )}
         {preview && !preview.lines && <p className="text-ui-body text-ink-secondary">The agents get no extra facts now, only the built-in facts.</p>}
-        {left > 0 && (
+        {leftOut.length > 0 && (
           <ActionFeedback error>
-            {left === 1 ? "1 approved fact is" : `${left} approved facts are`} not in this list. It no longer passes the checks, so the agents do not get it. Retire it, or edit it as a new draft.
+            {leftOut.length === 1 ? "1 approved fact is" : `${leftOut.length} approved facts are`} not in this list ({leftOut.map((id) => topicOf(id) || "another fact").join(", ")}). It no longer passes the checks, so the agents do not get it. Retire it, or edit it as a new draft.
           </ActionFeedback>
         )}
       </CardBody>

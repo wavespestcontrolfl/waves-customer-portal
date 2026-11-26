@@ -3,6 +3,7 @@ import { ActionFeedback, Button, Field, Input, Textarea } from "../../../../comp
 import { errorMessage } from "./factCopy";
 
 const MAX_CHARS = 400;
+const FIELD_LABELS = { topic: "Topic", factText: "The fact", question: "Question it answers", ownerWords: "Owner's words" };
 
 const COPY = {
   new: { save: "Save draft", note: "Write one to three plain sentences. Leave out numbers, prices, times and product names." },
@@ -25,7 +26,8 @@ const startingValues = (mode, fact) => ({
 export default function FactForm({ mode, initial = {}, onSubmit, onCancel, loadCurrent, onStale }) {
   const [baseline, setBaseline] = useState(() => ({ values: startingValues(mode, initial), hash: initial.text_sha256, updatedAt: initial.updated_at }));
   const [fields, setFields] = useState(baseline.values);
-  const [current, setCurrent] = useState(null);
+  // After a conflict: per field, what is saved now and what the editor typed (conflicts), and the fields that took the saved value.
+  const [conflict, setConflict] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const setField = (key) => (event) => setFields((prev) => ({ ...prev, [key]: event.target.value }));
@@ -45,9 +47,15 @@ export default function FactForm({ mode, initial = {}, onSubmit, onCancel, loadC
   const recover = async () => {
     const saved = await loadCurrent();
     const fresh = startingValues(mode, saved.fact);
-    setFields((prev) => Object.fromEntries(Object.keys(prev).map((key) => [key, prev[key] === baseline.values[key] ? fresh[key] : prev[key]])));
+    const keys = Object.keys(fields);
+    const touched = (key) => fields[key].trim() !== baseline.values[key];
+    const savedChanged = (key) => fresh[key] !== baseline.values[key];
+    setFields((prev) => Object.fromEntries(keys.map((key) => [key, touched(key) ? prev[key] : fresh[key]])));
     setBaseline({ values: fresh, hash: saved.fact.text_sha256, updatedAt: saved.fact.updated_at });
-    setCurrent(saved.fact.fact_text);
+    setConflict({
+      clashes: keys.filter((key) => touched(key) && savedChanged(key) && fresh[key] !== fields[key].trim()).map((key) => ({ key, saved: fresh[key], yours: fields[key].trim() })),
+      taken: keys.filter((key) => !touched(key) && savedChanged(key)),
+    });
   };
 
   const save = async () => {
@@ -67,11 +75,11 @@ export default function FactForm({ mode, initial = {}, onSubmit, onCancel, loadC
     try {
       await onSubmit(values);
     } catch (requestError) {
-      setCurrent(null);
+      setConflict(null);
       if (["STALE_TEXT", "STALE_FACT"].includes(requestError.code) && loadCurrent) {
         try {
           await recover();
-          setError(`Someone changed this ${requestError.code === "STALE_TEXT" ? "wording" : "fact"} while you had it open. Your text is still in the box. Compare it with the saved wording below, then save again.`);
+          setError(`Someone changed this ${requestError.code === "STALE_TEXT" ? "wording" : "fact"} while you had it open. Your text is still in the box. Compare the fields below, then save again.`);
         } catch {
           setError("Someone changed this fact, and the saved wording could not be loaded. Copy your text, close this, and reload the list.");
         }
@@ -99,15 +107,24 @@ export default function FactForm({ mode, initial = {}, onSubmit, onCancel, loadC
       <Field label="Owner's words (optional)" help="The owner's own answer, kept with the fact. It is not shown to customers.">
         <Textarea value={fields.ownerWords} rows={2} maxLength={500} onChange={setField("ownerWords")} />
       </Field>
-      {current !== null && (
-        <div className="rounded-xs bg-zinc-50 p-3 text-ui-body" aria-label="Saved wording">
-          <p className="m-0 text-ui-caption text-ink-secondary">Saved wording now:</p>
-          <p className="m-0 whitespace-pre-wrap break-words">{current}</p>
+      {conflict && (
+        <div className="space-y-2 rounded-xs bg-zinc-50 p-3 text-ui-body" aria-label="Fields that differ">
+          {conflict.clashes.map((clash) => (
+            <div key={clash.key}>
+              <p className="m-0 font-medium">{FIELD_LABELS[clash.key]}</p>
+              <p className="m-0 whitespace-pre-wrap break-words"><span className="text-ink-secondary">Saved now: </span>{clash.saved || "(empty)"}</p>
+              <p className="m-0 whitespace-pre-wrap break-words"><span className="text-ink-secondary">Yours: </span>{clash.yours || "(empty)"}</p>
+            </div>
+          ))}
+          {!conflict.clashes.length && <p className="m-0">No field you changed was also changed by someone else. Your changes go on top of the saved version.</p>}
+          {conflict.taken.length > 0 && (
+            <p className="m-0 text-ink-secondary">Now showing the saved value for: {conflict.taken.map((key) => FIELD_LABELS[key]).join(", ")}.</p>
+          )}
         </div>
       )}
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap gap-2">
-        <Button loading={busy} onClick={save}>{COPY[mode].save}</Button>
+        <Button loading={busy} onClick={save}>{conflict?.clashes.length ? "Keep my version and save" : COPY[mode].save}</Button>
         <Button variant="secondary" onClick={onCancel}>Cancel</Button>
       </div>
     </fieldset>

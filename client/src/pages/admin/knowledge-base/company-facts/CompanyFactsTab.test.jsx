@@ -39,7 +39,8 @@ function listAnswer(state, url) {
 function previewAnswer(state) {
   const approved = [...(state.pages?.approved?.first?.facts || [])].sort((a, b) => new Date(a.approved_at) - new Date(b.approved_at));
   const kept = approved.filter((f) => !state.excluded?.includes(f.id));
-  return { lines: kept.map((f) => `- ${f.fact_text.trim()}`).join("\n"), count: kept.length, version: "v", ids: kept.map((f) => f.id) };
+  const left = approved.filter((f) => state.excluded?.includes(f.id)).map((f) => f.id);
+  return { lines: kept.map((f) => `- ${f.fact_text.trim()}`).join("\n"), count: kept.length, version: "v", ids: kept.map((f) => f.id), consideredIds: approved.map((f) => f.id), leftOut: state.previewLeftOut || left };
 }
 
 function readAnswer(state, method, url) {
@@ -399,10 +400,12 @@ describe("Company facts tab", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(await screen.findByText(/Someone changed this wording/)).toBeInTheDocument();
-    expect(screen.getByLabelText("Saved wording")).toHaveTextContent("We service Parrish and Palmetto.");
+    const differs = screen.getByLabelText("Fields that differ");
+    expect(differs).toHaveTextContent("Saved now: We service Parrish and Palmetto.");
+    expect(differs).toHaveTextContent("Yours: My own wording of it.");
     expect(screen.getByLabelText(/The fact/)).toHaveValue("My own wording of it.");
     expect(screen.getByLabelText(/Topic/)).toHaveValue("Topic by other");
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keep my version and save" }));
     await waitFor(() => expect(patches).toHaveLength(2));
     expect(patches[1]).toEqual({ factText: "My own wording of it.", baseTextSha256: "d".repeat(64), baseUpdatedAt: "2026-11-25T16:00:00.000Z", expectStatus: "draft" });
   });
@@ -585,5 +588,153 @@ describe("Company facts tab", () => {
     expect(historyReads).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(historyReads).toHaveLength(2));
+  });
+
+  it("discards only the version it showed when Discard was opened", async () => {
+    let versionB = "2026-11-25T15:00:00.000Z";
+    const deletes = [];
+    serve({
+      owner: true,
+      pages: Object.defineProperty({}, "draft", { get: () => ({ first: { facts: [fact({ id: ID_A, topic: "Topic A", text_sha256: "a".repeat(64) }), fact({ id: ID_B, topic: "Topic B", updated_at: versionB, text_sha256: "b".repeat(64) })], nextCursor: null } }), enumerable: true }),
+      onRequest: (path, options) => { if (options.method === "DELETE") deletes.push([path, JSON.parse(options.body)]); if (options.method === "PATCH") versionB = "2026-11-25T19:00:00.000Z"; },
+    });
+    mount();
+    await screen.findByText("Topic B");
+    fireEvent.click(screen.getAllByRole("button", { name: "Discard" })[1]);
+    // Another admin saves B while the confirmation is open; the list reloads behind it (card A's Check again).
+    versionB = "2026-11-25T19:00:00.000Z";
+    fireEvent.click(screen.getAllByRole("button", { name: "Check again" })[0]);
+    await waitFor(() => expect(adminFetch.mock.calls.filter(([, o]) => o?.method === "PATCH")).toHaveLength(1));
+    fireEvent.click(screen.getAllByRole("button", { name: "Discard" }).at(-1));
+    await waitFor(() => expect(deletes).toHaveLength(1));
+    expect(deletes[0][1]).toEqual({ baseTextSha256: "b".repeat(64), baseUpdatedAt: "2026-11-25T15:00:00.000Z" });
+  });
+
+  it("shows a refused discard as a plain sentence and keeps the draft", async () => {
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: [fact()], nextCursor: null } } },
+      failWith: (method) => (method === "DELETE" ? { code: "STALE_FACT", status: 409 } : null),
+    });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Discard" }).at(-1));
+    expect(await screen.findByText(/Someone changed this fact while you had it open/)).toBeInTheDocument();
+    expect(screen.getByText("Service area")).toBeInTheDocument();
+  });
+
+  it("shows each conflicting field, saved against typed, and asks for an explicit save", async () => {
+    const patches = [];
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: [fact({ owner_words: "my first quote" })], nextCursor: null } } },
+      single: () => fact({ owner_words: "the other admin's quote", updated_at: "2026-11-25T17:00:00.000Z" }),
+      failWith: (method) => (method === "PATCH" && patches.length === 1 ? { code: "STALE_FACT", status: 409 } : null),
+      onRequest: (path, options) => { if (options.method === "PATCH") patches.push(JSON.parse(options.body)); },
+    });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/Owner's words/), { target: { value: "my edited quote" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    const differs = await screen.findByLabelText("Fields that differ");
+    expect(differs).toHaveTextContent("Owner's words");
+    expect(differs).toHaveTextContent("Saved now: the other admin's quote");
+    expect(differs).toHaveTextContent("Yours: my edited quote");
+    expect(screen.getByLabelText(/Owner's words/)).toHaveValue("my edited quote");
+    expect(patches).toHaveLength(1); // nothing was sent again by itself
+    fireEvent.click(screen.getByRole("button", { name: "Keep my version and save" }));
+    await waitFor(() => expect(patches).toHaveLength(2));
+    expect(patches[1]).toMatchObject({ ownerWords: "my edited quote", baseUpdatedAt: "2026-11-25T17:00:00.000Z" });
+  });
+
+  const approvedFact = (over = {}) => fact({ id: ID_A, topic: "Approved A", status: "approved", approved_at: "2026-11-25T16:00:00Z", ...over });
+
+  it("after saving a replacement of an approved fact, shows Drafts with the new draft outlined", async () => {
+    serve({
+      owner: true,
+      pages: {
+        approved: { first: { facts: [approvedFact()], nextCursor: null } },
+        draft: { first: { facts: [fact({ id: "11111111-1111-4111-8111-111111111111", topic: "New replacement draft" })], nextCursor: null } },
+      },
+    });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    await screen.findByText("Approved A");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/The fact/), { target: { value: "A new wording." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save as a new draft" }));
+    const title = await screen.findByText("New replacement draft");
+    expect(screen.getByRole("button", { name: "Drafts" })).toHaveAttribute("aria-pressed", "true");
+    expect(title.closest("[data-highlighted]")).not.toBeNull();
+  });
+
+  it("with another editor open, stays put and offers Show it for the new draft", async () => {
+    serve({
+      owner: true,
+      pages: {
+        approved: { first: { facts: [approvedFact(), approvedFact({ id: ID_B, topic: "Approved B" })], nextCursor: null } },
+        draft: { first: { facts: [fact({ id: "11111111-1111-4111-8111-111111111111", topic: "New replacement draft" })], nextCursor: null } },
+      },
+    });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    await screen.findByText("Approved A");
+    const edits = screen.getAllByRole("button", { name: "Edit" });
+    fireEvent.click(edits[1]);
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "Half-typed" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    fireEvent.change(screen.getAllByLabelText(/The fact/)[0], { target: { value: "A new wording." } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Save as a new draft" })[0]);
+    const show = await screen.findByRole("button", { name: "Show it" });
+    expect(screen.getByRole("button", { name: "Approved" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getAllByLabelText(/Topic/).some((box) => box.value === "Half-typed")).toBe(true);
+    fireEvent.click(show);
+    const title = await screen.findByText("New replacement draft");
+    expect(screen.getByRole("button", { name: "Drafts" })).toHaveAttribute("aria-pressed", "true");
+    expect(title.closest("[data-highlighted]")).not.toBeNull();
+  });
+
+  it("counts a fact as left out only from the preview's own read", async () => {
+    serve({
+      owner: true,
+      previewLeftOut: [],
+      pages: { approved: { first: { facts: [approvedFact(), approvedFact({ id: ID_B, topic: "Retired between reads", approved_at: "2026-11-25T17:00:00Z" })], nextCursor: null } } },
+    });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    await screen.findByLabelText("How the approved facts will read");
+    expect(screen.queryByText(/not in this list/)).not.toBeInTheDocument();
+  });
+
+  it("names the facts the preview left out", async () => {
+    serve({
+      owner: true,
+      excluded: [ID_B],
+      pages: { approved: { first: { facts: [approvedFact(), approvedFact({ id: ID_B, topic: "Noon fact", approved_at: "2026-11-25T17:00:00Z" })], nextCursor: null } } },
+    });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    expect(await screen.findByText(/1 approved fact is not in this list \(Noon fact\)/)).toBeInTheDocument();
+  });
+
+  it("lists a card kept for its editor once when Load more brings the same fact back", async () => {
+    const ID_N = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const ID_Z = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const book = { first: { facts: [fact({ id: ID_A, topic: "Topic Y" }), fact({ id: ID_B, topic: "Topic X" })], nextCursor: "C2" }, C2: { facts: [fact({ id: ID_Z, topic: "Topic Z" })], nextCursor: null } };
+    serve({ owner: true, pages: Object.defineProperty({}, "draft", { get: () => book, enumerable: true }) });
+    mount();
+    await screen.findByText("Topic Y");
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    // A new draft arrives: X is pushed past the first page boundary.
+    book.first = { facts: [fact({ id: ID_N, topic: "Topic N" }), fact({ id: ID_A, topic: "Topic Y" })], nextCursor: "C2" };
+    book.C2 = { facts: [fact({ id: ID_B, topic: "Topic X" }), fact({ id: ID_Z, topic: "Topic Z" })], nextCursor: null };
+    fireEvent.click(screen.getAllByRole("button", { name: "Check again" })[0]);
+    await screen.findByText("Topic N");
+    fireEvent.click(await screen.findByRole("button", { name: "Load more" }));
+    await screen.findByText("Topic Z");
+    expect(screen.getAllByText("Topic X")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Save changes" })).toHaveLength(1);
   });
 });

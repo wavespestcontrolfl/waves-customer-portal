@@ -33,14 +33,14 @@ function AddDraft({ onSaved, onCancel }) {
   );
 }
 
-function FactList({ list, status, onDone, onStale, onEditing }) {
+function FactList({ list, status, onDone, onStale, onEditing, focusId }) {
   if (list.loading) return <ActionFeedback className="min-h-11">Loading facts…</ActionFeedback>;
   if (list.error && !list.facts.length) return <ActionFeedback error onRetry={list.reload}>{list.error}</ActionFeedback>;
   if (!list.facts.length) return <p className="text-ui-body text-ink-secondary">{status.empty}</p>;
   return (
     <div className="grid gap-3">
       {list.facts.map((fact) => (
-        <FactCard key={fact.id} fact={fact} ownerActions={list.ownerActions} onDone={onDone} onStale={onStale} onEditing={onEditing} />
+        <FactCard key={fact.id} fact={fact} ownerActions={list.ownerActions} onDone={onDone} onStale={onStale} onEditing={onEditing} highlight={fact.id === focusId} />
       ))}
       {list.error && <ActionFeedback error>{list.error}</ActionFeedback>}
       {list.nextCursor && <Button variant="secondary" loading={list.loadingMore} onClick={list.loadMore}>Load more</Button>}
@@ -51,6 +51,9 @@ function FactList({ list, status, onDone, onStale, onEditing }) {
 export default function CompanyFactsTab({ showFeedback }) {
   const [statusKey, setStatusKey] = useState("draft");
   const [adding, setAdding] = useState(false);
+  // The draft a change just made (outlined and scrolled to), and the notice offered when an open editor stopped the switch to Drafts.
+  const [focusId, setFocusId] = useState(null);
+  const [notice, setNotice] = useState(null);
   const editing = useRef(new Set());
   const list = useFactList(statusKey, (id) => editing.current.has(id));
   const status = STATUSES.find((item) => item.key === statusKey);
@@ -62,13 +65,30 @@ export default function CompanyFactsTab({ showFeedback }) {
   const onEditing = useCallback((id, open) => { if (open) editing.current.add(id); else editing.current.delete(id); }, []);
 
   // A finished action: say so, then refresh the list on screen. It switches to the status the fact moved to only when the admin is still
-  // looking at the status the action started in and has no edit form open; otherwise it never moves the admin.
-  const done = (message, switchTo, origin) => {
+  // looking at the status the action started in and has no edit form open; otherwise it never moves the admin. A new draft it made
+  // (focusId) is then outlined, or offered through a "Show it" notice when an open editor stopped the switch.
+  const done = (message, switchTo, origin, newId) => {
     if (message) showFeedback(message);
     const here = nowRef.current.statusKey;
-    const moves = switchTo && switchTo !== here && (!origin || origin === here) && editing.current.size === 0;
-    if (moves) setStatusKey(switchTo);
-    else nowRef.current.reload(true);
+    const sameView = !origin || origin === here;
+    const moves = switchTo && switchTo !== here && sameView && editing.current.size === 0;
+    if (moves) {
+      setStatusKey(switchTo);
+      setFocusId(newId || null);
+    } else {
+      nowRef.current.reload(true);
+      if (newId && switchTo && sameView) setNotice({ id: newId, status: switchTo });
+    }
+  };
+  const showNew = () => {
+    setStatusKey(notice.status);
+    setFocusId(notice.id);
+    setNotice(null);
+  };
+  const chooseStatus = (key) => {
+    setStatusKey(key);
+    setFocusId(null);
+    setNotice(null);
   };
 
   return (
@@ -80,7 +100,7 @@ export default function CompanyFactsTab({ showFeedback }) {
             Short facts the agents may state to customers. Anyone on the team can draft one. Only the owner account approves it.
           </p>
         </div>
-        <Button onClick={() => { setAdding(true); setStatusKey("draft"); }}>Add draft</Button>
+        <Button onClick={() => { setAdding(true); chooseStatus("draft"); }}>Add draft</Button>
       </div>
 
       {adding && (
@@ -92,14 +112,20 @@ export default function CompanyFactsTab({ showFeedback }) {
 
       <div className="mb-4 flex flex-wrap gap-2" role="group" aria-label="Fact state">
         {STATUSES.map((item) => (
-          <Button key={item.key} variant={item.key === statusKey ? "primary" : "secondary"} aria-pressed={item.key === statusKey} onClick={() => setStatusKey(item.key)}>
+          <Button key={item.key} variant={item.key === statusKey ? "primary" : "secondary"} aria-pressed={item.key === statusKey} onClick={() => chooseStatus(item.key)}>
             {item.label}
           </Button>
         ))}
       </div>
 
       {statusKey === "approved" && !list.loading && !list.error && <HowItWillRead facts={list.facts} />}
-      <FactList list={list} status={status} onDone={done} onStale={() => nowRef.current.reload(true)} onEditing={onEditing} />
+      {notice && (
+        <ActionFeedback className="mb-3">
+          <span>The new draft is in Drafts. </span>
+          <Button variant="secondary" onClick={showNew}>Show it</Button>
+        </ActionFeedback>
+      )}
+      <FactList list={list} status={status} onDone={done} onStale={() => nowRef.current.reload(true)} onEditing={onEditing} focusId={focusId} />
     </div>
   );
 }

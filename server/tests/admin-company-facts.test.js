@@ -22,7 +22,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const mockBank = {
   listFacts: jest.fn(async () => ({ facts: [], nextCursor: null })),
-  readVerifiedFacts: jest.fn(async () => [{ id: 'f1', text: 'We service Parrish.' }, { id: 'f2', text: 'We offer a plan.' }]),
+  readVerifiedFacts: jest.fn(async () => ({ facts: [{ id: 'f1', text: 'We service Parrish.' }, { id: 'f2', text: 'We offer a plan.' }], consideredIds: ['f1', 'f2', 'f3'] })),
   renderBankFactsLines: jest.fn((facts) => facts.map((f) => `- ${f.text}`).join('\n')),
   bankVersionHash: jest.fn(() => 'v1'),
   createDraft: jest.fn(async () => ({ id: 'f1', status: 'draft', check_result: { blocks: ['banned_copy'], warnings: [] } })),
@@ -126,6 +126,8 @@ describe('any admin may draft, edit, discard, retire and restore', () => {
     expect(mockBank.listFacts).toHaveBeenLastCalledWith({ status: 'all', limit: '50', cursor: 'abc' });
     expect((await call(url(`/${ID}`), 'PATCH', { factText: 'x' })).body.fact.id).toBe('f2');
     expect((await call(url(`/${ID}`), 'DELETE')).body).toEqual({ id: 'f1', discarded: true });
+    expect((await call(url(`/${ID}`), 'DELETE', { baseTextSha256: 'h', baseUpdatedAt: '2026-11-25T15:00:00.000Z' })).status).toBe(200);
+    expect(mockBank.discardDraft).toHaveBeenLastCalledWith(ID, expect.objectContaining({ isOwner: false }), { baseTextSha256: 'h', baseUpdatedAt: '2026-11-25T15:00:00.000Z' });
     expect((await call(url(`/${ID}/retire`), 'POST', { reason: 'wrong' })).status).toBe(200);
     expect(mockBank.retireFact).toHaveBeenCalledWith(ID, { reason: 'wrong' }, expect.objectContaining({ isOwner: false }));
     expect((await call(url(`/${ID}/restore`), 'POST')).status).toBe(201);
@@ -137,7 +139,7 @@ describe('preview', () => {
   test('any admin gets the lines the agents snapshot serves, from a fresh read, and the route is not taken for an id', async () => {
     mockEmail = 'someone.else@example.test';
     const res = await call(url('/preview'));
-    expect(res).toEqual({ status: 200, body: { lines: '- We service Parrish.\n- We offer a plan.', count: 2, version: 'v1', ids: ['f1', 'f2'] } });
+    expect(res).toEqual({ status: 200, body: { lines: '- We service Parrish.\n- We offer a plan.', count: 2, version: 'v1', ids: ['f1', 'f2'], consideredIds: ['f1', 'f2', 'f3'], leftOut: ['f3'] } });
     expect(mockBank.readVerifiedFacts).toHaveBeenCalledTimes(1);
     expect(mockBank.getFact).not.toHaveBeenCalled();
   });

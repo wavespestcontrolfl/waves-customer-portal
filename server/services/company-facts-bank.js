@@ -412,22 +412,34 @@ async function editApprovedRow(trx, row, f, actor) {
 }
 
 /** A draft is edited in place; an approved row is never touched: its edit is a NEW draft that supersedes it. */
+/** What the editor (or the discard button) saw when it opened, as sent: { baseTextSha256, baseUpdatedAt, expectStatus }, every part optional. */
+function openedState(input) {
+  const open = input && typeof input === 'object' ? input : {};
+  return {
+    base: typeof open.baseTextSha256 === 'string' ? open.baseTextSha256.trim().toLowerCase() : '',
+    baseUpdatedAt: typeof open.baseUpdatedAt === 'string' ? Date.parse(open.baseUpdatedAt) : NaN,
+    expectStatus: ['draft', 'approved'].includes(open.expectStatus) ? open.expectStatus : '',
+  };
+}
+
+/** Under the row lock: the row must still be the one that was opened. Status first, then the wording, then any other field. */
+function assertRowAsOpened(row, { base, baseUpdatedAt, expectStatus }) {
+  // A draft that was approved meanwhile is never "edited" into a replacement draft.
+  if (expectStatus && expectStatus !== row.status) throw new FactError('STATUS_CHANGED', 409, { status: row.status });
+  // The wording it opened: a concurrent edit of the wording is refused, never overwritten.
+  if (base && base !== row.text_sha256) throw new FactError('STALE_TEXT', 409);
+  // The row as it was when opened (its updated_at, which every write moves; milliseconds, the precision JSON carries): a concurrent edit of
+  // any field, such as the owner's words, is refused too.
+  if (!Number.isNaN(baseUpdatedAt) && baseUpdatedAt !== new Date(row.updated_at).getTime()) throw new FactError('STALE_FACT', 409);
+}
+
 async function editFact(id, patch, actor, { dbi = db } = {}) {
   const f = cleanFields(patch, { requireAll: false });
-  const open = patch && typeof patch === 'object' ? patch : {};
-  const base = typeof open.baseTextSha256 === 'string' ? open.baseTextSha256.trim().toLowerCase() : '';
-  const baseUpdatedAt = typeof open.baseUpdatedAt === 'string' ? Date.parse(open.baseUpdatedAt) : NaN;
-  const expectStatus = ['draft', 'approved'].includes(open.expectStatus) ? open.expectStatus : '';
+  const opened = openedState(patch);
   return dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status === 'retired') throw new FactError('RETIRED_USE_RESTORE', 409);
-    // What the editor opened, compared under the row lock. A draft that was approved meanwhile is never "edited" into a replacement draft.
-    if (expectStatus && expectStatus !== row.status) throw new FactError('STATUS_CHANGED', 409, { status: row.status });
-    // The wording it opened: a concurrent edit of the wording is refused, never overwritten.
-    if (base && base !== row.text_sha256) throw new FactError('STALE_TEXT', 409);
-    // The row as it was when opened (its updated_at, which every write moves; milliseconds, the precision JSON carries): a concurrent edit of
-    // any field, such as the owner's words, is refused too.
-    if (!Number.isNaN(baseUpdatedAt) && baseUpdatedAt !== new Date(row.updated_at).getTime()) throw new FactError('STALE_FACT', 409);
+    assertRowAsOpened(row, opened);
     return row.status === 'draft' ? editDraftRow(trx, row, f, actor) : editApprovedRow(trx, row, f, actor);
   });
 }
@@ -451,10 +463,13 @@ async function restoreAsDraft(id, actor, { dbi = db } = {}) {
   });
 }
 
-async function discardDraft(id, actor, { dbi = db } = {}) {
+/** `baseTextSha256` and `baseUpdatedAt` (what the page showed when Discard was pressed): another admin's newer version is never deleted. */
+async function discardDraft(id, actor, { dbi = db, baseTextSha256, baseUpdatedAt } = {}) {
+  const opened = openedState({ baseTextSha256, baseUpdatedAt });
   return dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status !== 'draft') throw new FactError('NOT_A_DRAFT', 409);
+    assertRowAsOpened(row, opened);
     await trx('company_fact_bank').where({ id }).del();
     await addEvent(trx, id, 'discarded', actor, { text_sha256: row.text_sha256 });
     return { id, discarded: true };
@@ -667,7 +682,7 @@ function loadProblem(row, check, approvers) {
 }
 
 /** The approved rows that still pass every hard block and carry their approval, in approval order, at most MAX_ACTIVE_FACTS. */
-async function loadVerifiedFacts(dbi) {
+async function verifyApprovedRows(dbi) {
   const rows = await dbi('company_fact_bank').where({ status: 'approved' }).orderBy([{ column: 'approved_at', order: 'asc' }, { column: 'id', order: 'asc' }]).select('*');
   const base = await loadCheckContext(dbi, { statuses: [], excludeIds: [] });
   const approvers = await readApprovers(dbi, rows.map((r) => r.id));
@@ -691,8 +706,10 @@ async function loadVerifiedFacts(dbi) {
   const dropKey = dropped.join(',');
   if (dropKey && dropKey !== lastDropKey) logger.error(`[company-facts-bank] approved rows dropped at load (codes only): ${dropKey}`);
   lastDropKey = dropKey;
-  return Object.freeze(kept);
+  return { kept: Object.freeze(kept), consideredIds: rows.map((r) => r.id) };
 }
+
+const loadVerifiedFacts = async (dbi) => (await verifyApprovedRows(dbi)).kept;
 
 /**
  * Reload the snapshot. A failed read keeps the last copy (it ages out after STALE_MS). A read is applied only when no
@@ -717,8 +734,14 @@ async function refreshBankFacts({ dbi = db, now = Date.now } = {}) {
   return getApprovedBankFacts({ now: now() });
 }
 
-/** A fresh, verified read of the approved rows (what a snapshot load would keep), without touching the snapshot. Throws when the read fails. */
-const readVerifiedFacts = ({ dbi = db } = {}) => loadVerifiedFacts(dbi);
+/**
+ * A fresh, verified read of the approved rows (what a snapshot load would keep), without touching the snapshot. Throws when the read fails.
+ * Answers { facts, consideredIds } from ONE read: every approved row it looked at, and the ones it kept.
+ */
+const readVerifiedFacts = async ({ dbi = db } = {}) => {
+  const { kept, consideredIds } = await verifyApprovedRows(dbi);
+  return { facts: kept, consideredIds };
+};
 
 /** The approved lines every reader may use right now. SYNC. Empty before the first load and after STALE_MS. */
 function getApprovedBankFacts({ now = Date.now() } = {}) {

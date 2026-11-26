@@ -52,6 +52,8 @@ export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing })
   // counts only while the card still shows that text (an edit or a reload that changed the wording drops both).
   const [tickedFor, setTickedFor] = useState(null);
   const [fresh, setFresh] = useState(null);
+  // What the card showed when Discard was opened: the delete carries it, so a newer version saved meanwhile is never deleted.
+  const [discardBase, setDiscardBase] = useState(null);
   const { busy, error, run } = useAction(onDone, onStale);
   const blocks = fact.check_result?.blocks || [];
   const freshWarnings = fresh && fresh.text === fact.fact_text ? fresh.warnings : null;
@@ -93,7 +95,7 @@ export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing })
       {mode === "discard" && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-ui-body">Discard this draft for good?</span>
-          <Button variant="danger" loading={busy} onClick={() => run(() => send(`/${fact.id}`, "DELETE"), "Draft discarded.")}>Discard</Button>
+          <Button variant="danger" loading={busy} onClick={() => run(() => send(`/${fact.id}`, "DELETE", discardBase), "Draft discarded.")}>Discard</Button>
           <Button variant="secondary" onClick={() => setMode("view")}>Keep</Button>
         </div>
       )}
@@ -102,7 +104,7 @@ export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing })
           {ownerActions && <Button loading={busy} disabled={!canApprove} onClick={approve}>Approve</Button>}
           <Button variant="secondary" onClick={() => setMode("edit")}>Edit</Button>
           <Button variant="secondary" loading={busy} onClick={checkAgain}>Check again</Button>
-          <Button variant="secondary" onClick={() => setMode("discard")}>Discard</Button>
+          <Button variant="secondary" onClick={() => { setDiscardBase({ baseTextSha256: fact.text_sha256, baseUpdatedAt: fact.updated_at }); setMode("discard"); }}>Discard</Button>
         </div>
       )}
       {!ownerActions && <p className="text-ui-caption text-ink-secondary">Only the owner account can approve.</p>}
@@ -126,7 +128,13 @@ export function ApprovedActions({ fact, onDone, onStale, onEditing }) {
         loadCurrent={() => send(`/${fact.id}`, "GET")}
         onStale={onStale}
         onCancel={() => setMode("view")}
-        onSubmit={async (values) => { await send(`/${fact.id}`, "PATCH", values); setMode("view"); onDone("New draft saved. The approved fact is unchanged until it is approved.", "draft"); }}
+        onSubmit={async (values) => {
+          const saved = await send(`/${fact.id}`, "PATCH", values);
+          // This form is done: unregister it before reporting, so it does not hold back the switch to Drafts. Other open editors still do.
+          setMode("view");
+          onEditing?.(fact.id, false);
+          onDone("New draft saved. The approved fact is unchanged until it is approved.", "draft", saved?.fact?.id);
+        }}
       />
     );
   }

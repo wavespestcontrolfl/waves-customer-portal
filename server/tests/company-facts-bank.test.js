@@ -352,6 +352,25 @@ describe('the reviewed text hash the page sends', () => {
     await expect(Bank.editFact(ID, { topic: 'Areas', ...opened, baseTextSha256: VECTORS[3][1], baseUpdatedAt: '2026-11-25T14:59:00.000Z' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_TEXT' });
   });
 
+  test('a discard carries what the page showed: another admin\'s newer draft is not deleted', async () => {
+    const text = 'We service Parrish.';
+    const deleted = [];
+    const dbDiscard = () => {
+      const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(text), updated_at: new Date('2026-11-25T15:00:00.123Z') };
+      const trx = (table) => ({
+        where: () => ({ forUpdate: () => ({ first: async () => row }), del: async () => { deleted.push(table); } }),
+        insert: async () => [],
+      });
+      trx.raw = () => 'now';
+      return { transaction: (work) => work(trx) };
+    };
+    await expect(Bank.discardDraft(ID, owner, { dbi: dbDiscard(), baseTextSha256: sha256(text), baseUpdatedAt: '2026-11-25T14:00:00.000Z' })).rejects.toMatchObject({ code: 'STALE_FACT', status: 409 });
+    await expect(Bank.discardDraft(ID, owner, { dbi: dbDiscard(), baseTextSha256: VECTORS[3][1], baseUpdatedAt: '2026-11-25T15:00:00.123Z' })).rejects.toMatchObject({ code: 'STALE_TEXT' });
+    expect(deleted).toEqual([]);
+    await expect(Bank.discardDraft(ID, owner, { dbi: dbDiscard(), baseTextSha256: sha256(text), baseUpdatedAt: '2026-11-25T15:00:00.123Z' })).resolves.toEqual({ id: ID, discarded: true });
+    expect(deleted).toEqual(['company_fact_bank']);
+  });
+
   // A transaction that answers every read with "nothing" and the locked draft with `row`, enough to reach the approve checks.
   const approveDb = (text) => {
     const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(text.trim()), supersedes_id: null };
@@ -424,6 +443,14 @@ describe('snapshot', () => {
     expect(Bank.renderBankFactsLines(facts)).toBe(`- ${CLEAN}\n- We treat honeybee swarms on request.`);
     expect(Bank.getApprovedBankFacts({ now: T0 + Bank.STALE_MS })).toHaveLength(2);
     expect(Bank.getApprovedBankFacts({ now: T0 + Bank.STALE_MS + 1 })).toEqual([]);
+  });
+
+  test('a fresh read answers the rows it kept and every approved row it considered, from one read', async () => {
+    const dropped = approved(2, 'We open at noon.');
+    const read = await Bank.readVerifiedFacts({ dbi: fakeDb([approved(1, CLEAN), dropped]) });
+    expect(read.facts.map((f) => f.text)).toEqual([CLEAN]);
+    expect(read.consideredIds).toEqual([approved(1, CLEAN).id, dropped.id]);
+    expect(Bank.getApprovedBankFacts({ now: T0 })).toEqual([]); // the snapshot is not touched
   });
 
   test('the version hash follows the approved set', async () => {

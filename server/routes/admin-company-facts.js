@@ -6,7 +6,7 @@
  *                           is true for the owner account only, so the page can hide Approve)
  *   POST   /                add a draft { topic, factText, question?, ownerWords?, source?, sourceRef? }
  *   GET    /preview         the approved lines exactly as the agents' snapshot would load them, from a fresh read: { lines, count,
- *                           version, ids } (rows that fail the checks again are left out, so this can be shorter than the approved list);
+ *                           version, ids, consideredIds, leftOut } (rows that fail the checks again are left out, so this can be shorter than the approved list);
  *                           503 PREVIEW_UNAVAILABLE when the read fails
  *   GET    /:id             one fact
  *   GET    /:id/history     its events, oldest first, each with actor_name (the staff member's name, null when gone)
@@ -14,7 +14,8 @@
  *                           fields that changed, plus what the editor opened: baseTextSha256 (409 STALE_TEXT when the wording changed),
  *                           baseUpdatedAt (the fact's updated_at; 409 STALE_FACT when any field changed) and expectStatus 'draft' or
  *                           'approved' (409 STATUS_CHANGED, so a draft approved meanwhile is not edited into a replacement)
- *   DELETE /:id             discard a draft
+ *   DELETE /:id             discard a draft; body { baseTextSha256?, baseUpdatedAt? } (what the page showed): a draft changed since is
+ *                           refused 409 STALE_TEXT / STALE_FACT and not deleted
  *   POST   /:id/approve     OWNER ACCOUNT ONLY (requireFullAccess); { textSha256 (the hash the page showed; 409 STALE_TEXT
  *                           when the wording changed since), ownerWords?, acknowledgeWarnings (literal true), reviewedWarnings? (the codes
  *                           the owner ticked: a warning found now that is not among them is 409 WARNINGS_NOT_ACKNOWLEDGED) }
@@ -68,14 +69,20 @@ router.post('/', handle('create', { needsId: false, status: 201 }, async (req, a
 // Before /:id. A fresh verified read, so the owner sees what the agents can receive now. A failed read is a 503 PREVIEW_UNAVAILABLE,
 // never an empty list: an empty answer would read as "every approved fact failed its checks".
 router.get('/preview', handle('preview', { needsId: false }, async () => {
-  let facts;
+  let read;
   try {
-    facts = await Bank.readVerifiedFacts();
+    read = await Bank.readVerifiedFacts();
   } catch (err) {
     logger.error(`[admin-company-facts] preview read failed (code ${err?.code || 'unknown'})`);
     throw new Bank.FactError('PREVIEW_UNAVAILABLE', 503);
   }
-  return { lines: Bank.renderBankFactsLines(facts), count: facts.length, version: Bank.bankVersionHash(facts), ids: facts.map((f) => f.id) };
+  const { facts, consideredIds } = read;
+  const served = new Set(facts.map((f) => f.id));
+  // `leftOut` comes from the same read as `ids`, so the page never compares it with a list it read at another moment.
+  return {
+    lines: Bank.renderBankFactsLines(facts), count: facts.length, version: Bank.bankVersionHash(facts), ids: [...served],
+    consideredIds, leftOut: consideredIds.filter((id) => !served.has(id)),
+  };
 }));
 
 router.get('/:id/history', handle('history', {}, async (req) => ({ events: await Bank.factHistory(req.params.id) })));
@@ -84,7 +91,7 @@ router.get('/:id', handle('get', {}, async (req) => withCheck(await Bank.getFact
 
 router.patch('/:id', handle('edit', {}, async (req, actor) => withCheck(await Bank.editFact(req.params.id, req.body, actor))));
 
-router.delete('/:id', handle('discard', {}, (req, actor) => Bank.discardDraft(req.params.id, actor)));
+router.delete('/:id', handle('discard', {}, (req, actor) => Bank.discardDraft(req.params.id, actor, { baseTextSha256: req.body?.baseTextSha256, baseUpdatedAt: req.body?.baseUpdatedAt })));
 
 // The server enforces the owner rule: requireFullAccess answers 403 for any other admin, and the service refuses again.
 router.post('/:id/approve', requireFullAccess, handle('approve', {}, async (req, actor) => withCheck(await Bank.approveFact(req.params.id, req.body, actor))));
