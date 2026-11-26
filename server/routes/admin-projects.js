@@ -3245,6 +3245,17 @@ function reportHoldInvoiceRefusal(invoice, hold) {
 // be ad-hoc (no service_record_id / scheduled_service_id), so reuse must not
 // rely on a service linkage alone — every resolved invoice is recorded back on
 // the project.
+// The project row locked for the reuse-or-create decision. Every reuse reads the customer this request read: a
+// project moved to another customer since (a merge) refuses rather than bill the old one. A missing row reads as the
+// request's own copy (the create below then fails on its own).
+async function lockProjectForInvoiceResolve(trx, project) {
+  const locked = await trx('projects').where({ id: project.id }).forUpdate().first();
+  if (locked && String(locked.customer_id) !== String(project.customer_id)) {
+    throw Object.assign(new Error('This project moved to another customer while it was being sent. Refresh and try again.'), { code: 'project_customer_changed', status: 409 });
+  }
+  return locked || {};
+}
+
 async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false, holdRequested = false }) {
   // No-charge WDO (owner ruling 2026-07-15, #2751 follow-up): an explicit $0
   // inspection fee means nothing is billed for this visit. Refuse the
@@ -3279,13 +3290,8 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
   // lock makes the loser block until the winner commits the link, then re-read it
   // and reuse the same invoice. The lock is released on commit.
   return db.transaction(async (trx) => {
-    const locked = await trx('projects').where({ id: project.id }).forUpdate().first();
-    // Every reuse below reads the customer this request read: a project moved to another customer since (a merge)
-    // refuses rather than bill the old one.
-    if (locked && String(locked.customer_id) !== String(project.customer_id)) {
-      throw Object.assign(new Error('This project moved to another customer while it was being sent. Refresh and try again.'), { code: 'project_customer_changed', status: 409 });
-    }
-    const linkedInvoiceId = (locked && locked.invoice_id) || project.invoice_id;
+    const locked = await lockProjectForInvoiceResolve(trx, project);
+    const linkedInvoiceId = locked.invoice_id || project.invoice_id;
 
     // 1. Reuse the invoice already recorded on the project (covers ad-hoc
     //    projects with no service linkage, and the dry-run → send → resend path).
@@ -4174,6 +4180,39 @@ function heldReportInvoiceSms({ firstName, typeLabel, invoice, payUrl }) {
   return `Hi ${firstName}, your Waves ${typeLabel} is complete. Invoice ${invoice.invoice_number} — pay online: ${payUrl}\n\nYour report is emailed automatically as soon as it's paid.`;
 }
 
+// The release's steps up to the provider calls, each of which can stop it: the invoice (settled, or any for a staff
+// send), the claimed row's readiness, the signed PDF archived BEFORE the link is published (a failure leaves no token
+// and no portal visibility behind), the hidden link, and the lease renewal with the filing reference (written BEFORE
+// the email, in the same fenced update, so a retry after a crash records the filing actually sent).
+// Returns { done } (the release's answer) or { invoice, pdf, link }.
+async function prepareHeldRelease({ project, projectCols, ownClaim, ctx, source, actor, staffSend, readinessOverride, revertToHeld }) {
+  const superseded = { done: { released: false, reason: 'claim_superseded' } };
+  const invoice = staffSend ? await loadHeldInvoice(project) : await loadSettledHoldInvoice(project);
+  // Not due yet is not a delivery failure: no attempt is burned.
+  if (!invoice) return { done: await revertToHeld('invoice_not_settled', { countAttempt: false }) };
+  ctx.customer = project.customer_id ? await loadProjectCustomer(project.customer_id, { strict: true }) : null;
+  // Judged on the claimed row: a staff send skips the missing-details rule only when staff gave an override reason
+  // (a detail removed after the screen read, with no reason given, stops the send).
+  const blocked = await heldReleaseBlocker(project, ctx.customer, { readinessChecked: staffSend && Boolean(readinessOverride) });
+  if (blocked) return { done: await revertToHeld(blocked) };
+  const pdf = await buildAndArchiveHeldReportPdf({ project, customer: ctx.customer, invoice, source, sentByTechId: actor?.technicianId || null });
+  if (pdf.error) return { done: await revertToHeld(pdf.error) };
+  const link = await stampHeldReportLink({ project, projectCols, ownClaim, customer: ctx.customer, invoice, requireSettled: !staffSend });
+  if (!link) return superseded;
+  const refusal = HELD_LINK_REFUSALS[link.refused];
+  if (refusal) return { done: await revertToHeld(refusal.reason, { countAttempt: refusal.countAttempt }) };
+  if (!(await db('projects').where(ownClaim).update({ ...RELEASE_LEASE_RENEWAL(), ...releaseFilingFields(pdf.wdoFiling) }))) return superseded;
+  return { invoice, pdf, link };
+}
+
+// Why a link was not published while this claim is still ours: a refund that reopened the invoice is "not due yet"
+// (no attempt); a paid invoice owned by another customer hands the report back for a person to look (a counted
+// attempt rings the bell).
+const HELD_LINK_REFUSALS = {
+  unsettled: { reason: 'invoice_not_settled', countAttempt: false },
+  owner_mismatch: { reason: 'The paid invoice belongs to another customer, so the report was not sent. Check the invoice and the customer.', countAttempt: true },
+};
+
 /**
  * Deliver a payment-held WDO report: the /send delivery with a system actor.
  * Called by the release sweep once the linked invoice is 'paid' or 'prepaid'.
@@ -4205,31 +4244,9 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep', a
   const baseRevert = makeHeldReverter({ project, claim, ctx, source });
   const revertToHeld = (reason, opts = {}) => baseRevert(reason, staffSend ? { ...opts, countAttempt: false } : opts);
   try {
-    const invoice = staffSend ? await loadHeldInvoice(project) : await loadSettledHoldInvoice(project);
-    // Not due yet is not a delivery failure: no attempt is burned.
-    if (!invoice) return await revertToHeld('invoice_not_settled', { countAttempt: false });
-    ctx.customer = project.customer_id ? await loadProjectCustomer(project.customer_id, { strict: true }) : null;
-    // Judged on the claimed row: a staff send skips the missing-details rule only when staff gave an override reason
-    // (a detail removed after the screen read, with no reason given, stops the send).
-    const blocked = await heldReleaseBlocker(project, ctx.customer, { readinessChecked: staffSend && Boolean(readinessOverride) });
-    if (blocked) return await revertToHeld(blocked);
-
-    // The signed PDF is validated and archived BEFORE the report link is published: a failure here leaves no token
-    // and no portal visibility behind.
-    const pdf = await buildAndArchiveHeldReportPdf({ project, customer: ctx.customer, invoice, source, sentByTechId: actor?.technicianId || null });
-    if (pdf.error) return await revertToHeld(pdf.error);
-    const link = await stampHeldReportLink({ project, projectCols, ownClaim, customer: ctx.customer, invoice, requireSettled: !staffSend });
-    if (!link) return { released: false, reason: 'claim_superseded' };
-    if (link.unsettled) return await revertToHeld('invoice_not_settled', { countAttempt: false });
-    // The paid invoice is another customer's: this claim is still ours, so hand the report back now and let a person
-    // look (a counted attempt rings the bell).
-    if (link.ownerMismatch) return await revertToHeld('The paid invoice belongs to another customer, so the report was not sent. Check the invoice and the customer.');
-    // Lease renewal and ownership recheck right before the provider calls.
-    // The archived filing's reference is written BEFORE the email goes, in the same fenced update: a retry
-    // after a crash then records the filing that was actually sent.
-    if (!(await db('projects').where(ownClaim).update({ ...RELEASE_LEASE_RENEWAL(), ...releaseFilingFields(pdf.wdoFiling) }))) {
-      return { released: false, reason: 'claim_superseded' };
-    }
+    const prepared = await prepareHeldRelease({ project, projectCols, ownClaim, ctx, source, actor, staffSend, readinessOverride, revertToHeld });
+    if (prepared.done) return prepared.done;
+    const { invoice, pdf, link } = prepared;
 
     const sent = await sendHeldReport({ link, customer: ctx.customer, invoice, wdoPdf: pdf.wdoPdf, wdoFiling: pdf.wdoFiling, ownClaim, staffSend });
     // The FDACS PDF rides on the email only, so the email IS the delivery.
@@ -4322,30 +4339,33 @@ function makeHeldReverter({ project, claim, ctx, source }) {
       ...(unmintToken ? { report_token: null } : {}),
       updated_at: db.fn.now(),
     }).catch((err) => logger.warn(`[projects] hold revert failed for ${project.id}: ${err.message}`));
-    // ONE bell, rung until an alert is recorded: the attempt count is saved first, so a failed insert (or a stop
-    // between the writes) must not mean the bell is never raised. A marker on the row says one was recorded.
-    const channelsNow = typeof project.delivery_channels === 'string' ? safeJsonParse(project.delivery_channels) : project.delivery_channels;
-    // ...and only while the hold is still unreleased: a revert that lost its claim, or a manual release that finished
-    // meanwhile (and closed the alert), must not be followed by a new failure alert.
-    const stillHeld = reverted && (await db('projects').where({ id: project.id }).first('report_hold_status'))?.report_hold_status === 'held';
-    if (countAttempt && stillHeld && channelsNow?.release_bell !== true) {
-      if (attemptsSoFar === 0) {
-        await logProjectActivity(null, project, 'project_report_release_blocked',
-          `Paid report release blocked: ${String(reason || 'release failed').slice(0, 200)}`, { source }).catch(() => {});
-      }
-      if (await hold.raiseReleaseFailedBell({ project, customer: ctx.customer, reason })) {
-        const marked = await db('projects').where({ id: project.id, report_hold_status: 'held' }).update({
-          delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || '{\"release_bell\": true}'::jsonb"),
-        }).catch((err) => { logger.warn(`[projects] release bell marker not stored for ${project.id}: ${err.message}`); return null; });
-        // A release that finished between the check above and the raise closed its bells BEFORE this one existed.
-        // Every releaser closes after its release commits, so the row no longer being held here means this bell is
-        // stale: close it (one of the two sides always sees the other).
-        if (marked === 0) await hold.closeReleaseFailedBell(project.id);
-      }
-    }
+    if (countAttempt && reverted) await ringReleaseFailedOnce({ hold, project, customer: ctx.customer, reason, attemptsSoFar, source });
     return { released: false, reason: String(reason || 'release_failed') };
   };
 }
+
+// ONE release-failure bell, rung until an alert is recorded: the attempt count is saved first, so a failed insert (or a
+// stop between the writes) must not mean the bell is never raised. A marker on the row says one was recorded. Only
+// while the hold is still unreleased: a revert that lost its claim, or a release that finished meanwhile (and closed
+// the alert), must not be followed by a new failure alert.
+async function ringReleaseFailedOnce({ hold, project, customer, reason, attemptsSoFar, source }) {
+  const channelsNow = typeof project.delivery_channels === 'string' ? safeJsonParse(project.delivery_channels) : project.delivery_channels;
+  const stillHeld = (await db('projects').where({ id: project.id }).first('report_hold_status'))?.report_hold_status === 'held';
+  if (!stillHeld || channelsNow?.release_bell === true) return;
+  if (attemptsSoFar === 0) {
+    await logProjectActivity(null, project, 'project_report_release_blocked',
+      `Paid report release blocked: ${String(reason || 'release failed').slice(0, 200)}`, { source }).catch(() => {});
+  }
+  if (!(await hold.raiseReleaseFailedBell({ project, customer, reason }))) return;
+  const marked = await db('projects').where({ id: project.id, report_hold_status: 'held' }).update({
+    delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || '{\"release_bell\": true}'::jsonb"),
+  }).catch((err) => { logger.warn(`[projects] release bell marker not stored for ${project.id}: ${err.message}`); return null; });
+  // A release that finished between the check above and the raise closed its bells BEFORE this one existed. Every
+  // releaser closes after its release commits, so the row no longer being held here means this bell is stale: close it
+  // (one of the two sides always sees the other).
+  if (marked === 0) await hold.closeReleaseFailedBell(project.id);
+}
+
 
 // The held invoice for a staff release: any status (staff release the report before payment). A held report with no
 // bound invoice still releases, keyed on no invoice.
@@ -4415,8 +4435,7 @@ async function stampHeldReportLink({ project, projectCols, ownClaim, customer, i
     if (!lockedProject || String(lockedProject.customer_id) !== String(customer.id)) return 'lost';
     return (await trx('projects').where({ ...ownClaim, invoice_id: invoice.id }).update(tokenUpdate)) ? 'ok' : 'lost';
   });
-  if (published === 'unsettled') return { unsettled: true };
-  if (published === 'owner_mismatch') return { ownerMismatch: true };
+  if (published === 'unsettled' || published === 'owner_mismatch') return { refused: published };
   if (published !== 'ok') return null;
   const refreshed = await db('projects').where({ id: project.id }).first();
   const reportPath = await projectReportPathForProject(db, refreshed, customer);
@@ -4602,6 +4621,66 @@ function heldUnknownOutcomeMessage(staffSend) {
 // staffSend (a manual Send report): an earlier report email whose outcome stayed unknown holds its key for good (the
 // library refuses to guess). Staff pressing Send report is the approval for a fresh copy: the key moves on, as after a
 // block, and the next attempt (this button again, or the sweep) sends a new one. The sweep alone never does.
+// The report email's key: the release, its invoice, the filing it carries, the recipient (a corrected address mints a
+// new key), and a counter that moves only on proof that nothing reached the customer (heldReportEmailOutcome). An
+// earlier email of unknown outcome keeps its key for the automatic retry; a staff press after that, once staff have
+// checked with the customer, moves the counter first: a new copy.
+async function heldReportEmailKey({ refreshed, invoice, wdoFiling, recipientEmail, ownClaim, staffSend }) {
+  const recipientHash = crypto.createHash('sha1').update(String(recipientEmail).toLowerCase()).digest('hex').slice(0, 12);
+  const stored = typeof refreshed.delivery_channels === 'string' ? safeJsonParse(refreshed.delivery_channels) : refreshed.delivery_channels;
+  const newCopyApproved = staffSend && stored?.release_email_unknown === true;
+  if (newCopyApproved) {
+    await db('projects').where(ownClaim).update({
+      delivery_channels: db.raw("(coalesce(delivery_channels, '{}'::jsonb) - 'release_email_unknown') || jsonb_build_object('release_email_blocks', coalesce((delivery_channels->>'release_email_blocks')::int, 0) + 1)"),
+    });
+  }
+  const blocks = (Number(stored?.release_email_blocks) || 0) + (newCopyApproved ? 1 : 0);
+  const invoicePart = String(invoice.id).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40);
+  return `project.report_ready:${refreshed.id}:hold_release:${invoicePart}:${filingKeyPart(wdoFiling)}:${recipientHash}${blocks ? `:b${blocks}` : ''}`;
+}
+
+// What the report email's result means, and the mark it leaves on the row:
+// - unknown: the first attempt's timeout after the handoff (deliveryOutcome 'uncertain'), or any hold the library puts
+//   on an earlier attempt with this key (ambiguous, exhausted, in progress after a crash, scheduled). Link and key stay.
+// - unsettled: the handoff refused because the invoice is no longer settled. Correctly held again: no mark.
+// - rekey: proof nothing reached the customer, a refusal (blocked) or this key's bounced or dropped ledger row (deduped).
+// - keep: a plain error. The key stays: an earlier attempt with it may have been accepted, and the next retry finds it.
+const HELD_EMAIL_OUTCOME_MARKS = {
+  rekey: "coalesce(delivery_channels, '{}'::jsonb) || jsonb_build_object('release_email_blocks', coalesce((delivery_channels->>'release_email_blocks')::int, 0) + 1)",
+  unknown: "coalesce(delivery_channels, '{}'::jsonb) || '{\"release_email_unknown\": true}'::jsonb",
+};
+function heldReportEmailOutcome(result, handoffState) {
+  if (result.ok) return 'ok';
+  if (!result.blocked && (result.deliveryOutcome === 'uncertain' || /email send held by provider_retry_/.test(String(result.error || '')))) return 'unknown';
+  if (handoffState.boundaryBlock?.code === 'HELD_INVOICE_UNSETTLED') return 'unsettled';
+  return result.blocked || result.deduped ? 'rekey' : 'keep';
+}
+
+async function sendHeldReportEmail({ refreshed, reportUrl, customer, invoice, wdoPdf, wdoFiling, ownClaim, staffSend, emailRecipient }) {
+  const handoffState = { boundaryBlock: null };
+  const result = await ProjectEmail.sendProjectReportReady({
+    project: refreshed,
+    customer,
+    reportUrl,
+    isResend: false,
+    recipient: emailRecipient,
+    handoffState,
+    withProviderHandoff: heldReportRecipientHandoff({ customerId: customer.id, expectedEmail: emailRecipient.email, state: handoffState, ownClaim, invoice, requireSettled: !staffSend }),
+    attachments: wdoPdf ? [wdoPdf.attachment] : [],
+    idempotencyKey: await heldReportEmailKey({ refreshed, invoice, wdoFiling, recipientEmail: emailRecipient.email, ownClaim, staffSend }),
+  });
+  const outcome = heldReportEmailOutcome(result, handoffState);
+  if (HELD_EMAIL_OUTCOME_MARKS[outcome]) {
+    await db('projects').where(ownClaim).update({ delivery_channels: db.raw(HELD_EMAIL_OUTCOME_MARKS[outcome]) })
+      .catch((err) => logger.warn(`[projects] release email outcome (${outcome}) not recorded for ${refreshed.id}: ${err.message}`));
+  }
+  if (outcome === 'ok') return { ok: true, messageId: result.messageId || null };
+  return {
+    ok: false, uncertain: outcome === 'unknown', unsettled: outcome === 'unsettled',
+    error: outcome === 'unknown' ? heldUnknownOutcomeMessage(staffSend) : projectEmailFailureMessage(result),
+  };
+}
+
 async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim, staffSend = false }) {
   const { refreshed, reportUrl } = link;
   const channels = {};
@@ -4610,59 +4689,7 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
   let emailRecipient = { email: '' };
   try {
     emailRecipient = await ProjectEmail.resolveProjectEmailRecipientForSend(customer, { applyReportRule: true });
-    // The email address is hashed into the key: a retry after the office
-    // corrects a bounced address mints a NEW key and really delivers.
-    const recipientHash = crypto.createHash('sha1')
-      .update(String(emailRecipient.email).toLowerCase()).digest('hex').slice(0, 12);
-    // A blocked email (a suppressed address) is a terminal row for its key. Each confirmed block moves the key on
-    // (a counter kept on the row), so once the suppression is cleared the next sweep sends for real; accepted and
-    // uncertain sends keep their key, so a retry after a crash never repeats an email.
-    const stored = typeof refreshed.delivery_channels === 'string' ? safeJsonParse(refreshed.delivery_channels) : refreshed.delivery_channels;
-    // An earlier email of unknown outcome keeps its key for the automatic retry (the provider then never sends it
-    // twice). Only a staff press after that, once staff have checked with the customer, moves the key on: a new copy.
-    const newCopyApproved = staffSend && stored?.release_email_unknown === true;
-    if (newCopyApproved) {
-      await db('projects').where(ownClaim).update({
-        delivery_channels: db.raw("(coalesce(delivery_channels, '{}'::jsonb) - 'release_email_unknown') || jsonb_build_object('release_email_blocks', coalesce((delivery_channels->>'release_email_blocks')::int, 0) + 1)"),
-      });
-    }
-    const blocks = (Number(stored?.release_email_blocks) || 0) + (newCopyApproved ? 1 : 0);
-    const handoffState = { boundaryBlock: null };
-    const result = await ProjectEmail.sendProjectReportReady({
-      project: refreshed,
-      customer,
-      reportUrl,
-      isResend: false,
-      recipient: emailRecipient,
-      handoffState,
-      withProviderHandoff: heldReportRecipientHandoff({ customerId: customer.id, expectedEmail: emailRecipient.email, state: handoffState, ownClaim, invoice, requireSettled: !staffSend }),
-      attachments: wdoPdf ? [wdoPdf.attachment] : [],
-      idempotencyKey: `project.report_ready:${refreshed.id}:hold_release:${String(invoice.id).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40)}:${filingKeyPart(wdoFiling)}:${recipientHash}${blocks ? `:b${blocks}` : ''}`,
-    });
-    // Unknown outcome: the first attempt's timeout after the handoff (deliveryOutcome 'uncertain'), or a later attempt
-    // with the same key that the library holds back. Either way the link stays and the key stays.
-    const unknownOutcomeHeld = !result.ok && !result.blocked && (result.deliveryOutcome === 'uncertain'
-      // every hold the library puts on an earlier attempt with this key: ambiguous, exhausted, in progress (a crash
-      // after the handoff began left it queued), or scheduled
-      || /email send held by provider_retry_/.test(String(result.error || '')));
-    // A boundary refusal because the invoice is no longer settled (a refund or a reversal): the report is correctly
-    // held again, so this is no delivery failure (no block counted, no attempt, no bell).
-    const unsettledAtHandoff = !result.ok && handoffState.boundaryBlock?.code === 'HELD_INVOICE_UNSETTLED';
-    // The key moves only on proof that nothing reached the customer: a refusal (blocked), or the email ledger answering
-    // this key with its terminal failed row (deduped: bounced or dropped), which it would otherwise answer forever. A
-    // plain error keeps the key: an earlier attempt with it may have been accepted, and the next retry finds it.
-    if (!result.ok && !unknownOutcomeHeld && !unsettledAtHandoff && (result.blocked || result.deduped)) {
-      await db('projects').where(ownClaim).update({
-        delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || jsonb_build_object('release_email_blocks', coalesce((delivery_channels->>'release_email_blocks')::int, 0) + 1)"),
-      }).catch((err) => logger.warn(`[projects] release email block not counted for ${refreshed.id}: ${err.message}`));
-    } else if (unknownOutcomeHeld) {
-      await db('projects').where(ownClaim).update({
-        delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || '{\"release_email_unknown\": true}'::jsonb"),
-      }).catch((err) => logger.warn(`[projects] release email outcome not recorded for ${refreshed.id}: ${err.message}`));
-    }
-    channels.email = result.ok
-      ? { ok: true, messageId: result.messageId || null }
-      : { ok: false, uncertain: unknownOutcomeHeld, unsettled: unsettledAtHandoff, error: unknownOutcomeHeld ? heldUnknownOutcomeMessage(staffSend) : projectEmailFailureMessage(result) };
+    channels.email = await sendHeldReportEmail({ refreshed, reportUrl, customer, invoice, wdoPdf, wdoFiling, ownClaim, staffSend, emailRecipient });
   } catch (err) {
     channels.email = { ok: false, error: err.message };
   }
@@ -5116,17 +5143,38 @@ function sendHoldFlag(body) {
 }
 
 // Answers the request and returns true when the hold cannot be armed (no invoice needed yet).
-async function holdRequestRefused(res, project, customer, holdRequested) {
+// A combined send's delivery claim: a held send never takes a release's claim; a plain send claims no report that is
+// held or being released.
+const SEND_CLAIM_HOLD_EXCLUSION = {
+  true: "coalesce(report_hold_status, '') <> 'releasing'",
+  false: "coalesce(report_hold_status, '') NOT IN ('held', 'releasing')",
+};
+
+// The recipient a combined send's customer email goes to: a held send uses the billing email authority's recipient.
+function combinedSendEmailRecipient(hold, customer, invoice) {
+  return hold.active
+    ? heldInvoiceEmailRecipient(customer, invoice)
+    : ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
+}
+
+const HOLD_USE_SEND_REPORT = { status: 409, code: 'hold_use_send_report', error: 'This report is held until the invoice is paid. Press Send report to send it now, or re-send the held invoice.' };
+const HOLD_INVOICE_REQUIRED = { status: 422, code: 'hold_invoice_required', error: 'A held send needs the invoice the operator confirmed. Prepare the invoice first.' };
+
+async function holdRequestRefused(res, { project, customer, holdRequested, needsConfirmedInvoice }) {
   // The ONE preflight, before any invoice is created: the link, the release readiness and the credit balance (the
   // payer is checked where a draft would be created, and the payment evidence on the resolved invoice below).
   // The arming transaction judges the same things again under the locks.
-  let refusal = null;
+  // A held report goes out only through the release (Send report), never inside a plain report + invoice send. A held
+  // send bills an invoice that already exists (the drawer prepares the draft first and the operator confirms ITS
+  // amount): it never creates the invoice itself, so the amount confirmed is the amount sent.
+  let refusal = (!holdRequested && isReportHeld(project) && HOLD_USE_SEND_REPORT) || null;
   if (holdRequested) {
     refusal = await reportHoldRequestRefusal(project, await db('projects').columnInfo().catch(() => ({})), customer);
     if (!refusal && await require('../services/project-report-hold').customerHasCredit(project.customer_id)) {
       refusal = { status: 409, code: 'hold_has_credit', error: 'This customer has account credit, which would settle the invoice before the report is held. Use Send report + invoice.' };
     }
   }
+  refusal = refusal || (holdRequested && needsConfirmedInvoice && HOLD_INVOICE_REQUIRED) || null;
   if (refusal) res.status(refusal.status).json({ error: refusal.error, code: refusal.code });
   return Boolean(refusal);
 }
@@ -5341,6 +5389,57 @@ function buildSendReportPdf(hold, refreshed, customer) {
   return hold.active ? Promise.resolve(null) : buildWdoPdfAttachment(refreshed, customer);
 }
 
+// ONE SMS of a combined send, report link + pay link, as a channel result. It goes through the canonical
+// 'payment_link' policy (consent, kill switch, identity trust, invoiceId). That policy forbids an exact price and caps
+// at 2 segments, so the body omits the dollar amount (it's on the pay page / invoice PDF) and stays terse. For WDO it is
+// sent only after the email succeeds, since the report itself lives in the email-only FDACS PDF and a bare pay-link
+// text would be wrong; for non-WDO the report link is in the text, so it sends regardless.
+async function sendInvoicePayLinkText({ hold, isWdoProject, isPayerInvoice, emailOk, customer, project, invoice, firstName, typeLabel, reportUrl, payUrl, deliveryClaimToken }) {
+  const normalized = normalizeUsPhone(customer.phone);
+  if (!normalized) return { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
+  if (isWdoProject && !emailOk) return { ok: false, error: 'Skipped — email delivery did not succeed' };
+  try {
+    const result = await sendCustomerMessage({
+      to: normalized,
+      body: invoiceSendSmsBody({ hold, isPayerInvoice, firstName, typeLabel, reportUrl, invoice, payUrl }),
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'payment_link',
+      customerId: customer.id,
+      invoiceId: invoice.id,
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'admin_project_report_with_invoice',
+      operatorInitiated: true,
+      // original_message_type 'invoice' keeps the admin-sms-templates invoice kill switch applicable to this billing text.
+      metadata: { original_message_type: 'invoice', project_id: project.id, invoice_id: invoice.id, ...(hold.active ? { report_hold: true } : {}) },
+      // A held send's pay-link text: the number, the customer and this send's claim re-read under the phone locks
+      // through the provider request (a phone corrected or a merge during the send skips the text).
+      ...(hold.active ? { withSmsHandoff: heldInvoiceSmsHandoff({ customerId: customer.id, phone: normalized, projectId: project.id, invoiceId: invoice.id, deliveryClaimToken }) } : {}),
+    });
+    if (result.sent) return { ok: true };
+    return { ok: false, error: result.code === 'RECIPIENT_CHANGED' ? 'Skipped: the phone number or customer changed during the send' : (result.reason || result.code || 'SMS send blocked/failed') };
+  } catch (e) {
+    logger.error(`[projects] combined send sms failed: ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+}
+
+// The customer email of a combined send, as a channel result. The library reports its own errors in the result, so a
+// throw is usually before the provider phase (not sent); a held send knows better: a throw after its handoff started
+// may have reached the customer (outcome unknown).
+async function sendCustomerInvoiceEmail(args) {
+  if (!args.recipient.email) return { ok: false, error: 'No email on file' };
+  try {
+    const result = await sendInvoiceEmail(args);
+    return result.ok
+      ? { ok: true, messageId: result.messageId || null }
+      : { ok: false, error: projectEmailFailureMessage(result), uncertain: invoiceEmailUncertain(result) };
+  } catch (e) {
+    logger.error(`[projects] combined send email failed: ${e.message}`);
+    return { ok: false, error: e.message, uncertain: Boolean(args.handoffState?.handoffStarted) };
+  }
+}
+
 // The customer email: invoice-first for a hold, report-only for a payer-billed invoice, else combined.
 function sendInvoiceEmail({ handoffState, hold, deliveryClaimToken, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient }) {
   if (hold.active) {
@@ -5407,6 +5506,49 @@ function invoiceEmailUncertain(result) {
   return !result.ok && !result.blocked && !result.skipped && result.deliveryOutcome === 'uncertain';
 }
 
+// The checks every held pay-link handoff (the invoice email and the text) runs on its locked handle, in one place:
+// the invoice and the project still belong to the customer, this send still owns the claim on a held, unshared
+// report, it is still the homeowner's own bill (not withdrawn to a payer, the visit not billed to a third party now),
+// and no collections hold stops the pay link (an operator send skips only a plain dispute hold; an unreadable hold
+// refuses). Returns { live, liveProject } or { code, reason } (a refusal).
+async function heldPayLinkFence(database, { customerId, projectId, invoiceId, deliveryClaimToken }) {
+  const live = await database('invoices').where({ id: invoiceId }).forShare().first();
+  const liveProject = await database('projects').where({ id: projectId }).forShare().first();
+  if (!live || !liveProject) return { code: 'HELD_INVOICE_UNREADABLE', reason: 'The invoice or project could not be re-read' };
+  if ([live.customer_id, liveProject.customer_id].some((id) => String(id) !== String(customerId))) {
+    return { code: 'INVOICE_CUSTOMER_MISMATCH', reason: 'The invoice or project moved to another customer' };
+  }
+  if (String(liveProject.delivery_claim_token || '') !== String(deliveryClaimToken)
+    || liveProject.report_hold_status !== 'held' || reportLinkShared(liveProject)) {
+    return { code: 'HELD_SEND_SUPERSEDED', reason: 'This send no longer owns a held, unshared report' };
+  }
+  const ownership = await require('../services/invoice-helpers').selfPayAtDispatch(invoiceId, database)();
+  if (ownership.ok !== true) return { code: ownership.code || 'INVOICE_PAYER_BILLED', reason: ownership.reason || 'Not the homeowner\'s bill' };
+  if (await liveBillToRefusal(liveProject, database)) return { code: 'INVOICE_PAYER_BILLED', reason: 'This service is now billed to a third party' };
+  const collectionHold = require('../services/collections/collection-hold');
+  const held = await collectionHold.messagingHeldByCollectionHold(customerId, database, { ignoreDisputeHold: collectionHold.holdExemptionApplies('operator') });
+  if (held.held) return { code: 'COLLECTION_HOLD', reason: 'A collections hold applies to this customer' };
+  return { live, liveProject };
+}
+
+// Everything arming checked, again at the invoice email's provider boundary: still a fee to bill, no payment started,
+// no account credit, and a report that can still send by itself once paid. Returns a refusal or null.
+async function heldInvoiceStillArmable(database, { live, liveProject, customerId }) {
+  if (resolveWdoInspectionFee(parseFindings(liveProject)) === 0) return { code: 'WDO_NO_CHARGE', reason: 'The inspection is now recorded as no charge' };
+  try {
+    await require('../services/project-report-hold').assertNoPaymentStarted(live, database);
+  } catch (err) {
+    return { code: 'HOLD_PAYMENT_STARTED', reason: err.message };
+  }
+  const liveCustomer = await loadProjectCustomer(customerId, { strict: true, database });
+  if (!liveCustomer || liveCustomer.deleted_at) return { code: 'INVOICE_CUSTOMER_MISMATCH', reason: 'The customer record changed' };
+  if (Number(liveCustomer.account_credits) > 0) return { code: 'HOLD_HAS_CREDIT', reason: 'The customer now has account credit' };
+  if (await holdReleasabilityRefusal(liveProject, liveCustomer, { database })) {
+    return { code: 'HOLD_NOT_RELEASABLE', reason: 'The report could no longer send by itself after payment' };
+  }
+  return null;
+}
+
 // The held invoice email's provider handoff: the canonical billing email authority (the customer's comms lock, the
 // recipient re-resolved under it, the invoice's deposit-settlement lock, collection holds, suppression), held from the
 // last check through the provider request. Its pre-send check, run on the LOCKED handle before dispatch and again at the
@@ -5421,45 +5563,16 @@ function heldInvoiceProviderHandoff({ invoice, project, deliveryClaimToken, reci
   const preSendCheck = async ({ database }) => {
     // The switch is read again: turning the hold off stops a held invoice email that has not gone yet.
     if (!wdoReportHoldLive()) return refuse('HOLD_SWITCHED_OFF', 'The report hold was switched off');
-    const live = await database('invoices').where({ id: invoice.id }).first();
-    const liveProject = await database('projects').where({ id: project.id }).forShare().first();
-    if (!live || !liveProject) return refuse('HELD_INVOICE_UNREADABLE', 'The invoice or project could not be re-read');
-    if ([live.customer_id, liveProject.customer_id].some((id) => String(id) !== String(customerId))) {
-      return refuse('INVOICE_CUSTOMER_MISMATCH', 'The invoice or project moved to another customer');
-    }
-    if (String(liveProject.delivery_claim_token || '') !== String(deliveryClaimToken)
-      || liveProject.report_hold_status !== 'held' || reportLinkShared(liveProject)) {
-      return refuse('HELD_SEND_SUPERSEDED', 'This send no longer owns a held, unshared report');
-    }
+    const fence = await heldPayLinkFence(database, { customerId, projectId: project.id, invoiceId: invoice.id, deliveryClaimToken });
+    if (fence.code) return refuse(fence.code, fence.reason);
+    const { live, liveProject } = fence;
     if (String(live.status || '') !== 'sending') return refuse('HELD_INVOICE_NOT_SENDABLE', 'The invoice was paid, voided or changed state');
     const due = require('../services/invoice-helpers').invoiceAmountDue(live);
     if (billingFingerprint(live) !== billingFingerprint(invoice) || due !== expectedDue || !(due > 0)) {
       return refuse('HELD_INVOICE_CHANGED', 'The invoice amount changed before delivery');
     }
-    const ownership = await require('../services/invoice-helpers').selfPayAtDispatch(invoice.id, database)();
-    if (ownership.ok !== true) return ownership;
-    // ...and the visit is still billed to the homeowner as it is now (a payer assigned since arming refuses).
-    if (await liveBillToRefusal(liveProject, database)) return refuse('INVOICE_PAYER_BILLED', 'This service is now billed to a third party');
-    // Everything arming checked, again at the provider boundary: still a fee to bill, no payment started, no account
-    // credit, and a report that can still send by itself once paid.
-    if (resolveWdoInspectionFee(parseFindings(liveProject)) === 0) return refuse('WDO_NO_CHARGE', 'The inspection is now recorded as no charge');
-    try {
-      await require('../services/project-report-hold').assertNoPaymentStarted(live, database);
-    } catch (err) {
-      return refuse('HOLD_PAYMENT_STARTED', err.message);
-    }
-    const liveCustomer = await loadProjectCustomer(customerId, { strict: true, database });
-    if (!liveCustomer || liveCustomer.deleted_at) return refuse('INVOICE_CUSTOMER_MISMATCH', 'The customer record changed');
-    if (Number(liveCustomer.account_credits) > 0) return refuse('HOLD_HAS_CREDIT', 'The customer now has account credit');
-    if (await holdReleasabilityRefusal(liveProject, liveCustomer, { database })) {
-      return refuse('HOLD_NOT_RELEASABLE', 'The report could no longer send by itself after payment');
-    }
-    // The authority reads collection holds only for the dunning templates, so this send asks itself, on the locked
-    // handle: an operator send skips a plain dispute hold; a wrong-number or wrong-party fallback hold stops the pay
-    // link, and an unreadable hold refuses (the shared read answers held).
-    const collectionHold = require('../services/collections/collection-hold');
-    const held = await collectionHold.messagingHeldByCollectionHold(customerId, database, { ignoreDisputeHold: collectionHold.holdExemptionApplies('operator') });
-    return held.held ? refuse('COLLECTION_HOLD', 'A collections hold applies to this customer') : { ok: true };
+    const notArmable = await heldInvoiceStillArmable(database, { live, liveProject, customerId });
+    return notArmable ? refuse(notArmable.code, notArmable.reason) : { ok: true };
   };
   return (dispatch) => require('../services/billing-channel-email-authority').dispatchUnderBillingEmailAuthority({
     input: { customerId, invoiceId: invoice.id, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' } },
@@ -5482,24 +5595,13 @@ function heldInvoiceSmsHandoff({ customerId, phone, projectId, invoiceId, delive
     try {
       return await withSmsConsentLock(db, { phone, customerId }, async (trx) => {
         const liveCustomer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id', 'phone');
-        const liveInvoice = await trx('invoices').where({ id: invoiceId }).forShare().first();
-        const liveProject = await trx('projects').where({ id: projectId }).forShare().first();
-        if (!liveCustomer || normalizeUsPhone(liveCustomer.phone) !== phone
-          || String(liveInvoice?.customer_id) !== String(customerId)
-          // paid from the email meanwhile (or voided): no second request to pay
-          || ['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'].includes(String(liveInvoice?.status || '').toLowerCase())
-          || !(require('../services/invoice-helpers').invoiceAmountDue(liveInvoice) > 0)
-          || String(liveProject?.customer_id) !== String(customerId)
-          || String(liveProject?.delivery_claim_token || '') !== String(deliveryClaimToken)
-          || liveProject?.report_hold_status !== 'held') return refused;
-        // Still the homeowner's own bill: not withdrawn to a payer, and the visit not billed to a third party now.
-        const ownership = await require('../services/invoice-helpers').selfPayAtDispatch(invoiceId, trx)();
-        if (ownership.ok !== true || await liveBillToRefusal(liveProject, trx)) return refused;
-        // A collections hold (a wrong-number or wrong-party fallback) stops the pay link, as on the invoice email; an
-        // operator send skips only a plain dispute hold, and an unreadable hold refuses.
-        const collectionHold = require('../services/collections/collection-hold');
-        const held = await collectionHold.messagingHeldByCollectionHold(customerId, trx, { ignoreDisputeHold: collectionHold.holdExemptionApplies('operator') });
-        if (held.held) return { ok: false, code: 'COLLECTION_HOLD', reason: 'collection_hold', retryable: false };
+        if (!liveCustomer || normalizeUsPhone(liveCustomer.phone) !== phone) return refused;
+        const fence = await heldPayLinkFence(trx, { customerId, projectId, invoiceId, deliveryClaimToken });
+        if (fence.code === 'COLLECTION_HOLD') return { ok: false, code: 'COLLECTION_HOLD', reason: 'collection_hold', retryable: false };
+        if (fence.code) return refused;
+        // paid from the email meanwhile (or voided): no second request to pay
+        if (['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'].includes(String(fence.live.status || '').toLowerCase())
+          || !(require('../services/invoice-helpers').invoiceAmountDue(fence.live) > 0)) return refused;
         dispatched = true;
         return dispatch(trx);
       });
@@ -5520,6 +5622,20 @@ async function heldInvoiceEmailRecipient(customer, invoice) {
   }, 'projects');
   if (resolved.refusal) return { email: null, refusal: resolved.refusal };
   return { email: resolved.to, name: resolved.recipient?.name || '', role: resolved.recipient?.role || 'billing' };
+}
+
+// A held send whose invoice email outcome is unknown is never marked sent (no sent stamp, no reminders, no visit
+// closeout); the office bell asks staff to check with the customer. A first delivery parks the invoice for review the
+// way a stale send is (still payable from the link the customer may hold, so payment still releases the report). An
+// invoice already sent (sent, viewed, overdue) keeps its status: its earlier delivery still stands.
+async function settleUnverifiedHeldInvoice(invoice, previousInvoiceStatus) {
+  const firstDelivery = ['draft', 'scheduled'].includes(String(previousInvoiceStatus || '').toLowerCase());
+  const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
+  const update = firstDelivery
+    ? { status: 'scheduled', scheduled_send_at: null, scheduled_send_error: STALE_SEND_PARK_ERROR, send_claim_token: null }
+    : { status: previousInvoiceStatus };
+  await db('invoices').where({ id: invoice.id, status: 'sending' }).update({ ...update, updated_at: db.fn.now() })
+    .catch((err) => logger.error(`[projects] unverified held invoice not settled for ${invoice.id}: ${err.message}`));
 }
 
 // The one bell for an invoice email of unknown outcome: the hold stays, and staff check whether it arrived. A later
@@ -5778,16 +5894,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Report hold (GATE_WDO_REPORT_HOLD): send the invoice and pay link only, and send the report
     // by itself once the invoice is paid. Prepare mode checks the hold but never arms it.
     const holdRequested = sendHoldFlag(req.body);
-    if (await holdRequestRefused(res, project, customer, holdRequested)) return;
-    // A held report goes out only through the release (Send report), never inside a plain report + invoice send.
-    if (!holdRequested && isReportHeld(project)) {
-      return res.status(409).json({ error: 'This report is held until the invoice is paid. Press Send report to send it now, or re-send the held invoice.', code: 'hold_use_send_report' });
-    }
-    // A held send bills an invoice that already exists (the drawer prepares the draft first and the operator confirms ITS
-    // amount): it never creates the invoice itself, so the amount confirmed is the amount sent.
-    if (holdRequested && !dryRun && !prepareInvoice && !req.body?.invoice_id) {
-      return res.status(422).json({ error: 'A held send needs the invoice the operator confirmed. Prepare the invoice first.', code: 'hold_invoice_required' });
-    }
+    const needsConfirmedInvoice = !dryRun && !prepareInvoice && !req.body?.invoice_id;
+    if (await holdRequestRefused(res, { project, customer, holdRequested, needsConfirmedInvoice })) return;
 
     const hold = createSendHold(project, holdRequested);
     const { invoice, created } = await resolveOrCreateProjectInvoice({
@@ -5941,9 +6049,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // ...and a plain send never claims a report held (or being released) since the read above. No send at all takes a
     // release's claim (a crashed one is handed back by the release's own recovery).
     if ('report_hold_status' in project) {
-      deliveryClaimQuery.whereRaw(holdRequested
-        ? "coalesce(report_hold_status, '') <> 'releasing'"
-        : "coalesce(report_hold_status, '') NOT IN ('held', 'releasing')");
+      deliveryClaimQuery.whereRaw(SEND_CLAIM_HOLD_EXCLUSION[String(Boolean(holdRequested))]);
     }
     const deliveryClaimRows = await deliveryClaimQuery
       .update({ delivery_status: 'sending', delivery_claim_token: deliveryClaimToken, updated_at: db.fn.now() });
@@ -6112,9 +6218,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // The recipient the invoice email really goes to: a held send resolves it with the contact's email switch (the
     // service contact falls back to the account holder), and that one address receives the email and is the one the
     // billing copy is compared with. (Resolved before anything is dispatched.)
-    const emailRecipient = hold.active
-      ? await heldInvoiceEmailRecipient(customer, invoice)
-      : ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
+    const emailRecipient = await combinedSendEmailRecipient(hold, customer, invoice);
     // ONE email FIRST — it carries the report attachments (the FDACS PDF for WDO)
     // + the invoice PDF. For WDO it's the required channel: the pay-link SMS is
     // only sent after the email succeeds, so a failed email can't leave the
@@ -6123,23 +6227,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // (the report link rides in the SMS), so its failure doesn't block the text.
     if (hold.active) heldHandoffState = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
     else dispatchStarted = true;
-    if (emailRecipient.email) {
-      try {
-        const result = await sendInvoiceEmail({
-          handoffState: heldHandoffState, hold, deliveryClaimToken, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient: emailRecipient,
-        });
-        channels.email = result.ok
-          ? { ok: true, messageId: result.messageId || null }
-          : { ok: false, error: projectEmailFailureMessage(result), uncertain: invoiceEmailUncertain(result) };
-      } catch (e) {
-        // The library reports its own errors in the result, so a throw is usually before the provider phase (not sent).
-        // A held send knows: a throw after its handoff started may have reached the customer (outcome unknown).
-        logger.error(`[projects] combined send email failed: ${e.message}`);
-        channels.email = { ok: false, error: e.message, uncertain: Boolean(heldHandoffState?.handoffStarted) };
-      }
-    } else {
-      channels.email = { ok: false, error: 'No email on file' };
-    }
+    channels.email = await sendCustomerInvoiceEmail({
+      handoffState: heldHandoffState, hold, deliveryClaimToken, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient: emailRecipient,
+    });
 
     // Billing-contact copy: recipient resolution above prefers the slot-1
     // service contact, so a configured billing contact (notification_prefs
@@ -6246,39 +6336,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // terse. For WDO it's sent only after the email succeeds, since the report
     // itself lives in the email-only FDACS PDF and a bare pay-link text would be
     // wrong; for non-WDO the report link is in the text, so it sends regardless.
-    const normalized = normalizeUsPhone(customer.phone);
-    if (!normalized) {
-      channels.sms = { ok: false, error: customer.phone ? `Invalid phone format: ${customer.phone}` : 'No phone on file' };
-    } else if (isWdoProject && !channels.email?.ok) {
-      channels.sms = { ok: false, error: 'Skipped — email delivery did not succeed' };
-    } else {
-      try {
-        const smsBody = invoiceSendSmsBody({ hold, isPayerInvoice, firstName, typeLabel, reportUrl, invoice, payUrl });
-        const result = await sendCustomerMessage({
-          to: normalized,
-          body: smsBody,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'payment_link',
-          customerId: customer.id,
-          invoiceId: invoice.id,
-          identityTrustLevel: 'phone_matches_customer',
-          entryPoint: 'admin_project_report_with_invoice',
-          operatorInitiated: true,
-          // original_message_type 'invoice' keeps the admin-sms-templates
-          // invoice kill switch applicable to this billing text.
-          metadata: { original_message_type: 'invoice', project_id: project.id, invoice_id: invoice.id, ...(hold.active ? { report_hold: true } : {}) },
-          // A held send's pay-link text: the number, the customer and this send's claim re-read under the phone locks
-          // through the provider request (a phone corrected or a merge during the send skips the text).
-          ...(hold.active ? { withSmsHandoff: heldInvoiceSmsHandoff({ customerId: customer.id, phone: normalized, projectId: project.id, invoiceId: invoice.id, deliveryClaimToken }) } : {}),
-        });
-        channels.sms = result.sent ? { ok: true }
-          : { ok: false, error: result.code === 'RECIPIENT_CHANGED' ? 'Skipped: the phone number or customer changed during the send' : (result.reason || result.code || 'SMS send blocked/failed') };
-      } catch (e) {
-        logger.error(`[projects] combined send sms failed: ${e.message}`);
-        channels.sms = { ok: false, error: e.message };
-      }
-    }
+    channels.sms = await sendInvoicePayLinkText({
+      hold, isWdoProject, isPayerInvoice, emailOk: Boolean(channels.email?.ok), customer, project, invoice, firstName, typeLabel, reportUrl, payUrl, deliveryClaimToken,
+    });
 
     // Mirror /send: only count channels the customer actually has, so an
     // email-only or SMS-only customer whose one channel succeeds is recorded as
@@ -6327,22 +6387,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Phase 2: an accrued invoice is finalized by its statement, not here.
     const invoiceDelivered = !accruedOnStatement
       && (isPayerInvoice ? !!channels.payer_email?.ok : delivered);
-    // A held send whose invoice email outcome is unknown: the invoice is parked for review the way a stale send is
-    // (still payable from the link the customer may hold, so payment still releases the report), never marked sent
-    // (no sent stamp, no reminders, no visit closeout). The office bell asks staff to check with the customer.
-    // Parked only when this was the invoice's first delivery: an invoice already sent (sent, viewed, overdue) keeps
-    // its status, since its earlier delivery still stands (the bell still asks staff to check this resend).
-    const firstDelivery = ['draft', 'scheduled'].includes(String(previousInvoiceStatus || '').toLowerCase());
-    const parkUnverified = hold.active && !isPayerInvoice && Boolean(channels.email?.uncertain);
-    if (invoiceDelivered && parkUnverified && !firstDelivery) {
-      await db('invoices').where({ id: invoice.id, status: 'sending' })
-        .update({ status: previousInvoiceStatus, updated_at: db.fn.now() })
-        .catch((err) => logger.error(`[projects] unverified held resend status not restored for ${invoice.id}: ${err.message}`));
-    } else if (invoiceDelivered && parkUnverified) {
-      const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
-      await db('invoices').where({ id: invoice.id, status: 'sending' })
-        .update({ status: 'scheduled', scheduled_send_at: null, scheduled_send_error: STALE_SEND_PARK_ERROR, send_claim_token: null, updated_at: db.fn.now() })
-        .catch((err) => logger.error(`[projects] unverified held invoice not parked for ${invoice.id}: ${err.message}`));
+    const unverifiedHeld = invoiceDelivered && hold.active && !isPayerInvoice && Boolean(channels.email?.uncertain);
+    if (unverifiedHeld) {
+      await settleUnverifiedHeldInvoice(invoice, previousInvoiceStatus);
     } else if (invoiceDelivered) {
       await InvoiceService.markDeliverySent(invoice.id, {
         sms: !!channels.sms?.ok,

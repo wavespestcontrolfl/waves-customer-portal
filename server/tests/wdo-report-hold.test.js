@@ -900,7 +900,7 @@ describe('manual send releases a held report early, and never races the sweep', 
   test('a plain send (Send report, or report + invoice without the hold) claims no report that became held after its read', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
     expect(source).toContain("if ('report_hold_status' in project) sendClaimQuery.whereRaw(\"coalesce(report_hold_status, '') NOT IN ('held', 'releasing')\");");
-    expect(source).toContain(`: "coalesce(report_hold_status, '') NOT IN ('held', 'releasing')");`);
+    expect(source).toContain(`false: "coalesce(report_hold_status, '') NOT IN ('held', 'releasing')",`);
   });
 
   test('GET /:id offers the hold only while the gate is on, for an unsent WDO', async () => {
@@ -2220,7 +2220,7 @@ describe('audit fixes', () => {
 
     test('a held send-with-invoice never takes a release claim', () => {
       const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
-      expect(source).toContain(`? "coalesce(report_hold_status, '') <> 'releasing'"`);
+      expect(source).toContain(`true: "coalesce(report_hold_status, '') <> 'releasing'",`);
     });
   });
 
