@@ -425,8 +425,27 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
     await blockSpamSender({ id: 3, from_address: 'News@Mail.BASF.com' });
     expect(db).not.toHaveBeenCalled();
     // A look-alike is not a digest sender: it reaches the ordinary lookups.
+    const spy = jest.spyOn(require('../services/email/vendor-sender'), 'isVendorWeUse').mockResolvedValue(false);
     db.mockImplementation(() => { throw new Error('lookup reached'); });
     await expect(blockSpamSender({ id: 4, from_address: 'srep@siteone.com.evil.example' })).rejects.toThrow('lookup reached');
+    spy.mockRestore();
+  });
+
+  test('blockSpamSender adds no block for a vendor we use (owner 2026-11-25)', async () => {
+    const vendorSender = require('../services/email/vendor-sender');
+    // Fixed-list vendors, subdomain and Name <addr> forms: no lookup at all.
+    await blockSpamSender({ id: 1, from_address: 'news@mail.anthropic.com' });
+    await blockSpamSender({ id: 2, from_address: 'OpenAI <noreply@tm.openai.com>' });
+    expect(db).not.toHaveBeenCalled();
+    // A vendor known from the database: returns before the block lookups and any Gmail filter.
+    const spy = jest.spyOn(vendorSender, 'isVendorWeUse').mockResolvedValue(true);
+    await blockSpamSender({ id: 3, from_address: 'deals@promo.supplier.example' });
+    expect(db).not.toHaveBeenCalled();
+    // Not a vendor: it reaches the ordinary lookups.
+    spy.mockResolvedValue(false);
+    db.mockImplementation(() => { throw new Error('lookup reached'); });
+    await expect(blockSpamSender({ id: 4, from_address: 'deals@retailer.example.com' })).rejects.toThrow('lookup reached');
+    spy.mockRestore();
   });
 
   test('blockSpamSender returns before any lookup or Gmail filter for a government sender', async () => {

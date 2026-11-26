@@ -198,6 +198,9 @@ async function blockSpamSender(email) {
   // Gmail filter would trash every later promo or price notice. Lazy require:
   // the digest loads inbox-hygiene, which loads this module.
   if (require('../procurement/siteone-deals-digest').isDealSenderDomain(fromAddress)) return;
+  // Nor any vendor we use (owner 2026-11-25): the one email is still
+  // quarantined, but no block row or Gmail trash filter for later promo mail.
+  if (await require('./vendor-sender').isVendorWeUse(email)) return;
 
   // Don't block known good domains
   const isVendor = await db('vendor_email_domains').where('domain', domain).first();
