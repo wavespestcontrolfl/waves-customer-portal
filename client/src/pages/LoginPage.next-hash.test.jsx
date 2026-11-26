@@ -60,7 +60,7 @@ describe('the report button target survives the login round trip', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
     await waitFor(() => expect(screen.getByLabelText('Verification code')).toBeInTheDocument());
     fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '123456' } });
-    fireEvent.click(screen.getByRole('button', { name: /verify|sign in|continue/i }));
+    // The sixth digit signs in by itself; no button tap is needed.
 
     await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/?tab=property#irrigation'));
     expect(await screen.findByText('Portal home')).toBeInTheDocument();
