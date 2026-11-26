@@ -373,6 +373,14 @@ describe('parseInspectionReport', () => {
     // Two counted, one of the first visit's: the other could be 35A. A row first cited at a follow-up is not its.
     const screen = row('35B-03-4', 'Basic - From follow-up inspection 2026-09-03: Screen torn.');
     expect(read(`${door}${screen}`, 2)).toBeNull();
+    // Two rows that cite the same at the first visit (code, label and initial note) are one of its citations,
+    // whatever their later notes: the other counted citation could be 35A. A different initial note meets the count.
+    const doorAgain = row('35B-01-4', 'Basic - - From initial inspection : Basic - Gap under the back door. '
+      + '- From follow-up inspection 2026-09-03: Corrected on site.');
+    expect(read(`${door}${doorAgain}`, 2)).toBeNull();
+    const vent = row('35B-01-4', 'Basic - - From initial inspection : Basic - Gap around the vent pipe. '
+      + '- From follow-up inspection 2026-09-03: **Time Extended**');
+    expect(read(`${door}${vent}`, 2)).toEqual({ pestEvidence: false, findings: [] });
     // A 35A row first cited at a follow-up does not block the first visit's answer.
     const flies = row('35A-02-8', 'High Priority - From follow-up inspection 2026-09-03: Live flies.');
     expect(read(`${door}${flies}`, 1)).toEqual({ pestEvidence: false, findings: [] });

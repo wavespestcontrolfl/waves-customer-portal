@@ -306,7 +306,7 @@ const hasWord = (text) => /[A-Za-z0-9]/.test(text);
 // The type is tested compact, so a line break or a character a browser draws as nothing inside a word ("Callba<br>ck")
 // cannot hide a callback. Joined words can only add a match ("Structure Inspection"), which gives no answer.
 function namesFirstVisit(inspectionType) {
-  return typeof inspectionType === 'string' && hasWord(inspectionType)
+  return typeof inspectionType === 'string' && inspectionType.trim() !== ''
     && !CALLBACK_TYPE_RE.test(compact(inspectionType));
 }
 
@@ -374,6 +374,14 @@ function initialNoteFirst(row) {
   // A stable sort keeps the page order within a rank and a day.
   const notes = [...row.notes.notes].sort((a, b) => rank(a) - rank(b) || (day(a) === day(b) ? 0 : day(a) > day(b) ? -1 : 1));
   return [row.notes.label, notes.map((note) => note.text).join(' - ')].filter(Boolean).join(' ');
+}
+
+// What a 35 row cites at the first visit: the whole text of a routine row; on a follow-up report, the row's label
+// and its initial note, without the later visits' notes.
+function firstVisitCitation(row) {
+  if (row.notes.routine) return row.text;
+  const initial = row.notes.notes.filter((note) => note.date === null).map((note) => note.text);
+  return [row.notes.label, ...initial].join(' ');
 }
 
 // At most FINDING_TEXT_MAX characters, cut between characters (code points): half an emoji is not valid text, and
@@ -467,8 +475,8 @@ function readReportTables(page) {
  *   report (any violations row labelled with its visit) each 35 row must be labelled, and its initial note is the
  *   first visit's citation;
  * - it lists at least as many 35A or 35B rows of the read visit as the file counted for it (violation35): the missing
- *   one could be 35A. A row listed twice (the same code and text) counts once and is one finding. Without the
- *   count only a 35A row answers.
+ *   one could be 35A. Rows that cite the same at the first visit (the same code and text; on a follow-up report,
+ *   the same label and initial note) count once and are one finding. Without the count only a 35A row answers.
  * findings holds the visit's 35A rows, each with its initial note first, cut at FINDING_TEXT_MAX.
  */
 function parseInspectionReport(html, { violation35 = null, visitDate = null, visitNumber = null } = {}) {
@@ -494,10 +502,11 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   // The read visit's own 35 rows: every row of a routine report; on a follow-up report, those with the initial note.
   const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => note.date === null));
   if (!ofVisit.length) return null;
-  // A row listed twice (the same code, and the same text compact) counts once and is one finding.
+  // Rows that cite the same at the first visit (the same code, and the same citation compact: firstVisitCitation,
+  // whatever their later notes) count once and are one finding.
   const keys = new Set();
   const distinct = ofVisit.filter((row) => {
-    const key = `${row.code} ${compact(row.text)}`;
+    const key = `${row.code} ${compact(firstVisitCitation(row))}`;
     if (keys.has(key)) return false;
     keys.add(key);
     return true;
