@@ -3035,6 +3035,39 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     })();
   }, [selectedCustomer?.id, hasAutoMosquitoLine, mosquitoQuote]);
 
+  // One-time pest hint (owner 2026-11-26 "say the one time price when asked"): under a one-time pest line, the system's price
+  // for the home this visit is booked at, so staff can quote it. READ ONLY: it never changes a line price, the total, the
+  // preview or the booking; staff type the number if they quote it. The answer belongs to one customer, property and linked
+  // estimate: a change of any of them, or a cleared customer, discards it, and a late answer for an older request is ignored.
+  const isOneTimePestHintLine = (svc) => (svc?.service_key ?? svc?.serviceKey) === 'one_time_pest_control';
+  const hasOneTimePestLine = services.some(isOneTimePestHintLine);
+  const pestHintKey = selectedCustomer?.id && hasOneTimePestLine
+    ? [selectedCustomer.id, propertyPickerActive && selectedPropertyId ? selectedPropertyId : '', linkedEstimate?.id || ''].join('|')
+    : '';
+  const [pestHint, setPestHint] = useState(null);
+  useEffect(() => {
+    setPestHint(null);
+    if (!pestHintKey) return undefined;
+    let current = true;
+    const [customerId, propertyId, estimateId] = pestHintKey.split('|');
+    const qs = new URLSearchParams({ customerId });
+    if (propertyId) qs.set('propertyId', propertyId);
+    if (estimateId) qs.set('estimateId', estimateId);
+    (async () => {
+      try {
+        const r = await adminFetch(`/admin/schedule/one-time-pest-quote?${qs.toString()}`);
+        const price = r?.price != null ? Number(r.price) : null;
+        if (current && Number.isFinite(price) && price > 0) setPestHint({ key: pestHintKey, price });
+      } catch {
+        // No answer, no hint.
+      }
+    })();
+    return () => { current = false; };
+  }, [pestHintKey]);
+  const pestHintText = pestHint?.key === pestHintKey && pestHintKey
+    ? `System price for this home: $${Number.isInteger(pestHint.price) ? pestHint.price : pestHint.price.toFixed(2)}`
+    : '';
+
   // Rodent trapping notice (rodentTrappingNoticeText). The address is the
   // booking's: the picked property, else the linked estimate's (the booking
   // route stamps that one), else the customer's primary. It waits for the
@@ -6282,6 +6315,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     }}
                   >
                     {trappingNotice}
+                  </div>
+                )}
+
+                {pestHintText && isOneTimePestHintLine(svc) && (
+                  <div
+                    role="status"
+                    data-testid="one-time-pest-hint"
+                    style={{ gridColumn: '1 / -1', fontSize: 14, lineHeight: 1.45, color: D.muted }}
+                  >
+                    {pestHintText}
                   </div>
                 )}
 

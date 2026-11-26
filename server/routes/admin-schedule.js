@@ -13,6 +13,7 @@ const logger = require('../services/logger');
 const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const areaAddOnRows = require('../services/area-addon-visit-rows');
 const mistingRefill = require('../services/misting-refill');
+const { oneTimePestBookingPrice } = require('../services/one-time-pest-booking-price');
 const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG_KEY: MISTING_REFILL_KEY } = require('../utils/mosquito-misting-system');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
@@ -3176,6 +3177,29 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
       ? computed
       : (Number.isFinite(catalogBase) && catalogBase > 0 ? Math.round(catalogBase * 100) / 100 : null);
     res.json({ price, source: computed != null ? 'engine_default' : (price != null ? 'catalog_base' : null) });
+  } catch (err) { next(err); }
+});
+
+// GET /one-time-pest-quote?customerId=&propertyId=&estimateId= — the system's one-time pest price for the home the visit
+// is booked at, for the create-appointment modal's hint under a one-time pest line (owner 2026-11-26 "say the one time price
+// when asked"). READ ONLY: it changes no booking, line price or invoice, and answers { price: null } when the engine has no
+// clean price (no home size on file, commercial records, no fresh settings). The property is the one the booking uses: the
+// chosen one, else the linked estimate's (callBookingGuardPropertyId, the create path's own rule), else the customer's
+// primary. requireAdmin, like the mosquito quote above.
+router.get('/one-time-pest-quote', requireAdmin, async (req, res, next) => {
+  try {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const customerId = String(req.query.customerId || '').trim();
+    if (!uuid.test(customerId)) throw httpError(400, 'customerId must be a valid customer id');
+    const propertyId = req.query.propertyId == null ? '' : String(req.query.propertyId).trim();
+    const estimateId = req.query.estimateId == null ? '' : String(req.query.estimateId).trim();
+    if (propertyId && !uuid.test(propertyId)) throw httpError(400, 'propertyId must be a valid property id');
+    if (estimateId && !uuid.test(estimateId)) throw httpError(400, 'estimateId must be a valid estimate id');
+    const bookingPropertyId = await callBookingGuardPropertyId(db, {
+      bookingProperty: propertyId ? { property_id: propertyId } : null,
+      linkedEstimateId: estimateId || null,
+    });
+    res.json({ price: await oneTimePestBookingPrice(customerId, { propertyId: bookingPropertyId || null }) });
   } catch (err) { next(err); }
 });
 
