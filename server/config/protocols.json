@@ -3072,9 +3072,12 @@
               "Tekko Pro IGR"
             ],
             "completionApplicationMethod": "spot_treatment",
-            "tankRatePerGallon": {
+            "labelRatePerGallon": {
               "amount": 0.66,
-              "unit": "fl_oz"
+              "unit": "fl_oz",
+              "use": "fleas, in the shared tank at 1 gallon per 1,000 sq ft",
+              "epa": "53883-335",
+              "weakerMix": true
             }
           },
           "Exterior, shaded pet zones only when pets rest outside: the same tank mix, 1 gallon per 1,000 sq ft": {
