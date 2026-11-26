@@ -1,9 +1,10 @@
 'use strict';
 // Facts staff know and the texting agent may state (owner 2026-11-25, texting AI fix step 2: "feed the facts staff know"; owner ruling
 // 2026-09-30: price and fee questions are explained from the estimate and invoice on file): the open estimate's per-application price and
-// applications a year, and a customer's prepaid visits left. This module only READS the numbers; the AI never sees them raw: each becomes one
-// finished sentence in payment-status-contract.js (the same copy-verbatim contract as the plan price and the balance, PR #5331), so a figure
-// the AI writes in its own words is held. Never a technician note or a visit note. A read that fails is null, never a guess.
+// applications a year, a customer's prepaid visits left, and the prep guide of the customer's booked visit. This module only READS the facts.
+// The numbers never reach the AI raw: each becomes one finished sentence in payment-status-contract.js (the same copy-verbatim contract as the
+// plan price and the balance, PR #5331), so a figure the AI writes in its own words is held. The guide's own published sentences reach it as the
+// PREP GUIDE section (sms-shadow-drafter.js prepGuideSection). Never a technician note or a visit note. A read that fails is null, never a guess.
 
 const logger = require('./logger');
 
@@ -99,4 +100,69 @@ async function loadPrepaidPlanFacts(customerId, { db } = {}) {
   }
 }
 
-module.exports = { loadEstimateFacts, loadPrepaidPlanFacts };
+// ---- Prep guide ----------------------------------------------------------------------------------------------------------------------
+
+// The text parts of a published guide's blocks that read as prose: paragraphs, callouts and list items (never a heading, the service
+// details rows, the button or the signature: the page itself drops the last two for the same reason).
+function proseOfBlocks(blocks) {
+  const parts = [];
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    if (!block || typeof block !== 'object') continue;
+    if (['paragraph', 'callout'].includes(block.type) && typeof block.content === 'string') parts.push(block.content);
+    if (block.type === 'list' && Array.isArray(block.items)) parts.push(...block.items.filter((item) => typeof item === 'string'));
+  }
+  return parts;
+}
+
+// One sentence of a guide the AI may repeat: a plain sentence about the service. Dropped: merge tags, links and addresses, em dashes, a
+// price, wording that points at the email or page itself, and a product or brand name (the company facts bank's own rule). The drafter
+// screens what is left for banned claims (prepGuideSection).
+const SENTENCE_END = /(?<=[.!?])\s+/;
+function guideSentences(blocks, productNames) {
+  const { productTokens, mentionsProduct } = require('./company-facts-bank');
+  const tokens = productTokens(productNames);
+  const sentences = [];
+  for (const part of proseOfBlocks(blocks)) {
+    for (const raw of String(part).replace(/\s+/g, ' ').trim().split(SENTENCE_END)) {
+      const sentence = raw.trim();
+      if (sentence.length < 12 || sentence.length > 260) continue;
+      if (/\{\{|\]\(|https?:|www\.|@|\u2014|\$/.test(sentence)) continue;
+      if (/\b(?:e-?mail|inbox|button|below|above|this (?:guide|page))\b/i.test(sentence)) continue;
+      if (mentionsProduct(sentence, tokens)) continue;
+      sentences.push(sentence);
+    }
+  }
+  return sentences;
+}
+
+/**
+ * The prep guide the customer may be asking about: { source, key, label, sentences } with the published words of that guide. Which guide:
+ * the one prep-guide-sender gives the customer's BOOKED visit (bookedPrepGuide: the soonest upcoming guide visit and its stored guide,
+ * else its family's); with no booked visit, the family the LAST completed service belongs to (prepFamilyForServiceType: the sender's own
+ * match rule). Only that one service's guide, never another's. The words are the template's ACTIVE version, the same row the customer's
+ * prep page renders (EmailTemplateLibrary.loadTemplateByKey).
+ * { sentences: [] } when no guide covers the visit or the guide is not published (a successful read of nothing); null when the read failed.
+ * Never throws: the drafter writes without a section, and a send-time check reads null as an outage (never as "nothing changed").
+ */
+async function loadPrepGuideFacts(customerId, lastRecord, { db } = {}) {
+  const none = { sentences: [] };
+  if (!customerId || !db) return null;
+  try {
+    const sender = require('./prep-guide-sender');
+    const booked = await sender.bookedPrepGuide([customerId]);
+    const family = booked ? (booked.config ? [booked.pestType, booked.config] : null) : sender.prepFamilyForServiceType(lastRecord?.service_type);
+    if (!family) return none;
+    const config = family[1];
+    const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
+    if (!loaded?.activeVersion) return none;
+    const raw = loaded.activeVersion.blocks;
+    const blocks = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const sentences = guideSentences(blocks, await require('./company-facts-bank').readProductNames(db));
+    return sentences.length ? { source: booked ? 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sentences } : none;
+  } catch (err) {
+    logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = { loadEstimateFacts, loadPrepaidPlanFacts, loadPrepGuideFacts };

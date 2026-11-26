@@ -1014,6 +1014,74 @@ describe('sendPrepToCustomer', () => {
   });
 });
 
+// Which guide a visit gets, read in JS by the texting AI's PREP GUIDE facts (owner 2026-11-25, step 2C). The JS matcher and the pick are
+// held to what the sender itself runs: the SQL upcomingFamilyVisits emits for each config, and the guide the visit's page shows.
+describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide)', () => {
+  const sender = require('../services/prep-guide-sender');
+  const VISIT = liveVisit({ customer_id: 'cust-1', service_type: 'Pest Control', scheduled_date: FUTURE });
+  // the SQL predicate upcomingFamilyVisits builds, evaluated against a service type with real LIKE semantics ('%' any run, '_' one char)
+  const likeTest = (pattern, text) => new RegExp(`^${String(pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.')}$`).test(text);
+  const sqlMatches = (calls, serviceType) => calls.every(([sql, args]) => {
+    const name = serviceType.toLowerCase();
+    let at = 0;
+    return String(sql).replace(/^\(|\)$/g, '').split(' OR ').some((part) => {
+      const arg = args[at++];
+      return part.includes('NOT LIKE') ? !likeTest(arg, name) : likeTest(arg, name);
+    });
+  });
+  const SERVICE_TYPES = [
+    'Pest Control', 'Quarterly Pest Control', 'Lawn Pest Control', 'Lawn Care', 'Lawn Dethatching', 'Lawn Plugging', 'Lawn Top Dressing', 'Lawn Health Inspection',
+    'Lawn Inspection & Treatment', 'Lawn Assessment', 'Termite Inspection', 'Termite Liquid Treatment & Inspection', 'Termite Bond Renewal', 'Termite Monitoring',
+    'Termite Foam Treatment', 'WDO Inspection', 'Rodent Control', 'Pest Control & Rodent Exclusion', 'Pest Rodent Control', 'Rodent Sanitation Service',
+    'Rodent Trapping & Sanitation', 'Dead Rodent Removal & Odor Treatment', 'Dead Rodent Removal & Bait Station', 'Waves Pest Control Appointment', 'Mosquito Control',
+    'Flea Treatment', 'Flea & Tick Pest Control', 'Bed Bug Treatment', 'Bed Bug Heat Treatment', 'Roach Treatment', 'Roach Vehicle Treatment', 'Pest Inspection',
+    'Pest Inspection & Spot Treatment', 'Pest Assessment', 'Tree & Shrub Care', 'One-Time Pest Control', 'Sprinkler Timer Guide', '',
+  ];
+
+  test('the JS matcher agrees with the SQL the sender builds for every guide family, on every service type of a hostile table', async () => {
+    for (const [pestType, config] of Object.entries(sender.PREP_CONFIG)) {
+      if (config.guide) { expect(SERVICE_TYPES.some((type) => sender.prepConfigMatches(config, type))).toBe(false); continue; }
+      scheduledQueries = [];
+      upcomingVisitRow = VISIT;
+      await sender.nextUpcomingVisit(['cust-1'], config.serviceKeywords[0]);
+      const calls = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).filter(([sql]) => /service_type/.test(String(sql)));
+      expect(calls.length).toBeGreaterThan(0);
+      for (const type of SERVICE_TYPES) expect({ pestType, type, js: sender.prepConfigMatches(config, type) }).toEqual({ pestType, type, js: sqlMatches(calls, type) });
+    }
+  });
+
+  test('a service type belongs to the first family whose match covers it, in table order; a how-to guide and no name belong to none', () => {
+    const family = (type) => sender.prepFamilyForServiceType(type)?.[0] || null;
+    expect(family('Quarterly Pest Control')).toBe('interior_pest');
+    expect(family('Flea & Tick Pest Control')).toBe('flea');
+    expect(family('Bed Bug Heat Treatment')).toBe('bed_bug_heat');
+    expect(family('Lawn Pest Control')).toBe('lawn');
+    expect(family('Pest Rodent Control')).toBe('interior_pest');
+    expect(family('Rodent Control')).toBe('rodent');
+    expect(family('Termite Inspection')).toBeNull();
+    expect(family('Waves Pest Control Appointment')).toBeNull();
+    expect(family('Sprinkler Timer Guide')).toBeNull();
+    expect(family('')).toBeNull();
+    expect(family(null)).toBeNull();
+  });
+
+  test('bookedPrepGuide: the soonest guide visit and the guide its page shows (the stored key wins, an unknown one names no guide)', async () => {
+    upcomingVisitRow = VISIT;
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ visit: { id: 'svc-9' }, pestType: 'flea', config: { emailTemplateKey: 'prep.flea' } }); // every family finds it: table order breaks the tie
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.lawn' };
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ pestType: 'lawn', config: { emailTemplateKey: 'prep.lawn' } });
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.something_retired' };
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ visit: { id: 'svc-9' }, pestType: null, config: null });
+    upcomingVisitRow = null;
+    expect(await sender.bookedPrepGuide(['cust-1'])).toBeNull();
+  });
+
+  test('bookedPrepGuide throws on a failed lookup: a failed read is never "nothing booked"', async () => {
+    visitLookupError = new Error('db down');
+    await expect(sender.bookedPrepGuide(['cust-1'])).rejects.toThrow('db down');
+  });
+});
+
 // The sprinkler timer guide: a one-time how-to, not visit prep (owner scope
 // 2026-09-05, docs/irrigation-controller-guide-scope.md).
 describe('sprinkler timer guide', () => {

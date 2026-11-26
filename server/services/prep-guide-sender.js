@@ -41,7 +41,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const { resolveProjectEmailRecipientForSend, ensureServicePrepToken } = require('./project-email');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
@@ -351,6 +351,44 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
 
 async function nextUpcomingVisits(customerId, config) {
   return upcomingFamilyVisits([customerId], config, Infinity);
+}
+
+// ---- Which guide a visit gets (read by the texting AI's PREP GUIDE facts too) ------------------------------------------------------
+// ONE JS reading of a config's visit match, the same rule upcomingFamilyVisits runs in SQL (a keyword matches, no exclusion keyword
+// matches unless one of its `unless` patterns keeps the row; '%' is the only LIKE wildcard the table uses). A test evaluates the SQL
+// the builder emits for every config against this function, so the two readings cannot drift. First config in table order wins, the
+// order the composer's soonest-visit scan breaks ties in. A how-to guide (no keywords) never matches.
+const likeContains = (pattern, text) => new RegExp(String(pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*')).test(text);
+function prepConfigMatches(config, serviceType) {
+  const name = String(serviceType || '').toLowerCase();
+  if (!name || config.guide || !config.serviceKeywords?.some((keyword) => name.includes(keyword))) return false;
+  return !(config.excludeKeywords || []).some((ex) => (typeof ex === 'string'
+    ? name.includes(ex)
+    : name.includes(ex.keyword) && ![].concat(ex.unless).some((cue) => likeContains(cue, name))));
+}
+// [pestType, config] of the guide family a service type belongs to, or null.
+function prepFamilyForServiceType(serviceType) {
+  return Object.entries(PREP_CONFIG).find(([, config]) => prepConfigMatches(config, serviceType)) || null;
+}
+
+/**
+ * The prep guide the customer's BOOKED visit gets: the soonest upcoming visit across the guide families (the family queries above, the
+ * composer's own tie-break by date, arrival window, id), and the guide that visit's page shows: its stored prep_template_key when it
+ * names a guide here, else its family's. { visit, pestType, config } or null with no booked visit; pestType and config are null for a
+ * visit whose stored key is not one of ours (no guide can be named, never a guess). THROWS on a lookup error: a failed read is not
+ * "nothing booked".
+ */
+async function bookedPrepGuide(customerIds) {
+  const sortKey = (v) => `${etCalendarDayOf(v.scheduled_date)} ${v.window_start ? String(v.window_start).padStart(8, '0') : '~'} ${v.id}`;
+  let pick = null;
+  for (const [pestType, config] of Object.entries(PREP_CONFIG)) {
+    if (config.guide) continue;
+    const [visit] = await upcomingFamilyVisits(customerIds, config, 1);
+    if (visit && (!pick || sortKey(visit) < sortKey(pick.visit))) pick = { visit, pestType, config };
+  }
+  if (!pick || !pick.visit.prep_template_key || pick.visit.prep_template_key === pick.config.emailTemplateKey) return pick;
+  const stored = Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === pick.visit.prep_template_key);
+  return { visit: pick.visit, pestType: stored?.[0] || null, config: stored?.[1] || null };
 }
 
 // A visit's prep key is never MOVED between guides. The automated lanes
@@ -1185,4 +1223,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 
 module.exports = {
   sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, buildWateringBlock, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
+  prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide,
 };

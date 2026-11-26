@@ -13,6 +13,7 @@ jest.mock('../services/visit-loops-facts', () => ({
 jest.mock('../services/sms-staff-facts', () => ({
   loadEstimateFacts: jest.fn(async () => ({ perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4 }] })),
   loadPrepaidPlanFacts: jest.fn(async () => [{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]),
+  loadPrepGuideFacts: jest.fn(async () => ({ source: 'booked', key: 'prep.interior_pest', label: 'Interior Pest Treatment', sentences: ['Please clear the area under the sinks.'] })),
 }));
 
 const db = require('../models/db');
@@ -123,37 +124,51 @@ describe('getContextForCustomer asOf', () => {
   });
 });
 
-// Texting AI facts (owner 2026-11-25): the open estimate's per-application price and the prepaid visits left are OPT IN (includeSmsStaffFacts): never for
-// another caller or a frozen replay; the drafting callers pass the gate as the opt-in, and the send-time recheck asks regardless of it.
+// Texting AI facts (owner 2026-11-25): the open estimate's per-application price, the prepaid visits left and the booked visit's prep guide are OPT IN
+// (includeSmsStaffFacts): never for another caller or a frozen replay; the drafting callers pass the gate as the opt-in, and the send-time recheck
+// names the number facts it re-renders (it never reads the guide).
 describe('getContextForCustomer texting AI staff facts', () => {
   const staffFacts = require('../services/sms-staff-facts');
-  const reads = () => staffFacts.loadEstimateFacts.mock.calls.length + staffFacts.loadPrepaidPlanFacts.mock.calls.length;
+  const reads = () => staffFacts.loadEstimateFacts.mock.calls.length + staffFacts.loadPrepaidPlanFacts.mock.calls.length + staffFacts.loadPrepGuideFacts.mock.calls.length;
+  const GUIDE = { source: 'booked', key: 'prep.interior_pest', label: 'Interior Pest Treatment', sentences: ['Please clear the area under the sinks.'] };
 
-  test('an opted-in live context carries both, read for the customer (the estimate facts for the pending estimate)', async () => {
+  test('an opted-in live context carries all three, read for the customer (the estimate facts for the pending estimate, the guide for the customer\'s last service)', async () => {
     const context = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true });
     expect(context.prepaidPlans).toEqual([{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]);
     expect(context.estimateFacts).toEqual({ perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4 }] });
+    expect(context.prepGuide).toEqual(GUIDE);
     expect(staffFacts.loadPrepaidPlanFacts).toHaveBeenCalledWith(customer.id, { db });
     expect(staffFacts.loadEstimateFacts).toHaveBeenCalledWith(null, { db }); // (no pending estimate in this fake: the loader answers "nothing listed")
+    expect(staffFacts.loadPrepGuideFacts).toHaveBeenCalledWith(customer.id, null, { db }); // (no completed service in this fake)
   });
 
   test('every other caller (no opt-in, or the drafter\'s gate off) and a frozen replay read none of it', async () => {
     const plain = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
-    expect([plain.prepaidPlans, plain.estimateFacts]).toEqual([null, null]);
+    expect([plain.prepaidPlans, plain.estimateFacts, plain.prepGuide]).toEqual([null, null, null]);
     const gateOff = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: false });
-    expect([gateOff.prepaidPlans, gateOff.estimateFacts]).toEqual([null, null]);
+    expect([gateOff.prepaidPlans, gateOff.estimateFacts, gateOff.prepGuide]).toEqual([null, null, null]);
     const replay = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true, asOf: ASOF });
-    expect([replay.prepaidPlans, replay.estimateFacts]).toEqual([null, null]);
+    expect([replay.prepaidPlans, replay.estimateFacts, replay.prepGuide]).toEqual([null, null, null]);
     expect(reads()).toBe(0);
   });
 
-  test('the send-time recheck reads only the facts a copy needs, and still reads them after the drafting gate is rolled back', async () => {
+  test('the send-time recheck reads only the number facts a copy needs, never the guide, and still reads them after the drafting gate is rolled back', async () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
     const prepaidOnly = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: { prepaid: true } });
     expect(prepaidOnly.prepaidPlans).toHaveLength(1);
-    expect(prepaidOnly.estimateFacts).toBeNull();
+    expect([prepaidOnly.estimateFacts, prepaidOnly.prepGuide]).toEqual([null, null]);
     const estimateOnly = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: { estimate: true } });
     expect(estimateOnly.estimateFacts.perApplication).toHaveLength(1);
-    expect(estimateOnly.prepaidPlans).toBeNull();
+    expect([estimateOnly.prepaidPlans, estimateOnly.prepGuide]).toEqual([null, null]);
+    expect(staffFacts.loadPrepGuideFacts).not.toHaveBeenCalled();
+  });
+
+  test('the guide alone can be asked for; a failed guide read stays null in the context (the drafter writes without it, the fingerprint refuses)', async () => {
+    const guideOnly = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: { guide: true } });
+    expect(guideOnly.prepGuide).toEqual(GUIDE);
+    expect([guideOnly.estimateFacts, guideOnly.prepaidPlans]).toEqual([null, null]);
+    expect(staffFacts.loadEstimateFacts).not.toHaveBeenCalled();
+    staffFacts.loadPrepGuideFacts.mockResolvedValueOnce(null);
+    expect((await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true })).prepGuide).toBeNull();
   });
 });
