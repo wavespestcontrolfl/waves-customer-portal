@@ -66,14 +66,16 @@ describe('the initiator', () => {
 
   test('a visit the day re-plan moved is not person-placed, so the night pass may still optimize it', async () => {
     // The night pass selects scheduled_services.*, so its row carries the intent and stamp columns (no fresh read).
-    const visit = { id: 's1', scheduled_date: '2026-11-04', window_start: '09:00:00', customer_asked_time: null, date_exception_source: null };
+    const visit = { id: 's1', scheduled_date: '2026-11-04', window_start: '09:00:00', customer_asked_time: null, date_exception_source: null,
+      service_type: 'General Pest Control', service_id: null };
     const moved = (initiated_by) => [{
       id: 'l1', scheduled_service_id: 's1', series_move_id: null, original_date: '2026-11-04', new_date: '2026-11-04',
       original_window: '13:00-14:00', new_window: '09:00-10:00', initiated_by, created_at: T1,
     }];
     expect(await isPersonPlacedVisit(visit, personPlacedDb(moved('day_replan')))).toEqual({ placed: false });
-    // The control: an unknown mover still protects the visit, so the answer above is the list, not a blind spot.
-    expect(await isPersonPlacedVisit(visit, personPlacedDb(moved('some_new_flow')))).toMatchObject({ placed: true });
+    // Owner 2026-11-26: no mover holds a visit by itself any more, an unknown one included (only the asked box, a Waves
+    // Assessment and the staff lock do).
+    expect(await isPersonPlacedVisit(visit, personPlacedDb(moved('some_new_flow')))).toEqual({ placed: false });
   });
 
   test('is not counted toward the night pass\'s two-move cap', async () => {
@@ -90,7 +92,8 @@ describe('the initiator', () => {
 
 describe('booking_make_room (the make-room accept, owner 2026-11-09) is an automatic mover too', () => {
   test('a visit it moved is not person-placed', async () => {
-    const visit = { id: 's1', scheduled_date: '2026-11-04', window_start: '10:00:00', customer_asked_time: null, date_exception_source: null };
+    const visit = { id: 's1', scheduled_date: '2026-11-04', window_start: '10:00:00', customer_asked_time: null, date_exception_source: null,
+      service_type: 'General Pest Control', service_id: null };
     const log = [{
       id: 'l1', scheduled_service_id: 's1', series_move_id: null, original_date: '2026-11-04', new_date: '2026-11-04',
       original_window: '09:00-10:00', new_window: '10:00-11:00', initiated_by: 'booking_make_room', created_at: T1,

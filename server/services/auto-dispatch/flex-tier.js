@@ -1,17 +1,25 @@
 /**
- * FLEX-TIER — Flexible-tier day moves for existing recurring visits
+ * FLEX-TIER — Flexible-tier day moves for existing visits
  * (owner-approved 2026-09-25/26, capacity-picker-scope-20260925.md §11:
  * "this is costing us the most money"). Runs INSIDE the auto-dispatch pass,
  * ACTIVE ONLY while GATE_AUTO_DISPATCH_FLEX_TIER is on (see
  * config.js/feature-gates.js) — off, none of this module runs.
  *
  * Owner rules:
- *   Fixed tier  = a series' first visit, and every one-time/first-time
- *                 customer's visit — never touched here. eligibility.js's
- *                 existing recurring-child-only checks (NON_RECURRING,
- *                 PARENT_TEMPLATE_ROW) already exclude both: the parent row
- *                 IS the series' first visit, so a "child" (recurring_parent_id
- *                 set) is always a 2nd+ occurrence.
+ *   Fixed       = only a visit with "Customer asked for this time" (the
+ *                 office box, first visit only on a series), a Waves
+ *                 Assessment and a visit staff locked (eligibility.js
+ *                 isPersonPlacedVisit), plus the told lock and the freeze
+ *                 below. Owner 2026-11-26 ("the only visits that should not
+ *                 be moved are these ... even reservices or reschedules by
+ *                 customers can be moved"; "lock waves assessments, but clear
+ *                 the rest") replaced the 2026-09-25 Fixed tier (a series'
+ *                 first visit and every one-time visit). A plan's first visit
+ *                 (the parent row) is its own series' key (seriesKeyOf); its
+ *                 night move is stamped as a this-visit-only exception so the
+ *                 plan keeps its dates (rebooker.js dateExceptionStamp). A
+ *                 one-time visit has no series: no neighbors, the ±5 band.
+ *                 A booster-month row stays out (eligibility.js).
  *   Flexible tier = everything eligibility.js lets through. May re-time SAME
  *                 DAY, or move up to ±5 days (±6 for a plan that runs every
  *                 2 months, ±7 for one that runs every 3 months or longer,
@@ -171,6 +179,21 @@ function seriesPosition(row) {
     : row.scheduled_date);
 }
 
+// A one-time visit: no plan behind it (not recurring, no parent row). A
+// booster-month row (not recurring WITH a parent) is not one: eligibility.js
+// keeps it out of the run.
+function isOneTimeVisit(row) {
+  return !!row && row.is_recurring !== true && row.recurring_parent_id == null;
+}
+
+// The id that keys a visit's series: its parent row's, or its own when it IS
+// the parent row (a plan's first visit). Null for a visit with no series.
+function seriesKeyOf(row) {
+  if (!row) return null;
+  if (row.recurring_parent_id) return row.recurring_parent_id;
+  return row.is_recurring === true ? row.id : null;
+}
+
 // Parent ids per read — keeps each whereIn well inside Postgres' bind limit
 // on a large run (loadEligibleServices caps a run at 5,000 visits).
 const NEIGHBOR_CHUNK = 1000;
@@ -253,7 +276,14 @@ async function loadSeriesNeighbors(db, services, { lock = false, withRadius = fa
   const map = new Map();
   const byParent = new Map();
   for (const s of services || []) {
-    const parentId = s && s.recurring_parent_id;
+    if (!s) continue;
+    // A one-time visit has no series: nothing to cross, the narrow band (owner 2026-11-26: one-time = ±5).
+    if (isOneTimeVisit(s)) {
+      map.set(s.id, withRadius ? { prev: null, next: null, radiusDays: FLEX_TIER_RADIUS_DAYS, nearestDays: null } : { prev: null, next: null });
+      continue;
+    }
+    // A plan's first visit (the parent row) is its own series' key: its family is itself and its children.
+    const parentId = seriesKeyOf(s);
     if (!parentId) continue;
     const key = String(parentId);
     if (!byParent.has(key)) byParent.set(key, []);
@@ -498,6 +528,8 @@ module.exports = {
   flexFreezeHoursFor,
   seriesPosition,
   loadSeriesNeighbors,
+  seriesKeyOf,
+  isOneTimeVisit,
   flexTierMoveWindow,
   flexWindowAdmits,
   ownScheduleFrozen,

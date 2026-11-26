@@ -186,15 +186,17 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
 // invert lock order against a writer holding the fence; a busy series is
 // simply refused (fail closed — the 04:10 pass retries tomorrow).
 // Parents sorted so multi-series grouped moves acquire in a stable order.
+// A plan's first visit (the parent row) fences its own series; a one-time
+// visit has none (flexTier.seriesKeyOf).
 async function fenceFlexSeries(trx, rows, refuse) {
-  const parents = [...new Set(rows.map((r) => r.recurring_parent_id).filter(Boolean).map(String))].sort();
+  const parents = [...new Set(rows.map((r) => flexTier.seriesKeyOf(r)).filter(Boolean).map(String))].sort();
   for (const parentId of parents) {
     const result = await trx.raw(
       'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
       ['recurring-series-maintenance', parentId],
     );
     if (result?.rows?.[0]?.locked !== true) {
-      const row = rows.find((r) => String(r.recurring_parent_id) === parentId);
+      const row = rows.find((r) => String(flexTier.seriesKeyOf(r)) === parentId);
       throw refuse(row.id, 'has a series update in progress (no move, fail closed)');
     }
   }
@@ -261,7 +263,11 @@ function isUnplacedDueDate(row) {
 // `lock24h` (the run always passes true; owner 2026-11-03): the freeze is 25 hours
 // instead of 73, so the refusal text names the hours actually enforced (flexFreezeHoursFor).
 async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination, lock24h = false) {
-  if (guardMode !== 'flex' || row.is_recurring !== true || !row.recurring_parent_id
+  // Every visit the run moves gets the freeze and the band: a plan visit, a
+  // plan's first visit and a one-time visit (owner 2026-11-26). Only a
+  // booster-month row (never loaded; eligibility.js) and the unplaced
+  // due-date shape skip it.
+  if (guardMode !== 'flex' || (row.is_recurring !== true && row.recurring_parent_id != null)
     || isUnplacedDueDate(row)) return;
   const now = new Date();
   const hours = flexTier.flexFreezeHoursFor(lock24h);
@@ -397,7 +403,27 @@ function makeMoveGuard({ service, best, config = {} }) {
     // destination. That step changes no day or hour, and the fresh row it reads already shows the new slot, so a
     // first placement would read as a move and be left on its old technician (Codex #7767 r1 P2).
     if (destination) await reminderOff.assertRemindersOn(trx, [row], refuse);
+    // Last, after every refusal: a plan's first visit moving to another technician keeps the plan's technician.
+    await keepPlanTechnician(trx, [row], receiving);
   };
+}
+
+// A plan's FIRST visit (the parent row) is also the plan's technician template: a new plan visit takes
+// recurring_technician_id, else the parent's own technician_id (admin-schedule.js recurringTemplateTechnicianId). Since
+// owner 2026-11-26 the night run may move a first visit, to another technician too; that is a one-visit change, so the
+// plan's technician is pinned first, as the office's "this visit only" assignment does (admin-schedule.js
+// assignScheduleJobs). One UPDATE on the move transaction, before this row's technician changes: it pins the technician
+// the row carries NOW (read by the database, never the pass-1 snapshot) and only when nothing is pinned yet, so a plan
+// already pinned, or pinned by staff since, keeps its own. A plan visit, a one-time visit and a same-technician move
+// write nothing. `receiving` is the technician the move lands the visit on (null = unassigned).
+async function keepPlanTechnician(trx, rows, receiving) {
+  for (const r of rows) {
+    if (r.is_recurring !== true || r.recurring_parent_id != null) continue;
+    if (String(r.technician_id || '') === String(receiving || '')) continue;
+    await trx('scheduled_services').where({ id: r.id })
+      .where(function notPinned() { this.whereNull('recurring_technician_override').orWhere({ recurring_technician_override: false }); })
+      .update({ recurring_technician_id: trx.raw('COALESCE(recurring_technician_id, technician_id)'), recurring_technician_override: true });
+  }
 }
 
 // Night told-lock (owner 2026-11-05, "D1 a"), the moving visit's own told-time check inside its move
@@ -595,6 +621,8 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     await assertCapabilitiesActive(trx, best.technician_id || service.technician_id || null, rows, refuse);
     // GATE_TERRITORY_NIGHT_RUN: an unassigned pest / termite sibling lands only in its own territory.
     await assertInOwnTerritory(rows, best.technician_id || service.technician_id || null, refuse);
+    // A grouped first visit the unit hands to another technician keeps the plan's technician (keepPlanTechnician).
+    if (best.technician_id) await keepPlanTechnician(trx, rows, best.technician_id);
   };
 }
 
@@ -1248,7 +1276,7 @@ module.exports = {
   // Exported for direct unit tests of the flex-tier apply-time guards (Codex
   // pre-push P1) — otherwise only reachable through the full member/move
   // guard closures.
-  checkFlexOwnBounds, checkFlexSiblingBounds, checkTiersSiblingBounds,
+  checkFlexOwnBounds, checkFlexSiblingBounds, checkTiersSiblingBounds, keepPlanTechnician,
 };
 // Own line: the primary visit's told-time check (night told-lock), exported for its unit tests.
 module.exports.assertNotToldOnMove = assertNotToldOnMove;

@@ -1138,12 +1138,11 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(guard(sunday)({ trx: fakeTrx({ siblings: [{ ...skipper, skip_weekends: false }] }), members })).resolves.toBeUndefined();
   });
 
-  test('per-row eligibility (local audit): a one-time / booster, parent-template, locked, geo-less, archived-customer or lapsed-plan sibling refuses the grouped automatic move', async () => {
+  test('per-row eligibility (local audit): a booster, locked, geo-less, archived-customer or lapsed-plan sibling refuses the grouped automatic move', async () => {
     const members = [primary, { id: 's2', status: 'confirmed' }];
     const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
     const cases = [
       [eligible({ is_recurring: false }), /NON_RECURRING/],
-      [eligible({ recurring_parent_id: null }), /PARENT_TEMPLATE_ROW/],
       [eligible({ auto_dispatch_locked: true }), /MANUALLY_LOCKED/],
       [eligible({ customer_latitude: null }), /MISSING_GEO/],
       [eligible({ customer_active: false }), /CUSTOMER_INACTIVE/],

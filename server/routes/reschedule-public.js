@@ -69,6 +69,7 @@ const { visitInsideMoveNoticeWindow, violatesSelfServeNotice, awaitingCustomerPi
 const moveLimits = require('../services/scheduling/customer-move-limits');
 const { roundsOneOffWindow, roundsRegularDate } = require('../services/lawn-rounds');
 const { isAssignable } = require('../services/technician-eligibility');
+const { isAssessmentBooking } = require('../services/assessment-booking');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -328,10 +329,12 @@ function dayPromiseMoveOptions(svc, timePromise) {
   return { timePromise, previousDate: apptDateStr(svc.scheduled_date) };
 }
 
-// GATE_DAY_ONLY_PROMISE part B3: the rebooker option that records the customer's own hour for a single move. A later "any time
-// that day" choice (timePromise 'day') passes customerAskedTime: false here instead.
-function dayPromiseMoveIntent() {
-  return { customerAskedTime: true };
+// GATE_DAY_ONLY_PROMISE part B3: the rebooker option that records the customer's own hour for a single move. Since owner
+// 2026-11-26 ("lock waves assessments, but clear the rest") only a Waves Assessment's pick records "the customer asked for
+// this time": any other visit the customer moves here stays free for the night run until its reminders. `svc` is the visit
+// being moved (none: not an assessment).
+async function dayPromiseMoveIntent(svc) {
+  return svc && await isAssessmentBooking(svc) ? { customerAskedTime: true } : {};
 }
 
 // handleReschedule's options for a customer move: the repeat-move deferral and the day-promise choice, as a spread (none
@@ -1490,7 +1493,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             placeInRoute: bookingPlacesInRoute(),
             // GATE_DAY_ONLY_PROMISE part B3: the picker's slots are hours the customer chose, recorded by this move's own UPDATE
             // (rebooker.js moveIntentColumns). Gate off: no key, so the call keeps today's exact arguments.
-            ...dayPromiseMoveIntent(),
+            ...(await dayPromiseMoveIntent(svc)),
             // No arrivalGraceMinutes (owner ruling 2026-09-28, scope cut
             // Codex r1 P1 #5314): this page's own commit runs a STRICT
             // pre-verify travel probe that a grace-kept slot would fail

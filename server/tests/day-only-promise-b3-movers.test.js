@@ -245,9 +245,12 @@ describe('moveIntentColumns (the one helper every mover uses)', () => {
   test('an explicit boolean wins; a customer surface records true; anything else records nothing', () => {
     expect(moveIntentColumns(conn, { customerAskedTime: false })).toEqual({ customer_asked_time: false, customer_asked_time_at: { sql: 'now()' } });
     expect(moveIntentColumns(conn, { customerAskedTime: true, sourceSurface: 'dispatch_board' }).customer_asked_time).toBe(true);
+    // Owner 2026-11-26: a customer surface records "asked for this time" on a Waves Assessment only.
     for (const surface of ['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']) {
-      expect(moveIntentColumns(conn, { sourceSurface: surface }).customer_asked_time).toBe(true);
+      expect(moveIntentColumns(conn, { sourceSurface: surface }, { assessment: true }).customer_asked_time).toBe(true);
+      expect(moveIntentColumns(conn, { sourceSurface: surface })).toEqual({});
     }
+    expect(moveIntentColumns(conn, { sourceSurface: 'dispatch_board' }, { assessment: true })).toEqual({});
     expect(moveIntentColumns(conn, { customerAskedTime: false, sourceSurface: 'customer_web' }).customer_asked_time).toBe(false);
     expect(moveIntentColumns(conn, { sourceSurface: 'dispatch_board' })).toEqual({});
     expect(moveIntentColumns(conn, {})).toEqual({});
@@ -257,7 +260,8 @@ describe('moveIntentColumns (the one helper every mover uses)', () => {
   test('a move that did not change the slot records nothing; a series move records a customer surface on every row', () => {
     expect(moveIntentColumns(conn, { customerAskedTime: false }, { slotChanged: false })).toEqual({});
     expect(moveIntentColumns(conn, { customerAskedTime: false, sourceSurface: 'dispatch_board' }, { series: true })).toEqual({});
-    expect(moveIntentColumns(conn, { customerAskedTime: false, sourceSurface: 'customer_web' }, { series: true }).customer_asked_time).toBe(true);
+    expect(moveIntentColumns(conn, { customerAskedTime: false, sourceSurface: 'customer_web' }, { series: true, assessment: true }).customer_asked_time).toBe(true);
+    expect(moveIntentColumns(conn, { sourceSurface: 'customer_web' }, { series: true })).toEqual({});
     expect(moveIntentFor({ customerAskedTime: false }, { series: true })).toBeUndefined();
   });
 
@@ -282,11 +286,21 @@ describe('single move (rebooker.reschedule): the intent rides the move\'s own UP
     expect(payloadOf(asked.updateQuery)).toMatchObject({ customer_asked_time: true, customer_asked_time_at: NOW_RAW });
   });
 
-  test('customer class: every customer surface records "asked for this time" with no option from its caller', async () => {
-    for (const [surface, initiatedBy] of [['customer_web', 'customer_self_serve'], ['sms_reply', 'customer_sms'], ['call_reschedule', 'admin'], ['call_reschedule', 'ai_call_pipeline']]) {
-      const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+  // Owner 2026-11-26 ("lock waves assessments, but clear the rest"): only a Waves Assessment records it.
+  const SURFACES = [['customer_web', 'customer_self_serve'], ['sms_reply', 'customer_sms'], ['call_reschedule', 'admin'], ['call_reschedule', 'ai_call_pipeline'], ['call_makeup', 'ai_call_pipeline']];
+  test('customer class: every customer surface records "asked for this time" on a Waves Assessment, with no option from its caller', async () => {
+    for (const [surface, initiatedBy] of SURFACES) {
+      const { updateQuery } = wireRescheduleMocks({ ...liveService('confirmed'), service_type: 'Waves Assessment' });
       await move({ sourceSurface: surface }, initiatedBy);
       expect(payloadOf(updateQuery)).toMatchObject({ customer_asked_time: true, customer_asked_time_at: NOW_RAW });
+    }
+  });
+
+  test('customer class: any other visit a customer moves records nothing (the night run may move it)', async () => {
+    for (const [surface, initiatedBy] of SURFACES) {
+      const { updateQuery } = wireRescheduleMocks({ ...liveService('confirmed'), service_type: 'General Pest Control' });
+      await move({ sourceSurface: surface }, initiatedBy);
+      expect(payloadOf(updateQuery)).not.toHaveProperty('customer_asked_time');
     }
   });
 
@@ -307,15 +321,22 @@ describe('single move (rebooker.reschedule): the intent rides the move\'s own UP
 });
 
 describe('series move (rebooker.rescheduleSeries): a customer series move records its intent on every swept row, an office one on its anchor only', () => {
-  const SIBS = () => [
-    { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
-    { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
+  const SIBS = (service_type = 'Waves Assessment') => [
+    { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00', service_type },
+    { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00', service_type },
   ];
 
-  test('customer class: every swept row carries true + the database clock in its own UPDATE', async () => {
-    const { updates } = wireSeriesMocks('confirmed', SIBS());
-    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+  test('customer class, plain visits: no swept row records anything (owner 2026-11-26)', async () => {
+    const { updates } = wireSeriesMocks('confirmed', SIBS('General Pest Control'));
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
       { allowLive: true, sourceSurface: 'customer_web' });
+    for (const u of updates) expect(u.update.mock.calls[0][0]).not.toHaveProperty('customer_asked_time');
+  });
+
+  test('customer class, Waves Assessment rows: every swept row carries true + the database clock in its own UPDATE', async () => {
+    const { updates } = wireSeriesMocks('confirmed', SIBS());
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_sms',
+      { allowLive: true, sourceSurface: 'sms_reply' });
     expect(result.success).toBe(true);
     for (const u of updates) expect(u.update.mock.calls[0][0]).toMatchObject({ customer_asked_time: true, customer_asked_time_at: NOW_RAW });
   });
@@ -399,8 +420,8 @@ describe('A -> B -> C -> B: an office move\'s intent cannot land over a later cu
     visit.commit(payloadOf(office.updateQuery));
     expect(visit.read()).toBe(false);
     for (let i = 0; i < 2; i += 1) {                                                        // B -> C, C -> B
-      const customer = wireRescheduleMocks(liveService('confirmed'));
-      await move({ sourceSurface: 'customer_web' }, 'customer_self_serve');
+      const customer = wireRescheduleMocks({ ...liveService('confirmed'), service_type: 'Waves Assessment' });
+      await move({ sourceSurface: 'sms_reply' }, 'customer_sms');
       visit.commit(payloadOf(customer.updateQuery));
     }
     expect(visit.row.customer_asked_time).toBe(true);
@@ -421,15 +442,15 @@ describe('A -> B -> C -> B: an office move\'s intent cannot land over a later cu
   test('series class: an office series move writes its box on the anchor; the customer series move\'s true holds', async () => {
     const visit = visitModel();
     const rows = () => [
-      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
-      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00', service_type: 'Waves Assessment' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00', service_type: 'Waves Assessment' },
     ];
     const officeSeries = wireSeriesMocks('confirmed', rows());
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin', { allowLive: true, sourceSurface: 'dispatch_board', customerAskedTime: false });
     visit.commit(officeSeries.updates[0].update.mock.calls[0][0]);
     expect(visit.row.customer_asked_time).toBe(false);
     const customerSeries = wireSeriesMocks('confirmed', rows());
-    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', { allowLive: true, sourceSurface: 'customer_web' });
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_sms', { allowLive: true, sourceSurface: 'sms_reply' });
     visit.commit(customerSeries.updates[0].update.mock.calls[0][0]);
     expect(visit.read()).toBe(true);
   });
@@ -462,8 +483,8 @@ describe('the customer movers name a surface that records the intent', () => {
     expect(timePromise.CUSTOMER_MOVE_SURFACES).toEqual(['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']);
     // The series call names its surface; the single call passes the explicit option.
     expect(read('../routes/reschedule-public.js')).toContain("sourceSurface: 'customer_web'");
-    expect(read('../routes/reschedule-public.js')).toContain('...dayPromiseMoveIntent(),');
-    expect(read('../routes/reschedule-public.js')).toContain('return { customerAskedTime: true };');
+    expect(read('../routes/reschedule-public.js')).toContain('...(await dayPromiseMoveIntent(svc)),');
+    expect(read('../routes/reschedule-public.js')).toContain('? { customerAskedTime: true } : {}');
     expect(read('../services/sms-scheduling-act.js')).toContain("const SOURCE_SURFACE = 'sms_reply';");
     expect(read('../services/reschedule-sms.js')).toContain("sourceSurface: 'sms_reply'");
     expect(read('../services/call-reschedule-apply.js').match(/sourceSurface: 'call_reschedule'/g).length).toBeGreaterThanOrEqual(2);

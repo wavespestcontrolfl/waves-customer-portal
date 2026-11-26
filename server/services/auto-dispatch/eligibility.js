@@ -83,15 +83,20 @@ function heldOutOfAutoDispatch(service) {
 function isEligibleForAutoDispatch(service, ctx = {}) {
   if (!service) return deny('NOT_FOUND', 'Service row missing');
 
-  // is_recurring ONLY — booster-month visits carry a recurring_parent_id but are
-  // stored is_recurring=false precisely so cadence maintenance ignores them
-  // (see services/waveguard-existing-services.js). Don't move those.
-  if (service.is_recurring !== true) return deny('NON_RECURRING', 'Not a recurring cadence visit');
-
-  // Child occurrences only. The parent row (recurring_parent_id null) is also the
-  // template for future generation (recurringTemplateTechnicianId / anchor date),
-  // so moving it would shift not-yet-generated occurrences. Optimize children.
-  if (service.recurring_parent_id == null) return deny('PARENT_TEMPLATE_ROW', 'Recurring parent/template row — children only');
+  // Every visit may move before the told lock except a booster-month visit
+  // (owner 2026-11-26: "the only visits that should not be moved are these
+  // [customer asked for this time] ... even reservices or reschedules by
+  // customers can be moved"; it replaced the 2026-09-25 rule that kept a plan's
+  // first visit and every one-time visit fixed). A plan's first visit (the
+  // parent row) moves as a this-visit-only move: the night writers stamp its
+  // cadence position (rebooker.js dateExceptionStamp), so the plan keeps its
+  // dates. A booster-month visit carries a recurring_parent_id but is stored
+  // is_recurring=false so cadence maintenance ignores it
+  // (services/waveguard-existing-services.js); it is not a member of the
+  // series order the flex guards read, so it stays out.
+  if (service.is_recurring !== true && service.recurring_parent_id != null) {
+    return deny('NON_RECURRING', 'Booster-month visit (not part of the series cadence)');
+  }
 
   const status = String(service.status || '');
   if (!VALID_STATUSES.has(status)) {
@@ -184,9 +189,10 @@ async function lapsedPlanKeys(services, db) {
  *   - staff locked or excluded it ("Keep auto-dispatch off this visit"): MANUALLY_LOCKED;
  *   - the customer asked for this time (customer_asked_time, the office's box or a customer surface), while that intent
  *     still holds for the current slot (time-promise.currentIntent, THE one read rule): CUSTOMER_ASKED_TIME;
- *   - the newest placement onto the current date was made by the customer, or by a mover this rule does not know
- *     (fail closed: only AUTOMATIC_INITIATORS and STAFF_INITIATORS leave a moved visit free), or a customer date exception
- *     is newer than every logged move: CUSTOMER_PICKED.
+ *   - a Waves Assessment (assessment-booking.js isAssessmentBooking): WAVES_ASSESSMENT_FIXED (owner 2026-11-26).
+ *   A customer's own reschedule no longer holds a visit (owner 2026-11-26: "even reservices or reschedules by customers
+ *   can be moved, if they are before the 72 hr reminders are sent"; it replaced the CUSTOMER_PICKED hold). Only the
+ *   asked box and the staff lock hold; the told lock and the 25-hour freeze still stop every night move.
  * A staff placement and a customer confirmation alone do not hold it any more (they replace the 10-06 person-placed hold
  * and the 10-09 confirmed hold). An office "day only" intent (customer_asked_time false, recorded with the newest move) is
  * a staff placement. Preferred days and times (candidate-slots), mowing days, an hour told in writing (the told lock) and
@@ -209,13 +215,6 @@ async function lapsedPlanKeys(services, db) {
  * Fails CLOSED and DEGRADED: a read error holds the visit for this run and marks the result degraded so the run does not
  * report as healthy. The function keeps its old name for its callers.
  */
-// 'day_replan': the nightly day re-plan (services/day-replan/apply.js, owner 2026-11-03) is an automatic mover too.
-// 'booking_make_room': the booking-time make-room move (services/scheduling/booking-make-room-accept.js, owner 2026-11-09) is
-// an automatic mover, not a person's placement.
-const AUTOMATIC_INITIATORS = new Set(['auto_dispatch', 'system', 'machine', 'weather_auto', 'day_replan', 'booking_make_room']);
-// Office and field staff. Their placement alone no longer holds a visit (owner 2026-11-22). 'rider_onetime_move' is a
-// legacy staff date-exception source.
-const STAFF_INITIATORS = new Set(['admin', 'admin_ib', 'admin_bulk', 'operator', 'tech', 'rider_onetime_move']);
 const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai', 'ai_call_pipeline']);
 // A row records a chosen slot only when the date or the window changed.
 const SLOT_CHANGED_SQL = '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)';
@@ -227,7 +226,7 @@ const placementSql = (t = '') => `(${t}original_date IS DISTINCT FROM ${t}new_da
   + ` AND left(split_part(COALESCE(${t}original_window, ''), '-', 1), 5) IS DISTINCT FROM left(split_part(${t}new_window, '-', 1), 5)))`;
 const PLACEMENT_SQL = placementSql();
 const PLACEMENT_COLUMNS = ['auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source',
-  'date_exception_at', 'customer_asked_time', 'customer_asked_time_at', 'window_start'];
+  'date_exception_at', 'customer_asked_time', 'customer_asked_time_at', 'window_start', 'service_type', 'service_id'];
 const LOG_COLUMNS = ['created_at', 'new_date', 'initiated_by', 'reason_code', 'original_date', 'original_window', 'new_window'];
 // Staff moves made FOR the customer's request hold like the customer's own: the reviewed AI-call reschedule
 // (call-reschedule-apply.js) and the legacy 'customer_call_request', both logged as 'admin'. The series writer adds
@@ -284,7 +283,7 @@ function ownsSlot(r, dateStr, start) {
 // the caller's select left the intent or stamp columns out, so a missing column can never read as "not asked").
 async function placementRow(service, db, refresh) {
   if (!refresh && service.customer_asked_time !== undefined && service.date_exception_source !== undefined
-    && service.window_start !== undefined) return service;
+    && service.window_start !== undefined && service.service_type !== undefined && service.service_id !== undefined) return service;
   const query = db('scheduled_services').where({ id: service.id });
   const fresh = await (refresh ? query.forShare() : query).first(...PLACEMENT_COLUMNS);
   return fresh ? { ...service, ...fresh } : service;
@@ -297,11 +296,6 @@ function customerExceptionAt(service) {
   return Number.isNaN(at.getTime()) ? null : at;
 }
 
-// A placement row that holds the visit: the customer's, a staff move for the customer's request, or a mover this rule
-// does not know (fail closed).
-const holdsSlot = (r) => customerRequested(r) || (!AUTOMATIC_INITIATORS.has(r.initiated_by) && !STAFF_INITIATORS.has(r.initiated_by));
-const pickedBy = (r) => (CUSTOMER_INITIATORS.has(r.initiated_by) || customerRequested(r)
-  ? 'The customer' : `An unknown mover (${r.initiated_by || 'unknown'})`);
 const asked = (service) => service.customer_asked_time === true || service.customer_asked_time === false;
 
 async function isPersonPlacedVisit(input, db, opts = {}) {
@@ -313,6 +307,11 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
     if (service.auto_dispatch_locked === true || service.auto_dispatch_excluded === true) {
       return { placed: true, reason_code: 'MANUALLY_LOCKED', reason_description: 'Locked from auto-dispatch by staff' };
     }
+    // A Waves Assessment never moves (owner 2026-11-26: "lock waves assessments, but clear the rest"). The canonical
+    // identity read (name, else the catalog row), on the caller's connection: the apply-time refresh reads it on `trx`.
+    if (await require('../assessment-booking').isAssessmentBooking(service, db)) {
+      return { placed: true, reason_code: 'WAVES_ASSESSMENT_FIXED', reason_description: 'A Waves Assessment keeps its booked time' };
+    }
     const withIntent = asked(service);
     const newestRows = await loadNewestSlotRows(db, service.id, { withIntent });
     // The newest change of date or start: an end-only edit makes neither an asked time nor a date edit stale (the same
@@ -321,15 +320,7 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
     // Lazy: time-promise requires this module lazily too.
     const intent = withIntent ? require('../time-promise').currentIntent(service, owners[0] || null) : null;
     if (intent === true) return { placed: true, reason_code: 'CUSTOMER_ASKED_TIME', reason_description: 'The customer asked for this time' };
-    const placedAt = owners.length ? new Date(owners[0].created_at) : null;
-    const exceptionAt = customerExceptionAt(service);
-    if (exceptionAt && (!placedAt || exceptionAt > placedAt)) {
-      return { placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: 'The customer chose this date (date edit)' };
-    }
-    const start = startOf(service.window_start);
-    const placement = owners.find((r) => ownsSlot(r, dateStr, start) && holdsSlot(r));
-    if (!placement) return { placed: false };
-    return { placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: `${pickedBy(placement)} chose this date or time` };
+    return { placed: false };
   } catch (err) {
     return { placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read the move history: ${err.message}` };
   }

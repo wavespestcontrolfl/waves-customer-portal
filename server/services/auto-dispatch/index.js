@@ -104,12 +104,13 @@ function makeCapabilityFn(map) {
 function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
   return db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    // is_recurring=true only — booster-month rows carry a recurring_parent_id but
-    // is_recurring=false and must not be swept (see waveguard-existing-services.js).
-    .where('scheduled_services.is_recurring', true)
-    // Child occurrences only — the parent row is the generation template (see
-    // eligibility PARENT_TEMPLATE_ROW).
-    .whereNotNull('scheduled_services.recurring_parent_id')
+    // Every visit but a booster-month row (is_recurring=false WITH a parent;
+    // waveguard-existing-services.js): plan visits, a plan's first visit and
+    // one-time visits (owner 2026-11-26; eligibility.js NON_RECURRING).
+    .where(function () {
+      this.where('scheduled_services.is_recurring', true)
+        .orWhereNull('scheduled_services.recurring_parent_id');
+    })
     // Archiving a customer sets customers.deleted_at without clearing `active`,
     // so filter it here like the reminder/billing crons do.
     .whereNull('customers.deleted_at')

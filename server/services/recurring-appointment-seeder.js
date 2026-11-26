@@ -192,6 +192,15 @@ function seriesCadencePosition(row) {
   return dateOnly(position) || '';
 }
 
+// The date a series PARENT row projects its plan from: the cadence date a this-visit-only move of the parent left
+// (date_exception_cadence_date; a staff "this visit only" move or, since owner 2026-11-26, a night auto-dispatch move of a
+// plan's first visit), else its own date. Every later visit, add-on and nth-weekday option is read from it, so moving the
+// first visit alone never shifts the plan. Unlike seriesCadencePosition it ignores a hand-off due date (unchanged readers).
+function seriesBaseDate(parent) {
+  const base = (parent?.date_exception && parent?.date_exception_cadence_date) ? parent.date_exception_cadence_date : parent?.scheduled_date;
+  return dateOnly(base) || null;
+}
+
 // Lawn rounds: the date whose offset in its round and weekday place every
 // visit of the series. A write that re-places the series from a new date
 // (a series move on a later visit, an Edit appointment cadence rewrite, make
@@ -566,7 +575,7 @@ function* recurringDateCandidates(baseDate, pattern, {
 
 function buildRecurringFollowUpRows(parent = {}, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent.recurring_pattern);
-  const baseDate = dateOnly(opts.baseDate || parent.scheduled_date);
+  const baseDate = dateOnly(opts.baseDate || seriesBaseDate(parent));
   if (!pattern || !baseDate || !parent.customer_id) return [];
 
   const plannedCount = plannedVisitCountForPattern(pattern, opts);
@@ -774,7 +783,7 @@ async function markParentRecurring(conn, parent, pattern, opts = {}) {
   const normalizedPattern = normalizeRecurringPattern(pattern);
   if (!parentId || !normalizedPattern) return 0;
   const columns = opts.columns || await scheduledServiceColumns(conn);
-  const baseDate = typeof parent === 'object' ? dateOnly(parent.scheduled_date) : null;
+  const baseDate = typeof parent === 'object' ? seriesBaseDate(parent) : null;
   const rOpts = baseDate ? recurrenceOrdinalOptions(baseDate, {
     nth: opts.recurringNth ?? parent.recurring_nth,
     weekday: opts.recurringWeekday ?? parent.recurring_weekday,
@@ -1319,7 +1328,7 @@ async function customerPrefersNoWeekends(conn, customerId) {
 async function seedingBlackoutDates(conn, parent, opts = {}) {
   try {
     const { getBlackoutLayers } = require('./scheduling/blackout-dates');
-    const baseDate = dateOnly(opts.baseDate || parent.scheduled_date);
+    const baseDate = dateOnly(opts.baseDate || seriesBaseDate(parent));
     const layers = await getBlackoutLayers(
       baseDate,
       etDateString(addETDays(parseETDateTime(`${baseDate}T12:00`), 460)),
@@ -1657,6 +1666,7 @@ function separateProgramMatches(existingSeries, reviewedIds) {
 
 module.exports = {
   seriesCadencePosition,
+  seriesBaseDate,
   seriesRoundAnchor,
   separateProgramMatches,
   acquireSeriesCreateLocks,

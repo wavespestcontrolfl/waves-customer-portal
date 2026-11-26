@@ -251,7 +251,7 @@ function toolMoveChains(moveRows, auditRows) {
  * at (D2), or null: the visit's current date when it is no longer where the
  * newest auto move left it, else the chain's own restart. Null for a visit no
  * auto move touched, or for an incomplete chain. A staff re-date no longer holds the visit (owner 2026-11-22,
- * eligibility.js isPersonPlacedVisit holds only a customer's pick or asked time, or the staff lock box); a flex move of
+ * eligibility.js isPersonPlacedVisit holds only the asked time, a Waves Assessment, or the staff lock box); a flex move of
  * such a visit still stays inside its band around both its current date and its anchor (flex-tier.flexTierMoveWindow).
  */
 function redateRestart(service, anchorMap) {
