@@ -373,6 +373,11 @@ async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigatio
 // customer page even after a report or staff page moved '/'. Its build is
 // always retained (pruneStaleAssets), so its assets stay with it.
 const CUSTOMER_SHELL_URL = '/__waves/customer-shell';
+// The files of the customer copy this worker last served on a slow load: the
+// page runs that build even after a late refresh moves the copy on, so every
+// prune keeps them by path while this worker lives (one set, replaced on the
+// next serve).
+let servedCopyPaths = new Set();
 // What every prune keeps for the customer copy: its build, and its files by
 // path, the HTML's own assets and the files its build's list names. By path
 // too, because a file several builds share can lose the customer build's tag
@@ -496,9 +501,6 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     };
     try {
       await putShell(cache, withoutUrl(shellResponse.clone()), buildId);
-      // Part of the commit: a failed write (quota) rolls the generation back
-      // and takes the quota retry, like the '/' write.
-      if (customerShell) await cache.put(CUSTOMER_SHELL_URL, withoutUrl(shellResponse.clone()));
       if (!supersedable) await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } }));
     } catch (err) {
       await restorePreviousShell();
@@ -514,6 +516,19 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
       await restorePreviousShell();
       await withAssetWrites(rollBackCreated);
       throw new Error('Shell refresh superseded by a newer navigation');
+    }
+    // The customer copy goes last, once nothing else can roll the
+    // generation back: a slow customer load reads it at once (savedShell),
+    // so it must never name assets a rollback may still delete. Its own
+    // failure (quota) rolls back and takes the quota retry, like the '/' write.
+    if (customerShell) {
+      try {
+        await cache.put(CUSTOMER_SHELL_URL, withoutUrl(shellResponse.clone()));
+      } catch (err) {
+        await restorePreviousShell();
+        await withAssetWrites(rollBackCreated);
+        throw err;
+      }
     }
   };
   try {
@@ -584,6 +599,7 @@ function pruneStaleAssets(cache, retainedBuildIds, { firmOnly = false } = {}) {
     // The customer app's saved copy keeps its build in every prune.
     const customerKeep = await customerShellKeep(cache).catch(() => null);
     if (customerKeep) retained.add(customerKeep.buildId);
+    const keptPaths = new Set([...(customerKeep ? customerKeep.paths : []), ...servedCopyPaths]);
     const requests = await cache.keys();
     await Promise.all(requests.map(async request => {
       const pathname = new URL(request.url).pathname;
@@ -598,7 +614,7 @@ function pruneStaleAssets(cache, retainedBuildIds, { firmOnly = false } = {}) {
         return;
       }
       if (!pathname.startsWith('/assets/')) return;
-      if (customerKeep && customerKeep.paths.has(pathname)) return;
+      if (keptPaths.has(pathname)) return;
       const cached = await cache.match(request);
       // firmOnly: a chunk survives only if a RETAINED build really listed it.
       // Chunks kept alive solely by a provisional claim go, freeing the space
@@ -773,6 +789,17 @@ function startNavigationFetch(request) {
   );
 }
 
+async function noteServedCopy(shell, navSeq) {
+  try {
+    const assets = shellAssetUrls(await shell.clone().text());
+    if (!assets.length) return;
+    const buildId = buildIdOf(assets);
+    advanceLiveBuild(buildId, navSeq);
+    const cache = await caches.open(CACHE_NAME);
+    servedCopyPaths = new Set([...assets, ...((await ownedAssetsOf(cache, buildId)) || [])]);
+  } catch { /* the build tags still hold its files */ }
+}
+
 async function savedShell() {
   try {
     const cache = await caches.open(CACHE_NAME);
@@ -834,11 +861,9 @@ async function answerNavigation(request, attempt, { customer, networkOnly }, dec
         const shell = await savedShell();
         if (shell) {
           decide('saved');
-          // The page now runs the saved build: chunks it loads are that build's.
-          await shell.clone().text().then(html => {
-            const assets = shellAssetUrls(html);
-            if (assets.length) advanceLiveBuild(buildIdOf(assets), navSeq);
-          }).catch(() => {});
+          // The page now runs the saved build: chunks it loads are that
+          // build's, and the prunes keep its files.
+          await noteServedCopy(shell, navSeq);
           return shell;
         }
       }
@@ -852,6 +877,7 @@ async function answerNavigation(request, attempt, { customer, networkOnly }, dec
       const shell = await savedShell();
       if (shell) {
         decide('saved');
+        await noteServedCopy(shell, navSeq);
         return shell;
       }
     }

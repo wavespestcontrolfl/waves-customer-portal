@@ -1687,6 +1687,26 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']);
   });
 
+  it('publishes the customer copy only after the install marker is stored', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchInstall, setFetch } = loadWorker(cache);
+    const shell000 = shellHtml(['/assets/index-000.js']);
+    await cacheCompleteShellResponse(fakeResponse(shell000), undefined, { customerShell: true });
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    let release;
+    const parked = new Promise(resolve => { release = resolve; });
+    let reached;
+    const atMarker = new Promise(resolve => { reached = resolve; });
+    cache.putGate = (url) => (url === 'https://portal.test/__waves/install-commit' ? (reached(), parked) : null);
+    const install = dispatchInstall();
+    await atMarker;
+    // Mid-commit: '/' moved, but a slow customer load still reads the old copy.
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(shell000);
+    release();
+    await install;
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(shellHtml(['/assets/index-BBB.js']));
+  });
+
   it('removes a first customer copy when its generation rolls back', async () => {
     const cache = fakeCache();
     const { dispatchInstall, setFetch } = loadWorker(cache);
@@ -2016,6 +2036,22 @@ describe('service-worker slow page loads', () => {
       : fakeResponse(`asset:${request.url}`)));
     await (await load('/').promise).settled();
     expect(await (await cache.match('/')).text()).toBe(networkHtml);
+  });
+
+  it('keeps the files of the copy it served through the late refresh\'s prune', async () => {
+    const { cache, network, load } = await start();
+    // The served build's entry file lost its own tag (shared, capped).
+    const entry = fakeResponse('old entry');
+    entry.headers.set('x-waves-build', 'zzzzzzzzzzzzzzzz');
+    await cache.put('/assets/index-OLD.js', entry);
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    network.release();
+    await result.settled();
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(networkHtml);
+    expect(await cache.match('/assets/index-OLD.js')).toBeTruthy();
   });
 
   it('a customer screen load refreshes the customer copy', async () => {
