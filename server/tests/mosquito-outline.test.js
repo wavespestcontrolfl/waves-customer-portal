@@ -30,6 +30,7 @@ const RULE = {
 // Catalog rows as production stores them (product facts only), with the duplicate inactive Tekko Pro IGR row (the Tekko
 // Trio formula) that production holds.
 const CATALOG = [
+  { name: 'Suspend Polyzone', display_name: null, active_ingredient: 'Deltamethrin 4.75%', category: 'insecticide', product_type: 'pesticide', active: true },
   { name: 'LESCO Crosscheck Plus', display_name: null, active_ingredient: 'Bifenthrin 7.9%', category: 'insecticide', product_type: 'pesticide', active: true },
   { name: 'Scion Insecticide', display_name: null, active_ingredient: 'Gamma-cyhalothrin 5.9%', category: 'insecticide', product_type: 'pesticide', active: true },
   { name: 'Tekko Pro IGR', display_name: null, active_ingredient: '(S)-Hydroprene 9.0% + Novaluron 2.6% + Pyriproxyfen 2.6%', category: 'insecticide', product_type: 'pesticide', active: false },
@@ -127,7 +128,7 @@ describe('the Mosquito packet', () => {
     expect(result.content.property).toEqual(expect.objectContaining({ programLabel: 'One routine for every yard', turfType: null }));
     expect(result.meta).toEqual(expect.objectContaining({
       serviceLine: 'mosquito',
-      contentLibraryVersion: 'mosquito-v1-copy-1',
+      contentLibraryVersion: 'mosquito-v1-copy-2',
       protocolVersion: PROTOCOLS.mosquito.version ?? null,
     }));
     expect(result.inputSnapshot).toEqual(expect.objectContaining({ serviceLine: 'mosquito', addOns: { dunks: 0, stations: 0 } }));
@@ -203,16 +204,15 @@ describe('the product list', () => {
   test('active catalog rows with the active ingredient, no rate; the inactive duplicate never prints', async () => {
     const products = section(await build(), 'products');
     expect(products.bullets).toEqual([
-      'Barrier spray: LESCO Crosscheck Plus (bifenthrin); Scion Insecticide (gamma-cyhalothrin)',
-      'Larval control: Tekko Pro IGR (pyriproxyfen + novaluron)',
+      'Barrier spray: Suspend Polyzone (deltamethrin); Tekko Pro IGR (pyriproxyfen + novaluron)',
     ]);
     expect(products.bullets.join(' ')).not.toMatch(/hydroprene|Tekko Trio|%/);
   });
 
   test.each([
-    ['dunks only', { dunkCount: 2, stationCount: 0 }, 'Larval control: Tekko Pro IGR (pyriproxyfen + novaluron); Summit Mosquito Dunk Tablets (bacillus thuringiensis subsp. israelensis solids)'],
-    ['stations only', { dunkCount: 0, stationCount: 1 }, 'Larval control: Tekko Pro IGR (pyriproxyfen + novaluron); In2Care Mosquito Station (beauveria bassiana spores + pyriproxyfen)'],
-    ['both', { dunkCount: 3, stationCount: 2 }, 'Larval control: Tekko Pro IGR (pyriproxyfen + novaluron); Summit Mosquito Dunk Tablets (bacillus thuringiensis subsp. israelensis solids); In2Care Mosquito Station (beauveria bassiana spores + pyriproxyfen)'],
+    ['dunks only', { dunkCount: 2, stationCount: 0 }, 'Larval control: Summit Mosquito Dunk Tablets (bacillus thuringiensis subsp. israelensis solids)'],
+    ['stations only', { dunkCount: 0, stationCount: 1 }, 'Larval control: In2Care Mosquito Station (beauveria bassiana spores + pyriproxyfen)'],
+    ['both', { dunkCount: 3, stationCount: 2 }, 'Larval control: Summit Mosquito Dunk Tablets (bacillus thuringiensis subsp. israelensis solids); In2Care Mosquito Station (beauveria bassiana spores + pyriproxyfen)'],
   ])('add-on rows print only with counts above zero: %s', async (_name, addOns, larval) => {
     const products = section(await build({ rows: [programRow(addOns)] }), 'products');
     expect(products.bullets[1]).toBe(larval);
@@ -221,20 +221,18 @@ describe('the product list', () => {
   test('a row with no add-ons key, or null add-ons, prints neither add-on row', async () => {
     for (const row of [{ service: 'mosquito' }, { service: 'mosquito', addOns: null }]) {
       const products = section(await build({ rows: [row] }), 'products');
-      expect(products.bullets[1]).toBe('Larval control: Tekko Pro IGR (pyriproxyfen + novaluron)');
+      expect(products.bullets).toEqual(['Barrier spray: Suspend Polyzone (deltamethrin); Tekko Pro IGR (pyriproxyfen + novaluron)']);
     }
   });
 
-  test('Atticus Talak 7.9 F stays a catalog row but is no longer the house bifenthrin: it never prints (owner 2026-11-18)', async () => {
-    const talak = { ...CATALOG[0], name: 'Atticus Talak 7.9 F' };
-    expect(section(await build({ catalog: [...CATALOG, talak] }), 'products').bullets[0]).toBe('Barrier spray: LESCO Crosscheck Plus (bifenthrin); Scion Insecticide (gamma-cyhalothrin)');
-    const talakOnly = CATALOG.map((row) => (row.name === 'LESCO Crosscheck Plus' ? talak : row));
-    expect(section(await build({ catalog: talakOnly }), 'products').bullets[0]).toBe('Barrier spray: Scion Insecticide (gamma-cyhalothrin)');
+  test('the barrier is the mosquito card\'s PolyZone; CrossCheck Plus, Scion and Atticus Talak never print (owner 2026-11-25, D7)', async () => {
+    const talak = { ...CATALOG[1], name: 'Atticus Talak 7.9 F' };
+    expect(section(await build({ catalog: [...CATALOG, talak] }), 'products').bullets[0]).toBe('Barrier spray: Suspend Polyzone (deltamethrin); Tekko Pro IGR (pyriproxyfen + novaluron)');
   });
 
   test('a retired (inactive) product drops; with every row gone the section leaves out', async () => {
-    const noScion = CATALOG.map((row) => (row.name === 'Scion Insecticide' ? { ...row, active: false } : row));
-    expect(section(await build({ catalog: noScion }), 'products').bullets[0]).toBe('Barrier spray: LESCO Crosscheck Plus (bifenthrin)');
+    const noPolyzone = CATALOG.map((row) => (row.name === 'Suspend Polyzone' ? { ...row, active: false } : row));
+    expect(section(await build({ catalog: noPolyzone }), 'products').bullets[0]).toBe('Barrier spray: Tekko Pro IGR (pyriproxyfen + novaluron)');
     const result = await build({ catalog: CATALOG.map((row) => ({ ...row, active: false })) });
     expect(section(result, 'products')).toBeUndefined();
     expect(result.validation.status).toBe('passed');
@@ -311,7 +309,7 @@ describe('who gets the page: an exact recurring mosquito row', () => {
 
   test('the registry entry carries the stamps, the keys and the send words', () => {
     const program = OUTLINE_PROGRAMS.mosquito;
-    expect(program.contentLibraryVersion()).toBe('mosquito-v1-copy-1');
+    expect(program.contentLibraryVersion()).toBe('mosquito-v1-copy-2');
     expect(program.protocolVersion()).toBe(PROTOCOLS.mosquito.version ?? null);
     expect(program.listKeys).toEqual({ available: 'mosquitoOutlineAvailable', outline: 'mosquitoServiceOutline' });
     expect(program.offError).toBe('Mosquito outlines are not turned on.');

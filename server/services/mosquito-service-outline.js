@@ -35,7 +35,7 @@ const featureGates = require('../config/feature-gates');
 const PROTOCOLS = require('../config/protocols.json');
 
 const SERVICE_LINE = 'mosquito';
-const MOSQUITO_CONTENT_LIBRARY_VERSION = 'mosquito-v1-copy-1';
+const MOSQUITO_CONTENT_LIBRARY_VERSION = 'mosquito-v1-copy-2';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 // GATE_MOSQUITO_OUTLINE: staff can build and send a Mosquito outline from an estimate. Off = no Mosquito outline can be
@@ -93,7 +93,7 @@ const MOSQUITO_COPY = Object.freeze({
   programTiles: Object.freeze([
     tile('insects', 'Treat where they rest', 'By day, many adult mosquitoes rest in shaded leaves: hedges, fence lines, under decks, and the lanai and pool-cage edges. The spray goes there, not across the open lawn.'),
     tile('dry_spots', 'Find where they breed', 'Each visit we check gutters, drains, planters, bromeliads, saucers, tarps and toys, and tip out standing water where we can.'),
-    tile('spots', 'Treat water that has to stay', 'Where breeding water can’t be removed, a growth regulator goes on only where the label and the site allow. Bti dunks and a mosquito station are added when your estimate includes them.'),
+    tile('spots', 'Treat water that has to stay', 'Where breeding water can’t be removed, Bti dunks and a mosquito station go in when your estimate includes them, only where the label and the site allow.'),
   ]),
   yearTitle: 'Your Year At A Glance',
   yearBody: 'Every visit follows the same routine; what changes through the year is how many mosquitoes are out. This season is open; tap any season to see what to expect and one thing to do at home.',
@@ -118,8 +118,8 @@ const MOSQUITO_COPY = Object.freeze({
   treatments: Object.freeze([
     Object.freeze({ key: 'inspection', label: 'Inspection', text: 'A walk of the yard each visit: shady resting spots, and anything holding water.' }),
     Object.freeze({ key: 'dry_spots', label: 'Source reduction', text: 'Standing water tipped out where we can. Sources we can\'t reach, or that need a fix such as a clogged gutter or poor drainage, go on your report.' }),
-    Object.freeze({ key: 'insects', label: 'Barrier spray', text: 'A fine spray from a backpack sprayer into and beneath the shaded leaves where adults rest. Kept off blooms with pollinators on them, edible plants, and open water.' }),
-    Object.freeze({ key: 'spots', label: 'Larval control', text: 'A growth regulator where the label and the site allow, plus Bti dunks and a mosquito station when your estimate includes them. The growth regulator: eggs don’t hatch and young insects can’t grow into breeding adults.' }),
+    Object.freeze({ key: 'insects', label: 'Barrier spray', text: 'A fine spray from a backpack sprayer into and beneath the shaded leaves where adults rest, with a growth regulator in the same spray: eggs don’t hatch and young insects can’t grow into breeding adults. Kept off blooms with pollinators on them and edible plants, at least 25 feet from ponds, lakes and canals, and 10 feet from storm drains.' }),
+    Object.freeze({ key: 'spots', label: 'Larval control', text: 'Bti dunks and a mosquito station when your estimate includes them, where the label and the site allow.' }),
   ]),
   productsTitle: 'Products We May Use',
   productsBody: 'Each visit uses only what the yard needs. Your service report names every product applied, with its EPA number.',
@@ -176,13 +176,13 @@ const MOSQUITO_COPY = Object.freeze({
 });
 
 // The product list: catalog rows read by name at build time (decision D1-B, as on the lawn and pest outlines), never a
-// typed-in name. The house bifenthrin is LESCO Crosscheck Plus (owner ruling 2026-11-18; it replaced Atticus Talak 7.9 F).
-// The dunk and station rows print only when the estimate's program row holds that add-on. Left off:
-// Tekko Trio (indoor-only, owner 2026-10-01), Bifen I/T and Talstar P (inactive; they are Talak, which is no longer the house bifenthrin), Cyzmic CS, Altosid.
+// typed-in name. The barrier is the mosquito card's own (owner 2026-11-25, protocols pick D7): Suspend PolyZone with Tekko Pro in one
+// tank (server/config/protocols.json, mosquito), so both print in the barrier step. The dunk and station rows print only when the estimate's program row holds that
+// add-on. Left off: Scion (off the card, D7), LESCO Crosscheck Plus (the card's stand-in only when PolyZone runs out),
+// Tekko Trio (indoor-only, owner 2026-10-01), Bifen I/T and Talstar P (inactive), Cyzmic CS, Altosid.
 const MOSQUITO_PRODUCTS = Object.freeze([
-  { step: 'insects', names: ['LESCO Crosscheck Plus'] },
-  { step: 'insects', names: ['Scion Insecticide'] },
-  { step: 'spots', names: ['Tekko Pro IGR'] },
+  { step: 'insects', names: ['Suspend Polyzone'] },
+  { step: 'insects', names: ['Tekko Pro IGR'] },
   { step: 'spots', names: ['Summit Mosquito Dunk Tablets'], addOn: 'dunks' },
   { step: 'spots', names: ['In2Care Mosquito Station'], addOn: 'stations' },
 ].map((product) => Object.freeze(product)));

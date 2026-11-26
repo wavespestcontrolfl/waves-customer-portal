@@ -2073,23 +2073,26 @@
   "mosquito": {
     "name": "Mosquito Control Protocol",
     "notes": [
-      "Mosquito service depends on source reduction plus directed barrier treatment. Outdoor pressure can rebuild from neighboring breeding and resting sites.",
-      "Peak SWFL pressure is typically May through October, but shaded, irrigated, or water-adjacent properties can need service outside that window.",
-      "Avoid pollinator activity and blooming plants when selecting treatment zones.",
+      "Dump and drain, larvicide, then one barrier tank: Suspend PolyZone with Tekko Pro, sprayed with the mist blower. No fogger and no ULV: the bifenthrin and Fendona labels ban ULV and thermal fog for residuals.",
+      "Keep 25 ft from every lake, pond, retention pond and canal, and 10 ft from storm drains. Inside that strip: dump and drain and Bti only. Say this at the sale; many yards back onto ponds.",
+      "PolyZone repeats at 21 days. No Tekko Pro repeat outdoors inside 14 days. If PolyZone (deltamethrin) runs out, LESCO Crosscheck Plus (bifenthrin) is the cheaper stand-in.",
+      "Demand CS and Cyzmic CS go on shrubs only, never on a lawn (\"DO NOT apply directly to residential lawns and turf\"). Scion, In2Care stations and Tekko Trio are not part of this card.",
+      "Visit 1 or heavy pressure: PolyZone up to 1.5 fl oz per 1,000 sq ft (its label's high rate). Mix it by hand; the app gives the standard rate.",
+      "Monthly plan: all year, with the barrier in December to February only when adults are present. Seasonal plan: 9 visits, March to November. Success is the customer's report of fewer bites and fewer containers with larvae at each visit. No landing counts.",
       "Account that also has tree and shrub service: barrier spray at most monthly, aimed at low shaded foliage; no spray on blooming plants or on sago, ficus, camellia, holly or magnolia."
     ],
     "safety_rules": [
-      "Wind and rain conditions must support safe application.",
-      "Do not spray open water, edible plants, blooming plants with active pollinators, or inaccessible areas.",
-      "Document standing water sources that cannot be corrected.",
-      "Use customer notes to separate source reduction from adult mosquito suppression."
+      "No spraying in rain, or when the wind is over 15 mph (PolyZone label). In the wet season, do mosquito stops before about 1 PM.",
+      "Keep 25 ft from open water and 10 ft from storm drains. No spray on open blooms, vegetables or open sunny turf.",
+      "No fogger and no space spray. The mist blower or the 4-gal backpack does all of it.",
+      "Document standing water sources that cannot be corrected."
     ],
     "visits": [
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Mosquito Barrier Treatment\nTreat shaded resting zones, foliage edges, fence lines, lanai perimeter, pool cage edges, under decks, and vegetation transitions\nUse adulticide selected from inventory and label/site fit\nApply with directed backpack or approved equipment",
-        "secondary": "Inspect gutters, drains, planters, bromeliads, saucers, tarps, toys, and water-holding containers\nDump standing water where practical\nDocument inaccessible breeding sources",
+        "primary": "Mosquito Barrier Treatment\nWalk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nBarrier: Suspend PolyZone 1.1 fl oz per gallon, 1 gallon per 1,500 sq ft, with the mist blower from the ground up to 10 ft: leaf undersides, shaded shrubs, under decks, the lanai base and fence lines\nGrowth regulator in the same tank: Tekko Pro 1 fl oz per gallon\nHand the customer the dump-and-drain note with their containers ticked",
+        "secondary": "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond\nOr an Altosid 30-day briquet in the same water, when dunks are out",
         "material_cost": "inventory",
         "labor_cost": "standard",
         "tiers": {
@@ -2098,13 +2101,61 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "This is the default recurring mosquito template. The customer note should mention both treatment areas and source findings."
+        "notes": "The recurring mosquito visit, about 20 minutes. The customer note names the treated areas and the water sources found.",
+        "lineMeta": {
+          "Barrier: Suspend PolyZone 1.1 fl oz per gallon, 1 gallon per 1,500 sq ft, with the mist blower from the ground up to 10 ft: leaf undersides, shaded shrubs, under decks, the lanai base and fence lines": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Suspend Polyzone"
+            ],
+            "completionApplicationMethod": "foliar_spray",
+            "labelRatePerGallon": {
+              "amount": 1.1,
+              "unit": "fl_oz",
+              "use": "mosquitoes",
+              "epa": "101563-143"
+            }
+          },
+          "Growth regulator in the same tank: Tekko Pro 1 fl oz per gallon": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Tekko Pro IGR"
+            ],
+            "completionApplicationMethod": "foliar_spray",
+            "tankRatePerGallon": {
+              "amount": 1,
+              "unit": "fl_oz"
+            }
+          },
+          "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Summit Mosquito Dunk Tablets"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          },
+          "Or an Altosid 30-day briquet in the same water, when dunks are out": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Altosid 30 Day Briquets"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          }
+        },
+        "completionDefaultProducts": [
+          "Suspend Polyzone",
+          "Tekko Pro IGR"
+        ]
       },
       {
         "visit": 2,
         "month": "Any",
-        "primary": "Source Reduction / Larval Support\nInspect and correct standing water sources\nApply Bti dunk tablets or approved mosquito stations where breeding sources cannot be removed\nUse IGR support only where label, water source, and site conditions fit",
-        "secondary": "Recheck prior breeding sources\nFlag drainage, irrigation, screen, or gutter issues\nExplain that adult pressure can persist when sources are off-property",
+        "primary": "Source Reduction / Larval Support\nWalk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nLarvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond",
+        "secondary": "Or an Altosid 30-day briquet in the same water, when dunks are out\nRecheck the breeding sources from the last visit\nFlag drainage, irrigation, screen or gutter problems\nExplain that adults can still fly in when the water is off the property",
         "material_cost": "inventory",
         "labor_cost": "standard",
         "tiers": {
@@ -2113,13 +2164,31 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Use this template when breeding-source pressure is the main driver, not just resting adult pressure."
+        "notes": "Use when breeding water is the main driver. No barrier spray on this visit.",
+        "lineMeta": {
+          "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Summit Mosquito Dunk Tablets"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          },
+          "Or an Altosid 30-day briquet in the same water, when dunks are out": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Altosid 30 Day Briquets"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          }
+        }
       },
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Event / Heavy-Pressure Mosquito Service\nInspect event-use zones, seating areas, lanai, pool deck, paths, and shaded perimeter\nTreat high-use resting zones only where label, wind, rain, and pollinator conditions allow\nPrioritize customer-visible use areas over blanket coverage",
-        "secondary": "Set expectations for short-term knockdown versus recurring pressure\nRecommend recurring mosquito plan if pressure is structural or seasonal\nDocument weather limits and inaccessible zones",
+        "primary": "Event / Heavy-Pressure Mosquito Service\nInspect the seating areas, lanai, pool deck and paths 24 to 72 hours before the event\nSpray the barrier only on the shaded shrubs, hedges and plant beds around those areas. No spray on the pool deck, paths or other paved surfaces\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nBarrier: Suspend PolyZone 1.1 fl oz per gallon, 1 gallon per 1,500 sq ft, with the mist blower from the ground up to 10 ft: leaf undersides, shaded shrubs, under decks, the lanai base and fence lines\nGrowth regulator in the same tank: Tekko Pro 1 fl oz per gallon",
+        "secondary": "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond\nOr an Altosid 30-day briquet in the same water, when dunks are out\nSet expectations: this is short-term relief; recommend the recurring plan when pressure is seasonal",
         "material_cost": "inventory",
         "labor_cost": "event",
         "tiers": {
@@ -2128,7 +2197,124 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Use for one-time event prep or heavy-pressure corrective visits. Do not overpromise duration."
+        "notes": "One-time event prep or a heavy-pressure visit. Do not promise how long it lasts.",
+        "lineMeta": {
+          "Barrier: Suspend PolyZone 1.1 fl oz per gallon, 1 gallon per 1,500 sq ft, with the mist blower from the ground up to 10 ft: leaf undersides, shaded shrubs, under decks, the lanai base and fence lines": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Suspend Polyzone"
+            ],
+            "completionApplicationMethod": "foliar_spray",
+            "labelRatePerGallon": {
+              "amount": 1.1,
+              "unit": "fl_oz",
+              "use": "mosquitoes",
+              "epa": "101563-143"
+            }
+          },
+          "Growth regulator in the same tank: Tekko Pro 1 fl oz per gallon": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Tekko Pro IGR"
+            ],
+            "completionApplicationMethod": "foliar_spray",
+            "tankRatePerGallon": {
+              "amount": 1,
+              "unit": "fl_oz"
+            }
+          },
+          "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Summit Mosquito Dunk Tablets"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          },
+          "Or an Altosid 30-day briquet in the same water, when dunks are out": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Altosid 30 Day Briquets"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          }
+        },
+        "completionDefaultProducts": [
+          "Suspend Polyzone",
+          "Tekko Pro IGR"
+        ]
+      },
+      {
+        "visit": 4,
+        "month": "Any",
+        "primary": "Mosquito Callback\nAsk the customer where and when they are bitten\nWalk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads\nLarvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond",
+        "secondary": "Or an Altosid 30-day briquet in the same water, when dunks are out\nSpray only if adults are resting: LESCO Crosscheck Plus at its low rate, on shaded resting sites, with no repeat inside 7 days. No PolyZone or Tekko Pro before day 21\nNote why pressure came back: new water, a neighbor's yard, rain, or a missed area",
+        "lineMeta": {
+          "Spray only if adults are resting: LESCO Crosscheck Plus at its low rate, on shaded resting sites, with no repeat inside 7 days. No PolyZone or Tekko Pro before day 21": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "LESCO Crosscheck Plus"
+            ],
+            "completionApplicationMethod": "foliar_spray"
+          },
+          "Larvicide only water that cannot be dumped: a Summit Bti dunk per 100 sq ft of water surface (30 days). Never an HOA or CDD pond": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Summit Mosquito Dunk Tablets"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          },
+          "Or an Altosid 30-day briquet in the same water, when dunks are out": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Altosid 30 Day Briquets"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "tiers": {
+          "bronze": false,
+          "silver": true,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "A re-service visit. It prefills no spray: PolyZone repeats only at 21 days, and Tekko Pro outdoors not inside 14 days."
+      },
+      {
+        "visit": 5,
+        "month": "Any",
+        "primary": "Mosquito Station Service\nService each In2Care station by its label: refill the water, replace the insert, and log the station count\nKeep stations in shade, near the resting sites, away from where children and pets play",
+        "secondary": "Walk the yard: count the containers that hold water and the ones with larvae\nDump and drain: tip, drain or cover saucers, buckets, toys, tarps, gutters and bromeliads",
+        "lineMeta": {
+          "Service each In2Care station by its label: refill the water, replace the insert, and log the station count": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "In2Care Mosquito Station"
+            ],
+            "completionApplicationMethod": "station_check"
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "tiers": {
+          "bronze": false,
+          "silver": true,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "The In2Care station add-on the customer bought. Stations are off the barrier card's defaults, not out of service.",
+        "completionDefaultProducts": [
+          "In2Care Mosquito Station"
+        ]
       }
     ]
   },

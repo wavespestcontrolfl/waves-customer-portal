@@ -606,7 +606,7 @@ describe('GET /admin/estimates Mosquito outline (GATE_MOSQUITO_OUTLINE)', () => 
         base('e-server-repriced', { service_interest: 'Mosquito', monthly_total: '55.00', pricing_authority: 'SERVER', estimate_data: { result: { recurring: { services: [] } }, engineResult: { recurring: { services: [{ service: 'mosquito' }] } } } }),
       ],
       outlines: [
-        { id: 'mosquito-packet', estimate_id: 'e-program', service_line: 'mosquito', status: 'sent', validation_status: 'passed', created_at: '2026-10-26T12:00:00Z', summary_json: {}, content_json: {}, content_library_version: 'mosquito-v1-copy-1', template_version: 'mvp-1', product_registry_version: 'public-facts-v1', protocol_version: null },
+        { id: 'mosquito-packet', estimate_id: 'e-program', service_line: 'mosquito', status: 'sent', validation_status: 'passed', created_at: '2026-10-26T12:00:00Z', summary_json: {}, content_json: {}, content_library_version: 'mosquito-v1-copy-2', template_version: 'mvp-1', product_registry_version: 'public-facts-v1', protocol_version: null },
       ],
     });
     await withServer(async (baseUrl) => {

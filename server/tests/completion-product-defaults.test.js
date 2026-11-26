@@ -397,8 +397,8 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
     expect([second.matchedVisit.visit, second.matchedVisit.reason, second.source]).toEqual([3, 'bed_bug_followup', 'none']);
   });
 
-  test('every curated default and every lineMeta hint on the flea, bed bug and cockroach cards names a card line', () => {
-    for (const key of ['flea', 'bed_bug', 'cockroach']) {
+  test('every curated default and every lineMeta hint on the flea, bed bug, cockroach and mosquito cards names a card line', () => {
+    for (const key of ['flea', 'bed_bug', 'cockroach', 'mosquito']) {
       for (const visit of realProtocols[key].visits) {
         const lines = `${visit.primary}\n${visit.secondary}`.split('\n');
         for (const line of Object.keys(visit.lineMeta || {})) expect(lines).toContain(line);
@@ -431,15 +431,34 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
     expect(result.names).toEqual(['Atticus Antapex WSG', 'Tekko Pro IGR', 'Advion Evolution Cockroach Gel Bait']);
   });
 
-  test('other curated-less programs (pest visit 1, mosquito, termite) carry no field yet', () => {
-    for (const visitList of Object.values({
-      mosquito: realProtocols.mosquito.visits,
-      termite: realProtocols.termite.visits,
-    })) {
-      for (const visit of visitList) {
-        expect(visit.completionDefaultProducts).toBeUndefined();
-      }
+  test('mosquito: the barrier visits prefill PolyZone + Tekko Pro; source reduction and callbacks prefill nothing (owner 2026-11-25, D7)', () => {
+    for (const [serviceType, serviceKey] of [['Monthly Mosquito Control Service', 'mosquito_monthly'], ['Seasonal Mosquito Control Service', 'mosquito_seasonal'], ['One-Time Mosquito Control Service', 'mosquito_one_time']]) {
+      const result = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType, serviceKey });
+      expect([serviceType, result.programKey, result.source, result.names]).toEqual([serviceType, 'mosquito', 'protocol_visit', ['Suspend Polyzone', 'Tekko Pro IGR']]);
     }
+    // Source reduction prefills nothing: the tech picks the dunk or the briquet.
+    // The briquet is the fallback when dunks are out: never base work beside the dunk on any card (Codex #8615 r1).
+    for (const visit of realProtocols.mosquito.visits) {
+      const briquet = Object.keys(visit.lineMeta || {}).find((line) => line.startsWith('Or an Altosid'));
+      if (briquet) expect([visit.visit, visit.primary.split('\n').includes(briquet), visit.secondary.split('\n').includes(briquet)]).toEqual([visit.visit, false, true]);
+    }
+    expect(realProtocols.mosquito.visits.find((v) => v.visit === 2).completionDefaultProducts).toBeUndefined();
+    // A callback (booked from a finished visit, or named so) prefills no spray: PolyZone repeats only at 21 days, Tekko Pro outdoors not inside 14.
+    for (const args of [{ serviceType: 'Monthly Mosquito Control Service', serviceKey: 'mosquito_monthly', isFollowup: true }, { serviceType: 'Mosquito Callback' }, { serviceType: 'Mosquito Control Re-Service' }]) {
+      const callback = resolveCompletionDefaultProductNames({ protocols: realProtocols, ...args });
+      expect([callback.matchedVisit.visit, callback.matchedVisit.reason || callback.reason, callback.source, callback.names]).toEqual([4, expect.anything(), 'none', []]);
+    }
+    // A booked station service gets the station card and default, never the larvicide visit's dunk.
+    const stations = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Mosquito Treatment - Stations' });
+    expect([stations.matchedVisit.visit, stations.names]).toEqual([5, ['In2Care Mosquito Station']]);
+    const dunks = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Mosquito Treatment - Dunks' });
+    expect([dunks.matchedVisit.visit, dunks.names]).toEqual([2, []]);
+    const names = realProtocols.mosquito.visits.flatMap((v) => v.completionDefaultProducts);
+    for (const retired of ['Scion Insecticide', 'Tekko Trio']) expect(names).not.toContain(retired);
+  });
+
+  test('other curated-less programs (pest visit 1, termite) carry no field yet', () => {
+    for (const visit of realProtocols.termite.visits) expect(visit.completionDefaultProducts).toBeUndefined();
     expect(realProtocols.pest.visits.find((v) => v.visit === 1).completionDefaultProducts).toBeUndefined();
   });
 });
