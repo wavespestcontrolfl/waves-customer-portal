@@ -381,6 +381,9 @@ async function assertManualActionAllowed(trx, requestId, action) {
 async function settleRequestLedgerBells(trx, requestId) {
   const row = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id');
   if (!row) return;
+  // A price check (history-total order) is about the charge, not the stock: receiving keeps it open.
+  const held = await trx('vendor_orders').where({ id: row.id }).first('evidence');
+  if (/^Auto-order price check/.test(String(meta(held?.evidence).bell?.title || ''))) return;
   await retireLedgerBells(trx, row.id);
   await trx('vendor_orders').where({ id: row.id }).update({ evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt'"), updated_at: new Date() });
 }

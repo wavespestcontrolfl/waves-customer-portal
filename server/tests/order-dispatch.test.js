@@ -995,6 +995,15 @@ describe('history-total placement', () => {
     expect(JSON.parse(placedRow.evidence).bell.title).toMatch(/^Auto-order price check/);
   });
 
+  test('receiving the stock keeps an open price check (its bell is about the charge)', async () => {
+    const { settleRequestLedgerBells } = require('../services/procurement/order-dispatch');
+    mockState.requestLedger = { id: 'ledger-1' };
+    mockState.parkedEvidence = { bell: { title: 'Auto-order price check: sticker', body: 'x', v: 'a' } };
+    const before = mockState.updates.length;
+    await settleRequestLedgerBells(require('../models/db'), 'req-1');
+    expect(mockState.updates.slice(before).filter((u) => u.table === 'vendor_orders')).toHaveLength(0);
+  });
+
   test('final total within tolerance (5%) rings nothing', async () => {
     expect(await run(historyAdapter(32900))).toMatchObject({ status: 'placed', amountCents: 32900 });
     expect(notify).not.toHaveBeenCalled();
