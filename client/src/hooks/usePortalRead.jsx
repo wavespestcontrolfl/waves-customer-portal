@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useBiometricLock } from '../components/BiometricGate';
 import { isNativeApp } from '../native/platform';
-import { clearSavedHome, readHomeReads, storedHomeIdentity, writeHomeRead } from '../lib/homeSnapshot';
+import { SAVED_READ_KEYS, clearHomeReads, clearSavedHome, readHomeReads, storedHomeIdentity, writeHomeRead } from '../lib/homeSnapshot';
 
 const PortalReadContext = createContext(null);
 export const READ_TIMEOUT_MS = 15000;
@@ -24,12 +24,13 @@ function hydrateSavedReads(identity, property) {
 // 'next-visit' and 'latest-service' reads are saved to localStorage, cut down to
 // what the saved visit card prints (lib/homeSnapshot SAVED_READ_KEYS), under the
 // login identity + property they were read for, and hydrated at mount as
-// unverified (the `saved` card shows until a refresh succeeds). A 401/403, a
-// sign-out, or a login or property change deletes them. Every other read stays
-// in memory only.
+// unverified (the `saved` card shows until a refresh succeeds). Any eviction
+// deletes the saved reads; an access denial (401/403) deletes the saved account
+// too. Every other read stays in memory only.
 export function PortalReadProvider({ enabled, persistIdentity = null, persistProperty = null, children }) {
-  const cache = useRef(null);
-  if (cache.current === null) cache.current = hydrateSavedReads(enabled ? persistIdentity : null, persistProperty);
+  const cacheRef = useRef(null);
+  if (cacheRef.current === null) cacheRef.current = hydrateSavedReads(enabled ? persistIdentity : null, persistProperty);
+  const cache = cacheRef.current;
   const persistRef = useRef({ identity: persistIdentity, property: persistProperty });
   persistRef.current = { identity: enabled ? persistIdentity : null, property: persistProperty };
   // The login stored in this browser when a read starts; its answer is saved
@@ -41,22 +42,10 @@ export function PortalReadProvider({ enabled, persistIdentity = null, persistPro
     if (stamp !== identity) return;
     writeHomeRead(identity, property, key, entry.data, entry.updatedAt);
   }, []);
-  // Access denied: every mounted reader loses its data and bumps its own
-  // sequence, so an answer already on the way is discarded and a sibling can
-  // neither keep showing hydrated data nor write the cache or storage again.
-  const invalidated = useRef(new Set()).current;
-  const onInvalidate = useCallback((reset) => {
-    invalidated.add(reset);
-    return () => invalidated.delete(reset);
-  }, [invalidated]);
-  const invalidate = useCallback((message) => {
-    cache.current.clear();
-    // The saved account goes with the saved reads: an offline relaunch must
-    // not adopt a screen the server just denied.
-    clearSavedHome();
-    [...invalidated].forEach((reset) => reset(message));
-  }, [invalidated]);
   const readers = useRef(new Set()).current;
+  const invalidationReaders = useRef(new Map()).current;
+  const invalidationEpoch = useRef(0);
+  const keyInvalidationEpochs = useRef(new Map()).current;
   const [online, setOnline] = useState(() => navigator.onLine !== false);
   const [refreshing, setRefreshing] = useState(false);
   const refreshingRef = useRef(false);
@@ -70,6 +59,50 @@ export function PortalReadProvider({ enabled, persistIdentity = null, persistPro
     readers.add(read);
     return () => readers.delete(read);
   }, [readers]);
+
+  const getInvalidationEpoch = useCallback((key) => ({
+    all: invalidationEpoch.current,
+    key: keyInvalidationEpochs.get(key) || 0,
+  }), [keyInvalidationEpochs]);
+
+  const invalidationEpochIsCurrent = useCallback((key, expected) => (
+    invalidationEpoch.current === expected?.all
+    && (keyInvalidationEpochs.get(key) || 0) === expected?.key
+  ), [keyInvalidationEpochs]);
+
+  const registerInvalidation = useCallback((key, expectedEpoch, invalidate) => {
+    const keyedReaders = invalidationReaders.get(key) || new Set();
+    if (!invalidationReaders.has(key)) invalidationReaders.set(key, keyedReaders);
+    keyedReaders.add(invalidate);
+    // An old denial can settle after render but before this effect subscribes.
+    // Reconcile that gap before the reader can keep showing its render-time cache.
+    if (!invalidationEpochIsCurrent(key, expectedEpoch)) invalidate();
+    return () => {
+      keyedReaders.delete(invalidate);
+      if (keyedReaders.size === 0) invalidationReaders.delete(key);
+    };
+  }, [invalidationEpochIsCurrent, invalidationReaders]);
+
+  const evict = useCallback(({ key, clearAll = false, message, denied = false } = {}) => {
+    // The disk copy goes with the memory copy, also when the reader unmounted;
+    // an access denial deletes the saved account as well, so an offline
+    // relaunch adopts nothing the server just refused.
+    if (denied) clearSavedHome();
+    else if (clearAll || SAVED_READ_KEYS.includes(key)) clearHomeReads();
+    let targets;
+    if (clearAll) {
+      cache.clear();
+      invalidationEpoch.current += 1;
+      targets = [...invalidationReaders.values()].flatMap(keyedReaders => [...keyedReaders]);
+    } else {
+      cache.delete(key);
+      keyInvalidationEpochs.set(key, (keyInvalidationEpochs.get(key) || 0) + 1);
+      targets = [...(invalidationReaders.get(key) || [])];
+    }
+    // Snapshot before notifying because an invalidation may synchronously
+    // unmount a reader and mutate the registration map.
+    targets.forEach(invalidate => invalidate(message));
+  }, [cache, invalidationReaders, keyInvalidationEpochs]);
 
   const refresh = useCallback(async ({ preserveVerified = true } = {}) => {
     if (!enabled || refreshingRef.current || lockedRef.current || navigator.onLine === false) return;
@@ -141,8 +174,22 @@ export function PortalReadProvider({ enabled, persistIdentity = null, persistPro
   }, [locked, refresh]);
 
   const value = useMemo(() => ({
-    enabled, cache: cache.current, register, online, refreshing, refresh, persistRead, readStamp, onInvalidate, invalidate,
-  }), [enabled, register, online, refreshing, refresh, persistRead, readStamp, onInvalidate, invalidate]);
+    enabled,
+    cache,
+    evict,
+    getInvalidationEpoch,
+    invalidationEpochIsCurrent,
+    register,
+    registerInvalidation,
+    online,
+    refreshing,
+    refresh,
+    persistRead,
+    readStamp,
+  }), [
+    enabled, cache, evict, getInvalidationEpoch, invalidationEpochIsCurrent,
+    register, registerInvalidation, online, refreshing, refresh, persistRead, readStamp,
+  ]);
   return <PortalReadContext.Provider value={value}>{children}</PortalReadContext.Provider>;
 }
 
@@ -150,20 +197,32 @@ export function usePortalRefresh() {
   return useContext(PortalReadContext);
 }
 
+function portalReadAuthorizationDenied(error) {
+  return error?.status === 401 || error?.status === 403 || error?.sessionExpired;
+}
+
 // Used only for the portal's read-only visit/document data. Cached results never
 // stand in for auth, permission checks, writes, or success acknowledgments.
 export default function usePortalRead(key, load) {
   const portal = usePortalRefresh();
-  const cache = portal?.enabled ? portal.cache : null;
-  const register = portal?.enabled ? portal.register : null;
+  const {
+    cache = null,
+    evict: providerEvict = null,
+    getInvalidationEpoch = null,
+    invalidationEpochIsCurrent = null,
+    register = null,
+    registerInvalidation = null,
+    persistRead,
+    readStamp,
+  } = portal?.enabled ? portal : {};
   const offline = portal?.enabled && !portal.online;
-  const persistRead = portal?.enabled ? portal.persistRead : undefined;
-  const readStamp = portal?.enabled ? portal.readStamp : undefined;
-  const onInvalidate = portal?.enabled ? portal.onInvalidate : undefined;
-  const invalidate = portal?.enabled ? portal.invalidate : undefined;
   const loadRef = useRef(load);
   loadRef.current = load;
   const sequence = useRef(0);
+  const renderedEpoch = useRef(null);
+  if (renderedEpoch.current?.key !== key || renderedEpoch.current?.source !== getInvalidationEpoch) {
+    renderedEpoch.current = { key, source: getInvalidationEpoch, value: getInvalidationEpoch?.(key) };
+  }
   const [state, setState] = useState(() => ({
     data: cache?.get(key)?.data,
     updatedAt: cache?.get(key)?.updatedAt || null,
@@ -176,8 +235,21 @@ export default function usePortalRead(key, load) {
     if (offline) setState(previous => ({ ...previous, verified: false }));
   }, [offline]);
 
+  const invalidateLocal = useCallback((message = 'Could not update this information.') => {
+    sequence.current += 1;
+    setState({
+      data: undefined,
+      updatedAt: null,
+      loading: false,
+      pending: false,
+      verified: false,
+      error: message,
+    });
+  }, []);
+
   const refresh = useCallback(async ({ preserveVerified = false } = {}) => {
     const attempt = ++sequence.current;
+    const attemptEpoch = getInvalidationEpoch?.(key);
     const stamp = readStamp?.();
     // Background reads preserve a healthy view so they do not collapse scroll
     // or remove focused inputs. Manual retries, offline/error/remounted-cache
@@ -190,23 +262,60 @@ export default function usePortalRead(key, load) {
       error: previous.data === undefined ? '' : previous.error,
     }));
     let timer;
+    let timedOut = false;
+    const clearDeniedRead = (error) => {
+      const denied = portalReadAuthorizationDenied(error);
+      if (denied) {
+        if (providerEvict) providerEvict({ clearAll: true, message: error?.message, denied: true });
+        else cache?.clear();
+      }
+      return denied;
+    };
     try {
       if (cache && navigator.onLine === false) throw new Error('You are offline. Reconnect to update this information.');
+      const loadPromise = Promise.resolve(loadRef.current({ isCurrent: () => sequence.current === attempt }));
+      // Promise.race stops forwarding once the timeout wins. Observe the
+      // underlying request as well so a later explicit denial still purges
+      // shared customer data before an offline remount can recover it.
+      void loadPromise.catch(error => {
+        // Rejections before the timeout continue through the ordinary catch
+        // below. This observer owns only a rejection that arrives after the
+        // race has already settled, avoiding duplicate state transitions.
+        if (!timedOut || !clearDeniedRead(error)) return;
+        if (sequence.current === attempt) {
+          setState(previous => ({
+            ...previous,
+            data: undefined,
+            updatedAt: null,
+            loading: false,
+            pending: false,
+            verified: false,
+            error: error?.message || 'Could not update this information.',
+          }));
+        }
+      });
       const data = await Promise.race([
-        loadRef.current(),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('The connection is taking too long. Please try again.')), READ_TIMEOUT_MS); }),
+        loadPromise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(new Error('The connection is taking too long. Please try again.'));
+          }, READ_TIMEOUT_MS);
+        }),
       ]);
-      // Superseded, or access was denied to a sibling (its reset bumps this sequence).
-      if (sequence.current !== attempt) return;
+      if (sequence.current !== attempt || (invalidationEpochIsCurrent && !invalidationEpochIsCurrent(key, attemptEpoch))) return;
       const next = { data, updatedAt: Date.now(), loading: false, pending: false, verified: navigator.onLine !== false, error: '' };
       cache?.set(key, next);
       persistRead?.(key, next, stamp);
       setState(next);
     } catch (error) {
-      if (sequence.current !== attempt) return;
       // An explicit access denial must not leave cached customer details behind.
-      const denied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
-      if (denied) { if (invalidate) invalidate(error?.message); else cache?.clear(); }
+      const denied = clearDeniedRead(error);
+      // Auth/session denial is provider-wide and remains authoritative even
+      // when this reader unmounted while the request was in flight. Local UI
+      // state is still guarded by the sequence below, but the shared cache
+      // must not resurrect revoked details on an offline remount.
+      if (sequence.current !== attempt) return;
       setState(previous => ({
         ...previous,
         ...(denied ? { data: undefined, updatedAt: null } : {}),
@@ -218,21 +327,19 @@ export default function usePortalRead(key, load) {
     } finally {
       clearTimeout(timer);
     }
-  }, [cache, key, persistRead, readStamp, invalidate]);
+  }, [cache, getInvalidationEpoch, invalidationEpochIsCurrent, key, persistRead, providerEvict, readStamp]);
+
+  useEffect(() => registerInvalidation?.(
+    key,
+    renderedEpoch.current?.value,
+    invalidateLocal,
+  ), [invalidateLocal, key, registerInvalidation]);
 
   useEffect(() => {
     void refresh();
     return () => { sequence.current += 1; };
   }, [refresh]);
   useEffect(() => register?.(refresh), [register, refresh]);
-  // A denial seen by ANY reader empties this one too and drops its own answer
-  // still in flight.
-  useEffect(() => onInvalidate?.((message) => {
-    sequence.current += 1;
-    setState(previous => ({
-      ...previous, data: undefined, updatedAt: null, loading: false, pending: false, verified: false, error: message || 'Could not update this information.',
-    }));
-  }), [onInvalidate]);
 
   const update = useCallback((change) => {
     sequence.current += 1;
@@ -245,5 +352,37 @@ export default function usePortalRead(key, load) {
     });
   }, [cache, key, persistRead, readStamp]);
 
-  return { ...state, refresh, update, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
+  const invalidate = useCallback((message = 'Could not update this information.', { clearAll = false } = {}) => {
+    // Scope/auth conflicts are stronger than an ordinary failed refresh: the
+    // last verified payload is no longer safe to display or remount from the
+    // provider cache. Advancing the sequence also denies every in-flight
+    // completion that started before the invalidation.
+    if (providerEvict) providerEvict({ key, clearAll, message });
+    else {
+      if (clearAll) cache?.clear();
+      else cache?.delete(key);
+      invalidateLocal(message);
+    }
+  }, [cache, invalidateLocal, key, providerEvict]);
+
+  const evict = useCallback(({ clearAll = false, message } = {}) => {
+    // Direct pagination reads do not flow through refresh's catch, and may
+    // finish after their reader unmounts. The provider notifies any remaining
+    // mounted readers while the dead caller only retains this stable function.
+    if (providerEvict) providerEvict({ key, clearAll, message });
+    else if (clearAll) cache?.clear();
+    else cache?.delete(key);
+  }, [cache, key, providerEvict]);
+
+  const cacheEntryGuard = useCallback(() => {
+    const expected = cache?.get(key);
+    return () => cache?.get(key) === expected;
+  }, [cache, key]);
+
+  const freshnessGuard = useCallback(() => {
+    const expected = sequence.current;
+    return () => sequence.current === expected;
+  }, []);
+
+  return { ...state, refresh, update, invalidate, evict, cacheEntryGuard, freshnessGuard, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
 }

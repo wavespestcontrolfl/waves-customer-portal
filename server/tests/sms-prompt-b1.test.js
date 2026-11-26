@@ -52,15 +52,15 @@ describe('version identity', () => {
   test('B1 off keeps 25_n / 26_n; on mints 27_n / 28_n following the scheduler gate (each with the e tag)', () => {
     const d = freshDrafter();
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers45_n+e');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers49_n+e');
     process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers46_n+e');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers50_n+e');
     process.env.GATE_SMS_PROMPT_B1 = 'true';
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers48_n+e');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers52_n+e');
     delete process.env.GATE_SMS_OFFERS_SCHEDULER;
-    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers47_n+e');
-    expect(d.B1_PROMPT_VERSION).toBe('house_voice_v12_real_answers47_n');
-    expect(d.B1_NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers48_n');
+    expect(d.currentPromptVersion()).toBe('house_voice_v12_real_answers51_n+e');
+    expect(d.B1_PROMPT_VERSION).toBe('house_voice_v12_real_answers51_n');
+    expect(d.B1_NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers52_n');
   });
 
   test('the longest identity (every tag) fits the varchar(40) columns', () => {
@@ -70,7 +70,7 @@ describe('version identity', () => {
     for (const c of d.REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     process.env.GATE_SMS_VOICE_PROFILE_PIN = '3';
     const longest = d.currentPromptVersion();
-    expect(longest).toBe('house_voice_v12_real_answers48_n+bcelmv');
+    expect(longest).toBe('house_voice_v12_real_answers52_n+bcelmv');
     expect(longest.length).toBe(39);
     expect(longest.length).toBeLessThanOrEqual(40);
   });
@@ -83,9 +83,9 @@ describe('version identity', () => {
 
   test('the sealed exam contract: 27_n / 28_n need the same facts as 25_n, so frozen items stay compatible', () => {
     const { requiredFactMarkers, forbiddenFactMarkers } = require('../services/sms-sealed-eval');
-    for (const v of ['house_voice_v12_real_answers47_n', 'house_voice_v12_real_answers48_n+c']) {
-      expect(requiredFactMarkers(v)).toEqual(requiredFactMarkers('house_voice_v12_real_answers45_n'));
-      expect(forbiddenFactMarkers(v)).toEqual(forbiddenFactMarkers('house_voice_v12_real_answers45_n'));
+    for (const v of ['house_voice_v12_real_answers51_n', 'house_voice_v12_real_answers52_n+c']) {
+      expect(requiredFactMarkers(v)).toEqual(requiredFactMarkers('house_voice_v12_real_answers49_n'));
+      expect(forbiddenFactMarkers(v)).toEqual(forbiddenFactMarkers('house_voice_v12_real_answers49_n'));
     }
   });
 
@@ -95,8 +95,8 @@ describe('version identity', () => {
     on();
     const facts = d.buildFactsBlock(baseContext, { now: NOW, reserviceOpeningsBlock: '- Tuesday, June 16: 9:00 AM - 11:00 AM' });
     expect(facts).toContain('FREE RE-SERVICE OPENINGS (');
-    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers47_n')).toBe(true);
-    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers45_n')).toBe(true);
+    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers51_n')).toBe(true);
+    expect(itemCompatibleWith(facts, 'house_voice_v12_real_answers49_n')).toBe(true);
   });
 });
 
@@ -108,11 +108,12 @@ describe('system prompt: gate off vs on', () => {
   test('gate off keeps every old line (no B1 section)', () => {
     const off = promptOff();
     expect(off).toContain("say CONCRETELY that you're sending their free re-service booking link now");
-    expect(off).toContain('Say the team will confirm the cancellation, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
-    expect(off).toContain('Never offer OPEN TIMES for the missed visit.');
+    expect(off).toContain('Never offer OPEN TIMES for the missed visit, and promise no reply');
     expect(off).toContain("or say we'll text their pay link");
-    expect(off).toContain('say a teammate will confirm, using the EXACT wording');
     expect(off).not.toContain('NO FALSE PROMISES');
+    // owner 2026-11-25: neither variant orders a follow-up promise any more; both carry the DRAFT KINDS rules
+    expect(off).toContain('DRAFT KINDS (every reply is exactly one kind');
+    expect(off).not.toContain('using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
   });
 
   test('PEST REPORTS: a teammate texts the link, offers the openings, never says it is being sent', () => {
@@ -128,31 +129,27 @@ describe('system prompt: gate off vs on', () => {
     expect(p).toContain('"note":"reservice_times: <the offered days and windows>"');
   });
 
-  test('CANCELLATIONS inside the 10-09 ruling: one accepting sentence, no team confirms, cancel_request kept', () => {
+  test('CANCELLATIONS: the same never-an-ACK line with B1 on or off, no promise, cancel_request kept (owner 2026-11-25)', () => {
     const off = cancelLine(promptOff());
     const line = cancelLine(promptOn());
-    expect(line).not.toContain('Say the team will confirm');
-    expect(line).toContain('Accept it in ONE plain sentence');
-    expect(line).toContain('Never say the office, the team or a teammate will confirm, cancel or process it');
-    expect(line).toContain('a person will reply within the hour');
-    expect(line).toContain('NEVER a promise that the owner or anyone will call them');
+    expect(line).toBe(off);
+    expect(line).not.toContain('FOLLOW-UP SLA RIGHT NOW');
+    expect(line).not.toContain('Accept it in ONE plain sentence');
+    expect(line).toContain('never an ACK');
+    expect(line).toContain('NEVER promise that the owner, the office, the team or anyone will call, confirm, cancel or process it');
     expect(line).toContain('"note":"cancel_request"');
     expect(line).toContain('PORTAL SELF-CANCEL: available (customer portal, Plan tab, Account Options)');
     expect(line).toContain('ONLY when the customer asks what their options are');
     expect(line).toContain('NEVER invent a discount, credit, or refund.');
-    // only that one sentence differs from the 10-09 text
-    const sentence = 'Say the team will confirm the cancellation, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.';
-    const head = off.slice(0, off.indexOf(sentence));
-    const tail = off.slice(off.indexOf(sentence) + sentence.length);
-    expect(line.startsWith(head)).toBe(true);
-    expect(line.endsWith(tail)).toBe(true);
+    expect(line).toContain('return ABSTAIN');
   });
 
   test('MISSED VISIT rules offer times when OPEN TIMES is listed and keep the hand-off otherwise', () => {
     const p = promptOn();
     expect(p).toContain('When OPEN TIMES is listed, offer 2–3 SPECIFIC times from it to rebook that visit');
-    expect(p).toContain("With no OPEN TIMES, say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW");
-    expect(p).not.toContain('Never offer OPEN TIMES for the missed visit.');
+    expect(p).toContain('With no OPEN TIMES, add {"type":"escalate","note":"needs_person"} to intended_actions, promise no reply, follow-up or timing');
+    expect(p).toContain('return ABSTAIN instead');
+    expect(p).not.toContain('Never offer OPEN TIMES for the missed visit');
   });
 
   test('NO FALSE PROMISES block: sends, office actions, SLA = reply only, greeting, and the other confirm wordings', () => {
@@ -160,13 +157,16 @@ describe('system prompt: gate off vs on', () => {
     expect(p).toContain('NO FALSE PROMISES');
     expect(p).toContain('say a teammate will text it, with no time');
     expect(p).toContain('Never promise that the office, the team, a teammate or someone will confirm, cancel, add, move, call, email or send something');
-    expect(p).toContain('promises only a REPLY');
+    expect(p).not.toContain('promises only a REPLY');
     expect(p).toContain('never open with Hi, Hello or Hey and a name');
     expect(p).toContain('a teammate will text their pay link (no time)');
     expect(p).not.toContain("or say we'll text their pay link");
-    expect(p).not.toContain('say a teammate will confirm, using the EXACT wording');
-    expect(p).toContain('say a person will check and reply, using the EXACT wording');
-    expect(p).toContain('a person will check the exact time and reply');
+    // owner 2026-11-25: the "a person will check and reply" stall line is gone from every rule; an ABSTAIN replaces it
+    expect(p).not.toContain('a person will check');
+    expect(p).not.toContain('using the EXACT wording');
+    expect(p).toContain('do not write a promise to check or reply either (see DRAFT KINDS: return ABSTAIN)');
+    // the DRAFT KINDS ban keeps the link hand-off the B1 rules above it still order
+    expect(p).toContain('the one allowed hand-off is that a teammate will text the pay link or the free re-service booking link, with no time');
   });
 
   test('the system prompt stays time-invariant (no SLA phrase interpolated)', () => {
@@ -216,8 +216,9 @@ describe('validateB1Promises', () => {
     expect(r.violations.join(' ')).toMatch(/office or a teammate/);
   });
 
-  test('accepts "a person will check and reply" and a plain acceptance', () => {
-    expect(check("Got it, I've noted that you want to cancel and a person will reply within the hour.").ok).toBe(true);
+  // owner 2026-11-25: the follow-up wording moved out of validateB1Promises into validateNoFollowupPromise (every real-answers draft, B1 or not)
+  test('validateB1Promises accepts a plain acceptance; the follow-up wording is validateNoFollowupPromise\'s job', () => {
+    expect(check("Got it, I've noted that you want to cancel.").ok).toBe(true);
     expect(check('A person will check and reply within the hour.').ok).toBe(true);
   });
 
@@ -227,14 +228,14 @@ describe('validateB1Promises', () => {
     'We will send the link within the hour.',
     'The report arrives within the hour.',
     'Your visit is confirmed by 9 AM tomorrow morning.',
-  ])('rejects the SLA wording paired with a delivery: %s', (reply) => {
-    expect(check(reply).ok).toBe(false);
-  });
-
-  test('accepts the SLA wording promising only a reply', () => {
-    expect(check('You will hear back within the hour.').ok).toBe(true);
-    expect(check('Sorry about the missed visit. A person will reply within the hour.').ok).toBe(true);
-    expect(check('Sorry for the wait. You will hear back by 9 AM tomorrow morning about your quote.').ok).toBe(true);
+    "Got it, I've noted that you want to cancel and a person will reply within the hour.",
+    'A person will check and reply within the hour.',
+    'You will hear back within the hour.',
+    'Sorry about the missed visit. A person will reply within the hour.',
+    'Sorry for the wait. You will hear back by 9 AM tomorrow morning about your quote.',
+  ])('every follow-up wording is refused, with or without a delivery attached: %s', (reply) => {
+    on();
+    expect(freshDrafter().validateNoFollowupPromise({ reply }).ok).toBe(false);
   });
 
   test('a name greeting mid-thread is rejected only when Waves texted in the last three days', () => {
@@ -265,18 +266,19 @@ describe('MISSED VISIT: facts line and the deterministic check', () => {
   const offered = [{ date: 'Tuesday, June 16', window: '9:00 AM - 11:00 AM' }];
   const OT = '- Tuesday, June 16: 9:00 AM - 11:00 AM, 1:00 PM - 3:00 PM';
 
-  test('gate off: the old line, never offer OPEN TIMES; on: rebook from OPEN TIMES, else SLA + escalation', () => {
+  test('gate off: the old line, never offer OPEN TIMES; on: rebook from OPEN TIMES, else an escalated ABSTAIN (no follow-up promise)', () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    expect(factsWith({})).toContain('quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised so the office rebooks it; never offer OPEN TIMES for it');
+    expect(factsWith({})).toContain('escalate needs_person so the office rebooks it (promise no reply, follow-up or timing; return ABSTAIN when the apology is all you can say); never offer OPEN TIMES for it');
     on();
     const onFacts = factsWith({});
     expect(onFacts).toContain('- MISSED VISIT: the Pest Control visit');
     expect(onFacts).toContain('when OPEN TIMES is listed offer 2–3 of its times to rebook it (each declared in offered_times)');
-    expect(onFacts).toContain('so a person rebooks it');
+    expect(onFacts).toContain('escalate needs_person so a person rebooks it');
+    expect(onFacts).not.toContain('quote FOLLOW-UP SLA RIGHT NOW');
     expect(onFacts).not.toContain('never offer OPEN TIMES for it');
   });
 
-  test('with OPEN TIMES in the facts: a reply that offers declared times passes; neither times nor SLA + escalation fails', () => {
+  test('with OPEN TIMES in the facts: a reply that offers declared times passes; neither times nor an escalation fails; an ABSTAIN passes', () => {
     on();
     const d = freshDrafter();
     const facts = factsWith({ openTimesBlock: OT });
@@ -284,10 +286,12 @@ describe('MISSED VISIT: facts line and the deterministic check', () => {
     expect(good.ok).toBe(true);
     const neither = d.validateOpenLoopAnswer({ reply: 'Sorry we missed you.', factsBlock: facts, intendedActions: [{ type: 'none' }], offeredTimes: [] });
     expect(neither.ok).toBe(false);
-    expect(neither.violations.join(' ')).toMatch(/EXACT wording from FOLLOW-UP SLA RIGHT NOW/);
-    expect(neither.violations.join(' ')).toMatch(/followup_promised/);
-    const sla = d.validateOpenLoopAnswer({ reply: 'Sorry we missed you. A person will reply within the hour.', factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'followup_promised' }], offeredTimes: [] });
-    expect(sla.ok).toBe(true);
+    expect(neither.violations.join(' ')).toMatch(/needs_person/);
+    expect(neither.violations.join(' ')).not.toMatch(/FOLLOW-UP SLA RIGHT NOW/);
+    const escalated = d.validateOpenLoopAnswer({ reply: 'Sorry we missed you.', factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'needs_person' }], offeredTimes: [] });
+    expect(escalated.ok).toBe(true);
+    // an ABSTAIN has no text: nothing to judge, a person handles it
+    expect(d.validateOpenLoopAnswer({ reply: '', factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'needs_person' }], offeredTimes: [] }).ok).toBe(true);
   });
 
   test("with no OPEN TIMES in the facts: today's rule, and offered times are still refused", () => {
@@ -364,7 +368,7 @@ describe('generateGroundedDraft wiring (single pass, nothing is sent)', () => {
     const onRun = await draftFor(ctx, 'ok thanks');
     expect(onSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'Pest Control' });
     expect(onRun.factsBlock).toContain('Tuesday, June 16: 9:00 AM - 11:00 AM');
-    expect(onRun.promptVersion).toBe('house_voice_v12_real_answers47_n');
+    expect(onRun.promptVersion).toBe('house_voice_v12_real_answers51_n');
   });
 
   test('a missed visit with a linked estimate for another service keeps the hand-off: no OPEN TIMES at all', async () => {
@@ -502,8 +506,8 @@ describe('re-service offer validation with openings', () => {
 describe('a missed visit AND a covered pest report in one text (Codex r2 P1 on #6615)', () => {
   const OPENINGS = '- Tuesday, June 16: 9:00 AM - 11:00 AM, 1:00 PM - 3:00 PM';
   const offered = [{ date: 'Tuesday, June 16', window: '9:00 AM - 11:00 AM' }];
-  const reply = 'Sorry we missed you, a person will reply within the hour about rebooking. For the ants, I can get your free re-service Tuesday, June 16 at 9:00 AM - 11:00 AM, and a teammate will text the link to book it.';
-  const actions = [{ type: 'escalate', note: 'followup_promised' }, { type: 'escalate', note: 'send_reservice_link' }];
+  const reply = 'Sorry we missed you. For the ants, I can get your free re-service Tuesday, June 16 at 9:00 AM - 11:00 AM, and a teammate will text the link to book it.';
+  const actions = [{ type: 'escalate', note: 'needs_person' }, { type: 'escalate', note: 'send_reservice_link' }];
   const build = () => {
     on();
     const d = freshDrafter();
@@ -522,7 +526,7 @@ describe('a missed visit AND a covered pest report in one text (Codex r2 P1 on #
 
   test('the missed-visit hand-off is still required beside the openings, and a made-up time is still refused', () => {
     const { d, facts } = build();
-    const noHandoff = d.validateOpenLoopAnswer({ reply: 'Sorry about the ants. A teammate will text the link.', factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], offeredTimes: offered });
+    const noHandoff = d.validateOpenLoopAnswer({ reply: 'Sorry about the ants. A teammate will text the link.', factsBlock: facts, intendedActions: [{ type: 'none' }], offeredTimes: offered });
     expect(noHandoff.ok).toBe(false);
     const rebook = d.validateOpenLoopAnswer({ reply, factsBlock: facts, intendedActions: actions, offeredTimes: [{ date: 'Friday, June 19', window: '9:00 AM - 11:00 AM' }] });
     expect(rebook.ok).toBe(false);

@@ -4507,6 +4507,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // MONDAYS 8:15AM ET — "Why we win and lose" weekly bell (owner ruling 2026-11-25). ONE needs-you
+  // row for the Monday-to-Sunday week that ended: wins vs not booked, top switch reasons, top rivals,
+  // top not-booked reasons, and leads with a promised quote or callback still owed. Key = the ET
+  // Monday reported, so a rerun writes nothing; a week with no leads raises nothing. Sends nothing to
+  // a customer, no paid API. Kill switch: LEAD_WHY_WEEKLY=off (not a gate).
+  // =========================================================================
+  cron.schedule('15 8 * * 1', async () => {
+    if (process.env.LEAD_WHY_WEEKLY === 'off') return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('lead-why-weekly', async () => {
+        const result = await require('./lead-why-weekly').runLeadWhyWeekly();
+        logger.info(`Lead why weekly: ${result.leads} lead(s) (${result.outcome})`);
+      });
+    } catch (err) {
+      logger.error(`Lead why weekly failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :40 — Call re-transcription backfill (voice-corpus training).
   // Upgrades consented legacy recordings to diarized transcripts (batch-
   // capped); the nightly miner then folds them into the voice corpus. One

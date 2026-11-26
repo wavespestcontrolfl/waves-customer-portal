@@ -189,6 +189,7 @@ const completedVisit = (over) => ({
 const COMPLETED = [
   completedVisit({
     id: 'svc-1',
+    propertyId: 'prop-demo-a',
     date: day(-22),
     type: 'Quarterly Pest Control',
     notes: 'Exterior perimeter application completed. Swept eaves and entry points, refreshed granular bait band along the foundation. No interior activity reported.',
@@ -203,6 +204,7 @@ const COMPLETED = [
   }),
   completedVisit({
     id: 'svc-2',
+    propertyId: 'prop-demo-b',
     date: day(-50),
     type: 'Lawn Care Program',
     notes: 'Summer micronutrient application with spot weed treatment along the driveway edge. Turf color and density improving through the growing season.',
@@ -455,12 +457,18 @@ Object.assign(api, {
   rescheduleAppointment: async () => ({ success: true }),
 
   // services
-  getServices: async (params = {}) => ({
-    services: COMPLETED.slice(params.offset || 0, (params.offset || 0) + (params.limit || 20)),
-    total: COMPLETED.length,
-    limit: params.limit || 20,
-    offset: params.offset || 0,
-  }),
+  getServices: async ({ historyProperty, propertyScoped, offset = 0, limit = 20 } = {}) => {
+    const house = historyProperty || (SAVED_PROPERTIES && propertyScoped && savedSelected().propertyId);
+    const records = house && house !== 'all' ? COMPLETED.filter(v => v.propertyId === house) : COMPLETED;
+    return {
+      ...(historyProperty ? { historyProperty, historyCustomerId: CUSTOMER.id } : {}),
+      ...(SAVED_PROPERTIES && propertyScoped ? { propertyScope: savedScopeEcho() } : {}),
+      services: records.slice(offset, offset + limit).map(v => ({
+        ...v, ...(propertyScoped ? { homeSummary: v.notes || null } : {}), propertyAddress: SAVED_ENTRIES.find(entry => entry.propertyId === v.propertyId)?.address.line1 || null,
+      })),
+      total: records.length, limit, offset,
+    };
+  },
   getService: async (id) => {
     const s = COMPLETED.find((v) => v.id === id) || COMPLETED[0];
     return {

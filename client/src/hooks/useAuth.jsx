@@ -682,7 +682,15 @@ export function AuthProvider({ children }) {
       releaseSavedHold();
       return true;
     } catch (err) {
-      if (sessionEpochRef.current !== epoch || propertyReadSeqRef.current !== seq) return false;
+      if (sessionEpochRef.current !== epoch) return false;
+      // The server DENIED the session (not an outage): same cleanup as a
+      // /auth/me 401, for any read of the session (winning or not), and before
+      // the transient fallback below can release the saved-account hold.
+      if (isSessionDenial(err)) {
+        denySession();
+        return false;
+      }
+      if (propertyReadSeqRef.current !== seq) return false;
       console.error('Failed to reload service properties:', err);
       setPropertiesError('Other service properties are temporarily unavailable.');
       // A winning failure over a fresh /auth/me runs the same fallback the
@@ -694,7 +702,7 @@ export function AuthProvider({ children }) {
       }
       return false;
     }
-  }, [releaseSavedHold, adoptScopeFromMe]);
+  }, [releaseSavedHold, adoptScopeFromMe, denySession]);
 
   // target: a profile id (string — every shipped caller) or a saved-property
   // pair { customerId, propertyId } (GATE_APP_PROPERTY_SCOPE). A same-profile

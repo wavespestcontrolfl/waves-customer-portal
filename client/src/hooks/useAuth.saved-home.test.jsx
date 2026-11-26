@@ -537,4 +537,45 @@ describe('saved home screen at launch', () => {
     expect(text('name')).toBe('Pat Fresh');
     expect(authApi.propertiesError).toBeTruthy();
   });
+
+  describe.each([401, 403])('a %i from a reconnect / pull-to-refresh property read', (status) => {
+    it('a winning read that is denied ends the session instead of releasing the saved hold', async () => {
+      seedSnapshot();
+      let releaseOlder;
+      api.getMe.mockResolvedValueOnce(FRESH_ME);
+      api.getAuthProperties
+        .mockImplementationOnce(() => new Promise((resolve) => { releaseOlder = resolve; }))
+        .mockRejectedValueOnce(Object.assign(new Error('denied'), { status }));
+      await mount();
+      expect(text('saved')).toBe('true');
+      await act(async () => { await authApi.refreshProperties(); });
+      expect(api.clearTokens).toHaveBeenCalled();
+      expect(text('name')).toBe('');
+      expect(text('saved')).toBe('false');
+      expect(authApi.isAuthenticated).toBe(false);
+      expect(savedSnapshot()).toBeNull();
+      expect(authApi.propertiesError).toBeNull();
+      // The older successful read must not bring the session back.
+      await act(async () => { releaseOlder(PROPS); });
+      expect(text('name')).toBe('');
+      expect(authApi.isAuthenticated).toBe(false);
+    });
+
+    it('a denied read that a newer read has already replaced still ends the session', async () => {
+      seedSnapshot();
+      let rejectOlder;
+      api.getMe.mockResolvedValueOnce(FRESH_ME);
+      api.getAuthProperties
+        .mockResolvedValueOnce(PROPS)
+        .mockImplementationOnce(() => new Promise((_, reject) => { rejectOlder = reject; }))
+        .mockImplementationOnce(() => new Promise(() => {}));
+      await mount();
+      await act(async () => { void authApi.refreshProperties(); });
+      await act(async () => { void authApi.refreshProperties(); });
+      await act(async () => { rejectOlder(Object.assign(new Error('denied'), { status })); });
+      expect(api.clearTokens).toHaveBeenCalled();
+      expect(text('name')).toBe('');
+      expect(savedSnapshot()).toBeNull();
+    });
+  });
 });
