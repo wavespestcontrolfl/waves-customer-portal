@@ -355,10 +355,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
   // Migration 20261125200000 (owner 2026-11-25, "YES THEY DID"): the Beehiiv import rows that still
   // hold their sign-up get the reader proof; a source label alone, or any opt-out, sunset or
   // comeback stamp, does not.
-  test('the Beehiiv sign-up step writes the proof only on import-day rows nobody wrote since, with the sign-up intact', async () => {
+  test('the Beehiiv sign-up step writes the proof only on rows of the import run nobody wrote since, with the sign-up intact', async () => {
     const migration = require('../models/migrations/20261125200000_newsletter_beehiiv_signup_proof');
-    const day = new Date('2026-04-19T16:00:00Z');
-    const confirmed = new Date('2026-04-19T16:00:01Z');
+    const day = new Date('2026-04-19T11:42:00Z');
+    const confirmed = new Date('2026-04-19T11:42:01Z');
     // Everything runs in one transaction that always rolls back: the step updates every
     // matching row of the database, not only these fixtures.
     const trx = await db.transaction();
@@ -374,6 +374,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
         orphan: await bee({ source: 'beehiiv_migration_orphan' }),
         upper: await bee({ email: `UPPER-${addr()}`.toUpperCase() }),
         written: await bee({ updated_at: new Date('2026-08-01T12:00:00Z') }),
+        // An address corrected 30 minutes after the import: the move stamps updated_at.
+        corrected: await bee({ updated_at: new Date(day.getTime() + 30 * MIN) }),
+        // A Beehiiv-labelled row from a public sign-up later the same day: outside the run.
+        sameDay: await bee({ created_at: new Date('2026-04-19T16:00:00Z'), updated_at: new Date('2026-04-19T16:00:00Z') }),
         lateLabel: await bee({ created_at: new Date('2026-06-01T12:00:00Z'), updated_at: new Date('2026-06-01T12:00:00Z') }),
         website: await bee({ source: 'newsletter_footer' }),
         optedOut: await bee({ status: 'unsubscribed', unsubscribed_at: day }),

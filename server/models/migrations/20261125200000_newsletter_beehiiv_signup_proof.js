@@ -9,16 +9,17 @@
  * cannot tell a reader's click from a trusted add. The owner has now answered that for
  * one group: the rows the Beehiiv import wrote. So this one-time step writes the proof
  * for each import row that still holds that sign-up, and nothing else:
- *   - source is beehiiv_migration or beehiiv_migration_orphan, AND created_at is on the
- *     import day (2026-04-19 ET; every such row in production was created that day). A
- *     source label alone is not evidence: the public sign-up route stores the caller's
- *     source, and a re-signup rewrites it. A row created after the import cannot match;
- *   - the row was never written after the import: updated_at within an hour of
- *     created_at. Every later writer stamps updated_at (an opt-out, a sunset or its
- *     comeback, a trusted resubscribe, and the email fanout that moves a row to a
- *     corrected address), so this proves the address on the row is the address the
- *     reader signed up with. Production read 2026-11-25: 596 of the 597 active import
- *     rows were never written again; the one that was gets no proof here;
+ *   - source is beehiiv_migration or beehiiv_migration_orphan, AND created_at is inside
+ *     the import run: 2026-04-19 11:41:06Z to 11:44:56Z. Production read 2026-11-25: all
+ *     637 Beehiiv rows were created in that run, and no row of any other source was
+ *     created within 10 minutes of it. A source label alone is not evidence: the public
+ *     sign-up route stores the caller's source, and a re-signup rewrites it;
+ *   - the row was never written after its insert: updated_at = created_at (the insert
+ *     stamps both with the same now()). Every later writer stamps updated_at (an
+ *     opt-out, a sunset or its comeback, a trusted resubscribe, and the email fanout
+ *     that moves a row to a corrected address), so the address on the row is the
+ *     address the reader signed up with. Production read 2026-11-25: 596 of the 597
+ *     active import rows match; the one written later gets no proof here;
  *   - status active, confirmed_at set, and no opt-out or comeback stamp
  *     (unsubscribed_at, deactivated_at, resubscribed_at all NULL);
  *   - no proof on the row yet (a reader who already clicked keeps that click).
@@ -31,24 +32,24 @@
  * later real click with the same stamps, and clearing a real click would be wrong.
  */
 const IMPORT_SOURCES = ['beehiiv_migration', 'beehiiv_migration_orphan'];
-// 2026-04-19 00:00 to 24:00 America/New_York (EDT, UTC-4).
-const IMPORT_DAY_START = '2026-04-19T04:00:00Z';
-const IMPORT_DAY_END = '2026-04-20T04:00:00Z';
+// The Beehiiv import run (first and last row it created, production, read 2026-11-25).
+const IMPORT_RUN_START = '2026-04-19T11:41:06Z';
+const IMPORT_RUN_END = '2026-04-19T11:44:56Z';
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('newsletter_subscribers'))) return;
   if (!(await knex.schema.hasColumn('newsletter_subscribers', 'reader_confirmed_at'))) return;
   await knex('newsletter_subscribers')
     .whereIn('source', IMPORT_SOURCES)
-    .where('created_at', '>=', IMPORT_DAY_START)
-    .where('created_at', '<', IMPORT_DAY_END)
+    .where('created_at', '>=', IMPORT_RUN_START)
+    .where('created_at', '<', IMPORT_RUN_END)
     .where('status', 'active')
     .whereNotNull('confirmed_at')
     .whereNull('unsubscribed_at')
     .whereNull('deactivated_at')
     .whereNull('resubscribed_at')
     .whereNull('reader_confirmed_at')
-    .whereRaw("updated_at < created_at + interval '1 hour'")
+    .whereRaw('updated_at = created_at')
     .update({
       reader_confirmed_at: knex.ref('confirmed_at'),
       reader_confirmed_email: knex.raw('LOWER(email)'),
@@ -58,5 +59,5 @@ exports.up = async function up(knex) {
 exports.down = async function down() {};
 
 exports.IMPORT_SOURCES = IMPORT_SOURCES;
-exports.IMPORT_DAY_START = IMPORT_DAY_START;
-exports.IMPORT_DAY_END = IMPORT_DAY_END;
+exports.IMPORT_RUN_START = IMPORT_RUN_START;
+exports.IMPORT_RUN_END = IMPORT_RUN_END;
