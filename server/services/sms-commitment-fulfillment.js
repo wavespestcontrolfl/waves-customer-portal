@@ -208,6 +208,12 @@ const textCallbackAsk = (commitment) => commitment.kind === 'callback' && commit
 // for a text call-back ask and only when the call began after the text;
 // every other call row it returns is outbound.
 const personAnsweredCallIn = (record) => record.direction === 'inbound' && record.status === 'completed' && record.answered_by === 'human';
+// A staff call back that reached the customer (personCallBack). A
+// callback-card attempt also needs its customer leg completed >= 60 s, the
+// bar call-commitments.js sets for one (cardLegSql): its leg result comes
+// from a later webhook, so a missing one proves nothing yet.
+const personCallBackFor = (record) => personCallBack(record)
+  && (!record.card_attempt || (record.customer_leg_status === 'completed' && Number(record.customer_leg_seconds) >= 60));
 // The keys a payments row names its invoice by, as the Stripe webhook's
 // findInvoiceForPayment reads them: a dispute stamps dispute_invoice_id
 // before it clears the invoice's PaymentIntent, and a won dispute restores
@@ -404,13 +410,17 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
         .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
         // Who placed the call and whether it reached the customer (personCallBack).
         .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', ...callContactSelects(conn),
-          ...(callIn ? ['direction', 'answered_by'] : []))
+          // A callback-card attempt (call-commitments.js cardLegSql) gets its
+          // customer leg's result from a later webhook (personCallBackFor).
+          ...(callIn ? ['direction', 'answered_by', conn.raw(`(COALESCE(call_log.metadata->>'callback_policy', '') = 'card'
+            OR call_log.metadata->>'relatedCommitmentId' IS NOT NULL) as card_attempt`)] : []))
         // Last in the chain, after every call_log reference: the sandbox
         // census (voice-relay-sandbox-dry-run.test.js) reads each one forward.
         .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b));
-      // Only a call in carries its direction and who answered.
-      return callIn ? rows.map(({ direction, answered_by: answeredBy, ...row }) => (direction === 'inbound'
-        ? { ...row, direction, answered_by: answeredBy } : row)) : rows;
+      // Only a call in carries its direction and who answered, and only a
+      // card attempt its mark: every other row keeps exactly its old fields.
+      return callIn ? rows.map(({ direction, answered_by: answeredBy, card_attempt: card, ...row }) => ({ ...row,
+        ...(direction === 'inbound' ? { direction, answered_by: answeredBy } : {}), ...(card ? { card_attempt: true } : {}) })) : rows;
     })(),
     email: conn('emails').where({ customer_id: customerId }).where('received_at', '>', after)
       .where('received_at', '<=', now).orderBy('received_at', 'desc').limit(LIMIT + 1)
@@ -960,10 +970,10 @@ function customerWitness(record, commitment, records = []) {
       // automated notice; a staff promise, any text written after it.
       && (commitment.kind !== 'other' || (writtenAfterAsk(record, commitment) && (staffPromise(commitment) || operatorReply(record)))),
     // A call in that a person answered answers a text call-back ask only.
-    // For one, a call back that reached the customer (personCallBack) counts
+    // For one, a call back that reached the customer (personCallBackFor) counts
     // whatever the staff leg's length: the helper has its own leg checks.
     call: () => (record.direction === 'inbound' ? textCallbackAsk(commitment) && personAnsweredCallIn(record)
-      : record.status === 'completed' && (Number(record.duration_seconds) >= 60 || (textCallbackAsk(commitment) && personCallBack(record)))
+      : record.status === 'completed' && (Number(record.duration_seconds) >= 60 || (textCallbackAsk(commitment) && personCallBackFor(record)))
       // A general ask takes only a call back that reached the customer.
       && (commitment.kind !== 'other' || personCallBack(record))),
     // The candidate query already restricts this to a person-sent Gmail row
@@ -1189,7 +1199,7 @@ function replyFulfillment(evidence, commitment, { eventOnly = false } = {}) {
   // automated SendGrid send (coordinator correction #1, 2026-09-29).
   const answers = (row) => {
     if (ask) return ['sms', 'call', 'email_reply'].includes(row.type);
-    if (callBack) return row.type === 'call' && (personAnsweredCallIn(row) || personCallBack(row));
+    if (callBack) return row.type === 'call' && (personAnsweredCallIn(row) || personCallBackFor(row));
     return row.type === 'sms' && operatorReply(row);
   };
   const replies = evidence.records.filter((row) => answers(row) && witnessAllowed(row, commitment, evidence.records, eventOnly));

@@ -2994,6 +2994,20 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(dispatchWithFallback).not.toHaveBeenCalled();
     });
 
+    test('a callback-card attempt closes the ask only once its customer leg completed for 60 s', async () => {
+      const after = await callbackAsk();
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+      const card = await outboundCall(after, { source: 'admin-callback', metadata: { callback_policy: 'card' } });
+      const now = new Date(after.getTime() + 120000);
+      expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ fulfilled: 0 });
+      expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+      await mockPg('call_log').where({ id: card.id }).update({ metadata: { callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 75 } } });
+      await mockPg('system_settings').where({ key: 'sms_operations.fulfillment_cursor' }).del();
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 60000) })).toMatchObject({ fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ basis: 'person_reply', record_id: card.id });
+      expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    });
+
     test('a call back that a cached "open" verdict judged is closed now, with no model call', async () => {
       const after = await callbackAsk();
       await outboundCall(after, { source: 'admin-callback', metadata: { customer_leg: { status: 'completed', duration_seconds: 163 } } });
