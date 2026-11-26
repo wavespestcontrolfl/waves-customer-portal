@@ -84,11 +84,13 @@ const OLD_EMAIL = 'pat.example@example.test';
 
 let server;
 let baseUrl;
+// The error the route handed to next(): what the shared error handler would log (message and stack).
+let forwardedError;
 beforeAll((done) => {
   const app = express();
   app.use(express.json());
   app.use('/api/customer/profile', require('../routes/customer-profile'));
-  app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+  app.use((err, _req, res, _next) => { forwardedError = err; res.status(500).json({ error: err.message }); });
   server = app.listen(0, '127.0.0.1', () => {
     baseUrl = `http://127.0.0.1:${server.address().port}`;
     done();
@@ -109,6 +111,7 @@ beforeEach(() => {
   mockUpdates = [];
   mockOrder = [];
   mockWhereIn = [];
+  forwardedError = null;
   mockSavedInHour = 0;
   mockApplyEmail.mockReset();
   mockLockedWhere = null;
@@ -562,5 +565,41 @@ describe('POST /api/customer/profile/confirm-email', () => {
     expect(mockCode.consume).toHaveBeenCalled();
     await flush();
     expect(mockSend).not.toHaveBeenCalled();
+  });
+});
+
+// The shared error handler logs message + stack of whatever a route forwards, and a Knex error's message is the failed
+// SQL with its bound values. Regression: both handlers forwarded the raw error, so a failed write logged the typed
+// name and email. Only the error's class and database code may leave the route.
+describe('a database failure never forwards the typed name or email to the error log', () => {
+  const sqlError = () => Object.assign(
+    new Error(`update "customers" set "first_name" = 'Robin', "email" = '${NEW_EMAIL}' where "id" = 'x' - duplicate key value violates unique constraint`),
+    { code: '23505' },
+  );
+  const expectNoBoundValues = (res) => {
+    expect(res.status).toBe(500);
+    const logged = `${forwardedError.message}\n${forwardedError.stack}`;
+    expect(logged).not.toContain('Robin');
+    expect(logged).not.toContain(NEW_EMAIL);
+    expect(logged).not.toContain('first_name');
+    expect(forwardedError.code).toBe('23505');
+    expect(forwardedError.message).toContain('23505');
+  };
+
+  test('PUT', async () => {
+    mockDb.transaction.mockRejectedValueOnce(sqlError());
+    expectNoBoundValues(await put({ firstName: 'Robin', email: NEW_EMAIL }));
+  });
+
+  test('POST confirm-email', async () => {
+    mockDb.transaction.mockRejectedValueOnce(sqlError());
+    expectNoBoundValues(await confirm('123456'));
+  });
+
+  test('an error with no database code forwards its class name only', async () => {
+    mockDb.transaction.mockRejectedValueOnce(new TypeError(`cannot read ${NEW_EMAIL}`));
+    expect((await put({ firstName: 'Robin' })).status).toBe(500);
+    expect(forwardedError.message).toBe('customer profile request failed (TypeError)');
+    expect(forwardedError.stack).not.toContain(NEW_EMAIL);
   });
 });

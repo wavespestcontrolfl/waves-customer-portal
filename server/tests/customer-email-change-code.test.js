@@ -55,7 +55,8 @@ describe('issueRequest', () => {
     const [row] = trx.rows;
     expect(row).toMatchObject({ id, customer_id: CUSTOMER, new_email: 'new.address@example.test', from_email: 'on.file@example.test', attempts: 0, consumed_at: null });
     expect(row.code_hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(JSON.stringify(row)).not.toContain(code);
+    // No stored field is the plaintext code (an exact compare: a serialized row can hold the same digits by chance).
+    expect(Object.values(row)).not.toContain(code);
     expect(row.code_hash).toBe(Code.hashCode(id, code));
     const ms = new Date(row.expires_at).getTime() - Date.now();
     expect(ms).toBeGreaterThan(14.9 * 60 * 1000);
@@ -69,8 +70,12 @@ describe('issueRequest', () => {
   });
 
   test('a new request replaces the open one (one open request per customer); the old code stops working', async () => {
+    // Two fixed, different codes: two random codes are equal once in a million runs, and the old code would then pass.
+    const randomInt = jest.spyOn(require('crypto'), 'randomInt').mockReturnValueOnce(111111).mockReturnValueOnce(222222);
     const first = await issue('first@example.test');
     const second = await issue('second@example.test');
+    randomInt.mockRestore();
+    expect([first.code, second.code]).toEqual(['111111', '222222']);
     expect(trx.rows).toHaveLength(1);
     expect(trx.rows[0].id).toBe(second.id);
     expect((await check(first.code)).outcome).toBe('wrong');

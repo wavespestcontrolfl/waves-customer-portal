@@ -129,6 +129,20 @@ describe('ProfileEditCard', () => {
       expect(screen.getByLabelText('Code')).toHaveValue('');
     });
 
+    // Regression: another tab confirmed the address, so the resend answers "no change" with no emailPending. The card
+    // closed but kept the pending address, and Edit went straight back to the obsolete code prompt.
+    it('a resend the server answers with no change (the address is already saved): leaves the code step, re-reads /auth/me, and Edit opens the form', async () => {
+      const refreshCustomer = await startEmailChange();
+      api.updateCustomerProfile.mockResolvedValue({ changed: [] });
+      fireEvent.click(screen.getByTestId('profile-code-resend'));
+      await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved.'));
+      expect(refreshCustomer).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId('profile-code-form')).toBeNull();
+      fireEvent.click(screen.getByTestId('profile-edit-open'));
+      expect(screen.getByTestId('profile-edit-form')).toBeInTheDocument();
+      expect(screen.queryByTestId('profile-code-form')).toBeNull();
+    });
+
     it('a resend the server limits shows its message and keeps the step open', async () => {
       await startEmailChange();
       api.updateCustomerProfile.mockRejectedValue(new Error('Too many profile changes. Please try again later.'));

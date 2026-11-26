@@ -89,6 +89,13 @@ function httpError(status, message, code) {
   return Object.assign(new Error(message), { profileStatus: status, profileCode: code });
 }
 
+// The shared error handler logs an error's message and stack, and a database error's message carries the SQL with its
+// bound values (here the typed name and email). Forward the error's class and database code only (AGENTS.md "PII in
+// logs"; routes/requests.js plan-restart forwards the same way).
+function withoutBoundValues(err) {
+  return Object.assign(new Error(`customer profile request failed (${err?.code || err?.name || 'error'})`), { code: err?.code });
+}
+
 async function savedChangesInLastHour(trx, customerId) {
   const row = await trx('audit_log')
     .where({ actor_type: 'customer', actor_id: customerId })
@@ -205,7 +212,7 @@ function sendChangeNotices({ customerId, before, after, changes }) {
       contactOverride: { email, name: '' },
       greetingName: NOTICE_GREETING,
       idempotencyKey: `account.profile_edit:${customerId}:${stamp}:${index}`,
-    })).catch((err) => logger.warn(`[customer-profile] account.updated email failed for ${customerId}: ${err.message}`));
+    })).catch((err) => logger.warn(`[customer-profile] account.updated email failed for ${customerId}: ${err.status || err.code || err.name || 'send_failed'}`));
   });
 }
 
@@ -301,7 +308,7 @@ router.put('/', gateOn, authenticateAllowInactive, async (req, res, next) => {
       ...(pending ? { emailPending: { email: pending.email, expiresInMinutes: pending.expiresInMinutes } } : {}),
     });
   } catch (err) {
-    return next(err);
+    return next(withoutBoundValues(err));
   }
 });
 
@@ -359,7 +366,7 @@ router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res
     return res.json({ profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
   } catch (err) {
     if (err.profileStatus) return sendProfileError(res, err);
-    return next(err);
+    return next(withoutBoundValues(err));
   }
 });
 

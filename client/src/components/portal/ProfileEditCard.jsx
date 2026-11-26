@@ -114,12 +114,17 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
     try {
       const result = await api.updateCustomerProfile(fields);
       const savedNames = Array.isArray(result?.changed) && result.changed.length > 0;
-      if (savedNames) await reload();
-      if (result?.emailPending?.email) {
-        setPendingEmail(result.emailPending.email);
+      const codeSentTo = result?.emailPending?.email;
+      // No code went out for an address the code step was waiting on ("Send a new code"): the account already has
+      // that address (it was confirmed in another tab), so that is saved too. Leave the code step and show the profile.
+      const saved = savedNames || (Boolean(pendingEmail) && !codeSentTo);
+      if (saved) await reload();
+      if (codeSentTo) {
+        setPendingEmail(codeSentTo);
         setNotice(savedNames ? 'Name saved.' : '');
       } else {
-        setNotice(savedNames ? 'Saved.' : 'No changes to save.');
+        setPendingEmail('');
+        setNotice(saved ? 'Saved.' : 'No changes to save.');
         setOpen(false);
       }
     } catch (err) {
