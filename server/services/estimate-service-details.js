@@ -174,7 +174,7 @@ const SERVICE_DETAILS_COPY = {
     productImages: {
       heading: 'A few of the products doing the work',
       images: [
-        { file: 'product-scion.png', product: 'Scion', caption: 'Scion® — residual insecticide' },
+        // Scion is off the mosquito card (owner 2026-11-25, D7); the barrier is Suspend PolyZone, which has no illustration yet.
         { file: 'product-tekko-pro.png', product: 'Tekko', caption: 'Tekko® Pro — insect growth regulator' },
       ],
       note: 'Stylized product illustrations — product selection follows the inspection, the season, and the label, and your service report names the exact products applied at your home.',

@@ -134,14 +134,15 @@ const MATCH_RULES = [
     terms: ['rodent', 'rat', 'mouse', 'mice', 'droppings'],
   },
   // A mosquito callback (a re-service booked from a finished visit, or named so): inspection and larvicide; the only spray is
-  // low-rate CrossCheck Plus, picked by the tech, so the card prefills nothing (owner 2026-11-25, D7).
+  // low-rate CrossCheck Plus, picked by the tech, so the card prefills nothing (owner 2026-11-25, D7). Only mosquito rules are read for a
+  // mosquito name, so the bare callback words anywhere in it ("Mosquito Control Re-Service") are enough.
   {
     programKey: 'mosquito',
     visit: 4,
     reason: 'mosquito_followup',
     explicitStage: true,
     followupOf: ['mosquito_barrier', 'mosquito_event_service', 'mosquito_source_reduction'],
-    terms: ['mosquito callback', 'mosquito call back', 'mosquito follow', 'mosquito recheck', 'mosquito re-service', 'mosquito reservice'],
+    terms: ['callback', 'call back', 'follow up', 'followup', 'recheck', 're service', 'reservice'],
   },
   // A booked In2Care station service: its own card and default, never the larvicide visit's Bti dunk.
   {
@@ -167,7 +168,6 @@ const MATCH_RULES = [
       'dunks',
       'standing water',
       'breeding',
-      'igr',
     ],
   },
   {

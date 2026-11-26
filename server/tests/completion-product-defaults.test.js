@@ -436,10 +436,10 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
       const result = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType, serviceKey });
       expect([serviceType, result.programKey, result.source, result.names]).toEqual([serviceType, 'mosquito', 'protocol_visit', ['Suspend Polyzone', 'Tekko Pro IGR']]);
     }
-    // Source reduction prefills nothing: an IGR booking and a dunk booking share it, and the tech picks the larvicide.
+    // Source reduction prefills nothing: the tech picks the dunk or the briquet.
     expect(realProtocols.mosquito.visits.find((v) => v.visit === 2).completionDefaultProducts).toBeUndefined();
     // A callback (booked from a finished visit, or named so) prefills no spray: PolyZone repeats only at 21 days, Tekko Pro outdoors not inside 14.
-    for (const args of [{ serviceType: 'Monthly Mosquito Control Service', serviceKey: 'mosquito_monthly', isFollowup: true }, { serviceType: 'Mosquito Callback' }]) {
+    for (const args of [{ serviceType: 'Monthly Mosquito Control Service', serviceKey: 'mosquito_monthly', isFollowup: true }, { serviceType: 'Mosquito Callback' }, { serviceType: 'Mosquito Control Re-Service' }]) {
       const callback = resolveCompletionDefaultProductNames({ protocols: realProtocols, ...args });
       expect([callback.matchedVisit.visit, callback.matchedVisit.reason || callback.reason, callback.source, callback.names]).toEqual([4, expect.anything(), 'none', []]);
     }
