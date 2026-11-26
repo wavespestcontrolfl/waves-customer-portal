@@ -20846,6 +20846,9 @@ function savedFloorReplayOverrides(estData) {
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
   // Area add-on price knobs (pricing_config area_addon_pricing): a sent add-on keeps the price it was quoted at.
   Object.assign(overrides, require('../services/estimate-area-addon-knob-replay').areaAddOnReplayOverrides(estData));
+  // Flea interior size basis (owner ruling 2026-11-26 "whole home"): a sent flea package quoted on the ground-floor footprint keeps it.
+  // Set even when empty, so a copy inside the stored inputs never prices.
+  Object.assign(overrides, require('../services/estimate-flea-size-replay').fleaSizeReplayOverrides(estData));
   // Termite station-cost snapshot (plan 2026-09-03 §A1) — same home, same
   // tri-state: stamped replays verbatim, unstamped termite replays the
   // pre-stamp constant, no termite line injects nothing.

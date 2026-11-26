@@ -2219,6 +2219,17 @@ function generateEstimate(input) {
       urgency: fleaOptions.urgency ?? input.urgency ?? 'STANDARD',
       afterHours: fleaOptions.afterHours ?? input.afterHours ?? false,
       isRecurringCustomer,
+      // Server-derived replay signal only (estimate-flea-size-replay.js): a stored estimate quoted on the
+      // ground-floor footprint keeps that size basis. Absent = the live whole-home rule.
+      fleaSizeBasis: input.fleaSizeBasisReplay,
+      // calculatePropertyProfile clears footprintUnknown once a measured footprint exists; the flea sizing needs the original flag.
+      fleaFootprintUnknown: input.footprintUnknown === true,
+      // Public website quote, no home size posted: the server lookup's measured whole home replaces the 2,000 default (flea only).
+      fleaMeasuredHomeSqFt: input.fleaMeasuredHomeSqFt,
+      fleaHomeSqFtIsDefault: input.homeSqFtIsDefault === true,
+      // The footprint the caller supplied. The profile's own footprint is homeSqFt / stories when none was supplied, so it
+      // cannot tell a measurement from a derivation (and would divide a building footprint by stories twice).
+      fleaExplicitFootprint: input.footprintSqFt ?? input.footprint ?? null,
     });
     lineItems.push(result);
   }
