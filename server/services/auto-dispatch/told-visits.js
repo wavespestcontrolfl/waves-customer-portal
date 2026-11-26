@@ -109,7 +109,7 @@ async function resolvePromises(conn, ids, now, options = {}) {
   if (!options.onSnapshot && opensSnapshot(conn)) {
     return conn.transaction((trx) => resolvePromises(trx, ids, now, { ...options, onSnapshot: true }), SNAPSHOT);
   }
-  const { sameDateOnly = false, membersOut = null } = options;
+  const { sameDateOnly = false, membersOut = null, firstOut = null } = options;
   const detector = require('../no-show-detector');
   const wanted = ids.map(String);
   const { stopOf, memberIds, dateOf, rowOf } = await loadStopMembers(conn, wanted);
@@ -134,12 +134,40 @@ async function resolvePromises(conn, ids, now, options = {}) {
     }
     const visitDate = sameDateOnly ? expected || dateOf.get(String(id)) || null : null;
     const keep = sameDateOnly ? (promise) => onVisitDate(promise, visitDate) : null;
+    if (firstOut && visitDate) {
+      const first = earliestToldOnDate(judged.flatMap((m) => eventsByVisit.get(String(m.id)) || []), visitDate, now);
+      if (first) firstOut.set(id, first);
+    }
     const promise = stop.length > 1
       ? detector.stopPromise(stop, eventsByVisit, now, keep ? { keep } : undefined)
       : latest.get(String(id));
     if (promise && keep && !keep(promise)) return [id, null];
     return [id, promise || null];
   }));
+}
+
+/** The earliest hour slot (a Date) the customer was told for `visitDate` in the CURRENT run of hour notices: the
+ *  stop's events read newest first, back to the first one that breaks the run (a day-only notice, a withdrawn time, or
+ *  a known slot on another date). An unknown window neither counts nor breaks the run. null when no known slot is in
+ *  the run. The day re-plan caps a told stop at 2 hours after this slot (owner 2026-11-25 *cap 2*, row 62): a told 9
+ *  may become 11, and then it stays at 11, so repeated re-plans and 3-day texts cannot walk the time later. */
+function earliestToldOnDate(events, visitDate, now) {
+  const at = (value) => {
+    const time = value instanceof Date ? value.getTime() : new Date(value).getTime();
+    return Number.isFinite(time) ? time : NaN;
+  };
+  const told = events.filter((e) => Number.isFinite(at(e.communicated_at)) && at(e.communicated_at) <= now.getTime())
+    .sort((a, b) => at(b.communicated_at) - at(a.communicated_at));
+  let first = null;
+  for (const event of told) {
+    if (event.withdrawn === true || event.level === 'day') break;
+    if (event.start_at == null) continue;
+    const start = event.start_at instanceof Date ? event.start_at : new Date(event.start_at);
+    if (Number.isNaN(start.getTime())) continue;
+    if (slotDateOf(start) !== visitDate) break;
+    if (!first || start < first) first = start;
+  }
+  return first;
 }
 
 /** Set of the given ids whose communicated window (the visit's own latest promise, or its stop's) has a known slot.
@@ -186,7 +214,8 @@ async function loadPromiseFacts(conn, ids, now = new Date(), { sameDateOnly = tr
   if (!ids || ids.length === 0) return facts;
   const expectedRead = typeof sameDateOnly === 'string' || sameDateOnly instanceof Map;
   const membersOut = expectedRead ? new Map() : null;
-  const promises = await resolvePromises(conn, ids, now, membersOut ? { sameDateOnly, membersOut } : { sameDateOnly });
+  const firstOut = sameDateOnly ? new Map() : null;
+  const promises = await resolvePromises(conn, ids, now, membersOut ? { sameDateOnly, membersOut, firstOut } : { sameDateOnly, firstOut });
   for (const id of ids) {
     const promise = promises.get(id);
     const level = promiseLevelOf(promise);
@@ -197,6 +226,12 @@ async function loadPromiseFacts(conn, ids, now = new Date(), { sameDateOnly = tr
     }
     // A visit seen off its expected date (date_mismatch) is unverified: callers keep the hour and mark the read failed.
     const fact = promise?.date_mismatch === true ? { level, start, mismatch: true } : { level, start };
+    // `firstStart`: the earliest hour told for this date in the current run (earliestToldOnDate), never later than
+    // `start`. Only with a known `start`; the day re-plan's cap (owner 2026-11-25 *cap 2*).
+    if (start && firstOut) {
+      const first = firstOut.get(id);
+      fact.firstStart = first && first < start ? first : start;
+    }
     if (membersOut) fact.members = membersOut.get(id) || [];
     facts.set(id, fact);
   }
@@ -210,4 +245,5 @@ async function loadPromiseLevels(conn, ids, now = new Date(), { sameDateOnly = t
   return new Map([...facts].map(([id, fact]) => [id, fact.level]));
 }
 
-module.exports = { loadToldVisitIds, loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf, readSnapshot };
+module.exports = {
+  earliestToldOnDate, loadToldVisitIds, loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf, readSnapshot };
