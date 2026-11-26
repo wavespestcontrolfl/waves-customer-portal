@@ -4,6 +4,13 @@ const TAGS = new Set(['b', 'br', 'html', 'table', 'td', 'tr', 'u', 'wbr']);
 const plain = (html) => plainPage(html, TAGS);
 
 describe('plainPage', () => {
+  test('a td or th that can cover more than one cell keeps one mark, "<td span>"; a span of 1 is a plain cell', () => {
+    expect(plain('<table><tr><td colspan="2">a<td COLSPAN=1>b<td rowspan=\'3\'>c<td colspan="x">d<td colspan=" 1px">e</table>'))
+      .toBe('<table><tr><td span>a<td>b<td span>c<td span>d<td>e</table>');
+  });
+  test('htmlText reads a marked cell tag as a cell boundary, never as text', () => {
+    expect(htmlText(plain('<table><tr><td colspan=2>Note<td>Two</table>'))).toBe('Note Two');
+  });
   test('rebuilds each tag without its attributes, keeps the text, and drops comments, doctypes, scripts, styles and the title', () => {
     expect(plain('<!DOCTYPE html><HTML><title>A <td>t</td></title><style>td { x: "</td>" }</style>'
       + '<TABLE border=1><tr class="r"><td>35A-02-8<td>Live roaches.</table><!-- <td>c</td> --></html>'))

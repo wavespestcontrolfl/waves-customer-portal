@@ -406,6 +406,74 @@ describe('findConstructionActivity', () => {
 
 });
 
+describe('parcel number forms (a 9-digit parcel number is stored padded to 10 digits)', () => {
+  const { paddedPermitPin, parcelTiers, guardAddressTier } = require('../services/property-lookup/manatee-permit-sync');
+  // Records each narrowing call so a test can read the query a tier builds.
+  const recorder = () => {
+    const calls = [];
+    const q = {};
+    for (const m of ['where', 'orWhere', 'whereNull', 'orWhereRaw']) {
+      q[m] = jest.fn((...args) => {
+        if (typeof args[0] === 'function') { calls.push([m, 'group']); args[0](q); } else calls.push([m, ...args]);
+        return q;
+      });
+    }
+    return { q, calls };
+  };
+
+  test('paddedPermitPin: only a 9-digit number gains its trailing 0', () => {
+    expect(paddedPermitPin('513309059')).toBe('5133090590');
+    expect(paddedPermitPin(' 513309059 ')).toBe('5133090590');
+    for (const pin of ['5133090590', '12345678', '1931135WE000021000020U', '', null, undefined]) expect(paddedPermitPin(pin)).toBeNull();
+  });
+
+  test('parcelTiers: the pin as given, then the padded pin that also names the loose key', () => {
+    expect(parcelTiers(null, '100sample34212')).toEqual([]);
+    const tiers = parcelTiers('513309059', '100sample34212');
+    expect(tiers).toHaveLength(2);
+    const first = recorder();
+    tiers[0](first.q);
+    expect(first.calls).toEqual([['where', 'parcel_pin', '513309059']]);
+    const second = recorder();
+    tiers[1](second.q);
+    expect(second.calls).toEqual([['where', 'parcel_pin', '5133090590'], ['where', 'address_loose_key', '100sample34212']]);
+    // No loose key: the padded pin alone could be another parcel's own number, so it is not asked.
+    expect(parcelTiers('513309059', null)).toHaveLength(1);
+    // A 10-digit number has one form.
+    expect(parcelTiers('5133090590', '100sample34212')).toHaveLength(1);
+  });
+
+  test('guardAddressTier: the parcel\'s pin in both forms passes, another clean pin does not', () => {
+    const nine = recorder();
+    guardAddressTier(nine.q, '513309059');
+    expect(nine.calls).toEqual([
+      ['where', 'group'], ['whereNull', 'parcel_pin'], ['orWhere', 'parcel_pin', '513309059'],
+      ['orWhere', 'parcel_pin', '5133090590'], ['orWhereRaw', "parcel_pin !~ '^[0-9]{10}$'"],
+    ]);
+    const ten = recorder();
+    guardAddressTier(ten.q, '5133090590');
+    expect(ten.calls.filter(([m]) => m === 'orWhere')).toEqual([['orWhere', 'parcel_pin', '5133090590']]);
+    const none = recorder();
+    expect(guardAddressTier(none.q, null)).toBe(none.q);
+    expect(none.calls).toEqual([]);
+  });
+
+  test('findSyncedPoolPermit and findConstructionActivity ask the padded tier for a 9-digit parcel', async () => {
+    const seen = [];
+    db.mockImplementation(() => {
+      const b = builder(undefined);
+      b.where = jest.fn((...args) => { if (typeof args[0] !== 'function') seen.push(args); return b; });
+      return b;
+    });
+    await findSyncedPoolPermit({ parcelPin: '513309059', looseKey: '100sample34212' });
+    expect(seen).toContainEqual(['parcel_pin', '5133090590']);
+    seen.length = 0;
+    const { findConstructionActivity } = require('../services/property-lookup/manatee-permit-sync');
+    await findConstructionActivity({ parcelPin: '513309059', looseKey: '100sample34212' });
+    expect(seen).toContainEqual(['parcel_pin', '5133090590']);
+  });
+});
+
 describe('syncPermits', () => {
   const { syncPermits } = require('../services/property-lookup/manatee-permit-sync');
 

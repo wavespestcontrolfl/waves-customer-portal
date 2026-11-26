@@ -656,7 +656,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     return capturedScheduledInsert;
   }
 
-  // The commercial first visit (GATE_COMMERCIAL_FIRST_VISIT, services/commercial-first-visit.js): the one PAID internal
+  // The commercial first visit (services/commercial-first-visit.js): the one PAID internal
   // booking. billing prices the visit only when it is not a callback; estimateGuard refuses inside the transaction,
   // under its own lock, before the insert.
   describe('paid internal visit + estimate guard (commercial first visit)', () => {

@@ -77,6 +77,12 @@
  * same time budget. The hold's proof never read the day rule, so the hold and the accept are unchanged. Gate off:
  * byte-identical days, checks and report.
  *
+ * Technician shift hours (GATE_TECH_SHIFT_HOURS, D4, read at call time): the new visit starts and ends inside its
+ * technician's shift that day (outside_shift), and every moved stop, at the longer of its window and its service
+ * length, still ends by the shift end (past_shift_end). The
+ * finder, the page's offer and the hold's proof read the shifts once (loadCheckFacts). A technician with no set hours
+ * is held to the day close only. A failed read offers nothing and fails the proof. Gate off: no read, same answers.
+ *
  * Never throws, spends nothing, sends nothing, and writes only its own log row. The estimate page starts it through
  * startBackgroundCheck: at most MAX_IN_FLIGHT checks at once and one per estimate per DEDUPE_MS, extra requests dropped.
  * A check has DEFAULT_BUDGET_MS. Once that runs out it sends no further read, and it keeps its slot until the reads it
@@ -191,7 +197,7 @@ function ownStops(rows, techId) {
  * assertNoClash), so such a chain is refused here too.
  * Returns { moves: [{ row, fromMin, toMin, widthMin }] } or { reason }. Pure.
  */
-function buildChain(own, { startMin, durationMin, closeMin, shiftMin = shiftMinutesFor(durationMin) }) {
+function buildChain(own, { startMin, durationMin, closeMin, shiftMin = shiftMinutesFor(durationMin), shiftEndMin = null }) {
   const shift = shiftMin;
   const moves = [];
   let busyUntil = startMin + durationMin;
@@ -205,6 +211,9 @@ function buildChain(own, { startMin, durationMin, closeMin, shiftMin = shiftMinu
     const widthMin = range.endMin - range.startMin;
     const toMin = range.startMin + shift;
     if (toMin + widthMin > closeMin) return { reason: 'past_day_close' };
+    // GATE_TECH_SHIFT_HOURS: a moved stop still ends by its technician's shift end (`shiftEndMin`; null: no shift).
+    // Its block is the longer of its window and its service length (window-rules.js rowBlockMinutes).
+    if (shiftEndMin != null && toMin + Math.max(widthMin, Number(row.estimated_duration_minutes) || 0) > shiftEndMin) return { reason: 'past_shift_end' };
     if (moves.length && toMin < Math.max(...moves.map((m) => m.toMin + m.widthMin))) return { reason: 'moved_stops_overlap' };
     moves.push({ row, fromMin: range.startMin, toMin, widthMin });
     busyUntil = Math.max(busyUntil, toMin + widthMin);
@@ -270,11 +279,11 @@ function chainRanges(candidate) {
 function chainCandidate({ day, startMin, env, request, slot, shiftMin, emptyHour = false }) {
   const { durationMin } = request;
   // An empty hour's chain starts at the stop after it: the walk treats the hour after the new visit as taken too.
-  const chain = buildChain(day.own, { startMin, durationMin: emptyHour ? durationMin + EMPTY_HOUR_REACH_MIN : durationMin, closeMin: env.closeMin, shiftMin });
+  const chain = buildChain(day.own, { startMin, durationMin: emptyHour ? durationMin + EMPTY_HOUR_REACH_MIN : durationMin, closeMin: env.closeMin, shiftMin, shiftEndMin: day.shift ? day.shift.endMin : null });
   if (chain.reason) return { reason: chain.reason };
   const fixed = chain.moves.map((m) => env.fixedReason(m.row, day.quick)).find(Boolean);
   if (fixed) return { reason: `fixed_${fixed}` };
-  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, shiftMin, moves: chain.moves, slot, ...(emptyHour ? { emptyHour: true } : {}) };
+  const candidate = { dateStr: day.dateStr, techId: day.techId, startMin, durationMin, shiftMin, moves: chain.moves, slot, ...(emptyHour ? { emptyHour: true } : {}), ...(day.shift ? { shiftEndMin: day.shift.endMin } : {}) };
   if (hitsAny(chainRanges(candidate), day.taken)) return { reason: 'taken_by_other' };
   const { prev } = neighbours(day.own, startMin, day.home);
   candidate.detourMin = addedDrive(env.legMin, prev, request.point, pointOf(chain.moves[0].row));
@@ -297,6 +306,8 @@ function tryHour({ day, startMin, env, request, emptyOnly = false }) {
   // capacity-mode slots, which is what filterCollidingSlots asks of a slot in capacity mode.
   const slot = { date: day.dateStr, windowStart: hhmm(startMin), windowEnd: hhmm(startMin + durationMin), durationMinutes: durationMin, techId: day.techId, routeMode: 'arrival_windows' };
   if (!request.admit(slot)) return { reason: 'not_offerable' };
+  // GATE_TECH_SHIFT_HOURS: the new visit itself is inside the technician's shift that day (day.shift; null: no shift).
+  if (day.shift && (startMin < day.shift.startMin || startMin + durationMin > day.shift.endMin)) return { reason: 'outside_shift' };
   const shifts = (emptyHour) => shiftsFor(durationMin).map((shiftMin) => chainCandidate({ day, startMin, env, request, slot, shiftMin, emptyHour }));
   let tries = shifts(false);
   const hourFree = tries[0].reason === 'hour_free';
@@ -331,7 +342,9 @@ function dayFacts({ dateStr, rows, techId, env, request }) {
   // One stop is enough to make room before; any other reason (untimed, no pin, under way) leaves the day alone.
   if (skip && skip !== 'FEWER_THAN_2_STOPS') return { reason: `day_${String(skip).toLowerCase()}` };
   const own = ownStops(rows, techId);
-  return { day: { dateStr, techId, own, home: env.homeOf(techId), quick: quickDayContext(dateStr, rows, request.now), taken: takenByOthers(rows, techId, env.techBlind) } };
+  // GATE_TECH_SHIFT_HOURS: the technician's shift that day (loadCheckFacts), or null (gate off, or no set hours).
+  const shift = typeof env.shiftOf === 'function' ? env.shiftOf(techId, dateStr) || null : null;
+  return { day: { dateStr, techId, own, home: env.homeOf(techId), quick: quickDayContext(dateStr, rows, request.now), taken: takenByOthers(rows, techId, env.techBlind), shift } };
 }
 
 // Every hour a stop starts on one technician-day.
@@ -447,8 +460,15 @@ async function routeKeepsWindows(candidate, { conn, env, request, caches }) {
   const moved = new Map(candidate.moves.map((m) => [String(m.row.id), m]));
   const result = env.evaluateArrivalPlacement({ ...context, rows: context.rows.map((row) => shiftRow(row, moved.get(String(row.id)))) }, {
     windowStart: hhmm(candidate.startMin), windowEnd: hhmm(candidate.startMin + candidate.durationMin), durationMinutes: candidate.durationMin,
+    // GATE_TECH_SHIFT_HOURS: the route with the new visit keeps the technician's shift end too (route_shift_end): the
+    // visit ends by it when the route reaches it late, and it moves no stop to end after it.
+    ...(candidate.shiftEndMin != null ? { shiftEndMin: candidate.shiftEndMin } : {}),
   });
   if (result?.feasible !== true) return `route_${result?.reason || 'unknown'}`;
+  // The engine compares the route with and without the new visit, and both have the moved stops at their new hours.
+  // So the move's own effect is read here: no stop of the modeled route, moved or after a moved one, may end after
+  // the shift end. A day that already runs past its shift end gets no make-room hour.
+  if (candidate.shiftEndMin != null && (result.arrivals || []).some((arrival) => minutesOf(arrival.departure) > candidate.shiftEndMin)) return 'route_shift_end';
   // find-time's own test: `fit.detourMinutes > capFor(date, tech.id)`.
   if (request.detourCap && result.detourMinutes > request.detourCap(candidate.dateStr, candidate.techId)) return 'detour_cap';
   return true;
@@ -703,6 +723,9 @@ function defaultDeps({ writeProof = false } = {}) {
     multiTechConfirmLive: require('../../config/feature-gates').multiTechConfirmLive,
     // The empty-hour move's gate (GATE_MAKE_ROOM_EMPTY_HOUR), read at call time.
     emptyHourOn: require('../../config/feature-gates').makeRoomEmptyHourLive,
+    // Technician shift hours (GATE_TECH_SHIFT_HOURS), read at call time, and the shifts themselves.
+    shiftHoursOn: require('../../config/feature-gates').techShiftHoursLive,
+    loadTechShifts: eligibility.loadTechShifts,
     // The later-days scan's gate (GATE_MAKE_ROOM_LATER_DAYS), read at call time.
     laterDaysOn: require('../../config/feature-gates').makeRoomLaterDaysLive,
   };
@@ -835,7 +858,7 @@ function plannedMinutes(durationMinutes) {
 
 // The reads the finder and the hold's proof both start from, under one budget: { env, dayRows, open, caps }, or null when
 // the budget ran out (report.timedOut) or a day read failed (loadDays records it).
-async function loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, zoneSlug, budget, report, writeProof = false }) {
+async function loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, zoneSlug, budget, report, now, writeProof = false }) {
   const base = deps || defaultDeps({ writeProof });
   const homes = await budget.race(() => base.loadTechStartPoints(conn));
   const holdIds = homes === TIMED_OUT ? TIMED_OUT : await budget.race(() => base.ownHoldIds(conn, estimateId));
@@ -852,6 +875,16 @@ async function loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, z
     report.timedOut = true;
     return null;
   }
+  // GATE_TECH_SHIFT_HOURS (D4): the shift hours every hour and every moved stop is held to (tryHour, buildChain). Read
+  // only while the gate is on; a failed read throws, so the check offers nothing and the hold's proof fails.
+  if (typeof base.shiftHoursOn === 'function' && base.shiftHoursOn() === true) {
+    const shiftOf = await budget.race(() => base.loadTechShifts(conn, { now }));
+    if (shiftOf === TIMED_OUT) {
+      report.timedOut = true;
+      return null;
+    }
+    env.shiftOf = shiftOf;
+  }
   return { env, dayRows, open, caps };
 }
 
@@ -859,7 +892,7 @@ async function findMakeRoom(report, { conn, pool, point, durationMin, candidateE
   const dates = datesFor({ dateFrom, dateTo, pool });
   report.dates = dates.length;
   // The setup reads run under the same budget as every later read.
-  const facts = await loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, zoneSlug, budget, report });
+  const facts = await loadCheckFacts(conn, deps, { dates, estimateId, capabilityRows, zoneSlug, budget, report, now });
   if (!facts) return;
   const { env, dayRows, open, caps } = facts;
   const bestFree = bestFreeTime(pool, { dayRows, homeOf: env.homeOf, point, legMin: env.legMin });
@@ -1057,7 +1090,7 @@ async function verifyMakeRoomHour({ conn, date, startMin, techId, durationMinute
     const scratch = { byReason: {}, timedOut: false, twoHourTried: 0 };
     // Recheck the destination under the booking locks, including stops staff booked from this estimate.
     const facts = await loadCheckFacts(conn, deps, {
-      dates: [date], estimateId, capabilityRows, zoneSlug, budget, report: scratch, writeProof: true,
+      dates: [date], estimateId, capabilityRows, zoneSlug, budget, report: scratch, now, writeProof: true,
     });
     if (!facts) return timedOut;
     const { env, dayRows, open, caps } = facts;

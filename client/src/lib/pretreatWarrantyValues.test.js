@@ -4,6 +4,10 @@ import {
   sentCertificate,
   pretreatWarrantyValues,
   basisDateProblem,
+  consumerNoticeCutoff,
+  consumerNoticeOnFile,
+  lateConsumerNotice,
+  noticeCutoffPassed,
   daysSinceTreatment,
   warrantyEligible,
   warrantyPlanYears,
@@ -133,5 +137,21 @@ describe('pretreatWarrantyValues', () => {
     expect(sentCertificate({ pretreat_sent_snapshot: JSON.stringify(copy) }).findings).toEqual({ gallons_applied: '180' });
     expect(sentCertificate({ pretreat_sent_snapshot: null })).toBeNull();
     expect(sentCertificate({})).toBeNull();
+  });
+});
+
+describe('consumer notice cutoff', () => {
+  it('is the earlier of treatment and basis date; a later signed notice does not qualify but is named as late', () => {
+    expect(consumerNoticeCutoff('10/01/2026', '09/01/2026')).toBe('09/01/2026');
+    expect(consumerNoticeCutoff('10/01/2026', '')).toBe('10/01/2026');
+    expect(consumerNoticeCutoff('', '')).toBe('');
+    const late = { usable: true, signedOn: '09/15/2026' };
+    expect(consumerNoticeOnFile([late], '10/01/2026', '09/01/2026')).toBeNull();
+    expect(consumerNoticeOnFile([late], '10/01/2026', '')).toBe(late);
+    expect(lateConsumerNotice([{ usable: false, signedOn: '08/01/2026' }, late])).toBe(late);
+    expect(lateConsumerNotice([])).toBeNull();
+    expect(noticeCutoffPassed('09/01/2026', '2026-11-25')).toBe(true);
+    expect(noticeCutoffPassed('11/25/2026', '2026-11-25')).toBe(false);
+    expect(noticeCutoffPassed('', '2026-11-25')).toBe(false);
   });
 });

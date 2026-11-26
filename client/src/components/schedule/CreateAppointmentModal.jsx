@@ -4131,7 +4131,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       group.lines.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0),
     ), 0,
   );
-  const { conflicts: slotConflicts } = useSlotConflicts({
+  const { conflicts: slotConflicts, shiftWarning: slotShiftWarning } = useSlotConflicts({
     date: apptDate ? String(apptDate).split('T')[0] : null,
     // The chosen technician scopes the overlap warning to that route (server
     // side, only with GATE_MULTI_TECH_CONFIRM); auto mode stays tech-blind.
@@ -5846,6 +5846,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             conflicts={stripCoversRouteWarning(availability, { currentDate: apptDate ? String(apptDate).split('T')[0] : null, currentStart: windowStart })
               ? (slotConflicts || []).filter((conflict) => !conflict.warning)
               : slotConflicts}
+            // No line for the default hour behind "Choose a time" (requireTimeChoice): nothing is picked yet.
+            shiftWarning={timeChosen ? slotShiftWarning : null}
             style={{ marginBottom: 10 }}
           />
           <AvailabilityStrip

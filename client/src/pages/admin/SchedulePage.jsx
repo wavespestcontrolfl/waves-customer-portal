@@ -2085,13 +2085,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     );
     return base + addonDur;
   })();
-  const { conflicts: slotConflicts } = useSlotConflicts({
+  const { conflicts: slotConflicts, shiftWarning: slotShiftWarning } = useSlotConflicts({
     serviceId: service.id,
     technicianId: form.technicianId || null,
     date: form.scheduledDate,
     windowStart: form.windowStart,
     windowEnd: form.windowEnd,
     durationMinutes: slotCheckDuration,
+    // update-details writes this duration when the form has one, so the check judges the visit on it.
+    // A blank Duration with no add-on length sends none and the save keeps the stored length: the check
+    // then reads the stored length, as for a move.
+    durationEdit: slotCheckDuration > 0,
     excludeServiceIds: [service.id],
   });
   // The Service address picker's state lives ahead of the hint hook: a
@@ -6029,6 +6033,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 conflicts={stripCoversRouteWarning(availability, stripCurrent)
                   ? slotConflicts.filter((conflict) => !conflict.warning)
                   : slotConflicts}
+                shiftWarning={slotShiftWarning}
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <AvailabilityStrip
@@ -7901,7 +7906,8 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
           ? adminFetch(
               // An unknown date sends an empty month, which the route reads
               // as none (the rule visit).
-              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}&month=${visitMonth}`,
+              // visitId: the server reads this visit's service key and whether it was booked as a follow-up, and serves that card.
+              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}&month=${visitMonth}${service.id ? `&visitId=${encodeURIComponent(service.id)}` : ""}`,
             )
           : Promise.resolve(null),
       ]);
@@ -9594,7 +9600,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // it). Suggested options are left unannotated: the server already ranks
   // them.
   const manualBlock = windowFor(manualTime);
-  const { conflicts: manualConflicts } = useSlotConflicts({
+  const { conflicts: manualConflicts, shiftWarning: manualShiftWarning } = useSlotConflicts({
     serviceId: service.id,
     technicianId: service.technicianId || service.technician_id || null,
     date: manualDate,
@@ -9805,6 +9811,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       durationMinutes={durationMinutes}
       handleManualReschedule={handleManualReschedule}
       manualConflicts={manualConflicts}
+      manualShiftWarning={manualShiftWarning}
       manualAvailability={manualAvailability}
       onClose={onClose}
     />
@@ -15354,6 +15361,8 @@ export function CompletionPanel({
       // The server reads the visit's account (bermuda removal) itself.
       if (service.id) params.set("scheduledServiceId", service.id);
     }
+    // The server reads this visit's service key and whether it was booked as a follow-up (its name is a copy of the first visit's), and serves that card.
+    if (!isLawn && service.id) params.set("visitId", service.id);
     // Lawn and month-keyed programs (tree & shrub) pick the visit for the
     // appointment's month; the server ignores it for 'Any'-month programs.
     const serviceMonth = protocolMonthForService(service);

@@ -48,6 +48,8 @@ async function calculateBoundedTrackingEta({
   bouncieService,
   timeoutMs = CUSTOMER_TRACKING_ETA_TIMEOUT_MS,
   logPrefix = 'customer-tracking-eta',
+  // false: no provider call (Distance Matrix is a paid API); the straight-line estimate only.
+  allowProvider = true,
 } = {}) {
   const fromLat = finiteNumber(techLat);
   const fromLng = finiteNumber(techLng);
@@ -55,6 +57,7 @@ async function calculateBoundedTrackingEta({
   const toLng = finiteNumber(customerLng);
   if (fromLat == null || fromLng == null || toLat == null || toLng == null) return null;
   if (!isFreshTimestamp(techUpdatedAt)) return null;
+  if (allowProvider === false) return { ...haversineEtaFallback(fromLat, fromLng, toLat, toLng), techUpdatedAt };
 
   try {
     const svc = bouncieService || require('./bouncie');

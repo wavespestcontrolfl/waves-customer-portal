@@ -688,6 +688,46 @@ function computeSignificance({ candidateResults = [], baselineResults = [], alph
  * Returns true when a result row landed; false leaves the item pending for
  * a resume pass (transient provider/judge misses must not poison the run).
  */
+// When the source draft of a frozen item was built (its message_drafts.created_at): the instant the owner-approved bank lines in its frozen
+// block are checked at (sms-company-facts isOwnerBankLine), so a replay accepts what the draft did. { at } is a Date (null = an item with no
+// source draft id, checked now), or { unreadable: true } when the timestamp cannot be read (a database error, no row, a bad value). There
+// is NO fallback to the item's inbound time: a late draft was built long after it, so the wrong time would drop a line the draft carried and
+// record a score for the wrong context. The caller keeps the item pending for a retry.
+async function itemBankAt(item, dbi) {
+  if (!item.source_draft_id) return { at: null };
+  try {
+    const row = await dbi('message_drafts').where({ id: item.source_draft_id }).first('created_at');
+    const at = row?.created_at ? new Date(row.created_at) : null;
+    return at && !Number.isNaN(at.getTime()) ? { at } : { unreadable: true };
+  } catch {
+    return { unreadable: true };
+  }
+}
+
+// Replay one frozen item through the live drafter. {} (no draft: the caller leaves the item pending) when the source draft's time cannot be read.
+async function replayItemDraft({ drafter, client, item, intent, route, voiceProfile, promptPatch, dbi }) {
+  const bank = await itemBankAt(item, dbi);
+  if (bank.unreadable) {
+    logger.warn(`[sealed-eval] item ${String(item.id).slice(0, 8)}: its source draft's time could not be read; left pending`);
+    return {};
+  }
+  return drafter.generateGroundedDraft({
+    client,
+    inboundMessage: item.inbound_message,
+    intent,
+    schedulingIntent: Boolean(item.scheduling_intent),
+    factsBlock: item.facts_block, // frozen day-of snapshot — never a live context
+    bankAt: bank.at, // the original draft's time, for its owner-approved bank lines
+    routeOverride: route, // pinned leg, cross-provider fallback disabled
+    voiceProfile, // pinned at run creation — null means drafted profile-free
+    promptPatch, // exam-only candidate rules (run.prompt_patch_id); undefined = the live drafter's own
+    laneId: 'sealed_eval', // exam traffic is its own ledger lane, never the live drafter's
+  });
+}
+
+// The block the judge grades against: the one the replay actually used (an unverified bank section is stripped from it), else the frozen one.
+const gradedFactsBlock = (item, usedFactsBlock) => usedFactsBlock || item.facts_block;
+
 async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = null, promptPatch }) {
   const startedAt = Date.now();
   const drafter = require('./sms-shadow-drafter');
@@ -717,16 +757,8 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   }
 
   const intent = { intent: item.intent || 'GENERAL' };
-  const { parsed, passes, converged, model, voiceProfileVersion, promptVersion } = await drafter.generateGroundedDraft({
-    client,
-    inboundMessage: item.inbound_message,
-    intent,
-    schedulingIntent: Boolean(item.scheduling_intent),
-    factsBlock: item.facts_block, // frozen day-of snapshot — never a live context
-    routeOverride: route, // pinned leg, cross-provider fallback disabled
-    voiceProfile, // pinned at run creation — null means drafted profile-free
-    promptPatch, // exam-only candidate rules (run.prompt_patch_id); undefined = the live drafter's own
-    laneId: 'sealed_eval', // exam traffic is its own ledger lane, never the live drafter's
+  const { parsed, passes, converged, model, voiceProfileVersion, promptVersion, factsBlock: usedFactsBlock } = await replayItemDraft({
+    drafter, client, item, intent, route, voiceProfile, promptPatch, dbi,
   });
   if (!parsed) {
     logger.warn(`[sealed-eval] draft failed for item ${String(item.id).slice(0, 8)} (leg ${run.provider_leg}); left pending`);
@@ -770,7 +802,8 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
       inbound_message: item.inbound_message,
       draft_response: parsed.reply,
       context_summary: item.context_summary,
-      facts_block: item.facts_block,
+      // the block the replay actually used (an unverified bank section is stripped from it): the judge credits only facts the drafter saw
+      facts_block: gradedFactsBlock(item, usedFactsBlock),
     },
     { id: item.human_reply_sms_id, message_body: item.human_reply_text }
   );

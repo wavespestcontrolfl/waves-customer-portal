@@ -114,3 +114,42 @@ describe('RainOutSheet: stops a rest-of-route move would land outside the shift'
     expect(liveChecks().length).toBeGreaterThan(0);
   });
 });
+
+// The tapped stop's own picked hour (shiftWarning on an option and on the live target check).
+describe('RainOutSheet: the shift line for the picked hour', () => {
+  const LINE = "Synthetic Tech's shift is 8:00 AM to 1:00 PM. This visit is outside those hours.";
+  const SHOWN = `⚠️ ${LINE} Shift hours alone do not block this move.`;
+
+  it('shows the option\'s line for this stop only, with no rest-of-route line', async () => {
+    todayRow.shiftWarning = LINE;
+    await open();
+    expect(await screen.findByText(SHOWN)).toBeInTheDocument();
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+  });
+
+  it('says nothing when neither the option nor the live check has a line', async () => {
+    await open();
+    await waitFor(() => expect(liveChecks().length).toBeGreaterThan(0));
+    expect(screen.queryByTestId('quick-move-shift-warning')).not.toBeInTheDocument();
+  });
+
+  it('the live check of the picked time wins: its line, or none', async () => {
+    liveAnswer = { ok: true, conflicts: [], routeConflicts: [], shiftWarning: LINE };
+    await open();
+    expect(await screen.findByText(SHOWN)).toBeInTheDocument();
+    cleanup();
+    todayRow.shiftWarning = LINE;
+    liveAnswer = { ok: true, conflicts: [], routeConflicts: [] };
+    await open();
+    await waitFor(() => expect(screen.queryByTestId('quick-move-shift-warning')).not.toBeInTheDocument());
+  });
+
+  it('shows beside the rest-of-route line', async () => {
+    todayRow.shiftWarning = LINE;
+    todayRow.routeShiftConflicts = [late];
+    await open();
+    restOfRoute();
+    expect(await screen.findByText(SHOWN)).toBeInTheDocument();
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+  });
+});

@@ -1223,6 +1223,28 @@ router.get('/kpi-history', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/office-cost-per-stop?months=12
+// Office cost per stop from the stored monthly snapshots (services/monthly-financial-snapshot.js,
+// written on the 2nd of each month): the last `months` rows, the trailing-three-month headline,
+// and whether the owner's own office time is counted. Reads one small table; no live P&L build.
+router.get('/office-cost-per-stop', dashboardCache, async (req, res, next) => {
+  try {
+    const { getOfficeCostPerStopSeries } = require('../services/monthly-financial-snapshot');
+    res.json(await getOfficeCostPerStopSeries({ months: req.query.months, db }));
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dashboard/ops-buyer-metrics
+// Work and routes: the owner's field hours and the share of stops others do, revenue per route day, route fill
+// for the next 28 days (planning only), and the 12-month return-visit rate. Read live, read-only; each metric
+// fails on its own (null + an error note). See services/ops-buyer-metrics.js.
+router.get('/ops-buyer-metrics', dashboardCache, async (req, res, next) => {
+  try {
+    const { buildOpsBuyerMetrics } = require('../services/ops-buyer-metrics');
+    res.json(await buildOpsBuyerMetrics({ db }));
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dashboard/ebitda-bridge
 // Month-to-date adjusted-EBITDA waterfall: revenue → gross profit → contribution
 // (after marketing actuals) → adjusted EBITDA (after owner-entered overhead

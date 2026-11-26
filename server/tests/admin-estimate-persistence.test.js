@@ -55,7 +55,7 @@ const {
 const { generateEstimate } = require('../services/pricing-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
-function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false, scheduledGroupMember = null }) {
+function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = false, scheduledGroupMember = null, completedVisits = [] }) {
   const updates = [];
   const inserts = [];
   let storedEstimate = estimate;
@@ -69,6 +69,7 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
     columnInfo: async () => ({ is_recurring: {} }),
     whereNotIn() { return this; },
     leftJoin() { return this; },
+    join() { return this; },
     select: async () => [],
     where(clause) {
       return {
@@ -95,7 +96,12 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
         whereNotExists() {
           return this;
         },
-        select: async () => [],
+        // The returning-customer setup fee's history read (GATE_RETURNING_SETUP_FEE_GAP): an Error fails it.
+        select: async () => {
+          if (!(table === 'scheduled_services as s' && clause['s.status'] === 'completed')) return [];
+          if (completedVisits instanceof Error) throw completedVisits;
+          return completedVisits;
+        },
         first: async () => {
           // The scheduled-group guard's member lookups (#3750).
           if (table === 'estimates' && clause.estimate_group_id && clause.status === 'scheduled') return scheduledGroupMember;
@@ -141,6 +147,7 @@ function makeDatabase({ lead, estimate, customer = null, emptyEstimateUpdate = f
     // qualifying-services lookups) AND carrying .transaction for the write path.
     database: Object.assign((table) => trx(table), {
       transaction: async (callback) => callback(trx),
+      raw: (sql) => sql,
     }),
     updates,
     inserts,
@@ -1205,6 +1212,215 @@ describe('admin estimate persistence', () => {
 
     const stored = JSON.parse(inserts.find((e) => e.table === 'estimates').row.estimate_data);
     expect(stored.membershipLapsedRequote).toBeUndefined();
+  });
+
+  // Owner 2026-11-24 rule, 2026-11-25 "I'd like to automate this": a lapsed customer back inside one plan cycle
+  // + 30 days gets a quote with no $99 setup fee, decided by the save itself. Credible regressions: the fee stays
+  // (the Nov 24 case), a mosquito plan keeps the fee in its stored totals, a save trusts a posted waiver, a
+  // technician saves a price his preview did not show, or a failed history read quietly charges the fee.
+  describe('returning customer setup fee (GATE_RETURNING_SETUP_FEE_GAP)', () => {
+    afterEach(() => { delete process.env.GATE_RETURNING_SETUP_FEE_GAP; });
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const { agentEngineResultDigest } = require('../services/agent-estimate-preview');
+    const pestInputs = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, services: { pest: { frequency: 'quarterly' } } };
+    const mosquitoInputs = { homeSqFt: 2200, stories: 1, lotSqFt: 12000, services: { mosquito: { tier: 'monthly' } } };
+    const quoteBody = (engineInputs, estimateData = {}) => ({
+      ...baseBody,
+      customerId: 'cust-back',
+      estimateData: { engineInputs, result: { total: 125 }, ...estimateData },
+    });
+    const pestVisit = { scheduled_date: '2026-08-21', service_type: 'Pest Control Service', is_recurring: true, recurring_pattern: 'quarterly' };
+    // The default account holds no plan: what a cancellation leaves on the customer row.
+    const cancelledAccount = { id: 'cust-back', active: true, waveguard_tier: null, monthly_rate: 0 };
+    const save = async (body, completedVisits, extra = {}, customer = cancelledAccount) => {
+      const { database, inserts } = makeDatabase({
+        lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+        customer,
+        completedVisits,
+      });
+      await createOrReuseAdminEstimate({
+        database,
+        body,
+        technicianId: 'tech-1',
+        now: () => new Date('2026-11-24T17:00:00.000Z'),
+        randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+        ...extra,
+      });
+      return JSON.parse(inserts.find((e) => e.table === 'estimates').row.estimate_data);
+    };
+
+    test('a quarterly pest customer back after 95 days saves with the fee waived, with no staff step', async () => {
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      const stored = await save(quoteBody(pestInputs), [pestVisit]);
+      expect(stored.operatorPriceAdjustment).toEqual(expect.objectContaining({
+        waiveSetupFee: true,
+        returningCustomerGap: expect.objectContaining({ family: 'pest_control', lastCompletedVisitDate: '2026-08-21', gapDays: 95, windowDays: 121 }),
+      }));
+      expect(Number(stored.result.oneTime.membershipFee || 0)).toBe(0);
+      expect(stored.engineResult.membershipSetupFeeWaived).toBe(true);
+    });
+
+    test('gate off: no history read, the fee stays, and a posted copy of the waiver is dropped', async () => {
+      const posted = Returning.withReturningSetupWaiver(null, { rule: 'returning_customer_gap', family: 'pest_control', gapDays: 1, windowDays: 121 });
+      const stored = await save(quoteBody(pestInputs, { operatorPriceAdjustment: posted }), new Error('must not be read'));
+      expect(stored.operatorPriceAdjustment).toBeUndefined();
+      expect(Number(stored.result.oneTime.membershipFee)).toBe(99);
+    });
+
+    test('gate on: every save decides again, so a posted waiver with no visit history charges the fee', async () => {
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      const posted = Returning.withReturningSetupWaiver(null, { rule: 'returning_customer_gap', family: 'pest_control', gapDays: 1, windowDays: 121 });
+      const stored = await save(quoteBody(pestInputs, { operatorPriceAdjustment: posted }), []);
+      expect(stored.operatorPriceAdjustment).toBeUndefined();
+      expect(Number(stored.result.oneTime.membershipFee)).toBe(99);
+    });
+
+    test('a staff waiver stays a staff waiver: the rule adds no evidence to it', async () => {
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      const stored = await save(
+        quoteBody(pestInputs, { operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'owner said so' } }), [pestVisit],
+      );
+      expect(stored.operatorPriceAdjustment).toEqual({ waiveSetupFee: true, internalReason: 'owner said so' });
+      expect(Number(stored.result.oneTime.membershipFee || 0)).toBe(0);
+    });
+
+    test('a solo mosquito plan saves with the fee out of the stored one-time and year-1 totals', async () => {
+      const charged = await save(quoteBody(mosquitoInputs), []);
+      const fee = Number(charged.result.oneTime.membershipFee);
+      expect(fee).toBe(99);
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      const waived = await save(quoteBody(mosquitoInputs), [
+        { scheduled_date: '2026-10-30', service_type: 'Mosquito Control', is_recurring: true, recurring_pattern: 'monthly' },
+      ]);
+      expect(waived.operatorPriceAdjustment.returningCustomerGap).toEqual(expect.objectContaining({ family: 'mosquito', gapDays: 25 }));
+      expect(Number(waived.result.oneTime.membershipFee || 0)).toBe(0);
+      expect(Number(waived.result.oneTime.total)).toBe(Math.round((Number(charged.result.oneTime.total) - fee) * 100) / 100);
+      expect(Number(waived.result.totals.year1)).toBe(Math.round((Number(charged.result.totals.year1) - fee) * 100) / 100);
+    });
+
+    // An active member's fee is the existing-member waiver's (membershipSnapshot), which the accept checks again.
+    // Regression (pre-push audit 2026-11-25): the rule stored a second, permanent waiver for a member with a
+    // recent visit; after the plan lapsed, that waiver still left the $99 out.
+    test('an active member is never under the rule: a recent visit stores nothing and changes no total', async () => {
+      const member = { ...cancelledAccount, waveguard_tier: 'Silver', monthly_rate: 45 };
+      const recentMosquito = [{ scheduled_date: '2026-10-30', service_type: 'Mosquito Control', is_recurring: true, recurring_pattern: 'monthly' }];
+      const gateOff = await save(quoteBody(mosquitoInputs), new Error('must not be read'), {}, member);
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      const gateOn = await save(quoteBody(mosquitoInputs), recentMosquito, {}, member);
+      expect(gateOn.operatorPriceAdjustment).toBeUndefined();
+      expect(gateOn.result.oneTime).toEqual(gateOff.result.oneTime);
+      expect(gateOn.result.totals).toEqual(gateOff.result.totals);
+      // The pricing step holds a member its caller verified to the same answer, whatever history it is handed.
+      const history = { todayKey: '2026-11-24', lastByFamily: { mosquito: { lastVisitKey: '2026-10-30', cycleDays: 30 } } };
+      const at = { now: new Date('2026-11-24T17:00:00.000Z'), returningVisitHistory: history };
+      expect((await serverRecomputeFromEstimateData({ engineInputs: mosquitoInputs }, at)).returningSetupFeeWaiver)
+        .toEqual(expect.objectContaining({ family: 'mosquito' }));
+      expect((await serverRecomputeFromEstimateData({ engineInputs: mosquitoInputs }, { ...at, recurringCustomer: true })).returningSetupFeeWaiver)
+        .toBeNull();
+    });
+
+    test('a replay of the stored answer keeps the mosquito fee out; a staff waiver keeps today\'s stored totals', async () => {
+      const at = { now: new Date('2026-11-24T17:00:00.000Z') };
+      const plain = await serverRecomputeFromEstimateData({ engineInputs: mosquitoInputs }, at);
+      const staff = await serverRecomputeFromEstimateData({ engineInputs: mosquitoInputs, operatorPriceAdjustment: { waiveSetupFee: true } }, at);
+      expect(staff.serverResult.oneTime).toEqual(plain.serverResult.oneTime);
+      const replay = await serverRecomputeFromEstimateData({
+        engineInputs: mosquitoInputs,
+        operatorPriceAdjustment: Returning.withReturningSetupWaiver(null, { rule: 'returning_customer_gap', family: 'mosquito', gapDays: 25, windowDays: 60 }),
+      }, at);
+      expect(Number(replay.serverResult.oneTime.membershipFee || 0)).toBe(0);
+      expect(Number(replay.serverResult.oneTime.total)).toBe(Number(plain.serverResult.oneTime.total) - 99);
+    });
+
+    // The stored answer was decided for one plan family. Regression: a quote whose mix changed after the save
+    // (pest answer, now a mosquito plan, or the reverse) replays with the other family's $99 left out.
+    test('a replay honors the stored answer only for the plan family it names', async () => {
+      const at = { now: new Date('2026-11-24T17:00:00.000Z') };
+      const answerFor = (family) => Returning.withReturningSetupWaiver(null, { rule: 'returning_customer_gap', family, gapDays: 25, windowDays: 121 });
+      const replay = async (engineInputs, family) => (await serverRecomputeFromEstimateData(
+        { engineInputs, operatorPriceAdjustment: answerFor(family) }, at,
+      ));
+      const pestOnMosquito = await replay(mosquitoInputs, 'pest_control');
+      expect(Number(pestOnMosquito.serverResult.oneTime.membershipFee)).toBe(99);
+      expect(pestOnMosquito.returningSetupFeeWaiver).toBeNull();
+      const mosquitoOnPest = await replay(pestInputs, 'mosquito');
+      expect(Number(mosquitoOnPest.serverResult.oneTime.membershipFee)).toBe(99);
+      expect(Number((await replay(pestInputs, 'pest_control')).serverResult.oneTime.membershipFee || 0)).toBe(0);
+    });
+
+    // A save the server cannot price stores the client's totals, so the rule may only confirm what those totals
+    // say. Regressions: a waiver stored beside totals that carry the $99 (page and bill disagree), or totals
+    // without the fee stored for a customer the rule no longer waives (the bill adds $99 the quote never showed).
+    describe('a save the server cannot price', () => {
+      const unpriced = { recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }) };
+      const at = { now: new Date('2026-11-24T17:00:00.000Z') };
+      const history = { todayKey: '2026-11-24', lastByFamily: { pest_control: { lastVisitKey: '2026-08-21', cycleDays: 91 } } };
+      const previewResult = async (waived) => {
+        const priced = await serverRecomputeFromEstimateData({ engineInputs: pestInputs }, { ...at, returningVisitHistory: waived ? history : null });
+        return { ...priced.serverResult, ...(waived ? { returningSetupFeeWaiver: { rule: 'returning_customer_gap' } } : {}) };
+      };
+      const bodyWith = (result) => ({ ...baseBody, customerId: 'cust-back', estimateData: { inputs: { address: '123 Palm Ave' }, result } });
+
+      test('a preview priced without the fee keeps the waiver while the rule still waives', async () => {
+        process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+        const stored = await save(bodyWith(await previewResult(true)), [pestVisit], unpriced);
+        expect(stored.operatorPriceAdjustment.returningCustomerGap).toEqual(expect.objectContaining({ family: 'pest_control', gapDays: 95 }));
+        expect(Number(stored.result.oneTime.membershipFee || 0)).toBe(0);
+        expect(stored.result).not.toHaveProperty('returningSetupFeeWaiver');
+      });
+
+      test('a preview priced without the fee is refused once the rule no longer waives', async () => {
+        process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+        const body = bodyWith(await previewResult(true));
+        await expect(save(body, [], unpriced)).rejects.toMatchObject({ statusCode: 409 });
+        // The gate turned off after the preview: the same stale totals are refused.
+        delete process.env.GATE_RETURNING_SETUP_FEE_GAP;
+        await expect(save(body, [pestVisit], unpriced)).rejects.toMatchObject({ statusCode: 409 });
+      });
+
+      test('a preview that carries the fee stores no waiver, even when the rule would waive', async () => {
+        process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+        const stored = await save(bodyWith(await previewResult(false)), [pestVisit], unpriced);
+        expect(stored.operatorPriceAdjustment).toBeUndefined();
+        expect(Number(stored.result.oneTime.membershipFee)).toBe(99);
+      });
+    });
+
+    test('a save drops the website quote\'s frozen copy of the rule\'s answer and keeps every other frozen decision', () => {
+      const ruleMade = { setupFeeQuote: { amount: 0, waived: Returning.FROZEN_WAIVED_REASON, kind: 'waveguard_membership' } };
+      Returning.dropReturningSetupWaiver(ruleMade);
+      expect(ruleMade).not.toHaveProperty('setupFeeQuote');
+      for (const setupFeeQuote of [
+        { amount: 0, waived: 'existing_member', kind: 'waveguard_membership' },
+        { amount: 0, waived: 'fee_already_queued', kind: 'waveguard_membership' },
+        { amount: 99, kind: 'waveguard_membership' },
+      ]) {
+        const kept = { setupFeeQuote: { ...setupFeeQuote }, operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'owner said so' } };
+        Returning.dropReturningSetupWaiver(kept);
+        expect(kept).toEqual({ setupFeeQuote, operatorPriceAdjustment: { waiveSetupFee: true, internalReason: 'owner said so' } });
+      }
+    });
+
+    test('a technician save whose preview showed the $99 is refused once the rule waives it (pest and mosquito)', async () => {
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      const at = { now: new Date('2026-11-24T17:00:00.000Z') };
+      for (const [inputs, visit] of [
+        [pestInputs, pestVisit],
+        [mosquitoInputs, { scheduled_date: '2026-10-30', service_type: 'Mosquito Control', is_recurring: true, recurring_pattern: 'monthly' }],
+      ]) {
+        const previewWithFee = agentEngineResultDigest((await serverRecomputeFromEstimateData({ engineInputs: inputs }, at)).rawEngineResult);
+        await expect(save(quoteBody(inputs), [visit], { expectedEngineResultDigest: previewWithFee }))
+          .rejects.toMatchObject({ statusCode: 409 });
+        // The same digest saves when the history shows no returning customer.
+        await expect(save(quoteBody(inputs), [], { expectedEngineResultDigest: previewWithFee })).resolves.toBeDefined();
+      }
+    });
+
+    test('a failed history read refuses the save (retry), never a quiet $99', async () => {
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      await expect(save(quoteBody(pestInputs), new Error('db down'))).rejects.toMatchObject({ statusCode: 503 });
+    });
   });
 
   test('P1-2: a NON-member does not gain a recurring flag in the stored engineInputs', async () => {

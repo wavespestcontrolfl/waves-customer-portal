@@ -17,8 +17,9 @@
  *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
- * read yet, true = a 35A finding, false = 35B only. The report-page reads that fill it are the next change; until
- * then every inspection stays NULL.
+ * read yet, true = a 35A finding, false = 35B only. After the files, each run reads the report pages of the cited
+ * first visits its own good read of the inspection file lists from the last 45 days: one page a second, at most 100
+ * a run, each row at most 3 times (readReports).
  *
  * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
  * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
@@ -33,9 +34,10 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
 const { isExcludedLocality, isExcludedZip, sharedZipNeedsCity } = require('../excluded-localities');
+const { plainPage, htmlText } = require('./plain-html');
 const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
-const { etDateString, etCalendarDaysUntil } = require('../../utils/datetime-et');
+const { etDateString, etCalendarDaysUntil, addETDays } = require('../../utils/datetime-et');
 
 const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
 const FILES = {
@@ -69,7 +71,18 @@ const REQUIRED_COLUMNS = {
 const KEY_MAX = 40;
 
 const FILE_TIMEOUT_MS = 60 * 1000;
+const REPORT_BASE = 'https://www.myfloridalicense.com/inspectionDetail.asp';
+const FINDING_TEXT_MAX = 400;
 const REPORT_MAX_ATTEMPTS = 3;
+// The report reads: each page's own timeout, a second between pages, inspections of the last 45 days, at most 100
+// pages a run.
+const REPORT_TIMEOUT_MS = 15 * 1000;
+// A report page is about 40 KB (three live pages, 2026-11-25): a larger one is refused before it is parsed, as the
+// parse runs on the portal's event loop.
+const REPORT_MAX_BYTES = 512 * 1024;
+const REPORT_GAP_MS = 1000;
+const REPORT_WINDOW_DAYS = 45;
+const REPORT_MAX_PER_RUN = 100;
 const UPSERT_CHUNK = 500;
 
 function syncDisabled(env = process.env) {
@@ -139,8 +152,7 @@ function visitNumberOf(value) {
   return number || null;
 }
 
-// The public report page's address is built from these two ids only (the page reads are the next change), so both
-// must be digits.
+// The public report page's address is built from these two ids only (reportUrl), so both must be digits.
 const ID_RE = /^\d{1,12}$/;
 
 // csv-parse keeps a row cut short, with only the cells it has. Such a row is skipped and counted: stored, it would
@@ -290,10 +302,284 @@ function parseLicenseRows(rows, kind, counts = {}, today = null) {
 // An inspection type that names a later visit ("Callback - Food", "Follow-up", "Re-inspection"): not a first visit.
 const CALLBACK_TYPE_RE = /call\W{0,3}back|follow\W{0,3}up|re\W{0,3}inspect/i;
 
-// Whether a report page's own inspection type names a first visit: given, and naming no callback, follow-up or
-// re-inspection. The page has the last word on that, not the files: the state can relabel a visit between files.
+// A text with every space and every default-ignorable code point taken out (a joiner, a variation selector, a tag
+// character: characters a browser draws as nothing, which htmlText keeps), so a line break or such a character
+// inside a word ("Callba<br>ck", "Callba&zwj;ck") cannot hide it from a test that reads the text so.
+const compact = (text) => text.replace(/[\s\p{Default_Ignorable_Code_Point}]+/gu, '');
+// Whether text shows a word: a letter or a digit. Spaces, punctuation and the characters a browser draws as nothing
+// (a joiner, which htmlText keeps) name nothing, so text of only those is no inspection type and no observation.
+const hasWord = (text) => /[A-Za-z0-9]/.test(text);
+
+// Whether a report page's own inspection type names a first visit: given (it shows a word), and naming no callback,
+// follow-up or re-inspection. The page has the last word on that, not the files: the state can relabel a visit
+// between files.
+// The type is tested compact, so a line break or a character a browser draws as nothing inside a word ("Callba<br>ck")
+// cannot hide a callback. Joined words can only add a match ("Structure Inspection"), which gives no answer.
 function namesFirstVisit(inspectionType) {
-  return typeof inspectionType === 'string' && inspectionType.trim() !== '' && !CALLBACK_TYPE_RE.test(inspectionType);
+  return typeof inspectionType === 'string' && hasWord(inspectionType)
+    && !CALLBACK_TYPE_RE.test(compact(inspectionType));
+}
+
+// ── Report page (pure) ──────────────────────────────────────────
+
+// The state office's street address closes every whole page.
+const PAGE_FOOTER_RE = /2601 Blair Stone Road/;
+// The tags the state's report pages use (the pages saved on 2026-11-19), with the other table parts the reader
+// handles (tbody, thead, tfoot, th) and two inline tags (span, wbr). plainPage refuses a page with any other tag.
+const REPORT_TAGS = new Set(['a', 'b', 'body', 'br', 'center', 'div', 'font', 'form', 'head', 'html', 'img', 'li',
+  'option', 'p', 'span', 'strong', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul', 'wbr']);
+const VIOLATION_CODE_RE = /^\d\d[A-Z]?-\d\d-\d$/;
+// On the page plainPage rebuilt (tags without attributes): a cell (td or th; group 1), or a row or table tag (group 2
+// names it). HTML lets a page leave out </td> and </tr>,
+// and the state's pages do, so a cell runs to the next table tag (a cell, a row or a table, start or end), as a
+// browser closes it, and any row or table tag ends the row. A cell that holds a table gives only its text before it.
+const CELL_OR_ROW_END_RE = /<t[dh]\b[^>]*>((?:(?!<\/?(?:t[dhr]|table|tbody|thead|tfoot)\b)[\s\S])*)|<\/?(tr|table|tbody|thead|tfoot)\b[^>]*>/gi;
+// The row that heads the violations table names two columns, "Violation" and "Observation", with blank spacer cells
+// around them. Returns the Violation column's position in the row, or -1 for any other row.
+function violationsColumn(cells) {
+  const named = cells.filter(Boolean);
+  if (named.length !== 2 || !/^violation$/i.test(named[0]) || !/^observation$/i.test(named[1])) return -1;
+  return cells.findIndex((cell) => /^violation$/i.test(cell));
+}
+
+// A follow-up report lists each violation of the inspection with every visit's note, labelled, oldest first:
+// "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
+// A word that names a later visit, in any case, starting a word ("before inspection" is not one): the cell text has
+// its inline tags and invisible characters out already (htmlText), so a break inside the word cannot hide it.
+// A space or a character a browser draws as nothing may split it anywhere ("fol<br>low-up", "fol&zwj;low-up"), but
+// it must start a word.
+const spaced = (word) => word.split('').join('[\\s\\p{Default_Ignorable_Code_Point}]*');
+const LATER_VISIT_WORD_RE = new RegExp(`\\b(?:${spaced('follow')}\\W{0,3}${spaced('up')}|${spaced('call')}\\W{0,3}${spaced('back')}`
+  + `|${spaced('re')}\\W{0,3}${spaced('inspect')})`, 'iu');
+const VISIT_NOTE_RE = /(?:-\s*)?From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
+// Any mention of a visit label, read by VISIT_NOTE_RE or not: any case, and any separator inside "follow-up",
+// "call back" or "re-inspection" (a dash of another kind). It reads the row's text compact, so a line break or a
+// character a browser draws as nothing inside a word ("inspec<br>tion", "inspec&zwj;tion") cannot hide one. A row
+// where the two counts differ cannot be read.
+const VISIT_LABEL_RE = /from(?:initial|follow\W{0,3}up|call\W{0,3}back|re\W{0,3})inspection/gi;
+// Whether the inspection table's visit row is the read visit's, as a first visit: its date reads (and is visitDate
+// when given), and its inspection type names a first visit (namesFirstVisit, the rule saveReport checks too).
+function isFirstVisitRow(visit, visitDate) {
+  const date = parseUsDate(visit.date);
+  return Boolean(date) && (!visitDate || date === visitDate) && namesFirstVisit(visit.type);
+}
+
+// How a row's text names its visits: { routine: true } without labels (all of it the read visit's own), { label,
+// notes } with labels (a note's date is null for the initial visit), or { unreadable: true } when a label does not
+// read (another date form, other case): such a row cannot be tied to a visit.
+function visitNotes(text) {
+  const marks = [...text.matchAll(VISIT_NOTE_RE)];
+  if ((compact(text).match(VISIT_LABEL_RE) || []).length !== marks.length) return { unreadable: true };
+  if (!marks.length) return { routine: true };
+  const ends = marks.map((mark, i) => (i + 1 < marks.length ? marks[i + 1].index : text.length));
+  // A label with no observation after it ("From initial inspection : - From follow-up …") cannot be read.
+  if (marks.some((mark, i) => !hasWord(text.slice(mark.index + mark[0].length, ends[i])))) return { unreadable: true };
+  const notes = marks.map((mark, i) => ({
+    date: mark[1] || null,
+    text: text.slice(mark.index, ends[i]).replace(/^-\s*/, '').trim(),
+  }));
+  return { label: text.slice(0, marks[0].index).trim(), notes };
+}
+
+// The initial note first (the first visit's citation, the only visit a page answers for), then the later
+// notes newest first, each with its label, so the cap never drops it. A routine row, or one with a single note, is
+// unchanged.
+function initialNoteFirst(row) {
+  if (row.notes.routine || row.notes.notes.length < 2) return row.text;
+  const rank = (note) => (note.date === null ? 0 : 1);
+  const day = (note) => note.date || '';
+  // A stable sort keeps the page order within a rank and a day.
+  const notes = [...row.notes.notes].sort((a, b) => rank(a) - rank(b) || (day(a) === day(b) ? 0 : day(a) > day(b) ? -1 : 1));
+  return [row.notes.label, notes.map((note) => note.text).join(' - ')].filter(Boolean).join(' ');
+}
+
+// What a 35 row cites at the first visit: the whole text of a routine row; on a follow-up report, the row's label
+// and its initial note, without the later visits' notes.
+function firstVisitCitation(row) {
+  if (row.notes.routine) return row.text;
+  const initial = row.notes.notes.filter((note) => note.date === null).map((note) => note.text);
+  return [row.notes.label, ...initial].join(' ');
+}
+
+// Two citations are the same when their letters and digits match, case aside: separators, punctuation and
+// spacing ("Basic - From …" against "Basic - - From …") never tell two citations apart. Counting two near copies
+// as one can only give no answer, never a wrong one.
+const citationKey = (text) => compact(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+
+// At most FINDING_TEXT_MAX characters, cut between characters (code points): half an emoji is not valid text, and
+// PostgreSQL refuses it in a JSON column.
+const capText = (text) => Array.from(text).slice(0, FINDING_TEXT_MAX).join('');
+
+// The report page's tables, row by row: the violations entries (each code with its observation cells), whether a row
+// could not be read, and each visit the inspection table lists. A row ends at a row or table tag, or at the page end.
+// In the violations table (from its "Violation" / "Observation" head row to the next table tag) a row with anything
+// in it must hold a code alone in the Violation column and nothing before it; anywhere else no cell may be a code.
+// The inspection table is a head row naming "Inspection Date" (and "Inspection Type"), then the rows under it: each
+// row up to the table's end is a visit, its date and type in those columns, so a second visit's row is a second visit.
+// A table that opens inside either table makes the page unreadable: its tags would end that table's reading early,
+// and a visit or a violation row after it (a callback's row) would go unread. A second violations head row makes the
+// page unreadable too: a page lists one inspection's violations, and another table's rows (an earlier inspection's,
+// say) could not be tied to the read visit.
+function readReportTables(page) {
+  const entries = [];
+  const visits = [];
+  let unreadable = false;
+  let codeColumn = -1; // the Violation column's position while in the violations table, else -1
+  let dateColumn = -1; // the Inspection Date column's position from its head row to the table's end, else -1
+  let typeColumn = -1; // the Inspection Type column's position in that head row, -1 when it has none
+  let violationsEnd = null; // where the last violations table's reading ended (a table tag), null while in it
+  let violationsHeads = 0; // the violations head rows read so far: a second one makes the page unreadable
+  let row = []; // the cell texts of the row being read, blank cells kept so each keeps its position
+  let spanned = false; // whether a cell of the table being read covers more than one column or row ("<td span>")
+  const outerSpanned = []; // the flag of each table a nested table opened inside, restored when it closes
+  const endRow = () => {
+    // A merged cell anywhere in either table (a row above its head row too, as a rowspan reaches down) puts cells at
+    // the wrong positions: the page cannot answer. Each table keeps its own flag: a table nested in a cell starts
+    // clear, and its end gives back the flag of the table around it.
+    if (spanned && (codeColumn >= 0 || dateColumn >= 0 || row.includes('Inspection Date') || violationsColumn(row) >= 0)) {
+      unreadable = true;
+    }
+    if (codeColumn >= 0 && row.some(Boolean)) {
+      const code = row[codeColumn] || '';
+      if (VIOLATION_CODE_RE.test(code) && !row.slice(0, codeColumn).some(Boolean)) {
+        entries.push({ code, parts: row.slice(codeColumn + 1).filter(Boolean) });
+      } else {
+        unreadable = true;
+      }
+    } else if (row.some((cell) => VIOLATION_CODE_RE.test(cell))) {
+      unreadable = true;
+    }
+    if (row.includes('Inspection Date')) {
+      dateColumn = row.indexOf('Inspection Date');
+      typeColumn = row.indexOf('Inspection Type');
+    } else if (dateColumn >= 0 && row.some(Boolean)) {
+      visits.push({ date: row[dateColumn] || '', type: row[typeColumn] || '' });
+    }
+  };
+  for (const match of page.matchAll(CELL_OR_ROW_END_RE)) {
+    if (match[1] !== undefined) {
+      if (/^<t[dh] span>/i.test(match[0])) spanned = true;
+      row.push(htmlText(match[1]));
+      continue;
+    }
+    endRow();
+    const column = violationsColumn(row);
+    if (column >= 0) {
+      violationsHeads += 1;
+      if (violationsHeads > 1) unreadable = true;
+      codeColumn = column;
+      violationsEnd = null;
+    }
+    if (/^table$/i.test(match[2])) {
+      if (!match[0].startsWith('</') && (codeColumn >= 0 || dateColumn >= 0)) unreadable = true;
+      if (codeColumn >= 0) violationsEnd = match.index;
+      codeColumn = -1;
+      dateColumn = -1;
+    }
+    if (/^table$/i.test(match[2])) {
+      if (match[0].startsWith('</')) {
+        spanned = outerSpanned.length ? outerSpanned.pop() : false;
+      } else {
+        outerSpanned.push(spanned);
+        spanned = false;
+      }
+    }
+    row = [];
+  }
+  endRow();
+  return { entries, unreadable, visits, violationsEnd };
+}
+
+// Whether the page's rows cannot be tied to its visit in time: any row (a 35 row or not) whose visit label does not
+// read; a follow-up note dated on a day that does not exist, or on or before the page's own visit (that visit was not
+// the first: the page and the file disagree); or text that names a later visit in a form the labels do not read.
+function cannotPlaceInTime(entries, pageDate) {
+  const texts = entries.map((entry) => entry.parts.join(' '));
+  const allNotes = texts.map(visitNotes);
+  if (allNotes.some((notes) => notes.unreadable)) return true;
+  const dates = allNotes.flatMap((notes) => (notes.notes || []).map((note) => note.date)).filter((date) => date !== null);
+  if (dates.some((date) => !isCalendarDay(date) || date <= pageDate)) return true;
+  // With the labels that read taken out, any later-visit word left ("From follow-up:", "call back") is one that
+  // does not read: on a labelled page or not.
+  return texts.some((text) => LATER_VISIT_WORD_RE.test(text.replace(VISIT_NOTE_RE, ' ')));
+}
+
+// Whether a YYYY-MM-DD string is a real calendar day ("2026-13-01" and "2026-02-30" are not).
+function isCalendarDay(date) {
+  const day = new Date(`${date}T00:00:00Z`);
+  return !Number.isNaN(day.getTime()) && day.toISOString().slice(0, 10) === date;
+}
+
+/**
+ * Report page HTML -> { inspectionType, pestEvidence, findings: [{ code, text }] }, or null when the page cannot
+ * answer. No answer is a failed read, retried later, never "no pests". inspectionType is the page's own visit row's
+ * type, which saveReport checks again. The page answers only when:
+ * - its markup rebuilds (plainPage): every tag is one the state's pages use, and the page ends inside no tag, comment
+ *   or script. The tables are read on the rebuilt page, so they hold the tags and the text a browser reads;
+ * - it is whole: the state office footer follows its violations table, so an error page, a page cut short (inside
+ *   that table or after it) or a page with the footer text only above the table gives no answer;
+ * - it is one first visit's: its inspection table lists one visit, whose date reads (and is visitDate when given)
+ *   and whose inspection type names a first visit (namesFirstVisit: given, and no callback, follow-up or
+ *   re-inspection);
+ * - the read visit is its inspection's first (visitNumber 1). A later visit's page holds free text that may clear an
+ *   earlier citation ("No flies observed", "door repaired"), labelled or not, so a later visit, or one whose number
+ *   is not known, gets no answer either way;
+ * - its violations table reads cleanly: the rows after the "Violation" / "Observation" head, up to the next table
+ *   tag, each read whole by cell position (the cell in the Violation column is the code, the cells after it are the
+ *   observation), so a code quoted in a note, a comment or a script never starts an entry. A row whose Violation cell
+ *   is not a code alone (blank, or 35A-02-8*), a code cell outside that table (another table, the footer), a table
+ *   that opens inside the inspection table or the violations table, or a second violations table (an earlier
+ *   inspection's, say, whose rows could not be tied to the read visit) means the page is not laid out as expected;
+ * - each 35 row's observation shows a word, and every visit label on them reads and has text after it. On a follow-up
+ *   report (any violations row labelled with its visit) each 35 row must be labelled, and its initial note is the
+ *   first visit's citation;
+ * - it lists at least as many 35A or 35B rows of the read visit as the file counted for it (violation35): the missing
+ *   one could be 35A. Rows that cite the same at the first visit (the same code and text; on a follow-up report,
+ *   the same label and initial note) count once and are one finding. Without the count only a 35A row answers.
+ * findings holds the visit's 35A rows, each with its initial note first, cut at FINDING_TEXT_MAX.
+ */
+function parseInspectionReport(html, { violation35 = null, visitDate = null, visitNumber = null } = {}) {
+  // Only an inspection's first visit gets an answer. The list shows pests only, and the first visit's own row answers
+  // for the inspection; a sighting first cited at a callback is not read.
+  if (visitNumber !== 1) return null;
+  const page = plainPage(html, REPORT_TAGS);
+  if (page === null) return null;
+  const whole = htmlText(page);
+  if (!/Inspection Information/.test(whole) || !PAGE_FOOTER_RE.test(whole)) return null;
+  const { entries, unreadable, visits, violationsEnd } = readReportTables(page);
+  if (violationsEnd === null || !PAGE_FOOTER_RE.test(htmlText(page.slice(violationsEnd)))) return null;
+  // A page that lists two visits, whose date does not read, of another visit, or of a callback cannot answer.
+  if (visits.length !== 1 || !isFirstVisitRow(visits[0], visitDate)) return null;
+  // A 35 code outside the 35A and 35B families cannot be classed as pest or not.
+  if (entries.some((entry) => /^35(?![AB]-)/.test(entry.code))) return null;
+  const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => {
+    const text = entry.parts.join(' ');
+    return { code: entry.code, text, notes: visitNotes(text) };
+  });
+  // A follow-up report (any violations row labelled with its visit) ties each row to a visit, so an unlabelled 35 row
+  // on it cannot be tied to one. A 35 row whose text shows no word (only a joiner, say) cannot answer either.
+  const followUp = entries.some((entry) => !visitNotes(entry.parts.join(' ')).routine);
+  if (cannotPlaceInTime(entries, parseUsDate(visits[0].date))) return null;
+  if (unreadable || rows35.some((row) => row.notes.unreadable || !hasWord(row.text) || (followUp && row.notes.routine))) return null;
+  // The read visit's own 35 rows: every row of a routine report; on a follow-up report, those with the initial note.
+  const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => note.date === null));
+  if (!ofVisit.length) return null;
+  // Rows that cite the same at the first visit (the same code, and the same citation compact: firstVisitCitation,
+  // whatever their later notes) count once and are one finding.
+  const keys = new Set();
+  const distinct = ofVisit.filter((row) => {
+    const key = `${row.code} ${citationKey(firstVisitCitation(row))}`;
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  });
+  const rows35A = distinct.filter((row) => /^35A-/.test(row.code));
+  // Fewer of the visit's distinct 35 rows than the file counted: the missing one could be 35A, and a copy cannot
+  // stand in for it. Without the count (a row stored before it was kept), only a 35A row answers: "no pests" needs
+  // the count.
+  if (Number.isInteger(violation35) ? distinct.length < violation35 : !rows35A.length) return null;
+  const findings = rows35A.map((row) => ({ code: row.code, text: capText(initialNoteFirst(row)) }));
+  return { inspectionType: visits[0].type, pestEvidence: findings.length > 0, findings };
 }
 
 // ── Store ───────────────────────────────────────────────────────
@@ -361,7 +647,7 @@ async function pendingInspections({ cutoff, limit, keys }) {
     .whereNull('pest_evidence')
     .where('detail_attempts', '<', REPORT_MAX_ATTEMPTS)
     .where('event_date', '>=', cutoff)
-    // First visits with a citation only (ANSWERABLE_SQL): the report parser (the next part) answers for no other. A row
+    // First visits with a citation only (ANSWERABLE_SQL): the parser answers for no other. A row
     // stored before the count and the visit number were kept waits until a re-read of the file fills them. The stored visit number is the files' word and only saves
     // page reads: the state can relabel a visit between files. The page has the last word: saveReport saves no answer
     // whose page's own inspection type is missing or names a callback, follow-up or re-inspection.
@@ -374,7 +660,7 @@ async function pendingInspections({ cutoff, limit, keys }) {
       db.raw(`detail->>'visitNumber' AS "visitNumber"`),
       db.raw(`to_char(event_date, 'YYYY-MM-DD') AS "visitDate"`),
     );
-  // The file's count, the visit number and the visit's date, by the names the report parser (the next part) reads.
+  // The file's count, the visit number and the visit's date, by the names the parser reads: a row is its input as it is.
   return rows.map((row) => ({ ...row, violation35: wholeNumber(row.violation35), visitNumber: wholeNumber(row.visitNumber) }));
 }
 
@@ -458,7 +744,8 @@ async function settleRead(kind, read, now) {
 
 // ── Weekly job ──────────────────────────────────────────────────
 
-const defaultStore = { upsertRecords, settleRead, raiseVisits };
+const defaultStore = { upsertRecords, settleRead, raiseVisits, pendingInspections, saveReport, bumpAttempts };
+const defaultSleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 // The row width each file has, as cells minus header names. The inspection file fills every header column. The
 // license files never fill their last two (Base Risk Level, Secondary Risk Level): every row of the 2026-11-20 files
@@ -597,7 +884,13 @@ function judgeRead(last, read, now) {
   return { problem, save: save ? { fiscalYear: read.fiscalYear, rows: read.rows } : null };
 }
 
+// Loads the three files. Returns the keys of the visits whose report pages the run reads (firstVisitKeys) and their
+// current license id and date (currentVisits), taken only
+// from a read of the inspection file that loaded and passed: a failed, short or stale read names none, since it may
+// list a visit a newer file corrected or dropped.
 async function syncFiles(deps, result) {
+  let keys = [];
+  let visits = new Map();
   for (const kind of Object.keys(FILES)) {
     try {
       const { records, malformed, rows, fiscalYear, newest, laterVisits } = await loadFile(kind, deps.fetchText, deps.now);
@@ -613,6 +906,9 @@ async function syncFiles(deps, result) {
         result.failures += 1;
         result.files[kind][problem.flag] = true;
         logger.warn(`[dbpr-prospects] ${kind} file ${problem.text}`);
+      } else if (kind === 'inspection') {
+        keys = firstVisitKeys(unique, reportCutoff(deps.now));
+        visits = currentVisits(unique, keys);
       }
     } catch (err) {
       result.failures += 1;
@@ -620,24 +916,110 @@ async function syncFiles(deps, result) {
       logger.warn(`[dbpr-prospects] ${kind} file failed (${err.code || err.name})`);
     }
   }
+  return { keys, visits };
+}
+
+// The public report page of one inspection visit, or null when either id is not digits only.
+function reportUrl(visitId, licenseId) {
+  if (!ID_RE.test(String(visitId)) || !ID_RE.test(String(licenseId))) return null;
+  return `${REPORT_BASE}?InspVisitID=${visitId}&id=${licenseId}`;
+}
+
+// The first day of the report reads' window, as an Eastern date.
+const reportCutoff = (now) => etDateString(addETDays(now, -REPORT_WINDOW_DAYS));
+
+// The visits whose report pages a run reads: the first visits with a violation-35 citation that its own read of the
+// inspection file lists, dated on or after `cutoff`. A visit the file also names as a later visit carries the higher
+// number (raiseVisit), so it is never one of them.
+function firstVisitKeys(records, cutoff) {
+  return records
+    .filter((record) => record.detail.visitNumber === 1 && record.detail.violation35 > 0 && record.event_date >= cutoff)
+    .map((record) => record.source_key);
+}
+
+// The same visits' license id and date as the run's own read lists them (source_key -> { license_id, visitDate }).
+// The stored row keeps its first license id and date (and the business they name), so a visit the newer file
+// corrected is not read: its answer would sit on the stored business and date (readReports skips it).
+function currentVisits(records, keys) {
+  const wanted = new Set(keys);
+  return new Map(records.filter((record) => wanted.has(record.source_key))
+    .map((record) => [record.source_key, { license_id: record.license_id, visitDate: record.event_date }]));
+}
+
+// Downloads and reads one report page for a pendingInspections row (its names are the parser's options). A failed
+// download, an id that is not digits only, or a page that cannot answer returns null: a failed read.
+async function readOneReport(row, deps) {
+  const url = reportUrl(row.source_key, row.license_id);
+  if (!url) return null;
+  try {
+    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS, REPORT_MAX_BYTES), row);
+  } catch {
+    return null;
+  }
+}
+
+// The report pages of the run's visits (keys) not answered yet, in the store's order (newest first), at most
+// REPORT_MAX_PER_RUN, one request a second. Each answer is saved as it is read, so a killed run keeps its progress.
+// A failed read adds one attempt (pendingInspections stops at REPORT_MAX_ATTEMPTS) and leaves pest_evidence NULL. An
+// answer the store does not save (the row changed after it was picked) is left for a later run, at no attempt. A
+// database failure is not a failed read: it stops the reads (the caller counts it) and costs the row no attempt.
+async function readReports(deps, result, keys, visits = new Map()) {
+  // Every pending row of the run's keys (one per key at most, so the batch is bounded by the file): a row the loop
+  // skips (corrected) never takes a request, and at most REPORT_MAX_PER_RUN pages are requested.
+  const pending = await deps.store.pendingInspections({ cutoff: reportCutoff(deps.now), limit: keys.length, keys });
+  let requests = 0;
+  for (let i = 0; i < pending.length && requests < REPORT_MAX_PER_RUN; i += 1) {
+    const current = visits.get(pending[i].source_key);
+    if (current && (current.license_id !== pending[i].license_id || current.visitDate !== pending[i].visitDate)) {
+      result.reportsSkipped += 1;
+      continue;
+    }
+    if (requests > 0) await deps.sleep(REPORT_GAP_MS);
+    requests += 1;
+    const report = await readOneReport(pending[i], deps);
+    if (!report) {
+      result.reportsFailed += 1;
+      await deps.store.bumpAttempts(pending[i].id);
+    } else if (await deps.store.saveReport(pending[i], report)) {
+      result.reportsRead += 1;
+      if (report.pestEvidence) result.pestFound += 1;
+    } else {
+      result.reportsLeft += 1;
+    }
+  }
+  // Every read failing (the site down, or a changed page) is a failed run, not a quiet week. Some failed reads beside
+  // a good one are not.
+  if (result.reportsFailed > 0 && result.reportsRead === 0 && result.reportsLeft === 0) {
+    result.failures += 1;
+    logger.warn(`[dbpr-prospects] every report read failed (${result.reportsFailed})`);
+  }
 }
 
 /**
- * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
- * { fetchText, store, now }.
- * @returns {Promise<{ skipped?: string, failures: number, files: object, elapsedMs: number }>}
+ * The weekly job: the three files, then the report pages. Never throws: each failure is counted in the result.
+ * `deps` is for tests: { fetchText, sleep, store, now }.
+ * @returns {Promise<{ skipped?: string, failures: number, files: object, reportsRead: number, reportsFailed: number,
+ *   reportsLeft: number, pestFound: number, elapsedMs: number }>}
  */
 async function syncRestaurantProspects(deps = {}) {
   const started = Date.now();
-  const result = { failures: 0, files: {}, elapsedMs: 0 };
+  const result = { failures: 0, files: {}, reportsRead: 0, reportsFailed: 0, reportsLeft: 0, reportsSkipped: 0, pestFound: 0, elapsedMs: 0 };
   if (syncDisabled()) return { ...result, skipped: 'disabled' };
-  await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
+  const ctx = { fetchText: defaultFetchText, sleep: defaultSleep, store: defaultStore, now: new Date(), ...deps };
+  const { keys, visits } = await syncFiles(ctx, result);
+  try {
+    await readReports(ctx, result, keys, visits);
+  } catch (err) {
+    result.failures += 1;
+    logger.warn(`[dbpr-prospects] report reads stopped early (${err.code || err.name})`);
+  }
   result.elapsedMs = Date.now() - started;
   const counts = Object.entries(result.files)
     .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${READ_FLAGS.filter((flag) => f[flag]).map((flag) => `(${flag})`).join('')}`
       + `${f.malformed ? `(${f.malformed} malformed)` : ''}`)
     .join(' ');
-  logger.info(`[dbpr-prospects] ${counts} failures=${result.failures} ${result.elapsedMs}ms`);
+  logger.info(`[dbpr-prospects] ${counts} reportsRead=${result.reportsRead} reportsFailed=${result.reportsFailed} `
+    + `reportsLeft=${result.reportsLeft} pestFound=${result.pestFound} failures=${result.failures} ${result.elapsedMs}ms`);
   return result;
 }
 
@@ -647,7 +1029,9 @@ module.exports = {
   parseUsDate,
   parseInspectionRows,
   parseLicenseRows,
+  parseInspectionReport,
   pickPhone,
+  reportUrl,
   namesFirstVisit,
   upsertRecords,
   pendingInspections,

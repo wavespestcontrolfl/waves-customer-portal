@@ -39,13 +39,20 @@ async function fetchSlotCheck(targets, signal) {
   return data.results;
 }
 
-export function useSlotConflicts({ date, windowStart, windowEnd, durationMinutes, excludeServiceIds, serviceId, technicianId, enabled = true }) {
+// `durationEdit`: the caller's save writes `durationMinutes` as the visit's length (the edit form; the
+// same flag as useBestTimes). A move leaves the stored length in place and sends its booked window's span,
+// so it sends no flag, and the server then judges the visit's shift line on the stored length.
+export function useSlotConflicts({ date, windowStart, windowEnd, durationMinutes, durationEdit, excludeServiceIds, serviceId, technicianId, enabled = true }) {
   const [conflicts, setConflicts] = useState([]);
+  // GATE_TECH_SHIFT_HOURS: the line the office's save would state when the technician's shift does not
+  // hold the picked slot (results[0].shiftWarning; the key is absent with the gate off). Null: no line.
+  const [shiftWarning, setShiftWarning] = useState(null);
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
   const excludeKey = (excludeServiceIds || []).map(String).join(',');
   useEffect(() => {
     setConflicts([]);
+    setShiftWarning(null);
     const end = windowEnd || deriveEnd(windowStart, durationMinutes);
     if (!enabled || !date || !windowStart || !end) {
       setChecking(false);
@@ -62,16 +69,18 @@ export function useSlotConflicts({ date, windowStart, windowEnd, durationMinutes
           serviceId,
           technicianId,
           durationMinutes: Number(durationMinutes) > 0 ? Number(durationMinutes) : undefined,
+          durationEdit: durationEdit ? true : undefined,
         }], controller.signal);
         if (!controller.signal.aborted && results) {
           setConflicts(Array.isArray(results[0]?.conflicts) ? results[0].conflicts : []);
+          setShiftWarning(typeof results[0]?.shiftWarning === 'string' && results[0].shiftWarning ? results[0].shiftWarning : null);
         }
       } catch { /* advisory only — a failed check just shows no hint */ }
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, windowStart, windowEnd, durationMinutes, excludeKey, serviceId, technicianId]);
-  return { conflicts, checking };
+  }, [enabled, date, windowStart, windowEnd, durationMinutes, durationEdit, excludeKey, serviceId, technicianId]);
+  return { conflicts, shiftWarning, checking };
 }
 
 // Half-open minutes since midnight, matching the engine's overlap predicate.

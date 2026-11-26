@@ -39,7 +39,7 @@ const {
   settleCatchUpForVisit,
   normalizeOptionList,
 } = require('../services/waveguard-plan-engine');
-const { matchServiceProtocol } = require('../services/protocol-matcher');
+const { matchServiceProtocol, followupVisitMatch } = require('../services/protocol-matcher');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
 const { fertilizerSafetyRules } = require('../services/lawn-fertilizer-safety');
 const jobCard = require('../services/job-card');
@@ -78,6 +78,7 @@ const PROGRAM_KEYS = [
   'mosquito',
   'palm_injection',
   'cockroach',
+  'flea',
   'bed_bug',
   'termite',
 ];
@@ -811,6 +812,20 @@ router.get('/equipment', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The card for a service name, read the way the job card reads it. ?visitId= names the booked visit the screen is open on (one this
+// viewer may see): its catalog service key decides the program before its name does, and a visit booked as a follow-up of a finished
+// visit (its name is a copy of that visit's) gets the program's follow-up card. With no visit, the name alone decides, as before.
+async function matchForBookedVisit(req, protocols, serviceType) {
+  const id = String(req.query.visitId || '');
+  const visit = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+    ? await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id }))
+      .leftJoin('services', 'scheduled_services.service_id', 'services.id')
+      .first('scheduled_services.followup_source_service_id', db.raw('COALESCE(scheduled_services.service_key_snapshot, services.service_key) as service_key'))
+    : null;
+  const match = matchServiceProtocol(protocols, serviceType, { serviceKey: visit?.service_key || null, month: req.query.month || null });
+  return followupVisitMatch(match, visit?.followup_source_service_id != null);
+}
+
 // GET /api/admin/protocols/match — best service template plus full program fallback.
 router.get('/match', async (req, res, next) => {
   try {
@@ -819,7 +834,7 @@ router.get('/match', async (req, res, next) => {
     // Month-keyed programs (tree & shrub) pick the appointment month's visit.
     // Passed raw, not through monthAbbr: an unusable month must keep the rule
     // visit, never default to today's month.
-    const result = matchServiceProtocol(protocols, serviceType, { month: req.query.month || null });
+    const result = await matchForBookedVisit(req, protocols, serviceType);
 
     if (!result.program) return res.status(404).json({ error: 'Protocol program not found' });
 
@@ -1278,7 +1293,7 @@ router.get('/completion-actions', async (req, res, next) => {
       }
     } else {
       // Raw month (see /match): an unusable value keeps the rule visit.
-      const matched = matchServiceProtocol(protocols, serviceType, { month: req.query.month || null });
+      const matched = await matchForBookedVisit(req, protocols, serviceType);
       programKey = matched.programKey;
       program = matched.program;
       visit = matched.matchedVisit || program?.visits?.[0] || null;
@@ -2001,6 +2016,7 @@ router.get('/programs', async (req, res, next) => {
       mosquito: programSummary('mosquito', protocols.mosquito),
       palm_injection: programSummary('palm_injection', protocols.palm_injection),
       cockroach: programSummary('cockroach', protocols.cockroach),
+      flea: programSummary('flea', protocols.flea),
       bed_bug: programSummary('bed_bug', protocols.bed_bug),
       termite: programSummary('termite', protocols.termite),
     }));

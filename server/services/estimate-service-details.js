@@ -96,7 +96,7 @@ const COMPLIANCE_SECTION = {
 const SERVICE_DETAILS_COPY = {
   pest_control: {
     title: 'Pest Protection — Service Details',
-    // Stylized in-house renders (gemini-3-pro-image, 2026-07-11 — no
+    // Stylized in-house renders (gpt-image-2.6-sunburst, remade 2026-11-25 without the Gemini SynthID watermark — no
     // manufacturer photography/trade dress). Owner-picked set, cut to Taurus
     // 2026-10-26: the Talstar P render shows a brand Waves does not buy (owner
     // 2026-09-11: the bifenthrin bottle was Atticus Talak 7.9 F; owner 2026-11-18: now LESCO Crosscheck Plus), and the
@@ -294,7 +294,7 @@ const SERVICE_DETAILS_COPY = {
         ['Signal word', 'CAUTION'],
         ['Standard station checks', '4 per year (quarterly)'],
         ['Required for coverage', 'Annual inspection + current payments'],
-        ['Retreatment and repair', 'As your signed agreement or bond states'],
+        ['Retreatment', 'As your signed agreement or bond states. New agreements cover retreatment only, with no damage repair'],
         // Bond option (owner 2026-07-20): terms are program structure and
         // stable; the per-application price for each term lives on the
         // estimate's bond selector, never in this static guide (rates are
@@ -372,11 +372,11 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'What exactly does the agreement cover?',
-        a: 'Your signed agreement covers subterranean termites, including Formosan. It does not cover drywood termites, powderpost beetles or old house borers; drywood treatment such as Bora-Care\u00ae is quoted separately. Retreatment and repair terms are the ones in your signed agreement or bond.',
+        a: 'Your signed agreement covers subterranean termites, including Formosan. It does not cover drywood termites, powderpost beetles or old house borers; drywood treatment such as Bora-Care\u00ae is quoted separately. Retreatment terms are the ones in your signed agreement or bond. New agreements cover retreatment only, with no damage repair; a bond signed earlier follows its own terms.',
       },
       {
         q: 'What does the agreement NOT cover?',
-        a: 'Drywood termites, powderpost beetles, old house borers and other wood-destroying organisms; damage that existed before coverage began; repair of any damage unless a signed repair bond covers it; detached structures (sheds, fences, decks) unless added in writing; and whole-structure fumigation. Keeping coverage active requires the annual inspection, current payments, and reasonable property conditions \u2014 no wood-to-soil contact, moisture problems addressed, and access for inspections. Your signed agreement is the authority; read it and ask us anything unclear.',
+        a: 'Drywood termites, powderpost beetles, old house borers and other wood-destroying organisms; damage that existed before coverage began; repair of termite damage on new agreements (a bond signed earlier follows its own terms); detached structures (sheds, fences, decks) unless added in writing; and whole-structure fumigation. Keeping coverage active requires the annual inspection, current payments, and reasonable property conditions \u2014 no wood-to-soil contact, moisture problems addressed, and access for inspections. Your signed agreement is the authority; read it and ask us anything unclear.',
       },
     ],
     // Termite-specific customer responsibilities (external review): the
@@ -740,8 +740,8 @@ const SERVICE_DETAILS_COPY = {
         'Waves Pest Control, LLC operates under Florida license JB351547 and is insured. Florida law requires a posted treatment notice at every qualifying lawn visit; your report carries the details behind the sign.',
       ],
     },
-    // Stylized in-house product renders (client/public/product-images) — the
-    // program's flagship products, generated 2026-07-11 (gemini-3-pro-image;
+    // Stylized in-house product renders (server/assets/product-images) — the
+    // program's flagship products, remade 2026-11-25 (gpt-image-2.6-sunburst, no SynthID;
     // no manufacturer photography, no copied trade dress). Products chosen
     // from the lawn protocols: Arena 50 WDG (insecticide rotation), LESCO
     // granular fert, Celsius WG

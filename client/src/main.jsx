@@ -8,7 +8,12 @@ import { initNativeLinks } from './native/nativeLinks';
 import { clearStaffDeviceData, getAdminAuthToken } from './lib/adminAuth';
 import { installStaffSessionGuard } from './lib/staffSessionGuard';
 import { installPortalVersionWatch } from './lib/portalVersion';
-import { handleVitePreloadError, watchPageUse } from './lib/staleChunkReload';
+import { handleVitePreloadError, stripNetworkOnlyParam, watchPageUse } from './lib/staleChunkReload';
+
+// A heal reload marks its address so the service worker fetches the page
+// from the network (lib/staleChunkReload.js); drop the mark before the router
+// reads the address.
+stripNetworkOnlyParam();
 
 // Reads which client build the server runs from each staff API answer, so an
 // out-of-date staff tab can tell (lib/portalVersion.js). First, so later

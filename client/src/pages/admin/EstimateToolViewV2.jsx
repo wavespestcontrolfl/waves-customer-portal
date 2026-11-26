@@ -105,6 +105,15 @@ const TRENCHING_PRODUCT_OPTIONS = [
   { value: "talstar_p", label: "Crosscheck Plus - Bifenthrin, repellent barrier" },
 ];
 
+
+// Termite trenching warranty names (owner 2026-11-25: retreatment only, no damage repair). The tier keys keep
+// "repair_retreat" so saved estimates replay; only the label shown to staff changed.
+const TRENCHING_WARRANTY_LABELS = {
+  one_year_retreat: "1-Year Retreat",
+  three_year_repair_retreat: "3-Year Retreat Warranty",
+  five_year_repair_retreat: "5-Year Retreat Warranty",
+};
+
 const TRENCHING_PRODUCT_META = {
   termidor_sc: {
     warning: "Premium fipronil non-repellent trench treatment. Eligible for longer warranty tiers with product premium surcharge.",
@@ -115,11 +124,11 @@ const TRENCHING_PRODUCT_META = {
     config: "78 oz @ $95 | 0.8 oz / finished gal standard",
   },
   bifen_it: {
-    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year retreatment warranty is quote-required by default.",
     config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
   talstar_p: {
-    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year retreatment warranty is quote-required by default.",
     config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
 };
@@ -5132,10 +5141,16 @@ export default function EstimateToolViewV2({
         return null;
       }
 
+      // The save prices a lead-only builder for the lead's own customer (its leadId and typed contact). The
+      // preview gets the same three values, outside `options` (those are stored and replayed), so the
+      // returning-customer setup fee rule reads the same customer's visits in both. A reopened estimate sends none.
+      const lead = !editMode?.id && form.leadId
+        ? { leadId: form.leadId, customerPhone: form.customerPhone || "", customerEmail: form.customerEmail || "" }
+        : undefined;
       const r = await fetch("/api/admin/estimator/calculate-estimate", {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ profile, selectedServices, options }),
+        body: JSON.stringify({ profile, selectedServices, options, lead }),
       });
       if (!r.ok) {
         const openQuestion = await scopeUnresolvedQuestion(r);
@@ -5925,6 +5940,14 @@ export default function EstimateToolViewV2({
           <div className="mb-4 border-hairline border-zinc-900 rounded-xs bg-zinc-50 px-4 py-3 text-14 text-zinc-700" data-testid="move-estimate-edit-banner">
             New-home estimate for a move. The $99 setup fee is waived.
             {formatCalendarDate(editMoveEstimate.moveInDate) && <> Move-in {formatCalendarDate(editMoveEstimate.moveInDate)}.</>}
+          </div>
+        )}
+        {E?.returningSetupFeeWaiver && (
+          <div className="mb-4 border-hairline border-zinc-900 rounded-xs bg-zinc-50 px-4 py-3 text-14 text-zinc-700" data-testid="returning-setup-fee-banner">
+            Returning customer. The $99 setup fee is waived.
+            {formatCalendarDate(E.returningSetupFeeWaiver.lastCompletedVisitDate) && (
+              <> Last plan visit {formatCalendarDate(E.returningSetupFeeWaiver.lastCompletedVisitDate)}, {E.returningSetupFeeWaiver.gapDays} days ago. The fee comes back after {E.returningSetupFeeWaiver.windowDays} days.</>
+            )}
           </div>
         )}
         {editMode && (
@@ -7958,9 +7981,7 @@ export default function EstimateToolViewV2({
                             k="trenchingWarrantyTier"
                             options={[
                               { value: "none", label: "None" },
-                              { value: "one_year_retreat", label: "1-Year Retreat" },
-                              { value: "three_year_repair_retreat", label: "3-Year Repair + Retreat" },
-                              { value: "five_year_repair_retreat", label: "5-Year Repair + Retreat" },
+                              ...Object.entries(TRENCHING_WARRANTY_LABELS).map(([value, label]) => ({ value, label })),
                             ]}
                           />
                         </Field>
@@ -9660,7 +9681,7 @@ export default function EstimateToolViewV2({
                                   {item.warrantyAdder > 0 && (
                                     <TierRowV2
                                       name="Warranty"
-                                      detail={item.warrantyTier || "Warranty"}
+                                      detail={TRENCHING_WARRANTY_LABELS[item.warrantyTier] || item.warrantyTier || "Warranty"}
                                       price={`+$${item.warrantyAdder}`}
                                     />
                                   )}

@@ -8,6 +8,7 @@
  *
  * The label of a home shows its MONTHLY price (annual / 12 from whole cents, the same toPrice as the admin list and the
  * home's page), the office line to text and the date the price is held until (PRICE_HOLD_DAYS from the day it was marked).
+ * The name and the office line are frozen in the snapshot too (mailed_price.label), for a reprint.
  * Nothing here sends anything and no paid service is called.
  */
 
@@ -24,6 +25,8 @@ const BATCH_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const PRICE_COLUMNS = ['id', 'status', 'price_status', 'price_annual', 'price_setup_fee', 'priced_at', 'mailed_at', 'mail_batch', 'mailed_price'];
+// What marking reads of a home: its price, the address for the customer check, and what the label prints.
+const MARK_COLUMNS = [...PRICE_COLUMNS, 'address_line1', 'city', 'state', 'zip', 'recipient_names', 'page_slug', 'page_token'];
 
 /** What the label shows, frozen: dollars as numbers (the unit of price_annual), monthly from whole cents. */
 function snapshotOf(row) {
@@ -44,6 +47,52 @@ function printedPriceOf(row) {
   const pricedTime = typeof snap.pricedAt === 'string' ? new Date(snap.pricedAt) : null;
   const pricedAt = pricedTime && Number.isFinite(pricedTime.getTime()) ? pricedTime.toISOString() : null;
   return { monthly: snap.monthly, annual: snap.annual, setupFee: snap.setupFee, pricedAt };
+}
+
+/**
+ * What the label prints besides the price, frozen with it at marking: { name, nameCheck, textNumber, officeByDefault }.
+ * The page address (page_slug) is not frozen here: the public lookup resolves the row's own slug, which is written once
+ * and never changed (prospect-store assignPageSlug), so the label always prints the address that reaches the home.
+ */
+function labelFieldsOf(row) {
+  const { name, check } = labelName(row.recipient_names);
+  const office = officeLineOf(row);
+  return { name, nameCheck: check, textNumber: office.number, officeByDefault: office.byDefault };
+}
+
+/**
+ * The label fields a mailed row was printed with (mailed_price.label), or null for a row marked before they were kept or
+ * a snapshot that does not hold them. A reprint of a batch uses these, so a later change of the Clerk's names or of an
+ * office line never makes the second print differ from the cards in the mail.
+ */
+function printedLabelOf(row) {
+  if (!row || !row.mailed_at) return null;
+  let snap = row.mailed_price;
+  if (typeof snap === 'string') {
+    try { snap = JSON.parse(snap); } catch { snap = null; }
+  }
+  const label = snap && snap.label;
+  if (!label || typeof label.name !== 'string' || typeof label.textNumber !== 'string' || !label.textNumber) return null;
+  return {
+    name: label.name,
+    nameCheck: label.nameCheck === true,
+    textNumber: label.textNumber,
+    officeByDefault: label.officeByDefault === true,
+  };
+}
+
+/**
+ * True when the home is no longer a stranger to Waves: a customers row (customer, lead or cancelled) is at its address
+ * (the list's own check, prospect-store addressKnownToWaves) or a member is at or near it (the price pass's check,
+ * home-quote memberStatusOf). The list and the price pass ran these days before; marking runs them again, so a home
+ * that called or signed up since gets no postcard. Strict: a lookup that cannot finish throws, and nothing is marked.
+ * (`deps.knownToWaves` of markBatch, wouldMark and labelsFor replaces it in a test with no customers table.)
+ */
+async function knownToWavesNow(row, conn) {
+  const { addressKnownToWaves } = require('./prospect-store');
+  if (await addressKnownToWaves(row.address_line1, row.zip, conn)) return true;
+  const quote = require('./home-quote');
+  return (await quote.memberStatusOf(row, quote.memberAtAddressOn(conn))) !== null;
 }
 
 /** The Eastern calendar day the hold ends, "YYYY-MM-DD": PRICE_HOLD_DAYS after the day the label was marked. */
@@ -140,18 +189,24 @@ function mailable(conn, ids) {
 
 /**
  * Read only: the homes markBatch would mark now, with the price each would print. `ids` limits it to those prospects.
- * @returns {Promise<{ homes: { id: string, monthly: number, annual: number, setupFee: number }[], notMailable: string[] }>}
+ * knownNow: the ready homes that are left out because Waves knows the address now (knownToWavesNow); they are in
+ * notMailable too when `ids` named them.
+ * @returns {Promise<{ homes: { id: string, monthly: number, annual: number, setupFee: number }[], knownNow: string[], notMailable: string[] }>}
  */
-async function wouldMark({ ids } = {}, conn = db) {
+async function wouldMark({ ids } = {}, conn = db, deps = {}) {
+  const known = deps.knownToWaves || knownToWavesNow;
   const list = checkIds(ids);
-  const rows = await mailable(conn, list).select(...PRICE_COLUMNS);
+  const rows = await mailable(conn, list).select(...MARK_COLUMNS);
   const homes = [];
+  const knownNow = [];
   for (const row of rows) {
     const snap = snapshotOf(row);
-    if (snap) homes.push({ id: row.id, monthly: snap.monthly, annual: snap.annual, setupFee: snap.setupFee });
+    if (!snap) continue;
+    if (await known(row, conn)) knownNow.push(row.id);
+    else homes.push({ id: row.id, monthly: snap.monthly, annual: snap.annual, setupFee: snap.setupFee });
   }
   const found = new Set(homes.map((h) => h.id));
-  return { homes, notMailable: list ? list.filter((id) => !found.has(id)) : [] };
+  return { homes, knownNow, notMailable: list ? list.filter((id) => !found.has(id)) : [] };
 }
 
 /**
@@ -159,9 +214,12 @@ async function wouldMark({ ids } = {}, conn = db) {
  * name and the frozen snapshot of the price the label prints. A mailed row is never touched again (the select skips it and
  * the update names mailed_at IS NULL), and a batch name that already has homes marks nothing (batchExists), so a second run of
  * the same call is a no-op even when more homes have been priced since.
- * @returns {Promise<{ marked: string[], notMailable: string[], batchExists?: boolean }>}
+ * The snapshot also keeps what the label prints besides the price (labelFieldsOf). A home Waves knows now is not marked
+ * (knownNow).
+ * @returns {Promise<{ marked: string[], knownNow?: string[], notMailable: string[], batchExists?: boolean }>}
  */
-async function markBatch({ batch, ids, now = new Date() }, conn = db) {
+async function markBatch({ batch, ids, now = new Date() }, conn = db, deps = {}) {
+  const known = deps.knownToWaves || knownToWavesNow;
   checkBatch(batch);
   const list = checkIds(ids);
   return conn.transaction(async (trx) => {
@@ -169,11 +227,15 @@ async function markBatch({ batch, ids, now = new Date() }, conn = db) {
     // was already exported. The advisory lock makes two runs with one name take turns; the second sees the first's rows.
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`mail_batch:${batch}`]);
     if (await trx('mail_prospects').where({ mail_batch: batch }).first('id')) return { marked: [], notMailable: list || [], batchExists: true };
-    const rows = await mailable(trx, list).forUpdate().select(...PRICE_COLUMNS);
+    const rows = await mailable(trx, list).forUpdate().select(...MARK_COLUMNS);
     const marked = [];
+    const knownNow = [];
     for (const row of rows) {
-      const snap = snapshotOf(row);
-      if (!snap) continue;
+      const price = snapshotOf(row);
+      if (!price) continue;
+      // Checked again here, on this transaction: the home is left as it is (not marked, no status change) and reported.
+      if (await known(row, trx)) { knownNow.push(row.id); continue; }
+      const snap = { ...price, label: labelFieldsOf(row) };
       const updated = await trx('mail_prospects')
         .where({ id: row.id })
         .whereNull('mailed_at')
@@ -181,19 +243,36 @@ async function markBatch({ batch, ids, now = new Date() }, conn = db) {
       if (updated) marked.push(row.id);
     }
     const done = new Set(marked);
-    return { marked, notMailable: list ? list.filter((id) => !done.has(id)) : [] };
+    return { marked, knownNow, notMailable: list ? list.filter((id) => !done.has(id)) : [] };
   });
 }
 
+// One label row from a home, the price it prints and its label fields.
+function labelRowOf(row, priceNow, fields) {
+  return {
+    name: fields.name,
+    price: labelPrice(priceNow.monthly),
+    perApplication: perApplicationLabel(priceNow.annual),
+    slug: row.page_slug || null,
+    token: row.page_token,
+    textNumber: fields.textNumber,
+    // The last day the printed price is held, as the label words it ("Jan 23"); booking honors it (home-book.js).
+    heldUntil: heldUntilLabel(heldUntilOf(row.mailed_at)),
+    // The one-time setup fee the page shows and booking applies (null when there is none), so the label can say it.
+    setupFee: Number(priceNow.setupFee) > 0 ? labelPrice(priceNow.setupFee) : null,
+  };
+}
+
 /**
- * Read only: the label rows [{ name, price, perApplication, slug, token, textNumber, setupFee }] for the homes of `batch`, or (no batch)
+ * Read only: the label rows [{ name, price, perApplication, slug, token, textNumber, heldUntil, setupFee }] for the homes of `batch`, or (no batch)
  * for the homes markBatch would mark at `now`. price is the monthly price the label shows; for a marked home it is the frozen
- * snapshot. No hold date: booking does not honor one yet. Also returns the prospect ids whose name or office needs a look.
+ * snapshot; heldUntil counts from its mailed_at. Also returns the prospect ids whose name or office needs a look.
  */
-async function labelsFor({ batch, ids } = {}, conn = db) {
+async function labelsFor({ batch, ids } = {}, conn = db, deps = {}) {
+  const known = deps.knownToWaves || knownToWavesNow;
   const list = checkIds(ids);
   if (batch !== undefined && batch !== null) checkBatch(batch);
-  const columns = [...PRICE_COLUMNS, 'recipient_names', 'page_slug', 'page_token', 'city', 'zip'];
+  const columns = MARK_COLUMNS;
   let query;
   if (batch) {
     query = conn('mail_prospects').where({ list_key: LIST_KEY, mail_batch: batch })
@@ -210,28 +289,18 @@ async function labelsFor({ batch, ids } = {}, conn = db) {
     const printed = row.mailed_at ? printedPriceOf(row) : null;
     const priceNow = printed || snapshotOf(row);
     if (!priceNow || priceNow.monthly == null) continue;
-    const { monthly, annual } = priceNow;
-    const { name, check } = labelName(row.recipient_names);
-    const office = officeLineOf(row);
-    if (check) nameCheck.push(row.id);
-    if (office.byDefault) officeByDefault.push(row.id);
-    labels.push({
-      name,
-      price: labelPrice(monthly),
-      perApplication: perApplicationLabel(annual),
-      slug: row.page_slug || null,
-      token: row.page_token,
-      textNumber: office.number,
-      // No hold date yet: booking re-prices live today, so a printed "held until" could not be kept. The booking change
-      // that honors mailed_price adds it back.
-      // The one-time setup fee the page shows and booking applies (null when there is none), so the label can say it.
-      setupFee: Number(priceNow.setupFee) > 0 ? labelPrice(priceNow.setupFee) : null,
-    });
+    // A home not yet marked is listed only if markBatch would mark it now.
+    if (!row.mailed_at && await known(row, conn)) continue;
+    // A marked home prints what it was marked with; one marked before the fields were kept is worked out again.
+    const fields = printedLabelOf(row) || labelFieldsOf(row);
+    if (fields.nameCheck) nameCheck.push(row.id);
+    if (fields.officeByDefault) officeByDefault.push(row.id);
+    labels.push(labelRowOf(row, priceNow, fields));
   }
   return { labels, nameCheck, officeByDefault };
 }
 
 module.exports = {
-  markBatch, wouldMark, labelsFor, snapshotOf, printedPriceOf, heldUntilOf, heldUntilLabel, labelPrice, perApplicationLabel, labelName, officeLineOf,
+  markBatch, wouldMark, labelsFor, snapshotOf, printedPriceOf, printedLabelOf, labelFieldsOf, knownToWavesNow, heldUntilOf, heldUntilLabel, labelPrice, perApplicationLabel, labelName, officeLineOf,
   PRICE_HOLD_DAYS, PLAN, BATCH_RE,
 };

@@ -61,7 +61,7 @@ export function resolveDocNextSteps({ cta = {}, authoredProposal = false, accept
   if (TERMINAL_VARIANTS[terminal]) return { variant: TERMINAL_VARIANTS[terminal], primaryLabel: null };
   // GATE_COMMERCIAL_PROPOSAL_SIGN: the server offers online signing (cta.commercialAgreement). The document is a
   // PDF, so the button is a link to the estimate page, where the sign tap lives.
-  // GATE_COMMERCIAL_FIRST_VISIT (cta.commercialFirstVisit): the customer picks the first visit right after signing.
+  // cta.commercialFirstVisit: the customer picks the first visit right after signing.
   if (authoredProposal && cta.commercialAgreement?.canSign === true) {
     return { variant: cta.commercialFirstVisit?.state === 'after_signing' ? 'authored_sign_book' : 'authored_sign', primaryLabel: SIGN_BUTTON_LABEL };
   }

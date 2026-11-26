@@ -74,6 +74,7 @@ describe('Bouncie tracking webhook, truck clock-in hook', () => {
       arrival: { ok: true, arrivalMarked: true, serviceId: 'svc-1' },
       logId: 7,
       payload: PAYLOAD,
+      verified: false,
     });
     expect(logUpdate.update).toHaveBeenCalledWith({ processed: true });
   });
@@ -85,6 +86,35 @@ describe('Bouncie tracking webhook, truck clock-in hook', () => {
       payload: { eventType: 'tripStart', imei: 'imei-1', start: { timestamp: '2026-10-25T12:30:00.000Z', gps: { lat: 27.4331, lon: -82.4057 } } },
     });
     expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'trip-start' }));
+  });
+
+  test('the verified flag from the receiver is passed to the hook unchanged', async () => {
+    await router._test.processTrackingEvent({ logId: 7, eventType: 'tripData', payload: PAYLOAD, verified: true });
+    expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledWith(expect.objectContaining({ verified: true }));
+  });
+
+  test.each([
+    ['a matched secret under enforce', { accepted: true, matched: true, mode: 'enforce' }, true],
+    ['a matched secret under log mode', { accepted: true, matched: true, mode: 'log' }, false],
+    ['an unmatched request accepted under log mode', { accepted: true, matched: false, mode: 'log' }, false],
+    ['an unmatched request accepted with verification disabled', { accepted: true, matched: false, mode: 'disabled' }, false],
+  ])('the POST handler marks %s as verified=%p', async (_label, verify, expected) => {
+    inspectBouncieWebhook.mockReturnValue({ ...verify, from: 'test' });
+    db.mockReset();
+    db.raw = jest.fn().mockResolvedValue({});
+    const insertChain = {
+      insert: jest.fn().mockReturnThis(),
+      onConflict: jest.fn().mockReturnThis(),
+      ignore: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 12 }]),
+    };
+    db.mockReturnValueOnce(insertChain).mockReturnValueOnce(tableMock({ first: TECH })).mockReturnValueOnce(tableMock());
+    const layer = router.stack.find((l) => l.route && l.route.path === '/' && l.route.methods.post);
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+    await layer.route.stack[0].handle({ headers: {}, body: PAYLOAD }, res);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(truckClockIn.maybeClockInFromTruck).toHaveBeenCalledWith(expect.objectContaining({ verified: expected }));
   });
 
   test('a thrown error in the hook is logged, leaves the detector result intact and the event processed', async () => {

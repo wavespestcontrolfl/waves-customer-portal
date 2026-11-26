@@ -24,60 +24,7 @@ const { sourceEvidenceLabelSql, withSourceEvidence } = require('../services/lead
 const { projectRelatedVisits } = require('../services/related-visit-links');
 const { leadServiceDisplayLive } = require('../config/feature-gates');
 
-const RELATED_VISITS_LIMIT = 25;
-
-// Outcome evidence must name the record, not merely the person. A customer or
-// phone match can span multiple inquiries and is therefore never a visit link.
-function leadRelatedVisitQuery(conn, lead) {
-  const leadId = String(lead.id);
-  return conn('scheduled_services as ss')
-    .where(function confirmedLeadIdentity() {
-      this.whereExists(
-        conn('lead_activities as la')
-          .select(conn.raw('1'))
-          .where('la.lead_id', lead.id)
-          .where('la.activity_type', 'appointment_scheduled')
-          .whereRaw("la.metadata->>'appointmentId' = ss.id::text"),
-      ).orWhereExists(
-        conn('ad_service_attribution as asa')
-          .select(conn.raw('1'))
-          .where('asa.lead_id', lead.id)
-          .whereRaw('asa.self_booked_appointment_id = ss.self_booking_id'),
-      ).orWhereExists(
-        conn('estimates as e')
-          .select(conn.raw('1'))
-          .whereRaw('e.id = ss.source_estimate_id')
-          // The estimate's lead mirror wins over a stale leads.estimate_id.
-          .where(function exactEstimateOwner() {
-            this.whereRaw("e.estimate_data->>'lead_id' = ?", [leadId]);
-            if (lead.estimate_id) {
-              this.orWhere(function unmirroredLeadEstimate() {
-                this.whereRaw("e.estimate_data->>'lead_id' IS NULL")
-                  .where('e.id', lead.estimate_id);
-              });
-            }
-          })
-          // Nullable ownership is not disagreement. Two populated owners must
-          // agree, and a populated lead customer vetoes either dissenting row.
-          .whereRaw('(e.customer_id IS NULL OR ss.customer_id IS NULL OR e.customer_id = ss.customer_id)')
-          .modify((estimate) => {
-            if (!lead.customer_id) return;
-            estimate.where((owner) => owner.whereNull('e.customer_id').orWhere('e.customer_id', lead.customer_id));
-          }),
-      );
-    })
-    // Exact record linkage does not override a known owner conflict: showing
-    // another customer's invoice is worse than omitting a stale association.
-    // An unknown visit owner remains eligible for every exact linkage arm.
-    .modify((visits) => {
-      if (lead.customer_id) {
-        visits.where((owner) => owner.whereNull('ss.customer_id').orWhere('ss.customer_id', lead.customer_id));
-      }
-    })
-    .orderByRaw('ss.scheduled_date DESC NULLS LAST, ss.id DESC')
-    .limit(RELATED_VISITS_LIMIT + 1)
-    .select('ss.id', 'ss.status', 'ss.scheduled_date');
-}
+const { leadRelatedVisitQuery, RELATED_VISITS_LIMIT } = require('../services/lead-related-visits');
 
 async function loadLeadRelatedVisits(conn, lead) {
   const rows = await leadRelatedVisitQuery(conn, lead);

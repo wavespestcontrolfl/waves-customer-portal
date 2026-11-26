@@ -51,7 +51,7 @@ const DAY = '2097-06-10';
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
 // GATE_REMINDER_72H_EMAIL_FIRST is cleared too: these fixture visits are one-time, and under it their 72-hour reminder
 // goes by email, so they would never move.
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP', 'GATE_TECH_SHIFT_HOURS'];
 
 maybeDescribe('make-room check on real PostgreSQL', () => {
   let database;
@@ -289,6 +289,43 @@ maybeDescribe('make-room check on real PostgreSQL', () => {
     expect(report.error).toBeNull();
     expect(report.passed.find((p) => p.start === '09:00')).toBeUndefined();
     expect(report.byReason.page_collision).toBeGreaterThanOrEqual(1);
+  });
+
+  // GATE_TECH_SHIFT_HOURS (D4): the technician's set hours hold the new visit and every stop it moves (the real reads).
+  test('shift hours on: the hold\'s proof refuses an hour whose moved stop would end after the shift end, and takes it when the shift holds the chain', async () => {
+    const { findMakeRoomOffers, verifyMakeRoomHour } = require('../services/scheduling/booking-make-room');
+    const estimateId = randomUUID();
+    const placement = makeRoomPlacement({ estimateZone: null, coords: PIN, serviceMix: null, candidateExpectedMinutes: null, estimateId, lineRanking: null });
+    const prove = () => verifyMakeRoomHour({
+      conn: mockConn, date: DAY, startMin: 9 * 60, techId, durationMinutes: 60, point: PIN, estimateId, admit, placement, now: NOW, budgetMs: 60000,
+    });
+    const offer = async () => (await findMakeRoomOffers({
+      estimateId: randomUUID(), pool: [{ date: '2097-06-11', windowStart: '12:00', techId }], coords: PIN, durationMinutes: 60, dateFrom: DAY, dateTo: '2097-06-11',
+      admit, placement, now: NOW, conn: mockConn, budgetMs: 60000,
+    })).hours.map((h) => `${h.date} ${h.start}`);
+    // The chain's last stop (D) ends at 1:00 PM. A shift that ends at 12:30 PM does not hold it.
+    await mockConn('technicians').where({ id: techId }).update({ shift_start: '08:00', shift_end: '12:30' });
+    // Gate off: the set hours are not read.
+    expect((await prove()).moves).toHaveLength(3);
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    expect(await prove()).toEqual({ reason: 'past_shift_end' });
+    expect(await offer()).toEqual([]);
+    // A shift that ends at 1:00 PM holds the chain's booked hours. On the route the technician reaches the moved stops
+    // late in their hours, so the last one ends after 1:00 PM: the route check refuses it.
+    await mockConn('technicians').where({ id: techId }).update({ shift_end: '13:00' });
+    expect(await prove()).toEqual({ reason: 'route_shift_end' });
+    expect(await offer()).toEqual([]);
+    // The route's later stops run late too: the visit moves the day's last stop to end after a 3:00 PM shift end.
+    await mockConn('technicians').where({ id: techId }).update({ shift_end: '15:00' });
+    expect(await prove()).toEqual({ reason: 'route_shift_end' });
+    // A shift that ends at 5:00 PM holds the chain on the clock and on the route.
+    await mockConn('technicians').where({ id: techId }).update({ shift_end: '17:00' });
+    expect((await prove()).moves).toHaveLength(3);
+    expect(await offer()).toEqual([`${DAY} 09:00`]);
+    // A shift that starts after the new visit's hour does not hold the new visit.
+    await mockConn('technicians').where({ id: techId }).update({ shift_start: '09:30', shift_end: '17:00' });
+    expect(await prove()).toEqual({ reason: 'outside_shift' });
+    expect(sentAnything()).toEqual([]);
   });
 
   test('the technician marked out that day is never a candidate (the free-slot finder\'s own absence rule)', async () => {

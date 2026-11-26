@@ -1049,6 +1049,17 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
               </div>
             )}
 
+            {/* GATE_TECH_SHIFT_HOURS: the tapped stop's own picked hour. The line the move would state
+                (checkTarget, or the offered option), from the live check of a picked time first. */}
+            {selected && activeSource?.shiftWarning && (
+              <div data-testid="quick-move-shift-warning" style={{
+                fontSize: 14, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 18,
+                background: '#FFFBEB', border: '1px solid #FDE68A', color: '#B45309',
+              }}>
+                {`⚠️ ${activeSource.shiftWarning} Shift hours alone do not block this move.`}
+              </div>
+            )}
+
             <RouteShiftNotice
               rows={shiftRowsOf(activeSource)}
               formatTime={fmtTime}

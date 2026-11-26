@@ -868,6 +868,23 @@ function oneHourWindow(startHHMM) {
   };
 }
 
+// The target a move of `service` books: `target`, or the same day with its
+// on-the-hour block. Owner rule: windows are ALWAYS on the hour. The series
+// mover writes its anchor's start to every shifted occurrence, so an off-hour
+// TECH-SUPPLIED target (custom input passes the routes' date-only validation)
+// would mint a whole off-hour series — normalize through the same on-the-hour
+// block the options sheet books (codex P1). Scoped to the rain-out's own
+// anchor on a day move (`anchorDateStr` is the date it is on): route SIBLINGS
+// keep their existing windows, and rounding a legacy half-hour window would
+// silently shift that customer's time. commit() books this target; a read that
+// says what the commit would state (checkTarget's shift line) asks about it too.
+function bookedTarget(service, target, anchorDateStr) {
+  const offHour = (hhmmToMinutes(target.window.start) ?? 0) % 60 !== 0;
+  return process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true' && !!service.is_recurring && String(target.date) !== anchorDateStr && offHour
+    ? { ...target, window: oneHourWindow(target.window.start) }
+    : target;
+}
+
 async function loadServiceWithCustomer(serviceId) {
   return db('scheduled_services')
     .where('scheduled_services.id', serviceId)
@@ -1578,7 +1595,7 @@ async function checkTarget({ serviceId, target, caller = null, reasonCode = null
     // occupied span, not just its start — a sibling can land on the row the
     // anchor has not vacated yet.
     .first('id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
-      'estimated_duration_minutes', 'route_order');
+      'estimated_duration_minutes', 'route_order', 'is_recurring');
   if (!service) return { ok: false, reason: 'not_found' };
   // Route siblings flagged (not excluded) so one response serves both
   // scopes — the sheet filters by its live scope toggle without refetching.
@@ -1610,8 +1627,108 @@ async function checkTarget({ serviceId, target, caller = null, reasonCode = null
   } catch (err) {
     logger.info(`[rain-out] route-scope conflict probe failed for ${serviceId}: ${err.message}`);
   }
-  // The one caller is the office's sheet (admin-dispatch target-check), whose move commits as the office.
-  return { ok: true, conflicts, routeConflicts, ...(await routeShiftRows(service, route, { office: true }))(target) };
+  // The one caller is the office's sheet (admin-dispatch target-check), whose move commits as the office:
+  // the tapped stop's own shift line, and the rows of the rest of the route. The line is about the window
+  // the commit books (bookedTarget: a recurring visit's day move lands on the hour), as commit() reads it.
+  const booked = bookedTarget(service, { date: targetDate, window: target.window }, dateOnlyString(service.scheduled_date) || etDateString());
+  const [shiftWarning] = await pickedShiftLines([movedShiftAsk(service, targetDate, booked.window)], caller);
+  return {
+    ok: true, conflicts, routeConflicts, ...(shiftWarning ? { shiftWarning } : {}),
+    ...(await routeShiftRows(service, route, { office: true }))(target),
+  };
+}
+
+// GATE_TECH_SHIFT_HOURS (D4): the shift line an office save states, asked before the save for each hour
+// the office picked or its sheet offers: "<Name>'s shift is 8:00 AM to 6:00 PM. This visit is outside those
+// hours." `asks` is [{ technicianId, date, block }], `block` the visit as the save would leave it (pickedBlock);
+// the answer has one entry for each ask, in order: the line, or null. It is the office reader's own answer
+// (technician-eligibility.js shiftLinesFor): the shift line alone, none on a day the technician does not
+// work (the shift is not that day's), none for a time it cannot read, no read with the gate off, and one
+// pair of reads for each technician asked about. No technician: no line. Advisory: a failure is logged
+// and gives no line. `caller` is who asks: an ask the caller may not make (mayAskShiftOf) reads nothing
+// and has no line.
+async function pickedShiftLines(asks, caller) {
+  const lines = asks.map(() => null);
+  const idOf = (ask) => (ask.technicianId && mayAskShiftOf(caller, ask.technicianId) ? String(ask.technicianId) : null);
+  for (const technicianId of new Set(asks.map(idOf).filter(Boolean))) {
+    const own = asks.map((_ask, i) => i).filter((i) => idOf(asks[i]) === technicianId);
+    try {
+      const told = await require('./technician-eligibility').shiftLinesFor(technicianId, own.map((i) => asks[i]));
+      own.forEach((i, n) => { lines[i] = told[n] || null; });
+    } catch (err) {
+      logger.info(`[rain-out] picked-hour shift line failed for technician ${technicianId}: ${err.message}`);
+    }
+  }
+  return lines;
+}
+
+// Whose shift a caller may ask about before a save: an admin any technician's, a technician its own.
+// The line names the technician and the shift's hours (today's follow the clock-in), and these reads
+// change nothing, so a technician-role login never learns another technician's hours from them,
+// whatever GATE_TECH_LOGIN_PRIVACY says. No caller: no one's. The two ids are compared as uuids, not as
+// text: slot-check takes an id in capitals, in braces or with no hyphens (Joi.guid), and so does PostgreSQL.
+const uuidDigits = (id) => String(id).toLowerCase().replace(/[{}-]/g, '');
+const mayAskShiftOf = (caller, technicianId) => caller?.isAdmin === true
+  || (caller?.technicianId != null && uuidDigits(caller.technicianId) === uuidDigits(technicianId));
+
+// A visit as a save of the picked window would leave it: that window, and the visit's length.
+const pickedBlock = (window, minutes) => ({ window_start: window.start, window_end: window.end, estimated_duration_minutes: minutes });
+
+// The ask about a visit a Quick Move would land on `date` at `window`: the visit's technician, and the
+// window with the visit's stored length. A stop that keeps its day and its hours is not asked about (no
+// technician, no line): the mover states no shift line for it either (rebooker: hoursChangedBy).
+function movedShiftAsk(service, date, window) {
+  const keeps = String(date) === dateOnlyString(service.scheduled_date)
+    && !require('./scheduling/window-rules').hoursChangedBy({ window_start: window.start, window_end: window.end }, service);
+  return { technicianId: keeps ? null : service.technician_id, date, block: pickedBlock(window, service.estimated_duration_minutes) };
+}
+
+// The office's sheet states the shift line of each hour it offers (pickedShiftLines), as `shiftWarning` on
+// the option. A technician's own options are held to the shift already (sameDayChoices, findRescheduleOptions).
+async function tellOfferedShiftLines(service, options, { initiatedBy, caller }) {
+  if (initiatedBy !== 'admin') return;
+  const lines = await pickedShiftLines(options.map((opt) => movedShiftAsk(service, opt.date, opt.window)), caller);
+  options.forEach((opt, i) => { if (lines[i]) opt.shiftWarning = lines[i]; });
+}
+
+// The asks of the pickers' check: each picked slot with the length a save of it leaves the visit. A new
+// appointment, and an edit of the length (`durationEdit`, the edit form: update-details writes the form's
+// length; the same flag as on the best-times read), are judged on the length sent. A move of a visit that
+// exists (`serviceId`) keeps the visit's stored length, and the calendars send the booked window's span as
+// the length: a 90-minute visit in a one-hour window works past that window. So a move is judged on the
+// stored length, and on its window alone when the visit has none, as the save judges it.
+async function pickedSlotAsks(slots, caller) {
+  const stored = await storedLengths(slots, caller);
+  // The read of the lengths failed: a move's length is not known, so that slot is not asked about (no
+  // technician, no line). A line on the length sent could disagree with the save.
+  const unread = (p) => stored === null && !!p.serviceId && !p.durationEdit;
+  const moved = (p) => !p.durationEdit && !!stored && stored.has(uuidDigits(p.serviceId));
+  const lengthOf = (p) => (moved(p) ? stored.get(uuidDigits(p.serviceId)) : p.durationMinutes);
+  return slots.map((p) => ({ technicianId: unread(p) ? null : p.technicianId, date: p.date, block: pickedBlock(p.window, lengthOf(p)) }));
+}
+
+// GATE_TECH_SHIFT_HOURS: the stored length of each visit a picked slot moves, keyed as uuidDigits reads its
+// id. One read, and only for a slot that can get a line and is a move: it names a visit, it is no edit of
+// the length, and it names a technician the caller may ask about. The gate off, or no such slot: no read.
+// A failed read is logged and gives null: no move of the check gets a line (pickedSlotAsks). A technician
+// caller gets the length of its own visits only (mayAskShiftOf on the visit's technician): a line that
+// appears or not at a picked hour would tell the stored length of any visit whose id it sends. Another
+// technician's visit is judged on the length sent, as a visit that is not found.
+async function storedLengths(slots, caller) {
+  const lengths = new Map();
+  const ids = [...new Set(slots
+    .filter((p) => p.serviceId && !p.durationEdit && p.technicianId && mayAskShiftOf(caller, p.technicianId))
+    .map((p) => String(p.serviceId)))];
+  if (!ids.length || !require('../config/feature-gates').techShiftHoursLive()) return lengths;
+  try {
+    const rows = await db('scheduled_services').whereIn('id', ids).select('id', 'technician_id', 'estimated_duration_minutes');
+    rows.filter((row) => mayAskShiftOf(caller, row.technician_id))
+      .forEach((row) => lengths.set(uuidDigits(row.id), row.estimated_duration_minutes));
+  } catch (err) {
+    logger.info(`[slot-check] stored visit lengths not read: ${err.message}`);
+    return null;
+  }
+  return lengths;
 }
 
 // Batch advisory probe for the generic date/time pickers (edit, reschedule,
@@ -1651,6 +1768,7 @@ async function checkSlots({ targets, caller = null } = {}) {
       serviceId: t.serviceId,
       technicianId: t.technicianId,
       durationMinutes: t.durationMinutes,
+      durationEdit: t.durationEdit === true,
     });
   }
   // No service in hand, so nameScopeFor degrades to admin-or-nobody: admins
@@ -1690,6 +1808,10 @@ async function checkSlots({ targets, caller = null } = {}) {
           // The warning names the stop, window and minutes (no customer
           // name, so a technician's row reads the same).
           detail: true,
+          // GATE_TECH_SHIFT_HOURS: the route's shift end is read only for a technician whose hours the
+          // caller may ask about (mayAskShiftOf): an admin any, a technician its own and only when the
+          // slot names it. Otherwise a `shift_end` answer would tell another technician's hours.
+          shiftHours: caller?.isAdmin === true || (!!p.technicianId && mayAskShiftOf(caller, p.technicianId)),
           // The pickers' Google road times are staff-only: a technician's
           // check stays on the model. Counted against the admin who asked
           // (picker-road-spend.js).
@@ -1710,7 +1832,10 @@ async function checkSlots({ targets, caller = null } = {}) {
       }),
     };
   }));
-  return { ok: true, results };
+  // The office's shift line for each picked slot that names a technician (pickedShiftLines), beside its
+  // overlap answer and never in it: `conflicts` is what the pickers count and word as a double booking.
+  const lines = await pickedShiftLines(await pickedSlotAsks(parsed, caller), caller);
+  return { ok: true, results: results.map((result, i) => (lines[i] ? { ...result, shiftWarning: lines[i] } : result)) };
 }
 
 /**
@@ -1855,6 +1980,7 @@ async function getOptions(serviceId, { caller = null, reasonCode, initiatedBy = 
     });
     Object.assign(opt, shiftRows({ date: opt.date, window: opt.window }));
   }
+  await tellOfferedShiftLines(service, [...sameDay, ...days], { initiatedBy, caller });
 
   // Custom-reason availability for the sheet: the option renders only when
   // the gate is on AND the template row is live — a missing/disabled row
@@ -2502,23 +2628,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         ? service.scheduled_date.toISOString()
         : service.scheduled_date).slice(0, 10)
     : todayStr;
-  // Owner rule: windows are ALWAYS on the hour. The series mover writes
-  // its anchor's start to every shifted occurrence, so an off-hour
-  // TECH-SUPPLIED target (custom input passes the routes' date-only
-  // validation) would mint a whole off-hour series — normalize through
-  // the same on-the-hour block the options sheet books (codex P1).
-  // Hoisted ABOVE the custom-move pre-render: everything downstream —
-  // the prebuilt SMS body included — must see the window that actually
-  // books, or the text quotes a time the schedule doesn't hold (codex
-  // r2 P1). Scoped to the rain-out's own anchor: route SIBLINGS keep
-  // their existing windows on a day move, and rounding a legacy
-  // half-hour window would silently shift that customer's time.
-  if (process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
-    && !!service.is_recurring
-    && String(target.date) !== anchorDateStr
-    && (hhmmToMinutes(target.window.start) ?? 0) % 60 !== 0) {
-    target = { ...target, window: oneHourWindow(target.window.start) };
-  }
+  // The window that books (bookedTarget). Hoisted ABOVE the custom-move
+  // pre-render: everything downstream — the prebuilt SMS body included —
+  // must see the window that actually books, or the text quotes a time the
+  // schedule doesn't hold (codex r2 P1).
+  target = bookedTarget(service, target, anchorDateStr);
   // A no-show is about THIS customer only — route scope would move every
   // remaining stop, text each unrelated customer "we missed you", and stamp
   // each with a customer_noshow log row that counts toward the

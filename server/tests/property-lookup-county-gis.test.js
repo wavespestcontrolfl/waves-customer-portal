@@ -512,16 +512,29 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
     expect(decodeURIComponent(url).replace(/\+/g, ' ')).toContain('BLDGS_SQFT_LIVING > 0');
   });
 
+  // Base-plat rows carry their plat name: the delimiter rule is applied to the names the layer returns.
+  const named = (pairs) => ({
+    ok: true,
+    json: async () => ({ features: pairs.map(([v, name]) => ({ attributes: { BLDGS_SQFT_LIVING: v, PAR_SUBDIV_NAME: name } })) }),
+  });
+  const BASE_ROWS = [[1558, 'X PH I'], [1678, 'X PH I'], [1920, 'X PH II'], [1920, 'X'], [2277, 'X PH II'], [2421, 'X UNIT 2'], [2421, 'X PH III'], [3070, 'X PH III'], [3101, 'X PH IV']];
+  const baseRows = (base, extra = []) => named([...BASE_ROWS.map(([v, n]) => [v, n.replace(/^X/, base)]), ...extra]);
+  // The Manatee layer's firewall rejects two UPPER() calls joined by AND or OR (measured 2026-11-22).
+  const upperCalls = (url) => (decodeURIComponent(String(url)).match(/UPPER\(/g) || []).length;
+
   test('widens a thin phase to the base plat name and reports which name answered', async () => {
     global.fetch = jest.fn()
       .mockResolvedValueOnce(living([2101, 2200]))
-      .mockResolvedValueOnce(living([1558, 1678, 1920, 1920, 2277, 2421, 2421, 3070, 3101]));
+      // A longer plat that only shares the prefix ("ESPLANADES") is not the base plat: its rows are dropped.
+      .mockResolvedValueOnce(baseRows('EXAMPLE ESPLANADE', [[9000, 'EXAMPLE ESPLANADES PH I'], [9100, 'EXAMPLE ESPLANADEX']]));
     const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131' });
     expect(global.fetch).toHaveBeenCalledTimes(2);
-    // Exact phase first, then a delimiter-aware base match — never a bare prefix wildcard.
+    // Exact phase first, then the base plat by ONE prefix test; the delimiter rule runs on the returned names.
     expect(decodeURIComponent(String(global.fetch.mock.calls[0][0])).replace(/\+/g, ' ')).toContain("UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE ESPLANADE PH VI SUBPH A & B PB80/131'");
-    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ')).toContain("(UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE ESPLANADE' OR UPPER(PAR_SUBDIV_NAME) LIKE 'EXAMPLE ESPLANADE %')");
-    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0]))).not.toContain("ESPLANADE%'");
+    const base = decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ');
+    expect(base).toContain("UPPER(PAR_SUBDIV_NAME) LIKE 'EXAMPLE ESPLANADE%' AND BLDGS_SQFT_LIVING > 0");
+    expect(base).toMatch(/outFields=[^&]*PAR_SUBDIV_NAME/);
+    expect(global.fetch.mock.calls.map(([url]) => upperCalls(url))).toEqual([1, 1]);
     expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9, minSqft: 1558, maxSqft: 3101, subdivisionQueried: 'EXAMPLE ESPLANADE' });
   });
 
@@ -610,12 +623,23 @@ describe('lookupSubdivisionMedianLivingSqft — plat median with range', () => {
   test('a recorded name with no phase suffix still widens (delimiter-aware) when its exact rows are thin', async () => {
     global.fetch = jest.fn()
       .mockResolvedValueOnce(living([2101, 2200]))
-      .mockResolvedValueOnce(living([1558, 1678, 1920, 1920, 2277, 2421, 2421, 3070, 3101]));
+      .mockResolvedValueOnce(baseRows('EXAMPLE PLAT', [[9000, 'EXAMPLE PLATINUM ESTATES']]));
     const result = await lookupSubdivisionMedianLivingSqft({ county: 'Manatee', subdivision: 'EXAMPLE PLAT' });
     expect(global.fetch).toHaveBeenCalledTimes(2);
     expect(decodeURIComponent(String(global.fetch.mock.calls[0][0])).replace(/\+/g, ' ')).toContain("UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE PLAT'");
-    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ')).toContain("(UPPER(PAR_SUBDIV_NAME) = 'EXAMPLE PLAT' OR UPPER(PAR_SUBDIV_NAME) LIKE 'EXAMPLE PLAT %')");
+    expect(decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ')).toContain("UPPER(PAR_SUBDIV_NAME) LIKE 'EXAMPLE PLAT%'");
+    expect(global.fetch.mock.calls.map(([url]) => upperCalls(url))).toEqual([1, 1]);
     expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9, subdivisionQueried: 'EXAMPLE PLAT' });
+  });
+
+  test('Sarasota keeps the delimiter rule on the server (two UPPER() calls; its layer answers them)', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ features: [{ attributes: { living: 2101 } }] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ features: [1558, 1678, 1920, 1920, 2277, 2421, 2421, 3070, 3101].map((v) => ({ attributes: { living: v } })) }) });
+    const result = await lookupSubdivisionMedianLivingSqft({ county: 'Sarasota', subdivision: 'EXAMPLE PLAT' });
+    const base = decodeURIComponent(String(global.fetch.mock.calls[1][0])).replace(/\+/g, ' ');
+    expect(base).toContain("(UPPER(subd) = 'EXAMPLE PLAT' OR UPPER(subd) LIKE 'EXAMPLE PLAT %')");
+    expect(result).toMatchObject({ medianSqft: 2277, sampleCount: 9 });
   });
 
   test('null below the sample floor, on layer failure, and for an unsupported county', async () => {

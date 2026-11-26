@@ -440,7 +440,6 @@ async function proposalSigning(row, closed) {
 }
 
 async function proposalFirstVisit(row, closed) {
-  if (!require('../../config/feature-gates').commercialFirstVisitLive()) return null;
   try {
     const found = await require('../commercial-first-visit').firstVisitReadiness(row, { conn: db, closed });
     return {

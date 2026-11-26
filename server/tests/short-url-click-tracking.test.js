@@ -87,6 +87,21 @@ describe('createShortCode tracking opts', () => {
   });
 });
 
+describe('createShortCode failure logging', () => {
+  test('exhausted collision retries log a code only: the error message carries the bound target URL (a bearer token)', async () => {
+    const logger = require('../services/logger');
+    const secretUrl = `https://portal.wavespestcontrol.com/track/${'z'.repeat(64)}`;
+    const err = Object.assign(new Error(`insert into "short_codes" ("target_url") values ('${secretUrl}') - duplicate`), {
+      code: '23505', detail: 'short_codes_code_unique',
+    });
+    for (let i = 0; i < 8; i++) enqueue('short_codes', { insertError: err });
+    await expect(createShortCode(secretUrl, { kind: 'tracking' })).rejects.toThrow('retries exhausted');
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).not.toContain('z'.repeat(64));
+    expect(logged).toContain('code=23505');
+  });
+});
+
 describe('shortenOrPassthrough — bare-string contract unchanged', () => {
   test('returns the short URL string on success', async () => {
     const url = await shortenOrPassthrough(LONG_URL, { kind: 'estimate' });

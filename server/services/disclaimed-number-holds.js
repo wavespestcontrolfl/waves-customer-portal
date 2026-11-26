@@ -520,14 +520,19 @@ async function clearDisclaimedNumberHoldsForCall({ callLogId, clearedBy = null, 
 /**
  * Raw read: true/false, THROWS on a read error (other than a missing
  * table). The two wrappers below decide what an error means.
+ *
+ * `strict` (the visit text recipient's checks, GATE_CALL_GIVEN_VISIT_TEXTS): a missing table is NOT read as "no hold" and every
+ * read error throws a fresh error carrying only the driver code (a knex message carries the bound phone). A recipient's text or
+ * link then holds / answers like an unknown token until the table can be read.
  */
-async function disclaimedNumberHeld(to, conn = db) {
+async function disclaimedNumberHeld(to, conn = db, { strict = false } = {}) {
   const phoneE164 = holdPhoneKey(to);
   if (!phoneE164) return false;
   try {
     const row = await conn(TABLE).where({ phone_e164: phoneE164 }).whereNull('cleared_at').first('id');
     return !!row;
   } catch (err) {
+    if (strict) throw Object.assign(new Error('disclaimed number hold read failed'), { code: err && err.code });
     // Inside a caller's transaction the failed statement has already
     // aborted it — rethrow (the wrapper fails closed) rather than claim a
     // clean answer on a poisoned connection.
@@ -575,7 +580,7 @@ async function disclaimedNumberBlocksSend({ to, conn = db } = {}) {
  * No visit context at all → false. THROWS on a read error — both callers
  * map that to their own posture (fail-closed boolean vs. tri-state null).
  */
-async function disclaimedNumberHeldForVisit(idsOrScheduledServiceId, conn = db) {
+async function disclaimedNumberHeldForVisit(idsOrScheduledServiceId, conn = db, { strict = false } = {}) {
   const isPlainId = typeof idsOrScheduledServiceId === 'string' || idsOrScheduledServiceId == null;
   const scheduledServiceId = isPlainId ? idsOrScheduledServiceId : idsOrScheduledServiceId.scheduledServiceId;
   const visitIdSupplied = !isPlainId && Object.prototype.hasOwnProperty.call(idsOrScheduledServiceId, 'visitId');
@@ -596,7 +601,7 @@ async function disclaimedNumberHeldForVisit(idsOrScheduledServiceId, conn = db) 
   const customers = await conn('customers').whereIn('id', customerIds).select('phone');
   const phones = [...new Set(customers.map((c) => holdPhoneKey(c.phone)).filter(Boolean))];
   for (const phone of phones) {
-    if (await disclaimedNumberHeld(phone, conn)) return true;
+    if (await disclaimedNumberHeld(phone, conn, { strict })) return true;
   }
   return false;
 }

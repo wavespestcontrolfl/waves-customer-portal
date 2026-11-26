@@ -81,7 +81,7 @@ describe('CommercialAgreementSign', () => {
   });
 });
 
-// GATE_COMMERCIAL_FIRST_VISIT: /data's cta.commercialFirstVisit turns the signed state into the first-visit picker.
+// /data's cta.commercialFirstVisit turns the signed state into the first-visit picker.
 describe('CommercialAgreementSign with the first-visit picker', () => {
   it('signed + pick: the picker replaces "we will follow up", and it loads the open times', async () => {
     const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true, days: [], slots: [] }) }));

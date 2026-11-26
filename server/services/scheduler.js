@@ -1051,6 +1051,10 @@ function initScheduledJobs() {
   // or observe to 'true' reaches this process too.
   require('./sms-prompt-patch').startPatchRefresh();
 
+  // Company facts bank (owner 2026-11-25): the approved-lines snapshot loads here too, before the cronJobs return below, so a process with
+  // crons disabled never serves a retired line past the 5-minute stale rule. Voice calls and email drafts read it (a process without the scheduler starts it on its first read); an empty bank changes nothing.
+  require('./company-facts-bank').startBankRefresh();
+
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.
   if (!isEnabled('cronJobs')) {
@@ -2169,6 +2173,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // MONTHLY, 2ND 5:35 AM ET — monthly financial snapshot (office cost per stop). Writes last month's row and
+  // re-writes the month before it (late ledger entries). Days 3-7 at 5:35 are the catch-up for a lost tick on
+  // the 2nd: they write only while last month's row is missing, so a finished month is never written twice.
+  // Writes one table (monthly_financial_snapshots), sends nothing. runExclusive: a deploy overlap must not
+  // double-write.
+  // =========================================================================
+  cron.schedule('35 5 2-7 * *', async () => {
+    try {
+      const { etDateString: etToday } = require('./../utils/datetime-et');
+      const catchUp = Number(etToday().slice(8, 10)) > 2;
+      await runExclusive('monthly-financial-snapshot', async () => {
+        const { runMonthlyFinancialSnapshots } = require('./monthly-financial-snapshot');
+        await runMonthlyFinancialSnapshots({ catchUp });
+      });
+    } catch (err) {
+      logger.error(`[monthly-financial-snapshot] cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:20AM — ROUTE-TIERS nightly intra-day reorder (tier 3: 72h–7d
   // band). Rewrites route_order per tech-day via the shared optimizer when
   // savings clear the floor; NEVER moves a visit's date/window/tech, skips any
@@ -2649,11 +2673,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY KNOWLEDGE-GAPS EMAIL — Monday 8:43am ET (owner 2026-10-01: "send
+  // WEEKLY KNOWLEDGE-GAPS ALERT — Monday 8:43am ET (owner 2026-10-01: "send
   // me a weekly email" of the questions the knowledge base could not fully
-  // answer), then hourly at :43 until Tuesday 8:43pm as catch-up ticks: the
-  // once-per-week send stamp makes them no-ops after a successful send, so a
-  // failed send or a deploy over 8:43 still reports that week. Minute 43 on
+  // answer; an admin notification since 2026-11-26), then hourly at :43 until
+  // Tuesday 8:43pm as catch-up ticks: the week-named dedupe key makes them
+  // no-ops after a successful raise, so a failed write or a deploy over 8:43
+  // still reports that week. Minute 43 on
   // Mon/Tue 8am-8pm is shared only with the every-minute jobs — no other
   // scheduled digest or sweep lands on it (#5490 r1: :41 met the autopay
   // SMS digest at 9:41:30). Kill: KNOWLEDGE_GAPS_WEEKLY=off.
@@ -2664,9 +2689,9 @@ function initScheduledJobs() {
       const lockRes = await runExclusive('knowledge-gaps-weekly', async () => {
         const { runKnowledgeGapsWeekly } = require('./knowledge/knowledge-gaps-weekly');
         const result = await runKnowledgeGapsWeekly();
-        logger.info(`[knowledge-gaps-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, gaps: result.gaps ?? null })}`);
-        if (result?.error || ['query_failed', 'unconfigured', 'recipient'].includes(result?.skipped)) {
-          throw new Error(`knowledge-gaps weekly email did not complete (${result.skipped || 'send_failed'})`);
+        logger.info(`[knowledge-gaps-weekly] cron run: ${JSON.stringify({ raised: result.raised || false, skipped: result.skipped || null, gaps: result.gaps ?? null })}`);
+        if (result?.error || result?.skipped === 'query_failed') {
+          throw new Error(`knowledge-gaps weekly alert did not complete (${result.skipped || 'raise_failed'})`);
         }
       });
       if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
@@ -2674,7 +2699,7 @@ function initScheduledJobs() {
         throw new Error(`knowledge-gaps weekly tick skipped: ${lockRes.reason || 'no_connection'}`);
       }
     } catch (err) {
-      logger.error(`Weekly knowledge-gaps email failed: ${err.message}`);
+      logger.error(`Weekly knowledge-gaps alert failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3494,13 +3519,12 @@ function initScheduledJobs() {
       const lockRes = await runExclusive('stripe-webhook-health', async () => {
         const { runStripeWebhookHealthCheck } = require('./stripe-webhook-health');
         const result = await runStripeWebhookHealthCheck();
-        logger.info(`[stripe-webhook-health] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0, stripeSide: result.stripeFailureCount || 0 })}`);
+        logger.info(`[stripe-webhook-health] cron run: ${JSON.stringify({ raised: result.raised || false, skipped: result.skipped || null, count: result.count || 0, stripeSide: result.stripeFailureCount || 0 })}`);
         // Delivery-BLOCKING skips count as failures; expected skips
-        // (nothing_found / disabled / recent_send) stay healthy. A failed
+        // (nothing_found / disabled) stay healthy. A failed
         // Stripe-side probe or ledger query fails the run even when the
-        // alert email went out — the check did not fully complete.
+        // alert was raised — the check did not fully complete.
         if (result?.skipped === 'query_failed' || result?.error
-            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient'
             || result?.skipped === 'stripe_check_failed'
             || result?.stripeCheckError || result?.ledgerCheckError) {
           const reason = result.skipped
@@ -4480,6 +4504,45 @@ function initScheduledJobs() {
       await runExclusive('call-research-miner', () => mineCallResearch({ limit: 150 }));
     } catch (err) {
       logger.error(`Call-research miner failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4:05AM ET — Lead "why" filler (no LLM). Fills leads.previous_company /
+  // switch_reason / not_booked_reason from call_research_chunks with fixed
+  // keyword rules; the job owns the fields and recomputes them (it replaces or
+  // clears a stale value). Runs an hour
+  // after the 3:05 call-research miner. Kill switch: LEAD_WHY_FILL=off (not a gate).
+  // =========================================================================
+  cron.schedule('5 4 * * *', async () => {
+    if (process.env.LEAD_WHY_FILL === 'off') return;
+    logger.info('Running: Lead why filler');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { fillLeadWhy } = require('./lead-why-fill');
+      await runExclusive('lead-why-fill', () => fillLeadWhy());
+    } catch (err) {
+      logger.error(`Lead why filler failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // MONDAYS 8:15AM ET — "Why we win and lose" weekly bell (owner ruling 2026-11-25). ONE needs-you
+  // row for the Monday-to-Sunday week that ended: wins vs not booked, top switch reasons, top rivals,
+  // top not-booked reasons, and leads with a promised quote or callback still owed. Key = the ET
+  // Monday reported, so a rerun writes nothing; a week with no leads raises nothing. Sends nothing to
+  // a customer, no paid API. Kill switch: LEAD_WHY_WEEKLY=off (not a gate).
+  // =========================================================================
+  cron.schedule('15 8 * * 1', async () => {
+    if (process.env.LEAD_WHY_WEEKLY === 'off') return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('lead-why-weekly', async () => {
+        const result = await require('./lead-why-weekly').runLeadWhyWeekly();
+        logger.info(`Lead why weekly: ${result.leads} lead(s) (${result.outcome})`);
+      });
+    } catch (err) {
+      logger.error(`Lead why weekly failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

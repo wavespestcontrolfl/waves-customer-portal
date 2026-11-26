@@ -7,7 +7,7 @@ import { uuid } from "../../utils/ibSession";
  * knowledgeMisses). Nothing is saved unless the operator taps the button,
  * and the search text sits in an editable box first, because it can carry
  * a customer's name, address or phone. Saved gaps go to the weekly
- * knowledge-gaps email.
+ * knowledge-gaps admin notification.
  *
  * Each box's state (its request key, draft, the text locked on the first
  * tap, and save status) lives in useKnowledgeGaps, owned by the palette, so
@@ -111,7 +111,7 @@ function GapRow({ gap, update, save, dark }) {
   if (status === "saved") {
     return (
       <div role="listitem" style={{ color: muted }}>
-        Added to Monday's knowledge-gaps email: "{text}"
+        Added to Monday's knowledge-gaps list: "{text}"
       </div>
     );
   }

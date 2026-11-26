@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import CommercialFirstVisitPicker, { firstVisitLabel } from './CommercialFirstVisitPicker';
 
-// "Pick your first visit" (GATE_COMMERCIAL_FIRST_VISIT): loads the open times, books one, and handles a taken time,
+// "Pick your first visit" loads the open times, books one, and handles a taken time,
 // an already-booked visit, a call-us answer and a failed load. Synthetic data only.
 const DAY = {
   date: '2026-11-03',

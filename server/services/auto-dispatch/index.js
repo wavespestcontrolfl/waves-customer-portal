@@ -319,13 +319,43 @@ function noteUnmoved(run, service, reasonCode) {
 // { clear: true } when it no longer conflicts. A visit whose only conflict is
 // the customer's mowing day (mowing-days.js) needs no person:
 // it reads clear here, so it raises no notice and closes an older one.
+// Conflicts a person never needs to hear about: the visit moves when a slot
+// fits and otherwise stays quietly (mowing-days.js; the saved day, owner 2026-11-25).
+const SILENT_CONFLICTS = new Set(['mowing_day', 'preferred_day']);
 async function standingConflict(seen, id) {
   const row = await db('scheduled_services').where({ id }).first('*');
   if (!row || !VALID_STATUSES.has(row.status) || !row.window_start) return null;
   const service = { ...seen.service, ...row };
   // Required lazily, like apply.js's conflict re-read.
   const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, seen.ctx);
-  return conflict && conflict.kind !== 'mowing_day' ? { service, conflict } : { clear: true };
+  return conflict && !SILENT_CONFLICTS.has(conflict.kind) ? { service, conflict } : { clear: true };
+}
+
+// Visits the run never loads: a one-time visit, a plan's first visit, a
+// booster-month visit, and a visit staff locked or took out of auto-dispatch.
+// The run never moves them, but one on a closed day, inside the customer's
+// blackout dates or on top of another stop still needs a person (owner
+// 2026-11-26: "all visits shoudlk be checked ... yes an office can move
+// them"). Open visits with an arrival time, tomorrow through the look-ahead
+// end, that pass 1 did not load. Null when the read failed.
+async function unloadedLiveVisitIds(run) {
+  if (!run.lookaheadEnd || !run.today) return [];
+  const loaded = new Set((run.loaded || []).map((s) => String(s.id)));
+  try {
+    const rows = await db('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .whereNull('customers.deleted_at')
+      .whereIn('scheduled_services.status', [...VALID_STATUSES])
+      .whereNotNull('scheduled_services.window_start')
+      .where('scheduled_services.scheduled_date', '>', run.today)
+      .where('scheduled_services.scheduled_date', '<=', run.lookaheadEnd)
+      .select('scheduled_services.id')
+      .limit(5000);
+    return rows.map((r) => String(r.id)).filter((id) => !loaded.has(id));
+  } catch (err) {
+    logger.warn(`[auto-dispatch] unloaded-visit conflict read failed: ${err.message}`);
+    return null;
+  }
 }
 
 // Every visit whose conflict the run must read at its end: the ledger (each
@@ -347,6 +377,9 @@ async function conflictsToSettle(run) {
     const id = String(service.id);
     if (!pending.has(id)) pending.set(id, unseen({ service, reason: 'SKIPPED' }));
   }
+  const unloaded = await unloadedLiveVisitIds(run);
+  if (unloaded === null) run.conflictScanComplete = false;
+  for (const id of unloaded || []) if (!pending.has(id)) pending.set(id, unseen({ reason: 'NOT_AUTO_DISPATCHED' }));
   for (const id of run.strandedIds) if (!pending.has(id)) pending.set(id, unseen({ reason: 'ERROR' }));
   const farListed = await needsPerson.farListedVisitIds();
   if (farListed === null) run.conflictScanComplete = false;
@@ -1392,7 +1425,7 @@ function inConflict(pm) {
 }
 
 // "Moved (+12.5)", naming the conflict the move cleared when there was one.
-const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day', mowing_day: ' off the customer\'s mowing day' };
+const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day', customer_blackout: ' out of the customer\'s away dates', mowing_day: ' off the customer\'s mowing day', preferred_day: ' onto the customer\'s saved day' };
 function movedDescription(appliedAudit) {
   const conflict = appliedAudit.constraints && appliedAudit.constraints.conflict;
   return `Moved${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(appliedAudit.improvement)})`;
@@ -1735,6 +1768,7 @@ async function runAutoDispatch(opts = {}) {
     guardMode: config.guardMode,
     nowDate,
     today,
+    lookaheadEnd,
     lockBoundary,
     totals,
     // geo self-heal: attempts (success OR fail) bound the cap, geocoded
@@ -1847,4 +1881,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, freezeReadArgs } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, freezeReadArgs, conflictsToSettle, unloadedLiveVisitIds } };

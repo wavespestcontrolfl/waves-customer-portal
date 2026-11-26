@@ -85,6 +85,68 @@ describe('caps', () => {
   });
 });
 
+describe('local first (owner 2026-11-26)', () => {
+  test('Tampa and Pinellas together fill at most AWAY_CAP slots, even when they outscore local events', () => {
+    const { AWAY_CAP } = require('../services/newsletter-portfolio');
+    const away = [1, 2, 3, 4, 5, 6].map((i) => ev({
+      region_zone: i % 2 ? 'tampa' : 'pinellas', editorial_score: 98 - i, source_id: `a-${i}`, start_at: i % 2 ? DAY.sat : DAY.fri,
+    }));
+    const local = ['manatee', 'sarasota', 'south_sarasota', 'manatee', 'sarasota', 'south_sarasota'].map((z, i) => ev({
+      region_zone: z, editorial_score: 80 - i, source_id: `l-${i}`, start_at: i % 2 ? DAY.sun : DAY.sat,
+    }));
+    const result = selectPortfolio([...away, ...local]);
+    const awayCount = result.selected.filter((e) => ['tampa', 'pinellas'].includes(e.region_zone)).length;
+    expect(AWAY_CAP).toBe(2);
+    expect(awayCount).toBeLessThanOrEqual(AWAY_CAP);
+    expect(result.selected.length - awayCount).toBeGreaterThanOrEqual(5);
+  });
+
+  test('an away event with no region_zone counts by its city', () => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'tampa', editorial_score: 96 - i, source_id: `t-${i}` }));
+    const untagged = ev({ region_zone: null, city: 'clearwater', editorial_score: 93, source_id: 'u-1' });
+    const local = ['manatee', 'sarasota', 'south_sarasota', 'manatee', 'sarasota'].map((z, i) => ev({
+      region_zone: z, editorial_score: 80 - i, source_id: `l-${i}`, start_at: i % 2 ? DAY.sun : DAY.sat,
+    }));
+    const result = selectPortfolio([...tagged, untagged, ...local]);
+    expect(result.selected.map((e) => e.id)).not.toContain(untagged.id);
+  });
+
+  test.each(['St. Petersburg', 'St. Pete Beach', 'Clearwater Beach', 'Palm Harbor', 'Indian Shores', 'Temple Terrace', 'Tierra Verde', 'Sun City Center', 'Palmetto Bay', '', 'Tampa'])('untagged %s counts as away', (city) => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'pinellas', editorial_score: 96 - i, source_id: `p-${i}` }));
+    const untagged = ev({ region_zone: null, city, editorial_score: 93, source_id: 'u-1' });
+    const result = selectPortfolio([...tagged, untagged]);
+    expect(result.selected.map((e) => e.id)).not.toContain(untagged.id);
+  });
+
+  test('capsAllow refuses a third away event against a surviving lineup', () => {
+    const { capsAllow } = require('../services/newsletter-portfolio');
+    const survivors = [ev({ region_zone: 'tampa', source_id: 'x1' }), ev({ region_zone: 'pinellas', source_id: 'x2' }), ev({ region_zone: 'sarasota', source_id: 'x3' })];
+    expect(capsAllow(survivors, ev({ region_zone: 'pinellas', source_id: 'x4' }))).toBe(false);
+    expect(capsAllow(survivors, ev({ region_zone: 'manatee', source_id: 'x5' }))).toBe(true);
+  });
+
+  test.each(['Holmes Beach', 'Myakka City', 'Venice'])('untagged local %s is not counted as away', (city) => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'tampa', editorial_score: 96 - i, source_id: `t-${i}` }));
+    const local = ev({ region_zone: null, city, editorial_score: 93, source_id: 'u-3' });
+    expect(selectPortfolio([...tagged, local]).selected.map((e) => e.id)).toContain(local.id);
+  });
+
+  test('an untagged local city is not counted as away', () => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'tampa', editorial_score: 96 - i, source_id: `t-${i}` }));
+    const local = ev({ region_zone: null, city: 'Lakewood Ranch', editorial_score: 93, source_id: 'u-2' });
+    const result = selectPortfolio([...tagged, local]);
+    expect(result.selected.map((e) => e.id)).toContain(local.id);
+  });
+
+  test('a thin local week selects fewer events (below the minimum the issue skips) instead of a third Tampa Bay event', () => {
+    const away = [1, 2, 3, 4].map((i) => ev({ region_zone: 'pinellas', editorial_score: 95 - i, source_id: `p-${i}`, venue_name: `PV ${i}` }));
+    const local = [ev({ region_zone: 'sarasota', editorial_score: 82, source_id: 'l-1' })];
+    const result = selectPortfolio([...away, ...local]);
+    expect(result.selected.filter((e) => e.region_zone === 'pinellas').length).toBe(2);
+    expect(result.selected.length).toBe(3);
+  });
+});
+
 describe('portfolio coverage', () => {
   // A rich, diverse pool: plenty of weekend/family/parents/free/hero/novel
   // candidates across 4 zones.

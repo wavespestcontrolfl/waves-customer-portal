@@ -228,9 +228,9 @@ describe('the Payment options fact for the Zelle situations (Codex round-25 P1; 
     expect(ambiguous).not.toContain(COPY);
     expect(ambiguous).not.toContain('pay@example.com');
   });
-  test('no Zelle facts and no ambiguity (an unverifiable state, no target): mention no Zelle, say a teammate will confirm', () => {
+  test('no Zelle facts and no ambiguity (an unverifiable state, no target): mention no Zelle, promise no confirmation', () => {
     const l = line({ state: null, invoiceId: 'a', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' });
-    expect(l).toContain('do not mention Zelle; if they ask about it, say a teammate will confirm');
+    expect(l).toContain('do not mention Zelle; if they ask about it, promise no confirmation');
     expect(l).not.toContain(COPY);
     expect(factsFor({ state: null, invoiceId: 'a', invoiceNumber: 'WPC-2026-0001', recipient: 'pay@example.com' })).not.toContain('by Zelle to');
   });
@@ -266,7 +266,7 @@ describe('conflict vs ambiguity wording (Codex round-27 P2)', () => {
   test('conflict: the named invoice is not open — target-specific, not "SEVERAL", and no Zelle is mentioned', () => {
     const l = line({ zelleTargetConflict: true });
     expect(l).toContain('does not match one we can confirm here');
-    expect(l).toContain('do not say whether it is paid, open or owed; say a teammate will confirm which invoice they mean; do not mention Zelle');
+    expect(l).toContain('do not say whether it is paid, open or owed; promise no confirmation of which invoice they mean; do not mention Zelle');
     expect(l).not.toContain('SEVERAL');
     expect(l).not.toContain('ask which invoice');
     expect(l).not.toContain('pay@example.com');
@@ -516,7 +516,7 @@ describe('an unmodeled own invoice (legacy unpaid) leaves the Zelle target unres
       const { buildFactsBlock } = require('../services/sms-shadow-drafter');
       const l = buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), zelleTargetUnknown: true })
         .split('\n').find((x) => x.startsWith('- Payment options:'));
-      expect(l).toContain('do not mention Zelle; if they ask about it, say a teammate will confirm');
+      expect(l).toContain('do not mention Zelle; if they ask about it, promise no confirmation');
       expect(l).not.toContain('or Zelle to');
       expect(l).not.toContain('copy the Zelle sentence');
       expect(l).not.toContain('SEVERAL');

@@ -459,3 +459,40 @@ test('gate on, no estimate: opts.serviceType names the candidate service; an est
   await engine.getAvailableSlots('Palmetto', 'est-1', { serviceType: 'Lawn Fertilization' });
   expect(expectedMinutesSync).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'Lawn Fertilization' }));
 });
+
+// GATE_TECH_SHIFT_HOURS (D4): the engine books a visit with no technician, so it offers an hour only when some
+// technician's shift holds it.
+describe('offer: an hour no technician\'s shift holds is not offered (GATE_TECH_SHIFT_HOURS)', () => {
+  const eligibility = require('../services/technician-eligibility');
+  let load;
+  afterEach(() => { if (load) load.mockRestore(); load = null; });
+
+  test('only hours a shift holds are offered; the rule is read once and asked with each hour\'s day, start and end', async () => {
+    // Some shift holds 10:00 to 14:00.
+    const holds = jest.fn((date, startMin, endMin) => startMin >= 600 && endMin <= 840);
+    load = jest.spyOn(eligibility, 'loadAnyShiftHolds').mockResolvedValue(holds);
+    const starts = startsOf(await engine.getAvailableSlots('Palmetto', 'est-1'));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledWith(db, { dateFrom: DATE, dateTo: DATE });
+    expect(starts.length).toBeGreaterThan(0);
+    for (const start of starts) expect(start >= '10:00' && start <= '13:00').toBe(true);
+    expect(starts).not.toContain('09:00');
+    expect(holds).toHaveBeenCalledWith(DATE, 540, 600);
+  });
+
+  test('no shift holds any hour: the day is not offered', async () => {
+    load = jest.spyOn(eligibility, 'loadAnyShiftHolds').mockResolvedValue(() => false);
+    expect((await engine.getAvailableSlots('Palmetto', 'est-1')).days).toEqual([]);
+  });
+
+  test('a failed read of the hours offers nothing: the error reaches the caller', async () => {
+    load = jest.spyOn(eligibility, 'loadAnyShiftHolds').mockRejectedValue(new Error('synthetic read failure'));
+    await expect(engine.getAvailableSlots('Palmetto', 'est-1')).rejects.toThrow('synthetic read failure');
+  });
+
+  test('gate off: the real reader reads no technician (the harness throws on an unexpected table)', async () => {
+    delete process.env.GATE_TECH_SHIFT_HOURS;
+    expect(startsOf(await engine.getAvailableSlots('Palmetto', 'est-1'))).toContain('09:00');
+    expect(seen).not.toContain('technicians');
+  });
+});

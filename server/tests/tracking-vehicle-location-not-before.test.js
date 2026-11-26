@@ -41,11 +41,92 @@ const freshLoc = () => ({ lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.1).toIS
 
 beforeEach(() => { db.mockReset(); pingTechLocation.mockReset(); });
 
+describe('requireCurrentJobIds: a visit text recipient sees the truck only while its active job is this visit', () => {
+  test('the active job is this visit: the cached fix is served', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'visit-1' } });
+    expect((await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'] })).source).toBe('tech_status');
+  });
+  test('the active job is a SIBLING visit of the same group (no group lookup for a recipient, who asks for its own id only): no position', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'sibling-2' } });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'] })).toBeNull();
+  });
+  test('the technician has moved on to another stop (a different active job, or none): no position', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'other-customer-visit' } });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'] })).toBeNull();
+    install({ ts: { ...fixRow(1), current_job_id: null } });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'] })).toBeNull();
+  });
+  test('without the requirement (the holder\'s own page) the cached fix is served whatever the active job', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'other-customer-visit' } });
+    expect((await resolveFreshTechPosition({ techId: 't1' })).source).toBe('tech_status');
+  });
+});
+
+describe('requireFixAfter: the cached fix must be from THIS drive (strictly after the visit\'s en_route_at)', () => {
+  const AFTER = new Date('2026-05-05T11:50:00.000Z');
+  const at = (iso) => new Date(iso);
+  beforeEach(() => { jest.useFakeTimers().setSystemTime(new Date('2026-05-05T11:52:00.000Z')); });
+  afterEach(() => { jest.useRealTimers(); });
+  const ask = () => resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireCurrentJobIds: ['visit-1'], requireFixAfter: AFTER });
+  const world_ = (fix, received) => ({ lat: '27.1', lng: '-82.2', current_job_id: 'visit-1', location_updated_at: at(fix), location_received_at: received === undefined ? at(fix) : (received && at(received)) });
+
+  test('a fix reported and received after en_route_at is served', async () => {
+    install({ ts: world_('2026-05-05T11:51:00.000Z') });
+    expect((await ask()).source).toBe('tech_status');
+  });
+  test('the previous stop\'s fix (older than en_route_at) is not served, though the active job already matches', async () => {
+    install({ ts: world_('2026-05-05T11:49:00.000Z') });
+    expect(await ask()).toBeNull();
+  });
+  test('a fix exactly AT en_route_at is not served (strictly after)', async () => {
+    install({ ts: world_('2026-05-05T11:50:00.000Z') });
+    expect(await ask()).toBeNull();
+  });
+  test('a fix reported after but RECEIVED before it, or with no receipt time, is not served', async () => {
+    install({ ts: world_('2026-05-05T11:51:00.000Z', '2026-05-05T11:49:00.000Z') });
+    expect(await ask()).toBeNull();
+    install({ ts: world_('2026-05-05T11:51:00.000Z', null) });
+    expect(await ask()).toBeNull();
+  });
+  test('an unreadable en_route_at serves nothing; without the requirement the fix is served as before', async () => {
+    install({ ts: world_('2026-05-05T11:51:00.000Z') });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, requireFixAfter: 'not-a-date' })).toBeNull();
+    expect((await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false })).source).toBe('tech_status');
+  });
+});
+
+describe('strict: a recipient\'s link tells a FAILED tech_status read from "no usable fix"', () => {
+  const logger = require('../services/logger');
+  const failingRead = () => {
+    db.mockImplementation(() => ({
+      leftJoin: () => ({ where: () => ({ first: async () => { throw Object.assign(new Error('select ... tech_id = \'tech-secret-1\' - connection terminated +19415550123'), { code: '57P01' }); } }) }),
+    }));
+  };
+  test('a failed read THROWS with a code only; the default still answers null; the log never carries the message', async () => {
+    failingRead();
+    const err = await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, strict: true }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.code).toBe('57P01');
+    expect(`${err.message} ${err.stack}`).not.toContain('9415550123');
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false })).toBeNull();
+    const logged = JSON.stringify(logger.warn.mock.calls);
+    expect(logged).toContain('code=57P01');
+    expect(logged).not.toContain('9415550123');
+    expect(logged).not.toContain('connection terminated');
+  });
+  test('a successful read with no usable fix is null, not an error, in strict mode too', async () => {
+    install({ ts: { ...fixRow(1), current_job_id: 'other' } });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, strict: true, requireCurrentJobIds: ['visit-1'] })).toBeNull();
+    install({ ts: null });
+    expect(await resolveFreshTechPosition({ techId: 't1', allowBouncieFallback: false, strict: true })).toBeNull();
+  });
+});
+
 describe('one statement: current mapping + cache', () => {
   test('the query joins technicians to tech_status and selects the mapping columns with the cache columns', async () => {
     install({ ts: fixRow(1) });
     await resolveFreshTechPosition({ techId: 't1' });
-    expect(queries).toEqual(['technicians as t', 'join:tech_status as ts:ts.tech_id=t.id', 'cols:t.bouncie_imei,t.bouncie_imei_changed_at,ts.lat,ts.lng,ts.location_updated_at,ts.location_received_at']);
+    expect(queries).toEqual(['technicians as t', 'join:tech_status as ts:ts.tech_id=t.id', 'cols:t.bouncie_imei,t.bouncie_imei_changed_at,ts.lat,ts.lng,ts.location_updated_at,ts.location_received_at,ts.current_job_id']);
   });
   test('never remapped (NULL change time): a fresh cached fix is trusted, no fallback call', async () => {
     install({ ts: fixRow(1) });

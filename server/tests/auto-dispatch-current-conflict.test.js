@@ -16,7 +16,14 @@ const rebooker = require('../services/rebooker');
 const blackout = require('../services/scheduling/blackout-dates');
 const { currentConflict } = require('../services/auto-dispatch/current-conflict');
 
-const CTX = { db: jest.fn(), conflictMoves: true };
+// Every fake below answers the saved-day read with "no saved day" (owner 2026-11-25 preferred_day conflict).
+function noPrefs(other) {
+  return jest.fn((name) => {
+    if (name === 'property_preferences') { const c = { where: () => c, first: async () => undefined }; return c; }
+    return other ? other(name) : undefined;
+  });
+}
+const CTX = { db: noPrefs(), conflictMoves: true };
 const SERVICE = {
   id: 's1', customer_id: 'c1', technician_id: 't1', scheduled_date: '2026-12-07',
   window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60,
@@ -60,7 +67,7 @@ test('back-to-back stops do not overlap; a partial overlap does', async () => {
 
 // The place read: scheduled_services rows by id (property + service address).
 function placesDb(places) {
-  return jest.fn(() => {
+  return noPrefs(() => {
     const c = { leftJoin: () => c, whereIn: () => c, select: async () => places };
     return c;
   });
@@ -101,7 +108,8 @@ test('another customer needs no place read', async () => {
   rebooker.probeMoveConflicts.mockResolvedValue({ rows: [row()] });
   const db = placesDb([]);
   await currentConflict(SERVICE, { ...CTX, db });
-  expect(db).not.toHaveBeenCalled();
+  // Only the customer's own away dates are read (customer_blackout, owner 2026-11-26).
+  expect(db.mock.calls.map(([table]) => table)).toEqual(['property_preferences']);
 });
 
 test('until the schedule is technician-scoped, another technician\'s overlapping stop IS a conflict (Codex r3 P1)', async () => {

@@ -181,6 +181,7 @@ describe('Atticus Antapex WSG name is the one protocols.json and the service lib
   test('protocols.json names the new catalog row, never the old one', () => {
     const text = fs.readFileSync(path.join(__dirname, '../config/protocols.json'), 'utf8');
     expect(text).not.toContain('"Alpine WSG"');
-    expect((text.match(/"Atticus Antapex WSG"/g) || []).length).toBe(6);
+    // The flea and bed bug cards (2026-11-25) name it too; the retired pest visit 2 no longer does.
+    expect((text.match(/"Atticus Antapex WSG"/g) || []).length).toBe(11);
   });
 });

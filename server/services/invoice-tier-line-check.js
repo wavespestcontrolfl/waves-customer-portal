@@ -12,7 +12,9 @@
 //   tier row name the tier the estimate's records agree on (printedLabelMiss)? A row whose own tier record names no
 //   tier prints a bare "WaveGuard". Reading a label needs no rate. The tier names are written out here
 //   (TIER_LINE_NAMES), so a fault in the invoice's own label code cannot pass its own output.
-// - The invoice keeps the saving unnamed (reason discount_unnamed, or a breakdown with no tier share): would its own pricing
+// - The invoice keeps the saving unnamed (reason discount_unnamed, a breakdown with no tier share, or no saving at all on
+//   a line the visit bills at its accepted price, the net-only lawn shape whose list price the invoice's tier reading
+//   recovers from the engine line, completion-pricing.js engineListBasis): would its own pricing
 //   of the matched line name the tier, if its tier reading had found what the estimate's records hold
 //   (unnamedSavingMiss)? The witness is the engine's record: the tier and the rate it applied to that line, which the
 //   estimate's other records must not contradict. An estimate saved with no engine lines (the admin estimate tool's
@@ -30,7 +32,7 @@
 //   the line holds that net. Priced by the reader's own per-application derivation, it must be the visit's own price;
 //   the line is then priced at it and asked the second question.
 // A visit whose invoice keeps one line for another reason (no price of its own, its own price or discount, add-ons,
-// prepaid, no single matched line, a price that moved after acceptance, no saving on the line) is not read. Off gate =
+// prepaid, no single matched line, a price that moved after acceptance) is not read. Off gate =
 // one line by design: no finding.
 // Only a new bill of the visit at its own price is judged (pre-push audit round 14): what completing the visit bills,
 // by the shared prediction the schedule board, the close-out sheet and the cash forecast use (billsVisitAtItsPrice). A
@@ -73,33 +75,9 @@ function upcomingEstimateVisits(conn, { today, days }) {
     .select('s.*');
 }
 
-// The saved result the estimate's lines come from (estimate-public.js acceptanceServiceLists: result, else engineResult)
-// with its recurring block, and the engine's line items for that result: its own when the engine result was saved whole,
-// else the engine result saved beside the mapped one.
-function pricingRecords(data) {
-  const source = object(data.result || data.engineResult || data);
-  const lineItems = Array.isArray(source.lineItems) ? source.lineItems : list(object(data.engineResult).lineItems);
-  return { block: object(source.recurring), lineItems: lineItems.filter((item) => item && typeof item === 'object') };
-}
-
-// The engine's recurring lines of one service: each becomes a recurring row on its own (estimate-public.js
-// recurringServicesWithSupplements; a one-time line such as a plan's first-visit fee does not).
-function serviceEngineLines(lineItems, serviceKey) {
-  const { recurringServiceKey, recurringServicesWithSupplements } = require('../routes/estimate-public');
-  return lineItems.filter((item) => recurringServiceKey(item) === serviceKey && recurringServicesWithSupplements({ lineItems: [item] }).length > 0);
-}
-
-// The tier and rate the engine applied to one service of the estimate: exactly one recurring engine line of that
-// service, whose only discount is the WaveGuard tier, at one rate. Else null.
-function engineTierRecord(lineItems, serviceKey) {
-  const items = serviceEngineLines(lineItems, serviceKey);
-  if (items.length !== 1) return null;
-  const priced = list(items[0].discount?.appliedDiscounts).filter((d) => Number(d?.amount) > 0);
-  const [rate, ...otherRates] = [...new Set(priced.map((d) => Number(d.amount)))];
-  if (otherRates.length || !(rate > 0 && rate <= 1) || priced.some((d) => d.type !== 'waveguard')) return null;
-  // The engine names the tier on the applied discount (discount-engine.js getEffectiveDiscount).
-  return { rate, tier: word(priced[0].tier) };
-}
+// The estimate's saved records, the engine's recurring lines of one service and the engine's tier record of it are
+// read by the invoice's own pricing helpers (completion-pricing.js), so this check and the invoice read one record.
+const { pricingRecords, serviceEngineLines, engineTierRecord } = require('./completion-pricing');
 
 // An estimate saved from its mapped result only (the admin estimate tool saves recurring.services with no line items)
 // has no engine record: its witness is the tier and rate the estimate saved, read here on their own (recordsTier).
@@ -147,8 +125,8 @@ function matchedServiceKey(line) {
 // the printed tier row. That row, and only that row, carries the tier's rate (acceptedDiscountRows), so a staff label
 // that starts with "WaveGuard" is not one. Null when the line's saving has no tier share.
 function pricedTierRow(estimate, line) {
-  const { acceptedPricing, estimateDiscountContext } = require('./completion-pricing');
-  const rows = acceptedPricing(line, estimateDiscountContext(estimate)).discounts;
+  const { acceptedPricing, invoiceDiscountContext } = require('./completion-pricing');
+  const rows = acceptedPricing(line, invoiceDiscountContext(estimate)).discounts;
   const index = rows.findIndex((row) => row.percent !== undefined);
   return index < 0 ? null : { index, dollars: rows[index].dollars };
 }
@@ -177,7 +155,7 @@ function printedLabelMiss({ estimate, line, data, block, lineItems, serviceKey }
 
 // A saving the invoice leaves unnamed, that its own pricing of the matched line names, in its own discount context with
 // only its tier reading (savedEstimateTier) replaced by the witness's tier and rate. Not read when the invoice names no
-// tier by design (completion-pricing.js estimateDiscountContext, savedEstimateTier): a staff discount reaches recurring
+// tier by design (completion-pricing.js invoiceDiscountContext, savedEstimateTier): a staff discount reaches recurring
 // work in any saved shape, or the legacy nested block also supplies service rows. One part must be the tier row: the
 // row that carries a tier rate, as pricedTierRow reads it. Its name is not read, so a row whose own record names no
 // tier (it prints a bare "WaveGuard", pre-push audit) still counts. Records that disagree name no saving: the matched
@@ -185,12 +163,12 @@ function printedLabelMiss({ estimate, line, data, block, lineItems, serviceKey }
 // in that pricing and can claim another rate, which the pricing caps at the saving, pre-push audit). The tier left off,
 // or null.
 function unnamedSavingMiss({ estimate, line, data, block, lineItems, serviceKey }) {
-  const { acceptedPricing, estimateDiscountContext, staffDiscountOnRecurring } = require('./completion-pricing');
+  const { acceptedPricing, invoiceDiscountContext, staffDiscountOnRecurring } = require('./completion-pricing');
   if (staffDiscountOnRecurring(data, block) || list(legacyNestedBlock(data).services).length) return null;
   const record = lineItems.length ? engineTierRecord(lineItems, serviceKey) : NO_ENGINE_RECORD;
   const witness = record ? recordsTier(estimate, data, block, record) : null;
   if (!witness) return null;
-  const context = estimateDiscountContext({ ...estimate, estimate_data: data });
+  const context = invoiceDiscountContext({ ...estimate, estimate_data: data });
   const { discounts } = acceptedPricing(line, { ...context, estimateTier: { tier: witness.tier, amount: witness.rate } });
   const tierRow = discounts.find((d) => d.percent !== undefined);
   const named = discounts.length > 0 && discounts.every((d) => d.named) && !!tierRow
@@ -220,7 +198,7 @@ function unpricedLineMiss(records, visit) {
 // service key (a monthly and a seasonal mosquito line), never a line key.
 async function visitFinding(conn, visit) {
   const { breakdown, reason, estimate, line } = await require('./completion-pricing').acceptedVisitBreakdown(visit, { database: conn });
-  if ((!breakdown && !['discount_unnamed', 'no_breakdown'].includes(reason)) || !estimate) return null;
+  if ((!breakdown && !['discount_unnamed', 'no_breakdown', 'no_discount'].includes(reason)) || !estimate) return null;
   const serviceKey = matchedServiceKey(line);
   if (!serviceKey) return null;
   const data = parsed(estimate.estimate_data);

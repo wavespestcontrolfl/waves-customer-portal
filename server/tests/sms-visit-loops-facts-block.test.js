@@ -13,6 +13,7 @@ const {
   visitLoopStatus,
   visitLoopsNeedAnswer,
   validateOpenLoopAnswer,
+  factsListOpenLoop,
   REAL_ANSWERS_PROMPT_VERSION,
   REAL_ANSWERS_HANDOFF_CATEGORIES,
 } = require('../services/sms-shadow-drafter');
@@ -50,14 +51,14 @@ describe('renderVisitLoopsSection', () => {
     expect(out).not.toContain('Tech position');
     // no minutes: the alert's figure is frozen and measured from the internal job block
     expect(out).toContain('- DELAY FLAGGED (the Quarterly Pest visit, 8-10am): dispatch flagged this visit past its window — apologize once for the delay; never say "on time"\n');
-    expect(out).toContain("- WINDOW PASSED: the Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay, say you're checking with the tech, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised\n");
-    // an unassigned visit has no tech to check with
+    // owner 2026-11-25: no line orders a follow-up promise; a hand-off is an escalated ABSTAIN
+    expect(out).toContain("- WINDOW PASSED: the Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay and escalate needs_person; promise no check, reply or timing (return ABSTAIN when the apology is all you can say)\n");
     const loops = fullLoops();
-    expect(renderVisitLoopsSection({ ...loops, pastWindow: { ...loops.pastWindow, assigned: false } })).toContain("say you're checking with the office, quote FOLLOW-UP SLA");
+    expect(renderVisitLoopsSection({ ...loops, pastWindow: { ...loops.pastWindow, assigned: false } })).not.toMatch(/checking with|FOLLOW-UP SLA/);
     expect(out).not.toContain('no tech location');
     // a logged no-show nobody followed up: the frozen service, the day and the window as promised
     // the office rebooks a miss: the line always hands off (owner 10-02, #5610)
-    expect(out).toMatch(/- MISSED VISIT: the Lawn Care visit on [^\n]*Jun[^\n]* \(9-11am\) was missed and has not been rebooked — apologize once, quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised so the office rebooks it; never offer OPEN TIMES for it\n/);
+    expect(out).toMatch(/- MISSED VISIT: the Lawn Care visit on [^\n]*Jun[^\n]* \(9-11am\) was missed and has not been rebooked — apologize once and escalate needs_person so the office rebooks it \(promise no reply, follow-up or timing; return ABSTAIN when the apology is all you can say\); never offer OPEN TIMES for it\n/);
     expect(out).not.toContain('live note');
     expect(out).toContain('- WE OWE THEM: callback — Call back about the wasp nest quote (since Wednesday, Jun 10)\n');
     expect(out).toContain('- THEY ARE WAITING ON US FOR: question — Asked whether sprinklers need to be off (since Tuesday, Jun 9)\n');
@@ -242,11 +243,12 @@ describe('system prompt', () => {
     process.env[GATE] = 'true';
     const on = buildSystemPrompt();
     expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, the thread');
-    expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, address it in the reply even if the customer only said thanks or ok`);
-    expect(on).toContain('A reply of "" is allowed ONLY when none of those lines is listed.');
+    expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, the customer may still be waiting on something we owe, so a bare thanks or ok is never an ACK`);
+    expect(on).toContain('or return ABSTAIN so a person handles it. Never promise a reply, a follow-up or any timing for it.');
     expect(on).toContain('Never promise an arrival time, or say the tech is "on time"');
-    expect(on).toContain('- With MISSED VISIT, apologize in one plain sentence (no corporate hedging), say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
-    expect(on).toContain('- With WINDOW PASSED or MISSED VISIT listed, a reply without that FOLLOW-UP SLA RIGHT NOW wording and that escalation is not accepted.');
+    expect(on).toContain('- With MISSED VISIT, apologize in one plain sentence (no corporate hedging) and add {"type":"escalate","note":"needs_person"} to intended_actions');
+    expect(on).toContain('- With WINDOW PASSED or MISSED VISIT listed, a reply without that escalation is not accepted.');
+    expect(on).not.toContain('using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
     for (const banned of ['"Good question"', '"Great question"', '"I hear you"', '"Totally fine"', '"Good news"']) expect(on).toContain(banned);
     expect(on).toContain('at most TWO sentences');
   });
@@ -311,34 +313,33 @@ describe('visitLoopsNeedAnswer', () => {
 
 describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed eval behaves like live)', () => {
   const facts = (lines) => `UPCOMING SERVICES:\n- none\n${HEADER}\n${lines.join('\n')}\nOPEN TIMES:\n- Tue 9-11\nBILLING:\n`;
-  test('an empty reply fails while a must-answer line is listed; any text, none listed, or a position only passes', () => {
+  test('an empty reply (an ABSTAIN, owner 2026-11-25) is valid whatever is listed: a person handles it; any text, none listed, or a position only passes too', () => {
     const owed = facts(['- WE OWE THEM: callback — Call back (since Wednesday, Jun 10)']);
-    expect(validateOpenLoopAnswer({ reply: '', factsBlock: owed })).toMatchObject({ ok: false, violations: [expect.stringContaining('empty reply is not allowed')] });
-    expect(validateOpenLoopAnswer({ reply: '   ', factsBlock: owed }).ok).toBe(false);
+    expect(validateOpenLoopAnswer({ reply: '', factsBlock: owed })).toEqual({ ok: true, violations: [] });
+    expect(validateOpenLoopAnswer({ reply: '   ', factsBlock: owed }).ok).toBe(true);
     expect(validateOpenLoopAnswer({ reply: 'We still owe you that callback.', factsBlock: owed }).ok).toBe(true);
     for (const line of ['- DELAY FLAGGED: x', '- WINDOW PASSED: x', '- MISSED VISIT: x', '- THEY ARE WAITING ON US FOR: x']) {
-      expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts([line]) }).ok).toBe(false);
+      expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts([line]) }).ok).toBe(true);
     }
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- none']) }).ok).toBe(true);
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: facts(['- Tracking gap: x']) }).ok).toBe(true);
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: 'UPCOMING SERVICES:\n- none\nBILLING:\n' }).ok).toBe(true); // gate-off facts
   });
 
-  test('WINDOW PASSED / MISSED VISIT: the reply must carry the SLA wording AND an escalation (Codex #5610 r2 P1)', () => {
-    const esc = [{ type: 'escalate', note: 'followup_promised' }];
+  test('WINDOW PASSED / MISSED VISIT: a reply must record the escalation a person owns (Codex #5610 r2 P1); no follow-up wording is asked for or accepted', () => {
+    const esc = [{ type: 'escalate', note: 'needs_person' }];
     for (const line of ['- WINDOW PASSED: x', '- MISSED VISIT: x']) {
       const f = facts([line]);
-      expect(validateOpenLoopAnswer({ reply: "Sorry we missed you. We'll follow up within the hour.", factsBlock: f, intendedActions: esc }).ok).toBe(true);
-      // apology only: no timing, no escalation
+      expect(validateOpenLoopAnswer({ reply: 'Sorry we missed you.', factsBlock: f, intendedActions: esc }).ok).toBe(true);
+      // apology only, no escalation: nobody owns the miss
       expect(validateOpenLoopAnswer({ reply: 'Sorry we missed you.', factsBlock: f, intendedActions: [] }))
-        .toMatchObject({ ok: false, violations: [expect.stringContaining('FOLLOW-UP SLA RIGHT NOW'), expect.stringContaining('escalate')] });
-      // the wording without the escalation, and the escalation without the wording
-      expect(validateOpenLoopAnswer({ reply: "We'll follow up within the hour.", factsBlock: f, intendedActions: [] }).ok).toBe(false);
-      expect(validateOpenLoopAnswer({ reply: 'Sorry about that.', factsBlock: f, intendedActions: esc }).ok).toBe(false);
-      expect(validateOpenLoopAnswer({ reply: "We'll follow up within the hour.", factsBlock: f }).ok).toBe(false);
+        .toMatchObject({ ok: false, violations: [expect.stringContaining('escalate')] });
+      expect(validateOpenLoopAnswer({ reply: 'Sorry we missed you.', factsBlock: f }).ok).toBe(false);
+      // an ABSTAIN has no text and nothing to check
+      expect(validateOpenLoopAnswer({ reply: '', factsBlock: f, intendedActions: [] }).ok).toBe(true);
     }
     // MISSED VISIT: no times beside it, even from a frozen block that carries OPEN TIMES (Codex #5610 r3)
-    const okReply = "Sorry we missed you. We'll follow up within the hour.";
+    const okReply = 'Sorry we missed you.';
     const offer = [{ date: 'Tue', window: '9-11' }];
     expect(validateOpenLoopAnswer({ reply: okReply, factsBlock: facts(['- MISSED VISIT: x']), intendedActions: esc, offeredTimes: offer }))
       .toMatchObject({ ok: false, violations: [expect.stringContaining('offer no times')] });
@@ -351,23 +352,19 @@ describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed ev
     expect(validateOpenLoopAnswer({ reply: 'ok', factsBlock: `${facts(['- none'])}RECENT SMS THREAD:\n- MISSED VISIT: x\n`, intendedActions: [] }).ok).toBe(true);
   });
 
-  test('the timing must be the one the facts state, not any phrase from the vocabulary (Codex #5839 r3)', () => {
-    const esc = [{ type: 'escalate', note: 'followup_promised' }];
+  test('no timing is quoted any more, so the FOLLOW-UP SLA line in the facts decides nothing (replaces Codex #5839 r3)', () => {
+    const esc = [{ type: 'escalate', note: 'needs_person' }];
     const withSla = (phrase) => `${facts(['- MISSED VISIT: x'])}FOLLOW-UP SLA RIGHT NOW: ${phrase}\n`;
-    const f = withSla('within the hour');
-    expect(validateOpenLoopAnswer({ reply: "Sorry we missed you. We'll follow up within the hour.", factsBlock: f, intendedActions: esc }).ok).toBe(true);
-    // a recognized phrase, but not the one in these facts
-    expect(validateOpenLoopAnswer({ reply: "Sorry we missed you. We'll follow up by 9 AM tomorrow morning.", factsBlock: f, intendedActions: esc }))
-      .toMatchObject({ ok: false, violations: [expect.stringContaining('EXACT wording')] });
-    // both phrases in one reply: the wrong one still makes it a wrong promise
-    expect(validateOpenLoopAnswer({ reply: "We'll follow up within the hour, or by 9 AM tomorrow morning.", factsBlock: f, intendedActions: esc }).ok).toBe(false);
-    expect(validateOpenLoopAnswer({ reply: "Sorry we missed you. We'll follow up by 9 AM tomorrow morning.", factsBlock: withSla('by 9 AM tomorrow morning'), intendedActions: esc }).ok).toBe(true);
+    for (const phrase of ['within the hour', 'by 9 AM tomorrow morning']) {
+      expect(validateOpenLoopAnswer({ reply: 'Sorry we missed you.', factsBlock: withSla(phrase), intendedActions: esc }).ok).toBe(true);
+    }
   });
 
-  test('a real gate-on facts block with an owed promise trips it (frozen-facts eval path)', () => {
+  test('a real gate-on facts block with an owed promise lists it for review, and an empty reply (an ABSTAIN) is valid (frozen-facts eval path)', () => {
     process.env[GATE] = 'true';
     const block = buildFactsBlock({ ...baseContext, visitLoops: { weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back', since: '2026-06-09', source: 'call' }] } }, { now: NOW });
-    expect(validateOpenLoopAnswer({ reply: '', factsBlock: block }).ok).toBe(false);
+    expect(factsListOpenLoop(block)).toBe(true);
+    expect(validateOpenLoopAnswer({ reply: '', factsBlock: block }).ok).toBe(true);
     expect(validateOpenLoopAnswer({ reply: '', factsBlock: buildFactsBlock(baseContext, { now: NOW }) }).ok).toBe(true);
   });
 });
@@ -389,7 +386,7 @@ describe('visitLoopStatus', () => {
 
 describe('identity + sealed-eval marker', () => {
   test('the identity carries the cumulative set (compact key m: cflvp + the MISSED VISIT scope line) and fits the column with all four tags', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers41_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers53_n');
     expect(`${REAL_ANSWERS_PROMPT_VERSION}+bcelm`.length).toBeLessThanOrEqual(40);
     process.env[GATE] = 'true';
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';

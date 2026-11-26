@@ -1,5 +1,5 @@
 const protocols = require('../config/protocols.json');
-const { matchServiceProtocol } = require('../services/protocol-matcher');
+const { matchServiceProtocol, followupVisitMatch } = require('../services/protocol-matcher');
 
 function match(serviceType) {
   const result = matchServiceProtocol(protocols, serviceType);
@@ -112,15 +112,16 @@ describe('protocol matcher specialty routing', () => {
       visit: 2,
       reason: 'bed_bug_treatment',
     });
+    // Waves does not sell heat: a heat or hybrid name gets the inspection / scope card (no spray prefill).
     expect(match('Bed Bug Heat Treatment')).toEqual({
       programKey: 'bed_bug',
-      visit: 2,
-      reason: 'bed_bug_treatment',
+      visit: 1,
+      reason: 'bed_bug_heat_scope_review',
     });
     expect(match('Bed Bug Hybrid Heat + Residual Program')).toEqual({
       programKey: 'bed_bug',
-      visit: 2,
-      reason: 'bed_bug_treatment',
+      visit: 1,
+      reason: 'bed_bug_heat_scope_review',
     });
   });
 
@@ -168,15 +169,78 @@ describe('protocol matcher specialty routing', () => {
     });
   });
 
+  test('flea jobs route to the flea card; a booked second visit is treatment 2', () => {
+    expect(match('Flea Control Service')).toEqual({ programKey: 'flea', visit: 1, reason: 'flea_service' });
+    expect(match('Flea Follow-Up')).toEqual({ programKey: 'flea', visit: 2, reason: 'flea_followup' });
+    expect(match('Flea Treatment 2')).toEqual({ programKey: 'flea', visit: 2, reason: 'flea_followup' });
+    // The catalog key is flea-only, whatever an old display name says.
+    const keyed = matchServiceProtocol(protocols, 'Flea & Tick Control', { serviceKey: 'flea_tick' });
+    expect([keyed.programKey, keyed.matchedVisit.visit, keyed.reason]).toEqual(['flea', 1, 'flea_service']);
+    // A keyless name that also asks for ticks stays on the pest tick card.
+    expect(match('Flea & Tick Control')).toEqual({ programKey: 'pest', visit: 4, reason: 'tick_service' });
+    expect(match('Tick Control Service')).toEqual({ programKey: 'pest', visit: 4, reason: 'tick_service' });
+  });
+
+  test('bed bug cards: inspection, treatment 1, and one follow-up card for every later visit', () => {
+    expect(match('Bed Bug Treatment Service')).toEqual({ programKey: 'bed_bug', visit: 2, reason: 'bed_bug_treatment' });
+    expect(match('Bed Bug Inspection')).toEqual({ programKey: 'bed_bug', visit: 1, reason: 'bed_bug_inspection' });
+    // The stage of a later visit is not read from its name: every one of them is the follow-up card.
+    for (const name of ['Bed Bug Treatment 2', 'Bed Bug Follow-Up', 'Bed Bug Clearance Check', 'Bed Bug Recheck', 'Bed Bug Treatment 3', 'Third Bed Bug Treatment']) {
+      expect(match(name)).toEqual({ programKey: 'bed_bug', visit: 3, reason: 'bed_bug_followup' });
+    }
+    // A heavy grade alone is not a stage: a heavy job still starts with the inspection.
+    expect(match('Bed Bug Heavy Inspection')).toEqual({ programKey: 'bed_bug', visit: 1, reason: 'bed_bug_inspection' });
+    expect(protocols.bed_bug.visits.map((v) => v.visit)).toEqual([1, 2, 3]);
+  });
+
+  test('a bed bug booking that says heat or hybrid anywhere gets the inspection / scope card, never a spray card', () => {
+    for (const name of ['Bed Bug Heat Treatment', 'Bed Bug Heat', 'Heat Bed Bug Service', 'Bed Bug Hybrid Treatment', 'Bed Bug Treatment (Heat)', 'Bed Bug Treatment 2 - Heat', 'Bed Bug Follow-Up Hybrid']) {
+      expect(match(name)).toEqual({ programKey: 'bed_bug', visit: 1, reason: 'bed_bug_heat_scope_review' });
+    }
+    expect(protocols.bed_bug.visits.find((v) => v.visit === 1).completionDefaultProducts).toBeUndefined();
+  });
+
+  test('an explicit stage in the name outranks the catalog service key', () => {
+    const keyed = (name) => {
+      const result = matchServiceProtocol(protocols, name, { serviceKey: 'flea_tick' });
+      return [result.programKey, result.matchedVisit.visit, result.reason];
+    };
+    // A second flea visit booked by hand (no follow-up link) must not prefill the growth regulator again.
+    expect(keyed('Flea Treatment 2')).toEqual(['flea', 2, 'flea_followup']);
+    expect(keyed('Flea Follow-Up')).toEqual(['flea', 2, 'flea_followup']);
+    expect(keyed('Flea Control Service')).toEqual(['flea', 1, 'flea_service']);
+    expect(keyed('Flea & Tick Yard Treatment')).toEqual(['flea', 1, 'flea_service']);
+  });
+
+  test('followupVisitMatch: a booked follow-up gets the program follow-up card', () => {
+    const followup = (name) => {
+      const result = followupVisitMatch(matchServiceProtocol(protocols, name), true);
+      return [result.programKey, result.matchedVisit.visit, result.reason];
+    };
+    expect(followup('Flea Control Service')).toEqual(['flea', 2, 'flea_followup']);
+    expect(followup('Bed Bug Treatment Service')).toEqual(['bed_bug', 3, 'bed_bug_followup']);
+    expect(followup('Cockroach Control Service')).toEqual(['cockroach', 3, 'cockroach_followup']);
+    // A program with no follow-up card keeps its match, and so does any visit that is not a follow-up.
+    expect(followup('Quarterly Pest Control')).toEqual(['pest', 1, 'general_pest']);
+    // A linked visit whose own name says something else keeps its card: a later-stage name, a scope review, an inspection.
+    expect(followup('Bed Bug Clearance Check')).toEqual(['bed_bug', 3, 'bed_bug_followup']);
+    expect(followup('Bed Bug Heat Treatment')).toEqual(['bed_bug', 1, 'bed_bug_heat_scope_review']);
+    expect(followup('Bed Bug Inspection')).toEqual(['bed_bug', 1, 'bed_bug_inspection']);
+    const first = matchServiceProtocol(protocols, 'Flea Control Service');
+    expect(followupVisitMatch(first, false)).toBe(first);
+    expect(followupVisitMatch(null, true)).toBeNull();
+  });
+
   test('matches plural pest labels to the specialty pest visits', () => {
     expect(match('Ants')).toEqual({
       programKey: 'pest',
       visit: 3,
       reason: 'ant_service',
     });
+    // Flea has its own card since 2026-11-25; ticks keep the pest tick card.
     expect(match('Fleas')).toEqual({
-      programKey: 'pest',
-      visit: 4,
+      programKey: 'flea',
+      visit: 1,
       reason: 'flea_service',
     });
     expect(match('Ticks')).toEqual({
@@ -206,7 +270,8 @@ describe('catalog service keys', () => {
     expect(byKey('Spot Treat', 'termite_spot_treatment')).toEqual(['termite', 4, 'foam_drill']);
     // The general-pest keys: "Initial Pest Cleanout" is general active-infestation work, not the German-roach cleanout its name matches (job card r7 P1).
     expect(byKey('Initial Pest Cleanout', 'pest_initial_cleanout')).toEqual(['pest', 1, 'general_pest']);
-    expect(match('Initial Pest Cleanout')).toEqual({ programKey: 'pest', visit: 2, reason: 'german_roach' });
+    // The pest program's German-roach copy is retired: a keyless general cleanout is general pest work too.
+    expect(match('Initial Pest Cleanout')).toEqual({ programKey: 'pest', visit: 1, reason: 'general_pest' });
     expect(byKey('General Pest Control (Monthly)', 'pest_general_monthly')).toEqual(['pest', 1, 'general_pest']);
   });
 

@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fieldViewAssetsPlugin } from './src/lib/fieldViewAssets.js';
+import { customerBuildAssetsPlugin } from './src/lib/customerBuildAssets.js';
 import { stylesheetRetryPlugin } from './src/lib/stylesheetRetry.js';
 import { createRequire } from 'node:module';
 const devContext = createRequire(import.meta.url)('../scripts/dev/context.js');
@@ -44,7 +45,7 @@ export default defineConfig({
         .sort();
       this.emitFile({ type: 'asset', fileName: 'build-assets.json', source: JSON.stringify(assets) });
     },
-  }, fieldViewAssetsPlugin(), {
+  }, customerBuildAssetsPlugin(), fieldViewAssetsPlugin(), {
     // Every production build names itself in index.html: a short hash of the
     // page as built, which lists the hashed entry files, so any code change
     // moves it. The server stamps the live name on each staff API answer

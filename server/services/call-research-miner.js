@@ -202,8 +202,8 @@ function mapSegmentRefs(quote, transcriptStructured) {
 
 // Base eligibility: inbound, transcribed, consent played, not spam/robocall,
 // NULL-safe on pipeline columns (mirrors the voice-corpus filters).
-function eligibleCallsQuery({ onlyUnmined = true } = {}) {
-  let q = db('call_log')
+function eligibleCallsQuery({ onlyUnmined = true, conn = db } = {}) {
+  let q = conn('call_log')
     .where('direction', 'inbound')
     .modify((qb) => whereNotSandboxCall(qb)) // voice-agent bake-off calls never reach a corpus
     .whereNotNull('transcription')

@@ -11,10 +11,10 @@
 //   go in a new batch, so a label export of a batch is always the run that was printed), a mailed home is never touched
 //   again, and the table refuses any later change to its price. The price hold on the label (60 days) counts from this day.
 // - --labels <out.json> (read only unless --execute is also given): writes, for the homes of --batch (or, with no --batch,
-//   the homes a dry run would mark), [{ name, price, perApplication, slug, token, textNumber, setupFee }] for the label print tool:
+//   the homes a dry run would mark), [{ name, price, perApplication, slug, token, textNumber, heldUntil, setupFee }] for the label print tool:
 //   name = the buyers as the label shows them, price = the monthly price (whole dollars bare), perApplication = the price
 //   of one application (annual / 4, from whole cents; 4 a year), textNumber = the office line of the home's city or ZIP,
-//   setupFee = the one-time fee or null. No hold date until booking honors the printed price. The file holds buyer names and page tokens: it is written 0600; keep it out of the repo.
+//   heldUntil = "Mon D" (the last day booking holds the printed price), setupFee = the one-time fee or null. The file holds buyer names and page tokens: it is written 0600; keep it out of the repo.
 //   Labels come ONLY from a named batch that is already marked (--labels needs --batch): print what was marked, so a home
 //   priced between a preview and the mark can never be marked mailed without a card, and the hold date matches the label.
 // - No customer comms, no paid calls.
@@ -117,18 +117,20 @@ async function main() {
       const result = await markBatch({ batch, ids });
       if (result.batchExists) console.log(`Batch "${batch}" already exists: nothing marked. A batch name is used once; pick a new name for new homes.`);
       else console.log(`Marked ${result.marked.length} home(s) as mailed in batch "${batch}".`);
-      if (result.notMailable.length) console.log(`  ${result.notMailable.length} id(s) not marked (not eligible, not priced, or already mailed)`);
+      if (result.knownNow && result.knownNow.length) console.log(`  ${result.knownNow.length} home(s) NOT marked, Waves knows the address now (a customer, a lead or a member): ${result.knownNow.join(', ')}`);
+      if (result.notMailable.length) console.log(`  ${result.notMailable.length} id(s) not marked (not eligible, not priced, already mailed, or known to Waves now)`);
     } else if (!labelsPath) {
       // The same answer --execute would give: a used batch name marks nothing.
       if (batch && await db('mail_prospects').where({ mail_batch: batch }).first('id')) {
         console.log(`Batch "${batch}" already exists: --execute would mark nothing. A batch name is used once; pick a new name for new homes.`);
         return;
       }
-      const { homes, notMailable } = await wouldMark({ ids });
+      const { homes, knownNow, notMailable } = await wouldMark({ ids });
       console.log(`Homes ready to mark as mailed: ${homes.length}`);
       for (const h of homes.slice(0, 200)) console.log(`  would mark prospect ${h.id}: $${h.monthly} a month (annual ${h.annual}, setup ${h.setupFee})`);
       if (homes.length > 200) console.log(`  ... and ${homes.length - 200} more`);
-      if (notMailable.length) console.log(`  ${notMailable.length} of the given ids are not ready (not eligible, not priced, or already mailed)`);
+      if (knownNow.length) console.log(`  ${knownNow.length} home(s) left out, Waves knows the address now (a customer, a lead or a member): ${knownNow.join(', ')}`);
+      if (notMailable.length) console.log(`  ${notMailable.length} of the given ids are not ready (not eligible, not priced, already mailed, or known to Waves now)`);
       console.log('Dry run: nothing written. Pass --execute --batch <name> to mark.');
     }
     if (labelsPath) {

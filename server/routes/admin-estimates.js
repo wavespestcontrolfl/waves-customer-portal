@@ -4815,11 +4815,9 @@ router.get('/:id/proposal', async (req, res, next) => {
           .agreementAdminStatus(estimate, db, { closed: closedOnline });
       } catch (_) { commercialAgreement = null; }
     }
-    // GATE_COMMERCIAL_FIRST_VISIT: whether the signer will book the first visit online, and if not why, for the
-    // builder's Readiness card (owner 2026-11-01). Never throws; the key is absent with the gate off.
-    const firstVisit = require('../config/feature-gates').commercialFirstVisitLive()
-      ? await require('../services/commercial-first-visit').firstVisitReadiness(estimate, { conn: db, closed: closedOnline })
-      : null;
+    // Whether the signer will book the first visit online, and if not why, for the builder's Readiness card
+    // (owner 2026-11-01). Never throws.
+    const firstVisit = await require('../services/commercial-first-visit').firstVisitReadiness(estimate, { conn: db, closed: closedOnline });
     res.json({
       proposal,
       totals: computeProposalTotals(proposal),

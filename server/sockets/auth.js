@@ -81,6 +81,8 @@ const { sessionMfaBlock } = require('../services/staff-mfa');
 //  In prod every real token would have been rejected with
 //  TRACK_TOKEN_INVALID and the customer-track socket would have
 //  silently failed to connect.)
+// Holder tokens only (64 hex). A visit text recipient's own tracker token (`vr_` + 48 hex) is not a socket credential: it fails this
+// format check and is refused before any database read.
 const TRACK_TOKEN_RE = /^[a-f0-9]{64}$/;
 
 function extractAuth(socket) {
@@ -134,7 +136,8 @@ async function socketAuth(socket, next) {
         .where('s.track_view_token', trackToken)
         .first('s.id', 's.customer_id', 's.track_token_expires_at', 'c.active');
     } catch (err) {
-      logger.error(`[socket-auth] track-token lookup failed: ${err.message}`);
+      // Code only: a knex error message carries its bound values, and here that is the bearer track token.
+      logger.error(`[socket-auth] track-token lookup failed (code=${(err && err.code) || 'none'})`);
       return next(rejectionError('Authentication backend unavailable', 'AUTH_FAILED'));
     }
     if (!row) {

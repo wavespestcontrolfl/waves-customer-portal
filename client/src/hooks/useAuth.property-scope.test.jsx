@@ -23,7 +23,8 @@ vi.mock('../utils/api', () => ({
     verifyCode: vi.fn(),
     getAuthProperties: vi.fn(async () => ({ properties: [] })),
     selectAuthProperty: vi.fn(),
-    setTokens: vi.fn(function setTokens(t, r) { this.token = t; this.refreshToken = r; }),
+    // Like the real client, publish the new access token to storage too.
+    setTokens: vi.fn(function setTokens(t, r) { this.token = t; this.refreshToken = r; localStorage.setItem('waves_token', t); }),
     adoptTokens: vi.fn(function adoptTokens(t, r) { this.token = t; this.refreshToken = r; }),
     clearTokens: vi.fn(function clearTokens() { this.token = null; this.refreshToken = null; }),
     request: vi.fn(async () => ({ success: true })),
@@ -241,6 +242,16 @@ describe('cross-tab saved-property switch', () => {
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-1');
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
     api.getAuthProperties.mockResolvedValue(SAVED);
+  });
+
+  it('retains the retired-profile marker after loading the saved-property list', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    const selected = { customerId: 'cust-1', propertyId: null, key: null, closed: true };
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: null, closed: true } });
+    api.getAuthProperties.mockResolvedValueOnce({ scope: 'saved', properties: [], selected });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(api.getAuthProperties).toHaveBeenCalled();
+    expect(authApi.selectedProperty).toEqual(selected);
   });
 
   it('a claim the server IGNORED (retired house / gate off) never becomes the selection: /auth/me says null → the primary from retained entries', async () => {

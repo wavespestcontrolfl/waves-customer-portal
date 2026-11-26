@@ -65,6 +65,51 @@ describe('buildSettingsRow (revenue settings merge)', () => {
     expect(buildSettingsRow(LATEST, { loadedLaborRate: -1 }, '2026-07-04').error).toMatch(/loadedLaborRate/);
   });
 
+  test('owner office time saves overlay only the sent keys, carry forward, clear on null, and leave overhead_entered_at alone', () => {
+    const withOwner = { ...LATEST, owner_office_hours_per_month: '10.00', owner_office_hourly_rate: '40.00' };
+    const { row } = buildSettingsRow(withOwner, { ownerOfficeHoursPerMonth: 12.5 }, '2026-07-04');
+    expect(row.owner_office_hours_per_month).toBe(12.5);
+    expect(row.owner_office_hourly_rate).toBe('40.00'); // untouched key carried
+    expect(row.overhead_entered_at).toBe(LATEST.overhead_entered_at);
+    expect(buildSettingsRow(withOwner, { ownerOfficeHourlyRate: null }, '2026-07-04').row.owner_office_hourly_rate).toBeNull();
+    expect(buildSettingsRow(withOwner, { ownerOfficeHoursPerMonth: '8' }, '2026-07-04').row.owner_office_hours_per_month).toBe(8);
+    // An overhead save carries the owner figures forward too.
+    expect(buildSettingsRow(withOwner, { ovhRent: 5 }, '2026-07-04').row.owner_office_hourly_rate).toBe('40.00');
+    expect(buildSettingsRow(LATEST, { ownerOfficeHoursPerMonth: 'abc' }, '2026-07-04').error).toMatch(/ownerOfficeHoursPerMonth/);
+    expect(buildSettingsRow(LATEST, { ownerOfficeHourlyRate: -1 }, '2026-07-04').error).toMatch(/ownerOfficeHourlyRate/);
+  });
+
+  test.each([
+    ['a numeric prefix', 'ownerOfficeHoursPerMonth', '12oops'],
+    ['an exponent', 'ownerOfficeHoursPerMonth', '1e2'],
+    ['a third decimal', 'ownerOfficeHourlyRate', '21.295'],
+    ['a float with a long tail', 'ownerOfficeHourlyRate', 0.1 + 0.2],
+    ['a leading sign', 'ownerOfficeHoursPerMonth', '+8'],
+    ['a negative number', 'ownerOfficeHourlyRate', -1],
+    ['hours above numeric(6,2)', 'ownerOfficeHoursPerMonth', 10000],
+    ['a rate above numeric(8,2)', 'ownerOfficeHourlyRate', 1000000],
+    ['a huge number', 'ownerOfficeHourlyRate', 1e21],
+    ['an empty string', 'ownerOfficeHoursPerMonth', ''],
+    ['a boolean', 'ownerOfficeHoursPerMonth', true],
+    ['an object', 'ownerOfficeHourlyRate', {}],
+    ['NaN', 'ownerOfficeHoursPerMonth', NaN],
+  ])('owner office time refuses %s (a 400 message, nothing coerced)', (_n, key, value) => {
+    const { row, error } = buildSettingsRow(LATEST, { [key]: value }, '2026-07-04');
+    expect(row).toBeUndefined();
+    expect(error).toMatch(new RegExp(key));
+  });
+
+  test.each([
+    ['the column maximums', { ownerOfficeHoursPerMonth: 9999.99, ownerOfficeHourlyRate: 999999.99 }, 9999.99, 999999.99],
+    ['two decimals as strings, padded with spaces', { ownerOfficeHoursPerMonth: ' 12.5 ', ownerOfficeHourlyRate: '21.29' }, 12.5, 21.29],
+    ['zero', { ownerOfficeHoursPerMonth: 0, ownerOfficeHourlyRate: '0.00' }, 0, 0],
+  ])('owner office time accepts %s', (_n, body, hours, rate) => {
+    const { row, error } = buildSettingsRow(LATEST, body, '2026-07-04');
+    expect(error).toBeUndefined();
+    expect(row.owner_office_hours_per_month).toBe(hours);
+    expect(row.owner_office_hourly_rate).toBe(rate);
+  });
+
   test('first-ever save (no latest row) still works', () => {
     const { row } = buildSettingsRow(null, { loadedLaborRate: 35 }, '2026-07-04');
     expect(row.loaded_labor_rate).toBe(35);

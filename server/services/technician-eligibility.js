@@ -167,6 +167,19 @@ async function dayWarningsFor(technicianId, dates, { conn = db, block = null, sh
   const list = (Array.isArray(dates) ? dates : [dates]).filter(Boolean);
   const hours = techShiftHoursLive() && block ? require('./scheduling/window-rules').rowBlockMinutes(block) : null;
   if (!((techWorkDaysLive() && !shiftOnly) || isBlock(hours)) || !technicianId || !list.length) return [];
+  const { tech, shiftOf } = await officeLineReads(technicianId, conn, isBlock(hours));
+  const lines = new Set();
+  for (const date of [...list].sort()) {
+    const offDay = offDayWarning(tech, date);
+    const line = offDay ? !shiftOnly && offDay : shiftWarning(tech, shiftOf(technicianId, date), hours);
+    if (line) lines.add(line);
+  }
+  return [...lines];
+}
+
+// The reads behind an office line: the technician's name and work days, and (`withShift`) the shift
+// reader. Each read has its own savepoint on a transaction; a failed read gives no technician, or no shift.
+async function officeLineReads(technicianId, conn, withShift) {
   const guarded = async (read, failed) => {
     try {
       return await (conn.isTransaction && typeof conn.transaction === 'function' ? conn.transaction((sp) => read(sp)) : read(conn));
@@ -176,14 +189,26 @@ async function dayWarningsFor(technicianId, dates, { conn = db, block = null, sh
   };
   const tech = await guarded((c) => c('technicians').where({ id: technicianId }).first('id', 'name', 'work_days'), null);
   const noShift = () => null;
-  const shiftOf = isBlock(hours) ? await guarded((c) => loadTechShifts(c, { technicianIds: [technicianId] }), noShift) : noShift;
-  const lines = new Set();
-  for (const date of [...list].sort()) {
-    const offDay = offDayWarning(tech, date);
-    const line = offDay ? !shiftOnly && offDay : shiftWarning(tech, shiftOf(technicianId, date), hours);
-    if (line) lines.add(line);
-  }
-  return [...lines];
+  return { tech, shiftOf: withShift ? await guarded((c) => loadTechShifts(c, { technicianIds: [technicianId] }), noShift) : noShift };
+}
+
+/**
+ * The shift line of dayWarningsFor's `shiftOnly`, for several questions about one technician on one
+ * pair of reads: `asks` is [{ date, block }], and the answer has one entry for each ask, in order, the
+ * line or null. For a screen that asks before a save about each hour it offers or the office picked
+ * (D4 picked-hour hints). The same answer as `dayWarningFor(technicianId, date, { block, shiftOnly: true })`
+ * for each ask: no line on a day the technician does not work, none for a time it cannot read, and no
+ * read with GATE_TECH_SHIFT_HOURS off, with no technician, or with no ask it can read. The id may be any
+ * spelling PostgreSQL takes for the uuid (braces, no hyphens): the shift is asked for by the id the
+ * technician's row carries. Who may ask is the caller's rule (rain-out.js mayAskShiftOf).
+ */
+async function shiftLinesFor(technicianId, asks, { conn = db } = {}) {
+  const { rowBlockMinutes } = require('./scheduling/window-rules');
+  const hours = asks.map((ask) => (techShiftHoursLive() && ask.date && ask.block ? rowBlockMinutes(ask.block) : null));
+  if (!technicianId || !hours.some(isBlock)) return asks.map(() => null);
+  const { tech, shiftOf } = await officeLineReads(technicianId, conn, true);
+  const id = tech?.id || technicianId;
+  return asks.map((ask, i) => (isBlock(hours[i]) && !offDayWarning(tech, ask.date) ? shiftWarning(tech, shiftOf(id, ask.date), hours[i]) : null));
 }
 
 /** dayWarningsFor for one date: its line (the day-off line or the shift line), or null. */
@@ -536,6 +561,45 @@ function shiftBounds(shift, openMin, closeMin) {
   return { openMin: Math.max(openMin, shift.startMin), closeMin: Math.min(closeMin, shift.endMin) };
 }
 
+/**
+ * A visit booked with no technician on it (the assistant's zone engine,
+ * availability.js): the hour is one some technician can work. True when any
+ * of `technicianIds` has no set hours that day, or a shift that holds the
+ * whole visit (start at or after the shift start, end by the shift end).
+ * No technician at all: true (nothing to judge by). Pure.
+ */
+function anyShiftHolds(technicianIds, shiftOf, date, startMin, endMin) {
+  if (!technicianIds.length) return true;
+  return technicianIds.some((id) => {
+    const day = shiftBounds(shiftOf(id, date), 0, 24 * 60);
+    return startMin >= day.openMin && endMin <= day.closeMin;
+  });
+}
+
+/**
+ * GATE_TECH_SHIFT_HOURS (D4): anyShiftHolds over the technicians a visit
+ * can be given to (applyAssignable), read once. Returns
+ * (date, startMin, endMin) => boolean. Gate off: nothing is read and every
+ * hour holds. A failed read throws: the caller offers and books nothing.
+ *
+ * `dateFrom` / `dateTo` (YYYY-MM-DD, the dates the caller will ask about): a
+ * technician who is out or off on a date (absentTechDays, as the finders
+ * read it) does not count on that date, and a date on which every
+ * technician is out holds no hour. With no technician at all there is
+ * nothing to judge by, and every hour holds.
+ */
+async function loadAnyShiftHolds(conn, { now = new Date(), dateFrom = null, dateTo = null } = {}) {
+  if (!techShiftHoursLive()) return () => true;
+  const technicianIds = (await applyAssignable(conn('technicians')).select('technicians.id')).map((row) => row.id);
+  if (!technicianIds.length) return () => true;
+  const shiftOf = await loadTechShifts(conn, { technicianIds, now });
+  const out = dateFrom && dateTo ? await absentTechDays(conn, { dateFrom, dateTo, technicianIds }) : new Set();
+  return (date, startMin, endMin) => {
+    const working = technicianIds.filter((id) => !out.has(`${id}:${date}`));
+    return working.length > 0 && anyShiftHolds(working, shiftOf, date, startMin, endMin);
+  };
+}
+
 /** Minutes after midnight as 'HH:MM'. Pure. */
 function clockOf(minutes) {
   return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
@@ -621,6 +685,8 @@ module.exports = {
   absentTechDays,
   offDayTechDays,
   loadTechShifts,
+  anyShiftHolds,
+  loadAnyShiftHolds,
   shiftBounds,
   shiftExcluding,
   shiftLostByDayChange,
@@ -633,5 +699,6 @@ module.exports = {
   shiftWarning,
   dayWarningFor,
   dayWarningsFor,
+  shiftLinesFor,
   capabilityOffWarningsFor,
 };

@@ -95,6 +95,28 @@ const COMPANY_FACTS = Object.freeze([
   'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
   'We do not tent for termites. For drywood termites in wood we can reach, we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is widespread or in wood we cannot reach, we refer the customer to a fumigation company.',
   'Product labels: the office can tell a customer which products were applied at a visit and can email a product label or Safety Data Sheet on request.',
+  // Standing answers the owner approved (2026-11-23 "yes we do" and the ant-label answer; 2026-11-25 "all rec" for the tube line), appended
+  // in this order, each the owner's words with no dollar amount, fixed dry time or "safe" claim. The sms-label-facts reply guard reads
+  // these lines too, so each one is worded to stay clear of its timing patterns (a vague time word such as "overnight", "stay out").
+  // NOT here, on purpose: (1) "we text you when the technician is on the way": the text does not go out on every visit (the customer's own
+  // text switch, one text for several same-day visits); (2) "you can go in after an inside treatment" and the flea "keep people and pets
+  // out" answer: they are re-entry claims, which only a LABEL FACTS sentence may make (the facts block carries no "keep people and pets"
+  // text when no label is on file, sms-label-facts.test.js r18), so the texting agent hands those questions to the office.
+  'Yes, we offer emergency service day or night.',
+  'The ant products we use inside are labeled for indoor ant treatment, including kitchens and pantries.',
+  'We don\'t service in-wall tube systems, and that\'s on purpose. They push spray into the walls inside your home. We\'d rather treat the outside of the house thoroughly and fix the moisture problems that draw pests in, without spraying inside your walls.',
+  // Owner rulings 2026-11-25 (texting AI fix, step 2: feed the facts staff know), appended in this order. Each line follows the company
+  // facts bank's own text rules (company-facts-bank checkFactText: at most three sentences, no digit or number word, no product name, no
+  // "safe" claim), which sms-company-facts.test.js runs over these lines. The width of the perimeter band is left out on purpose: a
+  // number word is banned, so the line says "a band around the home" and no other line carries the width. NOT here: a return-visit offer
+  // (a pest report before a visit moves that visit; the FREE RE-SERVICE fact owns return visits, so no line uses its words).
+  'The perimeter treatment is applied as a band around the home.',
+  'Lawn insect control is part of the lawn care plan, not the pest plan. The pest plan still treats the shrubs, ornamentals and bed areas around the home.',
+  'When a customer on a recurring plan reports pests before their next scheduled visit, we can move that visit earlier, and the later visits in the plan move up with it.',
+  'When rain forces a move and the customer is notified, we send our standard moved-visit text with the new day or a link to choose a day.',
+  'New sod and plugs get the same watering instructions as any other lawn: follow the water district\'s watering days and times.',
+  'For a wasp nest, we can explain how the nest is removed, and we suggest turning the outdoor lights off.',
+  'We never tell a customer that ants may stay. The ant products we use are non-repellents: ants carry them back to the colony, so results build over time.',
 ]);
 
 // The fixed money policy lines (paying, prepay refund): the payment-status contract treats a verbatim copy of one of their
@@ -157,6 +179,15 @@ function renderCompanyFactsLines(count, { retired = false, olderRetired = [] } =
 // (hasExactCompanyFacts): an old item must never grade the new identity. Any change to the
 // render also moves both prompt version numbers in sms-shadow-drafter.
 const PRIOR_COMPANY_FACTS_RENDERS = Object.freeze([
+  // 2026-11-25 owner rulings (texting AI fix, step 2): seven lines APPENDED (perimeter band, lawn insect control, pest report before a
+  // visit, rain moves, new sod, wasp nests, ants). The 29-line render live 2026-11-25 (prompts 45 to 52) has today's wording for every
+  // one of its lines, so it is the first 29 lines of today's list and needs no `retired` entry. No line was reworded.
+  { lines: 29, sha256: 'f22377899d74db87a65fcd13745316b89ff3e6b672216d88dd236774aaa5baa2' },
+  // 2026-11-25 standing answers (owner 2026-11-23 / 2026-11-25 "all rec"): three lines APPENDED (emergency service, ants near a
+  // pantry, in-wall tube systems). The 26-line render live 2026-11-24 to
+  // 2026-11-25 (prompts 41 to 44) has today's wording for every one of its lines, so it is the first 26 lines of today's list and
+  // needs no `retired` entry. No line was reworded, so the retired-facts send guard does not move.
+  { lines: 26, sha256: 'c1280281fafe73f1447b09f7bc92d3a20d3e7b2150b2b7835d110d5b180d8138' },
   // 2026-11-24 holidays line 6 (owner: closed on six holidays): the 26-line render live 2026-10-22 to 2026-11-23 (prompts 25 to 28)
   // and again until this change (prompts 37 to 40, the service area served again), with the old holidays line 6 only.
   { lines: 26, retired: [6], sha256: 'f58c532ee993a9b46b3af4505b5ab82f000c68e3a3209b0f65c51397804f02f0' },
@@ -233,6 +264,131 @@ function hasExactLabelFacts(factsBlock) {
   return before !== null && new RegExp(exactStructureRegexSource('required')).test(before);
 }
 
+// ---- MORE COMPANY FACTS: the owner-approved bank (company-facts-bank), texting reader ----
+//
+// The bank's lines are NOT part of the exact static region above (PRIOR_COMPANY_FACTS_RENDERS is a code constant pinned by tests; a
+// runtime list cannot live in it). The section sits in the part of the block that already varies per draft: right after the UPCOMING
+// SERVICES lines and directly before the VISIT STATUS & OPEN LOOPS section, never between COMPANY FACTS and BILLING:. A stored block keeps
+// its own bank section, so a retired line cannot rewrite history, and the readers below parse that stored section, never the live bank.
+// An empty (or stale) bank renders nothing: the facts block is byte-identical to a block built before the bank existed.
+//
+// Trust: only the drafter-built spot counts. The section is found by exact structure (the header on its own line, one to
+// BANK_SECTION_MAX_LINES "- " lines of at most BANK_LINE_MAX characters with no digit, then the VISIT STATUS header, in a block whose text
+// before the first BILLING: line ends with an exact company render), and the LAST such place wins. A header typed into an SMS sits in
+// the thread after BILLING and never counts, the same defense LABEL FACTS has. Structure is not enough (the lines above the section carry
+// free text: names, notes, windows), so a parsed line also grounds only when the owner ever approved exactly that wording
+// (company-facts-bank getEverApprovedHashes, fail closed when stale): a forged section can only repeat owner-approved text.
+const SMS_BANK_FACTS_HEADER = 'MORE COMPANY FACTS (owner-approved; state these plainly, same as COMPANY FACTS):';
+const BANK_SECTION_MAX_LINES = 20; // the bank's own cap (company-facts-bank MAX_ACTIVE_FACTS); a test pins them equal
+const BANK_LINE_MAX = 400; // company-facts-bank MAX_FACT_CHARS
+// The section that always follows the bank section (it renders gate-on, "- none" when empty); a test pins it to the drafter's header.
+const BANK_SECTION_FOLLOWER = 'VISIT STATUS & OPEN LOOPS:';
+// One line past the cap would make the judge's exemption clip a line, so the cap is the exact size of a full section.
+const BANK_SECTION_MAX_CHARS = SMS_BANK_FACTS_HEADER.length + 1 + BANK_SECTION_MAX_LINES * (BANK_LINE_MAX + 3) - 1;
+
+// A line a stored section may carry: bounded, and no digit of any script (the bank states no amount, so a forged line cannot smuggle one).
+const isBankLine = (line) => typeof line === 'string' && line.startsWith('- ') && line.length > 2 && line.length <= BANK_LINE_MAX + 2 && !/\p{N}/u.test(line);
+
+/**
+ * The section the drafter puts in the facts block: header + `- line` per approved bank fact + a newline. `facts` defaults to the
+ * in-process snapshot of approved lines (company-facts-bank.getApprovedBankFacts: sync, empty when stale or on any read fault).
+ * '' for an empty bank. Pure given `facts`.
+ */
+function renderSmsBankFactsSection(facts) {
+  let list = facts;
+  if (list === undefined) {
+    try { list = require('./company-facts-bank').getApprovedBankFacts(); } catch { list = []; }
+  }
+  const lines = (Array.isArray(list) ? list : [])
+    .map((f) => (f && typeof f.text === 'string' ? f.text.trim() : ''))
+    .filter(Boolean)
+    .slice(0, BANK_SECTION_MAX_LINES);
+  return lines.length ? `${SMS_BANK_FACTS_HEADER}\n${lines.map((l) => `- ${l}`).join('\n')}\n` : '';
+}
+
+/**
+ * The bank section in an array of facts-block lines: { start, end } (lines start..end-1: the header and its "- " lines; end is the
+ * line of the VISIT STATUS header), or null. Only places before `limit` count. The LAST valid place wins.
+ */
+function bankFactsRangeInLines(lines, limit = lines.length) {
+  for (let i = Math.min(limit, lines.length) - 1; i >= 0; i -= 1) {
+    if (lines[i] !== SMS_BANK_FACTS_HEADER) continue;
+    let end = i + 1;
+    while (end < lines.length && end - i - 1 < BANK_SECTION_MAX_LINES && isBankLine(lines[end])) end += 1;
+    if (end > i + 1 && lines[end] === BANK_SECTION_FOLLOWER && end < limit) return { start: i, end };
+  }
+  return null;
+}
+
+/**
+ * The bank section of a stored facts block ('' when absent): found only by exact structure, in a block whose text before the first
+ * BILLING: line ends with the exact static COMPANY FACTS render (today's or an earlier one) and the optional LABEL FACTS section.
+ * Returns the section text, header first, one "- " line per fact, no trailing newline.
+ */
+function exactBankFactsSection(factsBlock) {
+  const found = locateBankSection(factsBlock);
+  return found ? found.lines.slice(found.range.start, found.range.end).join('\n') : '';
+}
+// The bank section of a stored block by exact structure: { before, lines, range } (the text before the first BILLING:, its lines, and the
+// section's line range) or null.
+function locateBankSection(factsBlock) {
+  const before = textBeforeFirstBilling(factsBlock);
+  if (before === null || !before.includes(SMS_BANK_FACTS_HEADER)) return null;
+  if (!new RegExp(exactStructureRegexSource('optional', { anyRender: true })).test(before)) return null;
+  const lines = before.split('\n');
+  const range = bankFactsRangeInLines(lines);
+  return range ? { before, lines, range } : null;
+}
+
+/**
+ * The block as the models may read it: the owner-approved bank heading appears only on a bank section that verifies (every line exact owner
+ * wording the bank knew at `opts.at`, the time of the draft; omitted = now). Free text (a visit window, a note, a typed text) can reproduce
+ * the heading with any shape of lines under it, so:
+ *   - a structural section that does not verify is removed whole (its heading and its lines);
+ *   - every OTHER line that is exactly the heading, before or after the first BILLING:, parsed as a section or not (a lone or malformed
+ *     heading, an earlier forged one beside a genuine section), is removed alone: the lines under it stay as plain text of the field that
+ *     carried them, no longer under the owner-approved heading.
+ * Nothing else changes: a block with no heading, or only a verified section, is returned unchanged.
+ */
+function withoutUnverifiedBankSection(factsBlock, opts = {}) {
+  if (typeof factsBlock !== 'string' || !factsBlock.includes(SMS_BANK_FACTS_HEADER)) return factsBlock;
+  const found = locateBankSection(factsBlock);
+  const verified = found && found.lines.slice(found.range.start + 1, found.range.end).every((l) => isOwnerBankLine(l.slice(2), opts));
+  const lines = factsBlock.split('\n');
+  const drop = (line, i) => {
+    if (found && i >= found.range.start && i < found.range.end) return !verified;
+    return line === SMS_BANK_FACTS_HEADER;
+  };
+  const kept = lines.filter((line, i) => !drop(line, i));
+  return kept.length === lines.length ? factsBlock : kept.join('\n');
+}
+
+const bankLineHash = (text) => require('crypto').createHash('sha256').update(String(text).trim()).digest('hex');
+
+/**
+ * True when `text` is exact owner-approved wording the bank snapshot knows (company-facts-bank wasApprovedAt: sha256 of the trimmed text).
+ * `at`: when the draft that carries the line was built (a Date or epoch ms; omitted = now, so only a line live now counts), `'any'` = no
+ * time test. `approved` (tests): a Set of hashes used instead of the bank's, with no time test. Fails closed (false) on any read fault.
+ */
+function isOwnerBankLine(text, { approved, at } = {}) {
+  const sha = bankLineHash(text);
+  if (approved) return approved.has(sha);
+  try { return require('./company-facts-bank').wasApprovedAt(sha, at === undefined ? Date.now() : at); } catch { return false; }
+}
+
+/**
+ * The fact lines (text only) of a stored block's bank section that GROUND anything: [] when it has none, and a line only when the owner
+ * approved exactly that wording at or before `at`, the time of the draft that carries the block (isOwnerBankLine; a line retired more than
+ * five minutes before the draft was built does not count, so a copy forged into profile or visit text of a NEWER draft cannot revive it).
+ * The structure alone is not trust: the lines above the section (customer summary, notes, windows) are free text, so a forged section
+ * passes the shape test but can only repeat wording the owner had approved by then. An empty or stale bank snapshot recognizes nothing.
+ */
+function bankFactLinesFrom(factsBlock, opts = {}) {
+  const section = exactBankFactsSection(factsBlock);
+  if (!section) return [];
+  return section.split('\n').slice(1).map((l) => l.slice(2)).filter((line) => isOwnerBankLine(line, opts));
+}
+
 // ---- Rebasing a stored block onto today's static section (sealed-eval freezer) ----
 //
 // The COMPANY FACTS section is STATIC: byte-identical on every draft of one identity, so it carries
@@ -285,8 +441,14 @@ function priorRenderForBlock(factsBlock) {
   const before = textBeforeFirstBilling(factsBlock);
   if (before === null) return null;
   const renders = knownCompanyFactsRenders().slice(1);
+  // A render whose lines are all still today's lines is a PREFIX of today's render, so a plain substring test would also match a
+  // block drafted under today's render. The block's own render ends where the LABEL FACTS section (or the end of the text) starts.
+  const { LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
+  const tailOk = new RegExp(`^(?:\\n${LABEL_SECTION_REGEX_SRC})?$`);
   for (let i = 0; i < renders.length; i += 1) {
-    if (before.includes(`\n${renders[i].replace(/\n$/, '')}`)) return PRIOR_COMPANY_FACTS_RENDERS[i];
+    const needle = `\n${renders[i].replace(/\n$/, '')}`;
+    const at = before.lastIndexOf(needle);
+    if (at >= 0 && tailOk.test(before.slice(at + needle.length))) return PRIOR_COMPANY_FACTS_RENDERS[i];
   }
   return null;
 }
@@ -323,6 +485,10 @@ const HELD_PLACE_CONTEXT_RE = new RegExp(
   `\\b(?:punta gorda|charlotte|englewood|rotonda|rotunda|placida|boca grande|babcock|gulf cove|el jobean|deep creek|(?:${HELD_PLACE_TOPIC_ZIPS})(?:-\\d{4})?)\\b`, 'i');
 function heldPlaceInConversationContext(factsBlock) {
   let rest = String(factsBlock || '');
+  // the owner-approved bank section is company policy like the static lines (only the exact section drafted into this block)
+  // (stripped only when every line of it is owner wording: a section forged from profile text must not hide a place name from this check)
+  const bank = exactBankFactsSection(rest);
+  if (bank && bankFactLinesFrom(rest, { at: 'any' }).length === bank.split('\n').length - 1) rest = rest.replace(bank, '');
   for (const render of knownCompanyFactsRenders()) rest = rest.split(render.replace(/\n$/, '')).join('');
   return HELD_PLACE_CONTEXT_RE.test(rest);
 }
@@ -356,6 +522,17 @@ module.exports = {
   hasExactCompanyFacts,
   hasExactLabelFacts,
   exactLabelFactsSection,
+  SMS_BANK_FACTS_HEADER,
+  BANK_SECTION_MAX_LINES,
+  BANK_LINE_MAX,
+  BANK_SECTION_FOLLOWER,
+  BANK_SECTION_MAX_CHARS,
+  renderSmsBankFactsSection,
+  bankFactsRangeInLines,
+  exactBankFactsSection,
+  bankFactLinesFrom,
+  isOwnerBankLine,
+  withoutUnverifiedBankSection,
   COMPANY_FACTS,
   FACT_CLOSED_HOLIDAY_KEYS,
   closedHolidaysMatchFactsLine,

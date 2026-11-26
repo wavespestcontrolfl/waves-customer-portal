@@ -164,25 +164,28 @@ async function autoUnsubscribe(email) {
   // enrolls the shared inbox in SendGrid's suppression group — this
   // exact failure silently knocked contact@ off our own list twice.
   const { isOperationalDomain, isGovernmentDomain, domainFromAddress } = require('./spam-blocker');
-  if (isOperationalDomain(domainFromAddress(email.from_address))) {
-    logger.info(`[unsubscribe] Refused: operational sender (email ${email.id})`);
-    return { method: 'none', note: 'operational sender — never unsubscribe' };
-  }
-  // Same belt for government senders: dropping off a regulator's list
-  // (FDACS, DOR, county) can hide a licensing or tax notice.
-  if (isGovernmentDomain(domainFromAddress(email.from_address))) {
-    logger.info(`[unsubscribe] Refused: government sender (email ${email.id})`);
-    return { method: 'none', note: 'government sender — never unsubscribe' };
-  }
-  // Same belt for the supplier and maker feeds the weekly SiteOne deals digest
-  // reads (owner 2026-11-18: that agent owns them). On 2026-05-19 one newsletter
-  // verdict unsubscribed contact@ from SiteOne's promo mail, and the digest had
-  // nothing to read for six months. Lazy require: the digest loads
-  // inbox-hygiene, which loads spam-blocker.
+  // Lazy require: the digest loads inbox-hygiene, which loads spam-blocker.
   const { isDealSenderDomain } = require('../procurement/siteone-deals-digest');
-  if (isDealSenderDomain(email.from_address)) {
-    logger.info(`[unsubscribe] Refused: deals digest sender (email ${email.id})`);
-    return { method: 'none', note: 'deals digest sender — never unsubscribe' };
+  const senderDomain = domainFromAddress(email.from_address);
+  const keepBelts = [
+    ['operational sender', 'operational sender — never unsubscribe', () => isOperationalDomain(senderDomain)],
+    // Same belt for government senders: dropping off a regulator's list
+    // (FDACS, DOR, county) can hide a licensing or tax notice.
+    ['government sender', 'government sender — never unsubscribe', () => isGovernmentDomain(senderDomain)],
+    // Same belt for the supplier and maker feeds the weekly SiteOne deals digest
+    // reads (owner 2026-11-18: that agent owns them). On 2026-05-19 one newsletter
+    // verdict unsubscribed contact@ from SiteOne's promo mail, and the digest had
+    // nothing to read for six months.
+    ['deals digest sender', 'deals digest sender — never unsubscribe', () => isDealSenderDomain(email.from_address)],
+    // Same for every vendor we use (owner 2026-11-25: subscribe to all their
+    // promos). The caller still archives the email.
+    ['vendor we use', 'vendor we use — keep promos', () => require('./vendor-sender').isVendorWeUse(email)],
+  ];
+  for (const [label, note, applies] of keepBelts) {
+    if (await applies()) {
+      logger.info(`[unsubscribe] Refused: ${label} (email ${email.id})`);
+      return { method: 'none', note };
+    }
   }
 
   // The unsubscribe URLs are sender-controlled requests — following them for

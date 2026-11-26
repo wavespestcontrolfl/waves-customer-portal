@@ -35,6 +35,7 @@ const {
 } = require('../estimate-automation-duplicates');
 const { LOOKUP_PALM_REVIEW_REASON } = require('./lookup-palm-review');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
+const { callAutoSendShadowVerdict } = require('./call-auto-send-shadow');
 const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS } = require('../pricing-engine/unit-band-pricing');
 const { sameStreetAddress } = require('./address-compare');
 const { scopeUnresolvedVerdict, businessReviewReasons } = require('./business-scope-engine');
@@ -729,6 +730,13 @@ function scopeRedVerdict(propertyFacts, guardrailsOn) {
   };
 }
 
+// A line with a real price on it (monthly, annual or one-time).
+function lineCarriesMoney(l) {
+  return !!(Number(l.monthlyAfterDiscount ?? l.monthly)
+    || Number(l.annualAfterDiscount ?? l.annual)
+    || Number(l.priceAfterDiscount ?? l.price ?? l.total));
+}
+
 // ── Lane classification ───────────────────────────────────────
 function classifyLane({ intent, propertyFacts, engineResult, engineInput = null, totals, comps, calibration, context }) {
   const reasons = [];
@@ -764,10 +772,7 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // RED only when NO line carries money at all — a priced-but-custom-quote
   // line (oversize lawn) still deserves a provisional yellow draft; that is
   // exactly what the PROVISIONAL flag below surfaces for the operator.
-  const carriesMoney = (l) => Number(l.monthlyAfterDiscount ?? l.monthly)
-    || Number(l.annualAfterDiscount ?? l.annual)
-    || Number(l.priceAfterDiscount ?? l.price ?? l.total);
-  const moneyLines = lines.filter(carriesMoney);
+  const moneyLines = lines.filter(lineCarriesMoney);
 
   if (!lines.length) {
     return { lane: LANES.RED, reasons: ['pricing engine produced no line items for the selected services'] };
@@ -900,6 +905,14 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
     const pricedManual = manualLines.filter((l) => Number(l.monthlyAfterDiscount ?? l.monthly) || Number(l.priceAfterDiscount ?? l.price));
     reasons.push(`partial draft: ${manualLines.map((l) => l.service).join(', ')} still need${manualLines.length === 1 ? 's' : ''} manual scoping${pricedManual.length ? ' — their PROVISIONAL amounts are included in the totals; verify before send' : ''}`);
   }
+  // Owner 2026-11-26: a recurring mosquito lot above 2 acres waits for the
+  // owner's hand price. The line's own review mark already parks the draft
+  // (partial draft above); this names the cause in the operator's words, and
+  // the call-quote auto-send verdict holds on it (lane_review_reason).
+  if (lines.some((l) => l?.service === 'mosquito'
+    && (l.manualReviewReasons || []).includes('mosquito_lot_above_2_acres'))) {
+    reasons.push('Lot above 2 acres: set the mosquito price by hand');
+  }
   const lookupPalmLine = lines.find((l) => l?.service === 'tree_shrub' && l.palmCountFromLookup === true
     && Number(l.palmCount) > 0 && (l.manualReviewReasons || []).includes(LOOKUP_PALM_REVIEW_REASON));
   if (lookupPalmLine) {
@@ -1005,7 +1018,7 @@ function commercialSuiteSizeNoteLines(suiteSize) {
   return lines;
 }
 
-function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call }) {
+function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call, returningSetupFeeWaiver }) {
   const factLine = (label, fact) => {
     if (!fact) return `- ${label}: (unresolved)`;
     const rejected = (fact.rejected || []).map((r) => `rejected ${r.value} [${r.source}] — ${r.reason}`).join('; ');
@@ -1033,6 +1046,9 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
     ...commercialSuiteSizeNoteLines(propertyFacts?.commercialSuiteSize),
     '',
     `Totals: $${totals.monthly}/mo · $${totals.annual}/yr · $${totals.oneTime} one-time`,
+    returningSetupFeeWaiver
+      ? `Setup fee: waived, returning customer (last plan visit ${returningSetupFeeWaiver.lastCompletedVisitDate}, ${returningSetupFeeWaiver.gapDays} days ago; window ${returningSetupFeeWaiver.windowDays} days).`
+      : null,
     comps && !comps.insufficient
       ? `Comps band: median $${comps.median}/mo over ${comps.samples} comparable estimates (90d)${comps.outlier ? ' — OUTLIER' : ''}`
       : `Comps band: ${comps?.bundle ? 'multi-service bundle — no honest single-service comparison set' : 'not enough comparable estimates'}.`,
@@ -1056,6 +1072,25 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
 // (blocked/anonymous caller who dictated a callback number); when the two
 // disagree, classifyLane parks the draft in yellow with the composer's
 // number quoted so the operator applies it deliberately.
+// Watch-only verdict of the call auto-send rule, as the stamp spread into
+// estimate_data.estimatorEngine ({} when there is none). It is handed the
+// lane's own review reasons, so the shadow cannot grade a price more kindly
+// than the lane does. Fail-soft: a shadow verdict must never cost the draft.
+function callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone, laneReasons }) {
+  try {
+    const moneyLines = (engineResult?.lineItems || []).filter(lineCarriesMoney);
+    const autoSendShadow = callAutoSendShadowVerdict({
+      origin, intent, propertyFacts, context, priorQualifyingServices, laneReasons,
+      draftPhone: customerPhone,
+      homeSizeDrivesPrice: moneyLines.some((l) => l.pricingBasis !== UNIT_BAND_PRICING_BASIS),
+    });
+    return autoSendShadow ? { autoSendShadow } : {};
+  } catch (shadowErr) {
+    logger.warn(`[estimator-engine] call auto-send shadow verdict failed: ${shadowErr.message}`);
+    return {};
+  }
+}
+
 function resolveDraftCustomerPhone(intent, context) {
   const validPhone = (v) => String(v || '').replace(/\D/g, '').length >= 10;
   return (validPhone(context?.phone) ? context.phone : null)
@@ -1180,7 +1215,7 @@ async function writeGuardedLeadEstimateLink(context, estimateId) {
   await q.update({ estimate_id: estimateId });
 }
 
-async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
+async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null, returningSetupFeeWaiver = null }) {
   const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
@@ -1189,8 +1224,9 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // transcript evidence, model/call ids) lives in estimate_data — the public
   // estimate endpoint returns the `notes` COLUMN to the customer, so it must
   // never carry internal review material.
-  const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call });
+  const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call, returningSetupFeeWaiver });
   const customerPhone = resolveDraftCustomerPhone(intent, context);
+  const autoSendShadowStamp = callAutoSendShadowStamp({ origin, intent, propertyFacts, context, priorQualifyingServices, engineResult, customerPhone, laneReasons });
   // priorQualifyingServices must NOT ride inside the stored engineInputs —
   // the public reconcile path clears only the TOP-LEVEL key on stale
   // membership snapshots, and a nested copy would keep replaying the
@@ -1505,6 +1541,12 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         // WaveGuard setup fee (shouldIncludeWaveGuardSetupFeeForRecurring
         // keys off membershipSnapshot.isExistingCustomer).
         ...(membershipSnapshot ? { membershipSnapshot } : {}),
+        // The returning-customer setup fee rule's answer for this draft (estimator-engine/index.js decides it
+        // and marks engineResult), stored as a staff save stores it: the operator waiver the page and the
+        // accept read, with the rule's evidence beside it.
+        ...(returningSetupFeeWaiver ? {
+          operatorPriceAdjustment: require('../returning-setup-fee-waiver').withReturningSetupWaiver(null, returningSetupFeeWaiver),
+        } : {}),
         // Top-level copy matches the admin save path —
         // reconcileFrozenMembershipSnapshot clears THIS key when a stale
         // snapshot is invalidated; buried-in-engineInputs copies would
@@ -1539,6 +1581,9 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           calibration,
           composer: { model: model || null, confidence: intent.confidence },
           reviewNotes,
+          // Watch-only verdict of the call auto-send rule (owner 2026-11-25
+          // *build*, step 1). Review data only: nothing reads it to send.
+          ...autoSendShadowStamp,
         },
       }),
       address: intent.address,
@@ -1556,9 +1601,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       // A confident profile match rides the draft — snapshot revalidation
       // (reconcileFrozenMembershipSnapshot) returns early without it, and
       // downstream accept/convert links need it. Ambiguous matches stay null.
-      customer_id: (context?.customer?.id && !context?.customerPhoneAmbiguous)
-        ? context.customer.id
-        : null,
+      customer_id: trustedLinkedCustomer(context)?.id || null,
       monthly_total: totals.monthly,
       annual_total: totals.annual,
       onetime_total: totals.oneTime,

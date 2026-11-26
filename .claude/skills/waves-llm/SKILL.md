@@ -138,6 +138,12 @@ Currently live:
 - **Lawn visit read + paired recheck** (`MODEL_GEMINI_LAWN_ASSESSMENT`, default
   `gemini-3.8-flash`, owner 2026-10-24): their own Gemini selector, so the lawn
   read does not follow `MODEL_GEMINI_VISION`.
+- **Call sound check** (`ROUTES.callSoundCheck`, `MODEL_GEMINI_CALL_SOUND_CHECK`,
+  default `gemini-4-neon`, owner 2026-11-25): the one lane that sends AUDIO
+  through `llm/call.js` (payload `audio: [{ mimeType, data }]`, base64). Only
+  the Gemini leg takes it; every other provider fails the leg with
+  `unsupported_audio_provider`. Single leg (`hear` in
+  `services/call-sound-check.js`); no caller yet.
 - **Gemini 3.8 Flash** (`MODEL_GEMINI_VISION`; per-service override
   `GEMINI_VISION_MODEL`): every Gemini image-analysis leg — the photo lanes
   (`lawn-assessment.js`, `pest-identification.js`, `tree-shrub-assessment.js`,

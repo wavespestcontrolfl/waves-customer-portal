@@ -2754,7 +2754,7 @@ async function createSelfBooking(payload = {}) {
     // must never mint itself a free callback or skip the offer sig.
     //
     // callbackVisit.billing ({ estimatedPrice }, commercial-first-visit.js
-    // only, GATE_COMMERCIAL_FIRST_VISIT): a PAID internal booking, never a
+    // only): a PAID internal booking, never a
     // callback — the visit carries the server-resolved per-visit price and
     // invoices on completion. callbackVisit.estimateGuard ({ estimateId,
     // revalidate(trx) }): a booking made from an estimate's page

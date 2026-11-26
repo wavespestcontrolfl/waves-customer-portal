@@ -45,7 +45,7 @@ describe("KnowledgeGapPrompt", () => {
     expect(box()).toHaveValue("Smith chinch bugs zoysia");
     fireEvent.change(box(), { target: { value: "  chinch bugs   zoysia " } });
     fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
-    await waitFor(() => expect(screen.getByText(/Added to Monday's knowledge-gaps email/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Added to Monday's knowledge-gaps list/)).toBeInTheDocument());
     expect(save).toHaveBeenCalledTimes(1);
     expect(save).toHaveBeenCalledWith("chinch bugs zoysia", expect.stringMatching(UUID));
   });
@@ -73,7 +73,7 @@ describe("KnowledgeGapPrompt", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
     expect(save.mock.calls[1]).toEqual(save.mock.calls[0]);
-    expect(await screen.findByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/)).toBeInTheDocument();
+    expect(await screen.findByText(/Added to Monday's knowledge-gaps list: "chinch bugs"/)).toBeInTheDocument();
   });
 
   it("closing and reopening the palette keeps the key, the locked text and the status", async () => {
@@ -92,15 +92,15 @@ describe("KnowledgeGapPrompt", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
     expect(save.mock.calls[1]).toEqual(["chinch bugs", save.mock.calls[0][1]]);
-    await screen.findByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/);
+    await screen.findByText(/Added to Monday's knowledge-gaps list: "chinch bugs"/);
     togglePalette();
     togglePalette();
-    expect(screen.getByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/)).toBeInTheDocument();
+    expect(screen.getByText(/Added to Monday's knowledge-gaps list: "chinch bugs"/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Add to knowledge gaps|Try again/ })).toBeNull();
   });
 
   it.each([
-    ["after a save that landed", vi.fn(async () => ({ success: true })), /Added to Monday's knowledge-gaps email: "chinch bugs"/],
+    ["after a save that landed", vi.fn(async () => ({ success: true })), /Added to Monday's knowledge-gaps list: "chinch bugs"/],
     ["after an ambiguous failed save", vi.fn(async () => { throw new Error("Network error"); }), /Network error/],
   ])("refreshing the same task keeps the box as it was %s", async (_label, save, shown) => {
     render(<Harness misses={["Smith chinch bugs"]} save={save} scope="task-1" />);
@@ -124,7 +124,7 @@ describe("KnowledgeGapPrompt", () => {
     const save = vi.fn(async () => ({ success: true }));
     render(<Harness misses={["chinch bugs"]} save={save} scope="task-1" />);
     fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
-    await screen.findByText(/Added to Monday's knowledge-gaps email/);
+    await screen.findByText(/Added to Monday's knowledge-gaps list/);
     fireEvent.click(screen.getByRole("button", { name: "open other task" }));
     expect(screen.getByRole("button", { name: "Add to knowledge gaps" })).toBeInTheDocument();
   });
@@ -150,7 +150,7 @@ describe("KnowledgeGapPrompt", () => {
     const save = vi.fn(async () => ({ success: true, question: "chinch bugs" }));
     render(<Harness misses={["Smith chinch bugs"]} save={save} scope="task-1" />);
     fireEvent.click(screen.getByRole("button", { name: "Add to knowledge gaps" }));
-    expect(await screen.findByText(/Added to Monday's knowledge-gaps email: "chinch bugs"/)).toBeInTheDocument();
+    expect(await screen.findByText(/Added to Monday's knowledge-gaps list: "chinch bugs"/)).toBeInTheDocument();
   });
 
   it("disables the button for under 3 characters or no letter or number", () => {

@@ -160,6 +160,62 @@ describe('request URL log redaction', () => {
   });
 });
 
+describe('short links /l/:code (they front bearer-token URLs, and the 10-11 character code is itself the credential)', () => {
+  const { redactRequestUrl: redact } = require('../utils/redact-request-url');
+  // The real SMS shape: SHORTLINK_BASE_URL (default the portal) + /l/ + a 10-11 character code, optionally prefixed.
+  const CODES = ['abcdefghjk', 'abcdefghjkm', 'rt-abcdefghjk', 'ABCDEFGHJK'];
+
+  test.each(CODES)('the path /l/%s is redacted, the /l kept', (code) => {
+    expect(redact(`/l/${code}`)).toBe('/l/[REDACTED]');
+    expect(redact(`/l/${code}?utm=1`)).toBe('/l/[REDACTED]?utm=1');
+  });
+
+  test.each(CODES)('a Referer of the full SMS URL (https://portal.wavespestcontrol.com/l/%s) is redacted', (code) => {
+    expect(redact(`https://portal.wavespestcontrol.com/l/${code}`)).toBe('https://portal.wavespestcontrol.com/l/[REDACTED]');
+  });
+
+  test('the access line (URL and Referer) carries no short code', () => {
+    registerRedactedTokens(morgan);
+    const code = 'abcdefghjk';
+    const req = {
+      method: 'GET', httpVersionMajor: 1, httpVersionMinor: 1,
+      headers: { 'user-agent': 'x', referer: `https://portal.wavespestcontrol.com/l/${code}` },
+      originalUrl: `/l/${code}`, url: `/l/${code}`, socket: { remoteAddress: '203.0.113.9' },
+    };
+    const line = morgan.compile(REDACTED_COMBINED_LOG)(morgan, req, { statusCode: 302, getHeader: () => '-' });
+    expect(line).toContain('GET /l/[REDACTED] HTTP/1.1');
+    expect(line).not.toContain(code);
+  });
+
+  test.each(['L', 'l'])('the mount is matched without regard to case: /%s/<code> and a Referer https://host/%s/<code> (Express serves /L/<code> from the same router)', (mount) => {
+    expect(redact(`/${mount}/AbCdEfGhJk`)).toBe(`/${mount}/[REDACTED]`);
+    expect(redact(`https://portal.wavespestcontrol.com/${mount}/AbCdEfGhJk`)).toBe(`https://portal.wavespestcontrol.com/${mount}/[REDACTED]`);
+    expect(redact(`/${mount}/abcdefghjk/extra?x=1`)).toBe(`/${mount}/[REDACTED]/[REDACTED]?x=1`);
+  });
+
+  test('Express itself is case-insensitive for this mount and the router lowercases the code, so no other spelling reaches it', async () => {
+    const express = require('express');
+    const app = express();
+    expect(app.get('case sensitive routing')).toBeFalsy();
+    const hits = [];
+    app.use('/l', (req, res) => { hits.push(req.originalUrl); res.end('ok'); });
+    const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+    try {
+      for (const path of ['/l/abc', '/L/abc']) {
+        await fetch(`http://127.0.0.1:${server.address().port}${path}`);
+      }
+    } finally { server.close(); }
+    expect(hits).toEqual(['/l/abc', '/L/abc']);
+    expect(require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8')).not.toMatch(/case sensitive routing|caseSensitive/);
+  });
+
+  test('other paths that merely contain an "l" segment, and the /l index itself, are untouched', () => {
+    expect(redact('/l')).toBe('/l');
+    expect(redact('/api/admin/l/abcdefghjk')).toBe('/api/admin/l/abcdefghjk');
+    expect(redact('/api/admin/customers/abc')).toBe('/api/admin/customers/abc');
+  });
+});
+
 describe('newsletter event click-through tokens (codex on #3028)', () => {
   const { redactRequestUrl } = require('../utils/redact-request-url');
   test('the engagement token after /e/ is redacted; the event UUID after it stays', () => {

@@ -264,3 +264,36 @@ describe('repairing a day committed on an earlier run', () => {
     expect(out.status).toBe('completed');
   });
 });
+
+// GATE_TECH_SHIFT_HOURS (D4): the writer's own plan reads the technician's hours again.
+describe('technician shift hours at the write', () => {
+  const eligibility = require('../services/technician-eligibility');
+  let load;
+  afterEach(() => { if (load) load.mockRestore(); load = null; });
+
+  test('a shift the office shortened after the run began is the one obeyed: the day is not written', async () => {
+    process.env.GATE_DAY_REPLAN = 'true';
+    // The run's read: no set hours. Every later read (the writer's): the shift ends at 09:00.
+    load = jest.spyOn(eligibility, 'loadTechShifts')
+      .mockImplementationOnce(async () => () => null)
+      .mockImplementation(async () => () => ({ startMin: 8 * 60, endMin: 9 * 60, source: 'roster' }));
+    const w = setup({ rows: zigzagRows() });
+    const before = w.windows();
+    const out = await w.run();
+    expect(load.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(load).toHaveBeenLastCalledWith(w.conn, { now: NOW });
+    expect(w.windows()).toEqual(before);
+    expect(out.appliedVisits).toBe(0);
+    expect(out.apply).toHaveLength(1);
+    expect(out.apply[0].status).not.toBe('applied');
+  });
+
+  test('the same hours at the write: the day is written as before', async () => {
+    process.env.GATE_DAY_REPLAN = 'true';
+    load = jest.spyOn(eligibility, 'loadTechShifts').mockImplementation(async () => () => ({ startMin: 8 * 60, endMin: 17 * 60, source: 'roster' }));
+    const w = setup({ rows: zigzagRows() });
+    const out = await w.run();
+    expect(out.apply[0]).toMatchObject({ status: 'applied' });
+    expect(out.appliedVisits).toBeGreaterThan(0);
+  });
+});

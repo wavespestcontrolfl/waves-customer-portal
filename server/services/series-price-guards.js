@@ -27,10 +27,13 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+// A failure log line carries a fixed code only: a Knex error's message echoes the SQL and its bound values,
+// which here include the bell's text (a customer's name).
+const safeErrorSummary = (err) => require('./notification-service').safeErrorSummary(err);
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 
-// Child price may exceed the last paid amount by at most this ratio.
-const OVER_LAST_PAID_RATIO = 1.25;
+// done_by of the cancelled-root alert this module closes itself.
+const CLOSED_BY = 'series-price-guard';
 
 function seriesPriceGuardsLive() {
   return require('../config/feature-gates').isEnabled('seriesPriceGuards');
@@ -107,6 +110,21 @@ async function seriesCarriesPrepayTerm(conn, parentId, parent) {
   return !!linked;
 }
 
+// What the guard compares for one extension child: its price, what the series
+// last collected and whether the price is over that by more than the ratio.
+// null when the child is exempt (callback / always-free, unpriced, annual-prepay
+// series: see below), which reads nothing further. Shared by the verdict and by
+// the alert closer, so both judge the same facts.
+async function extensionPriceFacts(conn, { parent, parentId, child }) {
+  const price = positiveAmount(child?.estimated_price);
+  if (!price || child?.is_callback || isAlwaysFreeServiceType(child?.service_type)) return null;
+  if (await seriesCarriesPrepayTerm(conn, parentId, parent)) return null;
+  const lastPaid = await lastPaidSeriesVisitAmount(conn, parentId);
+  // Integer cents, exactly: over the ceiling when price * 4 > lastPaid * 5 (125%), no rounded ratio.
+  const over = lastPaid != null && Math.round(price * 100) * 4 > Math.round(lastPaid * 100) * 5;
+  return { price, lastPaid, over };
+}
+
 // The verdict for one extension child about to be inserted. null = insert
 // as before, no alert. Callers check seriesPriceGuardsLive() first, so the
 // gate-off path makes no reads at all.
@@ -116,11 +134,9 @@ async function seriesCarriesPrepayTerm(conn, parentId, parent) {
 // (the billable-amount gate owns those), and an annual-prepay series (its
 // visits are settled by the term, not billed per visit).
 async function extensionPriceVerdict(conn, { parent, parentId, child }) {
-  const price = positiveAmount(child?.estimated_price);
-  if (!price || child?.is_callback || isAlwaysFreeServiceType(child?.service_type)) return null;
-  if (await seriesCarriesPrepayTerm(conn, parentId, parent)) return null;
-  const lastPaid = await lastPaidSeriesVisitAmount(conn, parentId);
-  const over = lastPaid != null && Math.round(price * 100) > Math.round(lastPaid * OVER_LAST_PAID_RATIO * 100);
+  const facts = await extensionPriceFacts(conn, { parent, parentId, child });
+  if (!facts) return null;
+  const { price, lastPaid, over } = facts;
   if (parent?.status === 'cancelled' && (lastPaid == null || over)) {
     return { skip: true, kind: 'cancelled_root', price, lastPaid };
   }
@@ -139,10 +155,11 @@ function visitLink(visitId, dateStr) {
   return `/admin/dispatch?tab=schedule&date=${encodeURIComponent(dateStr)}&appointment=${encodeURIComponent(visitId)}`;
 }
 
-async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, childDate, serviceLabel }) {
+async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, childDate, serviceLabel }, trx = null) {
   const { raiseAdminAlert } = require('./admin-alert-compose');
   const names = require('./admin-alert-names');
-  const name = await names.lookupCustomerName(db, parent.customer_id) || 'a customer';
+  // On the caller's transaction when it has one: no second pool connection while the series lock is held.
+  const name = await names.lookupCustomerName(trx || db, parent.customer_id) || 'a customer';
   const day = names.shortDateET(new Date(`${childDate}T12:00:00Z`));
   const service = serviceLabel || 'service';
   const lastPaidWords = verdict.lastPaid != null ? `the last paid visit was ${money(verdict.lastPaid)}` : 'no paid visit to compare';
@@ -169,27 +186,105 @@ async function raiseExtensionPriceAlert(verdict, { parent, parentId, childId, ch
     : `A ${service} plan added its ${day} visit at ${money(verdict.price)}, more than 25% over the plan's last paid visit (${money(verdict.lastPaid)}). Check the price before the visit is billed.`;
   // One open row per series and kind: a top-up run can add many children at
   // the same price, and the nightly run re-meets a cancelled root every night.
-  const dedupeKey = `series-price-guard:${cancelled ? 'cancelled-root' : 'over-last-paid'}:${parentId}`;
+  const dedupeKey = cancelled ? cancelledRootDedupeKey(parentId) : `series-price-guard:over-last-paid:${parentId}`;
+  // The cancelled-root bell names the occurrence the top-up refused NOW
+  // (metadata.refusedDate). The nightly run meets the same cancelled root every
+  // night, so the standing open row is refreshed through notifyAdmin's own
+  // refresh-on-dedupe (under its dedupe lock): body, detail and refusedDate
+  // change together, quietly (no ring, no bump). The refused date is the
+  // dedupeVersion, so a row raised before the date existed picks it up even when
+  // its text is the same. A closed row is never touched: the probe skips done rows (dedupeOpenOnly), and
+  // refreshOnlyOpen makes the write itself conditional on the row still being open, so a person's Done between
+  // the probe and the write gets a fresh open bell instead of a new date on a closed row.
+  const refresh = cancelled
+    ? { refreshOnDedupe: true, refreshOnlyOpen: true, dedupeVersion: childDate, ringOnRefresh: () => false }
+    : {};
   return raiseAdminAlert('billing', { ...spec, severity: 'needs-you', who: 'person' }, {
     bell: true,
     dedupeKey,
     dedupeOpenOnly: true,
+    ...refresh,
+    ...(trx ? { trx } : {}),
     detail,
     metadata: {
       dedupeKey, kind: verdict.kind, seriesRootId: parentId, scheduledServiceId: childId || null,
       customerId: parent.customer_id, price: verdict.price, lastPaid: verdict.lastPaid,
+      ...(cancelled ? { refusedDate: childDate } : {}),
     },
   });
 }
 
-// Raise the alert once `conn`'s transaction commits (never on rollback).
+const cancelledRootDedupeKey = (rootId) => `series-price-guard:cancelled-root:${rootId}`;
+
+// The conditional close, on the savepoint `sp` of the extension's transaction. The rows it may close are
+// openToCloser's: not done, or done by a person or by the quiet 72-hour fall-off (their "Recently done" Reopen
+// would otherwise bring the obsolete alert back). keepExisting: the first done_at stands, a person's own
+// resolution text stands, the quiet fall-off's text is replaced by ours, and done_by becomes this closer (the
+// condition really cleared, so the Reopen is refused).
+async function closeStandingRefusedAlert(sp, { parent, parentId, child, childDate, childId }) {
+  const { doneColumns, openToCloser } = require('./notification-service')._private;
+  // The predicate and the key expression are the ones notifications_admin_dedupe_key_idx is built on, so the
+  // lookup reads that index; the literal 'admin' (not a bound value) lets the planner match the partial index.
+  const standing = () => openToCloser(sp('notifications')
+    .whereRaw("recipient_type = 'admin'")
+    .whereRaw("metadata->>'dedupeKey' = ?", [cancelledRootDedupeKey(parentId)])
+    .whereRaw("metadata->>'refusedDate' = ?", [childDate]), CLOSED_BY);
+  if (!(await standing().first('id'))) return false;
+  if (await insertedRowIsPrepaid(sp, childId)) return false;
+  const facts = await extensionPriceFacts(sp, { parent, parentId, child });
+  if (!facts || facts.lastPaid == null || facts.over) return false;
+  const closed = await standing().update(doneColumns({
+    by: CLOSED_BY, resolution: 'The plan added the visit it had held, at a price its last paid visit backs', keepExisting: true, conn: sp,
+  })).returning('id');
+  return closed.length > 0;
+}
+
+// The bell closes itself only on this proof: the guard's own extension later
+// ADDED the very occurrence it had refused (same series root, same scheduled
+// date, metadata.refusedDate), the child priced afresh from today's template and
+// due add-ons, and a paid visit of the series backs that price (not over 125% of
+// it). No stored price is re-read, and a cheaper occurrence on another date
+// proves nothing. Called inside the extension's transaction right after the
+// insert, only when the guard is live and returned no verdict. The close is a
+// conditional update in that same transaction, so a rolled-back dry run undoes
+// the insert and the close together; it runs in a savepoint, so a failed close
+// is logged and can never abort the visit insert.
+async function closeRefusedPriceAlertAfterInsert(conn, args) {
+  if (!seriesPriceGuardsLive() || !args.childDate || !args.childId) return false;
+  try {
+    return await conn.transaction((sp) => closeStandingRefusedAlert(sp, args));
+  } catch (err) {
+    logger.warn(`[series-price-guard] could not close the plan price alert for series ${args.parentId}: ${safeErrorSummary(err)}`);
+    return false;
+  }
+}
+
+// The cancelled-root refusal bell, written INSIDE the refusal's own transaction
+// (notifyAdmin's `trx`: its dedupe lock, probe and insert run on `conn`, and its
+// phone banner waits for the outermost commit). The refusal and its bell commit
+// or roll back together (a dry run leaves no bell), and the series lock the
+// extension holds also covers the bell: a corrected retry can only run after
+// this commit, so it finds the bell and closes it, and a bell for a visit that
+// was already added can never appear late. Savepoint: a failed write is logged and
+// never aborts the extension's transaction.
+async function raiseExtensionPriceAlertInTransaction(conn, verdict, context) {
+  try {
+    const created = await conn.transaction((sp) => raiseExtensionPriceAlert(verdict, context, sp));
+    if (!created) logger.error(`[series-price-guard] ${verdict.kind} alert NOT recorded for series ${context.parentId}`);
+  } catch (err) {
+    logger.error(`[series-price-guard] ${verdict.kind} alert failed for series ${context.parentId}: ${safeErrorSummary(err)}`);
+  }
+}
+
+// Raise the alert once `conn`'s transaction commits (never on rollback). Only
+// the over-last-paid alert: its visit is already inserted, so a late row is harmless.
 function raiseExtensionPriceAlertAfterCommit(conn, verdict, context) {
   require('./customer-credit').afterCommit(conn, async () => {
     try {
       const created = await raiseExtensionPriceAlert(verdict, context);
       if (!created) logger.error(`[series-price-guard] ${verdict.kind} alert NOT recorded for series ${context.parentId}`);
     } catch (err) {
-      logger.error(`[series-price-guard] ${verdict.kind} alert failed for series ${context.parentId}: ${err.message}`);
+      logger.error(`[series-price-guard] ${verdict.kind} alert failed for series ${context.parentId}: ${safeErrorSummary(err)}`);
     }
   });
 }
@@ -240,13 +335,14 @@ async function raiseUnbilledCompletionAlert(svc) {
 }
 
 module.exports = {
-  OVER_LAST_PAID_RATIO,
   seriesPriceGuardsLive,
   comparableVisitAmount,
   lastPaidSeriesVisitAmount,
   extensionPriceVerdict,
   insertedRowIsPrepaid,
+  closeRefusedPriceAlertAfterInsert,
   raiseExtensionPriceAlert,
+  raiseExtensionPriceAlertInTransaction,
   raiseExtensionPriceAlertAfterCommit,
   unbilledCompletionAlertDue,
   raiseUnbilledCompletionAlert,

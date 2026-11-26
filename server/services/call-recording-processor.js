@@ -5549,7 +5549,7 @@ async function callbackSpokenNumberSuggested({ call, extracted, customerLinkOver
   return true;
 }
 
-// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: this pipeline registers the reminder row with the confirmation already marked
+// This pipeline registers the reminder row with the confirmation already marked
 // (sendConfirmation:false) and sends its own text afterwards, so a delivered text for a visit booked for today or tomorrow
 // left the 24-hour "is tomorrow" reminder armed (it went out 3 to 12 minutes later). Called only after the primary text was
 // delivered, with the number it went to (smsRecipient: the caller's number when implied consent redirected it); the shared
@@ -26468,6 +26468,17 @@ const CallRecordingProcessor = {
         return { success: true, skipped: true, reason: 'pan_quarantined' };
       }
     } catch { /* unparseable metadata -> treat as unstamped */ }
+    // An internal call (the voice-agent sandbox, the tech voice line) never
+    // takes recording audio into the pipeline, whoever asked. The row's own
+    // stored source decides, ahead of the lookup below: the request that
+    // scheduled this can carry another To, the sandbox number can change, and
+    // whatever audio Twilio holds under an internal call's CallSid (a staff
+    // test recording, say) is not pipeline audio. It sits AFTER the card-data
+    // cleanup above on purpose: an owed delete or alert is a duty whatever the
+    // row's source, and that cleanup deletes by the SIDs the row holds, never
+    // by a lookup.
+    const { isInternalCallSource, whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+    if (isInternalCallSource(call.source)) return { success: true, skipped: true, reason: 'internal_call' };
     if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };
 
     // A <Dial record> recording attaches to the CHILD dial leg (the
@@ -26477,12 +26488,7 @@ const CallRecordingProcessor = {
     // persisted at /inbound-forward-accept as metadata.forward_acceptance
     // .dial_call_sid — so a lost child-leg callback is recovered here and
     // never misreported downstream as "Twilio has no recording".
-    let childSid = null;
-    try {
-      const rawMeta = call.metadata;
-      const callMeta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
-      childSid = callMeta?.forward_acceptance?.dial_call_sid || null;
-    } catch { childSid = null; }
+    const childSid = parseJsonObjectSafe(call.metadata)?.forward_acceptance?.dial_call_sid || null;
     const lookupSids = childSid && childSid !== callSid ? [callSid, childSid] : [callSid];
 
     let recording = null;
@@ -26502,11 +26508,13 @@ const CallRecordingProcessor = {
     const url = recordingMediaUrl(recording);
     if (!url) return { success: false, reason: 'recording_url_missing' };
 
-    const updated = await db('call_log')
+    // The write carries the same refusal as the read above: a row that became
+    // internal while Twilio was being asked takes nothing.
+    const updated = await whereNotSandboxCall(db('call_log')
       .where('twilio_call_sid', callSid)
       .where(function () {
         this.whereNull('recording_url').orWhere('recording_url', '');
-      })
+      }))
       .update({
         recording_url: url,
         recording_sid: recording.sid,

@@ -26,6 +26,8 @@ const REQUESTS = [
   ["serviceLines", "/admin/dashboard/service-lines", "growth", true],
   ["mix", "/admin/dashboard/service-mix", "profit"],
   ["ebitda", "/admin/dashboard/ebitda-bridge", "profit"],
+  ["officeCost", "/admin/dashboard/office-cost-per-stop?months=12", "profit"],
+  ["opsMetrics", "/admin/dashboard/ops-buyer-metrics", "profit"],
   ["revenueOverview", "/admin/revenue/overview?period=month", "profit"],
   ["mrrTrend", "/admin/dashboard/mrr-trend?months=12", "retention"],
   ["mrrBridge", "/admin/dashboard/mrr-bridge?months=6", "retention"],
@@ -47,6 +49,8 @@ const REQUIRED_SHAPE = {
   today: (value) => typeof value.total === "number",
   data: (value) => isRecord(value.kpis),
   funnel: (value) => isRecord(value.funnel),
+  officeCost: (value) => Array.isArray(value.months),
+  opsMetrics: (value) => isRecord(value.errors),
   aging: (value) => isRecord(value.aging),
   reviewTrend: (value) => Array.isArray(value.trend),
 };

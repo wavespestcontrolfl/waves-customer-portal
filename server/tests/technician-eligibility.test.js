@@ -22,6 +22,7 @@ const {
   shiftWarning,
   dayWarningFor,
   dayWarningsFor,
+  shiftLinesFor,
   loadTechShifts,
   shiftMinutes,
   storedShift,
@@ -1087,6 +1088,88 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
         // With the work-days gate off no day is a day off: the Friday is told.
         delete process.env.GATE_TECH_WORK_DAYS;
         expect(await only(visit('18:00', '19:00'), ['2031-03-07'])).toEqual([LINE]);
+      });
+
+      // D4 picked-hour hints: the shift line of several hours of one technician, asked before a save.
+      describe('shiftLinesFor: the shift line of several picked hours, on one pair of reads', () => {
+        const offFridays = { tech: { ...TECH_ROW, work_days: [1, 2, 3, 4] } };
+        const ask = (date, start, end, minutes) => ({ date, block: visit(start, end, minutes) });
+        const NIGHT = ask(TOMORROW, '19:00', '20:00');
+
+        test('one answer for each ask, in order; the reads are the name, the hours and today\'s clock-ins, once each', async () => {
+          gateOn();
+          const made = commitConn();
+          expect(await shiftLinesFor('tech-1', [
+            ask(TOMORROW, '17:30', '18:30'),
+            ask(TOMORROW, '09:00', '10:00'),
+            ask('2031-03-07', '07:00', '08:00'),
+            ask(TOMORROW, '17:00', '17:30', 90), // the window ends in the hours; the length does not
+            ask(TOMORROW, '17:00', '18:00'), // a visit may end at the shift's end
+            ask(TOMORROW, '08:00', '09:00'), // and start at its start
+          ], { conn: made.conn })).toEqual([LINE, null, LINE, LINE, null, null]);
+          expect(made.conn.mock.calls.map(([table]) => table)).toEqual(['technicians', 'technicians', 'time_entries']);
+          expect(hoursReads(made.calls)).toHaveLength(1);
+          // The hours are read for that technician alone.
+          expect(made.calls.technicians).toContainEqual(['whereIn', 'id', ['tech-1']]);
+        });
+
+        test('each answer is the one dayWarningFor gives with shiftOnly: none on a day the technician does not work', async () => {
+          gateOn();
+          process.env.GATE_TECH_WORK_DAYS = 'true';
+          // 2031-03-06 is a Thursday (a work day), 03-07 a Friday (a day off).
+          const asks = [ask('2031-03-06', '18:00', '19:00'), ask('2031-03-07', '18:00', '19:00'), ask('2031-03-06', '09:00', '10:00'), ask('2031-03-06', '4:05 PM', '11:05 PM')];
+          const each = [];
+          for (const { date, block } of asks) each.push(await dayWarningFor('tech-1', date, { conn: commitConn(offFridays).conn, block, shiftOnly: true }));
+          expect(each).toEqual([LINE, null, null, null]);
+          expect(await shiftLinesFor('tech-1', asks, { conn: commitConn(offFridays).conn })).toEqual(each);
+          // With the work-days gate off no day is a day off: the Friday is told.
+          delete process.env.GATE_TECH_WORK_DAYS;
+          expect(await shiftLinesFor('tech-1', asks, { conn: commitConn(offFridays).conn })).toEqual([LINE, LINE, null, null]);
+        });
+
+        test('today follows the clock-in, another day the set hours', async () => {
+          gateOn();
+          // 08:30 AM EST clock-in on TODAY with ten set hours: the day is 8:30 AM to 6:30 PM.
+          jest.useFakeTimers({ now: NOW });
+          const made = commitConn({ clockRows: [{ technician_id: 'tech-1', clock_in: new Date('2031-03-04T13:30:00Z') }] });
+          expect(await shiftLinesFor('tech-1', [ask(TODAY, '18:00', '19:00'), ask(TODAY, '17:30', '18:30'), ask(TOMORROW, '17:30', '18:30')], { conn: made.conn }))
+            .toEqual(["Tech One's shift is 8:30 AM to 6:30 PM. This visit is outside those hours.", null, LINE]);
+        });
+
+        test('nothing is read: the gate off, no technician, no ask, no ask it can read', async () => {
+          const quiet = async (technicianId, asks) => {
+            const made = commitConn();
+            expect(await shiftLinesFor(technicianId, asks, { conn: made.conn })).toEqual(asks.map(() => null));
+            expect(made.conn).not.toHaveBeenCalled();
+          };
+          await quiet('tech-1', [NIGHT]);
+          gateOn();
+          await quiet(null, [NIGHT]);
+          await quiet('tech-1', []);
+          await quiet('tech-1', [{ date: TOMORROW, block: null }, ask(null, '19:00', '20:00'), ask(TOMORROW, null, null, 60), ask(TOMORROW, 'noon', '13:00')]);
+        });
+
+        test('an id in another spelling PostgreSQL takes is the same technician: the shift is asked for by the row\'s id', async () => {
+          gateOn();
+          // PostgreSQL reads a uuid in braces or with no hyphens; the row comes back with the id as it is stored.
+          expect(await shiftLinesFor('{tech-1}', [NIGHT], { conn: commitConn().conn })).toEqual([LINE]);
+        });
+
+        test('an ask it cannot read has no line beside one it can', async () => {
+          gateOn();
+          expect(await shiftLinesFor('tech-1', [ask(null, '19:00', '20:00'), NIGHT, { date: TOMORROW, block: null }, ask(TOMORROW, 'noon', '13:00')], { conn: commitConn().conn }))
+            .toEqual([null, LINE, null, null]);
+        });
+
+        test('no set hours and a failed read of the hours give no line; a failed read of the name keeps the line', async () => {
+          gateOn();
+          expect(await shiftLinesFor('tech-1', [NIGHT], { conn: commitConn({ shiftRows: [] }).conn })).toEqual([null]);
+          expect(await shiftLinesFor('tech-1', [NIGHT], { conn: commitConn({ shiftError: new Error('column shift_start does not exist') }).conn })).toEqual([null]);
+          const inner = commitConn();
+          const noName = jest.fn((table) => Object.assign(inner.conn(table), { first: jest.fn(async () => { throw new Error('column work_days does not exist'); }) }));
+          expect(await shiftLinesFor('tech-1', [NIGHT], { conn: noName }))
+            .toEqual(["This technician's shift is 8:00 AM to 6:00 PM. This visit is outside those hours."]);
+        });
       });
 
       test('each read stands alone: a failed read of the hours keeps the day-off line, a failed read of the name keeps the shift line', async () => {

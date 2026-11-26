@@ -5,7 +5,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { EditServiceModal } from './SchedulePage';
 
-vi.mock('../../components/schedule/useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
+const slotCheckState = vi.hoisted(() => ({}));
+vi.mock('../../components/schedule/useSlotConflicts', () => ({
+  useSlotConflicts: (args) => { slotCheckState.args = args; return { conflicts: [], shiftWarning: slotCheckState.shiftWarning }; },
+}));
 const bestTimesState = vi.hoisted(() => ({ availability: undefined }));
 vi.mock('../../components/schedule/useBestTimes', () => ({
   useBestTimes: (args) => {
@@ -32,7 +35,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
 
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); bestTimesState.availability = undefined; saveNotice.shown.length = 0; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); bestTimesState.availability = undefined; saveNotice.shown.length = 0; slotCheckState.shiftWarning = undefined; });
 
 function Harness({ onSaved = vi.fn() }) {
   const [open, setOpen] = React.useState(false);
@@ -241,6 +244,19 @@ it('choosing Separate is the same one request with that choice', async () => {
   await clickSave();
   await waitFor(() => expect(writes()).toHaveLength(1));
   expect(body(0)).toMatchObject({ comboMove: 'separate', scheduledDate: '2035-01-03' });
+});
+
+it('the slot check is told that this save writes the length only while the form has one (durationEdit)', () => {
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  const dialog = screen.getByRole('dialog', { name: 'Edit appointment' });
+  expect(slotCheckState.args).toMatchObject({ serviceId: 'fixture-visit', durationEdit: true, durationMinutes: 60 });
+  const duration = within(dialog).getByText('Duration').parentElement.querySelector('input[type="number"]');
+  fireEvent.change(duration, { target: { value: '90' } });
+  expect(slotCheckState.args).toMatchObject({ durationEdit: true, durationMinutes: 90 });
+  // A blank Duration: the save keeps the stored length, so the check reads the stored length.
+  fireEvent.change(duration, { target: { value: '' } });
+  expect(slotCheckState.args).toMatchObject({ durationEdit: false, durationMinutes: 0 });
 });
 
 it('the best-times rows rank for the form\'s services and carry the move choice; the server adds the shared stop', () => {
@@ -554,4 +570,16 @@ it('the lawn rounds option is not offered to any other series', () => {
   const select = repeatsSelectOf(dialog);
   expect(select).toHaveValue('quarterly');
   expect([...select.options].some((o) => o.value === 'lawn_rounds_9')).toBe(false);
+});
+
+// GATE_TECH_SHIFT_HOURS (D4): the Edit form shows the shift line of the picked slot.
+it('shows the shift line of the picked slot, and nothing without one', () => {
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  expect(screen.queryByTestId('slot-shift-warning')).not.toBeInTheDocument();
+  cleanup();
+  slotCheckState.shiftWarning = "Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.";
+  render(<Harness />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  expect(screen.getByTestId('slot-shift-warning')).toHaveTextContent("Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.");
 });

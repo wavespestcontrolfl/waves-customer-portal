@@ -3,8 +3,9 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import usePortalRead, { PortalReadProvider, usePortalRefresh } from './usePortalRead';
+import usePortalRead, { PortalReadProvider, READ_TIMEOUT_MS, usePortalRefresh } from './usePortalRead';
 import { PortalRefreshArea } from '../components/portal/PortalRefresh';
+import { HOME_READS_KEY, HOME_SNAPSHOT_KEY, homeIdentityKey, readHomeSnapshot, writeHomeRead, writeHomeSnapshot } from '../lib/homeSnapshot';
 
 const native = vi.hoisted(() => ({ enabled: false, callback: null, remove: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../native/platform', () => ({ isNativeApp: () => native.enabled }));
@@ -28,6 +29,7 @@ function Read({ load }) {
     <div data-testid="state">{read.saved ? 'saved' : read.error ? 'error' : read.loading ? 'loading' : 'ready'}</div>
     <button onClick={read.refresh}>Retry read</button>
     <button onClick={() => read.update(previous => ({ ...previous, title: 'Confirmed' }))}>Confirm fixture</button>
+    <button onClick={() => read.invalidate('Property scope changed')}>Invalidate read</button>
   </>;
 }
 function RefreshFixture() {
@@ -38,12 +40,27 @@ function SilentRead({ load }) {
   usePortalRead('documents', load);
   return null;
 }
+function KeyedRead({ cacheKey, label, load, readRef }) {
+  const read = usePortalRead(cacheKey, load);
+  if (readRef) readRef.current = read;
+  return <>
+    <div data-testid={`${label}-data`}>{read.data?.title || 'No saved information'}</div>
+    <div data-testid={`${label}-state`}>{read.saved ? 'saved' : read.error ? 'error' : read.loading ? 'loading' : 'ready'}</div>
+    <button onClick={read.refresh}>{label} retry</button>
+  </>;
+}
 function App({ load, extraLoad, account = 'a', show = true, enabled = true }) {
   return <PortalReadProvider key={account} enabled={enabled}><PortalRefreshArea>
     <RefreshFixture /><div data-testid="pull-target">Visits</div>
     {show && <Read load={load} />}
     {extraLoad && <SilentRead load={extraLoad} />}
   </PortalRefreshArea></PortalReadProvider>;
+}
+function InvalidationApp({ visitsLoad, documentsLoad, visitsRef, showVisits = true }) {
+  return <PortalReadProvider enabled>
+    {showVisits && <KeyedRead cacheKey="visits" label="visits" load={visitsLoad} readRef={visitsRef} />}
+    <KeyedRead cacheKey="documents" label="documents" load={documentsLoad} />
+  </PortalReadProvider>;
 }
 
 beforeEach(() => {
@@ -144,6 +161,27 @@ describe('customer portal reads', () => {
     expect(screen.getByTestId('state')).toHaveTextContent('ready');
   });
 
+  it('invalidates the keyed cache and denies an older in-flight completion', async () => {
+    const pending = deferred();
+    const load = vi.fn().mockResolvedValueOnce({ title: 'Cached visit' }).mockReturnValueOnce(pending.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Cached visit');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Invalidate read' }));
+    expect(screen.queryByText('Cached visit')).not.toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('error');
+
+    await act(async () => pending.resolve({ title: 'Stale completion' }));
+    expect(screen.queryByText('Stale completion')).not.toBeInTheDocument();
+
+    rerender(<App load={load} show={false} />);
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    rerender(<App load={load} />);
+    expect(screen.queryByText('Cached visit')).not.toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the saved state visible while retrying a failed refresh', async () => {
     const pending = deferred();
     const load = vi.fn().mockResolvedValueOnce({ title: 'Saved visit' }).mockRejectedValueOnce(new Error('unreachable')).mockReturnValueOnce(pending.promise);
@@ -211,6 +249,178 @@ describe('customer portal reads', () => {
     Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
     rerender(<App load={load} />);
     expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
+  });
+
+  it('clears a saved result when the loader throws an access denial synchronously', async () => {
+    const denied = Object.assign(new Error('Denied'), { status: 403 });
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Visit A' })
+      .mockImplementationOnce(() => { throw denied; });
+    render(<App load={load} />);
+    await screen.findByText('Visit A');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+
+    await waitFor(() => expect(screen.queryByText('Visit A')).not.toBeInTheDocument());
+    expect(screen.getByTestId('state')).toHaveTextContent('error');
+  });
+
+  it.each([401, 403])('evicts a saved result when an in-flight denial settles after the reader unmounts (%s)', async status => {
+    const denied = deferred();
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Visit A' })
+      .mockReturnValueOnce(denied.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Visit A');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+
+    rerender(<App load={load} show={false} />);
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status })));
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    rerender(<App load={load} />);
+
+    expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears a remounted offline reader when an older reader later loses authorization', async () => {
+    const denied = deferred();
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(denied.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Saved visit');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+
+    rerender(<App load={load} show={false} />);
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    rerender(<App load={load} />);
+    expect(screen.getByText('Saved visit')).toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('saved');
+
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status: 403 })));
+
+    expect(screen.queryByText('Saved visit')).not.toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('error');
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('blocks a newer mounted reader completion after an older reader loses authorization', async () => {
+    const denied = deferred();
+    const newer = deferred();
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(denied.promise)
+      .mockReturnValueOnce(newer.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Saved visit');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+
+    rerender(<App load={load} show={false} />);
+    rerender(<App load={load} />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+    expect(screen.getByText('Saved visit')).toBeInTheDocument();
+
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status: 403 })));
+    expect(screen.queryByText('Saved visit')).not.toBeInTheDocument();
+    await act(async () => newer.resolve({ title: 'Revoked stale visit' }));
+    expect(screen.queryByText('Revoked stale visit')).not.toBeInTheDocument();
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    rerender(<App load={load} show={false} />);
+    rerender(<App load={load} />);
+    expect(screen.getByTestId('data')).toHaveTextContent('No saved information');
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('propagates authorization eviction across every mounted cache key', async () => {
+    const denied = deferred();
+    const visitsLoad = vi.fn()
+      .mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(denied.promise);
+    const documentsLoad = vi.fn().mockResolvedValue({ title: 'Saved document' });
+    render(<InvalidationApp visitsLoad={visitsLoad} documentsLoad={documentsLoad} />);
+    expect(await screen.findByTestId('visits-data')).toHaveTextContent('Saved visit');
+    expect(await screen.findByTestId('documents-data')).toHaveTextContent('Saved document');
+    fireEvent.click(screen.getByRole('button', { name: 'visits retry' }));
+
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status: 401 })));
+
+    expect(screen.getByTestId('visits-data')).toHaveTextContent('No saved information');
+    expect(screen.getByTestId('documents-data')).toHaveTextContent('No saved information');
+    expect(screen.getByTestId('visits-state')).toHaveTextContent('error');
+    expect(screen.getByTestId('documents-state')).toHaveTextContent('error');
+  });
+
+  it('propagates a captured keyed eviction without clearing other keys or accepting a stale completion', async () => {
+    const older = deferred();
+    const newer = deferred();
+    const visitsRef = { current: null };
+    const visitsLoad = vi.fn()
+      .mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const documentsLoad = vi.fn().mockResolvedValue({ title: 'Saved document' });
+    const { rerender } = render(<InvalidationApp
+      visitsLoad={visitsLoad}
+      documentsLoad={documentsLoad}
+      visitsRef={visitsRef}
+    />);
+    expect(await screen.findByTestId('visits-data')).toHaveTextContent('Saved visit');
+    expect(await screen.findByTestId('documents-data')).toHaveTextContent('Saved document');
+    fireEvent.click(screen.getByRole('button', { name: 'visits retry' }));
+    await waitFor(() => expect(visitsLoad).toHaveBeenCalledTimes(2));
+    const evictOriginalKey = visitsRef.current.evict;
+
+    rerender(<InvalidationApp
+      visitsLoad={visitsLoad}
+      documentsLoad={documentsLoad}
+      visitsRef={visitsRef}
+      showVisits={false}
+    />);
+    rerender(<InvalidationApp
+      visitsLoad={visitsLoad}
+      documentsLoad={documentsLoad}
+      visitsRef={visitsRef}
+    />);
+    await waitFor(() => expect(visitsLoad).toHaveBeenCalledTimes(3));
+    expect(screen.getByTestId('visits-data')).toHaveTextContent('Saved visit');
+
+    act(() => evictOriginalKey());
+    expect(screen.getByTestId('visits-data')).toHaveTextContent('No saved information');
+    expect(screen.getByTestId('documents-data')).toHaveTextContent('Saved document');
+    await act(async () => newer.resolve({ title: 'Stale visit' }));
+    expect(screen.getByTestId('visits-data')).toHaveTextContent('No saved information');
+    await act(async () => older.resolve({ title: 'Older stale visit' }));
+    expect(screen.queryByText('Older stale visit')).not.toBeInTheDocument();
+  });
+
+  it.each([401, 403])('evicts a saved result when access denial arrives after the read timeout (%s)', async status => {
+    const denied = deferred();
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Visit A' })
+      .mockReturnValueOnce(denied.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Visit A');
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS); });
+    expect(screen.getByText('Visit A')).toBeInTheDocument();
+
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status })));
+    expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
+    rerender(<App load={load} show={false} />);
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    rerender(<App load={load} />);
+
+    expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(2);
   });
 
   it('prevents an older read from overwriting a confirmed result', async () => {
@@ -390,5 +600,197 @@ describe('customer portal reads', () => {
     fireEvent.touchCancel(target);
     fireEvent.touchEnd(target);
     expect(load).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Saved home reads (owner 2026-11-25): only 'next-visit' and 'latest-service'
+// reach browser storage, under the login + property they were read for.
+describe('saved home reads', () => {
+  const b64u = (o) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const tokenFor = (claims) => `${b64u({ alg: 'none' })}.${b64u(claims)}.sig`;
+  const TOKEN = tokenFor({ customerId: 'cust-1', sessionId: 'fam-1' });
+  const identity = homeIdentityKey(TOKEN);
+  const visit = { id: 'v1', serviceType: 'Pest Control', date: '2026-12-01', windowStart: '09:00', reportUrl: 'https://example.test/report/secret' };
+
+  function HomeReads({ nextLoad, lastLoad, otherLoad, who = identity, property = 'cust-1:p1' }) {
+    return <PortalReadProvider enabled persistIdentity={who} persistProperty={property}>
+      <Probe name="next-visit" load={nextLoad} />
+      <Probe name="latest-service" load={lastLoad} />
+      <Probe name="documents" load={otherLoad} />
+    </PortalReadProvider>;
+  }
+  function Probe({ name, load }) {
+    const read = usePortalRead(name, load);
+    return <div data-testid={name}>{`${read.data ? JSON.stringify(read.data) : 'none'}|${read.verified}|${read.saved}`}</div>;
+  }
+  const never = () => new Promise(() => {});
+  const seed = (property = 'cust-1:p1') => {
+    writeHomeRead(identity, property, 'next-visit', { next: visit, propertyScope: { enabled: true, propertyId: 'p1' } }, Date.now() - 60000);
+    writeHomeRead(identity, property, 'latest-service', { services: [visit] }, Date.now() - 60000);
+  };
+
+  beforeEach(() => { localStorage.clear(); localStorage.setItem('waves_token', TOKEN); });
+  afterEach(() => localStorage.clear());
+
+  it('hydrates the two reads at mount as unverified saved data before any load answers', () => {
+    seed();
+    render(<HomeReads nextLoad={never} lastLoad={never} otherLoad={never} />);
+    const next = screen.getByTestId('next-visit').textContent;
+    expect(next).toContain('Pest Control');
+    expect(next).toMatch(/\|false\|true$/);
+    expect(next).not.toContain('reportUrl');
+    expect(screen.getByTestId('latest-service').textContent).toMatch(/Pest Control.*\|false\|true$/);
+    // Nothing else is ever hydrated.
+    expect(screen.getByTestId('documents').textContent).toBe('none|false|false');
+  });
+
+  it('a successful refresh verifies the read and persists only the two home reads, cut to the card fields', async () => {
+    seed();
+    const fresh = { next: { ...visit, serviceType: 'Lawn Care' }, propertyScope: null };
+    render(<HomeReads nextLoad={async () => fresh} lastLoad={async () => ({ services: [visit] })} otherLoad={async () => ({ documents: [{ id: 'd1', name: 'Private doc' }] })} />);
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toMatch(/Lawn Care.*\|true\|false$/));
+    const raw = localStorage.getItem(HOME_READS_KEY);
+    expect(raw).toContain('Lawn Care');
+    for (const word of ['Private doc', 'documents', 'reportUrl', 'secret']) expect(raw).not.toContain(word);
+    expect(Object.keys(JSON.parse(raw).reads).sort()).toEqual(['latest-service', 'next-visit']);
+  });
+
+  it('a failed refresh keeps the saved read on screen and in storage', async () => {
+    seed();
+    render(<HomeReads nextLoad={async () => { throw new Error('weak signal'); }} lastLoad={never} otherLoad={never} />);
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toMatch(/Pest Control.*\|false\|true$/));
+    expect(JSON.parse(localStorage.getItem(HOME_READS_KEY)).reads['next-visit']).toBeTruthy();
+  });
+
+  it('a 401 clears the saved reads from memory and storage', async () => {
+    seed();
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 401 }); }} lastLoad={never} otherLoad={never} />);
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false'));
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('serves nothing, and deletes the entry, for another property or another login', () => {
+    seed('cust-1:p1');
+    render(<HomeReads nextLoad={never} lastLoad={never} otherLoad={never} property="cust-1:p2" />);
+    expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+    cleanup();
+    seed('cust-1:p1');
+    const other = homeIdentityKey(tokenFor({ customerId: 'cust-1', sessionId: 'fam-2' }));
+    render(<HomeReads nextLoad={never} lastLoad={never} otherLoad={never} who={other} />);
+    expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('writes nothing without a login identity (contact or cancelled sessions) and hydrates nothing', async () => {
+    seed();
+    render(<HomeReads nextLoad={async () => ({ next: null })} lastLoad={async () => ({ services: [] })} otherLoad={never} who={null} />);
+    expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false');
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toMatch(/\|true\|false$/));
+    // The entry from before is untouched by this identity-less provider.
+    expect(JSON.parse(localStorage.getItem(HOME_READS_KEY)).reads['next-visit'].data.next.id).toBe('v1');
+  });
+
+  it('never persists when the provider is disabled', async () => {
+    seed();
+    render(<PortalReadProvider enabled={false} persistIdentity={identity} persistProperty="cust-1:p1"><Probe name="next-visit" load={async () => ({ next: { id: 'x', serviceType: 'Disabled' } })} /></PortalReadProvider>);
+    await waitFor(() => expect(screen.getByTestId('next-visit').textContent).toContain('Disabled'));
+    expect(localStorage.getItem(HOME_READS_KEY)).not.toContain('Disabled');
+  });
+
+  it('a denied read empties every mounted sibling, in memory and on disk', async () => {
+    seed();
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 403 }); }} lastLoad={never} otherLoad={never} />);
+    // latest-service never answers, yet it must not keep its hydrated data.
+    await waitFor(() => expect(screen.getByTestId('latest-service').textContent).toBe('none|false|false'));
+    expect(screen.getByTestId('next-visit').textContent).toBe('none|false|false');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('an answer that was already on the way when a sibling was denied is discarded and writes nothing', async () => {
+    seed();
+    let release;
+    const lateLast = () => new Promise((resolve) => { release = resolve; });
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 401 }); }} lastLoad={lateLast} otherLoad={never} />);
+    await waitFor(() => expect(localStorage.getItem(HOME_READS_KEY)).toBeNull());
+    await act(async () => { release({ services: [{ id: 'late', serviceType: 'Late Visit', date: '2026-12-02' }] }); });
+    expect(screen.getByTestId('latest-service').textContent).not.toContain('Late Visit');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('saves nothing when the login that started the read is not the provider\'s login', async () => {
+    const otherToken = tokenFor({ customerId: 'cust-1', sessionId: 'fam-2' });
+    let release;
+    // The read starts while another login's token is stored, and answers after this provider's login is back.
+    localStorage.setItem('waves_token', otherToken);
+    render(<HomeReads nextLoad={() => new Promise((resolve) => { release = resolve; })} lastLoad={never} otherLoad={never} />);
+    localStorage.setItem('waves_token', TOKEN);
+    await act(async () => { release({ next: { id: 'x', serviceType: 'Wrong Login Visit' } }); });
+    expect(screen.getByTestId('next-visit').textContent).toContain('Wrong Login Visit');
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('a denied read also deletes the saved account, so an offline relaunch adopts nothing', async () => {
+    seed();
+    const me = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', actor: { kind: 'holder' }, cancelled: false };
+    expect(writeHomeSnapshot({ token: TOKEN, requestIdentity: identity, me, propertyPayload: { scope: 'saved', properties: [], selected: null } })).toBe(true);
+    expect(readHomeSnapshot(TOKEN)).not.toBeNull();
+    render(<HomeReads nextLoad={async () => { throw Object.assign(new Error('no'), { status: 401 }); }} lastLoad={never} otherLoad={never} />);
+    await waitFor(() => expect(localStorage.getItem(HOME_READS_KEY)).toBeNull());
+    expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
+    expect(readHomeSnapshot(TOKEN)).toBeNull();
+  });
+
+  it('a denial that lands after its reader unmounted still deletes the saved reads and the saved account', async () => {
+    seed();
+    const me = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', actor: { kind: 'holder' }, cancelled: false };
+    writeHomeSnapshot({ token: TOKEN, requestIdentity: identity, me, propertyPayload: { scope: 'saved', properties: [], selected: null } });
+    let reject;
+    const late = () => new Promise((_, no) => { reject = no; });
+    const Harness = ({ show }) => <PortalReadProvider enabled persistIdentity={identity} persistProperty="cust-1:p1">
+      {show && <Probe name="next-visit" load={late} />}
+    </PortalReadProvider>;
+    const view = render(<Harness show />);
+    view.rerender(<Harness show={false} />);
+    await act(async () => { reject(Object.assign(new Error('revoked'), { status: 403 })); });
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+    expect(localStorage.getItem(HOME_SNAPSHOT_KEY)).toBeNull();
+  });
+
+  it('evicting a saved read key deletes the saved reads; evicting another key leaves them', async () => {
+    seed();
+    let evictFor;
+    function Evictor({ name }) {
+      const read = usePortalRead(name, never);
+      evictFor = read.evict;
+      return null;
+    }
+    const view = render(<PortalReadProvider enabled persistIdentity={identity} persistProperty="cust-1:p1"><Evictor name="documents" /></PortalReadProvider>);
+    act(() => { evictFor({ message: 'scope changed' }); });
+    expect(localStorage.getItem(HOME_READS_KEY)).not.toBeNull();
+    view.unmount();
+    render(<PortalReadProvider enabled persistIdentity={identity} persistProperty="cust-1:p1"><Evictor name="next-visit" /></PortalReadProvider>);
+    act(() => { evictFor({ message: 'scope changed' }); });
+    expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
+  });
+
+  it('a denial that lands after its provider unmounted deletes only ITS login\'s saved entries, never another login\'s', async () => {
+    seed();
+    const me = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', actor: { kind: 'holder' }, cancelled: false };
+    const props = { scope: 'saved', properties: [], selected: null };
+    writeHomeSnapshot({ token: TOKEN, requestIdentity: identity, me, propertyPayload: props });
+    let reject;
+    const late = () => new Promise((_, no) => { reject = no; });
+    const view = render(<PortalReadProvider enabled persistIdentity={identity} persistProperty="cust-1:p1"><Probe name="next-visit" load={late} /></PortalReadProvider>);
+    view.unmount();
+    // Meanwhile another login on this browser saves its own screen.
+    const otherToken = tokenFor({ customerId: 'cust-2', sessionId: 'fam-5' });
+    const otherIdentity = homeIdentityKey(otherToken);
+    localStorage.setItem('waves_token', otherToken);
+    writeHomeSnapshot({ token: otherToken, requestIdentity: otherIdentity, me: { ...me, id: 'cust-2', firstName: 'Sam' }, propertyPayload: props });
+    writeHomeRead(otherIdentity, 'cust-2:p1', 'next-visit', { next: { id: 'o1', serviceType: 'Other Login Visit' } }, Date.now());
+    await act(async () => { reject(Object.assign(new Error('revoked'), { status: 401 })); });
+    expect(readHomeSnapshot(otherToken)).not.toBeNull();
+    expect(localStorage.getItem(HOME_READS_KEY)).toContain('Other Login Visit');
   });
 });
