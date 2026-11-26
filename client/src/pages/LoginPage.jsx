@@ -147,12 +147,15 @@ function useResendCooldown() {
       document.removeEventListener('visibilitychange', refresh);
     };
   }, [until, refresh]);
-  const start = useCallback(() => {
+  // The wait belongs to the number the code went to.
+  const phoneRef = useRef('');
+  const start = useCallback((digits) => {
+    phoneRef.current = digits;
     setUntil(Date.now() + RESEND_COOLDOWN_SECONDS * 1000);
     setLeft(RESEND_COOLDOWN_SECONDS);
   }, []);
-  const clear = useCallback(() => { setUntil(0); setLeft(0); }, []);
-  return { left, start, clear };
+  const leftFor = (digits) => (digits === phoneRef.current ? left : 0);
+  return { left, start, leftFor };
 }
 
 // A full 6-digit code (typed, or filled by the iOS one-time-code suggestion)
@@ -199,7 +202,9 @@ export default function LoginPage() {
   const handleSendCode = async (resend = false) => {
     const digits = phoneDigits(phone);
     if (digits.length !== 10 || sending) return;
-    if (resend && cooldownLeft > 0) return;
+    // The wait covers this number whichever button sends: switching to
+    // "Use a different number" and back must not skip it.
+    if ((resend ? cooldownLeft : cooldown.leftFor(digits)) > 0) return;
     setSending(true);
     setResendNotice(false);
     const success = await sendCode(`+1${digits}`);
@@ -209,7 +214,7 @@ export default function LoginPage() {
       lastSubmittedCodeRef.current = '';
       setStep('code');
       // Every sent code starts the wait, the first one too.
-      cooldown.start();
+      cooldown.start(digits);
       if (resend) setResendNotice(true);
     }
   };
@@ -248,7 +253,9 @@ export default function LoginPage() {
 
   const phoneReady = phoneDigits(phone).length === 10;
   const codeReady = code.length === 6;
-  const submitDisabled = step === 'phone' ? !phoneReady || sending : !codeReady || sending;
+  // Seconds left before this phone number can get another code (phone step).
+  const sameNumberLeft = cooldown.leftFor(phoneDigits(phone));
+  const submitDisabled = step === 'phone' ? !phoneReady || sending || sameNumberLeft > 0 : !codeReady || sending;
   const friendlyError = normalizeAuthError(error);
   const busyLabel = step === 'phone' ? 'Sending code...' : 'Verifying code...';
 
@@ -724,7 +731,7 @@ export default function LoginPage() {
               >
                 {sending
                   ? busyLabel
-                  : (step === 'phone' ? 'Send code' : 'Sign in')}
+                  : (step === 'phone' ? (sameNumberLeft ? `Send code in ${sameNumberLeft}s` : 'Send code') : 'Sign in')}
               </button>
 
               {step === 'code' && (
@@ -733,7 +740,8 @@ export default function LoginPage() {
                   <button
                     type="button"
                     className="portal-login-secondary"
-                    onClick={() => { clearError(); setStep('phone'); setCode(''); setResendNotice(false); cooldown.clear(); }}
+                    disabled={sending}
+                    onClick={() => { clearError(); setStep('phone'); setCode(''); setResendNotice(false); }}
                   >
                     Use a different number
                   </button>

@@ -185,6 +185,16 @@ describe('customer login recovery', () => {
       }
     });
 
+    it('keeps the wait when the customer switches number and comes back to the same one', async () => {
+      await reachCodeStep();
+      fireEvent.click(screen.getByRole('button', { name: 'Use a different number' }));
+      const send = screen.getByRole('button', { name: /Send code in \d+s/ });
+      expect(send).toBeDisabled();
+      fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '9415550199' } });
+      expect(screen.getByRole('button', { name: 'Send code' })).toBeEnabled();
+      expect(authMocks.sendCode).toHaveBeenCalledTimes(1);
+    });
+
     it('does not claim a new code was sent when the resend fails', async () => {
       await reachCodeStep();
       await passCooldown();
