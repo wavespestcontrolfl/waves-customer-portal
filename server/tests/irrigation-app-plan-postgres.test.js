@@ -41,7 +41,12 @@ jest.mock('../services/service-report/application-conditions', () => ({
   fetchServiceWeekWeather: jest.fn(),
 }));
 const { randomUUID } = require('crypto');
-const { findEligibleCustomers, buildWeeklyEmailDecision, weeklyInputsForCustomer, runWeeklyIrrigationEmailSweep } = require('../services/irrigation-weekly-email');
+const { findEligibleCustomers, buildWeeklyEmailDecision, weeklyInputsForCustomer, runWeeklyIrrigationEmailSweep: runSweepUnscoped } = require('../services/irrigation-weekly-email');
+// The suite shares one migrated database with the other suites of its CI lane, so an
+// unscoped sweep also picks up their committed customers and its counts change with
+// lane order. Every sweep here runs on this test's own customers only.
+let mockOwnIds = [];
+const runWeeklyIrrigationEmailSweep = (options = {}) => runSweepUnscoped({ customerIds: mockOwnIds, ...options });
 const { persistWeekPlan, loadCurrentWeekPlan, loadPriorWeekPlan, discardUnsentWeekPlan } = require('../services/irrigation-week-plan');
 const { gates } = require('../config/feature-gates');
 const EmailTemplateLibrary = require('../services/email-template-library');
@@ -68,6 +73,7 @@ const SKIP = !process.env.DATABASE_URL;
   });
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockOwnIds = [];
     mockFailedPlanReads = 0;
     mockFailedSentWrites = 0;
     delete process.env.GATE_PROPERTY_ALERTS;
@@ -85,6 +91,7 @@ const SKIP = !process.env.DATABASE_URL;
     });
     mockTransaction = await database.transaction();
     customerId = randomUUID();
+    mockOwnIds.push(customerId);
     await mockTransaction('customers').insert({ id: customerId, first_name: 'Sample', phone: '9415550100',
       email: 'sample@example.invalid', active: true, pipeline_stage: 'active_customer',
       address_line1: '100 Fixture Lane', address_line2: 'Unit 1', city: 'Sarasota', zip: '34236', latitude: 27.3, longitude: -82.5 });
@@ -132,6 +139,7 @@ const SKIP = !process.env.DATABASE_URL;
 
   test('an irrigation_email tag adds a customer without lawn service; the seasonal-tips opt-out still wins', async () => {
     const pestOnly = randomUUID();
+    mockOwnIds.push(pestOnly);
     await mockTransaction('customers').insert({ id: pestOnly, first_name: 'Sample', phone: '9415550101',
       email: 'pest-only@example.invalid', active: true, pipeline_stage: 'active_customer',
       address_line1: '102 Fixture Lane', city: 'Sarasota', zip: '34236', latitude: 27.3, longitude: -82.5 });
@@ -489,6 +497,7 @@ const SKIP = !process.env.DATABASE_URL;
 
   test('a customer merge retains the published plan over a draft without recording an email send', async () => {
     const loser = randomUUID();
+    mockOwnIds.push(loser);
     await mockTransaction('customers').insert({ id: loser, first_name: 'Sample', phone: '9415550101', active: true });
     const draft = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
     const [published] = await mockTransaction('irrigation_week_plans').insert({ ...draft, id: randomUUID(), customer_id: loser, published_at: now }).returning('*');
@@ -503,6 +512,7 @@ const SKIP = !process.env.DATABASE_URL;
 
   test.each(['stamped', 'provider_accepted'])('a customer merge keeps the emailed decision over a different app publication (%s)', async (evidence) => {
     const loser = randomUUID();
+    mockOwnIds.push(loser);
     await mockTransaction('customers').insert({ id: loser, first_name: 'Sample', phone: '9415550101', active: true });
     await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ published_at: now });
     const current = (await findEligibleCustomers({ now, customerId }))[0];
