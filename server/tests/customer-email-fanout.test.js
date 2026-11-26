@@ -320,6 +320,24 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls).toHaveLength(0);
   });
 
+  test('moveNewsletter:false: no subscriber row is locked, merged, moved or claimed; leads and estimates still follow; delivered tokens still rotate', async () => {
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [
+          { id: 739 }, // the customer's own subscriber at the old address
+          { id: 900, email: 'chriswsample@example.com', customer_id: null }, // an unlinked subscriber at the typed address: someone else's
+        ],
+      },
+    });
+    const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER, moveNewsletter: false }, conn);
+    expect(counts.newsletter).toBe(0);
+    expect(counts.leads).toBe(1);
+    expect(conn.__updates('leads')[0].arg.email).toBe('chriswsample@example.com');
+    expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && (c.op === 'del' || c.op === 'forUpdate'))).toBe(false);
+    expect(conn.__updates('newsletter_send_deliveries')[0].arg.engagement_token).toBeDefined();
+  });
+
   test('newsletter: deletes the misspelled row when the corrected spelling already subscribes', async () => {
     const conn = makeConn({
       newsletter_subscribers: {

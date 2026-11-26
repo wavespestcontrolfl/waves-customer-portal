@@ -209,6 +209,10 @@ async function repointNewsletterDeliveries(conn, { fromId, toId, customerId, now
  */
 async function propagateCustomerEmailChange({
   before, after, source = 'customer edit', reviewReasonCodes = EMAIL_REVIEW_REASON_CODES,
+  // false = never move, merge or claim a newsletter subscriber row for the new address. The customer-app profile
+  // edit passes false: the address is typed by the customer and not proven, so it must not take over (or merge
+  // into) a subscriber that belongs to someone else. Delivered engagement tokens of the old row still rotate.
+  moveNewsletter = true,
 }, conn = db) {
   const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, emailRetries: 0, reviewCards: 0, heldDripResumed: 0 };
   let pendingConfirmation = null;
@@ -525,10 +529,12 @@ async function propagateCustomerEmailChange({
       counts.newsletterDeliveries += await conn('newsletter_send_deliveries')
         .where({ subscriber_id: oldSubSnapshot.id })
         .update({ engagement_token: conn.raw('gen_random_uuid()'), updated_at: now });
-      oldSub = await conn('newsletter_subscribers')
-        .where({ id: oldSubSnapshot.id })
-        .forUpdate()
-        .first();
+      if (moveNewsletter) {
+        oldSub = await conn('newsletter_subscribers')
+          .where({ id: oldSubSnapshot.id })
+          .forUpdate()
+          .first();
+      }
     }
     if (oldSub) {
       const targetSub = await conn('newsletter_subscribers')
@@ -623,6 +629,7 @@ async function propagateCustomerEmailChange({
   // or the DOI/unsubscribe bearer links delivered to the rejected mailbox
   // stay valid after the record moves to the corrected address.
   const retargetSubscribersAtRejectedTargets = async (targets) => {
+    if (!moveNewsletter) return;
     // Unlocked snapshot → deliveries → FOR UPDATE re-read (Codex #3084
     // r43/r46): the retarget and delete act on the LOCKED read's status,
     // so an unsubscribe committing after our lock waits and one before it

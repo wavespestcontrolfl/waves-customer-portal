@@ -12,7 +12,7 @@ jest.mock('../middleware/auth', () => {
   const real = jest.requireActual('../middleware/auth');
   return {
     ...real,
-    authenticate: (req, _res, next) => {
+    authenticateAllowInactive: (req, _res, next) => {
       req.customerId = mockSession.customerId;
       req.customerInactive = mockSession.inactive === true;
       req.contactSession = mockSession.contact || null;
@@ -25,12 +25,14 @@ let mockRow;
 let mockUpdates;
 let mockOrder;
 let mockLockedWhere;
-const mockTrxBuilder = () => {
+let mockSavedInHour;
+const mockTrxBuilder = (table) => {
   const b = {
+    count: jest.fn(() => b),
     where: jest.fn((cond) => { if (!mockLockedWhere) mockLockedWhere = cond; return b; }),
     whereNull: jest.fn(() => b),
     forUpdate: jest.fn(() => b),
-    first: jest.fn(async () => mockRow),
+    first: jest.fn(async () => (table === 'audit_log' ? { n: mockSavedInHour } : mockRow)),
     update: jest.fn(async (patch) => { mockOrder.push('update'); mockUpdates.push(patch); return 1; }),
   };
   return b;
@@ -42,7 +44,9 @@ const mockResend = jest.fn(async () => {});
 jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: (...a) => mockEmailFanout(...a), resendPendingConfirmation: (...a) => mockResend(...a) }));
 const mockNameFanout = jest.fn(async () => { mockOrder.push('nameFanout'); });
 jest.mock('../services/customer-contact-fanout', () => ({ propagateCustomerNameChange: (...a) => mockNameFanout(...a) }));
-const mockDb = { transaction: jest.fn(async (fn) => fn(Object.assign(() => mockTrxBuilder(), { fn: { now: () => 'NOW' } }))) };
+const mockConflict = jest.fn(async () => null);
+jest.mock('../services/customer-email-write', () => ({ findCrossAccountEmailConflict: (...a) => mockConflict(...a) }));
+const mockDb = { transaction: jest.fn(async (fn) => fn(Object.assign((table) => mockTrxBuilder(table), { fn: { now: () => 'NOW' }, raw: (sql) => sql }))) };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockAudit = jest.fn(async () => 1);
@@ -81,6 +85,9 @@ beforeEach(() => {
   mockRow = { id: CUSTOMER_ID, active: true, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL };
   mockUpdates = [];
   mockOrder = [];
+  mockSavedInHour = 0;
+  mockConflict.mockClear();
+  mockConflict.mockResolvedValue(null);
   mockLockedWhere = null;
   mockLockEmails.mockClear();
   mockEmailFanout.mockClear();
@@ -164,12 +171,14 @@ describe('PUT /api/customer/profile', () => {
     await flush();
     expect(mockSend).toHaveBeenCalledTimes(2);
     const [toOld, toNew] = mockSend.mock.calls.map((c) => c[0]);
+    // The old mailbox learns only that the address changed, never the replacement; the new mailbox never sees the old address.
+    expect(toOld.changedItems).toEqual([{ key: 'email', label: 'Email address' }]);
+    expect(JSON.stringify(toOld)).not.toContain('new.address@example.test');
+    expect(toNew.changedItems).toEqual([{ key: 'email', label: 'Email address', newValue: 'new.address@example.test' }]);
+    expect(JSON.stringify(toNew.changedItems)).not.toContain(OLD_EMAIL);
     expect(toOld.contactOverride).toEqual({ email: OLD_EMAIL, name: 'Pat' });
     expect(toNew.contactOverride).toEqual({ email: 'new.address@example.test', name: 'Pat' });
-    for (const call of [toOld, toNew]) {
-      expect(call).toMatchObject({ customerId: CUSTOMER_ID, actorCustomerId: CUSTOMER_ID, alwaysNotify: true });
-      expect(call.changedItems).toEqual([{ key: 'email', label: 'Email address', oldValue: OLD_EMAIL, newValue: 'new.address@example.test' }]);
-    }
+    for (const call of [toOld, toNew]) expect(call).toMatchObject({ customerId: CUSTOMER_ID, actorCustomerId: CUSTOMER_ID, alwaysNotify: true });
     expect(toOld.idempotencyKey).not.toBe(toNew.idempotencyKey);
   });
 
@@ -210,6 +219,7 @@ describe('PUT /api/customer/profile', () => {
     expect(args.before).toMatchObject({ email: OLD_EMAIL, first_name: 'Pat' });
     expect(args.after).toMatchObject({ email: 'new.address@example.test', first_name: 'Pat' });
     expect(args.reviewReasonCodes).toEqual(['customer_email_missing']);
+    expect(args.moveNewsletter).toBe(false);
     expect(mockNameFanout).not.toHaveBeenCalled();
   });
 
@@ -228,10 +238,10 @@ describe('PUT /api/customer/profile', () => {
     expect(mockResend).toHaveBeenCalledWith({ id: 'sub-1', email: 'new.address@example.test' });
   });
 
-  test('a row cancelled after authenticate (no active row under the lock) is refused and nothing is sent', async () => {
+  test('a row cancelled after authenticate (no active row under the lock) is refused 403 and nothing is sent', async () => {
     mockRow = undefined;
     const res = await put({ email: 'new.address@example.test' });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
     expect(mockUpdates).toHaveLength(0);
     expect(mockAudit).not.toHaveBeenCalled();
     expect(mockEmailFanout).not.toHaveBeenCalled();
@@ -258,15 +268,40 @@ describe('PUT /api/customer/profile', () => {
     mockSend.mockResolvedValue({ ok: true });
   });
 
-  test('the 11th saved change in an hour is refused 429; refused requests do not count', async () => {
-    expect((await put({ firstName: '' })).status).toBe(400);
-    for (let i = 0; i < 10; i += 1) expect((await put({ firstName: `Sam${i}` })).status).toBe(200);
-    expect((await put({ firstName: 'Sam11' })).status).toBe(429);
+  test('the quota is counted from committed audit rows under the row lock: 10 in the last hour refuses with 429', async () => {
+    mockSavedInHour = 10;
+    const res = await put({ firstName: 'Sam' });
+    expect(res).toMatchObject({ status: 429, body: { error: expect.stringContaining('Too many') } });
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockAudit).not.toHaveBeenCalled();
+    await flush();
+    expect(mockSend).not.toHaveBeenCalled();
+    mockSavedInHour = 9;
+    expect((await put({ firstName: 'Sam' })).status).toBe(200);
   });
 
-  test('a missing customer row is a 404', async () => {
-    mockRow = undefined;
-    expect((await put({ firstName: 'Sam' })).status).toBe(404);
+  test('a no-op save is never refused by the quota and never counted (no audit row written)', async () => {
+    mockSavedInHour = 10;
+    expect((await put({ firstName: 'Pat' })).status).toBe(200);
+    expect(mockAudit).not.toHaveBeenCalled();
+  });
+
+  test('an address held by another account is refused 409, with no wording that says whose it is, and nothing is written', async () => {
+    mockConflict.mockResolvedValue({ id: 'other', account_id: 'other-account' });
+    const res = await put({ email: 'taken.address@example.test' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('email_unavailable');
+    expect(res.body.error).not.toMatch(/another|account|customer/i);
+    expect(mockConflict.mock.calls[0][1]).toMatchObject({ customerId: CUSTOMER_ID, email: 'taken.address@example.test' });
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockEmailFanout).not.toHaveBeenCalled();
+    await flush();
     expect(mockSend).not.toHaveBeenCalled();
   });
+
+  test('the conflict check is skipped for a name-only edit', async () => {
+    await put({ firstName: 'Sam' });
+    expect(mockConflict).not.toHaveBeenCalled();
+  });
+
 });
