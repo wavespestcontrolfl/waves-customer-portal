@@ -102,16 +102,18 @@ function completionRateFields(meta, product) {
 // gallon, where the catalog band is 10-30). The completion form starts a per-gallon rate at the bottom of the band, so the
 // card's rate goes along as the START of the rate: the band's top stays the review ceiling. Only when the catalog keeps the
 // band per gallon in the card's unit and the card's rate is not above its top (the job card's rule for a declared rate,
-// job-card.js protocolBand). A line with a label rate has its own fields (completionRateFields); a line another booked
-// card shares (sharedRate) has no one rate.
+// job-card.js protocolBand). A line with a label rate has its own fields (completionRateFields). A line another booked
+// card shares (sharedRate: a bed bug treatment at 20 with a flea add-on at 10) has no one rate: the rate starts blank
+// (cardStartRate ''), so the tech enters what went out and the form never picks one card's number.
 function cardStartRateFields(meta, product) {
-  if (!meta || meta.labelRatePerGallon || meta.sharedRate) return null;
+  if (!meta || meta.labelRatePerGallon) return null;
   const amount = Number(meta.tankRatePerGallon?.amount);
   const unit = meta.tankRatePerGallon?.unit;
   if (!(amount > 0) || !Number.isFinite(amount) || !unit) return null;
   const top = catalogPerGallonTop(product, unit);
-  if (top == null || amount > top) return null;
-  return { cardStartRate: amount };
+  if (top == null) return null;
+  if (meta.sharedRate) return { cardStartRate: '' };
+  return amount > top ? null : { cardStartRate: amount };
 }
 
 module.exports = { labelUseRate, labelRateCarrier, labelRateHeld, labelRateHoldText, completionRateFields, cardStartRateFields, normalizeEpa };

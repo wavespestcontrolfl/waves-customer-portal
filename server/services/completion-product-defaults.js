@@ -198,8 +198,7 @@ function lineFactsByName(visit, names) {
     const method = completionApplicationMethodForName(visit, name);
     if (method) methodsByName[name.toLowerCase()] = method;
     const meta = lineMetaForName(visit, name);
-    // A line that declares its tank's rate goes along too: the form starts its rate there (cardStartRateFields).
-    if (meta?.labelRatePerGallon || meta?.tankRatePerGallon) labelRateMetaByName[name.toLowerCase()] = meta;
+    if (meta?.labelRatePerGallon) labelRateMetaByName[name.toLowerCase()] = meta;
   }
   return { methodsByName, labelRateMetaByName };
 }
@@ -230,6 +229,27 @@ function labelRateFor(meta, hints) {
   if (!meta?.labelRatePerGallon && !meta?.tankRatePerGallon) return meta;
   const shared = !hints || (meta.catalogProductHints || []).some((hint) => hints.has(String(hint).toLowerCase()));
   return shared ? { ...meta, sharedRate: true } : meta;
+}
+
+// The visit card's lines that declare their tank's own rate (tankRatePerGallon) for one product: the bed bug cards' Antapex
+// at 20 g per gallon. Every such line of the card, seeded or not: the follow-up card seeds nothing, and a tech who adds
+// Antapex there still starts at the card's rate.
+function cardRateLines(visit) {
+  return Object.values(visit?.lineMeta || {}).filter((meta) => meta?.tankRatePerGallon && !meta.labelRatePerGallon
+    && Array.isArray(meta.catalogProductHints) && meta.catalogProductHints.length === 1);
+}
+
+// Those lines against the catalog, as [{ id, cardStartRate, completionApplicationMethod }]: the start of each product's rate on
+// the form (cardStartRateFields; '' when a booked add-on's card mixes the product at another rate) and the card's method.
+function cardRatesFor(lines, catalogRows, hints) {
+  const rates = [];
+  for (const meta of lines) {
+    const row = resolveCatalogProductForName(meta.catalogProductHints[0], catalogRows);
+    const fields = row ? cardStartRateFields(labelRateFor(meta, hints), row) : null;
+    if (!fields || rates.some((rate) => rate.id === row.id)) continue;
+    rates.push({ id: row.id, ...fields, completionApplicationMethod: typeof meta.completionApplicationMethod === 'string' && meta.completionApplicationMethod ? meta.completionApplicationMethod : null });
+  }
+  return rates;
 }
 
 // -- visit resolution + precedence (pure) ------------------------------
@@ -276,10 +296,10 @@ function resolveCompletionDefaultProductNames({
   const entries = dedupeEntries(visit?.completionDefaultProducts);
   const protocolNames = entries.map(entry => entry.name);
   if (protocolNames.length) {
-    return { programKey, matchedVisit, source: 'protocol_visit', entries, names: protocolNames, ...lineFactsByName(visit, protocolNames) };
+    return { programKey, matchedVisit, source: 'protocol_visit', entries, names: protocolNames, ...lineFactsByName(visit, protocolNames), cardRateLines: cardRateLines(visit) };
   }
 
-  return { programKey, matchedVisit, source: 'none', entries: [], names: [], methodsByName: {} };
+  return { programKey, matchedVisit, source: 'none', entries: [], names: [], methodsByName: {}, cardRateLines: cardRateLines(visit) };
 }
 
 // -- line shaping --------------------------------------------------------
@@ -296,7 +316,6 @@ function shapeCompletionProductLine(row, resolved, name) {
     defaultUnit: row.default_unit || null,
     // The prefill and the review ceiling for a line that carries its label's rate for this pest (protocol-label-rate.js).
     ...completionRateFields(resolved.labelRateMetaByName?.[String(name || '').toLowerCase()], row),
-    ...cardStartRateFields(resolved.labelRateMetaByName?.[String(name || '').toLowerCase()], row),
     applicationMethod: row.application_method || null,
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work -> 'spot_treatment') — overrides the client's
@@ -444,10 +463,14 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       holds = applicable.holds;
     }
 
+    const rateLines = resolved.cardRateLines || [];
     if (!resolved.entries.length) {
+      // A card that seeds nothing (a bed bug follow-up) may still state a rate for a product the tech adds by hand.
+      const cardRates = rateLines.length
+        ? cardRatesFor(rateLines, await loadActiveCatalogWithAliases(db), await addonCardHints(db, serviceId, protocolSet)) : [];
       return {
         serviceId, programKey: resolved.programKey, matchedVisit: resolved.matchedVisit,
-        source: resolved.source, products: [], unresolved: [], holds,
+        source: resolved.source, products: [], unresolved: [], holds, ...(cardRates.length ? { cardRates } : {}),
       };
     }
 
@@ -473,9 +496,10 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       });
     }
 
+    const cardRates = cardRatesFor(rateLines, catalogRows, hints);
     return {
       serviceId, programKey: resolved.programKey, matchedVisit: resolved.matchedVisit,
-      source: resolved.source, products, unresolved, holds,
+      source: resolved.source, products, unresolved, holds, ...(cardRates.length ? { cardRates } : {}),
     };
   } catch (err) {
     return { ...empty, error: err?.message || 'completion_product_defaults_failed' };

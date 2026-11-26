@@ -85,21 +85,35 @@ describe('labelUseItemFor', () => {
 
 describe('cardRateRow', () => {
   const antapex = { id: 'a', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal' };
-  const response = { source: 'protocol_visit', programKey: 'bed_bug', products: [{ id: 'x' }, { id: 'a', cardStartRate: 20, completionApplicationMethod: 'spot_treatment' }] };
+  const cardRates = [{ id: 'a', cardStartRate: 20, completionApplicationMethod: 'spot_treatment' }];
+  const response = { source: 'protocol_visit', programKey: 'bed_bug', products: [{ id: 'x', completionApplicationMethod: 'spot_treatment' }, { id: 'a' }], cardRates };
 
-  it('carries the card\'s own tank rate as the start of the rate, and leaves the catalog band (the review ceiling) alone', () => {
-    expect(cardRateRow(response, antapex)).toEqual({ product: antapex, applicationMethodOverride: undefined, startRate: 20 });
+  it('carries the card\'s own tank rate as the start of the rate and its method, and leaves the catalog band (the review ceiling) alone', () => {
+    expect(cardRateRow(response, antapex)).toEqual({ product: antapex, applicationMethodOverride: 'spot_treatment', startRate: 20 });
     // A product with no card rate, and a product the visit's card does not list.
     expect(cardRateRow(response, { id: 'x' }).startRate).toBeUndefined();
-    expect(cardRateRow(response, { id: 'other' }).startRate).toBeUndefined();
+    expect(cardRateRow(response, { id: 'other' })).toEqual({ product: { id: 'other' }, applicationMethodOverride: undefined });
   });
 
-  it('gives no start rate from a response this hook would not seed, or from a value that is not a rate', () => {
+  it('a card that seeds nothing (the bed bug follow-up) still gives the rate and method to a product the tech adds', () => {
+    expect(cardRateRow({ source: 'none', programKey: 'bed_bug', products: [], cardRates }, antapex)).toMatchObject({ applicationMethodOverride: 'spot_treatment', startRate: 20 });
+  });
+
+  it('a rate two booked cards disagree on starts blank', () => {
+    expect(cardRateRow({ ...response, cardRates: [{ id: 'a', cardStartRate: '' }] }, antapex).startRate).toBe('');
+  });
+
+  it('a seeded product the tech removes and adds again keeps its card method; a method the caller names wins', () => {
+    expect(cardRateRow(response, { id: 'x' }).applicationMethodOverride).toBe('spot_treatment');
+    expect(cardRateRow(response, antapex, 'bait_placement').applicationMethodOverride).toBe('bait_placement');
+  });
+
+  it('gives no start rate with no response, for a program another mechanism owns, or from a value that is not a rate', () => {
     expect(cardRateRow(null, antapex).startRate).toBeUndefined();
-    expect(cardRateRow({ ...response, source: 'none' }, antapex).startRate).toBeUndefined();
     expect(cardRateRow({ ...response, programKey: 'pest' }, antapex).startRate).toBeUndefined();
+    expect(cardRateRow({ ...response, cardRates: undefined }, antapex).startRate).toBeUndefined();
     for (const cardStartRate of [0, -5, 'x', null, Infinity]) {
-      expect(cardRateRow({ ...response, products: [{ id: 'a', cardStartRate }] }, antapex).startRate).toBeUndefined();
+      expect(cardRateRow({ ...response, cardRates: [{ id: 'a', cardStartRate }] }, antapex).startRate).toBeUndefined();
     }
   });
 });

@@ -192,8 +192,9 @@ const bedBugDefaultsResponse = {
   serviceId: 'cockroach-visit-1', programKey: 'bed_bug', matchedVisit: { visit: 2, reason: 'bed_bug_treatment', matched: true }, source: 'protocol_visit',
   products: [
     { id: 'b1', name: 'MGK Crossfire Bed Bug Concentrate', defaultRate: null, defaultUnit: 'fl_oz', completionApplicationMethod: 'spot_treatment' },
-    { id: 'b2', name: 'Atticus Antapex WSG', defaultRate: '10-30', defaultUnit: 'g/gal', completionApplicationMethod: 'spot_treatment', cardStartRate: 20 },
+    { id: 'b2', name: 'Atticus Antapex WSG', defaultRate: '10-30', defaultUnit: 'g/gal', completionApplicationMethod: 'spot_treatment' },
   ],
+  cardRates: [{ id: 'b2', cardStartRate: 20, completionApplicationMethod: 'spot_treatment' }],
   unresolved: [],
 };
 const bedBugService = () => cockroachService({ serviceType: 'Bed Bug Treatment Service',
@@ -209,6 +210,17 @@ it('a bed bug treatment starts with its card\'s products, Antapex at the card\'s
   expect(within(antapexRow).getByDisplayValue('20')).toBeTruthy();
   expect(within(antapexRow).queryByDisplayValue('10')).toBeNull();
   expect(within(antapexRow).getByDisplayValue('Spot treatment')).toBeTruthy();
+});
+
+it('with a flea add-on booked, Antapex starts blank: the two cards mix it at 20 and at 10', async () => {
+  stubFetchWithImmediateDefaults({ ...bedBugDefaultsResponse, cardRates: [{ id: 'b2', cardStartRate: '', completionApplicationMethod: 'spot_treatment' }] });
+  await act(async () => {
+    render(<CompletionPanel service={bedBugService()} products={bedBugCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  await screen.findByText('MGK Crossfire Bed Bug Concentrate');
+  const antapexRow = screen.getByText('Atticus Antapex WSG').closest('div');
+  expect(within(antapexRow).queryByDisplayValue('10')).toBeNull();
+  expect(within(antapexRow).queryByDisplayValue('20')).toBeNull();
 });
 
 it('a bed bug visit whose card lists no products (the inspection, a follow-up) starts empty', async () => {

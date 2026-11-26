@@ -85,17 +85,26 @@ export function labelUseItemFor(response, productId) {
 
 // A product about to land on the full form, with the visit card's rate and method when it is a card-rate product, however it
 // lands (the seeded row, or the tech removing it and adding it again from the picker). A method the caller names wins.
-// `startRate`: the card's own tank rate inside the catalog band (the bed bug card's Antapex at 20 g per gallon, band 10-30),
-// or undefined. The form starts the row's per-gallon rate there instead of at the bottom of the band; the band's top stays
-// the review ceiling.
+// The visit card's own tank rate for this product (response.cardRates: the bed bug cards' Antapex at 20 g per gallon, catalog
+// band 10-30), or null. It covers every line of the card, also one the visit does not seed (the bed bug follow-up).
+function cardRateFor(response, productId) {
+  if (!Array.isArray(response?.cardRates) || OWNED_ELSEWHERE_PROGRAM_KEYS.has(response.programKey)) return null;
+  return response.cardRates.find((row) => String(row?.id) === String(productId)) || null;
+}
+
+// `startRate`: where the form starts the row's per-gallon rate instead of the bottom of the catalog band: the card's rate, or
+// '' (blank) when a booked add-on's card mixes the product at another rate. Undefined: the catalog decides, as before. The
+// band's top stays the review ceiling. The method is the card's too, for a seeded product the tech removes and adds again.
 export function cardRateRow(response, product, methodOverride) {
   const item = labelUseItemFor(response, product.id);
-  const start = shouldApplyProtocolCompletionDefaults(response)
-    ? Number(response.products.find((row) => String(row?.id) === String(product.id))?.cardStartRate) : NaN;
+  const rate = cardRateFor(response, product.id);
+  const seeded = shouldApplyProtocolCompletionDefaults(response)
+    ? response.products.find((row) => String(row?.id) === String(product.id)) : null;
+  const start = rate?.cardStartRate === '' ? '' : Number(rate?.cardStartRate);
   return {
     product: labelUseProduct(product, item),
-    applicationMethodOverride: methodOverride || item?.completionApplicationMethod || undefined,
-    ...(start > 0 && Number.isFinite(start) ? { startRate: start } : {}),
+    applicationMethodOverride: methodOverride || item?.completionApplicationMethod || rate?.completionApplicationMethod || seeded?.completionApplicationMethod || undefined,
+    ...(start === '' || (start > 0 && Number.isFinite(start)) ? { startRate: start } : {}),
   };
 }
 

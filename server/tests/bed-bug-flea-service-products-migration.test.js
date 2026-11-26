@@ -195,6 +195,8 @@ describe('20261127120000 bed bug and flea service products', () => {
       (db) => { db.products_catalog[0].active = false; },
       (db) => { db.products_catalog[1].epa_reg_number = '53883-999'; },
       (db) => { db.products_catalog.push({ id: 'dup', name: 'MGK Crossfire Bed Bug Concentrate', epa_reg_number: '1021-2776', active: true }); },
+      // Two active rows of one name with different registration numbers: a list of names could not tell them apart.
+      (db) => { db.products_catalog[2].active = true; },
       (db) => { db.products_catalog = db.products_catalog.filter((row) => row.id !== 'demand'); },
     ]) {
       const { knex, db } = fakeKnex();

@@ -17570,9 +17570,10 @@ export function CompletionPanel({
       serviceLine: serviceLineFromType(rowType),
     });
     // The visit card's own tank rate (Antapex at 20 g per gallon on the bed bug card) starts a per-gallon row, never above
-    // the label band's top; any other row starts from the catalog as before.
-    const prefillRate = startRate && isPerGallonUnit(prefillRateUnit) && (labelMaxRate == null || startRate <= labelMaxRate)
-      ? startRate : catalogPrefillRate;
+    // the label band's top. A rate two booked cards disagree on starts blank. Any other row starts from the catalog as before.
+    const prefillRate = startRate === undefined || !isPerGallonUnit(prefillRateUnit) ? catalogPrefillRate
+      : startRate === "" ? ""
+        : labelMaxRate == null || startRate <= labelMaxRate ? startRate : catalogPrefillRate;
     // Lawn broadcast/granular products treat the whole measured lawn: start
     // the Sq ft field at the turf profile's treatable area and derive Total =
     // rate × area / 1,000 in the rate's own unit. Both stay editable; a

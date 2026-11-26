@@ -67,10 +67,12 @@ async function hasTables(knex, tables) {
   return true;
 }
 
-// The one active catalog row of a product (by name, and by registration number where given), or null.
+// The one active catalog row of that NAME, or null: the lists hold names only, so two active rows of one name (even with
+// different registration numbers) could not be told apart by a reader. Where a registration number is given, the row must carry it.
 async function activeRow(knex, name, epa = null) {
-  const rows = await knex('products_catalog').where({ name, active: true, ...(epa ? { epa_reg_number: epa } : {}) }).select('id');
-  return rows.length === 1 ? rows[0] : null;
+  const rows = await knex('products_catalog').where({ name, active: true }).select('id', 'epa_reg_number');
+  if (rows.length !== 1) return null;
+  return !epa || String(rows[0].epa_reg_number || '').trim() === epa ? rows[0] : null;
 }
 
 // Neither step writes a name or an id the catalog cannot resolve to one active row.
