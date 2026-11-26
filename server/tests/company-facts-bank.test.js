@@ -159,21 +159,41 @@ describe('hard blocks', () => {
     ['a million', 'We have served a million customers.'],
     ['a thousand square feet', 'Lawns of 1,000 square feet are included.'],
     ['zero', 'There is zero risk of that.'],
+    // No clock-time exception: a time is an amount too (intended; the owner rewords).
+    ['a clock time', 'Our office opens at nine a.m.'],
+    ['a clock time in digits', 'We open at 8:30 am.'],
+    ["a clock time with o'clock", "We open at ten o'clock."],
+    ['a clock time in the morning', 'We start at 8 in the morning.'],
+    ['a clock time in words in the morning', 'We start at nine in the morning.'],
+    ['a range of clock times', 'Crews work from 7 a.m. to 5 p.m.'],
+    ['an invalid time', 'We charge 49 in the morning.'],
+    // Any Unicode digit or number character.
+    ['fullwidth digits', 'We charge \uFF19\uFF19.'],
+    ['Arabic-Indic digits', 'We charge \u0664\u0669.'],
+    ['a superscript', 'We cover lot sizes of 5\u00B2.'],
+    ['a superscript alone', 'We cover lot \u00B2.'],
+    ['a vulgar fraction', 'We treat \u00BD of the yard.'],
+    ['a circled number', 'We treat zone \u2460.'],
+    // Multiplying and fraction words.
+    ['twice', 'We come out twice.'],
+    ['thrice', 'We come out thrice.'],
+    ['double', 'We apply a double treatment.'],
+    ['triple', 'We offer triple coverage.'],
+    ['quadruple', 'We offer quadruple coverage.'],
+    ['a quarter', 'We treat a quarter of the yard.'],
+    ['quarters', 'We treat the yard in quarters.'],
+    ['a third', 'We treat a third of the yard.'],
+    ['thirds', 'We treat the yard in thirds.'],
+    ['halves', 'We treat the yard in halves.'],
   ])('number_in_fact blocks %s (intended)', (_label, text) => {
     expect(blocksOf(text)).toContain('number_in_fact');
   });
 
   test.each([
-    'We open at 8:30 am.',
-    'We open at 8.30 am.',
-    'We open at nine thirty a.m.',
-    'Crews work from 7 a.m. to 5 p.m.',
-    "We open at ten o'clock.",
-    'We start at 8 in the morning.',
-    'We start at nine in the morning.',
-    'We close at 12:00 pm.',
-    'We close at twelve p.m.',
     'We offer quarterly, monthly, weekly and annual plans.',
+    'We work with a third-party lab, and a third party checks it.',
+    'We came out once and will come back.',
+    'Quarterly service keeps pests away.',
     'One of our techs will call you back.',
     'Ask one another.',
     'There is no one at the office overnight.',
@@ -187,13 +207,6 @@ describe('hard blocks', () => {
     'We service Palmetto and Parrish on Tuesdays.',
   ])('number_in_fact lets this through: %s', (text) => {
     expect(blocksOf(text)).not.toContain('number_in_fact');
-  });
-
-  test('a clock time does not hide an amount next to it, and invalid times are not times', () => {
-    expect(blocksOf('We open at 8 am and close at 99.')).toContain('number_in_fact');
-    expect(blocksOf('We open at 8 am. The visit is five.')).toContain('number_in_fact');
-    expect(blocksOf('We open at 8 am. A visit is five.')).toContain('number_in_fact');
-    expect(blocksOf('We open at 8 am and the fee is 49.')).toContain('number_in_fact');
   });
 
   test('lowercase sentence starts count, and abbreviations do not split a sentence', () => {

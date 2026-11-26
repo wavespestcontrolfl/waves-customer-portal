@@ -82,27 +82,26 @@ const ABBREVIATION_END_RE = /(?:\b[a-z]\.){2,}$|\b(?:mr|mrs|ms|dr|vs|approx|inc)
 // ("safe" is a hard block).
 const SAFETY_CLAIM_RE = /\bsafe(?:r|st|ly)?\b|\bnon[\s-]?toxic\b|\bharmless\b|\ball[\s-]?natural\b|\b(?:no|zero|without)\s+(?:harsh\s+|harmful\s+)?(?:chemicals?|toxins?|pesticides?)\b|\b(?:chemical|toxin|poison|pesticide)[\s-]?free\b|\b(?:eco|environmentally|child|kid|pet|family)[\s-]?friendly\b|\b(?:organic|green)\s+(?:pest|treatment|product|spray)/i;
 
-// number_in_fact: a bank fact states NO amount at all (owner: facts state no prices, counts or measures; the agents read them as policy,
-// and every attempt to tell a price from a count by wording kept leaking). So the text may hold no digit and no number word (zero to
-// nineteen, the tens, hundred, thousand, million, billion, dozen, half, couple), with ONE exception: a valid clock time ("8:30 am",
-// "nine a.m.", "ten o'clock", "8 in the morning"). "Quarterly", "monthly" and "weekly" are not numbers. "Prices" and "rates" are not
-// numbers either: the screens for those words are the soft warnings.
+// number_in_fact: a bank fact states NO amount at all (owner: facts state no prices, counts, measures or times; the agents read them as
+// policy, and every attempt to tell a price from a count by wording kept leaking). So the text may hold no digit of any script (any
+// Unicode decimal digit or other number character: fullwidth, Arabic-Indic, superscripts, vulgar fractions such as a half sign) and no
+// number word: zero to nineteen, the tens, hundred, thousand, million, billion, dozen, couple, and the multiplying or fraction words
+// half/halves, quarter(s), third(s) (but not "third-party"), twice, thrice, double, triple, quadruple. NO exception for clock times:
+// "Office opens at nine a.m." blocks (intended; the owner rewords). "Quarterly", "monthly", "weekly", "once", "first" and "second" are
+// not numbers. "Prices" and "rates" are not numbers either: the screens for those words are the soft warnings.
 const UNIT_WORD = 'one|two|three|four|five|six|seven|eight|nine';
 const TEEN_WORD = 'ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
-const NUMBER_WORD_RE = new RegExp(`\\b(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen|half|couple)\\b`, 'gi');
-// A valid clock time only: hour 1-12 (digit or word), optional minutes :00-:59, then a.m. / p.m. / o'clock, or the hour then "in the
-// morning/afternoon/evening". "99 pm", "ninety a.m.", "12:75 pm" and "49 in the morning" are not times, so they do not hide an amount.
-const CLOCK_HOUR_SRC = `(?:(?<![\\d.,:])(?:1[0-2]|0?[1-9])(?!\\d)(?:[:.][0-5]\\d(?!\\d))?|\\b(?:${UNIT_WORD}|ten|eleven|twelve)\\b(?:\\s+(?:fifteen|thirty|forty[-\\s]?five))?)`;
-const TIME_OF_DAY_RE = new RegExp(`${CLOCK_HOUR_SRC}\\s*(?:a\\.?m\\b\\.?|p\\.?m\\b\\.?|o'clock\\b)|${CLOCK_HOUR_SRC}\\s+in\\s+the\\s+(?:morning|afternoon|evening)\\b`, 'gi');
+const NUMBER_WORD_RE = new RegExp(`\\b(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen|couple|half|halves|quarters?|thirds?(?![-\\s]party\\b)|twice|thrice|double|triple|quadruple)\\b`, 'gi');
+const NUMBER_CHAR_RE = /[\p{Nd}\p{No}]/u;
 // "one" as a pronoun or in a compound is not a number: "one of our techs", "one another", "no one", "this one", "which one", "one-time".
 // ("anyone", "someone" and "everyone" never match \b one \b.) A counting "one" ("one visit", "one acre") still blocks.
 const ONE_PRONOUN_AFTER_RE = /^(?:\s+(?:of|another)\b|-(?:time|off)\b)/i;
 const ONE_PRONOUN_BEFORE_RE = /\b(?:no|this|that|which|each|every)\s+$/i;
 
-/** True when the text states an amount: any digit or number word, other than inside a valid clock time. */
+/** True when the text states an amount: any digit or number character, or any number word. */
 function hasNumberInFact(text) {
-  const plain = String(text).replace(TIME_OF_DAY_RE, ' TIME ');
-  if (/\d/.test(plain)) return true;
+  const plain = String(text);
+  if (NUMBER_CHAR_RE.test(plain)) return true;
   for (const m of plain.matchAll(NUMBER_WORD_RE)) {
     const pronoun = m[0].toLowerCase() === 'one'
       && (ONE_PRONOUN_AFTER_RE.test(plain.slice(m.index + 3)) || ONE_PRONOUN_BEFORE_RE.test(plain.slice(0, m.index)));
