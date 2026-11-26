@@ -406,6 +406,26 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(trigTimeline.ctx.join('\n')).not.toMatch(/applicant reply as trigger/);
   });
 
+  test('a recruiting reply mirrored in both tables never reaches the timeline, and a SID that does not resolve is unreadable', async () => {
+    const cid = await customer();
+    const number = phone(91);
+    const sid = `SM${tag}m1`;
+    const [conv] = await db('conversations').insert({ channel: 'sms', customer_id: cid, contact_phone: number }).returning('id');
+    made.conversations.push(conv.id);
+    await db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'mirrored applicant secret resume', message_type: 'job_applicant_reply', twilio_sid: sid, created_at: T0 });
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, message_type: 'job_applicant_reply', twilio_sid: sid, message_body: 'mirrored applicant secret resume', created_at: T0, status: 'received' });
+    // a real, earlier inbound text exists: the bell must not fall back to it
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, twilio_sid: `SM${tag}m0`, message_body: 'an ordinary earlier text', created_at: at(-60), status: 'received' });
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.unreadable).toBe(true);
+    expect(JSON.stringify(timeline)).not.toMatch(/secret resume/);
+    const missing = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=SM${tag}gone`);
+    const missingTimeline = await agent.buildTimeline(missing);
+    expect(missingTimeline.unreadable).toBe(true);
+    expect(missingTimeline.ctx).toEqual([]);
+  });
+
   test('a shared phone admits only rows tied to the customer; an unshared one also admits unlinked rows', async () => {
     const number = phone(82);
     const mine = await customer({ phone: number });

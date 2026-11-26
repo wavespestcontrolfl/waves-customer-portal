@@ -380,7 +380,8 @@ async function resolveInboundText(r, sid) {
   const canonical = await read('trigger-message', () => messagesBase(conn)
     .where('m.channel', 'sms').where('m.direction', 'inbound').where('m.twilio_sid', sid)
     .select('m.created_at', 'c.customer_id', conn.raw('left(m.body, 1500) as body'), conn.raw("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, '')) as phone")));
-  const legacy = await read('trigger-sms', () => excludeUnresolvedSendReservations(conn('sms_log as os').where('os.direction', 'inbound').where('os.twilio_sid', sid), 'os')
+  // Through smsBase: the same recruiting exclusion and reservation filter as every other text-log read.
+  const legacy = await read('trigger-sms', () => smsBase(conn).where('os.direction', 'inbound').where('os.twilio_sid', sid)
     .select('os.created_at', 'os.customer_id', conn.raw('left(os.message_body, 1500) as body'), conn.raw('os.from_phone as phone')));
   const found = [...canonical, ...legacy].filter((x) => x.created_at);
   if (!found.length) return null;
@@ -438,6 +439,8 @@ async function smsTimeline(r, alert, bellAt) {
   const text = sid ? await resolveInboundText(r, String(sid)) : null;
   const customerId = threadCustomer || text?.customerId || null;
   const anchor = text?.at || bellAt;
+  // The bell names a text that does not resolve (gone, or a recruiting message): fail closed. Never fall back to the latest inbound text.
+  if (sid && !text) return unreadable(anchor, bellAt);
   if (!customerId && !text?.phone) return unreadable(anchor, bellAt);
   const contact = await trustedContact(r, customerId, text?.phone, anchor);
   const { ctx, reply } = await smsContext(r, anchor, contact, text);
