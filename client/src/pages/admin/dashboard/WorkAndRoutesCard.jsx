@@ -32,19 +32,21 @@ function Block({ title, value, unit, lines = [], note, basis }) {
   );
 }
 
-function Unavailable({ title }) {
+function Unavailable({ title, reason }) {
   return (
     <div>
       <div className="text-ui-caption font-medium text-ink-secondary">{title}</div>
-      <div className="mt-1 text-ui-body text-ink-secondary">Unavailable. Try again shortly.</div>
+      <div className="mt-1 text-ui-body text-ink-secondary">{reason ? `Unavailable. ${reason}` : "Unavailable. Try again shortly."}</div>
     </div>
   );
 }
 
 function OwnerBlock({ owner }) {
-  if (!owner) return <Unavailable title="Owner reliance" />;
-  const hoursRow = owner.ownerFieldHoursPerWeek || {};
-  const share = owner.nonOwnerStopShare || {};
+  if (!owner || !owner.ownerFieldHoursPerWeek || !owner.nonOwnerStopShare) {
+    return <Unavailable title="Owner reliance" reason={owner?.unavailableReason} />;
+  }
+  const hoursRow = owner.ownerFieldHoursPerWeek;
+  const share = owner.nonOwnerStopShare;
   return (
     <Block
       title="Owner reliance"

@@ -6,6 +6,8 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// twilio.js pulls in the SDK and routes: only its owner-phone test is used here.
+jest.mock('../services/twilio', () => ({ isKnownOwnerPhone: (phone) => phone === '+19415550100' }));
 
 const svc = require('../services/ops-buyer-metrics');
 const { standardLaborMinutesFor, JOB_COST_STANDARD } = require('../services/job-costing');
@@ -24,12 +26,17 @@ describe('hours per week', () => {
 
 describe('standard stop minutes', () => {
   const std = { standardLaborMinutesFor, JOB_COST_STANDARD };
+  const stop = (...members) => ({ members });
   test('pest 25 and lawn 20 on site, plus 20 minutes of drive for each stop', () => {
-    const stops = [{ serviceType: 'Pest Control Visit' }, { serviceType: 'Lawn Care Visit' }];
+    const stops = [stop({ serviceType: 'Pest Control Visit' }), stop({ serviceType: 'Lawn Care Visit' })];
     expect(svc.standardStopMinutes(stops, std)).toBe(25 + 20 + 20 + 20);
   });
+  test('a grouped visit sums the on-site minutes of every member and drives once', () => {
+    const grouped = stop({ serviceType: 'Pest Control Visit' }, { serviceType: 'Lawn Care Visit' });
+    expect(svc.standardStopMinutes([grouped], std)).toBe(25 + 20 + 20);
+  });
   test('a type with no standard keeps its costed labor hours', () => {
-    expect(svc.standardStopMinutes([{ serviceType: 'Rodent Exclusion', laborHours: '1.5' }], std)).toBe(90 + 20);
+    expect(svc.standardStopMinutes([stop({ serviceType: 'Rodent Exclusion', laborHours: '1.5' })], std)).toBe(90 + 20);
   });
   test('no stops is 0 minutes', () => {
     expect(svc.standardStopMinutes([], std)).toBe(0);
@@ -87,38 +94,74 @@ describe('return-visit rate', () => {
 describe('route days', () => {
   // Monday 2026-11-23 through Sunday 2026-11-29: Thanksgiving is Thursday 2026-11-26.
   const week = ['2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26', '2026-11-27', '2026-11-28', '2026-11-29'];
-  const techs = [{ id: 'a', work_days: null }, { id: 'b', work_days: '{1,2,3,4}' }];
+  const techIds = ['a', 'b'];
   const none = new Set();
+  const count = (over = {}) => svc.countRouteDays({ techIds, dates: week, closedDates: none, absentKeys: none, ...over });
 
-  test('no work-days list means Monday to Friday; a list means those days', () => {
-    // a: Mon-Fri = 5; b: Mon-Thu = 4
-    expect(svc.countRouteDays({ techs, dates: week, closedDates: none, absentKeys: none })).toBe(9);
+  test('every technician counts on every open date: a technician with no work-days list works every open day', () => {
+    expect(count()).toBe(14);
   });
 
   test('a closed holiday takes every technician out for that date', () => {
     const closed = new Set(expandHolidayClosures('2026-11-23', '2026-11-29', new Set(['thanksgiving'])));
     expect(closed).toEqual(new Set(['2026-11-26']));
-    // Thursday gone: a 4, b 3
-    expect(svc.countRouteDays({ techs, dates: week, closedDates: closed, absentKeys: none })).toBe(7);
+    expect(count({ closedDates: closed })).toBe(12);
   });
 
-  test('a weekly day off closes that weekday for everyone, even a technician who works it', () => {
-    const fridays = new Set(expandWeeklyDaysOff('2026-11-23', '2026-11-29', new Set([5])));
-    expect(svc.countRouteDays({ techs, dates: week, closedDates: fridays, absentKeys: none })).toBe(8);
+  test('a weekly day off closes that weekday for everyone', () => {
+    const weekend = new Set(expandWeeklyDaysOff('2026-11-23', '2026-11-29', new Set([0, 6])));
+    expect(count({ closedDates: weekend })).toBe(10);
   });
 
-  test('a technician absence takes out only that technician on that date', () => {
-    expect(svc.countRouteDays({ techs, dates: week, closedDates: none, absentKeys: new Set(['b:2026-11-24']) })).toBe(8);
-  });
-
-  test('weekend dates count only for a technician whose list has them', () => {
-    const weekender = [{ id: 'c', work_days: [6, 0] }];
-    expect(svc.countRouteDays({ techs: weekender, dates: week, closedDates: none, absentKeys: none })).toBe(2);
+  test('an absence key (an absence or a work-days off day) takes out only that technician on that date', () => {
+    expect(count({ absentKeys: new Set(['b:2026-11-24', 'b:2026-11-28']) })).toBe(12);
   });
 
   test('no technicians or no dates is 0', () => {
-    expect(svc.countRouteDays({ techs: [], dates: week, closedDates: none, absentKeys: none })).toBe(0);
-    expect(svc.countRouteDays({ techs, dates: [], closedDates: none, absentKeys: none })).toBe(0);
+    expect(count({ techIds: [] })).toBe(0);
+    expect(count({ dates: [] })).toBe(0);
+  });
+});
+
+describe('return records', () => {
+  const row = (over = {}) => ({ flagged: false, service_key: null, service_name: null, record_type: 'Pest Control Visit', visit_type: null, ...over });
+  test('a flagged record is a return visit', () => {
+    expect(svc.isReturnRecord(row({ flagged: true }))).toBe(true);
+  });
+  test('a flagless catalog re-service is one, by catalog key, name or service type', () => {
+    expect(svc.isReturnRecord(row({ service_key: 'pest_re_service' }))).toBe(true);
+    expect(svc.isReturnRecord(row({ service_key: 'lawn_re_service' }))).toBe(true);
+    expect(svc.isReturnRecord(row({ service_key: 'rodent_trapping_followup' }))).toBe(true);
+    expect(svc.isReturnRecord(row({ service_name: 'Pest Re-Service' }))).toBe(true);
+    expect(svc.isReturnRecord(row({ record_type: 'Lawn Care Re-service' }))).toBe(true);
+    expect(svc.isReturnRecord(row({ visit_type: 'Pest Control Re-Service' }))).toBe(true);
+  });
+  test('an ordinary paid visit, and the paid extra trap check, are not', () => {
+    expect(svc.isReturnRecord(row())).toBe(false);
+    expect(svc.isReturnRecord(row({ service_key: 'rodent_trap_check_additional' }))).toBe(false);
+  });
+});
+
+describe('owner identity', () => {
+  const dbWith = (rows) => {
+    const builder = new Proxy({}, {
+      get: (_t, key) => (key === 'then' ? (resolve) => Promise.resolve(rows).then(resolve) : () => builder),
+    });
+    return () => builder;
+  };
+  test('exactly one admin field technician with an owner phone is the owner', async () => {
+    const db = dbWith([{ id: 'o', phone: '+19415550100' }, { id: 'x', phone: '+19415550111' }, { id: 'n', phone: null }]);
+    expect(await svc.resolveOwnerTechnician(db)).toEqual({ id: 'o' });
+  });
+  test('none is unavailable with a reason', async () => {
+    const out = await svc.resolveOwnerTechnician(dbWith([{ id: 'x', phone: '+19415550111' }]));
+    expect(out.id).toBeUndefined();
+    expect(out.reason).toMatch(/No active field technician/);
+  });
+  test('two is unavailable with a reason, never a pick', async () => {
+    const out = await svc.resolveOwnerTechnician(dbWith([{ id: 'o', phone: '+19415550100' }, { id: 'p', phone: '+19415550100' }]));
+    expect(out.id).toBeUndefined();
+    expect(out.reason).toMatch(/More than one/);
   });
 });
 
@@ -159,7 +202,9 @@ describe('buildOpsBuyerMetrics', () => {
     const db = fakeDb({
       technicians: new Error('technicians unavailable'),
       time_entries: [{ minutes: '0', shifts: '0' }],
-      service_records: [{ revenue_year: '1000', revenue_quarter: '400', days_year: '10', days_quarter: '4', stops: '40', return_stops: '2' }],
+      // The stand-in answers every service_records query with this one row: the revenue query reads its totals, the
+      // stop query sees one completed stop.
+      service_records: [{ revenue_year: '1000', revenue_quarter: '400', days_year: '10', days_quarter: '4', stop_key: 'k1', flagged: true }],
       scheduled_services: [{ stops: '5' }],
     });
     const out = await svc.buildOpsBuyerMetrics({ db, now: new Date('2026-11-26T15:00:00Z') });
@@ -168,7 +213,7 @@ describe('buildOpsBuyerMetrics', () => {
     expect(Object.keys(out.errors).sort()).toEqual(['ownerReliance', 'routeFill']);
     expect(out.revenuePerRouteDay.last12Months).toMatchObject({ revenue: 1000, routeDays: 10, revenuePerRouteDay: 100 });
     expect(out.revenuePerRouteDay.last90Days).toMatchObject({ revenue: 400, routeDays: 4, revenuePerRouteDay: 100 });
-    expect(out.returnVisitRate).toMatchObject({ returnVisits: 2, completedStops: 40, rate: 0.05 });
+    expect(out.returnVisitRate).toMatchObject({ returnVisits: 1, completedStops: 1, rate: 1 });
   });
 
   test('every query failing still returns a body with four nulls, never throws', async () => {

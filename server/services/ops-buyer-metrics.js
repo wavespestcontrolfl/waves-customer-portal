@@ -9,23 +9,28 @@
  *        job-costing standard minutes (JOB_COST_STANDARD: pest 25, lawn 20; other types keep their costed labor_hours)
  *        + the standard drive per stop (20 minutes). The payload carries both figures and names the one it used.
  *     b. the share of completed stops in the last 12 months done by someone other than the owner.
- *     The owner is a technicians row with role 'admin' (the owner-operator is the one admin who also works the field).
+ *     The owner is the ONE assignable field technician with the admin role whose phone is a known owner phone
+ *     (twilio.js isKnownOwnerPhone, the identity tech-open-visit-nudge.js already uses). No match, or more than one,
+ *     makes both owner numbers unavailable (null plus a reason), never a zero or a 100% share.
  *  2. Revenue per route day: SUM(service_records.revenue) (the gross-margin tile's basis: every visit with a revenue
  *     figure) / distinct (technician, ET date) pairs with at least one completed stop. Last 12 months and 90 days.
  *  3. Route fill: scheduled (not cancelled, skipped, no-show or rescheduled) stops in the next 28 days / (route days
- *     available x 12). A route day is an active field technician on a date they work (technicians.work_days, else
- *     Monday to Friday), not a company closed day (scheduling/blackout-dates.js: one-off dates, weekly days off, the
- *     closed holidays) and not a technician absence (technician_absences, which carries birthdays and holiday taken
- *     days). 12 stops is the owner's full-day figure. Planning only, not a pay target.
+ *     available x 12). A route day is an active field technician on an open date: not a company closed day
+ *     (scheduling/blackout-dates.js: one-off dates, weekly days off, the closed holidays) and not a technician absence
+ *     (technician_absences, which carries birthdays and holiday taken days; plus, while GATE_TECH_WORK_DAYS is live,
+ *     the weekdays outside the technician's work_days, both through absentTechDays like the scheduler). A technician with
+ *     no work_days works every open day. 12 stops is the owner's full-day figure. Planning only, not a pay target.
  *  4. Return-visit rate, 12 months: completed stops that are callbacks or free returns (service_records.is_callback,
- *     scheduled_services.is_callback, followup_included) / all completed stops. The Callback Rate tile is unchanged.
+ *     scheduled_services.is_callback, followup_included, or a re-service by the shared classifier re-service.js isReService
+ *     on the catalog key, name or service type, as production-share.js does) / all completed stops. The Callback Rate tile is unchanged.
  *
  * A stop is one physical visit: a grouped visit (scheduled_services.visit_id) counts once, a record with no group on
  * its own, the same rule as paidStopsForWindow in monthly-financial-snapshot.js. Every metric runs in its own
  * try/catch: a failed query returns null and an error note for that metric, never a 500.
  */
 const logger = require('./logger');
-const { applyAssignable, absentTechDays, normalizeWorkDays, dayOfWeekOfDate } = require('./technician-eligibility');
+const { applyAssignable, absentTechDays } = require('./technician-eligibility');
+const { isReService } = require('./re-service');
 const { getBlackoutDates } = require('./scheduling/blackout-dates');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const { STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
@@ -36,8 +41,6 @@ const YEAR_DAYS = 365;
 const QUARTER_DAYS = 90;
 const WEEKS_SHORT = 4;
 const WEEKS_LONG = 12;
-// No work-days list: the technician works Monday to Friday (0 = Sunday). A closed weekly day off still applies on top.
-const DEFAULT_WORK_DAYS = Object.freeze([1, 2, 3, 4, 5]);
 // Visit statuses that are not a stop on a route (same list as job-costing's PREPAY_UNCOUNTED_VISIT_STATUSES).
 const NOT_A_STOP_STATUSES = ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled'];
 
@@ -79,28 +82,29 @@ function returnVisitRatio(returnStops, completedStops) {
   return ratio(returnStops, completedStops);
 }
 
-/** Minutes the owner's stops cost by the job-costing standard: each stop's standard on-site time + one standard drive. */
+/**
+ * Minutes the owner's stops cost by the job-costing standard: the standard on-site time of EVERY service done at the stop
+ * (a grouped visit sums its members) + one standard drive for the stop. `stops` = [{ members: [{ serviceType, laborHours }] }].
+ */
 function standardStopMinutes(stops, standard) {
   const { standardLaborMinutesFor, JOB_COST_STANDARD } = standard;
   return stops.reduce((sum, stop) => {
-    const onSite = standardLaborMinutesFor(stop.serviceType) ?? (num(stop.laborHours) * 60);
+    const onSite = stop.members.reduce((acc, m) => acc + (standardLaborMinutesFor(m.serviceType) ?? (num(m.laborHours) * 60)), 0);
     return sum + onSite + JOB_COST_STANDARD.defaultDriveMinutes;
   }, 0);
 }
 
 /**
- * Route days in a date list: for each date that is not a closed day, each technician whose work days include the weekday
- * and who is not absent that date counts one. `techs` = [{ id, work_days }], `closedDates` a Set of YYYY-MM-DD,
- * `absentKeys` a Set of `${techId}:${date}`.
+ * Route days in a date list: for each date that is not a closed day, each technician who is not absent (or off by work
+ * days) that date counts one. `techIds` = [id], `closedDates` a Set of YYYY-MM-DD, `absentKeys` a Set of `${techId}:${date}`
+ * (absentTechDays: absences, plus work-days off days while GATE_TECH_WORK_DAYS is live).
  */
-function countRouteDays({ techs, dates, closedDates, absentKeys }) {
+function countRouteDays({ techIds, dates, closedDates, absentKeys }) {
   let days = 0;
   for (const date of dates) {
     if (closedDates.has(date)) continue;
-    const dow = dayOfWeekOfDate(date);
-    for (const tech of techs) {
-      const works = normalizeWorkDays(tech.work_days) || DEFAULT_WORK_DAYS;
-      if (works.includes(dow) && !absentKeys.has(`${tech.id}:${date}`)) days += 1;
+    for (const id of techIds) {
+      if (!absentKeys.has(`${id}:${date}`)) days += 1;
     }
   }
   return days;
@@ -124,15 +128,25 @@ const completedStopsBase = (db, from, to) => db('service_records as sr')
   .where('sr.status', 'completed')
   .whereBetween('sr.service_date', [from, to]);
 
-async function ownerTechnicianIds(db) {
-  const rows = await db('technicians').where('role', 'admin').select('id');
-  return rows.map((row) => row.id);
+/**
+ * The owner-operator's technician id: the ONE assignable field technician with the admin role whose phone is a known owner
+ * phone. { id } on exactly one match, else { reason } (none, or several, so it cannot be told apart).
+ */
+async function resolveOwnerTechnician(db) {
+  const { isKnownOwnerPhone } = require('./twilio');
+  const rows = await applyAssignable(db('technicians')).where('role', 'admin').select('id', 'phone');
+  const owners = rows.filter((row) => row.phone && isKnownOwnerPhone(row.phone));
+  if (owners.length === 1) return { id: owners[0].id };
+  return {
+    reason: owners.length === 0
+      ? 'No active field technician with the admin role has a known owner phone, so the owner cannot be told apart.'
+      : 'More than one active field technician with the admin role has a known owner phone, so the owner cannot be told apart.',
+  };
 }
 
-async function ownerClockMinutes(db, ownerIds, from, to) {
-  if (!ownerIds.length) return { minutes: 0, shifts: 0 };
+async function ownerClockMinutes(db, ownerId, from, to) {
   const row = await db('time_entries')
-    .whereIn('technician_id', ownerIds)
+    .where('technician_id', ownerId)
     .where('entry_type', 'shift')
     .whereIn('status', ['completed', 'edited'])
     .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [from, to])
@@ -141,35 +155,33 @@ async function ownerClockMinutes(db, ownerIds, from, to) {
   return { minutes: num(row && row.minutes), shifts: num(row && row.shifts) };
 }
 
-async function ownerStopRows(db, ownerIds, from, to) {
-  if (!ownerIds.length) return [];
+async function ownerStopRows(db, ownerId, from, to) {
   const rows = await completedStopsBase(db, from, to)
-    .whereRaw(`${TECH_SQL} IN (${ownerIds.map(() => '?').join(', ')})`, ownerIds)
+    .whereRaw(`${TECH_SQL} = ?`, [ownerId])
     .select(
       db.raw(`${STOP_KEY_SQL} AS stop_key`),
       'sr.service_type',
       'sr.labor_hours',
       db.raw("to_char(sr.service_date, 'YYYY-MM-DD') AS service_date"),
     );
-  // One row per physical stop (a grouped visit's services book one stop and its longest costed time).
+  // One entry per physical stop; a grouped visit keeps every service done at it.
   const stops = new Map();
   for (const row of rows) {
-    const prior = stops.get(row.stop_key);
-    if (!prior || num(row.labor_hours) > num(prior.laborHours)) {
-      stops.set(row.stop_key, { serviceType: row.service_type, laborHours: row.labor_hours, date: row.service_date });
-    }
+    const stop = stops.get(row.stop_key) || { date: row.service_date, members: [] };
+    stop.members.push({ serviceType: row.service_type, laborHours: row.labor_hours });
+    stops.set(row.stop_key, stop);
   }
   return [...stops.values()];
 }
 
 /** The owner's weekly hours for the last 4 and 12 weeks, from the time clock when it has shifts, else from stops. */
-async function ownerFieldHours(db, now, ids) {
+async function ownerFieldHours(db, now, ownerId) {
   const standard = require('./job-costing');
   const short = trailingWindow(now, WEEKS_SHORT * 7);
   const long = trailingWindow(now, WEEKS_LONG * 7);
-  const clockShort = await ownerClockMinutes(db, ids, short.from, short.to);
-  const clockLong = await ownerClockMinutes(db, ids, long.from, long.to);
-  const stops = await ownerStopRows(db, ids, long.from, long.to);
+  const clockShort = await ownerClockMinutes(db, ownerId, short.from, short.to);
+  const clockLong = await ownerClockMinutes(db, ownerId, long.from, long.to);
+  const stops = await ownerStopRows(db, ownerId, long.from, long.to);
   const stopsShort = stops.filter((stop) => stop.date >= short.from);
   const estimate = {
     last4Weeks: hoursPerWeek(standardStopMinutes(stopsShort, standard), WEEKS_SHORT),
@@ -181,7 +193,6 @@ async function ownerFieldHours(db, now, ids) {
   };
   const useClock = clockLong.shifts > 0;
   return {
-    ownerFound: ids.length > 0,
     source: useClock ? 'time_clock' : 'stops_standard',
     last4Weeks: useClock ? clock.last4Weeks : estimate.last4Weeks,
     last12Weeks: useClock ? clock.last12Weeks : estimate.last12Weeks,
@@ -191,42 +202,62 @@ async function ownerFieldHours(db, now, ids) {
       ? 'Owner shifts on the time clock, completed and edited entries, summed by work date and divided by the weeks '
         + '(4 and 12). Shift time as clocked: breaks are not taken out.'
       : 'No owner time-clock shifts in the last 12 weeks, so: the owner\'s completed stops x standard on-site minutes '
-        + '(pest 25, lawn 20; other types use their costed labor hours) + 20 minutes of drive per stop, divided by the weeks.',
+        + '(pest 25, lawn 20; other types use their costed labor hours), every service of a grouped visit counted, + 20 minutes of '
+        + 'drive once per stop, divided by the weeks.',
     windows: { last4Weeks: short, last12Weeks: long },
   };
 }
 
-/** Per-technician completed stops (and return visits) in the window, plus the overall totals. */
+/** Is this completed record a return visit: a callback flag, an included follow-up, or a re-service (re-service.js). */
+const isReturnRecord = (row) => row.flagged === true || isReService({
+  serviceKey: row.service_key, serviceName: row.service_name, serviceType: `${row.record_type || ''} ${row.visit_type || ''}`,
+});
+
+/**
+ * Completed stops in the window: { stops, returnStops, byTech: Map(technicianId|null -> stops) }. One stop per
+ * COALESCE(visit_id, record id); a stop is a return visit when any of its records is one (isReturnRecord).
+ */
 async function completedStopCounts(db, from, to) {
-  const totals = await completedStopsBase(db, from, to)
+  const rows = await completedStopsBase(db, from, to)
+    .leftJoin('services as sv', 'sv.id', 'ss.service_id')
     .select(
-      db.raw(`COUNT(DISTINCT ${STOP_KEY_SQL})::text AS stops`),
-      db.raw(`COUNT(DISTINCT ${STOP_KEY_SQL}) FILTER (WHERE ${RETURN_VISIT_SQL})::text AS return_stops`),
-    )
-    .first();
-  const byTech = await completedStopsBase(db, from, to)
-    .select(db.raw(`${TECH_SQL} AS technician_id`), db.raw(`COUNT(DISTINCT ${STOP_KEY_SQL})::text AS stops`))
-    .groupByRaw(TECH_SQL);
-  return {
-    stops: num(totals && totals.stops),
-    returnStops: num(totals && totals.return_stops),
-    byTech: byTech.map((row) => ({ technicianId: row.technician_id, stops: num(row.stops) })),
-  };
+      db.raw(`${STOP_KEY_SQL} AS stop_key`),
+      db.raw(`${TECH_SQL} AS technician_id`),
+      db.raw(`${RETURN_VISIT_SQL} AS flagged`),
+      db.raw('COALESCE(sv.service_key, ss.service_key_snapshot) AS service_key'),
+      'sv.name AS service_name',
+      'sr.service_type AS record_type',
+      'ss.service_type AS visit_type',
+    );
+  const stops = new Map();
+  for (const row of rows) {
+    const stop = stops.get(row.stop_key) || { technicianId: null, returned: false };
+    stop.technicianId = stop.technicianId || row.technician_id;
+    stop.returned = stop.returned || isReturnRecord(row);
+    stops.set(row.stop_key, stop);
+  }
+  const byTech = new Map();
+  let returnStops = 0;
+  for (const stop of stops.values()) {
+    byTech.set(stop.technicianId, (byTech.get(stop.technicianId) || 0) + 1);
+    if (stop.returned) returnStops += 1;
+  }
+  return { stops: stops.size, returnStops, byTech };
 }
 
 /** Owner reliance: weekly hours and the non-owner share of the last 12 months' completed stops. */
 async function ownerReliance(db, now) {
   const year = trailingWindow(now, YEAR_DAYS);
-  const ownerIds = await ownerTechnicianIds(db);
-  const hours = await ownerFieldHours(db, now, ownerIds);
-  const ids = new Set(ownerIds);
+  const owner = await resolveOwnerTechnician(db);
+  if (!owner.id) return { ownerFieldHoursPerWeek: null, nonOwnerStopShare: null, unavailableReason: owner.reason };
+  const hours = await ownerFieldHours(db, now, owner.id);
   const counts = await completedStopCounts(db, year.from, year.to);
-  const split = counts.byTech.reduce((acc, row) => {
-    if (!row.technicianId) acc.unassigned += row.stops;
-    else if (ids.has(row.technicianId)) acc.owner += row.stops;
-    else acc.other += row.stops;
-    return acc;
-  }, { owner: 0, other: 0, unassigned: 0 });
+  const split = { owner: 0, other: 0, unassigned: 0 };
+  for (const [technicianId, stops] of counts.byTech) {
+    if (!technicianId) split.unassigned += stops;
+    else if (technicianId === owner.id) split.owner += stops;
+    else split.other += stops;
+  }
   return {
     ownerFieldHoursPerWeek: hours,
     nonOwnerStopShare: {
@@ -236,7 +267,8 @@ async function ownerReliance(db, now) {
       unassignedStops: split.unassigned,
       window: year,
       basis: 'Completed stops done by someone other than the owner / completed stops with a technician on them. '
-        + 'The owner is a technician account with the admin role. Stops with no technician are left out.',
+        + 'The owner is the one active field technician with the admin role and a known owner phone. '
+        + 'Stops with no technician are left out.',
     },
   };
 }
@@ -282,12 +314,12 @@ async function routeFill(db, now) {
   const dates = upcomingDates(now, ROUTE_WINDOW_DAYS);
   const from = dates[0];
   const to = dates[dates.length - 1];
-  const techs = await applyAssignable(db('technicians')).select('id', 'work_days');
+  const techs = await applyAssignable(db('technicians')).select('id');
   const closedDates = await getBlackoutDates(from, to, db, { strict: true });
   const absentKeys = techs.length
-    ? await absentTechDays(db, { dateFrom: from, dateTo: to, technicianIds: techs.map((t) => t.id), includeOffDays: false })
+    ? await absentTechDays(db, { dateFrom: from, dateTo: to, technicianIds: techs.map((t) => t.id) })
     : new Set();
-  const routeDays = countRouteDays({ techs, dates, closedDates, absentKeys });
+  const routeDays = countRouteDays({ techIds: techs.map((t) => t.id), dates, closedDates, absentKeys });
   const scheduledStops = await scheduledStopCount(db, from, to);
   return {
     window: { from, to },
@@ -299,8 +331,9 @@ async function routeFill(db, now) {
     closedDays: [...closedDates].filter((d) => d >= from && d <= to).sort(),
     label: 'planning only, not a pay target',
     basis: 'Scheduled stops (not cancelled, skipped, no-show or rescheduled) in the next 28 days / (route days available x 12). '
-      + 'Route days: each active field technician on each day they work (their work days, else Monday to Friday), '
-      + 'minus company closed days (weekly days off, one-off dates and the closed holidays) and technician absences.',
+      + 'Route days: each active field technician on each open day (no work-days list means every open day; a list counts only '
+      + 'while the work-days setting is on), minus company closed days (weekly days off, one-off dates and the closed '
+      + 'holidays) and technician absences.',
   };
 }
 
@@ -313,7 +346,7 @@ async function returnVisitRate(db, now) {
     returnVisits: counts.returnStops,
     completedStops: counts.stops,
     rate: returnVisitRatio(counts.returnStops, counts.stops),
-    basis: 'Completed stops that are callbacks or free return visits (is_callback, included follow-up) / all completed stops. '
+    basis: 'Completed stops that are callbacks, included follow-ups or catalog re-services / all completed stops. '
       + 'Not the same figure as the Callback Rate tile, which uses the dashboard period.',
   };
 }
@@ -349,6 +382,8 @@ module.exports = {
   returnVisitRatio,
   standardStopMinutes,
   countRouteDays,
+  isReturnRecord,
+  resolveOwnerTechnician,
   trailingWindow,
   STOPS_PER_FULL_DAY,
 };

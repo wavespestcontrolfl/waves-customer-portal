@@ -52,6 +52,15 @@ describe("WorkAndRoutesCard", () => {
     expect(screen.getByText("$200")).toBeInTheDocument();
   });
 
+  test("an owner that cannot be told apart shows unavailable with the reason, never zero or 100%", () => {
+    const reason = "More than one active field technician with the admin role has a known owner phone, so the owner cannot be told apart.";
+    render(<WorkAndRoutesCard data={{ ...DATA, ownerReliance: { ownerFieldHoursPerWeek: null, nonOwnerStopShare: null, unavailableReason: reason } }} />);
+    expect(screen.getByText(`Unavailable. ${reason}`)).toBeInTheDocument();
+    expect(screen.queryByText("0.0 h")).not.toBeInTheDocument();
+    expect(screen.queryByText("100%")).not.toBeInTheDocument();
+    expect(screen.getByText("$200")).toBeInTheDocument();
+  });
+
   test("ratios with no denominator show a dash, never 0", () => {
     const data = {
       ...DATA,

@@ -13,6 +13,8 @@ jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), 
   },
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// twilio.js pulls in the SDK and routes: only its owner-phone test is used here.
+jest.mock('../services/twilio', () => ({ isKnownOwnerPhone: (phone) => phone === '+19415550100' }));
 
 const { randomUUID } = require('node:crypto');
 const svc = require('../services/ops-buyer-metrics');
@@ -21,6 +23,8 @@ jest.setTimeout(60000);
 // Thursday 2026-11-26, 10 AM ET (Thanksgiving). Windows: 12 months from 2025-11-27, 90 days from 2026-08-29,
 // 4 weeks from 2026-10-30, 12 weeks from 2026-09-04, next 28 days 2026-11-26 to 2026-12-23.
 const NOW = new Date('2026-11-26T15:00:00Z');
+const OWNER_PHONE = '+19415550100';
+const GATE = 'GATE_TECH_WORK_DAYS';
 
 postgres('ops buyer metrics (live Postgres)', () => {
   let database;
@@ -28,6 +32,7 @@ postgres('ops buyer metrics (live Postgres)', () => {
   let customerId;
   let owner;
   let other;
+  const OLD_GATE = process.env[GATE];
 
   const technician = async (fields) => {
     const id = randomUUID();
@@ -100,10 +105,14 @@ postgres('ops buyer metrics (live Postgres)', () => {
     await trx('scheduled_services').del();
     customerId = randomUUID();
     await trx('customers').insert({ id: customerId, first_name: 'Sample', last_name: 'Customer', phone: '+19415550143' });
-    owner = await technician({ role: 'admin' });
+    delete process.env[GATE];
+    owner = await technician({ role: 'admin', phone: OWNER_PHONE });
     other = await technician({ role: 'technician', work_days: [1, 2, 3, 4] });
   });
-  afterEach(async () => { await trx.rollback(); });
+  afterEach(async () => {
+    await trx.rollback();
+    if (OLD_GATE === undefined) delete process.env[GATE]; else process.env[GATE] = OLD_GATE;
+  });
 
   // Owner: 11-02 two pest stops (100, 120), 11-03 one lawn stop (80), 11-06 an included follow-up ($0).
   // Other: 11-04 one stop (150), 11-05 a grouped visit of two services (60 + 40) = ONE stop, 11-06 a callback ($0),
@@ -139,7 +148,6 @@ postgres('ops buyer metrics (live Postgres)', () => {
       expect(hours.source).toBe('time_clock');
       expect(hours.last4Weeks).toBe(4); // 960 min / 60 / 4
       expect(hours.last12Weeks).toBe(2.2); // 1560 min / 60 / 12 = 2.17
-      expect(hours.ownerFound).toBe(true);
     });
 
     it('with no owner shifts the hours are estimated from completed stops at the standard minutes plus drive', async () => {
@@ -154,6 +162,16 @@ postgres('ops buyer metrics (live Postgres)', () => {
       expect(hours.last4Weeks).toBe(0.7);
     });
 
+    it('the estimate sums every service of a grouped owner visit and adds the drive once per stop', async () => {
+      const visitId = await group('2026-11-10');
+      await record('2026-11-10', { technician_id: owner, revenue: 60 }, { visit_id: visitId });
+      await record('2026-11-10', { technician_id: owner, revenue: 40, service_type: 'Lawn Care Visit' }, { visit_id: visitId });
+      await record('2026-11-11', { technician_id: owner, revenue: 90 });
+      const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      // Grouped stop: pest 25 + lawn 20 + one drive 20 = 65. Plain stop: pest 25 + drive 20 = 45. Total 110 minutes.
+      expect(ownerReliance.ownerFieldHoursPerWeek.stopsStandard).toEqual({ last4Weeks: 0.5, last12Weeks: 0.2 });
+    });
+
     it('the non-owner share counts a grouped visit once and leaves unassigned stops out', async () => {
       await seedYear();
       const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
@@ -166,12 +184,30 @@ postgres('ops buyer metrics (live Postgres)', () => {
       expect(ownerReliance.ownerFieldHoursPerWeek.last4Weeks).toBe(0);
     });
 
-    it('with no admin account the owner is not found and nothing is attributed to an owner', async () => {
-      await trx('technicians').where({ id: owner }).update({ role: 'technician' });
+    it('an owner that cannot be identified makes both owner numbers unavailable, never 0 hours or a 100% share', async () => {
+      await trx('technicians').where({ id: owner }).update({ phone: '+19415550111' });
+      await seedYear();
+      const { ownerReliance, errors } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      expect(errors).toEqual({});
+      expect(ownerReliance.ownerFieldHoursPerWeek).toBeNull();
+      expect(ownerReliance.nonOwnerStopShare).toBeNull();
+      expect(ownerReliance.unavailableReason).toMatch(/No active field technician/);
+    });
+
+    it('two admin field technicians with an owner phone cannot be told apart: unavailable', async () => {
+      await technician({ role: 'admin', phone: OWNER_PHONE });
       await seedYear();
       const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
-      expect(ownerReliance.ownerFieldHoursPerWeek.ownerFound).toBe(false);
-      expect(ownerReliance.nonOwnerStopShare.share).toBe(1);
+      expect(ownerReliance.nonOwnerStopShare).toBeNull();
+      expect(ownerReliance.unavailableReason).toMatch(/More than one/);
+    });
+
+    it('an office admin who is not a field technician, or an admin without an owner phone, does not make the owner ambiguous', async () => {
+      await technician({ role: 'admin', phone: OWNER_PHONE, field_dispatchable: false });
+      await technician({ role: 'admin', phone: '+19415550122' });
+      await seedYear();
+      const { ownerReliance } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      expect(ownerReliance.nonOwnerStopShare).toMatchObject({ ownerStops: 4, otherStops: 4 });
     });
   });
 
@@ -209,6 +245,15 @@ postgres('ops buyer metrics (live Postgres)', () => {
       expect(returnVisitRate).toMatchObject({ completedStops: 2, returnVisits: 1, rate: 0.5 });
     });
 
+    it('a flagless catalog re-service counts, by the catalog key or by the service type, as production share does', async () => {
+      await record('2026-11-03', { technician_id: other, revenue: 0 }, { service_key_snapshot: 'pest_re_service' }); // key only, no flag
+      await record('2026-11-04', { technician_id: other, revenue: 0, service_type: 'Lawn Care Re-Service' }); // name only, no flag
+      await record('2026-11-05', { technician_id: other, revenue: 90 });
+      await record('2026-11-06', { technician_id: other, revenue: 90, service_type: 'Pest Control Visit' }, { service_key_snapshot: 'rodent_trap_check_additional' }); // paid extra check: not a return
+      const { returnVisitRate } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      expect(returnVisitRate).toMatchObject({ completedStops: 4, returnVisits: 2, rate: 0.5 });
+    });
+
     it('no stops is null', async () => {
       const { returnVisitRate } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
       expect(returnVisitRate).toMatchObject({ completedStops: 0, returnVisits: 0, rate: null });
@@ -223,11 +268,7 @@ postgres('ops buyer metrics (live Postgres)', () => {
       await setting('schedule_holiday_closures', '["thanksgiving"]');
     });
 
-    it('route days: work days, the weekly days off, a closed holiday and uncleared absences; stops: not cancelled, grouped once', async () => {
-      // Window 11-26 to 12-23 holds 20 weekdays; Thanksgiving (Thu 11-26) is closed: 19.
-      // owner (no work-days list = Monday to Friday): 19. other (Monday to Thursday): 16 Mon-Thu weekdays - Thanksgiving = 15.
-      await trx('technician_absences').insert({ technician_id: other, absence_date: '2026-12-01', reason: 'other' }); // out: -1
-      await trx('technician_absences').insert({ technician_id: other, absence_date: '2026-12-02', reason: 'other', cleared_at: trx.fn.now() }); // cleared: counts
+    const seedFillStops = async () => {
       await upcoming('2026-11-26', { status: 'completed', technician_id: owner });
       await upcoming('2026-11-27', { technician_id: owner });
       await upcoming('2026-12-01', { status: 'confirmed', technician_id: other });
@@ -242,24 +283,40 @@ postgres('ops buyer metrics (live Postgres)', () => {
       await upcoming('2026-12-02', { status: 'rescheduled' });
       await upcoming('2026-11-25'); // before the window
       await upcoming('2026-12-24'); // after it
+    };
+
+    it('route days: every open day for each technician, minus closed days and uncleared absences; stops: not cancelled, grouped once', async () => {
+      // Window 11-26 to 12-23 holds 20 weekdays and 8 weekend days. Weekends are the weekly days off and Thanksgiving
+      // (Thu 11-26) is closed: 19 open days. Two technicians, and the work-days list of `other` is ignored (the setting is off).
+      await trx('technician_absences').insert({ technician_id: other, absence_date: '2026-12-01', reason: 'other' }); // out: -1
+      await trx('technician_absences').insert({ technician_id: other, absence_date: '2026-12-02', reason: 'other', cleared_at: trx.fn.now() }); // cleared: counts
+      await seedFillStops();
       const { routeFill, errors } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
       expect(errors).toEqual({});
       expect(routeFill).toMatchObject({
         window: { from: '2026-11-26', to: '2026-12-23' },
         scheduledStops: 6,
-        routeDaysAvailable: 33, // 19 + 15 - 1
+        routeDaysAvailable: 37, // 19 + 19 - 1
         activeTechnicians: 2,
         label: 'planning only, not a pay target',
       });
-      expect(routeFill.fillRatio).toBe(0.0152); // 6 / (33 x 12)
+      expect(routeFill.fillRatio).toBe(0.0135); // 6 / (37 x 12)
       expect(routeFill.closedDays).toContain('2026-11-26');
       expect(routeFill.closedDays).toContain('2026-11-28');
     });
 
-    it('a one-off closed date and an empty week of work', async () => {
+    it('with GATE_TECH_WORK_DAYS on, a technician work-days list takes off the days it leaves out, like the scheduler', async () => {
+      process.env[GATE] = 'true';
+      await trx('technician_absences').insert({ technician_id: other, absence_date: '2026-12-01', reason: 'other' });
+      const { routeFill } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      // other works Monday to Thursday: its 4 open Fridays (11-27, 12-04, 12-11, 12-18) drop out: 19 + 15 - 1
+      expect(routeFill.routeDaysAvailable).toBe(33);
+    });
+
+    it('a one-off closed date takes a day from every technician', async () => {
       await trx('schedule_blackout_dates').insert({ date: '2026-12-07', reason: 'Sample closure' });
       const { routeFill } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
-      expect(routeFill.routeDaysAvailable).toBe(18 + 14); // 19 - 1 and 15 - 1 (Mon 12-07)
+      expect(routeFill.routeDaysAvailable).toBe(36); // 18 + 18
       expect(routeFill.scheduledStops).toBe(0);
       expect(routeFill.fillRatio).toBe(0);
     });
