@@ -49,20 +49,25 @@ describe('the planning table under plan-only mode', () => {
     estimated_duration_minutes: 60, ...extra });
 
   test.each([
+    // Owner 2026-11-26 per-service table.
     ['Quarterly Pest Control Service', 35],
-    ['Bi-Monthly Pest Control Service', 35],
-    ['Every 6 Weeks Lawn Care Service', 35],
+    ['Bi-Monthly Pest Control Service', 30],
+    ['Every 6 Weeks Lawn Care Service', 25],
     ['One-Time Pest Control Service', 45],
     ['Pest Control Re-Service', 15],
     ['Waves Assessment', 30],
-    ['Rodent Trapping Service', 30],
+    ['Rodent Trapping Service', 45],
+    ['Cockroach Treatment Service', 40],
+    ['Bee / Wasp Nest Removal Service', 30],
+    ['Monthly Mosquito Control Service', 30],
   ])('%s plans %i minutes', (name, minutes) => {
     setGate('plan');
     expect(plannedWorkMinutes(row(name))).toBe(minutes);
     expect(workDuration(row(name))).toBe(minutes);
   });
 
-  test.each(['Cockroach Treatment Service', 'Bee / Wasp Nest Removal Service', 'Monthly Mosquito Control Service'])(
+  // Owner 2026-11-26 per-service table: these are still unnamed.
+  test.each(['Bed Bug Treatment Service', 'Wildlife Trapping Service', 'Mosquito Misting System Installation'])(
     '%s is not in the table and keeps the legacy hour', (name) => {
       setGate('plan');
       expect(plannedWorkMinutes(row(name))).toBeNull();
