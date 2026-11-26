@@ -4,8 +4,12 @@
 // { amount, unit, use, epa }), where the catalog row holds the label's rate for another pest (Tekko Pro: 1 fl oz per
 // gallon in the catalog for fleas and flying insects, 2 for cockroaches). The rate belongs to one registered product,
 // so it applies only when the product the line resolved to carries the same EPA registration number: a fuzzy name or
-// alias match to another formulation keeps its own catalog rate. Every surface that doses or prefills the line (the
-// job card's tank calculator, the completion product defaults, the completion actions) reads it through here.
+// alias match to another formulation keeps its own catalog rate. One line opts out of that (weakerMix: true): the flea
+// card's Tekko Pro at 0.66, mixed below the label's dilution because its shared tank goes out at more water per area.
+// There the catalog rate is the stronger one, so a row with another or no registration number still gets the card's
+// rate, but only while that rate is at or under the top of the row's own per-gallon catalog band.
+// Every surface that doses or prefills the line (the job card's tank calculator, the completion product defaults, the
+// completion actions) reads it through here.
 
 function normalizeEpa(value) {
   return String(value == null ? '' : value).toLowerCase().replace(/\s+/g, '');
@@ -17,16 +21,24 @@ function labelUseRate(meta, product) {
   const amount = Number(declared?.amount);
   if (!(amount > 0) || !declared?.unit) return null;
   const epa = normalizeEpa(declared.epa);
-  if (!epa || normalizeEpa(product?.epa_reg_number ?? product?.epaRegNumber) !== epa) return null;
-  return { amount, unit: String(declared.unit) };
+  if (epa && normalizeEpa(product?.epa_reg_number ?? product?.epaRegNumber) === epa) return { amount, unit: String(declared.unit) };
+  if (declared.weakerMix !== true) return null;
+  const top = catalogPerGallonTop(product, declared.unit);
+  return top != null && amount <= top ? { amount, unit: String(declared.unit) } : null;
+}
+
+// The top of the product's catalog default_rate band ("1" -> 1, "0.25-1.5" -> 1.5) when the catalog keeps it per gallon in this
+// unit ("fl_oz/gal"), else null.
+function catalogPerGallonTop(product, unit) {
+  const catalogUnit = String(product?.default_unit ?? product?.defaultUnit ?? '').toLowerCase().replace(/\s+/g, '');
+  if (catalogUnit !== `${String(unit).toLowerCase()}/gal`) return null;
+  const parts = String(product?.default_rate ?? product?.defaultRate ?? '').split('-').map((part) => parseFloat(part)).filter((n) => Number.isFinite(n) && n > 0);
+  return parts.length ? parts[parts.length - 1] : null;
 }
 
 // The completion form reads its per-gallon prefill and its review ceiling from the catalog's default_rate band
-// (client/src/lib/product-rate-prefill.js: the band's low end prefills, its top is the ceiling). For a line with a label
-// rate, both become that rate, but only when the catalog keeps the band in the same per-gallon unit ("fl_oz/gal"); any
-// other unit is left unchanged. One line may name a higher ceiling of its own (labelRatePerGallon.ceiling): the flea
-// card mixes Tekko Pro at 0.66 because its shared tank goes out at more water per area, while the label's own dilution
-// is 1 fl oz per gallon. That line prefills 0.66 and reviews against 1; every other line reviews against its card rate.
+// (client/src/lib/product-rate-prefill.js). For a line with a label rate, both become that rate, but only when the
+// catalog keeps the band in the same per-gallon unit ("fl_oz/gal"); any other unit is left unchanged.
 function completionRateFields(meta, product) {
   const rate = labelUseRate(meta, product);
   if (!rate) return null;
@@ -35,9 +47,7 @@ function completionRateFields(meta, product) {
   // labelUseRate tells the client the band is the card's own (client/src/lib/protocol-completion-defaults.js). A line another
   // booked card shares (sharedRate, completion-product-defaults.js labelRateFor) has no one rate: the rate starts blank, so the
   // tech enters what went out and no single ceiling applies.
-  if (meta.sharedRate) return { defaultRate: '', labelUseRate: true };
-  const ceiling = Number(meta.labelRatePerGallon.ceiling);
-  return { defaultRate: ceiling > rate.amount ? `${rate.amount}-${ceiling}` : String(rate.amount), labelUseRate: true };
+  return { defaultRate: meta.sharedRate ? '' : String(rate.amount), labelUseRate: true };
 }
 
 module.exports = { labelUseRate, completionRateFields, normalizeEpa };

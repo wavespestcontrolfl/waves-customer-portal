@@ -2266,8 +2266,10 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       now: new Date('2026-12-08T14:00:00Z'),
     });
     expect(rows).toMatchObject({ amount: 2, ratePerGallon: { lo: 1, hi: 1 } });
-    // Another registration of the same name takes no rate from the card: its own catalog rate stands.
-    expect(await mix({ ...tekko, epa_reg_number: '53883-444' }, antapex)).toMatchObject({ amount: 2, ratePerGallon: { lo: 1, hi: 1 }, rateSource: 'catalog' });
+    // A row with another registration number, or none, still gets the card's weaker 0.66: never its stronger catalog rate.
+    for (const epa of ['53883-444', null]) {
+      expect(await mix({ ...tekko, epa_reg_number: epa }, antapex)).toMatchObject({ amount: 1.32, ratePerGallon: { lo: 0.66, hi: 0.66 }, rateSource: 'protocol' });
+    }
   });
 
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {

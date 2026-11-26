@@ -22,8 +22,8 @@ const REVIEWED = [
   ['cockroach', 1, 'Tekko Pro IGR', 2, 'fl_oz'],
   // Tekko Pro IGR, EPA 53883-335, fleas: "Dilute spray solution: 1 oz. per gal. of water ... Spray rate: 1 gal. per 1,500 ft2", so
   // 1 fl oz per 1,500 sq ft. The flea card sprays the shared Antapex tank at 1 gallon per 1,000 sq ft, so the tank carries 0.66 fl oz
-  // per gallon (0.66 per 1,000 sq ft, under the label's 0.667). Below the catalog's 1 per gallon: the close-out must start here, or a
-  // gallon per 1,000 sq ft puts down 1.5 times the label amount.
+  // per gallon (0.66 per 1,000 sq ft, under the label's 0.667). Below the catalog's 1 per gallon: the close-out starts and is
+  // reviewed here, since a gallon per 1,000 sq ft at 1 fl oz per gallon puts down 1.5 times the label amount.
   ['flea', 1, 'Tekko Pro IGR', 0.66, 'fl_oz'],
 ];
 
@@ -42,16 +42,16 @@ function labelRateLines() {
 describe('card lines that carry a label rate for their own pest', () => {
   test('every such line is on the reviewed list', () => {
     expect(labelRateLines()).toEqual(REVIEWED);
-    // Only the flea Tekko Pro line names a review ceiling above its card rate (the label's own dilution, 1 fl oz per gallon).
-    const ceilings = [];
+    // Only the flea Tekko Pro line is a weaker mix (below the label's dilution): the one line whose rate needs no registration match.
+    const weaker = [];
     for (const [programKey, program] of Object.entries(protocols)) {
       for (const visit of program?.visits || []) {
         for (const meta of Object.values(visit.lineMeta || {})) {
-          if (meta?.labelRatePerGallon?.ceiling != null) ceilings.push([programKey, visit.visit, meta.labelRatePerGallon.amount, meta.labelRatePerGallon.ceiling]);
+          if (meta?.labelRatePerGallon?.weakerMix != null) weaker.push([programKey, visit.visit, meta.labelRatePerGallon.amount, meta.labelRatePerGallon.weakerMix]);
         }
       }
     }
-    expect(ceilings).toEqual([['flea', 1, 0.66, 1]]);
+    expect(weaker).toEqual([['flea', 1, 0.66, true]]);
   });
 
   test('the cockroach line governs the Tekko Pro tank rate above the catalog band; a plain declared rate never does', () => {
@@ -71,11 +71,16 @@ describe('card lines that carry a label rate for their own pest', () => {
     expect(lineFor('cockroach', 1)).toMatchObject({ declaredRate: { lo: 2, hi: 2, unit: 'fl_oz' }, labelUseRate: true, selected: true });
     const flea = lineFor('flea', 1);
     expect(flea).toMatchObject({ declaredRate: { lo: 0.66, hi: 0.66, unit: 'fl_oz' }, labelUseRate: true });
-    // Another registration takes no rate from the flea card on either surface: the job card and the close-out both keep that
-    // product's own catalog rate (the label rate belongs to EPA 53883-335 alone).
-    const other = _test.linesFromLineMeta(protocols.flea.visits.find((visit) => visit.visit === 1), [{ ...TEKKO, epa_reg_number: null }]).find((line) => line.product.id === 't');
-    expect(other.declaredRate).toBeUndefined();
-    expect(other.labelUseRate).toBeUndefined();
+    // The flea rate is weaker than the catalog band, so a row with another or no registration number gets it too, on the job
+    // card and in the close-out alike: never that row's stronger catalog rate. A row whose own band is weaker keeps its band.
+    const fleaCard = protocols.flea.visits.find((visit) => visit.visit === 1);
+    for (const epa of ['53883-444', null]) {
+      const other = _test.linesFromLineMeta(fleaCard, [{ ...TEKKO, epa_reg_number: epa }]).find((line) => line.product.id === 't');
+      expect(other).toMatchObject({ declaredRate: { lo: 0.66, hi: 0.66, unit: 'fl_oz' }, labelUseRate: true });
+    }
+    const weakerRow = _test.linesFromLineMeta(fleaCard, [{ ...TEKKO, epa_reg_number: null, default_rate: '0.5' }]).find((line) => line.product.id === 't');
+    expect(weakerRow.labelUseRate).toBeUndefined();
+    expect(weakerRow.declaredRate).toBeUndefined();
   });
 
   test('the card line names no product or rate: a completion action records the generic step, the verified rate rides only with the product', () => {
@@ -148,15 +153,15 @@ describe('the completion form gets the cockroach label rate', () => {
     expect((await run({ ...TEKKO, default_unit: 'fl_oz/1000sqft' }, 'German Roach Cleanout', 'german_roach')).defaultRate).toBe('1');
     // The flea card prefills and reviews Tekko Pro at its own shared-tank rate: never the cockroach 2, and never the catalog 1
     // (1 fl oz per gallon at the card's gallon per 1,000 sq ft is 1.5 times the flea label amount).
-    // The band's low end is the prefill (0.66) and its top is the line's own ceiling, the label dilution (1): recording 1 fl oz per
-    // gallon, the label mix sprayed at 1 gallon per 1,500 sq ft, is not reviewed as above label. A wider catalog band changes nothing.
-    expect(await run(TEKKO, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66-1', labelUseRate: true });
-    expect(await run({ ...TEKKO, default_rate: '0.5-1.5' }, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66-1', labelUseRate: true });
+    // 0.66 is the prefill and the review ceiling: the card's tank goes out at 1 gallon per 1,000 sq ft, where anything above 0.66 fl
+    // oz per gallon is above the label amount per area. Any registration, as on the job card.
+    expect(await run(TEKKO, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66', labelUseRate: true });
+    expect(await run({ ...TEKKO, epa_reg_number: '53883-444' }, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66', labelUseRate: true });
+    expect((await run({ ...TEKKO, epa_reg_number: null, default_rate: '0.5' }, 'Flea Treatment', 'flea_tick')).defaultRate).toBe('0.5');
     // Every other label-rate line keeps its card rate as the ceiling: PolyZone on the mosquito card is 1.1, though its catalog band
     // reaches 1.5.
     const polyzone = { id: 't', name: 'Suspend Polyzone', active: true, default_rate: '0.25-1.5', default_unit: 'fl_oz/gal', epa_reg_number: '101563-143' };
     expect(await run(polyzone, 'Mosquito Barrier Treatment', 'mosquito_barrier')).toMatchObject({ defaultRate: '1.1', labelUseRate: true });
-    expect((await run({ ...TEKKO, epa_reg_number: '53883-444' }, 'Flea Treatment', 'flea_tick')).defaultRate).toBe('1');
     // A booked cockroach add-on lists Tekko Pro at 2: the flea rate starts blank too.
     expect(await run(TEKKO, 'Flea Treatment', 'flea_tick', [{ service_name: 'German Roach Cleanout', service_key: 'german_roach' }])).toMatchObject({ defaultRate: '', labelUseRate: true });
     // A booked flea add-on lists Tekko Pro at 0.66: the rate starts blank (neither the 2 nor the catalog 1), the tech records what went out.
