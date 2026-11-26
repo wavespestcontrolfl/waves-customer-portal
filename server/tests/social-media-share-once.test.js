@@ -53,8 +53,10 @@ describe('shareUrlOnce', () => {
     expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), expect.any(Array));
     // Dedup must NOT block on prior 'failed' rows (kept retryable) nor on
     // REJECTED studio drafts (admin killed the copy, not the URL).
-    expect(builder.whereNotIn).toHaveBeenCalledWith('status', ['dry_run', 'failed', 'rejected']);
-    expect(publishSpy).toHaveBeenCalledWith(expect.objectContaining({ source: 'autonomous_blog', noAiImage: true }));
+    // A 'publishing' row is an attempt a restart cut off: it never blocks; the
+    // share resumes and finishes only the sites it missed.
+    expect(builder.whereNotIn).toHaveBeenCalledWith('status', ['dry_run', 'failed', 'rejected', 'publishing']);
+    expect(publishSpy).toHaveBeenCalledWith(expect.objectContaining({ source: 'autonomous_blog', noAiImage: true, trackProgress: true }));
     // The autonomous blog lane opts into EVERY platform explicitly — the
     // omitted-channels default excludes twitter (admin preview flow).
     expect(publishSpy.mock.calls[0][0].channels).toEqual(expect.arrayContaining(['facebook', 'instagram', 'linkedin', 'gbp', 'twitter']));
