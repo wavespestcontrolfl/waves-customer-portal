@@ -785,11 +785,18 @@ async function answerNavigation(request, attempt, mayServeSaved, decide, navSeq)
       // before the HTML that names its entry script arrives. So the network
       // wins only with the whole (small) HTML body in hand: read a copy of
       // it, which buffers the same bytes for the page's own response.
+      // A body that fails part-way is no page: the saved copy answers then.
       const bodyReady = attempt.then(async outcome => {
-        if (outcome.copy) await outcome.copy.clone().text().catch(() => {});
-        return outcome;
+        if (!outcome.copy) return outcome;
+        try {
+          await outcome.copy.clone().text();
+          return outcome;
+        } catch {
+          return { ...outcome, bodyFailed: true };
+        }
       });
-      if ((await Promise.race([bodyReady, slow])) === 'slow') {
+      const first = await Promise.race([bodyReady, slow]);
+      if (first === 'slow' || first.bodyFailed) {
         const shell = await savedShell();
         if (shell) {
           decide('saved');
@@ -800,6 +807,8 @@ async function answerNavigation(request, attempt, mayServeSaved, decide, navSeq)
           }).catch(() => {});
           return shell;
         }
+        // No saved copy, and the page's HTML broke off: the reconnect page.
+        if (first !== 'slow') return await offlineNavigationResponse(request);
       }
     }
     const { response } = await attempt;

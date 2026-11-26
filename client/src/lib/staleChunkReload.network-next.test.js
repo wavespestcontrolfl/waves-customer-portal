@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { handleVitePreloadError, NETWORK_NEXT_MESSAGE, reloadFromNetwork, resetStaleChunkReloadForTests } from './staleChunkReload';
+import { handleVitePreloadError, isStaleChunkReloadPending, markStaleChunkReloadPending, NETWORK_NEXT_MESSAGE, reloadFromNetwork, resetStaleChunkReloadForTests } from './staleChunkReload';
 
 // A page opened from the service worker's saved copy reloads once for a chunk
 // the server replaced. The reload must reach the network, so the page first
@@ -67,6 +67,20 @@ describe('reloadFromNetwork', () => {
     reloadFromNetwork(reload);
     expect(reload).toHaveBeenCalledTimes(1);
     expect(controller.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('cancels the reload, and the pending mark, when the page moves during the wait', () => {
+    vi.useFakeTimers();
+    const reload = vi.fn();
+    const where = { ...window.location, pathname: '/' };
+    vi.stubGlobal('location', where);
+    withController(controllerThat({ ack: false }));
+    markStaleChunkReloadPending();
+    reloadFromNetwork(reload);
+    where.pathname = '/admin/dispatch';
+    vi.advanceTimersByTime(300);
+    expect(reload).not.toHaveBeenCalled();
+    expect(isStaleChunkReloadPending()).toBe(false);
   });
 
   it('reloads at once when the message cannot be posted', () => {

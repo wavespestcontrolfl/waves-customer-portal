@@ -124,11 +124,20 @@ export function reloadFromNetwork(reload = () => window.location.reload()) {
   let timer = null;
   let channel = null;
   let reloaded = false;
+  // The wait lets the user move (Back can open a staff page). A reload then
+  // would hit a page that never ran its own reload guards, so a move cancels
+  // it, and the pending mark goes with it: the page now in view shows its
+  // own failures.
+  const startPath = window.location.pathname;
   const go = () => {
     if (reloaded) return;
     reloaded = true;
     clearTimeout(timer);
     if (channel) channel.port1.close();
+    if (window.location.pathname !== startPath) {
+      reloadPending = false;
+      return;
+    }
     reload();
   };
   try {

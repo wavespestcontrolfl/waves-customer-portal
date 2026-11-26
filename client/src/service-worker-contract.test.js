@@ -1881,6 +1881,26 @@ describe('service-worker slow page loads', () => {
     expect(bodyOf(await nav.promise)).toBe(networkHtml);
   });
 
+  it('serves the saved copy when the HTML body breaks off before 3 s', async () => {
+    const { worker, load } = await start();
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? gatedResponse(networkHtml, Promise.reject(new TypeError('network connection was lost')))
+      : fakeResponse(`asset:${request.url}`)));
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(nav.done).toBe(true);
+    expect(bodyOf(await nav.promise)).toBe(savedHtml);
+  });
+
+  it('shows the reconnect page when the HTML body breaks off and no saved copy exists', async () => {
+    const { worker, load } = await start({ saved: false });
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? gatedResponse(networkHtml, Promise.reject(new TypeError('network connection was lost')))
+      : fakeResponse(`asset:${request.url}`)));
+    const result = await load().promise;
+    expect(String(bodyOf(result))).toContain('Reconnecting');
+  });
+
   it('serves the saved copy when the headers land fast but the HTML body stalls', async () => {
     const { worker, load } = await start();
     let releaseBody;
