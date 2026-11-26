@@ -208,10 +208,9 @@ export default function LoginPage() {
       setCode('');
       lastSubmittedCodeRef.current = '';
       setStep('code');
-      if (resend) {
-        setResendNotice(true);
-        cooldown.start();
-      }
+      // Every sent code starts the wait, the first one too.
+      cooldown.start();
+      if (resend) setResendNotice(true);
     }
   };
 

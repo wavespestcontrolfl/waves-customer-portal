@@ -2327,19 +2327,10 @@ describe('NotificationBell customer alerts strip, tabs and link taps', () => {
       return seen;
     }
 
-    it('uses SPA navigation for a same-origin link and does not reload the page', async () => {
-      mockList('/?tab=billing');
-      const seen = renderInRouter();
-      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
-      const row = await screen.findByRole('link', { name: /Report ready/ });
-      await act(async () => { fireEvent.click(row); });
-      await waitFor(() => expect(seen.path).toBe('/?tab=billing'));
-    });
-
-    it('keeps a full load for another origin, a file or API path, a link with a request id or hash, and any non-tab page', async () => {
+    it('keeps a full page load for every link, a plain tab link included', async () => {
       const original = window.location;
       const assign = vi.fn();
-      for (const link of ['https://example.org/x', '/api/files/report.pdf', '/?tab=messages&requestId=42', '/?tab=property#irrigation', '/?requestId=42', '/pay/abc123']) {
+      for (const link of ['/?tab=billing', 'https://example.org/x', '/api/files/report.pdf', '/?tab=messages&requestId=42', '/?tab=property#irrigation', '/?requestId=42', '/pay/abc123']) {
         mockList(link);
         const hrefSetter = vi.fn();
         Object.defineProperty(window, 'location', {

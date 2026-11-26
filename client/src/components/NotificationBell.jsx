@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef, useId, useContext } from 'react';
-import { UNSAFE_NavigationContext as NavigationContext } from 'react-router-dom';
+import { useState, useEffect, useRef, useId } from 'react';
 import { createPortal } from 'react-dom';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
@@ -41,23 +40,6 @@ function notificationSettingsHref(type) {
   const role = type === 'admin' ? staffRoleFromToken() : null;
   if (role === 'admin') return '/admin/communications#tab=notifications';
   return role === 'technician' ? '/admin/today/more#notifications' : null;
-}
-
-// Only a plain portal tab link ("/" with a `tab` query and nothing else) opens
-// by SPA navigation for a customer. Every other link keeps the full page load:
-// server-owned links, links that carry a request id or other params (a card that
-// is already on screen must not keep its old data), hash targets, other origins,
-// API/file paths and admin paths. Returns the in-app path, or null.
-function portalTabPath(href) {
-  try {
-    if (typeof href !== 'string') return null;
-    const url = new URL(href, window.location.origin);
-    if (url.origin !== window.location.origin || url.pathname !== '/' || url.hash) return null;
-    const keys = [...url.searchParams.keys()];
-    return keys.length === 1 && keys[0] === 'tab' ? `/${url.search}` : null;
-  } catch {
-    return null;
-  }
 }
 
 // Mirror a server-confirmed unread count onto the home-screen app icon
@@ -614,8 +596,6 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   const [pushError, setPushError] = useState(null);
   const biometricLocked = useBiometricLock();
   const pushPromptRequested = useRef(false);
-  // Present inside the app's router; empty in a bare render, which then falls back to a full load.
-  const routerContext = useContext(NavigationContext);
   const bellRef = useRef(null);
   const panelRef = useRef(null);
   // The customer shell keeps its bottom navigation through 899px, including
@@ -771,13 +751,11 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     }
   }, [open, type]);
 
-  // Open a notification's link. A customer's plain portal tab link uses the
-  // router (no reload); everything else, and every admin link, loads the page.
+  // Open a notification's link with a full page load (server-owned links and
+  // request cards must re-read their data).
   const openLink = (href) => {
     setOpen(false);
-    const appPath = type === 'customer' && routerContext?.navigator ? portalTabPath(href) : null;
-    if (appPath) routerContext.navigator.push(appPath);
-    else window.location.href = href;
+    window.location.href = href;
   };
 
   const handleEnablePush = async () => {
