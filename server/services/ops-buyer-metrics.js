@@ -313,10 +313,12 @@ async function revenuePerRouteDayMetric(db, now) {
   };
 }
 
-// One physical stop: a grouped visit (visit_id), else the same technician + customer + date + arrival window (stops-ahead.js
-// counts such ungrouped siblings once), else the row itself (a row with no customer).
+// One physical stop: a grouped visit (visit_id), else the same technician + customer + property + date + arrival window
+// (stops-ahead.js counts such ungrouped siblings once; the property keeps two homes of one customer apart, which matters
+// for unassigned work that has no technician route to tell them apart), else the row itself (a row with no customer).
 const SCHEDULED_STOP_KEY_SQL = `COALESCE(ss.visit_id::text, CASE WHEN ss.customer_id IS NULL THEN ss.id::text
-  ELSE concat_ws('|', ss.technician_id::text, ss.customer_id::text, ss.scheduled_date::text, ss.window_start::text) END)`;
+  ELSE concat_ws('|', ss.technician_id::text, ss.customer_id::text, ss.property_id::text, ss.scheduled_date::text,
+    ss.window_start::text) END)`;
 
 /**
  * Scheduled stops in [from, to]. Placement and status come from stops-ahead.js (a route stop is not cancelled, skipped, no-show

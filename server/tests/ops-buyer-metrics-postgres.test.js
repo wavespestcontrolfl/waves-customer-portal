@@ -372,6 +372,21 @@ postgres('ops buyer metrics (live Postgres)', () => {
       expect(routeFill.scheduledStops).toBe(4);
     });
 
+    it('two unassigned appointments for one customer at different properties in the same slot are two stops', async () => {
+      const homes = [randomUUID(), randomUUID()];
+      for (const [i, propertyId] of homes.entries()) {
+        await trx('customer_properties').insert({
+          id: propertyId, customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: i === 0,
+          address_line1: `${100 + i} Example Lane`, city: 'Lakewood Ranch', zip: '34211', active: true, address_key: randomUUID(),
+        });
+      }
+      await upcoming('2037-12-01', { technician_id: null, window_start: '09:00', property_id: homes[0] });
+      await upcoming('2037-12-01', { technician_id: null, window_start: '09:00', property_id: homes[1] }); // another home: another stop
+      await upcoming('2037-12-01', { technician_id: null, window_start: '09:00', property_id: homes[1], service_type: 'Lawn Care Visit' }); // sibling
+      const { routeFill } = await svc.buildOpsBuyerMetrics({ db: trx, now: NOW });
+      expect(routeFill.scheduledStops).toBe(2);
+    });
+
     it('an unclaimed estimate slot hold is not a stop, live or expired; claiming it adds exactly one stop', async () => {
       await upcoming('2037-12-01', { technician_id: owner }); // a real stop
       const hold = randomUUID();
