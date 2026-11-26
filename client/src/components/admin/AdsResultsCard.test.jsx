@@ -93,7 +93,7 @@ describe('AdsResultsCard', () => {
     expect(screen.getByText('2 PM call dry, stayed dry')).toBeInTheDocument();
     expect(screen.getByText('No 2 PM call (later forecast rain), not measured yet')).toBeInTheDocument();
     expect(screen.getByText('2 PM call unknown, not measured yet')).toBeInTheDocument();
-    expect(screen.getByText('2 PM call dry, no radar reading')).toBeInTheDocument();
+    expect(screen.getByText('2 PM call dry, no rain reading')).toBeInTheDocument();
   });
 
   it('the period rain total counts a recorded day with no ad row', async () => {
