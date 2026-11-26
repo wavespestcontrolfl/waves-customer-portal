@@ -3801,6 +3801,22 @@ async function lockedBookingProperty(trx, customerId, input) {
   return live;
 }
 
+/**
+ * GATE_TECH_SHIFT_HOURS (D4): the office's shift line for a visit this tool just booked or moved ("<name>'s shift is
+ * 8:00 AM to 3:00 PM. This visit is outside those hours."), as the Schedule's own saves say it
+ * (technician-eligibility.js dayWarningsFor, the shift line alone). ADVISORY: it joins the result's warning and never
+ * refuses the write; a failed read gives no line. Gate off, or no technician: [] and no read.
+ */
+async function ibShiftLines(trx, technicianId, date, block) {
+  if (!technicianId) return [];
+  try {
+    return await require('../technician-eligibility').dayWarningsFor(technicianId, [date], { conn: trx, block, shiftOnly: true });
+  } catch (err) {
+    logger.warn(`[intelligence-bar] shift line unread for ${date}: ${err.message}`);
+    return [];
+  }
+}
+
 async function createAppointment(input, actionContext = {}) {
   const { customer_id, scheduled_date, technician_name, time_window, notes } = input;
   // Reassigned once the catalog resolves a close name to its exact one.
@@ -4106,6 +4122,7 @@ async function createAppointment(input, actionContext = {}) {
         technicianId: created.technician_id,
       });
     }
+    routeAdvisories.push(...await ibShiftLines(trx, created.technician_id, dateStr, created));
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
     // inside the booking transaction — if an open credit appeared since the
@@ -4511,6 +4528,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // The technician on the COMMITTED row (the CAS does not pin technician_id,
   // so the pre-read `appt` may name a tech who was swapped out meanwhile).
   let committedTechId = null;
+  // The length the committed row carries (a Duration edit may have landed since the card): the shift line's block.
+  let committedMinutes = null;
   let overlapAdvisory = null;
   let routeAdvisories = [];
   // A package visit 1 with a live visit 2: the card shows one visit, so the
@@ -4620,9 +4639,10 @@ async function rescheduleAppointment(input, actionContext = {}) {
           ...liveReset,
           updated_at: new Date(),
         })
-        .returning(['id', 'technician_id']);
+        .returning(['id', 'technician_id', 'estimated_duration_minutes']);
       updatedRows = committed.length;
       committedTechId = committed[0]?.technician_id || null;
+      committedMinutes = committed[0]?.estimated_duration_minutes ?? null;
       // The probe above was scoped to the technician read before this
       // transaction. The CAS does not pin technician_id (the notice follows
       // the stop), so a concurrent reassignment can commit the row onto
@@ -4653,6 +4673,11 @@ async function rescheduleAppointment(input, actionContext = {}) {
           serviceId: appointment_id, date: dateStr, windowStart: probeWindowStart, windowEnd: probeWindowEnd,
           technicianId: committedTechId,
         });
+      }
+      if (updatedRows) {
+        routeAdvisories.push(...await ibShiftLines(trx, committedTechId, dateStr, {
+          window_start: newStart, window_end: newWindowEnd, estimated_duration_minutes: committedMinutes,
+        }));
       }
   }).catch((err) => {
     // A locked recheck that throws (package visit 2, grouped, frozen) is a refusal.
