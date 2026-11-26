@@ -100,6 +100,12 @@ describe('callAutoSendShadowVerdict', () => {
     expect(held.laneHolds).toEqual(['monthly $90 sits outside the comps band']);
   });
 
+  test('a declined offer is not a declining lawn', () => {
+    const lawn = (flag) => verdict((i) => { i.intent.services = { lawn: {} }; i.intent.constraint_flags = [{ flag, note: '' }]; });
+    expect(lawn('customer declined mosquito service').verdict).toBe('would_send');
+    expect(lawn('lawn is declining near the driveway').reasons).toContain('lawn_declining_book_assessment');
+  });
+
   test('termite in the treatment history alone is not a termite request', () => {
     expect(verdict((i) => { i.context.extraction.service_request = { quote_promised: true, primary_category: 'ants', prior_treatment_attempts: ['termite tenting in 2019'] }; }).verdict).toBe('would_send');
   });

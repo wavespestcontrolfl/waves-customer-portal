@@ -39,7 +39,9 @@ const { FALLBACK_SQFT_SOURCES } = require('./source-arbitration');
 const SHADOW_VERSION = 1;
 
 const YARD_CHANGED_RE = /new[_ -]?sod|re[_ -]?sod|sod[_ -]?(install|replac)|pool[_ -]?(build|construction|install)|construction|re[_ -]?grad|yard[_ -]?(changed|torn|redone)|new[_ -]?landscap/i;
-const LAWN_DECLINE_RE = /dying|dead[_ -]?(grass|lawn|sod|patch)|declin|brown[_ -]?patch|fungus|disease|diagnos/i;
+// A lawn-condition subject is required for decline wording: "customer
+// declined mosquito service" is not a declining lawn.
+const LAWN_DECLINE_RE = /dying|dead[_ -]?(grass|lawn|sod|patch)|(lawn|grass|sod|turf)[^|]{0,30}declining|declining[_ -]?(lawn|grass|sod|turf)|brown[_ -]?patch|fungus|disease|diagnos/i;
 // Free-text fallback for a payer other than the caller. It needs a payer AND
 // payment words: "landlord must approve access" alone is not a payer.
 const PAYER_WORDS = '(?:landlord|property[_ -]?manag\\w*|realty|realtor|hoa|home[_ -]?owner|owner)';
