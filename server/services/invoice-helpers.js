@@ -200,6 +200,15 @@ function firstDeliveryDueDate(database, today) {
   );
 }
 
+// The same rule on a row already read, for a caller that must show or confirm the due date a first delivery will
+// carry BEFORE its claim (a held WDO send's preview and fingerprint): the date firstDeliveryDueDate would write.
+function firstDeliveryDueDateOf(invoice, today) {
+  const due = invoice?.due_date ? require('../utils/date-only').dateOnlyString(invoice.due_date) : null;
+  const undelivered = ['draft', 'scheduled', 'sending'].includes(String(invoice?.status || ''))
+    && !invoice.sent_at && !invoice.sms_sent_at && !invoice.email_sent_at;
+  return undelivered && due && due < today ? today : due;
+}
+
 // The accepted-Text/pending-Email marker on scheduled_send_error (matched everywhere by
 // prefix): the queue's sender treats the Text leg as delivered and sends only the Email.
 // A combined-visit invoice whose link rides the visit summary text is scheduled under it
@@ -567,6 +576,7 @@ module.exports = {
   staleClaimReviewHoldError,
   preserveWithdrawalStamp,
   firstDeliveryDueDate,
+  firstDeliveryDueDateOf,
   selfPayAtDispatch,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,

@@ -29,6 +29,7 @@ const NOTIFICATION_SENDS = new Set([
   'admin-pricing-strategy.js:admin_pricing_strategy_upsell',
   'admin-projects.js:admin_project_report_send',
   'admin-projects.js:admin_project_report_with_invoice',
+  'admin-projects.js:project_report_hold_release', // the paid-hold release sweep's courtesy text (GATE_WDO_REPORT_HOLD)
   'admin-service-outlines.js:admin_lawn_service_outline_send',
 ]);
 
