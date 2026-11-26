@@ -131,13 +131,13 @@ function reportLinkShared(project) {
 
 // Money on the invoice, of any kind, refuses a hold (409 hold_payment_started; the normal send is still available):
 // a payment intent, a payments row (the ledger names the invoice under invoice_id, waves_invoice_id or a dispute's
-// dispute_invoice_id), a charge attempt, a paid or recorded payment, or a status that says money moved. The invoice row
+// dispute_invoice_id), a charge attempt, a paid or recorded payment, credit already applied, or a status that says money moved. The invoice row
 // is read whole, so a column this database lacks reads as absent.
 const PAYMENT_STATUSES = ['processing', 'paid', 'prepaid', 'partial', 'partially_paid', 'refunded'];
 async function assertNoPaymentStarted(invoice, database = db) {
   const id = String(invoice.id);
   const started = invoice.stripe_payment_intent_id || invoice.paid_at || invoice.payment_recorded_at
-    || Number(invoice.amount_paid) > 0 || PAYMENT_STATUSES.includes(String(invoice.status || '').toLowerCase())
+    || Number(invoice.amount_paid) > 0 || Number(invoice.credit_applied) > 0 || PAYMENT_STATUSES.includes(String(invoice.status || '').toLowerCase())
     || await database('payments')
       .whereRaw("(metadata->>'invoice_id' = ? OR metadata->>'waves_invoice_id' = ? OR metadata->>'dispute_invoice_id' = ?)", [id, id, id])
       .first('id')

@@ -389,6 +389,8 @@ beforeEach(() => {
   db.raw.mockImplementation((sql, bindings) => ({ sql, bindings }));
   mockGates.hold = true;
   mockGates.payerStatements = false;
+  // clearAllMocks keeps implementations: put the default send-time recipient back after a test replaced it
+  ProjectEmail.resolveProjectEmailRecipientForSend.mockImplementation(async (customer = {}) => ({ email: customer.email || '', name: customer.first_name || '', role: 'primary' }));
 });
 
 
@@ -508,11 +510,13 @@ describe('send-with-invoice hold_report_until_paid', () => {
   test('the hold dry run lists who the paid report will go to (the release recipient, then the named requestors, same exclusion rule)', async () => {
     const findings = { ...FINDINGS, report_sent_to: 'Holder <holder@example.com>, ABC Title <closing@abctitle.com>' };
     mockTables({ project: wdoProject({ findings }) });
-    ProjectEmail.resolveProjectEmailRecipientForSend.mockResolvedValueOnce({ email: 'holder@example.com', name: 'Holder', role: 'primary' });
+    ProjectEmail.resolveProjectEmailRecipientForSend.mockResolvedValue({ email: 'holder@example.com', name: 'Holder', role: 'primary' });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true, hold_report_until_paid: true, invoice_id: 'inv-1' });
       const body = await res.json();
       expect(body.report_hold_release).toEqual({ recipient: 'holder@example.com', copies: ['closing@abctitle.com'] });
+      // the confirm's own invoice recipient is the real one too (the contact's email switch applied)
+      expect(body.email_routing.recipient).toBe('holder@example.com');
     });
   });
 
@@ -1308,6 +1312,7 @@ describe('audit fixes', () => {
       ['paid_at', { paid_at: '2026-06-11T10:00:00Z' }],
       ['payment_recorded_at', { payment_recorded_at: '2026-06-11T10:00:00Z' }],
       ['amount_paid', { amount_paid: 20 }],
+      ['credit already applied', { credit_applied: 20 }],
       ['a partial status', { status: 'partial' }],
     ])('payment evidence on the invoice (%s) refuses the hold', async (_label, patch) => {
       mockTables({ invoice: invoiceRow(patch) });
@@ -1374,6 +1379,57 @@ describe('audit fixes', () => {
       expect(result.released).toBe(false);
       expect((updates.projects || []).some((u) => typeof u.report_token === 'string' || 'portal_visible' in u)).toBe(false);
       expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('round 11: recipient, blocked email, delivery evidence', () => {
+    test('a held send emails, and compares the billing copy with, the address the invoice email really uses', async () => {
+      ProjectEmail.resolveProjectEmailRecipientForSend.mockResolvedValue({ email: 'holder@example.com', name: 'Holder', role: 'primary' });
+      mockTables();
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => (table === 'notification_prefs'
+        ? chain({ first: jest.fn(async () => ({ billing_email: 'holder@example.com' })) })
+        : base(table)));
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      // one invoice email, to the holder: the billing contact IS the holder, so no second copy
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).toHaveBeenCalledTimes(1);
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0].recipient.email).toBe('holder@example.com');
+    });
+
+    test('a held send records no report delivery on the project (the invoice email is not the report)', async () => {
+      const { updates } = mockTables({ project: wdoProject({ delivery_status: null }) });
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const projectUpdates = updates.projects || [];
+      expect(projectUpdates.some((u) => 'delivery_channels' in u || 'last_delivery_at' in u)).toBe(false);
+      expect(projectUpdates.some((u) => u.delivery_status === 'sent' || u.delivery_status === 'partial')).toBe(false);
+      // the claim is given back with the status it had
+      expect(projectUpdates.some((u) => u.delivery_claim_token === null && u.delivery_status === null)).toBe(true);
+    });
+
+    test('a release blocked by email suppression counts the block, and the next attempt uses a new key (so a cleared suppression sends)', async () => {
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, blocked: true, reason: 'suppressed' });
+      const first = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(first.released).toBe(false);
+      expect((updates.projects || []).some((u) => u.delivery_channels?.sql?.includes('release_email_blocks'))).toBe(true);
+      const firstKey = ProjectEmail.sendProjectReportReady.mock.calls[0][0].idempotencyKey;
+      expect(firstKey).not.toMatch(/:b\d+$/);
+
+      ProjectEmail.sendProjectReportReady.mockClear();
+      mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_channels: { release_email_blocks: 1 } }), invoice: invoiceRow({ status: 'paid' }) });
+      const retry = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(retry.released).toBe(true);
+      expect(ProjectEmail.sendProjectReportReady.mock.calls[0][0].idempotencyKey).toBe(`${firstKey}:b1`);
+    });
+
+    test('an accepted or uncertain send keeps its key: a retry without a counted block repeats the same key', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const key = ProjectEmail.sendProjectReportReady.mock.calls[0][0].idempotencyKey;
+      ProjectEmail.sendProjectReportReady.mockClear();
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(ProjectEmail.sendProjectReportReady.mock.calls[0][0].idempotencyKey).toBe(key);
     });
   });
 

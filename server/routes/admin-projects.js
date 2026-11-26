@@ -4364,6 +4364,11 @@ async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownC
     // corrects a bounced address mints a NEW key and really delivers.
     const recipientHash = crypto.createHash('sha1')
       .update(String(emailRecipient.email).toLowerCase()).digest('hex').slice(0, 12);
+    // A blocked email (a suppressed address) is a terminal row for its key. Each confirmed block moves the key on
+    // (a counter kept on the row), so once the suppression is cleared the next sweep sends for real; accepted and
+    // uncertain sends keep their key, so a retry after a crash never repeats an email.
+    const stored = typeof refreshed.delivery_channels === 'string' ? safeJsonParse(refreshed.delivery_channels) : refreshed.delivery_channels;
+    const blocks = Number(stored?.release_email_blocks) || 0;
     const result = await ProjectEmail.sendProjectReportReady({
       project: refreshed,
       customer,
@@ -4371,8 +4376,13 @@ async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownC
       isResend: false,
       recipient: emailRecipient,
       attachments: wdoPdf ? [wdoPdf.attachment] : [],
-      idempotencyKey: `project.report_ready:${refreshed.id}:hold_release:${String(invoice.id).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40)}:${filingKeyPart(wdoFiling)}:${recipientHash}`,
+      idempotencyKey: `project.report_ready:${refreshed.id}:hold_release:${String(invoice.id).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40)}:${filingKeyPart(wdoFiling)}:${recipientHash}${blocks ? `:b${blocks}` : ''}`,
     });
+    if (!result.ok && result.blocked) {
+      await db('projects').where(ownClaim).update({
+        delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || jsonb_build_object('release_email_blocks', coalesce((delivery_channels->>'release_email_blocks')::int, 0) + 1)"),
+      }).catch((err) => logger.warn(`[projects] release email block not counted for ${refreshed.id}: ${err.message}`));
+    }
     channels.email = result.ok
       ? { ok: true, messageId: result.messageId || null }
       : { ok: false, error: projectEmailFailureMessage(result) };
@@ -4925,9 +4935,9 @@ function buildSendReportPdf(hold, refreshed, customer) {
 }
 
 // The customer email: invoice-first for a hold, report-only for a payer-billed invoice, else combined.
-function sendInvoiceEmail({ hold, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments }) {
+function sendInvoiceEmail({ hold, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient }) {
   if (hold.active) {
-    return ProjectEmail.sendProjectInvoiceBeforeReport({ project: refreshed, customer, payUrl, invoice, attachments });
+    return ProjectEmail.sendProjectInvoiceBeforeReport({ project: refreshed, customer, payUrl, invoice, attachments, recipient });
   }
   if (isPayerInvoice) {
     // Payer-billed: homeowner gets the report only (FDACS PDF for WDO + report link), never the invoice PDF or pay link.
@@ -4994,13 +5004,20 @@ function sendIsDelivered({ hold, channels, deliveredReport, payerLegOk }) {
 
 // The final project write of a send, fenced on the claim token (zero rows = a stale takeover owns
 // the row). Returns true when nothing needed writing (not delivered) or the write landed.
-async function finalizeInvoiceSend({ hold, delivered, project, refreshed, projectCols, channels, deliveryStatus, deliveryClaimToken, wdoFiling }) {
+async function finalizeInvoiceSend({ hold, delivered, project, refreshed, projectCols, channels, deliveryStatus, deliveryClaimToken, previousDeliveryStatus, wdoFiling }) {
   const fence = { id: project.id, delivery_claim_token: deliveryClaimToken };
   if (!delivered) {
     // The invoice never went out, so the hold this request armed is not armed: take it back (the
     // revert after this clears the claim token this is fenced on, so it runs first).
     await takeBackHoldStamp({ hold, project, deliveryClaimToken });
     return true;
+  }
+  // A held send: the invoice is out and the hold was stamped before delivery. The invoice email is NOT report
+  // delivery, so no delivery field of the project records it (closeout reads them as "the report went out"): the claim
+  // is simply given back with the status it had, and the activity log keeps the invoice outcome. The project stays
+  // unsent (no status 'sent' or sent_at): the sweep owns the release.
+  if (hold.active) {
+    return db('projects').where(fence).update({ delivery_status: previousDeliveryStatus, delivery_claim_token: null, updated_at: db.fn.now() });
   }
   const bookkeeping = {
     last_delivery_at: db.fn.now(),
@@ -5009,9 +5026,6 @@ async function finalizeInvoiceSend({ hold, delivered, project, refreshed, projec
     delivery_claim_token: null,
     updated_at: db.fn.now(),
   };
-  // A held send: the invoice is out and the hold was stamped before delivery. The project stays
-  // unsent (no status 'sent' or sent_at): the sweep owns the release.
-  if (hold.active) return db('projects').where(fence).update(bookkeeping);
   const written = await db('projects').where(fence).update({
     ...bookkeeping,
     // Resending a closed project's report must not regress its lifecycle
@@ -5258,7 +5272,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       // email), the billing-contact copy (same email, when a distinct billing
       // contact is configured), and the report-only third-party copies parsed
       // from the FDACS "Report Sent to Requestor and to:" line.
-      const previewRecipient = ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
+      // A hold preview names the address the held invoice email will really use (the contact's email switch applied).
+      const previewRecipient = holdRequested
+        ? await ProjectEmail.resolveProjectEmailRecipientForSend(customer, { applyReportRule: true })
+        : ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
       const previewPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
       const [previewBilling] = getInvoiceEmailRecipients(customer, previewPrefs || {});
       const previewRecipientEmail = String(previewRecipient.email || '').trim().toLowerCase();
@@ -5523,6 +5540,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       });
     }
 
+    // The recipient the invoice email really goes to: a held send resolves it with the contact's email switch (the
+    // service contact falls back to the account holder), and that one address receives the email and is the one the
+    // billing copy is compared with. (Resolved before anything is dispatched.)
+    const emailRecipient = hold.active
+      ? await ProjectEmail.resolveProjectEmailRecipientForSend(customer, { applyReportRule: true })
+      : ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
     // ONE email FIRST — it carries the report attachments (the FDACS PDF for WDO)
     // + the invoice PDF. For WDO it's the required channel: the pay-link SMS is
     // only sent after the email succeeds, so a failed email can't leave the
@@ -5530,11 +5553,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // (and retries can't duplicate that text). For non-WDO the email is a bonus
     // (the report link rides in the SMS), so its failure doesn't block the text.
     dispatchStarted = true;
-    const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
     if (emailRecipient.email) {
       try {
         const result = await sendInvoiceEmail({
-          hold, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments,
+          hold, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient: emailRecipient,
         });
         channels.email = result.ok
           ? { ok: true, messageId: result.messageId || null }
@@ -5769,7 +5791,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // Both delivered-branch finalizes are fenced on the claim token (same
     // contract as /send): zero rows = a stale takeover owns the row now.
     const finalized = await finalizeInvoiceSend({
-      hold, delivered, project, refreshed, projectCols, channels, deliveryStatus, deliveryClaimToken, wdoFiling,
+      hold, delivered, project, refreshed, projectCols, channels, deliveryStatus, deliveryClaimToken, previousDeliveryStatus: deliveryClaim?.previousStatus ?? null, wdoFiling,
     });
     if (delivered && !finalized) {
       logger.error(`[projects] combined-send finalize fenced off for ${project.id} — claim superseded by a stale-takeover; outcome not recorded`);
