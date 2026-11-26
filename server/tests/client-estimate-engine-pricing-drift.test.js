@@ -458,10 +458,14 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(preSlab.price).toBe(preSlab.basePrice);
   });
 
-  test('one-time pest mirrors the server: quarterly base × 2.2, floored at $199', () => {
-    // Must match server/services/pricing-engine ONE_TIME.pest model (pure multiple).
+  test('one-time pest mirrors the server for new quotes: max(quarterly base × 1.8, 10% over visit 1), floored at $199', () => {
+    // Must match server/services/pricing-engine/one-time-pest-price.js (new quotes).
     expect(source).toContain('const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, PEST_BASE.basePerVisit + pestBaseAdjustment(fpEff));');
-    expect(source).toContain('let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));');
+    // The multiple and the buffer are code constants (server ONE_TIME.pest.newRule), never fetched; the floor is the client's $199.
+    expect(source).toContain('const ONE_TIME_PEST_NEW_RULE = Object.freeze({ floor: 199, multiplier: 1.8, firstVisitBufferPct: 0.1 });');
+    expect(source).toContain('const bufferPrice = Math.round(Math.round((quarterlyBase + 99) * (1 + live.firstVisitBufferPct) * 100) / 100);');
+    expect(source).toContain('Math.max(live.floor, Math.round(quarterlyBase * live.multiplier), bufferPrice)');
+    expect(source).toContain('let fp = Math.max(ONE_TIME_PEST_NEW_RULE.floor, otP(oneTimePestNewRuleList(quarterlyBase)));');
     expect(source).toContain('if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;');
     expect(source).toContain("service: 'one_time_pest'");
     // The legacy 1.75× and the setup+premium forms must both be gone.
@@ -481,7 +485,7 @@ describe('deprecated client estimator pricing drift guards', () => {
     const item = estimate.oneTime.items.find((row) => row.service === 'one_time_pest');
     expect(item).toEqual(expect.objectContaining({
       name: 'One-Time Pest Control',
-      price: 246,
+      price: 232, // max(round(112 x 1.8), round((112 + 99) x 1.10)) on the in-code base
     }));
   });
 

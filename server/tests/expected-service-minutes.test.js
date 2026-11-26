@@ -307,6 +307,8 @@ describe('router minutes while the planning table is live', () => {
     { service_key: 'pest_general_monthly', name: 'Monthly Pest Control Service', category: 'pest_control', min_duration_minutes: 20, max_duration_minutes: 45 },
     { service_key: 'one_time_pest_control', name: 'One-Time Pest Control Service', category: 'pest_control', min_duration_minutes: 60, max_duration_minutes: 120 },
     { service_key: 'mosquito_monthly', name: 'Monthly Mosquito Control Service', category: 'mosquito', min_duration_minutes: 20, max_duration_minutes: 45 },
+    // Owner 2026-11-26 per-service table names mosquito now; bed bug stays unnamed, so this row keeps the catalog.
+    { service_key: 'bed_bug_treatment', name: 'Bed Bug Treatment Service', category: 'bed_bug', min_duration_minutes: 20, max_duration_minutes: 45 },
   ]);
   const stop = (service_type, extra = {}) => ({ service_type, service_key_snapshot: null, estimated_duration_minutes: 60, ...extra });
   const saved = process.env.GATE_SCHEDULING_CAPACITY;
@@ -315,11 +317,13 @@ describe('router minutes while the planning table is live', () => {
 
   test.each([
     ['a quarterly stop credits 35, not the catalog 45', stop('Quarterly Pest Control Service', { is_recurring: true }), 60, 35],
-    ['a monthly stop credits 35, not the catalog 32.5', stop('Monthly Pest Control Service', { is_recurring: true }), 60, 35],
+    // Owner 2026-11-26 per-service table: monthly pest plans 25.
+    ['a monthly stop credits 25, not the catalog 32.5', stop('Monthly Pest Control Service', { is_recurring: true }), 60, 25],
     ['a re-service (is_callback) credits 15', stop('Quarterly Pest Control Service', { is_callback: true }), 60, 15],
     ['a long stored estimate is kept, clamped to its window', stop('Quarterly Pest + Termite Bait Station Service', { estimated_duration_minutes: 120 }), 120, 120],
-    ['a service the table does not name keeps the catalog', stop('Monthly Mosquito Control Service'), 60, 32.5],
-    ['an unnamed, unmatched stop keeps the window (no credit)', stop('Bed Bug Treatment Service'), 60, 60],
+    ['a service the table does not name keeps the catalog', stop('Bed Bug Treatment Service'), 60, 32.5],
+    ['a mosquito stop credits the table 30, not the catalog 32.5', stop('Monthly Mosquito Control Service'), 60, 30],
+    ['an unnamed, unmatched stop keeps the window (no credit)', stop('Wildlife Trapping Service'), 60, 60],
   ])('%s', (_label, row, windowMinutes, minutes) => {
     expect(stopExpectedMinutesSync(row, windowMinutes)).toBe(minutes);
   });
@@ -336,7 +340,9 @@ describe('router minutes while the planning table is live', () => {
 
   test('the visit being booked keeps the catalog above the hour, for a service the table does not name, and without newVisit', () => {
     expect(expectedMinutesSync({ serviceKey: 'one_time_pest_control', serviceType: 'Pest Control', windowMinutes: 90, newVisit: true })).toBe(90);
-    expect(expectedMinutesSync({ serviceType: 'Monthly Mosquito Control Service', windowMinutes: 60, newVisit: true })).toBe(32.5);
+    expect(expectedMinutesSync({ serviceType: 'Bed Bug Treatment Service', windowMinutes: 60, newVisit: true })).toBe(32.5);
+    // Owner 2026-11-26 per-service table: mosquito is named, so a new mosquito visit plans 45.
+    expect(expectedMinutesSync({ serviceType: 'Monthly Mosquito Control Service', windowMinutes: 60, newVisit: true })).toBe(45);
     expect(expectedMinutesSync({ serviceType: 'Quarterly Pest Control Service', windowMinutes: 60 })).toBe(45);
   });
 

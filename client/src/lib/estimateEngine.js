@@ -510,6 +510,27 @@ export function isLawnStandardSold() {
 // re-armed floor (codex P2 round 8 on #2827).
 const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89, basePerVisit: 112 };
 
+// One-time pest for NEW quotes (owner 2026-11-26, "only new estimtes"): the multiple and the minimum over the first visit of a plan
+// are CODE constants, as on the server (ONE_TIME.pest.newRule): not a Setting, so nothing fetched, nothing that moves a price on a
+// link already sent. The floor is the client's existing $199, as before this rule.
+const ONE_TIME_PEST_NEW_RULE = Object.freeze({ floor: 199, multiplier: 1.8, firstVisitBufferPct: 0.1 });
+
+// The list for a quarterly visit on a new quote: the multiple, or the minimum over the first visit of a plan, whichever is more,
+// then the floor. Mirrors server one-time-pest-price.js newRuleListPrice; cents first, then whole dollars, as the server does.
+export function oneTimePestNewRuleList(quarterlyBase) {
+  const live = ONE_TIME_PEST_NEW_RULE;
+  const bufferPrice = Math.round(Math.round((quarterlyBase + 99) * (1 + live.firstVisitBufferPct) * 100) / 100);
+  return Math.max(live.floor, Math.round(quarterlyBase * live.multiplier), bufferPrice);
+}
+
+// The amount the estimate page / preview shows beside a plan: the list, then strictly above visit 1 (the same clamp the engine
+// applies). At the fixed 10% the list already clears visit 1 for every home; the clamp is kept so the two stay one rule.
+export function oneTimePestNewRuleChoice(quarterlyBase) {
+  const floored = oneTimePestNewRuleList(quarterlyBase);
+  const visitOne = Math.round((quarterlyBase + 99) * 100) / 100;
+  return floored <= visitOne ? visitOne + 1 : floored;
+}
+
 export function applyServerPestPricingConfig(config) {
   PEST_BASE.enforceFloorPostDiscount = (
     config?.enforce_floor_post_discount ?? config?.enforceFloorPostDiscount
@@ -2130,6 +2151,8 @@ export function calculateEstimate(inputs) {
     // This fallback prices under the 2026-11-26 rules it mirrors (palm credit minimum, one-time lawn rise), so the
     // server's saved-estimate reader replays the saved quote under them (estimate-floor-signal-replay.js).
     legacyPricingRules: false,
+    // One-time pest for new quotes (2026-11-26): this fallback prices under the new rule.
+    legacyOneTimePestBuffer: false,
     // Resolved program minimum for THIS run (0 = disarmed) — same replay
     // rule: estimate-public and the converter clamp/protect a saved fallback
     // quote at the minimum it was priced with, never the live global at
@@ -3032,15 +3055,14 @@ export function calculateEstimate(inputs) {
   if (svcOnetimePest && !isCommercial) {
     hasOT = true;
     const fpEff = footprint > 0 ? footprint : 2500;
-    // Mirror the server engine (server/services/pricing-engine): one-time =
-    // quarterly base × 2.2, never below $199. The quarterly base already encodes
-    // every property metric, so one-time scales proportionally. Anchor on the
-    // QUARTERLY base (frequency-independent), never R.pest.pa (discounted per-app).
-    // The trailing clamp keeps the loyalty perk from dropping one-time to/below a
-    // recurring customer's visit-1 cost (quarterly + $99 setup) — strictly above
-    // (+1, whole-dollar prices), matching the server engine.
+    // Mirror the server engine (server/services/pricing-engine/one-time-pest-price.js, new quotes, owner 2026-11-26): one-time =
+    // max(quarterly base x 1.8, (quarterly base + $99) x 1.10), never below the floor ($199). The quarterly base already encodes
+    // every property metric (home age is none of them), so one-time scales proportionally. Anchor on the QUARTERLY base
+    // (frequency-independent), never R.pest.pa (discounted per-app). The trailing clamp keeps the loyalty perk from dropping
+    // one-time to/below a recurring customer's visit-1 cost (quarterly + $99 setup) — strictly above (+1, whole-dollar
+    // prices), matching the server engine.
     const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, PEST_BASE.basePerVisit + pestBaseAdjustment(fpEff));
-    let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));
+    let fp = Math.max(ONE_TIME_PEST_NEW_RULE.floor, otP(oneTimePestNewRuleList(quarterlyBase)));
     if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;
     otItems.push({
       service: 'one_time_pest',

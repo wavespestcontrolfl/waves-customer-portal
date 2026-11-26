@@ -113,8 +113,8 @@ const KEEP_ENV = ['PATH', 'HOME', 'USER', 'TMPDIR', 'TZ', 'LANG'];
 const PROFILE_KEY_RE = /^(GATE_|MODEL_|INTELLIGENCE_BAR_|IB_)/;
 const SECRET_KEY_RE = /KEY|TOKEN|SECRET|PASSWORD/;
 // Forced off whatever the profile says: owner-direct commits a write with no
-// card; the OpenAI backup and the credit-key pool switch provider or key.
-const FORCED_OFF = ['GATE_IB_OWNER_DIRECT', 'GATE_IB_OPENAI_BACKUP', 'GATE_AI_CREDIT_KEYS'];
+// card; the credit-key pool switches the provider key.
+const FORCED_OFF = ['GATE_IB_OWNER_DIRECT', 'GATE_AI_CREDIT_KEYS'];
 
 // The gate profile to save with an export: the bar's settings, never a credential.
 function profileFrom(env) {

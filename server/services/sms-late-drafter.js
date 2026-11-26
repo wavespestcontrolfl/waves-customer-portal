@@ -32,8 +32,11 @@ const db = require('../models/db');
 const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isSmsReaction, hasSchedulingIntent } = require('./sms-intent');
-const { PREHANDLED_INBOUND_TYPES } = require('./sms-shadow-backfill');
 const { runWithoutPaidCalls } = require('./late-draft-egress-guard');
+
+// Inbound types a live flow already handled (opt keywords, reactions, a consumed reschedule reply, lead intake):
+// drafting those would sample flows the live path owns.
+const PREHANDLED_INBOUND_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'reschedule_reply', 'lead_intake'];
 
 // What draftShadowReply is told about where the draft came from.
 const SOURCE = 'mac_late';
@@ -91,7 +94,7 @@ function defaultFindCustomer(phone) {
 // webhook finishes before the drafter (opt keywords, reactions, consumed reschedule and lead
 // replies); an enforced spam verdict also returns before it.
 // The staffed location lines the live drafter samples, as last-10 digits, minus the AI line: the SQL half
-// of eligibility()'s line check (same source list as sms-shadow-backfill). Applied before the page limit
+// of eligibility()'s line check. Applied before the page limit
 // so a burst of texts to other lines can never fill every page and starve location-line texts. An empty
 // list matches nothing (fails closed).
 function draftableLineLast10s() {
@@ -285,5 +288,6 @@ module.exports = {
   silenceRefusal,
   isAiNumber,
   SOURCE,
+  PREHANDLED_INBOUND_TYPES,
   _internals: { candidateQuery, eligibility, draftableLineLast10s, RUN_LOCK_KEY },
 };

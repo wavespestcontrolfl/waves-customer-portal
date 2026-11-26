@@ -83,6 +83,15 @@ const formatUnitCost = (value, unit) => {
   return `$${numeric.toFixed(numeric >= 10 ? 2 : 4)}/${unit}`;
 };
 
+// What a field means when the row's meaning changed under it (owner 2026-11-26, "only new estimtes"): the one-time pest floor and
+// multiple price only quotes made before 11-26 and bedroom-priced (apartment/condo) quotes; new house quotes use fixed constants in
+// the code, not these fields.
+const FIELD_HELP = {
+  "onetime_pest.floor": "Applies to quotes made before 11-26 and to apartment/condo (bedroom-priced) quotes. New house quotes use a fixed $199 / 1.8x / 10% minimum.",
+  "onetime_pest.multiplier": "Applies to quotes made before 11-26 and to apartment/condo (bedroom-priced) quotes. New house quotes use a fixed $199 / 1.8x / 10% minimum.",
+};
+const fieldHelp = (configKey, field) => FIELD_HELP[`${configKey}.${field}`] || "";
+
 function StatusBadge({ status }) {
   // Main: pending amber, approved green, rejected red. The kit has no success
   // tone, so approved keeps the emphasis tone and pending gets its amber back.
@@ -304,7 +313,7 @@ function ConfigCard({ config, onUpdate }) {
     const path = [...parentPath, key];
     if (Array.isArray(value)) return <div key={key} className="mb-3 border-l-2 border-zinc-200 pl-3"><div className="mb-2 font-medium capitalize text-zinc-900">{key.replace(/_/g, " ")}</div>{renderArray(value, path)}</div>;
     if (typeof value === "object" && value !== null) return <div key={key} className="mb-3 border-l-2 border-zinc-200 pl-3"><div className="mb-2 font-medium capitalize text-zinc-900">{key.replace(/_/g, " ")}</div>{Object.entries(value).map(([nestedKey, nestedValue]) => renderValue(nestedKey, nestedValue, path))}</div>;
-    return <div key={key} className="flex min-h-11 items-center justify-between gap-3 border-b border-zinc-100 py-1"><span className="capitalize text-ink-secondary">{key.replace(/_/g, " ")}</span>{typeof value === "boolean" ? <Switch checked={value} disabled={!canEditPricing()} aria-label={key.replace(/_/g, " ")} onChange={(checked) => handlePathUpdate(path, checked)} /> : <EditCell value={value} onSave={(nextValue) => handlePathUpdate(path, nextValue)} type={typeof value === "number" ? "number" : "text"} />}</div>;
+    return <div key={key} className="flex min-h-11 items-center justify-between gap-3 border-b border-zinc-100 py-1"><span className="capitalize text-ink-secondary">{key.replace(/_/g, " ")}{!parentPath.length && fieldHelp(config.config_key, key) && <span className="mt-0.5 block text-ui-body normal-case text-ink-tertiary">{fieldHelp(config.config_key, key)}</span>}</span>{typeof value === "boolean" ? <Switch checked={value} disabled={!canEditPricing()} aria-label={key.replace(/_/g, " ")} onChange={(checked) => handlePathUpdate(path, checked)} /> : <EditCell value={value} onSave={(nextValue) => handlePathUpdate(path, nextValue)} type={typeof value === "number" ? "number" : "text"} />}</div>;
   };
 
   const isObject = typeof data === "object" && data !== null && !Array.isArray(data);

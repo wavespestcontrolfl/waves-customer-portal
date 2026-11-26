@@ -248,7 +248,7 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
   // The saved price-rule signals: the rules the estimate was priced with, the services an earlier revision added under
   // the current rules, and the palm minimum a sold palm line carries (a Settings edit never moves an existing line).
   const savedRules = require('./estimate-floor-signal-replay').savedFloorReplaySignals(estData);
-  for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'currentRulesServices', 'palmMinPerVisitReplay']) {
+  for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyOneTimePestBuffer', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay']) {
     if (savedRules[key] !== undefined) updatedInputs[key] = savedRules[key];
   }
   // The service being added was never quoted: it prices under the current rules, the existing lines keep theirs.
@@ -267,7 +267,7 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
     const draftEstimateData = removeSendSnapshotPricingBundle({
       ...estData,
       // The replay-only price-rule keys ride the saved result's stamp, never the stored inputs.
-      inputs: (({ addedServiceKeys: _a, legacyPricingRules: _l, legacyTwoStoryRoof: _t, currentRulesServices: _c, palmMinPerVisitReplay: _p, ...rest }) => rest)(updatedInputs),
+      inputs: (({ addedServiceKeys: _a, legacyPricingRules: _l, legacyTwoStoryRoof: _t, legacyOneTimePestBuffer: _w, oneTimePestCurrentServices: _o, currentRulesServices: _c, palmMinPerVisitReplay: _p, ...rest }) => rest)(updatedInputs),
       result: legacyResult,
       baseMonthly: newBaseMonthly > 0 ? newBaseMonthly : (estData?.baseMonthly || 0),
       onetimeTotalBase: newOneTime,

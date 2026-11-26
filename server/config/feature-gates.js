@@ -20,7 +20,6 @@
  *   GATE_TECH_ESTIMATES=true (owner 2026-11-09, "GO, FOR ALL": a technician prices and, in later steps, sends an estimate from the phone. It has a gate because the later steps text and email customers and because the price preview runs the paid property lookup. Off, every /api/tech/estimates route answers 404 {enabled:false} before any customer read. On, a route also needs the technician's own Can create estimates switch (technicians.can_create_estimates, off by default); an admin login always passes. Steps 1 and 2a price and save a draft estimate (sold by = the creator) and read his own; nothing is sent. Pest lines only (general pest, mosquito, rodent, termite), each open to a technician only when his job type for it is Qualified. Strict `=== 'true'`, read at call time via techEstimatesLive(); dark by default. Kill: unset.)
  *   GATE_LIVE_CALL_TRANSCRIPTION=true (owner 2026-11-16 "ok build all", live-call suite PR 1: when a staff member presses 1 to take an inbound call, Twilio Real-Time Transcription starts on the caller's call, both sides, and each final utterance is saved card-number scrubbed in call_live_utterances through POST /api/webhooks/twilio/live-transcription. It collects text only; the features that read it come later. Read via isEnabled('liveCallTranscription') at boot, strict 'true', dark by default; off = no transcription starts and the press-1 TwiML is unchanged. Spends money when on (Twilio, $0.027 a call minute): owner flip only. Kill: delete the variable.)
  *   GATE_LIVE_CALL_UPSET_ALERT=true (owner 2026-11-16 "ok build all", live-call suite: while a call is live, when the caller sounds upset and the owner is not the one on the call, one bell row and one phone banner tell him so he can step in. After a caller utterance is saved, a Claude Haiku 5.5 read of the last two minutes runs when the caller has 3 or more new utterances, at most once per 45 seconds and 8 times per call; mood upset or angry raises one alert per call. Needs GATE_LIVE_CALL_TRANSCRIPTION data. Read via isEnabled('liveCallUpsetAlert') at boot, strict 'true', dark by default; off = no model call, no new read, behavior byte-identical. Spends money when on (a Haiku call per check): owner flip only. Kill: delete the variable.)
- *   GATE_CALL_SCREEN_EXCHANGE_HISTORY=true (owner 2026-11-16 "build", spam-call audit: robodialers moved to STIR attestation A, so the press-1 screen also challenges an unknown caller when 2+ other unknown numbers from its 6-digit exchange hung up with no message or failed the screen in 14 days; a caller who fails the screen keeps the missed-call alert row but no push. Off = shadow stamps only. Kill: unset)
  *   GATE_CALL_SCREEN_ALL_UNKNOWN=true (owner 2026-11-24 "trial", 14-day trial; needs GATE_CALL_PRECONNECT_SCREEN: every caller not on a customer record hears the press-1 prompt on any attestation, except a staff phone, a number on a live lead, or a remembered caller who talked with the office 30 s or more or left a message over 10 s on an earlier call; a failed-screen call writes its missed-call bell without a push. Named risk: a real caller who does not press 1 goes to voicemail. Kill = unset, instant off. Off = today's behavior, no extra read.)
  *   GATE_MISSED_CALL_SPAM_REPEAT=true (owner 2026-11-19 "YES BUILD", missed-call spam check: an unknown caller on a Google listing line whose same number already hung up with no message on another Google line, or twice on any line, in 14 days keeps the missed-call alert row, titled "likely robocall", but gets no push or re-push. Off = shadow stamp only. Kill: unset)
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
@@ -180,13 +179,13 @@
  *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_CALL_HOLD=true (owner 2026-11-16 "ok build all", live-call suite: on a conference-path call (GATE_CALL_CONFERENCE_PATH), the staff press star to put the caller on hold. The caller hears a short script of pest facts, the call recording pauses, and the staff press 1 to go back. Strict opt-in, read at call time via callHoldLive(); off = byte-identical staff TwiML and no new route is reached. Spends money: Twilio bills the portal's neural Say voice (TWILIO_SAY_VOICE, default Polly.Joanna-Neural) per character of the script and prompts, so the owner flips it with his yes to the cost. Sends nothing to a customer. Kill: unset.)
  *   GATE_CALL_RING_FACT=true (owner 2026-11-16 "ok build all", live-call suite part 8: on half of the conference-path calls (GATE_CALL_CONFERENCE_PATH), chosen from the CallSid, the caller hears one pest fact from the hold script (call-hold-script.js FACTS) and then the ring, instead of the ring alone; the other half hear the ring as today. Each call is stamped conference_path.ring_fact {arm, fact} so ringFactReport() can compare hang-ups before the answer between the arms over 2 weeks. Strict opt-in, read at call time via callRingFactLive(); off = today's ring, byte for byte. Spends money (Twilio bills the Polly neural Say voice per character, about $1 a month) and the caller hears new audio, so the owner flips it; sends nothing to a customer. Kill: unset)
- *   GATE_CALL_HOLD_VOICE=true (owner 2026-11-16 "ok build all", live-call suite part 7: when a staff member says "please hold", "hold please" or "let me put you on hold" on a conference-path call, the caller is put on hold exactly as if the staff had pressed star; "hold on a second" does not start a hold. Named risk: a false match puts a caller on hold, so it has its own off switch. Strict opt-in, read at call time via callHoldVoiceLive(). Needs GATE_CALL_HOLD, GATE_LIVE_CALL_TRANSCRIPTION and GATE_CALL_CONFERENCE_PATH. Spends nothing beyond the hold's own Say voice. Sends nothing to a customer. Kill: unset.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
  *   GATE_PROMISE_RECORD_EVIDENCE=shadow|true (owner 2026-10-29, fix F4 "Stuck Alert Fixes": three false overdue bells on promises and asks the records had already answered. On, (1) an invoice Waves sent the customer after a staff promise ("I'll adjust the payment terms") is evidence the model may cite, (2) an estimate the customer accepted after a send-estimate ask counts even if it was sent before the ask, and (3) a waves row (promise or customer request) of kind other, callback or technician_follow_up whose customer has a live, non-series visit booked after the promise text and with its window end still ahead does not ring as overdue until that window end. `shadow` = change nothing; write audit_log rows for what it would have changed (sms_commitment.fulfillment.shadow, sms_commitment.on_track.shadow). Anything else = off, byte-identical. Read at call time via promiseRecordEvidenceMode(). See docs/gates-and-env.md.)
  *   GATE_SETTINGS_GATE_FLIP=true (owner 2026-11-06: Settings → Advanced → Features gets an on/off switch on every gate the portal can flip (a plain on/off gate with a description line here). Owner login only (requireFullAccess); turning a gate on asks for its name to be typed, turning it off is one click and writes 'false'; every flip writes an audit_log row (gate.flip) and goes through the same Railway variable write as the Intelligence Bar's set_railway_gate (compare-and-swap on the prior value; Railway redeploys the portal, so it restarts briefly). This gate itself, mode/timestamp gates and gates with no description stay Railway-only. Strict opt-in, read at call time via settingsGateFlipLive(); off = the page is read-only exactly as before and the flip routes answer 404)
  *   GATE_ALERT_CATALOG=watch (owner 2026-10-29, "ok go" on admin bell rebuild step D1: every notification-registry type declares how it closes, and an admin alert the 08-28 bell policy silences is counted. `watch` = when NotificationService.create silences an admin row it writes ONE audit_log row (notification.bell_policy.muted) per Eastern day per distinct alert, category + trigger key + digit-free title stem only; the bell, pushes and create()'s return are unchanged. Anything else = off, byte-identical: no read, no write. Read at call time via alertCatalogMode(). See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true|charge (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release; `charge` (owner 2026-10-28, "Charge the saved card"; narrowed 2026-10-29, option B) = charge the customer's saved Auto Pay card or bank for a held VISIT bill only, and only inside the visit-completion rail's own authorization (completion-charge-verdict.js: the visit's agreed price cap, the same lanes; an issued-invoice closeout counts as a performed visit for this charge only). Keep the hold when the charge went through or its outcome is unclear (an office alert says check Stripe). Over the agreed price, no agreed price, a visit that was not performed, a payer, or any guard refusal = the hold is kept, nothing is charged or texted, one office alert asks for a review (it is looked at again only after the bill or visit price changes). Release the hold only when the card was really declined or there is no Auto Pay method; an invoice bound to no visit, an annual-prepay term rail invoice, or a bill no completion lane admits is released as `true` releases it, never charged (one office alert, one audit_log row per attempt, invoice_followup.autopay_hold_timeout_charge). `charge` MOVES MONEY: the owner flips it. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
  *   GATE_AUTO_DISPATCH_DRY_TIME_ORDER=shadow|true (owner 2026-11-01, rain backtest of 440 outdoor stops + D5, ruling "forget the pest-early rule": auto-dispatch orders the day by product dry time. The service-family default time window (pest 8-10 AM, lawn 10 AM-12 PM) is replaced by a dry-time window from the products the visit uses: 4 h or more dry time 8-10 AM, 1-3 h 8 AM-12 PM, rain-proof (granular, bait, gel, dust, water-in, rain-OK services) 1-5 PM. DRY_TIME_ORDER_SEASON ('MM-DD..MM-DD', wrap-around allowed) narrows the dates; default all year. Customer-set times, blackouts and the flex-tier freeze are unchanged. Values: shadow = live windows unchanged, each pass-1 audit row logs constraints_checked.dry_time (class, hours, source, the slot today's window picked and the slot the dry window would pick); true = the dry window replaces the family default as the soft default time window, and for the rain-sensitive classes (4 h or more, 1-3 h) the credit also counts in a placed visit's move gain on its CURRENT date only: a timed visit is re-timed into its dry window on the same date, never moved to another date (owner 2026-10-24: no automatic day moves for rain). A rain-proof visit never gains from its afternoon window (a soft default only), and the flex-tier freeze, the score bar, the drive floor and the road check are unchanged. When the dry window opens after the day's first hour (rain-proof 1-5 PM) the search also asks the same slot finder for starts at or after the window start (not in capacity or arrival-search mode; no new paid calls): true adds them to the live candidates after the route options, shadow scores them for shadow_best only. shadow_best is the slot true would pick under these move rules; would_move says it differs from the current slot. Strict: exactly 'shadow' or 'true', read at call time via autoDispatchDryTimeOrderMode(). Ships DARK; off = byte-identical, no extra database read. Sends nothing to a customer. Kill switch: unset.)
+ *   GATE_AUTO_DISPATCH_RAIN_TERM=shadow (owner 2026-11-26: rain inside the 4:10 AM auto-dispatch night run. The goal is to move an outdoor visit that sits on a forecast-wet day 3 to 6 days out to a drier day inside its own legal day band, silently, before the 72-hour reminder text. THIS RELEASE IS SHADOW ONLY and moves nothing. Once per run it reads the free NWS hourly forecast once per forecast area (never the paid Open-Meteo backup), works out each day's wetness (the work-hour mean of the chance of rain, 30% dry to 80% wet) and how far to trust it (day 3 full, day 6 a quarter), and for each outdoor visit on a wet day writes constraints_checked.rain_term on its audit row: the area, the current day, the best drier date with a free slot for the same technician under today's 5-day landing floor and under a 73-hour floor, and whether it would move (a visit sharing a stop with other visits is never verified: it records the slot as a candidate with would_move false, reason grouped_unverified). Each chosen slot is vetted by the writer's own read-only occupancy probe (taken = skipped, unreadable = candidate only, reason occupancy_unverified), and a service list that cannot be read in full is reason error. The shadow calls no apply.js function and writes nothing but audit rows. A run summary goes to audit_log (auto_dispatch.rain_term_shadow). Strict: exactly 'shadow' records, anything else including 'true' is off, byte-identical, no forecast call and no extra read, read at call time via autoDispatchRainTermMode(). The drier-date search uses the arrival search with no road reader: no paid road lookup. Sends nothing to a customer. Kill switch: unset.)
  *   GATE_SERVICE_LINE_MAP=shadow (owner 2026-10-25, second technician starts early 2027: the service-line map. A service line (general pest, mosquito, lawn / tree & shrub, rodent, termite / WDO) has a home technician and a gap technician (Team tab "Service lines"). THIS RELEASE ONLY RECORDS: after each of six booking choice points commits (/book, phone live booking, after-call booking, estimate accept, office create left on Auto, the auto-dispatch night run) it writes one service_line_pick_shadow row with the technician actually chosen and the one the map would pick. Read at call time via serviceLineMapMode(): exactly 'shadow' (trimmed, any case) = record; exactly 'live' (build 4, owner "DO THIS NOW" 2026-10-30) = record AND pick: /book offers, the phone booking recheck, the after-call booking, the office Auto choice, the estimate time offers and the estimate accept send a mapped line's new work to its home technician, else its gap technician; a line with no technician set keeps today's choice. Anything else, including 'true', = off, no resolver call and no query. Shadow never changes a booking; neither value sends anything to a customer or staff member.)
  *   GATE_TERRITORY_ROUTING=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page: each technician has a territory, drawn as a ZIP list in territory_zips. On, the service-line map (GATE_SERVICE_LINE_MAP) lays the territory over a pest, mosquito, rodent or termite / WDO line: the technician who owns the visit's ZIP is that line's home technician, and the line's own home (else gap) technician covers gaps. Lawn / tree & shrub keeps the line map. The ZIP comes from the visit's ZIP, else its map position (Census ZIP shapes), else the customer's row. A ZIP with no territory technician adds no rule. It acts only where the line map acts: shadow rows show it under 'shadow', picks follow it under 'live'. Strict opt-in: exactly 'true', read at call time via territoryRoutingLive(). Ships DARK; off = the line map exactly as before, no territory query. Sends nothing to a customer.)
  *   GATE_TERRITORY_NIGHT_RUN=true (owner 2026-10-30, "go" on question 4 of the Waves Territory Map page, build 7: the auto-dispatch night run gives an UNASSIGNED pest, mosquito, rodent or termite / WDO visit only to the technician who owns the visit's ZIP (territory_zips): every other technician's slot is dropped as a candidate (drops.other_territory), so with no slot for that technician the visit keeps its place. The ZIP comes from the visit's service ZIP, else its map position, else the customer row. A visit with a technician, a lawn / tree & shrub visit, or a ZIP with no territory technician adds no rule. Strict opt-in: exactly 'true', read at call time via territoryNightRunLive(). Ships DARK; off = the night run byte-identical, no territory query. Sends nothing to a customer.)
@@ -304,7 +303,7 @@
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
  *   GATE_CALL_INCIDENTS=true (correction loop for calls: the nightly 04:10 ET job turns each self-audit field disagreement into an ai_incidents row, confirmed only when a second model on the other provider from the auditor's, reading the call blind, reaches the auditor's answer and both readers' excerpts are in the transcript (unknown auditor provider or a truncated call stays a lead); Sunday 04:50 fix proposals for calls; services/call-incidents.js. Adds about one fast-tier OpenAI call per finding; shadow data only, no customer sends; honoured only while GATE_CALL_SELF_AUDIT is on; ships DARK, read at call time via callIncidentsLive(); unset = off)
  *   GATE_CALL_SOUND_CHECK=true (owner 2026-11-25 "both", the sound check on every new call: every 5 minutes the portal sends the recording of each newly processed call (20 seconds to 30 minutes long, at most 48 hours old) to Gemini 4 Neon. The model LISTENS and notes the caller's mood at the start and at the end, whether the caller was upset, how many times staff talked over the caller, whether staff sounded rushed, and any risky claim staff made (safety, organic or natural, a guarantee, a promised result, a price, what a service includes, licensing). Notes only, saved on the call (call_log.metadata.sound_check): no bell, no text, nothing a customer sees. It has a gate because each listen is a paid Gemini API call, an estimated 1 to 4 cents a call. The job stops for the ET day at $0.83, the top of the range the owner approved ($0.33 to $0.83 a day, $10 to $25 a month). A call gets one attempt: a failed listen is not tried again. The job makes no call when the model has no price row. A call flagged for card data and a call on an internal test line are never sent. Strict `=== 'true'`, read at run time by server/services/call-sound-check.js via callSoundCheckLive(); dark by default; off (kill: unset) = no download, no model call, no write.)
- *   GATE_VISIT_ACCESS_FLAGS=shadow (visit access and safety flags, shadow leg: the hourly :34 sweep 05:34 to 19:34 ET puts visit_access.v1, six yes/no reads, to the typed-decision providers for today's and tomorrow's open visits and records the answers in decision_reviews under subject_type scheduled_services; services/typed-decisions/visit-access-shadow.js; codes never leave: the state says only whether codes are on file and every text is redacted; nothing is shown to a technician, written to a visit or sent; honoured only while GATE_TYPED_DECISIONS is live; ships DARK, read at call time via visitAccessShadowLive(); unset or any other value = off)
+ *   GATE_VISIT_ACCESS_FLAGS=shadow|on (visit access and safety flags: the hourly :34 sweep 05:34 to 19:34 ET puts visit_access.v1, six yes/no reads, to the typed-decision providers for today's and tomorrow's open visits and records the answers in decision_reviews under subject_type scheduled_services; services/typed-decisions/visit-access-shadow.js; codes never leave: the state says only whether codes are on file and every text is redacted; shadow = the sweep only, nothing is shown to a technician; on = the same sweep AND the technician's Visit Brief shows the flags with a Right / Wrong tap stored as one row in visit_access_verdicts (services/visit-access-flags.js; review rows and labels untouched; cards read the providers' current answers kept on visit_access_states.answers, and evidence counts only for the customer in visit_access_states.customer_id, the visit's current one); the tap writes no visit and sends nothing, except the tap that creates a Right on a dog flag with no pets on file saves one pet_details line; honoured only while GATE_TYPED_DECISIONS is live; ships DARK, read at call time via visitAccessSweepLive() and visitAccessCardsLive(); unset or any other value = off)
  *   GATE_TYPED_DECISIONS_CLEF=true (the same decision packages put to Cloudflare Clef on Workers AI as a second provider, ROUTES.typedDecisionClef, model MODEL_CLOUDFLARE_CLEF default clef-flash; askPackage(..., { provider: 'cloudflare' }); honoured only while GATE_TYPED_DECISIONS is live; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsClefLive(); unset = off)
  *   GATE_PREPAY_MINT_PRICE_HOLD=shadow|true (stamp-time price check for every annual prepay, not only a /secure pick: a new term records each covered visit's price when it is created (activity_log annual_prepay_mint_visit_prices); `true` = a visit whose price changed since then is not stamped as covered, bills normally and raises the existing 'repriced visit left uncovered' office alert; `shadow` = the price is recorded and a would-hold is only logged. Termite annual plans are left out. Off = byte-identical to today: nothing recorded, nothing read. Canonical CALL-TIME reader prepayMintPriceHoldMode(). Kill switch: unset.)
  *   GATE_PHOTO_PRIVACY=shadow (photo privacy check, Clef second wave idea 3: each technician social post's photo is put to Cloudflare Clef as photo_privacy.v1 (face, person, readable address text, license plate, child, pet) AFTER the post is published and logged, and the answers land in decision_reviews for labeling; services/typed-decisions/photo-privacy-shadow.js. SHADOW ONLY: nothing is held, changed or shown to the technician; `shadow` is the only value honoured (anything else = off) and only while GATE_TYPED_DECISIONS_CLEF is live; ships DARK, read at call time via photoPrivacyMode(); unset = off)
@@ -387,7 +386,6 @@
  *   GATE_LAWN_TECH_PARAGRAPH=true (lawn report "From your technician" paragraph, owner 2026-10-05; FIXED SENTENCES since 2026-10-06: every word comes from the owner-approved LAWN_SENTENCES in lawn-tech-paragraph.js ("Our technician saw {condition} in the {place}.", "There may be early signs of {label}; we will keep an eye on it.", "Today we applied {products}."); at most ONE model call per lawn visit extracts closed-list conditions and places with the technician's exact words and a seenToday judgment, and code keeps an item only when the quote is word for word in one note sentence naming the condition (the model judges, the code verifies, no word lists); the entry { text, slots, v: 2 } freezes first-writer-wins in structured_notes.lawnTechParagraph[assessmentId], is re-checked against its slots at read time and rides reportV2.lead.techParagraph on the web report and the PDF; lane lawn_tech_paragraph on TEXT_POLICIES.report; lawn only; read at call time via lawnTechParagraphLive(); off = no model call, byte-identical payload, PDF and PDF cache key)
  *   GATE_LAWN_COST_PLUS_LIST=true (residential recurring lawn care list price = annual cost / (1 - 0.45), never below the market table (its $55 list minimum retired 2026-11-06), from the v13 program product cost plus 10 more labor minutes a visit; WaveGuard and manual discounts on the lawn line apply in full since owner 2026-11-02 (they stopped at a 35% margin before); owner 2026-10-09; strict opt-in via gateEnvValue, read at CALL time in priceLawnCare and generateEstimate; a saved estimate replays as it was priced (pricingMetadata.lawnCostPlusList); the one-time lawn anchor and commercial lawn stay on the market table; ships DARK, off = byte-identical prices)
  *   GATE_SITEONE_PROGRAMS_CHECK=true (owner 2026-10-26: on the 1st of each month at 9:00 AM ET the portal signs in to siteone.com with the order bot's stored login, reads SiteOne's Early Order Programs, promotions and Partners points, compares them with last month's list and posts one admin notification for new programs, programs ending within 30 days and points expiring within 60 days. Read-only on SiteOne: never adds to the cart, never changes the account, never orders. Strict opt-in via gateEnvValue, read at call time by server/services/procurement/siteone-programs-check.js; dark by default; off = nothing runs. Sends nothing to a customer.)
- *   GATE_SITEONE_EMAIL_ORDER=true (owner 2026-10-26, "OK DO OPTION B": SiteOne's website blocks the order bot, so an owner can instead email ONE pickup order to SiteOne for an open restock request. The Restock tab shows "Email order to SiteOne" on an open request (admins only); it opens a preview with To, Subject, the body and the estimate before tax, and Send email goes out through SendGrid from contact@ to SITEONE_ORDER_EMAIL (cc SITEONE_ORDER_CC). Then the request is marked ordered, so Receive works as today. One email per request, ever. Strict opt-in via gateEnvValue, read at call time by server/services/procurement/vendor-order-email.js via siteOneEmailOrderLive(); dark by default; off = the two routes answer 404 and the tab shows no button. Sends an email to SiteOne, a vendor, never to a customer; the order bot is untouched.)
  *   GATE_SITEONE_DEAL_AI_END_DATE=true (owner 2026-11-19 "B" on the SiteOne Deal End Dates scope page: the Monday 8:00 AM SiteOne deals bell asks Claude Haiku 5.5 for each deal email's end date and shows it with the email's own words, for example: ends Apr 30 ("Offers valid March 1 – April 30, 2026."). The code keeps an answer only when those words are in the email and name that day (the end of a range, not its start). It has a gate because each read is a paid API call: about 2 deal emails a month cost under 1 cent; the cap (20 reads, one Monday run a week) is about $0.04 a week, $0.17 a month. Strict `=== 'true'`, read at run time by server/services/procurement/siteone-deals-digest.js via siteOneDealAiEndDateLive(); dark by default; off (kill: unset) = no model call, and each line keeps the date-pattern deadline it shows today.)
  *   GATE_MOSQUITO_MISTING=true (automatic mosquito misting system pricer: install price by tier, nozzle and riser overage, a $59 monthly plan and per-fill refill rates; the estimate engine accepts services.mosquitoMisting, the legacy mapper emits the plan line and a one-time install item, and the public price ranges list two rows; the line is not a WaveGuard tier service and takes no percent discount; draft prices, dealer cost unknown; also gates the misting system records (owner 2026-10-30): an admin-only Misting system panel on Customer 360 for the install calibration (spray-rate math checked against the label's daily limit) and the tank refill log, via /api/admin/misting-records, which answer 404 and render no panel when off; and the customer app's Home card, GET /api/misting-system (off = `{ system: null }` with no read); strict opt-in via gateEnvValue, read at CALL time via mosquitoMistingLive(); ships DARK, off = the key is ignored and every estimate is byte-identical)
  *   GATE_DEAD_ANIMAL_REMOVAL=true (owner 2026-10-26: the one-time Dead Rodent Removal & Odor Treatment line in the estimate engine: services.deadAnimalRemoval = { tier: reachable | attic | in_wall }, fixed tier prices, in_wall is a custom quote. NEW QUOTES ONLY: off = the estimator hides the choice and the engine refuses the input with a 400 failClosed error (DEAD_ANIMAL_REMOVAL_GATED); an estimate already saved with the line stays a normal estimate. Strict opt-in via gateEnvValue, read at CALL time via deadAnimalRemovalLive(); dark by default. Sends nothing to a customer.)
@@ -486,6 +484,7 @@
  *   GATE_MAIL_HOME_PAGE=true (owner 2026-11-22, mailer step 2c: the page of one new home on the county deed list, GET /api/public/home/:token, opened from the QR code on a later postcard. It answers with the home's address and its stored quarterly pest plan price, and counts a real open. Off = every request, a real token too, gets the same 404 as an unknown token. It is a new public link page. Read at call time via mailHomePageLive(), strict 'true', dark by default. Nothing is sent. Kill = unset.)
  *   GATE_PAYROLL_PRODUCTION_SHARE=true (owner 2026-11-24, technician production share PR 2 (Technician Terms v3, "Production share"): a pay run adds a "Production share" earning line to the check of a W-2 technician who has production share settings in force for the pay week: the rate times the credited production above the bar, from production-share.js shareForWeek, paid on the Friday check for its own pay week. It is taxable wages and counts in the federal regular rate for its own week (the half-time premium on the share, share / hours worked x 1/2 x overtime hours, rides on the same check through payroll-regular-rate.js). The check stores production_share_cents and a frozen snapshot of the credit (calc_snapshot.productionShare); a stop marked needs review pays $0 and the draft says how many stops need review. The pay stub, run table, run CSV, run totals, the Tech Rewards pay dating, the yearly statement and the tax package W-2 CSV carry it. Needs GATE_PAYROLL; works with GATE_PAYROLL_PAY_LINES on or off. Named risk: it adds money to technician checks. Read at call time via payrollProductionShareLive(), strict 'true', dark by default; off = no share is worked out and every pay run output is byte for byte today's for checks drafted with it off; a check drafted with it on keeps showing what it stored; rollback = unset. Pays, sends and files nothing; the owner finalizes every run and makes every payment himself.)
  *   GATE_MAIL_HOME_TEXT_BOOK=true (owner 2026-11-23, mailer step 2d-3: the new-home postcard prints "Text 101 EXAMPLE to (941) 297-2817". A text to one of the four office lines (Lakewood Ranch, Parrish, Sarasota, Venice) whose body is the house number and street name of a live home on the new-home mail list (a street type and a ZIP are accepted) gets one auto-reply from the same line with that home's short link, https://portal.wavespestcontrol.com/nh/<slug>, once per sender and home per 24 hours. It texts a person, so the flip is the owner's. Also needs GATE_MAIL_HOME_PAGE (the page the link opens). Off = the text is handled as any other inbound text. Read at call time via mailHomeTextBookLive(), strict 'true', dark by default. Kill = unset.)
+ *   GATE_ALERT_CLEAR_AGENT=shadow (owner 2026-11-26, alert clear-up agent PR 1: every 10 minutes an agent reads each open admin bell alert about a customer text, email, voicemail or missed call (category inbound_sms, inbound_email, voicemail_callback or missed_call, not Claude-queue rows) with what happened after it, and records in alert_clear_verdicts whether the work is done: answered, nothing_to_answer or still_owed. Plain rules go first; a staff text, a sent staff email or a human-answered call after the alert is the answer, and an alert that says we owe a quote, callback or promise is never closed by the model. Anything else is one paid Claude Sonnet read, capped per day (ALERT_CLEAR_AGENT_DAILY_CAP, default 150); code checks the record the model names as proof. SHADOW ONLY: it closes, edits and rings no notification and texts, emails and calls no one. It has a gate because each read is a paid API call. Off unless the value is exactly `shadow`; any other value is off and no query runs. Read at call time via alertClearAgentMode(). Kill: unset.)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -1125,10 +1124,10 @@ const gates = {
   // enforces: with GATE_TYPED_DECISIONS off the lane is dark whatever this
   // variable says, and the status must not read as enabled (Codex r1 on #5557).
   typedDecisionsClef: gateEnvValue('GATE_TYPED_DECISIONS') && gateEnvValue('GATE_TYPED_DECISIONS_CLEF'),
-  // Visit access and safety flags, shadow leg (Clef second wave idea 5):
-  // ships DARK. CALL-TIME reader is visitAccessShadowLive() below; this entry
-  // is for logGateStatus only and carries the reader's prerequisite.
-  visitAccessFlags: gateEnvValue('GATE_TYPED_DECISIONS') && String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase() === 'shadow',
+  // Visit access and safety flags (Clef second wave idea 5): ships DARK.
+  // CALL-TIME readers are visitAccessSweepLive() / visitAccessCardsLive()
+  // below; this entry is for logGateStatus only and carries their prerequisite.
+  visitAccessFlags: gateEnvValue('GATE_TYPED_DECISIONS') && ['shadow', 'on'].includes(String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase()),
   // Stamp-time price check for every annual prepay mint: ships DARK. CALL-TIME
   // reader is prepayMintPriceHoldMode() below ('shadow' or 'true'); this entry
   // is for logGateStatus only.
@@ -1701,14 +1700,6 @@ const gates = {
   // Spend rails: SEALED_EXAM_AUTO_MIN_ITEMS / SEALED_EXAM_AUTO_MAX_ITEMS.
   smsSealedExamAutoRun: process.env.GATE_SMS_SEALED_EXAM_AUTORUN === 'true',
 
-  // Shadow Backfill (brand-voice loop accelerator) — drafts house-voice
-  // replies for HISTORICAL inbound SMS that already have a human reply and
-  // feeds them to the existing judge, compressing months of per-intent
-  // score accumulation into days. Hourly batches, self-terminating once
-  // history is exhausted. Burns ~2 Anthropic calls per sample, so prod
-  // requires explicit opt-in; flip off (or leave — it no-ops) when done.
-  shadowBackfill: isProd ? process.env.GATE_SHADOW_BACKFILL === 'true' : true,
-
   // SMS Pathology Ledger (brand-voice loop diagnostics) — nightly classifies
   // each draft_unsafe judgment into a fixed (harness surface × failure mode)
   // cell, and weekly parks a harness-patch PROPOSAL card when a cell
@@ -2055,14 +2046,6 @@ const gates = {
   // call_log.metadata.preconnect_screen='would_gate' (shadow daily counters,
   // zero caller impact).
   callPreconnectScreen: process.env.GATE_CALL_PRECONNECT_SCREEN === 'true',
-  // Press-1 screen exchange trigger + failed-screen push quiet (owner 2026-11-16
-  // "build", spam-call audit). On: an unknown caller on any attestation is
-  // challenged when 2+ other unknown numbers from its 6-digit exchange hung up
-  // with no message or failed the screen in 14 days (missed-call-bell.js
-  // exchangeHangupScreenHit), and a failed-screen call's missed-call bell row is
-  // written without a push (stamped 'screen_quiet'). Off = shadow:
-  // preconnect_screen_exchange='shadow' and missed_call_screen_quiet_shadow.
-  callScreenExchangeHistory: process.env.GATE_CALL_SCREEN_EXCHANGE_HISTORY === 'true',
   // Press-1 screen for every unknown caller (owner 2026-11-24 "trial", 14-day
   // trial; needs GATE_CALL_PRECONNECT_SCREEN). On: an unknown caller on any
   // attestation hears the press-1 prompt unless the number is a staff phone, on
@@ -2506,14 +2489,8 @@ const gates = {
   sameQuestionCheck: process.env.GATE_SAME_QUESTION_CHECK === 'true',
   // GATE_ROUTE_ENGINE_SUMMARY (engine summary block on the admin Day Scorecard, read-only, dark). Boot-log entry only; the call-time reader is routeEngineSummaryLive().
   routeEngineSummary: process.env.GATE_ROUTE_ENGINE_SUMMARY === 'true',
-  // Day-only agreement shadow (owner 2026-10-20, PR 1 of 2): every 10 minutes a
-  // sweep reads recent two-party calls and quiet text threads where only a DAY
-  // was agreed for a visit (or a move of one), asks the model what the office
-  // should do, and records what the agent WOULD do in day_agreement_decisions
-  // so a week of shadow can be scored against what staff did. Books nothing,
-  // moves nothing, texts no one. The act step is a later PR.
-  // Off -> the cron tick returns before it reads anything.
-  dayAgreementShadow: process.env.GATE_DAY_AGREEMENT_SHADOW === 'true',
+  // GATE_ALERT_CLEAR_AGENT (alert clear-up agent, shadow only; exactly 'shadow'). Boot-log entry; the call-time reader is alertClearAgentMode().
+  alertClearAgent: process.env.GATE_ALERT_CLEAR_AGENT === 'shadow',
   // Shared-writer cancellation notice (job-status.js): when a visit whose
   // reminders already went out is cancelled through ANY path (cascade,
   // track, IB, raw transition), text the customer the existing
@@ -3513,15 +3490,6 @@ const gates = {
   // any DB read or browser launch. Opt-in, dark by default; kill = unset.
   siteOnePrograms: gateEnvValue('GATE_SITEONE_PROGRAMS_CHECK'),
 
-  // SiteOne order by email (owner 2026-10-26, "OK DO OPTION B"): an admin
-  // previews and sends ONE pickup-order email to SiteOne for an open restock
-  // request (GET/POST /admin/inventory/restock-requests/:id/siteone-email);
-  // the request then becomes ordered. CALL-time gateEnvValue through
-  // siteOneEmailOrderLive() in procurement/vendor-order-email.js and the
-  // restock queue; this entry is for logGateStatus. Off = both routes answer
-  // 404 and the Restock tab shows no button. Opt-in, dark by default; kill =
-  // unset. The order bot (GATE_AUTO_ORDER_SITEONE) is not touched.
-  siteOneEmailOrder: gateEnvValue('GATE_SITEONE_EMAIL_ORDER'),
 
   // Vendor order dispatch (runs right after the 6:10 ET reorder sweep): an
   // open auto_reorder request whose vendor has an adapter is ORDERED —
@@ -4053,6 +4021,11 @@ const gates = {
   // run reads autoDispatchDryTimeOrderMode() at call time. Kill switch: unset.
   autoDispatchDryTimeOrder: ['shadow', 'true'].includes(String(process.env.GATE_AUTO_DISPATCH_DRY_TIME_ORDER || '').trim().toLowerCase()),
 
+  // Rain inside the night run (owner 2026-11-26). Ships DARK and SHADOW ONLY: exactly 'shadow'.
+  // Registered for logGateStatus only; the run reads autoDispatchRainTermMode() at call time.
+  // Kill switch: unset.
+  autoDispatchRainTerm: process.env.GATE_AUTO_DISPATCH_RAIN_TERM === 'shadow',
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
@@ -4304,10 +4277,6 @@ const gates = {
   // Ring fact on the conference ring (services/call-ring-fact.js). Read at CALL time by
   // callRingFactLive(); this entry is for logGateStatus. Off = byte-identical caller TwiML.
   callRingFact: process.env.GATE_CALL_RING_FACT === 'true',
-
-  // Spoken "please hold" trigger for the star-key hold (services/call-hold-voice.js). Read at CALL time by
-  // callHoldVoiceLive(); this entry is for logGateStatus. Off = nothing reads the staff's words for a hold.
-  callHoldVoice: process.env.GATE_CALL_HOLD_VOICE === 'true',
 
   // Customer location line (services/twilio.js deriveOutboundNumber →
   // config/locations.js resolveServiceLocation). ON: a customer whose city is
@@ -5731,15 +5700,6 @@ function ibToolSearchLive() {
   return process.env.GATE_IB_TOOL_SEARCH === 'true';
 }
 
-// GATE_IB_OPENAI_BACKUP read at CALL time — strict `=== 'true'`, dark. When the
-// Intelligence Bar's Anthropic call fails with a provider error (usage limit,
-// auth, overloaded, 5xx, timeout), the request finishes on OpenAI with tool
-// calling (services/intelligence-bar/openai-tool-adapter.js). Off = no
-// fallback, today's behavior. Kill: unset.
-function ibOpenaiBackupLive() {
-  return process.env.GATE_IB_OPENAI_BACKUP === 'true';
-}
-
 // GATE_IB_FAST_MODE read at CALL time — strict `=== 'true'`, dark. SPEND GATE:
 // Opus fast mode bills at a premium rate. On, the Intelligence Bar's Anthropic
 // call asks for `speed: "fast"` (beta fast-mode-2026-02-01) when the served
@@ -6184,14 +6144,21 @@ function typedDecisionsClefLive() {
   return typedDecisionsLive() && gateEnvValue('GATE_TYPED_DECISIONS_CLEF');
 }
 
-// GATE_VISIT_ACCESS_FLAGS read at CALL time — ships DARK, live only when it
-// is exactly 'shadow' AND GATE_TYPED_DECISIONS is live (the sweep's answers
-// are decision_reviews rows). Off, the visit-access sweep
-// (typed-decisions/visit-access-shadow.js) returns before any read or
-// provider call; unset is the kill, no redeploy. Shadow is the only mode this
-// gate has: nothing reaches a technician's card yet.
-function visitAccessShadowLive() {
-  return typedDecisionsLive() && String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase() === 'shadow';
+// GATE_VISIT_ACCESS_FLAGS read at CALL time — ships DARK, both values need
+// GATE_TYPED_DECISIONS live (the sweep's answers are decision_reviews rows).
+// 'shadow' and 'on' run the visit-access sweep
+// (typed-decisions/visit-access-shadow.js); off, it returns before any read
+// or provider call. Only 'on' shows the flags to a technician and takes their
+// Right / Wrong tap (visitAccessCardsLive); 'shadow' shows nothing. Unset or
+// any other value is the kill, no redeploy.
+function visitAccessValue() {
+  return typedDecisionsLive() ? String(process.env.GATE_VISIT_ACCESS_FLAGS || '').trim().toLowerCase() : '';
+}
+function visitAccessSweepLive() {
+  return ['shadow', 'on'].includes(visitAccessValue());
+}
+function visitAccessCardsLive() {
+  return visitAccessValue() === 'on';
 }
 
 // GATE_PHOTO_PRIVACY read at CALL time: 'shadow' while the variable says
@@ -6425,6 +6392,13 @@ function autoDispatchKeepTechLive() {
 function autoDispatchDryTimeOrderMode() {
   const value = process.env.GATE_AUTO_DISPATCH_DRY_TIME_ORDER;
   return value === 'shadow' || value === 'true' ? value : 'off';
+}
+
+// GATE_AUTO_DISPATCH_RAIN_TERM read at CALL time - strict: exactly 'shadow', anything else (unset is the
+// kill, 'true' too in this release) is 'off'. The one reader for auto-dispatch/rain-term.js. The
+// `autoDispatchRainTerm` gates-map entry above is for logGateStatus only.
+function autoDispatchRainTermMode() {
+  return process.env.GATE_AUTO_DISPATCH_RAIN_TERM === 'shadow' ? 'shadow' : 'off';
 }
 
 // GATE_ESTIMATE_CONSULTATION_OFFER read at CALL time — strict `=== 'true'`,
@@ -7278,11 +7252,6 @@ function adminAlertRelevanceLive() {
 // before: no close pass, no reopen, the same notifyAdmin calls.
 function alertEpisodesLive() {
   return !['off', 'false', '0'].includes(String(process.env.ALERT_EPISODES ?? '').trim().toLowerCase());
-}
-
-// GATE_SITEONE_EMAIL_ORDER read at CALL time (so a flip needs no redeploy).
-function siteOneEmailOrderLive() {
-  return gateEnvValue('GATE_SITEONE_EMAIL_ORDER');
 }
 
 // GATE_TECH_LOGIN_PRIVACY read at CALL time (so a flip needs no redeploy); strict 'true'.
@@ -8203,11 +8172,6 @@ function callHoldLive() {
   return process.env.GATE_CALL_HOLD === 'true';
 }
 
-// GATE_CALL_HOLD_VOICE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-16, "ok build all"). Kill = unset.
-function callHoldVoiceLive() {
-  return process.env.GATE_CALL_HOLD_VOICE === 'true';
-}
-
 function smsBareYesReplyLive() {
   return process.env.GATE_SMS_BARE_YES_REPLY === 'true';
 }
@@ -8233,8 +8197,6 @@ module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.callHoldLive = callHoldLive;
 // GATE_CALL_RING_FACT reader, on its own line so gate PRs never conflict.
 module.exports.callRingFactLive = callRingFactLive;
-// GATE_CALL_HOLD_VOICE reader, on its own line so gate PRs never conflict.
-module.exports.callHoldVoiceLive = callHoldVoiceLive;
 module.exports.ibSeriesMoveLive = ibSeriesMoveLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
 // GATE_CALL_CONFERENCE_PATH reader, on its own line so gate PRs never conflict.
@@ -8514,7 +8476,8 @@ function callSoundCheckLive() {
 // GATE_CALL_SOUND_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.callSoundCheckLive = callSoundCheckLive;
 module.exports.typedDecisionsClefLive = typedDecisionsClefLive;
-module.exports.visitAccessShadowLive = visitAccessShadowLive;
+module.exports.visitAccessSweepLive = visitAccessSweepLive;
+module.exports.visitAccessCardsLive = visitAccessCardsLive;
 module.exports.photoPrivacyMode = photoPrivacyMode;
 module.exports.askWavesJevCheckMode = askWavesJevCheckMode;
 module.exports.lawnJevTimingCheckMode = lawnJevTimingCheckMode;
@@ -8709,8 +8672,6 @@ module.exports.ibGeneralReadLive = ibGeneralReadLive;
 module.exports.ibGeneralEditLive = ibGeneralEditLive;
 // GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
 module.exports.ibToolSearchLive = ibToolSearchLive;
-// GATE_IB_OPENAI_BACKUP reader, on its own line so gate PRs never conflict.
-module.exports.ibOpenaiBackupLive = ibOpenaiBackupLive;
 // GATE_IB_FAST_MODE reader, on its own line so gate PRs never conflict.
 module.exports.ibFastModeLive = ibFastModeLive;
 // GATE_IB_BILLING_MODE_EDIT reader, on its own line so gate PRs never conflict.
@@ -9066,8 +9027,6 @@ module.exports.callbackSourceTechLive = callbackSourceTechLive;
 module.exports.customerTextToVisitTechLive = customerTextToVisitTechLive;
 // Own line so concurrent gate PRs appending to the shared list never conflict with this one.
 module.exports.smsPromptAutopromoteMode = smsPromptAutopromoteMode;
-// GATE_SITEONE_EMAIL_ORDER reader, on its own line so gate PRs never conflict.
-module.exports.siteOneEmailOrderLive = siteOneEmailOrderLive;
 // GATE_SITEONE_DEAL_AI_END_DATE read at RUN time, strict `=== 'true'`, dark (owner 2026-11-19 "B"). It has a gate because
 // each deal email's end-date read is a paid Claude Haiku call. Off = the Monday SiteOne deals bell makes no model call and
 // keeps its date-pattern deadlines. Kill = unset.
@@ -9119,6 +9078,8 @@ module.exports.techVoiceLineLive = techVoiceLineLive;
 module.exports.schedulingPlanMinutesOnly = schedulingPlanMinutesOnly;
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER reader, on its own line so gate PRs never conflict.
 module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;
+// GATE_AUTO_DISPATCH_RAIN_TERM reader, on its own line so gate PRs never conflict.
+module.exports.autoDispatchRainTermMode = autoDispatchRainTermMode;
 // GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
 module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 // GATE_TECH_SET_TEXTS reader, on its own line so gate PRs never conflict.
@@ -9469,6 +9430,15 @@ function voiceGptLiveToolsLive() {
 }
 // GATE_VOICE_GPT_LIVE_TOOLS reader, on its own line so gate PRs never conflict.
 module.exports.voiceGptLiveToolsLive = voiceGptLiveToolsLive;
+
+// GATE_ALERT_CLEAR_AGENT read at CALL time: 'shadow' (exactly) or 'off' (owner 2026-11-26). It has a gate because each read is a
+// paid Claude call. Shadow writes alert_clear_verdicts rows and nothing else; there is no live mode in this build, so any other
+// value is off: no query, no model call. Kill = unset.
+function alertClearAgentMode() {
+  return process.env.GATE_ALERT_CLEAR_AGENT === 'shadow' ? 'shadow' : 'off';
+}
+// GATE_ALERT_CLEAR_AGENT reader, on its own line so gate PRs never conflict.
+module.exports.alertClearAgentMode = alertClearAgentMode;
 
 // GATE_WDO_REPORT_HOLD read at CALL time (so a flip needs no redeploy), strict `=== 'true'`, dark by default.
 // Owner 2026-11-24: Send with invoice on a WDO inspection may hold the FDACS report until the invoice is paid

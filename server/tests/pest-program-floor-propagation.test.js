@@ -669,7 +669,7 @@ describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save 
   // live PEST.base must fail the save closed — the fallback path has no
   // server recompute to correct it.
   function clientEnginePestPayload({ stamp, includePest = true } = {}) {
-    const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89 };
+    const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89, legacyOneTimePestBuffer: false };
     if (stamp !== undefined) pricingMetadata.pestBasePerVisit = stamp;
     return {
       result: {
@@ -709,6 +709,16 @@ describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save 
       .toThrow(/regenerate the estimate/);
   });
 
+  test('a new fallback pest quote must carry the new-rule stamp: an old bundle (no stamp, or stamped legacy) gets a 409 to reload and regenerate', () => {
+    constants.PEST.base = 112;
+    for (const strip of [(p) => { delete p.result.pricingMetadata.legacyOneTimePestBuffer; }, (p) => { p.result.pricingMetadata.legacyOneTimePestBuffer = true; }]) {
+      const stale = clientEnginePestPayload({ stamp: 112 });
+      strip(stale);
+      expect(() => assertLivePestBaseForClientPayload(stale, { liveConfigVerified: true })).toThrow(/reload the page and regenerate/);
+    }
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 112 }), { liveConfigVerified: true })).not.toThrow();
+  });
+
   test('client payloads without pest rows are untouched (no stamp required)', () => {
     constants.PEST.base = 112;
     expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ includePest: false }), { liveConfigVerified: true })).not.toThrow();
@@ -717,7 +727,7 @@ describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save 
   test('a one-time-only pest payload is gated too — no recurring rows, price still derives from the base (codex r3 P0)', () => {
     constants.PEST.base = 112;
     function oneTimeOnlyPayload({ stamp } = {}) {
-      const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89 };
+      const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89, legacyOneTimePestBuffer: false };
       if (stamp !== undefined) pricingMetadata.pestBasePerVisit = stamp;
       return {
         result: {

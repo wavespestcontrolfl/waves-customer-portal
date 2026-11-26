@@ -241,6 +241,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/review-requests/trigger` | admin-review-requests (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/reviews/send-time-preview` | admin-reviews |
 | GET | `/api/admin/schedule` | admin-schedule |
+| POST | `/api/admin/schedule/:id/access-flags/:questionId` | admin-schedule |
 | GET | `/api/admin/schedule/:id/card-request` | admin-schedule |
 | GET | `/api/admin/schedule/:id/estimate-source` | admin-schedule |
 | POST | `/api/admin/schedule/:id/invoice` | admin-schedule |
@@ -534,8 +535,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/inventory/reorder-suggestions` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/restock-requests/:id/action` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/restock-requests/:id/order-evidence` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
-| GET | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
-| POST | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/restock-requests/:id/vendor-cancellation` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/scrape-jobs` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/scrape-jobs/:vendorId/trigger` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |

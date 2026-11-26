@@ -599,6 +599,11 @@ function mapV1ToLegacyShape(v1Result) {
       belowMarginFloor: pestLI.belowMarginFloor === true,
       belowProgramFloor: pestLI.belowProgramFloor === true,
       finalMargin: pestLI.finalMargin ?? null,
+      // Which one-time pest rule priced this plan (new quotes only, 2026-11-26): the mapped result drops the raw lines, so the
+      // per-service stamp rides the row, and a replay of the mapped result reads it (estimate-floor-signal-replay.js).
+      ...(typeof pestLI.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: pestLI.legacyOneTimePestBuffer } : {}),
+      // The home-age step a plan saved before the rule carries: a one-time visit added to it anchors on the age-free rate.
+      ...(Number(pestLI.pestAgeAdj) > 0 ? { pestAgeAdj: Number(pestLI.pestAgeAdj) } : {}),
     };
     // Session 11a Step 2b-3: uppercase to match v2-legacy-mapper output.
     // pestLI.roachType is lowercase (german/regular/none) per service-pricing.
@@ -1183,6 +1188,7 @@ function mapV1ToLegacyShape(v1Result) {
       // Treatment-visit count (pest_initial_roach display config) — the
       // public estimate view reads it off the persisted item to render
       // "Includes N treatment visits" on the fee card.
+      if (li.service === 'one_time_pest' && typeof li.legacyOneTimePestBuffer === 'boolean') item.legacyOneTimePestBuffer = li.legacyOneTimePestBuffer;
       if (li.treatments !== undefined) item.treatments = li.treatments;
       if (li.spacing !== undefined) item.spacing = li.spacing;
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;

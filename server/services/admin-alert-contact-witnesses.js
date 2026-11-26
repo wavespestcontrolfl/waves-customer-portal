@@ -514,4 +514,4 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
   return bundles;
 }
 
-module.exports = { loadContactBundles, visitsCompletedAfterBell };
+module.exports = { loadContactBundles, visitsCompletedAfterBell, HOLD_VOICEMAIL_AT_SQL, sharedPhoneItems };

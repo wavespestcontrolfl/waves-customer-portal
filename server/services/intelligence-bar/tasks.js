@@ -63,21 +63,6 @@ async function checkpoint(id, actorId, { messages, target, state = 'running', re
   if (!(await query.update(updates))) throw new Error('Task execution was superseded');
 }
 
-// Which provider's reply history this task holds. Written when a request
-// switches to the OpenAI backup (ib-openai-backup.js); a task never mixes providers.
-// The switch also renews the lease (a full backup call fits in it).
-async function markModelProvider(id, actorId, runnerToken, provider) {
-  // A runner that lost its lease (another resume took the task) stops here,
-  // as checkpoint() does, so two runners never both run the tool loop (Codex r7).
-  const marked = await db('ib_tasks').where({ id, actor_id: String(actorId), runner_token: runnerToken })
-    .update({
-      request: db.raw('request || ?::jsonb', [JSON.stringify({ model_provider: provider })]),
-      lease_expires_at: leaseExpiry(),
-      updated_at: db.fn.now(),
-    });
-  if (!marked) throw new Error('Task execution was superseded');
-}
-
 async function claimResume(id, actorId, sessionId, { selectedTarget } = {}) {
   const task = await get(id, actorId, sessionId);
   if (!task) return { error: 'Task not found', code: 'not_found' };
@@ -119,9 +104,9 @@ function continuationError(task, receipts, { selectedTarget } = {}) {
   if (require('./tool-search').hasSearchAndThinking(task.checkpoint)) {
     return { error: 'This saved request cannot be continued after a model change. Start the request again.', code: 'not_resumable' };
   }
-  // A task that switched to the OpenAI backup continues only while that gate is
-  // on; with it off the history is not sent to Anthropic half-way through.
-  if (task.request?.model_provider === 'openai_backup' && !require('../../config/feature-gates').ibOpenaiBackupLive()) {
+  // A task marked by the retired OpenAI backup (none is saved in production) is never
+  // sent to Anthropic half-way through its history.
+  if (task.request?.model_provider === 'openai_backup') {
     return { error: 'This saved request was answered by the backup model, which is off. Start the request again.', code: 'not_resumable' };
   }
   if (task.state === 'running' && new Date(task.lease_expires_at).getTime() >= Date.now()) {
@@ -222,4 +207,4 @@ async function purgeExpiredTasks() {
     .where('lease_expires_at', '<=', db.fn.now()).del();
 }
 
-module.exports = { continuationError, REQUEST_KEY_RE, begin, checkpoint, markModelProvider, claimResume, get, list, requestStartedAt, snapshot, requestHash, withoutImages, purgeExpiredTasks };
+module.exports = { continuationError, REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, requestStartedAt, snapshot, requestHash, withoutImages, purgeExpiredTasks };

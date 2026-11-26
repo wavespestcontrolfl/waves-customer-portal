@@ -4,7 +4,7 @@
  * Press-1 screen for every unknown caller (GATE_CALL_SCREEN_ALL_UNKNOWN; owner
  * 2026-11-24 "trial", 14-day trial). With GATE_CALL_PRECONNECT_SCREEN also on,
  * the voice webhook challenges an unknown caller on ANY attestation, not only B
- * or an exchange-rule hit.
+ * attestation.
  *
  * The prompt is skipped (the caller rings straight through) for:
  *  - a number on a live customer record (the webhook's known-caller check),

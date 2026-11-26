@@ -4,8 +4,9 @@
 // drops into any of the customer style systems (data-glass inline, BrandCard
 // pages, the Tailwind outline page) without page-local CSS.
 import { useState } from 'react';
-import { Download, Share2, Printer, Lock } from 'lucide-react';
+import { Download, Share2, Printer, Lock, Home } from 'lucide-react';
 import { canSaveNative, canShareNative, isNativeApp, saveUrlNative, shareUrlNative } from '../native/nativeFile';
+import { AccountHomeLink, signedInSafe } from './brand/BackToAccount';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { docButton } from '../theme-doc';
 import { showCustomerAlert } from './brand/CustomerDialogHost';
@@ -167,9 +168,17 @@ export default function DocumentActionBar({
             <Printer size={16} /> Print
           </button>
         )}
-        <a data-glass-accent="" data-glass-size="primary" href="/login" style={buttonStyle()}>
-          <Lock size={16} /> Portal Login
-        </a>
+        {/* A signed-in customer already has an account: "Portal Login" would
+            only bounce them through /login, so send them straight home. */}
+        {signedInSafe() ? (
+          <AccountHomeLink data-glass-accent="" data-glass-size="primary" style={buttonStyle()}>
+            <Home size={16} /> My account
+          </AccountHomeLink>
+        ) : (
+          <a data-glass-accent="" data-glass-size="primary" href="/login" style={buttonStyle()}>
+            <Lock size={16} /> Portal Login
+          </a>
+        )}
       </div>
     </section>
   );

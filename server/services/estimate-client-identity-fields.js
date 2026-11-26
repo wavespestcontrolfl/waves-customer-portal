@@ -54,6 +54,9 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'legacyPricingRules',
   // Two-story roof-point stamp (rodent exclusion, 2026-11-26): server-derived from its own stamp, same rule.
   'legacyTwoStoryRoof',
+  // One-time pest rule (new quotes only, 2026-11-26): server-derived from its own stamp, same rule.
+  'legacyOneTimePestBuffer',
+  'oneTimePestCurrentServices',
   // The per-visit palm minimum a saved quote was priced with: server-derived from its own palm row.
   'palmMinPerVisitReplay',
   // The services a legacy estimate priced under the current rules (added by a revision): server-derived from its stamp.
