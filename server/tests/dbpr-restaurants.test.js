@@ -293,6 +293,16 @@ describe('namesFirstVisit', () => {
 });
 
 describe('parseInspectionReport', () => {
+  test('a label that does not read on any row, or a later-visit word on a routine page, gives no answer', () => {
+    const flies = '<tr><td>35A-02-8</td><td>Live flies.</td></tr>';
+    expect(parse(reportPage(flies), { violation35: 1 })).not.toBeNull();
+    expect(parse(reportPage('<tr><td>35A-02-8</td><td>From follow-up: Live flies.</td></tr>'), { violation35: 1 })).toBeNull();
+    expect(parse(reportPage(`${flies}<tr><td>22-01-4</td><td>Seen at call back.</td></tr>`), { violation35: 1 })).toBeNull();
+    // A non-35 row whose follow-up label has no note after it does not read: the page cannot be placed in time.
+    const labelled = '<tr><td>35A-02-8</td><td>Basic - From initial inspection : Live flies.</td></tr>';
+    const empty = '<tr><td>22-01-4</td><td>From initial inspection : Floor dirty. - From follow-up inspection 2026-11-16:</td></tr>';
+    expect(parse(reportPage(`${labelled}${empty}`), { violation35: 1 })).toBeNull();
+  });
   test('a follow-up note dated on or before the page\'s visit date gives no answer: that visit was not the first', () => {
     const cited = (date) => `<tr><td>35A-02-8</td><td>Basic - From initial inspection : Live roaches. - From follow-up inspection ${date}: Still seen.</td></tr>`;
     expect(parse(reportPage(cited('2026-11-16'), '11/16/2026'), { violation35: 1 })).toBeNull();
