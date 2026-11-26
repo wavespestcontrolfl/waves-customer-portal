@@ -138,6 +138,9 @@ function whyFrom(reason) {
   return words && !breaksAlertRules(words) ? words : FALLBACK_WHY;
 }
 
+// The staff member's name for a bell headline: letters, digits and a few marks, at most 20 characters.
+const staffNameOf = (acceptance) => String(acceptance?.csr_name || '').replace(/[^\p{L}\p{N} '.-]/gu, '').trim().slice(0, 20);
+
 async function raiseAlert(call, acceptance, reason) {
   const callSid = call.twilio_call_sid;
   // The call may have ended while the model ran: one fresh read, so the owner is not paged to join a dead call.
@@ -155,7 +158,7 @@ async function raiseAlert(call, acceptance, reason) {
     });
   if (!stamped) return false;
   try {
-    const name = String(acceptance?.csr_name || '').replace(/[^\p{L}\p{N} '.-]/gu, '').trim().slice(0, 20);
+    const name = staffNameOf(acceptance);
     const written = await raiseAdminAlert('live_call_upset', {
       area: 'Comms',
       action: name ? `step in on ${name}'s upset caller` : 'step in on an upset caller',
@@ -208,4 +211,5 @@ function afterCallerUtterance(callSid) {
   checkCall(callSid).catch(() => {});
 }
 
-module.exports = { afterCallerUtterance, checkCall, _test: { whyFrom, ownerAnswered, callEnded } };
+// ownerAnswered and staffNameOf are also read by live-call-early-summary.js (the next-step alert after an office call).
+module.exports = { afterCallerUtterance, checkCall, ownerAnswered, staffNameOf, _test: { whyFrom, callEnded } };

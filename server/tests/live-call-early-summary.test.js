@@ -7,12 +7,24 @@
  * by the token cap or an API error saves nothing; a long call keeps its opening and its end; a summary that finishes
  * after a card quarantine is not saved; the stopped event runs it after the settle wait, gate on only; the purge drops
  * the summary with the live text.
+ *
+ * Next step + staff promises + phone alert (owner 2026-11-26 "build both"): the one reply is JSON (fenced JSON, a
+ * bare-text reply and a broken JSON reply are handled), every string is scrubbed and capped; ONE admin alert is raised
+ * for a call a non-owner staff member answered, none for an owner answer or a call with no forward_acceptance, and a
+ * failed alert keeps the saved summary.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 
 const mockCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn(() => ({ messages: { create: (...args) => mockCreate(...args) } })));
+
+const mockRaise = jest.fn(async () => ({ id: 'n-1' }));
+// The real composer checks every spec the module raises (title and why budgets, forbidden tokens), as the alert's own rules do.
+jest.mock('../services/admin-alert-compose', () => {
+  const actual = jest.requireActual('../services/admin-alert-compose');
+  return { ...actual, raiseAdminAlert: (category, spec, opts) => { actual.composeAdminAlert(spec); return mockRaise(category, spec, opts); } };
+});
 
 const mockLedger = jest.fn((provider, model, fn) => fn());
 jest.mock('../services/llm-dispatch-metrics', () => ({ ledgerCall: (...args) => mockLedger(...args) }));
@@ -41,7 +53,7 @@ jest.mock('../models/db', () => {
       Object.assign(live(), JSON.parse(bindings[0]));
       return 1;
     });
-    q.first = jest.fn(async () => (state.call && !blockedByQuarantine(q) ? { id: state.call.id } : undefined));
+    q.first = jest.fn(async () => (state.call && !blockedByQuarantine(q) ? { id: state.call.id, metadata: state.call.metadata } : undefined));
     return q;
   }
   // The shared predicate (live-call-transcription QUARANTINE_WHERE_SQL): quarantined_at, or the recording scrub's
@@ -77,14 +89,20 @@ const SID = 'CA' + 'c'.repeat(32);
 const T0 = Date.UTC(2026, 10, 17, 15, 0, 0);
 const NOW = () => new Date(T0 + 60 * 1000);
 
-function setCall({ aiExtraction = null, liveState = {}, transcriptionMetadata = null } = {}) {
+const OWNER = '+19415550100';
+const staffAnswer = { accepted: true, answered_by_number: '+19415550111', csr_name: 'Virginia', accepted_at: new Date(T0).toISOString() };
+
+function setCall({ aiExtraction = null, liveState = {}, transcriptionMetadata = null, acceptance } = {}) {
   db.__state.onTranscriptRead = null;
   db.__state.call = {
     id: 'log-1',
     twilio_call_sid: SID,
     ai_extraction: aiExtraction,
     transcription_metadata: transcriptionMetadata,
-    metadata: { live_transcription: { live_at: new Date(T0).toISOString(), stopped_at: new Date(T0 + 50000).toISOString(), ...liveState } },
+    metadata: {
+      live_transcription: { live_at: new Date(T0).toISOString(), stopped_at: new Date(T0 + 50000).toISOString(), ...liveState },
+      ...(acceptance ? { forward_acceptance: acceptance } : {}),
+    },
   };
 }
 function say(lines) {
@@ -106,6 +124,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   isEnabled.mockImplementation(() => true);
   process.env.ANTHROPIC_API_KEY = 'test-key';
+  process.env.ADAM_PHONE = OWNER;
+  mockRaise.mockImplementation(async () => ({ id: 'n-1' }));
   setCall();
   say(CALL);
 });
@@ -157,6 +177,10 @@ describe('writeEarlySummary', () => {
     expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: true, reason: null });
     expect(saved()).toEqual({
       text: 'The caller has ants again. A free return visit is set for Thursday at 9.',
+      next_step: null,
+      promises: [],
+      alert_title: null,
+      alert_line: null,
       at: NOW().toISOString(),
       model: MODELS.LIVE_CALL,
     });
@@ -229,6 +253,148 @@ describe('writeEarlySummary', () => {
     });
     expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: false, reason: null });
     expect(saved()).toBeUndefined();
+  });
+});
+
+const JSON_REPLY = {
+  summary: 'The caller has ants again. A free return visit is set for Thursday at 9.',
+  next_step: 'Text Dana E. the roach quote today.',
+  promises: ["I'll text you the quote in a few minutes."],
+  alert_title: 'text Dana E. a roach quote',
+  alert_line: 'Dana E. wants a roach quote; Virginia promised a text.',
+};
+
+describe('the JSON reply', () => {
+  test('saves the summary, the next step, the promises and the alert words beside the text', async () => {
+    reply(JSON.stringify(JSON_REPLY));
+    expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: true, reason: null });
+    expect(saved()).toEqual({
+      text: JSON_REPLY.summary,
+      next_step: JSON_REPLY.next_step,
+      promises: JSON_REPLY.promises,
+      alert_title: JSON_REPLY.alert_title,
+      alert_line: JSON_REPLY.alert_line,
+      at: NOW().toISOString(),
+      model: MODELS.LIVE_CALL,
+    });
+  });
+
+  test('a reply wrapped in a code fence still parses', async () => {
+    reply('```json\n' + JSON.stringify(JSON_REPLY) + '\n```');
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().next_step).toBe(JSON_REPLY.next_step);
+  });
+
+  test('a bare-text reply is the summary alone', async () => {
+    reply('The caller has ants again.');
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved()).toMatchObject({ text: 'The caller has ants again.', next_step: null, promises: [], alert_title: null, alert_line: null });
+  });
+
+  test('a broken JSON reply saves nothing (raw braces never reach the office)', async () => {
+    reply('{"summary": "The caller has ants", "next_step": ');
+    expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: false, reason: 'no_summary' });
+    expect(saved()).toBeUndefined();
+  });
+
+  test('every string is scrubbed and capped; nulls and empty promises read as none', () => {
+    const long = 'Call back about the termite inspection and send the written quote ' + 'to the customer '.repeat(10);
+    const parsed = early._test.parseReply(JSON.stringify({
+      summary: 'Card 4242 4242 4242 4242 was read.',
+      next_step: long,
+      promises: ['  a\u0000b  ', '', 7, 'c', 'd', 'e', 'f'],
+      alert_title: 'x'.repeat(100),
+      alert_line: 'y '.repeat(100),
+    }));
+    expect(parsed.summary).not.toMatch(/4242 4242 4242 4242/);
+    expect(parsed.next_step.length).toBeLessThanOrEqual(91);
+    expect(parsed.promises).toEqual(['a b', 'c', 'd', 'e']);
+    expect(parsed.alert_title.length).toBeLessThanOrEqual(45);
+    expect(parsed.alert_line.length).toBeLessThanOrEqual(80);
+    const none = early._test.parseReply(JSON.stringify({ summary: 'Short call.', next_step: null, promises: null, alert_title: 'text someone', alert_line: null }));
+    expect(none).toEqual({ summary: 'Short call.', next_step: null, promises: [], alert_title: null, alert_line: null });
+  });
+});
+
+describe('the alert after an office call', () => {
+  const link = '/admin/communications#tab=calls&call=log-1';
+
+  test('a staff member who is not the owner answered: ONE needs-you alert with the model words', async () => {
+    setCall({ acceptance: staffAnswer });
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    const [category, spec, opts] = mockRaise.mock.calls[0];
+    expect(category).toBe('live_call_next_step');
+    expect(spec).toEqual({
+      area: 'Comms',
+      action: 'text Dana E. a roach quote',
+      why: "Virginia's call: Dana E. wants a roach quote; Virginia promised a text.",
+      severity: 'needs-you',
+      link,
+      subject: { type: 'call', id: 'log-1' },
+      doneWhen: 'office_followed_up',
+      who: 'person',
+    });
+    expect(opts).toEqual({ bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${SID}`, bannerKind: 'live_call_next_step' });
+  });
+
+  test('no next step: an fyi alert that still names the call, with the fallback action', async () => {
+    setCall({ acceptance: staffAnswer });
+    reply(JSON.stringify({ ...JSON_REPLY, next_step: null, alert_title: null, alert_line: null }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    const [, spec] = mockRaise.mock.calls[0];
+    expect(spec).toMatchObject({ severity: 'fyi', action: "read Virginia's call summary" });
+    expect(spec.why).toBe("Virginia's call: The caller has ants again.");
+  });
+
+  test('model words that break the alert rules fall back to fixed lines that compose', async () => {
+    setCall({ acceptance: { ...staffAnswer, csr_name: null } });
+    reply(JSON.stringify({ ...JSON_REPLY, alert_title: 'call back on 2026-11-26!', alert_line: 'Call me! Now. Please send it.', summary: 'Wants a quote. Staff will text it.' }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    const [, spec] = mockRaise.mock.calls[0];
+    expect(spec.action).toBe("read the office's call summary");
+    expect(spec.why).toBe("The office's call: Wants a quote.");
+  });
+
+  test('a why longer than 110 characters is cut at a word', async () => {
+    setCall({ acceptance: { ...staffAnswer, csr_name: 'Maria-Fernanda Gonzalez-Ortiz' } });
+    reply(JSON.stringify({ ...JSON_REPLY, alert_line: 'word '.repeat(40) }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise.mock.calls[0][1].why.length).toBeLessThanOrEqual(110);
+  });
+
+  test('the owner answered: no alert, the summary is still saved', async () => {
+    setCall({ acceptance: { ...staffAnswer, answered_by_number: OWNER, csr_name: 'Adam' } });
+    reply(JSON.stringify(JSON_REPLY));
+    expect((await early.writeEarlySummary(SID, { now: NOW })).written).toBe(true);
+    expect(mockRaise).not.toHaveBeenCalled();
+    expect(saved().next_step).toBe(JSON_REPLY.next_step);
+  });
+
+  test('no forward_acceptance (not a press-1 staff answer): no alert', async () => {
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('no summary saved (a quarantined call): no alert', async () => {
+    setCall({ acceptance: staffAnswer });
+    mockCreate.mockImplementationOnce(async () => {
+      db.__state.call.metadata.live_transcription.quarantined_at = new Date(T0 + 55000).toISOString();
+      return { stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(JSON_REPLY) }] };
+    });
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('an alert that fails keeps the saved summary and logs a warning', async () => {
+    setCall({ acceptance: staffAnswer });
+    mockRaise.mockRejectedValueOnce(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
+    reply(JSON.stringify(JSON_REPLY));
+    expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: true, reason: null });
+    expect(saved().text).toBe(JSON_REPLY.summary);
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('next-step alert failed'));
   });
 });
 

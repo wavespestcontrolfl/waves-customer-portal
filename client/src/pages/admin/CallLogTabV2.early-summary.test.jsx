@@ -5,7 +5,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import CallLogTabV2, { awaitingSummary, callSummaryFor, SUMMARY_POLL_MS } from "./CallLogTabV2";
+import CallLogTabV2, { awaitingSummary, callSummaryFor, nextStepFor, SUMMARY_POLL_MS } from "./CallLogTabV2";
 
 // GATE_CALL_EARLY_SUMMARY: a call row shows the summary Claude wrote from the live text the moment the call
 // ended, then the recording pipeline's own summary once it lands. A call with no live-text summary is unchanged.
@@ -40,6 +40,35 @@ describe("callSummaryFor", () => {
 
   it("reads metadata stored as a JSON string", () => {
     expect(callSummaryFor({ metadata: JSON.stringify(withEarly().metadata) })).toEqual({ text: EARLY, early: true });
+  });
+});
+
+// The next step and the staff promises come straight from the early summary, so they stay on the row after the
+// recording pipeline's summary replaces its text.
+const NEXT = "Text Dana E. the roach quote today.";
+const PROMISE = "I'll text you the quote in a few minutes.";
+const withNext = (extra = {}) => ({
+  metadata: {
+    live_transcription: { early_summary: { text: EARLY, next_step: NEXT, promises: [PROMISE, "", 5] } },
+    forward_acceptance: { csr_name: "Virginia" },
+  },
+  ...extra,
+});
+
+describe("nextStepFor", () => {
+  it("reads the next step and the promises, labelled with the staff name", () => {
+    expect(nextStepFor(withNext())).toEqual({ nextStep: NEXT, promises: [PROMISE], staffName: "Virginia" });
+  });
+
+  it("falls back to 'Staff' with no staff name, and reads metadata stored as a JSON string", () => {
+    const call = { metadata: JSON.stringify({ live_transcription: { early_summary: { text: EARLY, promises: [PROMISE] } } }) };
+    expect(nextStepFor(call)).toEqual({ nextStep: "", promises: [PROMISE], staffName: "Staff" });
+  });
+
+  it("is null when both are empty, for an older summary and for no summary", () => {
+    expect(nextStepFor(withEarly())).toBeNull();
+    expect(nextStepFor({ metadata: { live_transcription: { early_summary: { text: EARLY, next_step: " ", promises: [] } } } })).toBeNull();
+    expect(nextStepFor(null)).toBeNull();
   });
 });
 
@@ -79,6 +108,23 @@ describe("CallLogTabV2 summary block", () => {
     expect(screen.getByText("Summary from the live call")).toBeInTheDocument();
     expect(screen.getByText(FINAL)).toBeInTheDocument();
     expect(screen.getByText("Summary")).toBeInTheDocument();
+  });
+
+  it("shows the next step and the staff promises, and keeps them after the pipeline's summary lands", async () => {
+    renderWithCalls([call("call-4", withNext()), call("call-5", withNext({ call_summary: FINAL }))]);
+    expect(await screen.findByText(FINAL)).toBeInTheDocument();
+    expect(screen.getAllByText("Next step · draft")).toHaveLength(2);
+    expect(screen.getAllByText(NEXT)).toHaveLength(2);
+    expect(screen.getAllByText("What staff promised")).toHaveLength(2);
+    expect(screen.getAllByText(PROMISE)).toHaveLength(2);
+    expect(screen.getAllByText("Virginia:")).toHaveLength(2);
+  });
+
+  it("shows no next-step box when the summary carries neither", async () => {
+    renderWithCalls([call("call-6", withEarly())]);
+    expect(await screen.findByText(EARLY)).toBeInTheDocument();
+    expect(screen.queryByText("Next step · draft")).not.toBeInTheDocument();
+    expect(screen.queryByText("What staff promised")).not.toBeInTheDocument();
   });
 
   it("renders no summary block for a call without a live-text summary", async () => {

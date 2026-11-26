@@ -249,6 +249,20 @@ export function callSummaryFor(call) {
   return { text: earlyText, early: true };
 }
 
+// The office's next step and what staff promised the caller (GATE_CALL_EARLY_SUMMARY), read straight from the early
+// summary so they stay on the row after the recording pipeline's summary replaces its text. Null when both are empty.
+export function nextStepFor(call) {
+  const meta = parseJsonObject(call?.metadata);
+  const early = meta?.live_transcription?.early_summary;
+  const nextStep = typeof early?.next_step === "string" ? early.next_step.trim() : "";
+  const promises = (Array.isArray(early?.promises) ? early.promises : [])
+    .filter((p) => typeof p === "string" && p.trim())
+    .map((p) => p.trim());
+  if (!nextStep && !promises.length) return null;
+  const csr = meta?.forward_acceptance?.csr_name;
+  return { nextStep, promises, staffName: typeof csr === "string" && csr.trim() ? csr.trim() : "Staff" };
+}
+
 // While a call's summary is still being written in the background, an open Calls tab reloads every
 // SUMMARY_POLL_MS so it shows the early summary, then the recording pipeline's own summary. Bounded: a call stops
 // counting SUMMARY_WAIT_MS after its live text stopped.
@@ -1882,6 +1896,36 @@ export default function CallLogTabV2() {
                             {summary.early ? "Summary from the live call" : "Summary"}
                           </div>
                           <p className="m-0 text-14 text-ink-primary">{summary.text}</p>
+                        </div>
+                      );
+                    })()}
+                    {/* Next step and staff promises — from the same early summary; they stay
+                        after the recording pipeline's summary replaces its text. */}
+                    {(() => {
+                      const step = nextStepFor(c);
+                      if (!step) return null;
+                      return (
+                        <div className="mt-2 ml-8 p-2 bg-zinc-50 border-hairline rounded-md">
+                          {step.nextStep && (
+                            <>
+                              <div className="text-14 text-ink-tertiary font-medium mb-1">Next step · draft</div>
+                              <p className="m-0 text-14 text-ink-primary">{step.nextStep}</p>
+                            </>
+                          )}
+                          {step.promises.length > 0 && (
+                            <>
+                              <div className={`text-14 text-ink-tertiary font-medium mb-1${step.nextStep ? " mt-2" : ""}`}>
+                                What staff promised
+                              </div>
+                              <ul className="m-0 pl-4 list-disc text-14 text-ink-primary">
+                                {step.promises.map((promise, i) => (
+                                  <li key={i}>
+                                    <span className="text-ink-tertiary">{step.staffName}:</span> {promise}
+                                  </li>
+                                ))}
+                              </ul>
+                            </>
+                          )}
                         </div>
                       );
                     })()}

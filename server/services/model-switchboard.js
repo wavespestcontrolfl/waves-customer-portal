@@ -885,7 +885,7 @@ const LANE_DESCRIBE = {
   transcript_label: 'Labels who is speaking',
   contact_pass: 'Second listen for spelled emails and addresses',
   call_sound_check: 'Listens to each new call recording and notes caller mood, talk-over, rushed answers and risky claims (dark: GATE_CALL_SOUND_CHECK)',
-  live_call_early_summary: 'Summarizes a call from its live text the moment it ends, until the recording pipeline\'s summary lands (dark: GATE_CALL_EARLY_SUMMARY)',
+  live_call_early_summary: 'Summarizes a call from its live text the moment it ends, with the office\'s next step and what staff promised the caller, until the recording pipeline\'s summary lands (GATE_CALL_EARLY_SUMMARY)',
   call_self_audit: 'Audits the extraction against the transcript',
   call_incidents: 'Second opinion that confirms a self-audit disagreement',
   live_call_assist: 'Reads the last 3 minutes of a live call for what the caller asks, then shows the price and open times on the Live call panel (dark: GATE_CALL_LIVE_ASSIST)',
