@@ -12,7 +12,7 @@ jest.mock('../services/visit-loops-facts', () => ({
 
 jest.mock('../services/sms-staff-facts', () => ({
   loadPrepaidPlanFacts: jest.fn(async () => [{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]),
-  loadPrepGuideFacts: jest.fn(async () => ({ key: 'flea', label: 'Flea Treatment', sentences: ['Vacuum every carpet before we arrive.'] })),
+  loadPrepGuideFacts: jest.fn(async () => ({ key: 'flea', label: 'Flea Treatment', sections: [{ heading: 'How to prepare', sentences: ['Vacuum every carpet before we arrive.'] }] })),
 }));
 
 const db = require('../models/db');

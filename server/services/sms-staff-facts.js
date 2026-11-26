@@ -29,30 +29,32 @@ async function loadPrepaidPlanFacts(customerId, { db } = {}) {
 
 // ---- Prep guides ---------------------------------------------------------------------------------------------------------------------
 
-// The prose of a published guide's PREP sections, in the guide's own order: the paragraphs, callouts and list items under a heading that
-// reads as what to do before the visit ("How to prepare", "Before we arrive", "Step 2: ...", "Prep for ..."). Background sections ("Why
-// fleas are different"), what happens on the day and after, the service details rows, the button and the signature are left out, and no
-// sentence moves away from the heading, list or sentence that gives it its subject. A guide with no such heading yields none.
-const PREP_HEADING_RE = /\b(?:how to prepare|before (?:we|the|your|treatment|service|our)|prep(?:are|aration)?\b|step \d|get (?:the |your )?(?:home|house|yard) ready)/i;
-function proseOfBlocks(blocks) {
-  const parts = [];
-  let inPrep = false;
+// A published guide as its own sections, in order: { heading, parts } for each heading and the paragraphs, callouts and list items under it
+// (never the service details rows, the button or the signature). The heading rides with its sentences, so a guide that covers two
+// treatments ("Prep for a German roach cleanout", "Prep for palmetto bugs") keeps each one's steps under its own name, and no sentence moves
+// away from the heading, list or sentence that gives it its subject.
+function sectionsOfBlocks(blocks) {
+  const sections = [{ heading: null, parts: [] }];
   for (const block of Array.isArray(blocks) ? blocks : []) {
     if (!block || typeof block !== 'object') continue;
-    if (block.type === 'heading') inPrep = PREP_HEADING_RE.test(String(block.content || ''));
-    else if (!inPrep) continue;
-    else if (['paragraph', 'callout'].includes(block.type) && typeof block.content === 'string') parts.push(block.content);
-    else if (block.type === 'list' && Array.isArray(block.items)) parts.push(...block.items.filter((item) => typeof item === 'string'));
+    if (block.type === 'heading') sections.push({ heading: String(block.content || '').replace(/\s+/g, ' ').trim() || null, parts: [] });
+    else if (['paragraph', 'callout'].includes(block.type) && typeof block.content === 'string') sections[sections.length - 1].parts.push(block.content);
+    else if (block.type === 'list' && Array.isArray(block.items)) sections[sections.length - 1].parts.push(...block.items.filter((item) => typeof item === 'string'));
   }
-  return parts;
+  return sections;
 }
+
+// What reads as a usable sentence of a guide: no merge tags, links, addresses, em dashes, nor wording that points at the email or page itself.
+const usableSentence = (sentence) => sentence.length >= 12 && sentence.length <= 260
+  && !/\{\{|\]\(|https?:|www\.|@|\u2014/.test(sentence)
+  && !/\b(?:e-?mail|inbox|button|below|above|this (?:guide|page))\b/i.test(sentence);
 
 /**
  * The prep guide of the customer's booked visit: the soonest upcoming visit a guide covers, chosen by the prep senders' own eligibility
  * (prep-guide-sender.nextGuideVisit: one helper for the senders and for this lookup, so a visit the senders would not prep is never
- * read here). Only that visit's guide: the sentences of its ACTIVE email template, as { key, label, sentences }. Merge tags and links are
- * dropped here; the drafter screens what is left (banned claims, prompt-control text) and caps the section. null when no booked visit
- * has a guide or the template cannot be read. Never reads notes.
+ * read here). Only that visit's guide: its published email template as { key, label, sections: [{ heading, sentences }] }, in the guide's
+ * own order. Merge tags and links are dropped here; the drafter screens what is left (banned claims, prompt-control text) and caps the
+ * section. null when no booked visit has a guide or the template cannot be read. Never reads notes.
  */
 async function loadPrepGuideFacts(customerId, { db } = {}) {
   if (!customerId || !db) return null;
@@ -67,21 +69,14 @@ async function loadPrepGuideFacts(customerId, { db } = {}) {
     const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
     if (!loaded?.activeVersion) return null;
     const blocks = typeof loaded.activeVersion.blocks === 'string' ? JSON.parse(loaded.activeVersion.blocks) : loaded.activeVersion.blocks;
-    const sentences = [];
-    for (const part of proseOfBlocks(blocks)) {
-      for (const raw of String(part).replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/)) {
-        const sentence = raw.trim();
-        if (sentence.length < 12 || sentence.length > 260) continue;
-        if (/\{\{|\]\(|https?:|www\.|@|—/.test(sentence)) continue; // merge tags, links, addresses, em dashes
-        if (/\b(?:e-?mail|inbox|button|below|above|this (?:guide|page))\b/i.test(sentence)) continue; // points at the email or page itself, not at the service
-        sentences.push(sentence);
-      }
-    }
-    return sentences.length ? { key, label: config.label, sentences } : null;
+    const sections = sectionsOfBlocks(blocks)
+      .map(({ heading, parts }) => ({ heading, sentences: parts.flatMap((part) => String(part).replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/)).map((raw) => raw.trim()).filter(usableSentence) }))
+      .filter((section) => section.sentences.length);
+    return sections.length ? { key, label: config.label, sections } : null;
   } catch (err) {
     logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}${key ? ` (guide ${key})` : ''}: ${err.message}`);
     return null;
   }
 }
 
-module.exports = { loadPrepaidPlanFacts, loadPrepGuideFacts, proseOfBlocks };
+module.exports = { loadPrepaidPlanFacts, loadPrepGuideFacts, sectionsOfBlocks };

@@ -34,7 +34,7 @@ test('the context is read WITH the staff facts, as the drafter does: only while 
 test('a change to the prepaid visits left or to the prep guide changes the hash', async () => {
   const base = await hashWith({});
   const plans = (remaining) => ({ prepaidPlans: [{ label: 'Quarterly Pest Control', remaining, paid: 4 }] });
-  const guide = (text) => ({ prepGuide: { key: 'flea', label: 'Flea Treatment', sentences: [text] } });
+  const guide = (text) => ({ prepGuide: { key: 'flea', label: 'Flea Treatment', sections: [{ heading: 'How to prepare', sentences: [text] }] } });
   expect(await hashWith(plans(3))).not.toBe(base);
   expect(await hashWith(plans(3))).toBe(await hashWith(plans(3)));
   expect(await hashWith(plans(2))).not.toBe(await hashWith(plans(3)));

@@ -5022,24 +5022,31 @@ function paymentOptionsFactLine(context, extras) {
 }
 
 // PREP GUIDE (owner 2026-11-25, texting AI fix step 2): the written prep guide of the visit the customer has BOOKED - the sentences staff
-// would point them to, repeated as written, for THAT service only. The loader (sms-staff-facts.loadPrepGuideFacts) already dropped links,
-// merge tags and email-only wording; here every sentence also passes the banned-claim and prompt-control screens, and the section is capped
-// so the facts around it keep their room. Gate off, or no guide: no section.
-const PREP_GUIDE_MAX_SENTENCES = 8;
-const PREP_GUIDE_MAX_CHARS = 1000;
+// would point them to, repeated as written, for THAT service only, in the guide's own order with each section's heading above its steps (a
+// guide that covers two treatments keeps each one's steps under its own name). The loader (sms-staff-facts.loadPrepGuideFacts) already dropped
+// links, merge tags and email-only wording; here every heading and sentence also passes the banned-claim and prompt-control screens, and the
+// section is capped (from the end of the guide) so the facts around it keep their room. Gate off, or no guide: no section.
+const PREP_GUIDE_MAX_SENTENCES = 24;
+const PREP_GUIDE_MAX_CHARS = 2400;
+const prepGuideLineOk = (line) => !!line && !EXEMPLAR_INJECTION_RE.test(line) && !hasBannedCustomerCopy(line, { rainTimeGuard: true }); // a re-entry or dry-time claim only a LABEL FACTS sentence may make
 function prepGuideSection(context) {
   const guide = context.prepGuide;
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !guide || !Array.isArray(guide.sentences) || !guide.label) return '';
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !guide || !Array.isArray(guide.sections) || !guide.label) return '';
   const lines = [];
+  let sentences = 0;
   let used = 0;
-  for (const raw of guide.sentences) {
-    const sentence = sanitizeSingleLine(raw, 260);
-    if (!sentence || EXEMPLAR_INJECTION_RE.test(sentence) || hasBannedCustomerCopy(sentence, { rainTimeGuard: true })) continue; // a re-entry or dry-time claim only a LABEL FACTS sentence may make
-    if (lines.length >= PREP_GUIDE_MAX_SENTENCES || used + sentence.length > PREP_GUIDE_MAX_CHARS) break;
-    lines.push(`- ${sentence}`);
-    used += sentence.length;
+  for (const section of guide.sections) {
+    const heading = sanitizeSingleLine(section?.heading, 100);
+    const kept = [];
+    for (const raw of Array.isArray(section?.sentences) ? section.sentences : []) {
+      const sentence = sanitizeSingleLine(raw, 260);
+      if (prepGuideLineOk(sentence)) kept.push(sentence);
+    }
+    const room = kept.filter((sentence) => { sentences += 1; used += sentence.length; return sentences <= PREP_GUIDE_MAX_SENTENCES && used <= PREP_GUIDE_MAX_CHARS; });
+    if (room.length) lines.push(...(prepGuideLineOk(heading) ? [`${heading}:`] : []), ...room.map((sentence) => `- ${sentence}`));
+    if (room.length < kept.length) break;
   }
-  return lines.length ? `PREP GUIDE (our written prep guide for this customer's booked ${sanitizeSingleLine(guide.label, 60)}; repeat its sentences as written, for this service only, never for another service):\n${lines.join('\n')}\n` : '';
+  return lines.length ? `PREP GUIDE (our written prep guide for this customer's booked ${sanitizeSingleLine(guide.label, 60)}; repeat its sentences as written, for the section they sit under and this service only, never for another service):\n${lines.join('\n')}\n` : '';
 }
 
 function paymentHistoryFactLines(context, billingKnown) {
