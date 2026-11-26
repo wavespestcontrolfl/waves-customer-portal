@@ -4562,7 +4562,8 @@ router.post('/conference-staff-accept', async (req, res) => {
   }
 });
 
-// POST /conference-staff-status — a staff leg ended (completed, busy, no-answer, failed, canceled).
+// POST /conference-staff-status — a staff leg was placed (initiated: the first call SID owns the slot, a
+// second one is hung up) or ended (completed, busy, no-answer, failed, canceled).
 // Every leg over without a press 1 sends the caller to today's voicemail path; the winning leg's end
 // ends the room, so the caller's <Dial> action runs /call-complete (Twilio requests no <Dial> action
 // when the call that runs it hangs up, so this callback is the signal). Answered 200 either way: an

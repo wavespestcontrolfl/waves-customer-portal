@@ -58,10 +58,11 @@ const STAFF_END_SWEEP_LIMIT = 25;
 // The minute ring sweep sends a caller nobody answered to voicemail once the ring timeout, the in-memory backstop's
 // 20 s and this much more have passed: the backstop lives in memory, so a restart during the ring loses it.
 const RING_SWEEP_GRACE_SEC = 40;
-// A leg create that failed with no answer from Twilio (a 5xx, a timeout): a call to the same number from the same line
-// created this recently, still live, is that leg.
-const LEG_LOOKUP_WINDOW_MS = 2 * 60 * 1000;
-const LIVE_LEG_STATUSES = new Set(['queued', 'ringing', 'in-progress']);
+// A leg create that failed with no answer from Twilio (a 5xx, a timeout, a reset) may have placed the call. Its own
+// 'initiated' status callback (this parent, this leg index) is the proof: placement waits this long for it, checking
+// every LEG_CONFIRM_STEP_MS, before it tries again or falls back.
+const LEG_CONFIRM_MS = 2500;
+const LEG_CONFIRM_STEP_MS = 500;
 const OPEN_SQL = [
   "(metadata -> 'conference_path') IS NOT NULL",
   "(metadata #>> '{conference_path,voicemail_at}') IS NULL",
@@ -171,29 +172,84 @@ async function claimStart(callSid, { legCount, ringTimeoutSec }) {
 }
 
 const isRefusal = (err) => err?.status >= 400 && err?.status < 500;
+const legSlotSql = (index, key) => `(metadata #>> '{conference_path,legs,${index},${key}}') IS NULL`;
+const wait = (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); if (typeof t.unref === 'function') t.unref(); });
 
-async function findPlacedLeg(api, to, from) {
-  const since = Date.now() - LEG_LOOKUP_WINDOW_MS;
-  const calls = await api.calls.list({ to, from, limit: 5 }).catch(() => null);
-  return (calls || []).find((c) => LIVE_LEG_STATUSES.has(c?.status) && new Date(c.dateCreated).getTime() >= since) || null;
+// The first call SID seen for a leg slot owns it, whether it comes from the create response or from the leg's own
+// 'initiated' callback: 'claimed' | 'same' | 'other' (another call already owns the slot: this one is a duplicate).
+// A claim clears the 'failed' that a failed create stamped, since the call is ringing after all.
+async function claimLegSid(callSid, index, sid) {
+  const won = await updateState(callSid, [[['legs', String(index), 'sid'], sid], [['legs', String(index), 'status'], null]],
+    ["(metadata -> 'conference_path') IS NOT NULL", legSlotSql(index, 'sid')]);
+  if (won > 0) return 'claimed';
+  return (await loadState(callSid))?.legs?.[String(index)]?.sid === sid ? 'same' : 'other';
 }
 
-// One staff leg. A refusal (4xx) placed nothing and is thrown at once. Any other failure (a 5xx, a timeout, a reset)
-// may have placed the call: look for it first, so the phone never rings twice, then try once more, so it is not left
-// silent.
-async function createLeg(api, params) {
-  try {
-    return await api.calls.create(params);
-  } catch (err) {
-    if (isRefusal(err)) throw err;
-    const found = await findPlacedLeg(api, params.to, params.from);
-    if (found) {
-      logger.warn(`[conference] leg create failed (${errorCode(err)}) but the call was placed: using ${masked(found.sid)}`);
-      return found;
-    }
-    logger.warn(`[conference] leg create failed (${errorCode(err)}) and no call was placed: trying once more`);
-    return api.calls.create(params);
+// A placed leg: own the slot, or hang up as a duplicate. The call may also have settled while this leg was placed (the
+// caller left, voicemail, another leg won, the classic ring took over), and that clean-up could not see this SID. Read
+// after the claim, so one of the two ends it. Answers the SID that owns the slot when it still rings, else null.
+async function settleLeg(api, callSid, index, sid) {
+  const hangUp = (why) => api.calls(sid).update({ status: 'completed' })
+    .catch((err) => logger.info(`[conference] ${why} leg ${masked(sid)} not ended (${errorCode(err)})`));
+  const claim = await claimLegSid(callSid, index, sid).catch((err) => {
+    logger.warn(`[conference] leg ${index} SID stamp failed for ${masked(callSid)} (${errorCode(err)})`);
+    return 'claimed';
+  });
+  if (claim === 'other') {
+    logger.warn(`[conference] a second call rang leg ${index} of ${masked(callSid)}: ending ${masked(sid)}`);
+    await hangUp('duplicate');
+    return null;
   }
+  const latest = await loadState(callSid).catch(() => null);
+  if (latest && (latest.closed_at || latest.voicemail_at || latest.fallback || (latest.accepted_leg_sid && latest.accepted_leg_sid !== sid))) {
+    await hangUp('late');
+    return null;
+  }
+  return sid;
+}
+
+// A create with no answer: wait for the leg's own 'initiated' callback to name the call. null = no call seen.
+async function confirmedLegSid(callSid, index) {
+  for (let waited = 0; waited < LEG_CONFIRM_MS; waited += LEG_CONFIRM_STEP_MS) {
+    await wait(LEG_CONFIRM_STEP_MS);
+    const sid = (await loadState(callSid).catch(() => null))?.legs?.[String(index)]?.sid;
+    if (sid) return sid;
+  }
+  return null;
+}
+
+// One create: { sid } placed, { refused } (a 4xx placed nothing), { unknown } (no answer: maybe placed).
+async function tryCreate(api, params) {
+  try {
+    return { sid: (await api.calls.create(params)).sid };
+  } catch (err) {
+    if (isRefusal(err)) return { refused: err };
+    return { unknown: err };
+  }
+}
+
+// One staff leg. The caller-ID ring first (with a CallToken), then the Waves line, which gets one more try after a
+// create with no answer. Every create with no answer is checked against the leg's own callback before the next try, so
+// the phone is not left silent and a second ring is never placed while the first may still ring (a late one ends as a
+// duplicate when its callback arrives). Answers the leg's SID, or null.
+async function placeLeg(api, callSid, index, params, { callerFrom, wavesLine, callToken }) {
+  const attempts = [];
+  if (callToken && callerFrom) attempts.push({ from: callerFrom, callToken, label: 'caller-ID ring' });
+  attempts.push({ from: wavesLine, label: 'Waves line ring' }, { from: wavesLine, label: 'Waves line retry', retry: true });
+  let lastUnknown = false;
+  for (const { label, retry, ...from } of attempts) {
+    if (retry && !lastUnknown) break; // only a create with no answer earns the retry
+    const result = await tryCreate(api, { ...params, ...from });
+    if (result.sid) return settleLeg(api, callSid, index, result.sid);
+    const err = result.refused || result.unknown;
+    lastUnknown = Boolean(result.unknown);
+    logger.warn(`[conference] ${label} for leg ${index} of ${masked(callSid)} not placed (${errorCode(err)})`);
+    if (result.unknown) {
+      const sid = await confirmedLegSid(callSid, index);
+      if (sid) return sid;
+    }
+  }
+  return null;
 }
 
 async function placeStaffLegs({ callSid, numbers, ringTimeoutSec, callerFrom, wavesLine, callToken }) {
@@ -206,32 +262,20 @@ async function placeStaffLegs({ callSid, numbers, ringTimeoutSec, callerFrom, wa
       timeout: ringTimeoutSec,
       statusCallback: publicUrl(`${WEBHOOK_BASE}/conference-staff-status?${parent(callSid)}&leg=${index}`),
       statusCallbackMethod: 'POST',
-      statusCallbackEvent: ['completed'],
+      // initiated names the call even when the create's answer is lost; completed ends it.
+      statusCallbackEvent: ['initiated', 'completed'],
     };
     try {
-      let call = null;
-      if (callToken && callerFrom) {
-        call = await createLeg(api, { ...params, from: callerFrom, callToken }).catch((err) => {
-          logger.warn(`[conference] caller-ID passthrough not placed for leg ${index} (${errorCode(err)}); ringing from the Waves line`);
-          return null;
-        });
-      }
-      if (!call) call = await createLeg(api, { ...params, from: wavesLine });
-      await stampLeg(callSid, index, { sid: call.sid })
-        .catch((err) => logger.warn(`[conference] leg ${index} SID stamp failed for ${masked(callSid)} (${errorCode(err)})`));
-      // The call may have settled while this leg was placed (the caller left, voicemail, another leg
-      // won), and that clean-up could not see this SID. Read after the stamp, so one of the two ends it.
-      const latest = await loadState(callSid).catch(() => null);
-      if (latest && (latest.closed_at || latest.voicemail_at || (latest.accepted_leg_sid && latest.accepted_leg_sid !== call.sid))) {
-        await api.calls(call.sid).update({ status: 'completed' })
-          .catch((err) => logger.info(`[conference] late leg ${masked(call.sid)} not ended (${errorCode(err)})`));
-      }
-      return call.sid;
+      const sid = await placeLeg(api, callSid, index, params, { callerFrom, wavesLine, callToken });
+      if (sid) return sid;
+      logger.error(`[conference] staff leg ${index} not placed for ${masked(callSid)}`);
     } catch (err) {
       logger.error(`[conference] staff leg ${index} not placed for ${masked(callSid)} (${errorCode(err)})`);
-      await stampLeg(callSid, index, { status: 'failed' }).catch(() => {});
-      return null;
     }
+    // Only an empty slot: a late callback may have claimed it meanwhile.
+    await updateState(callSid, [[['legs', String(index), 'status'], 'failed']],
+      ["(metadata -> 'conference_path') IS NOT NULL", legSlotSql(index, 'sid')]).catch(() => {});
+    return null;
   }));
   return placed.filter(Boolean);
 }
@@ -361,8 +405,20 @@ async function onWinnerLegEnded(callSid, state, legSid) {
   return answer === 'voicemail' ? 'hold_voicemail' : endRoomAfterStaffHangup(callSid, state);
 }
 
+// The 'initiated' callback: the leg's own proof that Twilio placed it (its create may have had no answer).
+async function handleLegPlaced({ callSid, index, legSid }) {
+  if (!legSid) return 'ignored';
+  const state = await loadState(callSid);
+  if (!state || index >= (Number(state.leg_count) || 0)) return 'no_state';
+  return (await settleLeg(client(), callSid, index, legSid)) ? 'placed' : 'ended';
+}
+
 async function handleStaffLegStatus({ callSid, index, legSid, status }) {
-  if (!TERMINAL_LEG_STATUSES.has(status) || !Number.isInteger(index) || index < 0) return 'ignored';
+  if (!Number.isInteger(index) || index < 0) return 'ignored';
+  if (!TERMINAL_LEG_STATUSES.has(status)) return handleLegPlaced({ callSid, index, legSid });
+  // A duplicate leg's end (hung up above) is not the slot's end.
+  const owner = (await loadState(callSid))?.legs?.[String(index)]?.sid;
+  if (legSid && owner && owner !== legSid) return 'duplicate';
   await stampLeg(callSid, index, legSid ? { sid: legSid, status } : { status });
   const state = await loadState(callSid);
   if (!state) return 'no_state';
@@ -483,6 +539,7 @@ async function recoverUnansweredRings() {
       .whereRaw("(metadata #>> '{conference_path,accepted_leg_sid}') IS NULL")
       .whereRaw("(metadata #>> '{conference_path,voicemail_at}') IS NULL")
       .whereRaw("(metadata #>> '{conference_path,closed_at}') IS NULL")
+      .whereRaw("(metadata #>> '{conference_path,fallback}') IS NULL")
       .whereRaw("(metadata #>> '{ended_at}') IS NULL")
       .whereRaw(CALLER_LIVE_SQL)
       .orderBy('created_at', 'desc')
@@ -505,6 +562,10 @@ async function recoverUnansweredRings() {
           closed += 1;
           continue;
         }
+        // Only a caller who waits in the room: the classic ring (a fallback whose stamp failed) has no room, and its
+        // answer is not a press 1 here, so a talking caller must never be redirected.
+        const rooms = await client().conferences.list({ friendlyName: roomFor(callSid), limit: 5 });
+        if (!(rooms || []).some((room) => room.status !== 'completed')) continue;
         logger.warn(`[conference] ${masked(callSid)} rang out with no voicemail (a lost backstop): the sweep sends it to voicemail`);
         if ((await sendCallerToVoicemail(callSid, noAnswerStatus(state))) === 'redirected') voicemail += 1;
       } catch (err) {
