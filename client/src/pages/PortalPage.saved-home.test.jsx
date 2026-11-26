@@ -91,7 +91,6 @@ describe('saved home screen in the portal', () => {
   it('withholds the balance and the pay action on Home even when the live balance already answered', async () => {
     view();
     await screen.findByText(/hello pat/i);
-    await waitFor(() => expect(api.getBalance).toHaveBeenCalled());
     expect(screen.queryByText('Pay now')).not.toBeInTheDocument();
     expect(screen.queryByText(/\$120/)).not.toBeInTheDocument();
     expect(screen.queryByText(/NaN|\$0\.00/)).not.toBeInTheDocument();
@@ -162,17 +161,24 @@ describe('saved home screen in the portal', () => {
     expect(localStorage.getItem(HOME_READS_KEY) || '').not.toContain('Other House Visit');
   });
 
-  it('reloads the balance when the account turns fresh, even if the saved screen\'s first read failed offline', async () => {
-    api.getBalance.mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ currentBalance: 120 });
+  it('starts no money or account read while saved, and each one exactly once when the account turns fresh', async () => {
+    api.getReferrals.mockResolvedValue({ stats: { total: 1 }, totalEarned: 5000, rewardPerReferral: 25 });
     const { rerender } = view();
     await screen.findByText(/hello pat/i);
-    await waitFor(() => expect(api.getBalance).toHaveBeenCalledTimes(1));
+    // Home's other reads have started; the money and account reads have not.
+    await waitFor(() => expect(api.getGoogleReviewCard).toHaveBeenCalled());
+    for (const read of ['getBalance', 'getServiceStats', 'getAutopay', 'getReferrals']) expect(api[read]).not.toHaveBeenCalled();
+    // Desktop layout (the quick-action sub line shows): no dollar amount on the Refer button while saved.
+    const referSaved = screen.getAllByRole('button').find((b) => /^refer/i.test(b.textContent.trim()) && !b.closest('nav'));
+    expect(referSaved).toHaveTextContent('View details');
+    expect(referSaved.textContent).not.toContain('$');
     auth.saved = false;
     auth.customer = FRESH_CUSTOMER;
     rerender(<BrowserRouter><PortalPage /></BrowserRouter>);
     expect(await screen.findByText('Pay now')).toBeInTheDocument();
-    expect(api.getBalance).toHaveBeenCalledTimes(2);
-    expect(screen.queryByText('Billing unavailable')).not.toBeInTheDocument();
+    for (const read of ['getBalance', 'getServiceStats', 'getAutopay', 'getReferrals']) expect(api[read]).toHaveBeenCalledTimes(1);
+    const referFresh = screen.getAllByRole('button').find((b) => /^refer/i.test(b.textContent.trim()) && !b.closest('nav'));
+    await waitFor(() => expect(referFresh).toHaveTextContent('$25 credit'));
   });
 
   it('does not reload anything extra on a normal fresh launch', async () => {
@@ -181,6 +187,6 @@ describe('saved home screen in the portal', () => {
     view();
     await screen.findByText(/hello pat/i);
     await waitFor(() => expect(api.getBalance).toHaveBeenCalled());
-    expect(api.getBalance).toHaveBeenCalledTimes(1);
+    for (const read of ['getBalance', 'getServiceStats', 'getAutopay', 'getReferrals']) expect(api[read]).toHaveBeenCalledTimes(1);
   });
 });

@@ -336,4 +336,113 @@ describe('saved home screen at launch', () => {
     await mount();
     expect(localStorage.getItem(HOME_READS_KEY)).toBeNull();
   });
+
+  it('a /auth/me answer for a replaced login never unlocks the saved screen, and loads again under the current login', async () => {
+    seedSnapshot();
+    localStorage.setItem('waves_token', TOKEN);
+    let releaseOld;
+    api.getMe.mockImplementationOnce(() => new Promise((resolve) => { releaseOld = resolve; }));
+    await mount();
+    expect(text('saved')).toBe('true');
+    // A token refresh adopted another tab's login (a different customer) before any storage event.
+    const other = makeToken({ customerId: 'cust-2', sessionId: 'fam-7' });
+    localStorage.setItem('waves_token', other);
+    api.token = other;
+    api.getMe.mockImplementation(() => new Promise(() => {}));
+    // The old login's property list would never answer: the profile alone must not be published.
+    api.getAuthProperties.mockImplementation(() => new Promise(() => {}));
+    await act(async () => { releaseOld({ ...FRESH_ME, lastName: 'OldLogin' }); });
+    expect(text('name')).toBe('');
+    expect(text('saved')).toBe('false');
+    expect(text('loading')).toBe('true');
+    expect(authApi.isAuthenticated).toBe(false);
+    expect(api.getMe).toHaveBeenCalledTimes(2);
+  });
+
+  it('a property list that answers for a replaced login is discarded and the load restarts', async () => {
+    localStorage.setItem('waves_token', TOKEN);
+    let releaseList;
+    api.getMe.mockResolvedValueOnce(FRESH_ME);
+    api.getAuthProperties.mockImplementationOnce(() => new Promise((resolve) => { releaseList = resolve; }));
+    await mount();
+    expect(text('name')).toBe('Pat Fresh');
+    const other = makeToken({ customerId: 'cust-1', sessionId: 'fam-8' });
+    localStorage.setItem('waves_token', other);
+    api.token = other;
+    api.getMe.mockImplementation(() => new Promise(() => {}));
+    await act(async () => { releaseList(PROPS); });
+    expect(text('name')).toBe('');
+    expect(text('loading')).toBe('true');
+    expect(authApi.properties).toHaveLength(0);
+    expect(savedSnapshot()).toBeNull();
+  });
+
+  it('a 401 for a replaced login does not sign out the current login', async () => {
+    localStorage.setItem('waves_token', TOKEN);
+    let rejectOld;
+    api.getMe.mockImplementationOnce(() => new Promise((_, reject) => { rejectOld = reject; }));
+    await mount();
+    const other = makeToken({ customerId: 'cust-2', sessionId: 'fam-7' });
+    localStorage.setItem('waves_token', other);
+    api.token = other;
+    api.getMe.mockImplementation(() => new Promise(() => {}));
+    await act(async () => { rejectOld(Object.assign(new Error('expired'), { status: 401 })); });
+    expect(api.clearTokens).not.toHaveBeenCalled();
+    expect(api.getMe).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the saved screen (and the held tabs) until the property list settles, on success or failure', async () => {
+    seedSnapshot();
+    let releaseList;
+    api.getMe.mockResolvedValueOnce(FRESH_ME);
+    api.getAuthProperties.mockImplementationOnce(() => new Promise((resolve) => { releaseList = resolve; }));
+    await mount();
+    expect(text('name')).toBe('Pat Fresh');
+    expect(text('saved')).toBe('true');
+    await act(async () => { releaseList(PROPS); });
+    expect(text('saved')).toBe('false');
+    cleanup();
+    seedSnapshot();
+    let rejectList;
+    api.getMe.mockResolvedValueOnce(FRESH_ME);
+    api.getAuthProperties.mockImplementationOnce(() => new Promise((_, reject) => { rejectList = reject; }));
+    await mount();
+    expect(text('saved')).toBe('true');
+    await act(async () => { rejectList(new Error('offline')); });
+    expect(text('saved')).toBe('false');
+    expect(authApi.propertiesError).toBeTruthy();
+  });
+
+  it('a login published to storage by another tab (not yet adopted in memory) also discards the answer and adopts it', async () => {
+    seedSnapshot();
+    localStorage.setItem('waves_token', TOKEN);
+    let releaseOld;
+    api.getMe.mockImplementationOnce(() => new Promise((resolve) => { releaseOld = resolve; }));
+    await mount();
+    const other = makeToken({ customerId: 'cust-2', sessionId: 'fam-7' });
+    localStorage.setItem('waves_token', other);
+    api.getMe.mockImplementation(() => new Promise(() => {}));
+    await act(async () => { releaseOld({ ...FRESH_ME, lastName: 'OldLogin' }); });
+    expect(text('name')).toBe('');
+    expect(text('saved')).toBe('false');
+    expect(api.adoptTokens).toHaveBeenLastCalledWith(other, null);
+    expect(api.getMe).toHaveBeenCalledTimes(2);
+  });
+
+  it('a property list FAILURE for a replaced login is discarded too: nothing is published, the load restarts', async () => {
+    localStorage.setItem('waves_token', TOKEN);
+    let rejectList;
+    api.getMe.mockResolvedValueOnce(FRESH_ME);
+    api.getAuthProperties.mockImplementationOnce(() => new Promise((_, reject) => { rejectList = reject; }));
+    await mount();
+    const other = makeToken({ customerId: 'cust-1', sessionId: 'fam-8' });
+    localStorage.setItem('waves_token', other);
+    api.token = other;
+    api.getMe.mockImplementation(() => new Promise(() => {}));
+    await act(async () => { rejectList(new Error('offline')); });
+    expect(text('name')).toBe('');
+    expect(text('loading')).toBe('true');
+    expect(authApi.propertiesError).toBeNull();
+    expect(api.getMe).toHaveBeenCalledTimes(2);
+  });
 });

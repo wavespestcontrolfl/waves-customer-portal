@@ -3026,13 +3026,18 @@ function DashboardTab({ customer, accountSaved = false, onSwitchTab, onOpenPlanS
   // to a "Monthly rate" label before the mode resolves (false for
   // per-visit/per-application customers), nor forever when the load fails.
   const [billingModeStatus, setBillingModeStatus] = useState('loading');
+  // Money and account reads (autopay, service stats, balance, referrals) wait
+  // for fresh data: while the saved home screen shows (accountSaved) none of
+  // them starts, and each starts ONCE when the account turns fresh. A normal
+  // launch never has accountSaved, so they start once at mount as before.
   useEffect(() => {
+    if (accountSaved) return;
     api.getAutopay().then(d => {
       setBillingMode(d?.billing_mode || null);
       setResolvedNonMonthly(d?.non_monthly_billing === true);
       setBillingModeStatus('ready');
     }).catch(() => setBillingModeStatus('error'));
-  }, []);
+  }, [accountSaved]);
   const [reviewCardDismissed, setReviewCardDismissed] = useState(false);
   // Home-page content rows (owner 2026-07-09) — Facebook and Instagram
   // (same public feed the wavespestcontrol.com Social Hub renders), the
@@ -3071,6 +3076,7 @@ function DashboardTab({ customer, accountSaved = false, onSwitchTab, onOpenPlanS
   const annualPrepayLine = annualPrepayTermLine(annualPrepay);
 
   useEffect(() => {
+    if (accountSaved) return;
     api.getServiceStats()
       .then(d => {
         setStats(d);
@@ -3089,21 +3095,6 @@ function DashboardTab({ customer, accountSaved = false, onSwitchTab, onOpenPlanS
         console.error(err);
         setBalanceStatus('error');
       });
-    api.getGoogleReviewCard().then(d => {
-      // A card served under another house than Home shows (the echo
-      // disagrees with the entry) is not asked — the selection is re-read
-      // instead (GitHub codex r11 P2). Same rule as the next/last reads.
-      const { entry, saved, named, refresh } = pendingScopeRef.current;
-      if (scopeEchoMismatch(d.propertyScope, entry, saved, named)) {
-        if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
-      } else if (d.card && !reviewCardDone(reviewCardKey(d.card))) setReviewCard(d.card);
-      setReviewCardStatus('ready');
-    }).catch(err => {
-      // No error UI: the review card only exists when the server offers one,
-      // so a failed load safely renders nothing.
-      console.error(err);
-      setReviewCardStatus('error');
-    });
     api.getReferrals().then(d => {
       if (d?.stats) setReferralStats({
         ...d.stats,
@@ -3120,6 +3111,25 @@ function DashboardTab({ customer, accountSaved = false, onSwitchTab, onOpenPlanS
       // action stays visible with neutral copy rather than a made-up figure.
       console.error(err);
       setReferralStatsStatus('error');
+    });
+  }, [accountSaved]);
+
+  // The rest of Home's reads carry no money and start at mount.
+  useEffect(() => {
+    api.getGoogleReviewCard().then(d => {
+      // A card served under another house than Home shows (the echo
+      // disagrees with the entry) is not asked — the selection is re-read
+      // instead (GitHub codex r11 P2). Same rule as the next/last reads.
+      const { entry, saved, named, refresh } = pendingScopeRef.current;
+      if (scopeEchoMismatch(d.propertyScope, entry, saved, named)) {
+        if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
+      } else if (d.card && !reviewCardDone(reviewCardKey(d.card))) setReviewCard(d.card);
+      setReviewCardStatus('ready');
+    }).catch(err => {
+      // No error UI: the review card only exists when the server offers one,
+      // so a failed load safely renders nothing.
+      console.error(err);
+      setReviewCardStatus('error');
     });
     fetch(`${API_BASE}/public/social-feed`)
       .then((r) => (r.ok ? r.json() : null))
@@ -3138,36 +3148,6 @@ function DashboardTab({ customer, accountSaved = false, onSwitchTab, onOpenPlanS
       .then((d) => setNewsletterPosts((d?.posts || []).filter((p) => p.link).slice(0, 6)))
       .catch(() => {});
   }, []);
-
-  // The saved home screen mounted this tab before the account was fresh, so
-  // its mount-only reads may have failed on a weak signal. When the account
-  // turns fresh (customerSaved true -> false) read them again, and clear the
-  // old error first so a stale "unavailable" never outlives a good load.
-  const wasAccountSaved = useRef(accountSaved);
-  useEffect(() => {
-    const turnedFresh = wasAccountSaved.current && !accountSaved;
-    wasAccountSaved.current = accountSaved;
-    if (!turnedFresh) return;
-    setBalanceStatus('loading');
-    setStatsStatus('loading');
-    setBillingModeStatus('loading');
-    setReferralStatsStatus('loading');
-    api.getBalance().then(d => { setBalance(d); setBalanceStatus('ready'); }).catch(err => { console.error(err); setBalanceStatus('error'); });
-    api.getServiceStats().then(d => { setStats(d); setStatsStatus('ready'); }).catch(err => { console.error(err); setStatsStatus('error'); });
-    api.getAutopay().then(d => {
-      setBillingMode(d?.billing_mode || null);
-      setResolvedNonMonthly(d?.non_monthly_billing === true);
-      setBillingModeStatus('ready');
-    }).catch(() => setBillingModeStatus('error'));
-    api.getReferrals().then(d => {
-      if (d?.stats) setReferralStats({
-        ...d.stats,
-        totalEarned: d.totalEarned != null ? Number(d.totalEarned) / 100 : 0,
-        rewardPerReferral: d.capReached === true ? 0 : Number(d.rewardPerReferral) || 0,
-      });
-      setReferralStatsStatus('ready');
-    }).catch(err => { console.error(err); setReferralStatsStatus('error'); });
-  }, [accountSaved]);
 
   // position:relative lets the glass specular pseudo-elements anchor to each
   // card; inert without the glass theme mounted (no offsets, no stacking context).

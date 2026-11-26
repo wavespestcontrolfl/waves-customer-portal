@@ -90,6 +90,15 @@ export function tokenPropertyId(token) {
   }
 }
 
+// Which login a token belongs to: customer, session family, property and actor.
+// A /auth/me answer is published only while the token in use and the token in
+// storage still carry the login that asked (loadCustomer).
+function loginKey(token) {
+  const customerId = tokenCustomerId(token);
+  if (customerId === null || !token) return null;
+  return [customerId, tokenSessionIdentity(token)?.sessionId ?? '', tokenPropertyId(token) ?? '', tokenContactKey(token) ?? ''].join('|');
+}
+
 // Same ASYMMETRIC semantics as api.js sameRequestSession: only the OLD
 // (current) side wildcards — a legacy token with no sessionId upgrading
 // into a durable family via its first routine refresh is the same session,
@@ -295,6 +304,37 @@ export function AuthProvider({ children }) {
     // Who this request is for, captured before it leaves: the saved screen is
     // written only if the same login still holds the token afterwards.
     const requestIdentity = homeIdentityKey(api.token);
+    const requestLogin = loginKey(api.token);
+    // Another tab's login can be adopted into api.token by a token refresh
+    // (_adoptPublishedRotation) before its storage event reaches this tab, so
+    // the epoch alone cannot tell. A moved login discards the answer, ends
+    // everything still in flight and loads again under the current login.
+    const loginMoved = () => {
+      const stored = localStorage.getItem('waves_token');
+      return loginKey(api.token) !== requestLogin || (!!stored && loginKey(stored) !== requestLogin);
+    };
+    const restartUnderCurrentLogin = () => {
+      const stored = localStorage.getItem('waves_token');
+      if (stored && loginKey(stored) !== loginKey(api.token)) api.adoptTokens(stored, localStorage.getItem('waves_refresh_token'));
+      setSessionEpoch(++sessionEpochRef.current);
+      dropSavedHome();
+      customerRef.current = null;
+      setCustomer(null);
+      setProperties([]);
+      resetPropertyScope();
+      setPropertiesError(null);
+      setLoading(true);
+      loadCustomer();
+    };
+    // True when this answer must not be applied: the session epoch moved (a
+    // load for the new epoch is already running), or the login moved without an
+    // epoch bump, in which case it loads again under the current login.
+    const superseded = () => {
+      if (sessionEpochRef.current !== epoch) return true;
+      if (!loginMoved()) return false;
+      restartUnderCurrentLogin();
+      return true;
+    };
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -304,20 +344,19 @@ export function AuthProvider({ children }) {
       // The session changed while this response was in flight (logout,
       // property switch, cross-tab adoption) — a load for the NEW epoch is
       // already running; applying this one would paint a stale identity.
-      if (sessionEpochRef.current !== epoch) return;
+      if (superseded()) return;
       // Cancelled accounts and contact sessions never mount the bell,
       // including on a fresh launch (sessionMountsBell).
       if (!sessionMountsBell(data)) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
-      setCustomerSaved(false);
       // A cancelled or contact session has a narrower screen that is never
       // saved: drop the saved account AND the saved home reads.
       if (!snapshotEligible(data)) clearSavedHome();
       const propertyReadSeq = ++propertyReadSeqRef.current;
       try {
         const propertyData = await api.getAuthProperties({ scope: 'saved' });
-        if (sessionEpochRef.current !== epoch) return;
+        if (superseded()) return;
         // Superseded by a newer list read: that read owns the selection.
         if (propertyReadSeqRef.current === propertyReadSeq) {
           adoptPropertyPayload(propertyData);
@@ -331,7 +370,7 @@ export function AuthProvider({ children }) {
         // DEAD session — falling through would drop the loading screen
         // (setLoading(false) below) while the previous customer's state is
         // still rendered under the new token.
-        if (sessionEpochRef.current !== epoch) return;
+        if (superseded()) return;
         // A newer list read is in flight or has landed: it owns the
         // selection and the error state; this stale failure changes nothing.
         if (propertyReadSeqRef.current === propertyReadSeq) {
@@ -343,6 +382,9 @@ export function AuthProvider({ children }) {
           setPropertiesError('Other service properties are temporarily unavailable.');
         }
       }
+      // The saved selection is reconciled (the list was adopted, or the
+      // /auth/me fallback ran): only now do the held tabs open.
+      setCustomerSaved(false);
       setError(null);
       // Now authenticated — flush any APNs token captured before login (native
       // app only; no-op on web). See native/nativePush.js. A contact
@@ -354,7 +396,9 @@ export function AuthProvider({ children }) {
       // A stale failure must act on NOTHING: in particular, a 401 for a
       // token that has since been replaced would clear the NEW session's
       // credentials.
-      if (sessionEpochRef.current !== epoch) return;
+      if (superseded()) return;
+      // A failure for a login that has since been replaced says nothing about
+      // the current one (a 401 must not clear its credentials).
       console.error('Failed to load customer:', err);
       // Only a real auth rejection invalidates the session — a network drop
       // or server 5xx on launch must not wipe a valid 30-day login.
