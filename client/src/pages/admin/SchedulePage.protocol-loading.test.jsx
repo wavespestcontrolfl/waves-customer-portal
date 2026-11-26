@@ -426,4 +426,31 @@ describe("Job card Tank section rigs", () => {
     expect(screen.getByText("Label rate 0.042–0.169 fl oz per gallon")).toBeVisible();
     expect(document.body.textContent).not.toMatch(/\bml\b/i);
   });
+
+  it("names the spray volume a card's label rate holds at, and only when the answer carries one", async () => {
+    let bound = true;
+    fetch.mockImplementation((url) => {
+      const parsed = new URL(url, "http://localhost");
+      if (parsed.pathname.endsWith("/protocols/job-card/products")) return reply({ products: [{ id: "p4", name: "Tekko Pro IGR", category: "insecticide" }] });
+      if (parsed.pathname.endsWith("/protocols/job-card/mix")) {
+        // Cockroach card: 2 fl oz per gallon at 1 gal per 1,000 sq ft, for the 4 gallons asked.
+        return reply({ enabled: true, amount: 8, unit: "fl_oz", gallons: 4, ratePerGallon: { lo: 2, hi: 2, unit: "fl_oz" }, rateVerified: true, sprayCheck: { verdict: "unknown", reason: "Judged on the visit day" }, ...(bound ? { sprayVolumeGalPer1000: 1, coversSqft: 4000 } : {}) });
+      }
+      if (parsed.pathname.includes("/protocols/job-card/")) return reply(card);
+      return reply(fixture(url));
+    });
+    const view = await act(async () => render(<ProtocolPanel service={service} onClose={() => {}} />));
+    fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "tekko" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Tekko Pro IGR" }));
+    expect(await screen.findByText("Spray no more than 1 gal per 1,000 sq ft. More water per area puts down more than the label amount.")).toBeVisible();
+    expect(screen.getByText(/covers 4,000 sq ft/)).toBeVisible();
+    view.unmount();
+
+    bound = false;
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "tekko" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Tekko Pro IGR" }));
+    expect(await screen.findByText("Label rate 2 fl oz per gallon")).toBeVisible();
+    expect(screen.queryByText(/Spray no more than/)).toBeNull();
+  });
 });
