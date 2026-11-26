@@ -205,6 +205,33 @@ jest.setTimeout(120000);
       await expect(approve(d.id)).rejects.toMatchObject({ detail: { blocks: ['duplicate_bank_line'] } });
     });
 
+    test('a case or punctuation variant that exists as another draft blocks the approve until it is discarded', async () => {
+      const text = line();
+      const first = await draft(text);
+      const twin = await draft(text.toUpperCase());
+      expect(twin.check_result.blocks).toContain('duplicate_bank_line');
+      await expect(approve(first.id)).rejects.toMatchObject({ detail: { blocks: ['duplicate_bank_line'] } });
+      await Bank.discardDraft(twin.id, admin, opts());
+      await expect(approve(first.id)).resolves.toMatchObject({ status: 'approved' });
+    });
+
+    test('an acknowledgement covers only the warning codes it was given for: a new warning later drops the line', async () => {
+      const d = await draft('We can reschedule a visit from the customer portal.');
+      const a = await approve(d.id, { acknowledgeWarnings: true });
+      expect(a.check_result.acknowledged_warnings).toEqual(['promise_words']);
+      await Bank.refreshBankFacts(opts());
+      expect(Bank.getApprovedBankFacts().map((f) => f.id)).toEqual([a.id]);
+      // The record says the owner ticked for nothing (or for another code): the promise word is not covered any more.
+      await root.raw("UPDATE company_fact_bank SET check_result = jsonb_set(check_result, '{acknowledged_warnings}', '[\"price_words\"]') WHERE id = ?", [a.id]);
+      await Bank.refreshBankFacts(opts());
+      expect(Bank.getApprovedBankFacts()).toEqual([]);
+    });
+
+    test('a price with no currency sign is blocked even when warnings are acknowledged', async () => {
+      const d = await draft('The initial application costs 99.');
+      await expect(approve(d.id, { acknowledgeWarnings: true })).rejects.toMatchObject({ detail: { blocks: expect.arrayContaining(['price_amount']) } });
+    });
+
     test('warning words need warnings_acknowledged', async () => {
       const d = await draft('We can reschedule a visit from the customer portal.');
       await expect(approve(d.id)).rejects.toMatchObject({ code: 'WARNINGS_NOT_ACKNOWLEDGED', status: 409 });
@@ -317,6 +344,31 @@ jest.setTimeout(120000);
       expect(new Set(seen)).toEqual(new Set(made));
       expect(seen).toEqual([...made].sort().reverse());
       expect((await Bank.listFacts({ status: 'draft' }, opts())).nextCursor).toBeNull();
+    });
+
+    test('every malformed cursor is INVALID_CURSOR (400), never a database error, including dates only Postgres refuses', async () => {
+      const cursorOf = (ts, id) => Buffer.from(`${ts}|${id}`).toString('base64url');
+      const goodId = '11111111-1111-4111-8111-111111111111';
+      const cursors = [
+        cursorOf('2026-11-25 10:00:00+00', '------------------------------------'),
+        cursorOf('2026-11-25 10:00:00+00', 'abcdefab-abcd-abcd-abcd-abcdefabcdef0'),
+        cursorOf('2026-11-25 10:00:00+00', 'abcdefabcdefabcdefabcdefabcdefabcdef'),
+        cursorOf('2026-02-30 10:00:00+00', goodId),
+        cursorOf('2026-13-01 10:00:00+00', goodId),
+        cursorOf('2026-11-25 25:61:61+00', goodId),
+        cursorOf('now', goodId),
+        cursorOf('', goodId),
+        Buffer.from('no separator').toString('base64url'),
+        '!!!',
+      ];
+      for (const cursor of cursors) {
+        // Each in its own savepoint: Postgres aborts the transaction that ran a refused date (a pooled request is its own transaction).
+        await expect(root.transaction((sp) => Bank.listFacts({ status: 'draft', cursor }, { dbi: sp }))).rejects.toMatchObject({ code: 'INVALID_CURSOR', status: 400 });
+      }
+      // The database is still usable after each refusal, and a good cursor still pages.
+      await draft();
+      const page = await Bank.listFacts({ status: 'draft', limit: 1 }, opts());
+      expect(page.facts).toHaveLength(1);
     });
 
     test('list refuses a bad cursor and a bad status, and clamps the page size to 1..500', async () => {

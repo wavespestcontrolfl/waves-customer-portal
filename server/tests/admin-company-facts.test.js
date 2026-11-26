@@ -125,6 +125,11 @@ describe('any admin may draft, edit, discard, retire and restore', () => {
 });
 
 describe('errors', () => {
+  test('a malformed list cursor is a 400 INVALID_CURSOR, not a 500', async () => {
+    mockBank.listFacts.mockRejectedValueOnce(new FactError('INVALID_CURSOR', 400));
+    expect(await call(url('?cursor=garbage'))).toEqual({ status: 400, body: { error: 'INVALID_CURSOR', code: 'INVALID_CURSOR' } });
+  });
+
   test('a bad id is a 400 and never reaches the service', async () => {
     expect(await call(url('/nope'))).toMatchObject({ status: 400, body: { code: 'INVALID_ID' } });
     expect(mockBank.getFact).not.toHaveBeenCalled();

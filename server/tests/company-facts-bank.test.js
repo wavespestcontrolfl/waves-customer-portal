@@ -35,6 +35,14 @@ describe('hard blocks', () => {
     ['a dollar sign and a space', 'The initial application is $ 50.', 'dollar_amount'],
     ['US$', 'The initial application is US$50.', 'dollar_amount'],
     ['US dollars', 'The initial application is 50 US dollars.', 'dollar_amount'],
+    ['a price with no currency sign', 'The initial application costs 99.', 'price_amount'],
+    ['a start-at price', 'Plans start at 49 a month.', 'price_amount'],
+    ['a per-visit price', 'The service is 99 per visit.', 'price_amount'],
+    ['a slash rate', 'Plans are 49/mo.', 'price_amount'],
+    ['a two-decimal figure', 'The fee is 129.99.', 'price_amount'],
+    ['a thousands figure after a price word', 'We charge 1,200 for the job.', 'price_amount'],
+    ['a rate word and a number', 'Our rate is 75 for a quarterly visit.', 'price_amount'],
+    ['four lowercase sentences', 'we serve parrish. we serve ruskin. we serve wimauma. we serve palmetto.', 'too_many_sentences'],
     ['another currency symbol', 'The initial application is \u20AC50.', 'dollar_amount'],
     ['a percent', 'We take 10% off for members.', 'percent'],
     ['a product name', 'We apply Zorbex Pro 4L along the foundation.', 'product_brand'],
@@ -90,6 +98,30 @@ describe('hard blocks', () => {
 
   test('"safety" alone is not a safety claim, and the label-safety wording passes the claim screen', () => {
     expect(blocksOf('We follow every label and safety rule on each visit.')).not.toContain('safety_claim');
+  });
+
+  test.each([
+    'We make 3 visits a year.',
+    'We return every 90 days.',
+    'Visits take about 2 hours.',
+    'Lawns up to 1 acre are included.',
+    'We do 4 quarterly visits.',
+    'We started in 2009.',
+    'Costs have gone up since 2024.',
+    'We open at 8.30 am.',
+    'Only 3 visits are needed.',
+    'Just 2 visits are included.',
+    'Lots up to 0.25 acre are covered.',
+    'We come back every 90 days for a quarterly visit.',
+  ])('not a price: %s', (text) => {
+    expect(blocksOf(text)).not.toContain('price_amount');
+  });
+
+  test('lowercase sentence starts count, and abbreviations do not split a sentence', () => {
+    expect(Bank._test.countSentences('we serve a. we serve b. we serve c. we serve d.')).toBe(4);
+    expect(Bank._test.countSentences('We serve a. we serve b. we serve c.')).toBe(3);
+    expect(blocksOf('We open at 8 a.m. to start the first visit. we close at 5 p.m. on Fridays.')).not.toContain('too_many_sentences');
+    expect(Bank._test.countSentences('Most U.S. customers book e.g. online, i.e. by text.')).toBe(1);
   });
 
   test('a link is not also reported as injection shaped', () => {
@@ -235,7 +267,10 @@ describe('snapshot', () => {
       approved(1, CLEAN),
       approved(2, warn, { warnings_acknowledged: false }),
       approved(3, 'A person at the office handles every cancel request.', { warnings_acknowledged: 'true' }),
-      approved(4, 'We can also reschedule a visit by text message.', { warnings_acknowledged: true }),
+      approved(4, 'We can also reschedule a visit by text message.', { warnings_acknowledged: true, check_result: { acknowledged_warnings: ['promise_words'] } }),
+      // Ticked once for a promise word; the screens now also find a hand-off word: not covered.
+      approved(5, 'A person at the office can reschedule a visit by text.', { warnings_acknowledged: true, check_result: { acknowledged_warnings: ['promise_words'] } }),
+      approved(6, 'Our office can also reschedule a visit by phone.', { warnings_acknowledged: true, check_result: null }),
     ];
     const facts = await Bank._test.loadVerifiedFacts(fakeDb(rows));
     expect(facts.map((f) => f.id)).toEqual([rows[0].id, rows[3].id]);

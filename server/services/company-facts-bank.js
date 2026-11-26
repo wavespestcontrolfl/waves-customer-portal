@@ -72,12 +72,36 @@ const HANDLE_RE = /(?:^|\s)[@#]\w+/;
 const MONEY_RE = /[$€£¥]|(?<![a-z])usd(?![a-z])|\b(?:dollars?|bucks|cents?)\b/i;
 const PERCENT_RE = /%|\bper ?cent\b/i;
 const LINE_BREAK_RE = /[\r\n\u2028\u2029]/;
-const SENTENCE_SPLIT_RE = /(?<=[.!?])\s+(?=[A-Z0-9"'(])/;
+// A sentence ends at . ! or ? followed by white space, whatever letter case comes next. Not a boundary: after a dotted abbreviation
+// ("a.m.", "e.g.", "i.e.", "U.S.") or a common title or short word ("Mr.", "Dr.", "vs.", "approx.").
+const SENTENCE_END_RE = /(?<=[.!?])\s+/;
+const ABBREVIATION_END_RE = /(?:\b[a-z]\.){2,}$|\b(?:mr|mrs|ms|dr|vs|approx|inc)\.$/i;
 
 // Pesticide safety and "natural" claims (AGENTS.md compliance language). The SMS screen (SMS_COMPLIANCE_CLAIM_RE) only reads "safe"
 // near a treatment word, so "We use safe pesticides" slipped past it; the bank refuses the claim anywhere, as the owner ruled
 // ("safe" is a hard block).
 const SAFETY_CLAIM_RE = /\bsafe(?:r|st|ly)?\b|\bnon[\s-]?toxic\b|\bharmless\b|\ball[\s-]?natural\b|\b(?:no|zero|without)\s+(?:harsh\s+|harmful\s+)?(?:chemicals?|toxins?|pesticides?)\b|\b(?:chemical|toxin|poison|pesticide)[\s-]?free\b|\b(?:eco|environmentally|child|kid|pet|family)[\s-]?friendly\b|\b(?:organic|green)\s+(?:pest|treatment|product|spray)/i;
+
+// Prices written without a currency sign. (1) a rate: a number per/a/each/slash a billing unit ("99 per visit", "49/mo", "49 a month");
+// (2) a number near a price word ("costs 99", "starts at 49", "the fee is 129.99"), unless it is a count or measure ("only 3 visits",
+// "costs 2 hours") or a year ("costs have risen since 2024"); (3) a two-decimal figure that is not a measure ("129.99").
+// Counts and times that are not prices ("3 visits", "every 90 days", "2 hours", "1 acre", "4 quarterly visits", years) pass.
+const AMOUNT_SRC = '\\d{1,3}(?:,\\d{3})+(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?';
+const UNIT_SRC = '(?:visits?|days?|hours?|hrs?|minutes?|mins?|weeks?|months?|years?|acres?|feet|foot|ft|inch(?:es)?|miles?|times|treatments?|applications?|services?|stops?|trucks?|techs?|technicians?|people|customers?|properties|homes?|houses?|units?|zones?|rooms?|pests?|ants?|%|percent|a\\.?m\\.?|p\\.?m\\.?|st|nd|rd|th)\\b';
+const BILLING_UNIT_SRC = '(?:mo(?:nth)?|months?|visits?|applications?|treatments?|services?|years?|yr|quarters?|weeks?|wk|times?)\\b';
+const RATE_RE = new RegExp(`(?<![\\d.])(?:${AMOUNT_SRC})\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
+const PRICE_WORD_NUMBER_RE = new RegExp(`\\b(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as|only|just)\\b([^.\\d]{0,20})(?<![\\d.])(${AMOUNT_SRC})(?![\\d.]\\d)(?!\\s*${UNIT_SRC})`, 'gi');
+const DECIMAL_FIGURE_RE = new RegExp(`(?<![\\d.])\\d{1,4}\\.\\d{2}(?!\\d)(?!\\s*${UNIT_SRC})`, 'i');
+const YEAR_CONTEXT_RE = /\b(?:in|since|by|until|during|before|after|year|years)\b/i;
+
+function hasUnmarkedPrice(text) {
+  if (RATE_RE.test(text) || DECIMAL_FIGURE_RE.test(text)) return true;
+  for (const m of text.matchAll(PRICE_WORD_NUMBER_RE)) {
+    const isYear = /^(?:19|20)\d{2}$/.test(m[2]) && YEAR_CONTEXT_RE.test(m[1]);
+    if (!isYear) return true;
+  }
+  return false;
+}
 
 // [code, regex]: each is a hard block on its own.
 const SHAPE_BLOCKS = Object.freeze([
@@ -116,7 +140,13 @@ function loadScreens() {
 }
 
 function countSentences(text) {
-  return String(text).split(SENTENCE_SPLIT_RE).filter((part) => part.trim()).length;
+  let count = 0;
+  let previous = '';
+  for (const part of String(text).split(SENTENCE_END_RE).filter((piece) => piece.trim())) {
+    if (!previous || !ABBREVIATION_END_RE.test(previous.trim())) count += 1;
+    previous = part;
+  }
+  return count;
 }
 
 /** The full catalog names (4+ characters, normalised) plus the explicit brand aliases. */
@@ -177,6 +207,7 @@ function checkFactText(rawText, ctx = {}) {
   const blocks = [];
   if (text.length > MAX_FACT_CHARS) blocks.push('too_long');
   if (countSentences(text) > MAX_SENTENCES) blocks.push('too_many_sentences');
+  if (hasUnmarkedPrice(text)) blocks.push('price_amount');
   for (const [code, re] of SHAPE_BLOCKS) if (re.test(text)) blocks.push(code);
   if (loadScreens().injection.test(withoutShapes(text))) blocks.push('injection_shape');
   if (mentionsProduct(text, productTokens(ctx.productNames))) blocks.push('product_brand');
@@ -230,7 +261,8 @@ async function loadCheckContext(dbi, { statuses = ['draft', 'approved'], exclude
   return { productNames, codeKeys: codeFactKeys(), bankKeys: await readBankKeys(dbi, { statuses, excludeIds }) };
 }
 
-const checkResult = (check) => ({ blocks: check.blocks, warnings: check.warnings, checked_at: new Date().toISOString() });
+// `acknowledged` (approve only): the warning codes the owner ticked for. Anything else the screens later find is not acknowledged.
+const checkResult = (check, acknowledged = []) => ({ blocks: check.blocks, warnings: check.warnings, acknowledged_warnings: acknowledged, checked_at: new Date().toISOString() });
 
 /* ── Writer ───────────────────────────────────────────────────────────── */
 
@@ -386,7 +418,8 @@ async function approvedTextsExcept(trx, excludeId) {
 
 /** Every approve-time check, on the server. Throws BLOCKED (with codes) or WARNINGS_NOT_ACKNOWLEDGED. */
 async function approveChecks(trx, row, { acknowledgeWarnings }) {
-  const ctx = await loadCheckContext(trx, { statuses: ['approved'], excludeIds: [row.id, row.supersedes_id] });
+  // Other drafts count too, as in the draft check: a case or punctuation variant of this line must be discarded before this one is approved.
+  const ctx = await loadCheckContext(trx, { statuses: ['draft', 'approved'], excludeIds: [row.id, row.supersedes_id] });
   const check = checkFactText(row.fact_text, ctx);
   const others = await approvedTextsExcept(trx, row.supersedes_id);
   if (others.length >= MAX_ACTIVE_FACTS) check.blocks.push('bank_full');
@@ -436,7 +469,7 @@ async function approveFact(id, input, actor, { dbi = db } = {}) {
       approved_by: actor.id || null,
       approved_at: trx.fn.now(),
       owner_words: ownerWords || row.owner_words,
-      check_result: checkResult(check),
+      check_result: checkResult(check, acknowledgeWarnings ? check.warnings.map((w) => w.code) : []),
       warnings_acknowledged: Boolean(check.warnings.length && acknowledgeWarnings),
       updated_at: trx.fn.now(),
     }).returning('*');
@@ -476,9 +509,12 @@ async function retireFact(id, input, actor, { dbi = db } = {}) {
 
 const MAX_PAGE = 500;
 const encodeCursor = (createdAtText, id) => Buffer.from(`${createdAtText}|${id}`).toString('base64url');
+// The timestamp as Postgres prints a timestamptz ("2026-11-25 19:07:04.123456+00") and a canonical UUID: anything else is refused here, and a date that fits the shape but not the calendar is refused by Postgres (class 22), which listFacts maps to the same code.
+const CURSOR_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?[+-]\d{2}(?::?\d{2})?$/;
+const CURSOR_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function decodeCursor(cursor) {
   const [ts, id] = Buffer.from(String(cursor), 'base64url').toString('utf8').split('|');
-  if (!ts || !id || Number.isNaN(Date.parse(ts)) || !/^[0-9a-f-]{36}$/i.test(id)) throw new FactError('INVALID_CURSOR', 400);
+  if (!CURSOR_TS_RE.test(ts || '') || !CURSOR_ID_RE.test(id || '')) throw new FactError('INVALID_CURSOR', 400);
   return { ts, id };
 }
 
@@ -496,7 +532,14 @@ async function listFacts({ status, limit, cursor } = {}, { dbi = db } = {}) {
     const at = decodeCursor(cursor);
     q.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [at.ts, at.id]);
   }
-  const rows = await q;
+  let rows;
+  try {
+    rows = await q;
+  } catch (err) {
+    // A cursor the shape checks passed but Postgres refuses (an impossible date): a data exception (class 22) is the caller's cursor, not a fault.
+    if (cursor && String(err && err.code).startsWith('22')) throw new FactError('INVALID_CURSOR', 400);
+    throw err;
+  }
   const page = rows.slice(0, size);
   const last = rows.length > size ? page[page.length - 1] : null;
   const facts = page.map(({ cursor_ts: _cursorTs, ...fact }) => fact);
@@ -535,6 +578,13 @@ async function readApprovers(dbi, ids) {
   return approvers;
 }
 
+/** True when the owner ticked for every warning code the screens find today (the acknowledgement stored with the approval). */
+function warningsCovered(row, warnings) {
+  if (row.warnings_acknowledged !== true) return false;
+  const acked = row.check_result && Array.isArray(row.check_result.acknowledged_warnings) ? row.check_result.acknowledged_warnings : [];
+  return warnings.every((w) => acked.includes(w.code));
+}
+
 /** Why a stored approved row must not be served, or '' when it may be. Codes only. */
 function loadProblem(row, check, approvers) {
   if (row.text_sha256 !== sha256(String(row.fact_text || '').trim())) return 'hash_mismatch';
@@ -542,7 +592,7 @@ function loadProblem(row, check, approvers) {
   if (!row.approved_by || !row.approved_at || !(approvers.get(row.id) || new Set()).has(row.approved_by)) return 'no_approval_record';
   if (check.blocks.length) return check.blocks.join('+');
   // Warning words need the owner's tick; a row without it (written around the service, or newly matched by a widened screen) is not served.
-  if (check.warnings.length > 0 && row.warnings_acknowledged !== true) return 'warnings_not_acknowledged';
+  if (check.warnings.length > 0 && !warningsCovered(row, check.warnings)) return 'warnings_not_acknowledged';
   return '';
 }
 
