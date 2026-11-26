@@ -56,7 +56,7 @@ const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } = require('./area-addon-governed-rate');
-const { labelUseRate } = require('../utils/protocol-label-rate');
+const { labelUseRate, labelRateHoldText } = require('../utils/protocol-label-rate');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -1593,6 +1593,11 @@ function declaredTankRate(meta, hints, product) {
   if (hints.length !== 1) return {};
   const labelUse = labelUseRate(meta, product);
   if (labelUse) return { declaredRate: { lo: labelUse.amount, hi: labelUse.amount, unit: labelUse.unit }, labelUseRate: true };
+  // A weaker-mix line (the flea card's Tekko Pro at 0.66) whose row has another or no registration number, or a catalog rate that
+  // cannot be compared: the catalog band may be the stronger rate, so the tank search withholds the dose (labelHold) and no rate
+  // comes from the card or the catalog.
+  const hold = labelRateHoldText(meta, product);
+  if (hold) return { labelRateRefused: true, labelHold: hold };
   // The line names a label rate for another registration: its text states that rate too, so no rate is read from it (rateOf below
   // honors this) and the resolved product keeps its catalog band.
   if (meta?.labelRatePerGallon) return { labelRateRefused: true };
@@ -2425,7 +2430,11 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     // Only a card that carries its label's rate (labelUseRate) can disagree: another product's lines keep the first card's rate
     // narrowed by the label band, as before.
     const ratesDisagree = rates.size > 1 && selectedHits.some((h) => h.hit.labelUseRate) ? { conflictLines: selectedHits.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
-    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...ratesDisagree }, owners);
+    // A hold on any selected service's line holds the dose: the request names only the product, so another service's rate
+    // (the mosquito card's 1 fl oz per gallon beside a held flea add-on) must not stand in for it.
+    const heldHit = selectedHits.find((h) => h.hit.labelHold);
+    const held = heldHit ? { labelHold: heldHit.hit.labelHold } : {};
+    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...held, ...ratesDisagree }, owners);
   }
   const [conditional] = hits;
   return found(conditional ? { addon: conditional.c.addon, selected: false, rate: null, ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}) } : null, owners);

@@ -69,8 +69,12 @@ const MAX_RATE_PER_1000 = { snapshot: 4.6, f13013: 7.5 };
 // A card line that carries its label's rate for this pest (Tekko Pro at 2 fl oz per gallon on the home cockroach card, server
 // utils/protocol-label-rate.js) replaces the catalog band, so the prefill and the review ceiling both start from the card's rate.
 // Any other product passes through unchanged.
+// A blank card rate (two booked cards share the product, or the server holds the rate: its registration or catalog rate does not
+// match the card) clears the row's per-1,000 catalog rate too, so the rate starts blank whatever unit the catalog keeps.
 export function labelUseProduct(product, item) {
-  return item?.labelUseRate ? { ...product, default_rate: item.defaultRate, defaultRate: item.defaultRate } : product;
+  if (!item?.labelUseRate) return product;
+  const blank = item.defaultRate === '' ? { default_rate_per_1000: null, defaultRatePer1000: null, ratePer1000: null } : {};
+  return { ...product, default_rate: item.defaultRate, defaultRate: item.defaultRate, ...blank };
 }
 
 // The visit card's label-rate line for this product, or null: only from a response this hook would seed.
