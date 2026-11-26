@@ -20,8 +20,9 @@
  * order, so the reason never contradicts the disposition the call received):
  *   1. spam          layered classifier verdict spam, disposition
  *                    spam_discarded, or v2 call_nature robocall
- *   2. wrong_number  v2 call_nature wrong_number, call_type wrong_number,
- *                    disposition wrong_number_closed
+ *   2. wrong_number  v2 call_nature wrong_number, disposition
+ *                    wrong_number_closed, or call_type wrong_number when no
+ *                    usable v2 recommendation contradicts it (decideDisposition)
  *   3. solicitor     v2 call_nature spam_solicitation
  *   4. spam          the legacy-only signals: is_spam, call_type spam,
  *                    lead_quality spam (extraction or row), processing_status
@@ -39,11 +40,17 @@
  */
 
 const logger = require('./logger');
+const { TERMINAL_DISPOSITIONS } = require('./call-disposition');
 
 const INVALID_REASONS = Object.freeze(['spam', 'wrong_number', 'solicitor', 'out_of_area', 'service_not_offered', 'silent']);
 
 const lower = (v) => String(v == null ? '' : v).trim().toLowerCase();
 const truthy = (v) => v === true || v === 'true';
+
+function usableRecommendation(value) {
+  const rec = lower(value);
+  return TERMINAL_DISPOSITIONS.includes(rec) && !['spam_discarded', 'booked'].includes(rec);
+}
 
 // The signals, lower-cased and flattened.
 function factsOf({ legacy, v2, v2Result, spamVerdict, disposition, triageFlags, addressStatus, outOfAreaHold }) {
@@ -53,6 +60,8 @@ function factsOf({ legacy, v2, v2Result, spamVerdict, disposition, triageFlags, 
     ...(outOfAreaHold ? ['out_of_service_area'] : [])];
   return {
     nature: lower(extraction?.call_nature),
+    // decideDisposition's usable model recommendation: a v1 wrong_number guess stands only without one.
+    modelRecommended: usableRecommendation(extraction?.recommended_disposition),
     callType: lower(legacy?.call_type),
     disposition: lower(disposition),
     verdict: lower(spamVerdict?.verdict),
@@ -71,7 +80,8 @@ function legacySpam(f, { legacy, processingStatus, leadQuality }) {
 // Ordered rules: the first that holds wins (see the precedence list above).
 const RULES = [
   ['spam', (f) => f.verdict === 'spam' || f.disposition === 'spam_discarded' || f.nature === 'robocall'],
-  ['wrong_number', (f) => f.nature === 'wrong_number' || f.callType === 'wrong_number' || f.disposition === 'wrong_number_closed'],
+  ['wrong_number', (f) => f.nature === 'wrong_number' || (f.callType === 'wrong_number' && !f.modelRecommended)
+    || f.disposition === 'wrong_number_closed'],
   ['solicitor', (f) => f.nature === 'spam_solicitation'],
   ['spam', (f, raw) => legacySpam(f, raw)],
   ['out_of_area', (f) => f.flags.has('out_of_service_area') || f.addressStatus === 'out_of_service_area'],

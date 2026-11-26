@@ -60,6 +60,14 @@ describe('resolveInvalidReason precedence', () => {
     expect(resolveInvalidReason({ v2Result: { status: 'schema_failed', extraction: { call_nature: 'wrong_number' } } })).toBeNull();
   });
 
+  test('a legacy wrong_number guess yields to a usable v2 recommendation, as in decideDisposition', () => {
+    const legacy = { call_type: 'wrong_number' };
+    expect(resolveInvalidReason({ legacy, v2: { call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered' } })).toBeNull();
+    // spam_discarded / booked are not a usable recommendation, so the guess still stands
+    expect(resolveInvalidReason({ legacy, v2: { call_nature: 'new_lead', recommended_disposition: 'booked' } })).toBe('wrong_number');
+    expect(resolveInvalidReason({ legacy, v2: { call_nature: 'new_lead' } })).toBe('wrong_number');
+  });
+
   test('a vendor_or_partner call is not spam on the folded legacy call_type alone', () => {
     expect(resolveInvalidReason({ legacy: { call_type: 'spam' }, v2: { call_nature: 'vendor_or_partner' } })).toBeNull();
     expect(resolveInvalidReason({ legacy: { call_type: 'spam', is_spam: true }, v2: { call_nature: 'vendor_or_partner' } })).toBe('spam');

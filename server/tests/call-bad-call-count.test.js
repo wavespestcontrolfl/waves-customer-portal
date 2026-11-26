@@ -165,3 +165,23 @@ describe('weekly notification', () => {
     await expect(runWeeklyBadCallAlert({ summarize: async () => summary, raise: jest.fn().mockResolvedValue(null) })).rejects.toThrow('not written');
   });
 });
+
+describe('loadWeekRows: the call start decides the week', () => {
+  test('bounds the call start to the window, and widens created_at by a day for rows inserted after hangup', async () => {
+    const calls = [];
+    const qb = new Proxy({}, {
+      get: (_t, name) => (name === 'then' ? undefined : (...args) => { calls.push([name, ...args]); return qb; }),
+    });
+    const database = jest.fn(() => qb);
+    const start = new Date('2026-11-16T05:00:00Z');
+    const end = new Date('2026-11-23T05:00:00Z');
+    await _private.loadWeekRows({ start, end, database });
+    const raws = calls.filter(([n]) => n === 'whereRaw').map(([, sql, b]) => [sql, b]);
+    const startedLow = raws.find(([sql, b]) => sql.includes('make_interval') && sql.trim().endsWith('>= ?') && b[0] === start);
+    const startedHigh = raws.find(([sql, b]) => sql.includes('make_interval') && sql.trim().endsWith('< ?') && b[0] === end);
+    expect(startedLow).toBeTruthy();
+    expect(startedHigh).toBeTruthy();
+    const createdHigh = calls.find(([n, col, op]) => n === 'where' && col === 'cl.created_at' && op === '<');
+    expect(createdHigh[3].toISOString()).toBe('2026-11-24T05:00:00.000Z');
+  });
+});

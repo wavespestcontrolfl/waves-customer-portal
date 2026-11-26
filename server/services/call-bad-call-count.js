@@ -29,6 +29,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { toE164 } = require('../utils/phone');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { INVALID_REASONS, resolveInvalidReasonFromRow } = require('./call-invalid-reason');
+const { callStartedAtSql } = require('./sms-pending-conversations');
 const { raiseAdminAlert } = require('./admin-alert-compose');
 const { shortDateET } = require('./admin-alert-names');
 const { etWeekStart, etDateString, parseETDateTime, addETDaysAtWallClock } = require('../utils/datetime-et');
@@ -128,10 +129,15 @@ function summarizeRows(rows) {
 }
 
 async function loadWeekRows({ start, end, database = db }) {
+  // The call's start decides the week (a row inserted after hangup has a later created_at). A row is never
+  // written before the call starts, and no call runs a day, so the created_at bounds only narrow the scan.
+  const started = callStartedAtSql('cl');
   return whereNotSandboxCall(database('call_log as cl'), 'cl.source')
     .where('cl.direction', 'inbound')
     .where('cl.created_at', '>=', start)
-    .where('cl.created_at', '<', end)
+    .where('cl.created_at', '<', addETDaysAtWallClock(end, 1))
+    .whereRaw(`${started} >= ?`, [start])
+    .whereRaw(`${started} < ?`, [end])
     .select(
       'cl.source', 'cl.to_phone', 'cl.answered_by', 'cl.call_outcome', 'cl.answer_seconds', 'cl.invalid_reason',
       'cl.disposition', 'cl.processing_status', 'cl.lead_quality', 'cl.enrichment_status', 'cl.ai_extraction', 'cl.ai_extraction_enriched', 'cl.v2_extraction_status',
@@ -206,5 +212,5 @@ module.exports = {
   stampAnswerSeconds,
   weeklyBadCallSummary,
   runWeeklyBadCallAlert,
-  _private: { summarizeRows, composeBadCallAlert, reportWindow, median, sourceLine },
+  _private: { summarizeRows, composeBadCallAlert, reportWindow, median, sourceLine, loadWeekRows },
 };
