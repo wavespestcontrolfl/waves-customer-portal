@@ -87,7 +87,7 @@ describe('gate on', () => {
     expect(system).toContain('COMPANY FACTS:\n- The COMPANY FACTS section');
     expect(system).not.toMatch(/general pest knowledge/i);
     expect(system).toContain('COMPANY FACTS section in the context block is owner-approved and authoritative');
-    expect(system).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, VISIT STATUS & OPEN LOOPS, the thread');
+    expect(system).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, PREP GUIDE, VISIT STATUS & OPEN LOOPS, the thread');
   });
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {

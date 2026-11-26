@@ -16,6 +16,7 @@ const {
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { visitReportCustomerCopy, carriesReportNote } = require('./service-report/technician-report-copy');
 const { etDateString, formatETTime } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 // LIVE ETA (GATE_SMS_REAL_ANSWERS): reuses the exact functions + bounds
@@ -259,14 +260,14 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
 // recheck names the number facts it re-renders and never reads the guide. Every other caller skips the reads and the keys. The drafting callers
 // pass the GATE_SMS_REAL_ANSWERS gate as the opt-in (a new draft needs it); the send-time recheck asks regardless, so a reviewed card keeps its
 // live recheck after a gate rollback. Never in a frozen replay (asOf): these read today's rows, never an earlier day's.
-async function loadSmsStaffFacts({ customer, pendingEstimate, lastService, asOfDate, optedIn }) {
+async function loadSmsStaffFacts({ customer, pendingEstimate, lastServices, asOfDate, optedIn }) {
   if (!optedIn || asOfDate) return { estimateFacts: null, prepaidPlans: null, prepGuide: null };
   const want = optedIn === true ? { estimate: true, prepaid: true, guide: true } : optedIn;
   const staffFacts = require('./sms-staff-facts');
   const [estimateFacts, prepaidPlans, prepGuide] = await Promise.all([
     want.estimate ? staffFacts.loadEstimateFacts(pendingEstimate, { db }) : null,
     want.prepaid ? staffFacts.loadPrepaidPlanFacts(customer.id, { db }) : null,
-    want.guide ? staffFacts.loadPrepGuideFacts(customer.id, lastService, { db }) : null,
+    want.guide ? staffFacts.loadPrepGuideFacts(customer.id, lastServices, { db }) : null,
   ]);
   return { estimateFacts, prepaidPlans, prepGuide };
 }
@@ -1482,7 +1483,10 @@ class ContextAggregator {
 
     const lastService = serviceHistory[0] || null;
     const latestVisitFindings = await loadLatestVisitFindings(serviceHistory[0]);
-    const { estimateFacts, prepaidPlans, prepGuide } = await loadSmsStaffFacts({ customer, pendingEstimate, lastService, asOfDate, optedIn: includeSmsStaffFacts });
+    // the completed services of the latest service day: the history is ordered by that date alone, so two that finished the same day are tied (the guide
+    // fallback reads them all and names none when they disagree)
+    const lastServices = lastService ? serviceHistory.filter((record) => dateOnlyString(record.service_date) === dateOnlyString(lastService.service_date)) : [];
+    const { estimateFacts, prepaidPlans, prepGuide } = await loadSmsStaffFacts({ customer, pendingEstimate, lastServices, asOfDate, optedIn: includeSmsStaffFacts });
     // Third-party Bill-To (Codex r2, mirrors billing-v2 /balance): a payment
     // against a payer-billed invoice is the PAYER's even though the row sits
     // under the homeowner's customer_id — exclude those from both the

@@ -88,7 +88,29 @@ describe('loadPrepGuideFacts', () => {
     expect(result).toMatchObject({ source: 'last', key: 'prep.flea', label: 'Flea Treatment' });
     expect(sender.completedPrepGuide).toHaveBeenCalledWith({ scheduledServiceId: 'ss-1', serviceType: 'Flea Treatment' }); // (the visit that completed: its assigned guide first)
     expect((await load({ booked: null, family: null })).result).toEqual({ sections: [] }); // no guide covers it: a successful read of nothing
-    expect((await load({ booked: null, family: ['flea', FLEA] }, { last: null })).sender.completedPrepGuide).toHaveBeenCalledWith({ scheduledServiceId: undefined, serviceType: undefined });
+    const none = await load({ booked: null, family: ['flea', FLEA] }, { last: null }); // no completed service at all
+    expect(none.result).toEqual({ sections: [] });
+    expect(none.sender.completedPrepGuide).not.toHaveBeenCalled();
+  });
+
+  test('no booked visit and two services finished on the latest day: they must carry the same guide, else none is named', async () => {
+    const sameGuide = (config) => ({ pestType: 'x', config });
+    const run = async (resolve, records) => {
+      Object.assign(state, { booked: null, family: null, template: 'default', products: [], blocks: GUIDE_BLOCKS });
+      jest.resetModules();
+      jest.doMock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
+      jest.doMock('../models/db', () => jest.fn());
+      jest.doMock('../services/prep-guide-sender', () => ({ bookedPrepGuide: jest.fn(async () => null), completedPrepGuide: jest.fn(resolve) }));
+      jest.doMock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn(async () => ({ template: { status: 'active' }, activeVersion: { blocks: GUIDE_BLOCKS } })) }));
+      const database = jest.fn(() => ({ select: async () => [] }));
+      return require('../services/sms-staff-facts').loadPrepGuideFacts('c1', records, { db: database });
+    };
+    const records = [{ scheduled_service_id: 's1', service_type: 'Pest Control' }, { scheduled_service_id: 's2', service_type: 'Flea Treatment' }];
+    const byId = { s1: sameGuide(PEST), s2: sameGuide(FLEA) };
+    expect(await run(async ({ scheduledServiceId }) => byId[scheduledServiceId], records)).toEqual({ sections: [] }); // two guides: none
+    expect(await run(async () => sameGuide(PEST), records)).toMatchObject({ source: 'last', key: 'prep.interior_pest' }); // the same guide twice: it
+    expect(await run(async ({ scheduledServiceId }) => (scheduledServiceId === 's1' ? sameGuide(PEST) : { pestType: null, config: null }), records)).toEqual({ sections: [] }); // one with none
+    expect(await run(async () => sameGuide(PEST), [])).toEqual({ sections: [] }); // no completed service at all
   });
 
   test('a booked visit with no nameable guide gets none: the last service\'s guide is never put in its place', async () => {
@@ -232,6 +254,17 @@ describe('loadPrepGuideFacts', () => {
       });
       expect({ key, lines: body.split('\n').filter(Boolean) }).toEqual({ key, lines: expected });
     }
+  });
+
+  test('the system prompt carries the prep rule (gate on only): prep steps come only from the PREP GUIDE section, and with none the draft gives none of its own', () => {
+    const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
+    const on = buildSystemPrompt();
+    expect(on).toContain('PREP GUIDE (getting ready for a visit):');
+    expect(on).toContain('comes ONLY from a PREP GUIDE section in the context block');
+    expect(on).toContain('give no prep step of your own');
+    expect(on).toContain('LABEL FACTS, PREP GUIDE, VISIT STATUS & OPEN LOOPS, the thread');
+    delete process.env[GATE];
+    expect(buildSystemPrompt()).not.toContain('PREP GUIDE');
   });
 
   test('one rule for which guide a visit gets: this module holds no keyword or exclusion rule of its own', () => {

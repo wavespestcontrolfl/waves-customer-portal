@@ -139,7 +139,7 @@ describe('getContextForCustomer texting AI staff facts', () => {
     expect(context.prepGuide).toEqual(GUIDE);
     expect(staffFacts.loadPrepaidPlanFacts).toHaveBeenCalledWith(customer.id, { db });
     expect(staffFacts.loadEstimateFacts).toHaveBeenCalledWith(null, { db }); // (no pending estimate in this fake: the loader answers "nothing listed")
-    expect(staffFacts.loadPrepGuideFacts).toHaveBeenCalledWith(customer.id, null, { db }); // (no completed service in this fake)
+    expect(staffFacts.loadPrepGuideFacts).toHaveBeenCalledWith(customer.id, [], { db }); // (no completed service in this fake: the services of the latest service day, none)
   });
 
   test('every other caller (no opt-in, or the drafter\'s gate off) and a frozen replay read none of it', async () => {

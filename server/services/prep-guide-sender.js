@@ -404,7 +404,9 @@ async function completedPrepGuide({ scheduledServiceId = null, serviceType = nul
 async function bookedPrepGuide(customerIds) {
   const [visit] = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, 1, { strict: true });
   if (!visit) return null;
-  const stop = visit.stop_members || [visit];
+  // (a sibling the booking query itself would hide, a dispatch-owned booking nobody confirmed, is not part of what the customer sees)
+  const { dispatchOwnedUnreviewed } = require('../routes/appointment-public');
+  const stop = (visit.stop_members || [visit]).filter((row) => !dispatchOwnedUnreviewed(row));
   const storedKeys = new Set(stop.filter((row) => row.prep_template_key).map((row) => prepFamilyForStoredKey(row.prep_template_key)?.[0] || null));
   const families = storedKeys.size ? storedKeys : new Set(stop.map((row) => prepFamilyForServiceType(row.service_type)?.[0] || undefined).filter(Boolean));
   const [pestType] = families.size === 1 ? [...families] : [null];

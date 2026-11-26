@@ -1109,6 +1109,10 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
       expect(await stop(pest, [pest, { id: 'svc-2', service_type: 'Lawn Care' }])).toMatchObject({ pestType: null, config: null });
       // the snapshot is the whole stop: the visit row's own key is not read when the page state judged the stop on its members
       expect(await stop({ ...pest, prep_template_key: 'prep.lawn' }, [pest, keyed])).toMatchObject({ pestType: 'interior_pest' });
+      // a sibling the booking query itself hides (a dispatch-owned booking nobody confirmed) is not part of the stop the customer sees
+      const unreviewed = { id: 'svc-3', service_type: 'Pest Control', status: 'pending', source_action: 'ai_call_pipeline_followup', customer_confirmed: false, prep_template_key: 'prep.interior_pest' };
+      expect(await stop(first, [first, unreviewed])).toMatchObject({ pestType: 'lawn' });
+      expect(await stop(first, [first, { ...unreviewed, customer_confirmed: true }])).toMatchObject({ pestType: 'interior_pest' });
       // an ungrouped visit (no snapshot) is its own stop
       expect(await stop({ ...pest, prep_template_key: 'prep.lawn' }, null)).toMatchObject({ pestType: 'lawn' });
     } finally { spy.mockRestore(); }

@@ -166,20 +166,24 @@ function guideGroups(blocks, productNames) {
 /**
  * The prep guide the customer may be asking about: { source, key, label, sections: [{ heading, sentences }] } with the published words of (`sentences` are whole published items: a paragraph, list item, callout or FAQ row)
  * that guide. Which guide: the one prep-guide-sender gives the customer's BOOKED visit (bookedPrepGuide: the soonest upcoming visit, its
- * stop and its stored guide, else its service types' family), else, with no booked visit, the guide the LAST completed service carried
- * (completedPrepGuide: its visit's assigned guide, else the family its service type belongs to by the sender's own match rule). Only that one service's guide, never another's. The words are the template's
+ * stop and its stored guide, else its service types' family), else, with no booked visit, the guide the LAST completed service day's services carried (completedPrepGuide: a visit's assigned guide, else the
+ * family its service type belongs to by the sender's own match rule; services that finished the same day and disagree name none). Only that one service's guide, never another's. The words are the template's
  * ACTIVE version, the same row the customer's prep page renders (EmailTemplateLibrary.loadTemplateByKey).
  * { sections: [] } when no guide covers the visit or the guide is not published (a successful read of nothing); null when the read failed.
  * Never throws: the drafter writes without a section, and a send-time check reads null as an outage (never as "nothing changed").
  */
-async function loadPrepGuideFacts(customerId, lastRecord, { db } = {}) {
+async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
   const none = { sections: [] };
   if (!customerId || !db) return null;
+  const completedRecords = [].concat(lastRecords || []);
   try {
     const sender = require('./prep-guide-sender');
     const booked = await sender.bookedPrepGuide([customerId]);
-    const guide = booked || await sender.completedPrepGuide({ scheduledServiceId: lastRecord?.scheduled_service_id, serviceType: lastRecord?.service_type });
-    const config = guide.config;
+    // No booked visit: the services that completed on the latest service day (the history is ordered by that date alone, so several can tie).
+    // Each resolves to the guide it carried; they must all agree, else no guide is named.
+    const completed = booked ? [] : await Promise.all(completedRecords.map((record) => sender.completedPrepGuide({ scheduledServiceId: record?.scheduled_service_id, serviceType: record?.service_type })));
+    const configs = new Set(completed.map((guide) => guide.config?.emailTemplateKey || null));
+    const config = booked ? booked.config : (configs.size === 1 ? completed[0].config : null);
     if (!config) return none;
     const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
     // the template must be one the customer's own page and the email sender would use: published (an active version) and not switched off
