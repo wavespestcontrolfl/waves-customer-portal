@@ -580,13 +580,34 @@ async function recoverCommitted(home, contact, offer, shown, deps) {
   const draft = await (deps.db || db)('estimates').where({ id: estimateId }).first('id', 'estimate_data');
   const estimateToken = draft && (deps.handoffToken || REAL.handoffToken())(estimateId);
   if (!estimateToken) return null;
-  // The terms the committed booking was made on (the draft's mailTerms snapshot), so the retry's answer shows the same
-  // price; none when the snapshot is not there.
-  const data = typeof draft.estimate_data === 'string' ? (() => { try { return JSON.parse(draft.estimate_data); } catch { return null; } })() : draft.estimate_data;
+  return { estimateId, estimateToken, customerId, recovered: true, committedTerms: bookedTermsOf(draft) };
+}
+
+// The terms a booking was made on, from its draft: the mailTerms snapshot markEstimate wrote (a staff revision can change
+// the draft's totals later), with the setup fee at zero when the booking itself waived it (createSelfBooking freezes
+// setupFeeQuote { amount: 0, waived } when the customer already has a setup charge). Null when the snapshot is not there.
+function bookedTermsOf(draft) {
+  let data = draft && draft.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
   const kept = data && data.mailTerms;
-  const committedTerms = kept && Number.isInteger(kept.annualCents) && kept.annualCents > 0 && Number.isInteger(kept.setupCents) && kept.setupCents >= 0
-    ? { annualCents: kept.annualCents, setupCents: kept.setupCents } : null;
-  return { estimateId, estimateToken, customerId, recovered: true, committedTerms };
+  if (!kept || !Number.isInteger(kept.annualCents) || kept.annualCents <= 0 || !Number.isInteger(kept.setupCents) || kept.setupCents < 0) return null;
+  const quote = data.setupFeeQuote;
+  const waived = !!(quote && quote.waived && !(Number(quote.amount) > 0));
+  return { annualCents: kept.annualCents, setupCents: waived ? 0 : kept.setupCents };
+}
+
+// The price the 200 answer carries. A recovered retry: the committed draft's terms. A submission createSelfBooking
+// answered as the replay of another: that committed booking's terms, found now that it is committed. A fresh booking:
+// its own draft's terms (read again, for a fee the booking waived), else the terms it was prepared on.
+async function answerTermsOf(result, prepared, home, contact, offer, shown, deps) {
+  if (!result.ok) return null;
+  if (prepared.recovered) return prepared.committedTerms;
+  if (result.body && result.body.replayed) {
+    const committed = await recoverCommitted(home, contact, offer, shown, deps).catch(() => null);
+    return (committed && committed.committedTerms) || null;
+  }
+  const draft = await Promise.resolve((deps.db || db)('estimates').where({ id: prepared.estimateId }).first('id', 'estimate_data')).catch(() => null);
+  return bookedTermsOf(draft) || prepared.terms;
 }
 
 // The check createSelfBooking runs inside its transaction, after its own replay and conflict checks, before the visit is
@@ -761,10 +782,7 @@ async function bookHome(token, input, deps = {}) {
     // not insert a new one.
     commitGuard: prepared.recovered ? async () => false : commitGuardFor(home, shown, prepared.estimateId, deps, prepared.terms),
   });
-  // A recovered retry answers with the committed draft's terms; a fresh booking with its own, unless createSelfBooking
-  // answered it as the replay of another submission (then this submission's terms are not the committed ones).
-  const replayed = !!(result.body && result.body.replayed);
-  return answerOf(result, offer, pin, booking, prepared.committedTerms || (replayed ? null : prepared.terms));
+  return answerOf(result, offer, pin, booking, await answerTermsOf(result, prepared, home, contact, offer, shown, deps));
 }
 
 /** The typed body: { contact, offer, shown } or { refuse } (a 400 naming what is wrong). */
@@ -795,8 +813,8 @@ async function answerOf(result, offer, pin, booking, terms) {
   // The row the booking wrote has no column for the mail list (mail_prospects has none that fits): nothing is recorded there.
   const body = { booked: true, date: offer.date, window: { start: from, end: to || null } };
   // The price this booking was made on (the lower of the card's and today's while the card's price is held), so the page
-  // can show it. A retry of a committed booking carries that booking's price (from its draft); a concurrent submission
-  // answered as a replay carries none.
+  // can show it (answerTermsOf). A retry or a concurrent replay carries the committed booking's price, when its draft
+  // still has the snapshot.
   if (terms) body.price = { annual: terms.annualCents / 100, monthly: Math.round(terms.annualCents / 12) / 100, setupFee: terms.setupCents / 100 };
   return { status: 200, body };
 }

@@ -929,11 +929,29 @@ describe('the printed price is held for a mailed home', () => {
     expect((await bookHome(TOKEN, INPUT(), deps)).body).not.toHaveProperty('price');
   });
 
-  test('a concurrent submission that createSelfBooking answers as a replay carries no price', async () => {
+  test('a concurrent submission answered as a replay carries the committed booking\'s price, or none without its snapshot', async () => {
     booking.createSelfBooking.mockResolvedValue({ ok: true, body: { replayed: true, booking: { id: 'b1' } } });
+    // Not found before the booking (so it prepares its own draft), found after (the other tab committed).
+    findCommittedBookingCustomer.mockResolvedValueOnce(null).mockResolvedValue({ customerId: 'cust-1', estimateId: 'est-other' });
+    mockEstimateRow = { id: 'est-other', estimate_data: { mailTerms: { annualCents: 60000, setupCents: 0 } } };
     const res = await bookHome(TOKEN, INPUT(), deps);
-    expect(res.status).toBe(200);
-    expect(res.body).not.toHaveProperty('price');
+    expect(res).toMatchObject({ status: 200, body: { price: { annual: 600, setupFee: 0 } } });
+    findCommittedBookingCustomer.mockReset();
+    findCommittedBookingCustomer.mockResolvedValue(null);
+    expect((await bookHome(TOKEN, INPUT(), deps)).body).not.toHaveProperty('price');
+  });
+
+  test('a setup fee the booking itself waived is answered as zero', async () => {
+    mockRow = held({ price_setup_fee: '99.00' });
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 627, priceSetupFee: 99, priceDigest: 'd8' });
+    quote.judge.mockReturnValue({ price: { annual: 627, setupFee: 99, digest: 'd8' } });
+    // createSelfBooking froze the waiver on the draft (the customer already has a setup charge).
+    booking.createSelfBooking.mockImplementation(async () => {
+      mockEstimateRow = { id: 'est-1', estimate_data: { mailTerms: { annualCents: 62700, setupCents: 9900 }, setupFeeQuote: { amount: 0, waived: 'fee_already_queued', kind: 'waveguard_membership' } } };
+      return { ok: true, body: { booking: { id: 'b1' } } };
+    });
+    const res = await bookHome(TOKEN, { ...INPUT(), price: { annual: 627, setupFee: 99 } }, deps);
+    expect(res).toMatchObject({ status: 200, body: { price: { annual: 627, setupFee: 0 } } });
   });
 
   test('after the 60 days, and for a home never mailed, a moved price is still price_changed', async () => {
