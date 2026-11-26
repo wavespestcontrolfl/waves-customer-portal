@@ -15,6 +15,12 @@
  *     637 Beehiiv rows were created in that run, and no row of any other source was
  *     created within 10 minutes of it. A source label alone is not evidence: the public
  *     sign-up route stores the caller's source, and a re-signup rewrites it;
+ *   - subscribed_at is before the import run: the importer copied each reader's own
+ *     Beehiiv sign-up date (migrate-beehiiv-subscribers.js), and in April every other
+ *     writer (the public sign-up route, routes/newsletter.js, the column default) set it
+ *     to now(). So a web sign-up that carried a Beehiiv source label in the run window
+ *     cannot match. Production read 2026-11-25: all 596 candidates carry a sign-up date
+ *     from 2024-11-27 to 2026-04-17;
  *   - the row was never written after its insert: updated_at = created_at (the insert
  *     stamps both with the same now()). Every later writer stamps updated_at (an
  *     opt-out, a sunset or its comeback, a trusted resubscribe, and the email fanout
@@ -45,6 +51,7 @@ exports.up = async function up(knex) {
     .whereIn('source', IMPORT_SOURCES)
     .where('created_at', '>=', IMPORT_RUN_START)
     .where('created_at', '<', IMPORT_RUN_END)
+    .where('subscribed_at', '<', IMPORT_RUN_START)
     .where('status', 'active')
     .whereNotNull('confirmed_at')
     .whereNull('unsubscribed_at')

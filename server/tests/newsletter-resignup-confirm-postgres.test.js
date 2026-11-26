@@ -365,7 +365,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     try {
       const bee = async (over = {}) => {
         const [r] = await trx('newsletter_subscribers').insert({
-          email: addr(), source: 'beehiiv_migration', status: 'active', created_at: day, updated_at: day, confirmed_at: confirmed, ...over,
+          email: addr(), source: 'beehiiv_migration', status: 'active', subscribed_at: new Date('2025-06-01T12:00:00Z'), created_at: day, updated_at: day, confirmed_at: confirmed, ...over,
         }).returning('*');
         return r;
       };
@@ -380,6 +380,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
         first: await bee({ created_at: new Date('2026-04-19T11:41:06.249Z'), updated_at: new Date('2026-04-19T11:41:06.249Z') }),
         last: await bee({ created_at: new Date('2026-04-19T11:44:55.258Z'), updated_at: new Date('2026-04-19T11:44:55.258Z') }),
         atEnd: await bee({ created_at: new Date('2026-04-19T11:44:56Z'), updated_at: new Date('2026-04-19T11:44:56Z') }),
+        // A web sign-up inside the run that carried a Beehiiv label: its sign-up date is the insert time.
+        webInRun: await bee({ subscribed_at: day }),
         // A Beehiiv-labelled row from a public sign-up later the same day: outside the run.
         sameDay: await bee({ created_at: new Date('2026-04-19T16:00:00Z'), updated_at: new Date('2026-04-19T16:00:00Z') }),
         lateLabel: await bee({ created_at: new Date('2026-06-01T12:00:00Z'), updated_at: new Date('2026-06-01T12:00:00Z') }),
