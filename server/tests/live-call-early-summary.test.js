@@ -69,21 +69,20 @@ jest.mock('../models/db', () => {
       return [...state.utterances].sort((a, b) => a.spoken_at - b.spoken_at || a.id - b.id);
     });
     q.del = jest.fn(async () => { const n = state.utterances.length; state.utterances = []; return n; });
-    q.first = jest.fn(async () => state.utterances.find((u) => u.pan_masked));
     return q;
   }
-  // notifications: the purge deletes the office-call alert row by its dedupe key.
-  function notifications() {
+  // The Bell switch read (technicians + notification_preferences): one active admin, no preference row = on.
+  function listOf(rows) {
     const q = {};
     q.where = jest.fn(() => q);
-    q.whereRaw = jest.fn((sql, bindings) => { q.key = bindings[0]; return q; });
-    q.del = jest.fn(async () => { state.deletedAlertKeys.push(q.key); return 1; });
+    q.whereIn = jest.fn(() => q);
+    q.select = jest.fn(async () => rows());
     return q;
   }
-  state.deletedAlertKeys = [];
   const db = jest.fn((table) => {
     if (table === 'call_log') return callLog();
-    if (table === 'notifications') return notifications();
+    if (table === 'technicians') return listOf(() => [{ id: 'a-1' }]);
+    if (table === 'notification_preferences') return listOf(() => state.bellPrefs || []);
     return utterances();
   });
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -108,6 +107,7 @@ const staffAnswer = { accepted: true, answered_by_number: '+19415550111', csr_na
 
 function setCall({ aiExtraction = null, liveState = {}, transcriptionMetadata = null, acceptance } = {}) {
   db.__state.onTranscriptRead = null;
+  db.__state.bellPrefs = null;
   db.__state.call = {
     id: 'log-1',
     twilio_call_sid: SID,
@@ -193,8 +193,6 @@ describe('writeEarlySummary', () => {
       text: 'The caller has ants again. A free return visit is set for Thursday at 9.',
       next_step: null,
       promises: [],
-      alert_title: null,
-      alert_line: null,
       at: NOW().toISOString(),
       model: MODELS.LIVE_CALL,
     });
@@ -274,20 +272,16 @@ const JSON_REPLY = {
   summary: 'The caller has ants again. A free return visit is set for Thursday at 9.',
   next_step: 'Text Dana E. the roach quote today.',
   promises: ['You are set for Thursday at 9.'],
-  alert_title: 'text Dana E. a roach quote',
-  alert_line: 'Dana E. wants a roach quote; Virginia promised a text.',
 };
 
 describe('the JSON reply', () => {
-  test('saves the summary, the next step, the promises and the alert words beside the text', async () => {
+  test('saves the summary, the next step and the promises beside the text', async () => {
     reply(JSON.stringify(JSON_REPLY));
     expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: true, reason: null });
     expect(saved()).toEqual({
       text: JSON_REPLY.summary,
       next_step: JSON_REPLY.next_step,
       promises: JSON_REPLY.promises,
-      alert_title: JSON_REPLY.alert_title,
-      alert_line: JSON_REPLY.alert_line,
       at: NOW().toISOString(),
       model: MODELS.LIVE_CALL,
     });
@@ -302,7 +296,7 @@ describe('the JSON reply', () => {
   test('a bare-text reply is the summary alone', async () => {
     reply('The caller has ants again.');
     await early.writeEarlySummary(SID, { now: NOW });
-    expect(saved()).toMatchObject({ text: 'The caller has ants again.', next_step: null, promises: [], alert_title: null, alert_line: null });
+    expect(saved()).toMatchObject({ text: 'The caller has ants again.', next_step: null, promises: [] });
   });
 
   test('a broken JSON reply saves nothing (raw braces never reach the office)', async () => {
@@ -317,65 +311,52 @@ describe('the JSON reply', () => {
       summary: 'Card 4242 4242 4242 4242 was read.',
       next_step: long,
       promises: ['  a\u0000b  ', '', 7, 'c', 'd', 'e', 'f'],
-      alert_title: 'x'.repeat(100),
-      alert_line: 'y '.repeat(100),
     }));
     expect(parsed.summary).not.toMatch(/4242 4242 4242 4242/);
     expect(parsed.next_step.length).toBeLessThanOrEqual(91);
     expect(parsed.promises).toEqual(['a b', 'c', 'd', 'e']);
-    expect(parsed.alert_title.length).toBeLessThanOrEqual(45);
-    expect(parsed.alert_line.length).toBeLessThanOrEqual(80);
-    const none = early._test.parseReply(JSON.stringify({ summary: 'Short call.', next_step: null, promises: null, alert_title: 'text someone', alert_line: null }));
-    expect(none).toEqual({ summary: 'Short call.', next_step: null, promises: [], alert_title: null, alert_line: null });
+    const none = early._test.parseReply(JSON.stringify({ summary: 'Short call.', next_step: null, promises: null }));
+    expect(none).toEqual({ summary: 'Short call.', next_step: null, promises: [] });
   });
 });
 
 describe('the alert after an office call', () => {
   const link = '/admin/communications#tab=calls&call=log-1';
 
-  test('a staff member who is not the owner answered: ONE needs-you alert with the model words', async () => {
+  test('a known staff number that is not the owner answered: ONE needs-you alert in fixed words, no call text', async () => {
     setCall({ acceptance: staffAnswer });
     reply(JSON.stringify(JSON_REPLY));
-    await early.writeEarlySummary(SID, { now: NOW });
+    expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: true, reason: null });
     expect(mockRaise).toHaveBeenCalledTimes(1);
     const [category, spec, opts] = mockRaise.mock.calls[0];
     expect(category).toBe('live_call_next_step');
     expect(spec).toEqual({
       area: 'Comms',
-      action: 'text Dana E. a roach quote',
-      why: "Virginia's call: Dana E. wants a roach quote; Virginia promised a text.",
+      action: "next step on Virginia's call",
+      why: 'Open the call to see the next step and what was promised.',
       severity: 'needs-you',
       link,
       subject: { type: 'call', id: 'log-1' },
       doneWhen: 'office_followed_up',
       who: 'person',
     });
-    expect(opts).toEqual({ bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${SID}`, bannerKind: 'live_call_next_step', trx: expect.any(Function) });
+    expect(opts).toEqual({ bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${SID}`, bannerKind: 'live_call_next_step' });
   });
 
-  test('no next step: an fyi alert that still names the call, with the fallback action', async () => {
+  test('no word the model wrote ever reaches the alert (a spoken gate code, an address, a card)', async () => {
     setCall({ acceptance: staffAnswer });
-    reply(JSON.stringify({ ...JSON_REPLY, next_step: null, alert_title: null, alert_line: null }));
+    reply(JSON.stringify({ ...JSON_REPLY, summary: 'Gate is four two one nine. Lives at 12 Example Way.', next_step: 'Use gate four two one nine at 12 Example Way.' }));
     await early.writeEarlySummary(SID, { now: NOW });
     const [, spec] = mockRaise.mock.calls[0];
-    expect(spec).toMatchObject({ severity: 'fyi', action: "read Virginia's call summary" });
-    expect(spec.why).toBe("Virginia's call just ended.");
+    expect(`${spec.action} ${spec.why}`).not.toMatch(/four|Example|12/);
   });
 
-  test('model words that break the alert rules fall back to fixed lines that compose', async () => {
+  test('no next step: an fyi alert in fixed words', async () => {
     setCall({ acceptance: { ...staffAnswer, csr_name: null } });
-    reply(JSON.stringify({ ...JSON_REPLY, alert_title: 'call back on 2026-11-26!', alert_line: 'Call me! Now. Please send it.', summary: 'Wants a quote. Staff will text it.' }));
+    reply(JSON.stringify({ ...JSON_REPLY, next_step: null }));
     await early.writeEarlySummary(SID, { now: NOW });
     const [, spec] = mockRaise.mock.calls[0];
-    expect(spec.action).toBe("read the office's call summary");
-    expect(spec.why).toBe("The office's call just ended.");
-  });
-
-  test('a why longer than 110 characters is cut at a word', async () => {
-    setCall({ acceptance: { ...staffAnswer, csr_name: 'Maria-Fernanda Gonzalez-Ortiz' } });
-    reply(JSON.stringify({ ...JSON_REPLY, alert_line: 'word '.repeat(40) }));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(mockRaise.mock.calls[0][1].why.length).toBeLessThanOrEqual(110);
+    expect(spec).toMatchObject({ severity: 'fyi', action: "read the office's call summary", why: 'Open the call to see its summary.' });
   });
 
   test('the owner answered: no alert, the summary is still saved', async () => {
@@ -386,7 +367,10 @@ describe('the alert after an office call', () => {
     expect(saved().next_step).toBe(JSON_REPLY.next_step);
   });
 
-  test('no forward_acceptance (not a press-1 staff answer): no alert', async () => {
+  test('no forward_acceptance, or an unknown answerer (no number): no alert', async () => {
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    setCall({ acceptance: { ...staffAnswer, answered_by_number: null } });
     reply(JSON.stringify(JSON_REPLY));
     await early.writeEarlySummary(SID, { now: NOW });
     expect(mockRaise).not.toHaveBeenCalled();
@@ -402,73 +386,12 @@ describe('the alert after an office call', () => {
     expect(mockRaise).not.toHaveBeenCalled();
   });
 
-  test('a call with card words in its live text raises nothing; its summary is still saved', async () => {
+  test('every admin turned the Bell switch off: no row', async () => {
     setCall({ acceptance: staffAnswer });
-    say([...CALL, ['caller', 'Can I pay with my credit card now?']]);
-    reply(JSON.stringify(JSON_REPLY));
-    expect((await early.writeEarlySummary(SID, { now: NOW })).written).toBe(true);
-    expect(mockRaise).not.toHaveBeenCalled();
-  });
-
-  test('a call with a masked card number or a card-pause stamp raises nothing', async () => {
-    setCall({ acceptance: staffAnswer });
-    say(CALL);
-    db.__state.utterances[1].pan_masked = true;
-    reply(JSON.stringify(JSON_REPLY));
-    await early.writeEarlySummary(SID, { now: NOW });
-    setCall({ acceptance: staffAnswer, liveState: { card_pause: { open: false } } });
-    say(CALL);
+    db.__state.bellPrefs = [{ admin_user_id: 'a-1', bell_enabled: false }];
     reply(JSON.stringify(JSON_REPLY));
     await early.writeEarlySummary(SID, { now: NOW });
     expect(mockRaise).not.toHaveBeenCalled();
-  });
-
-  test('a warm-transferred call raises nothing (the answerer named may not be the one who promised)', async () => {
-    setCall({ acceptance: staffAnswer });
-    db.__state.call.metadata.conference_path = { hold: { transfers: 1, transfer: null } }; // a later hold replaced the transfer state
-    reply(JSON.stringify(JSON_REPLY));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(mockRaise).not.toHaveBeenCalled();
-  });
-
-  test('a promise no staff line says (a caller line or a model guess) is dropped', async () => {
-    setCall({ acceptance: staffAnswer });
-    reply(JSON.stringify({ ...JSON_REPLY, promises: ['You are set for Thursday at 9.', 'Thursday morning works.', 'We will waive the fee forever.'] }));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(saved().promises).toEqual(['You are set for Thursday at 9.']);
-  });
-
-  test('a refusal is never turned into a promise ("cannot" read as "can")', async () => {
-    setCall({ acceptance: staffAnswer });
-    say([...CALL, ['staff', 'I cannot waive the fee, sorry.']]);
-    reply(JSON.stringify({ ...JSON_REPLY, promises: ['I can waive the fee', 'I cannot waive the fee'] }));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(saved().promises).toEqual(['I cannot waive the fee, sorry.']);
-  });
-
-  test('a staff line too long to show whole is left out, never cut', async () => {
-    setCall({ acceptance: staffAnswer });
-    say([...CALL, ['staff', `${'Let me explain how this works. '.repeat(5)}I'll waive the fee only if the manager approves.`]]);
-    reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll waive the fee"] }));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(saved().promises).toEqual([]);
-  });
-
-  test('a quote that drops a condition is saved as the whole staff line, condition kept', async () => {
-    setCall({ acceptance: staffAnswer });
-    say([...CALL, ['staff', "I'll waive the fee only if the manager approves."]]);
-    reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll waive the fee"] }));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(saved().promises).toEqual(["I'll waive the fee only if the manager approves."]);
-  });
-
-  test('a code the 45-character cut would hide is caught on the whole title; any 3+ digit run is kept off the banner', async () => {
-    setCall({ acceptance: staffAnswer });
-    reply(JSON.stringify({ ...JSON_REPLY, alert_title: 'tell the technician to use 4821 at the front gate', alert_line: 'Dana E. lives at 1234 Example Way and wants a quote.' }));
-    await early.writeEarlySummary(SID, { now: NOW });
-    const [, spec] = mockRaise.mock.calls[0];
-    expect(spec.action).toBe("read Virginia's call summary");
-    expect(spec.why).toBe("Virginia's call just ended.");
   });
 
   test("the call's customer id rides in the alert metadata (an internal test customer rings nobody)", async () => {
@@ -479,59 +402,6 @@ describe('the alert after an office call', () => {
     expect(mockRaise.mock.calls[0][2].metadata).toEqual({ customerId: 'cust-9' });
   });
 
-  test('a gate code in the model words never reaches the banner: fixed copy instead', async () => {
-    setCall({ acceptance: staffAnswer });
-    reply(JSON.stringify({ ...JSON_REPLY, alert_title: 'use gate code 4821 for Dana', alert_line: 'Dana E. says the gate code is 4821.', summary: 'The gate code is 4821. Tech visits Thursday.' }));
-    await early.writeEarlySummary(SID, { now: NOW });
-    const [, spec] = mockRaise.mock.calls[0];
-    expect(spec.action).toBe("read Virginia's call summary");
-    expect(`${spec.action} ${spec.why}`).not.toMatch(/4821/);
-  });
-
-  test('an unknown answerer (no number) is not proof of a staff answer: no alert', async () => {
-    setCall({ acceptance: { ...staffAnswer, answered_by_number: null } });
-    reply(JSON.stringify(JSON_REPLY));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(mockRaise).not.toHaveBeenCalled();
-  });
-
-  test('card words in the middle of a long call (outside the text the model read) still block the alert', async () => {
-    setCall({ acceptance: staffAnswer });
-    const filler = Array.from({ length: 100 }, (_, i) => ['staff', `Filler line ${i} ${'x'.repeat(80)}`]);
-    say([...CALL, ...filler, ['caller', 'Here is my card number.'], ...filler, ...CALL]);
-    expect((await early._test.transcriptFor(SID)).text).not.toContain('card number');
-    reply(JSON.stringify(JSON_REPLY));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(mockRaise).not.toHaveBeenCalled();
-  });
-
-  test('a quarantine that commits before the locked re-check: nothing is written', async () => {
-    setCall({ acceptance: staffAnswer });
-    db.transaction.mockImplementationOnce(async (fn) => {
-      db.__state.call.metadata.live_transcription.quarantined_at = new Date(T0 + 70000).toISOString();
-      return fn(db);
-    });
-    reply(JSON.stringify(JSON_REPLY));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(mockRaise).not.toHaveBeenCalled();
-    expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_live_utterances:${SID}`]);
-  });
-
-  test('a phone number in the model title is redacted before the bell row', async () => {
-    setCall({ acceptance: staffAnswer });
-    reply(JSON.stringify({ ...JSON_REPLY, alert_title: 'call 941-555-0123 back' }));
-    await early.writeEarlySummary(SID, { now: NOW });
-    expect(mockRaise.mock.calls[0][1].action).not.toMatch(/555/);
-  });
-
-  test('a card-number quarantine deletes the office-call alert row with the summary', async () => {
-    setCall({ acceptance: staffAnswer, liveState: { early_summary: { text: 'x' } } });
-    say(CALL);
-    db.__state.deletedAlertKeys = [];
-    await liveText.purgeLiveUtterances(SID);
-    expect(db.__state.deletedAlertKeys).toContain(`live-call-next-step:${SID}`);
-  });
-
   test('an alert that fails keeps the saved summary and logs a warning', async () => {
     setCall({ acceptance: staffAnswer });
     mockRaise.mockRejectedValueOnce(Object.assign(new Error('db down'), { code: 'ECONNRESET' }));
@@ -539,6 +409,43 @@ describe('the alert after an office call', () => {
     expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: true, reason: null });
     expect(saved().text).toBe(JSON_REPLY.summary);
     expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('next-step alert failed'));
+  });
+});
+
+describe('the promises saved', () => {
+  test('a promise no staff line says (a caller line or a model guess) is dropped', async () => {
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ['You are set for Thursday at 9.', 'Thursday morning works.', 'We will waive the fee forever.'] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual(['You are set for Thursday at 9.']);
+  });
+
+  test('a refusal is never turned into a promise ("cannot" read as "can")', async () => {
+    say([...CALL, ['staff', 'I cannot waive the fee, sorry.']]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ['I can waive the fee', 'I cannot waive the fee'] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual(['I cannot waive the fee, sorry.']);
+  });
+
+  test('a quote that drops a condition is saved as the whole staff line, condition kept', async () => {
+    say([...CALL, ['staff', "I'll waive the fee only if the manager approves."]]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll waive the fee"] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual(["I'll waive the fee only if the manager approves."]);
+  });
+
+  test('a staff line too long to show whole is left out, never cut', async () => {
+    say([...CALL, ['staff', `${'Let me explain how this works. '.repeat(5)}I'll waive the fee only if the manager approves.`]]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll waive the fee"] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual([]);
+  });
+
+  test('a long call: a promise is matched against the whole staff line, not the text the model was cut to', async () => {
+    const filler = Array.from({ length: 100 }, (_, i) => ['caller', `Filler line ${i} ${'x'.repeat(80)}`]);
+    say([['caller', 'Hi.'], ['staff', `${'y'.repeat(1990)} I'll waive the fee only if the manager approves.`], ...filler, ...CALL]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll waive the fee"] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual([]);
   });
 });
 

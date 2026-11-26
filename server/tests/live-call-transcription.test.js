@@ -29,10 +29,7 @@ jest.mock('twilio', () => jest.fn(() => ({ request: mockRequest })));
 
 // The card-pause hook (GATE_CALL_RECORDING_CARD_PAUSE) is pinned here only as a call; its own suite covers the pause.
 const mockCardPause = jest.fn(() => Promise.resolve({ action: 'none' }));
-jest.mock('../services/live-call-card-pause', () => ({
-  onUtteranceStored: (...args) => mockCardPause(...args),
-  isCardIntent: jest.requireActual('../services/live-call-card-pause').isCardIntent,
-}));
+jest.mock('../services/live-call-card-pause', () => ({ onUtteranceStored: (...args) => mockCardPause(...args) }));
 
 // A small knex fake: call_log claims + stamps, and an in-memory call_live_utterances table.
 jest.mock('../models/db', () => {
@@ -119,19 +116,7 @@ jest.mock('../models/db', () => {
     });
     return q;
   }
-  // notifications: the purge deletes the call's office-call alert row (live-call-early-summary.js) by dedupe key.
-  function notifications() {
-    const q = {};
-    q.where = jest.fn(() => q);
-    q.whereRaw = jest.fn((sql, bindings) => { q.key = bindings[0]; return q; });
-    q.del = jest.fn(async () => { (state.deletedAlertKeys ||= []).push(q.key); return 0; });
-    return q;
-  }
-  const db = jest.fn((table) => {
-    if (table === 'call_log') return callLog();
-    if (table === 'notifications') return notifications();
-    return utterances();
-  });
+  const db = jest.fn((table) => (table === 'call_log' ? callLog() : utterances()));
   db.raw = jest.fn((sql, bindings) => {
     state.rawCalls.push(sql);
     if (/EXISTS/.test(sql) && /pan_detected/.test(sql)) { // purgeQuarantinedLiveText's lookup
@@ -257,14 +242,6 @@ describe('recordLiveTranscriptionEvent', () => {
       ['caller', 'I have ants in the kitchen'],
       ['staff', 'We can help with that'],
     ]);
-  });
-
-  test('a late card line takes away the office-call alert row (under the writer lock); other lines do not', async () => {
-    db.__state.deletedAlertKeys = [];
-    await live.recordLiveTranscriptionEvent(content(1, 'outbound_track', 'See you Thursday', 1));
-    expect(db.__state.deletedAlertKeys).toEqual([]);
-    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'Can I read you my credit card', 2));
-    expect(db.__state.deletedAlertKeys).toEqual([`live-call-next-step:${CALL}`]);
   });
 
   test('a stored caller utterance hands the call to the upset check; staff, duplicates and gate off do not', async () => {

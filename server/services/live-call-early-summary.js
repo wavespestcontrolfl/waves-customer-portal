@@ -16,12 +16,13 @@
  * live text and then this summary, and a summary is saved only while that text still exists, so a quarantined call
  * keeps neither. Fire and forget: nothing here throws or delays the webhook's 200.
  *
- * The same one Haiku call also returns the office's next step, what the staff member promised the caller, and the
- * words of one phone alert (owner 2026-11-26 "build both", no new gate: it rides this one). They are saved beside the
- * text as early_summary { text, next_step, promises, alert_title, alert_line, at, model }; the Calls tab keeps showing
- * the next step and the promises after the recording pipeline's summary replaces the text. When a staff member who is
- * not the owner took the call (forward_acceptance names someone but not ADAM_PHONE), the saved summary raises ONE
- * admin alert (category live_call_next_step, one per call). A failed alert never undoes the saved summary.
+ * The same one Haiku call also returns the office's next step and what the staff member promised the caller (owner
+ * 2026-11-26 "build both", no new gate: it rides this one). They are saved beside the text as early_summary
+ * { text, next_step, promises, at, model }; the Calls tab keeps showing them after the recording pipeline's summary
+ * replaces the text. When a known staff number that is not the owner's took the call, the saved summary raises ONE
+ * admin alert (category live_call_next_step, one per call) in FIXED words: the staff name and whether a next step is
+ * waiting. No word from the call goes on a lock screen (a spoken gate code, card or address has too many shapes to
+ * screen); the details are one tap away on the Calls tab. A failed alert never undoes the saved summary.
  *
  * Spend: one Haiku call per call that had live text (well under a cent each), so the gate is the owner's flip.
  */
@@ -33,7 +34,7 @@ const { ledgerCall } = require('./llm-dispatch-metrics');
 const { anthropicText } = require('./llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { scrubPans } = require('../utils/pan-scrub');
-const { raiseAdminAlert, cutAtWord, breaksAlertRules, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
+const { raiseAdminAlert } = require('./admin-alert-compose');
 const { staffAnswered, staffNameOf } = require('./live-call-upset-alert');
 
 let Anthropic = null;
@@ -50,17 +51,13 @@ const MAX_SUMMARY_CHARS = 600;
 const MAX_NEXT_STEP_CHARS = 90;
 const MAX_PROMISES = 4;
 const MAX_PROMISE_CHARS = 120;
-const MAX_ALERT_TITLE_CHARS = 45;
-const MAX_ALERT_LINE_CHARS = 80;
 
 const SYSTEM_PROMPT = `You read a finished phone call to Waves, a pest control company, for the office staff. "Caller:" is the customer or prospect. "Agent:" is the Waves staff member. The text is a live machine transcript, so some words may be wrong.
 Write in English, even when the call was in Spanish. Use only what the text says; do not guess. Never include card numbers, account numbers or security codes.
 Reply with ONLY this JSON object, no code fence:
 {"summary": "<2 or 3 plain sentences: what the caller wanted, what was agreed or done, and the next step if one was named>",
 "next_step": "<one plain sentence, ${MAX_NEXT_STEP_CHARS} characters or fewer, starting with a verb: what the office should do next; null if nothing is left to do>",
-"promises": [<at most ${MAX_PROMISES} exact word-for-word quotes, copied from one Agent line, of something the Agent promised the caller, such as "I'll text you the quote in a few minutes."; [] if none>],
-"alert_title": "<${MAX_ALERT_TITLE_CHARS} characters or fewer, starts lower case, verb first, such as "text Dana E. a roach quote"; the caller's first name and last initial only if said; null when next_step is null>",
-"alert_line": "<ONE sentence, ${MAX_ALERT_LINE_CHARS} characters or fewer: who called, what they want, what was promised; no exclamation mark, no dates, no codes>"}`;
+"promises": [<at most ${MAX_PROMISES} exact word-for-word quotes, copied from one Agent line, of something the Agent promised the caller, such as "I'll text you the quote in a few minutes."; [] if none>]}`;
 
 const gateOn = () => require('../config/feature-gates').isEnabled('callEarlySummary');
 
@@ -102,7 +99,9 @@ async function transcriptFor(callSid) {
   const body = text.length <= HEAD_CHARS + TAIL_CHARS
     ? text
     : `${text.slice(0, HEAD_CHARS)}\n[…]\n${text.slice(-TAIL_CHARS)}`;
-  return { text: body, utterances: lines.length };
+  // Every staff utterance whole (the head-and-tail cut above can split one): what promises are matched against.
+  const staffLines = (rows || []).filter((r) => r.speaker !== 'caller' && typeof r?.text === 'string' && r.text.trim()).map((r) => r.text.trim());
+  return { text: body, utterances: lines.length, staffLines };
 }
 
 // One paragraph, card numbers masked, control characters gone, cut at a word.
@@ -119,7 +118,7 @@ function cleanText(text, max, ellipsis = true) {
 }
 const cleanSummary = (text) => cleanText(text, MAX_SUMMARY_CHARS);
 
-// What the model returned, as { summary, next_step, promises, alert_title, alert_line } with every string cleaned
+// What the model returned, as { summary, next_step, promises } with every string cleaned
 // and capped, or null when there is no summary. A reply in a code fence still parses; a bare-text reply is the
 // summary alone; a reply that looks like JSON but does not parse is no summary (raw braces never reach the office).
 function parseReply(raw) {
@@ -128,18 +127,14 @@ function parseReply(raw) {
   try { obj = JSON.parse(plain.slice(plain.indexOf('{'), plain.lastIndexOf('}') + 1)); } catch { obj = null; }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
     const text = plain.startsWith('{') ? null : cleanSummary(plain);
-    return text ? { summary: text, next_step: null, promises: [], alert_title: null, alert_line: null } : null;
+    return text ? { summary: text, next_step: null, promises: [] } : null;
   }
   const summary = cleanSummary(obj.summary);
   if (!summary) return null;
-  const nextStep = cleanText(obj.next_step, MAX_NEXT_STEP_CHARS);
   return {
     summary,
-    next_step: nextStep,
+    next_step: cleanText(obj.next_step, MAX_NEXT_STEP_CHARS),
     promises: (Array.isArray(obj.promises) ? obj.promises : []).map((p) => cleanText(p, MAX_PROMISE_CHARS)).filter(Boolean).slice(0, MAX_PROMISES),
-    // Screened whole, then cut (bannerWords): a title or line that fails is null, so the alert uses fixed copy.
-    alert_title: nextStep ? cleanText(bannerWords(cleanText(obj.alert_title, 1000, false)), MAX_ALERT_TITLE_CHARS, false) : null,
-    alert_line: cleanText(bannerWords(cleanText(obj.alert_line, 1000, false)), MAX_ALERT_LINE_CHARS, false),
   };
 }
 
@@ -188,84 +183,44 @@ async function saveSummary(callSid, { summary, ...extras }, now) {
 // The alert's why: the staff name, then the model's one-line account of the call (or the summary's first sentence),
 // cut to the 110-character budget. A line the notification rules refuse (a second sentence, a date, a code) is
 // skipped for the next one; the last resort is a fixed line.
-// Words that may go on a lock screen, judged on the WHOLE model text before any cut (a cut can drop the word "gate"
-// and leave the code): names redacted as every alert does, and none at all when the text holds an access code (gate,
-// door, alarm), a card number, a security code, an SSN, or any run of 3+ digits (a code with no keyword, a phone
-// number, an address number). Those fall back to fixed copy; the details stay on the Calls tab behind the login.
-const DIGIT_RUN_RE = /\d(?:[\s.-]?\d){2,}/;
-function bannerWords(words) {
-  const { redactedWords } = require('./admin-alert-names');
-  const plain = redactedWords(words);
-  if (!plain || DIGIT_RUN_RE.test(plain)) return '';
-  const { redactAccessCodes } = require('./context-aggregator');
-  return redactAccessCodes(plain) === plain && scrubPans(plain) === plain ? plain : '';
-}
-
-// The alert's why: the staff name, then the model's one-line account of the call when the whole line may go on a
-// lock screen, cut to the 110-character budget; else a fixed line.
-function whyFor(name, reply) {
-  const lead = `${name || 'The office'}'s call: `;
-  const why = reply.alert_line ? `${lead}${cutAtWord(reply.alert_line, MAX_WHY_CHARS - lead.length)}` : '';
-  return why && !breaksAlertRules(why) ? why : `${lead.trim().replace(/:$/, '')} just ended.`;
-}
-
-// The alert's action (the bell title after "Comms — "): the model's title, or a fixed line when it breaks the rules.
-function actionFor(name, reply) {
-  const room = MAX_HEADLINE_CHARS - 'Comms — '.length;
-  const title = reply.alert_title ? cutAtWord(reply.alert_title, room) : '';
-  return title && !breaksAlertRules(title) ? title : `read ${name || 'the office'}'s call summary`;
-}
-
-// Why a call raises no office-call alert, or null when it may. A phone banner cannot be taken back, so:
-// - only a known staff number that is not the owner's (an unknown answerer is not proof);
-// - no warm transfer, ever tried on the call (a second staff member on the same Agent track: the name would be wrong;
-//   the transfers count stays after a later hold replaces the transfer state);
-// - no card talk anywhere in the live text (every utterance, not the head and tail the model read): a card-pause
-//   stamp, a masked card number or card words. Those are the calls a later card-number quarantine can clear.
-async function officeAlertBlock(conn, callSid, meta) {
-  if (!staffAnswered(meta?.forward_acceptance)) return 'not_staff';
-  const hold = meta?.conference_path?.hold;
-  if (hold?.transfer || Number(hold?.transfers) > 0) return 'transfer';
-  if (meta?.live_transcription?.card_pause) return 'card';
-  const { isCardIntent } = require('./live-call-card-pause');
-  const rows = await conn('call_live_utterances').where('call_sid', callSid).select('text', 'pan_masked');
-  return (rows || []).some((r) => isCardIntent(r.text, r.pan_masked)) ? 'card' : null;
-}
-
-// ONE admin alert per call answered by a staff member who is not the owner (see officeAlertBlock). A needs-you row
-// when the call left a next step, else an FYI row. A quarantined call raises nothing: the insert runs under the purge's
-// lock after a re-check, and a purge after it deletes the row. Never throws: the saved summary stands.
+// ONE admin alert per call a known staff number that is not the owner's answered (an unknown answerer is not proof).
+// Fixed words only (see the header): the staff name, which the CSR map gives (staffNameOf), never call text. A
+// needs-you row when the call left a next step, else an FYI row; no row at all when every admin turned this type's
+// Bell switch off in Push Settings. customerId rides in the metadata so an internal test customer's call rings nobody
+// (notification-service.js). Never throws: the saved summary stands whatever happens here.
 async function alertOfficeCall(callSid, reply) {
   try {
-    await db.transaction(async (trx) => {
-      // The lock the live-text writer and the purge share (live-call-transcription.js): every check below reads the
-      // call as it stands under it, so a late card utterance or a quarantine either lands first (and blocks) or waits
-      // for this commit (and the purge then deletes the row). The banner sends only after the commit.
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_live_utterances:${callSid}`]);
-      const call = await trx('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id', 'metadata', 'customer_id');
-      let meta = call?.metadata;
-      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-      if (!call || (await officeAlertBlock(trx, callSid, meta))) return;
-      await raiseOfficeAlert(trx, callSid, call, staffNameOf(meta.forward_acceptance), reply);
+    const call = await db('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id', 'metadata', 'customer_id');
+    let meta = call?.metadata;
+    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+    if (!call || !staffAnswered(meta?.forward_acceptance) || !(await bellSwitchOn())) return;
+    const name = staffNameOf(meta.forward_acceptance) || 'the office';
+    await raiseAdminAlert('live_call_next_step', {
+      area: 'Comms',
+      action: reply.next_step ? `next step on ${name}'s call` : `read ${name}'s call summary`,
+      why: reply.next_step ? 'Open the call to see the next step and what was promised.' : 'Open the call to see its summary.',
+      severity: reply.next_step ? 'needs-you' : 'fyi',
+      link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
+      subject: { type: 'call', id: String(call.id) },
+      doneWhen: 'office_followed_up',
+      who: 'person',
+    }, {
+      bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${callSid}`, bannerKind: 'live_call_next_step',
+      ...(call.customer_id ? { metadata: { customerId: call.customer_id } } : {}),
     });
   } catch (err) {
     logger.warn(`[live-call-early-summary] next-step alert failed: ${err?.code || err?.name || 'error'}`);
   }
 }
 
-// customerId rides in the metadata so an internal test customer's call rings nobody (notification-service.js).
-function raiseOfficeAlert(trx, callSid, call, name, reply) {
-  return raiseAdminAlert('live_call_next_step', {
-      area: 'Comms',
-      action: actionFor(name, reply),
-      why: whyFor(name, reply),
-      severity: reply.next_step ? 'needs-you' : 'fyi',
-      link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
-      subject: { type: 'call', id: String(call.id) },
-      doneWhen: 'office_followed_up',
-      who: 'person',
-    }, { bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${callSid}`, bannerKind: 'live_call_next_step', trx,
-    ...(call.customer_id ? { metadata: { customerId: call.customer_id } } : {}) });
+// The Bell switch for this type in Push Settings (trigger live_call_next_step): on while an active admin has it on,
+// by the rule triggerNotification writes a shared bell row by (bellWanted), as call-phone-yes-bell.js reads it.
+async function bellSwitchOn() {
+  const { TRIGGER_REGISTRY, bellWanted } = require('./notification-triggers');
+  const admins = await db('technicians').where({ active: true, role: 'admin' }).select('id');
+  const prefs = await db('notification_preferences').where({ trigger_key: 'live_call_next_step' })
+    .whereIn('admin_user_id', admins.map((admin) => admin.id)).select('admin_user_id', 'bell_enabled');
+  return bellWanted(TRIGGER_REGISTRY.live_call_next_step, admins, prefs);
 }
 
 // The promises the staff side really said: a model quote is kept only when it is a contiguous quote of one "Agent:"
@@ -273,8 +228,8 @@ function raiseOfficeAlert(trx, callSid, call, name, reply) {
 // it is longer than the promise budget): so a caller's words, a model's guess, a flipped refusal ("cannot" read as "can") or a dropped
 // condition ("only if the manager approves") never shows under a staff member's name.
 const normalized = (t) => String(t || '').toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
-function groundedPromises(promises, transcript) {
-  const agentLines = String(transcript || '').split('\n').filter((l) => l.startsWith('Agent: ')).map((l) => l.slice(7).trim());
+function groundedPromises(promises, staffLines) {
+  const agentLines = staffLines;
   const kept = [];
   for (const p of promises) {
     const quote = normalized(p);
@@ -295,12 +250,12 @@ async function writeEarlySummary(callSid, { now = () => new Date() } = {}) {
     if (!gateOn()) return { written: false, reason: 'gate_off' };
     if (!CALL_SID_RE.test(String(callSid || ''))) return { written: false, reason: 'bad_call_sid' };
     if (!(await claim(callSid, now()))) return { written: false, reason: 'not_claimed' };
-    const { text, utterances } = await transcriptFor(callSid);
+    const { text, utterances, staffLines } = await transcriptFor(callSid);
     if (utterances < MIN_UTTERANCES) return { written: false, reason: 'too_short' };
     if (await quarantinedNow(callSid)) return { written: false, reason: 'quarantined' };
     const parsed = await summarize(text);
     if (!parsed) return { written: false, reason: 'no_summary' };
-    const reply = { ...parsed, promises: groundedPromises(parsed.promises, text) };
+    const reply = { ...parsed, promises: groundedPromises(parsed.promises, staffLines) };
     const written = await saveSummary(callSid, reply, now());
     if (written) await alertOfficeCall(callSid, reply);
     return { written, reason: null };
