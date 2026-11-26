@@ -1774,6 +1774,24 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
       scheduledCron.scheduleInterval(runWdoAttentionSweep, 6 * 60 * 60 * 1000).unref();
     }
 
+    // WDO report hold release sweep — sends a held report once its invoice is paid or covered by
+    // credit (GATE_WDO_REPORT_HOLD governs creating holds; a hold already made always releases).
+    // The 60-second interval is the whole mechanism: every payment path ends in invoices.status, and
+    // the held -> releasing claim is one atomic update, so replicas and a manual send never both
+    // deliver. No-op until a held row exists.
+    {
+      const runReportHoldSweep = async () => {
+        try {
+          const { sweepHeldReportReleases } = require('./services/project-report-hold');
+          await sweepHeldReportReleases({ limit: 5 });
+        } catch (err) {
+          logger.error(`[report-hold] sweep failed: ${err.message}`);
+        }
+      };
+      scheduledCron.scheduleTimeout(runReportHoldSweep, 45 * 1000).unref();
+      scheduledCron.scheduleInterval(runReportHoldSweep, 60 * 1000).unref();
+    }
+
     // Orphaned-photo reclaim — drains project_photo_delete_orphaned
     // tombstones (DB-first photo deletes whose post-commit S3 delete
     // failed). Ungated hygiene: only touches objects whose DB rows the

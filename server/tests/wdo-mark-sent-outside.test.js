@@ -11,6 +11,7 @@ const mockAudit = jest.fn().mockResolvedValue('audit-1');
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
+  mock.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   mock.transaction = jest.fn(async (cb) => cb(mock));
   return mock;
 });
@@ -91,6 +92,7 @@ function chain(overrides = {}) {
     where: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     whereNotNull: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -197,6 +199,20 @@ describe('POST /:id/mark-sent-outside', () => {
       expect(res.status).toBe(200);
     });
     expect(write.update.mock.calls[0][0].sent_outside_portal_note).toBe('a'.repeat(500));
+  });
+
+  test('a schema without the hold columns sees no hold column in the update (the legacy-schema row has none)', async () => {
+    const { write } = wire();
+    await withServer(async (baseUrl) => { expect((await post(baseUrl, { note: 'x' })).status).toBe(200); });
+    expect(write.whereRaw).not.toHaveBeenCalled();
+    expect(Object.keys(write.update.mock.calls[0][0]).some((k) => k.startsWith('report_hold_'))).toBe(false);
+  });
+
+  test('a migrated schema carries the not-releasing condition with the release fields', async () => {
+    const { write } = wire({ current: baseProject({ report_hold_status: null }) });
+    await withServer(async (baseUrl) => { expect((await post(baseUrl, { note: 'x' })).status).toBe(200); });
+    expect(write.whereRaw).toHaveBeenCalledWith("coalesce(report_hold_status, '') <> 'releasing'");
+    expect(write.update.mock.calls[0][0]).toHaveProperty('report_hold_status');
   });
 
   test('success writes the three columns under the state guard, audits, and leaves sent_at alone', async () => {

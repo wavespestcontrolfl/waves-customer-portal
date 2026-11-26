@@ -43,8 +43,9 @@ describe('pretreatSentSnapshot (pure)', () => {
       'pretreatSentSnapshot(project, projectCols)', // savePretreatSentCopy (send with invoice)
       'pretreatSentSnapshot(updatedProject, projectCols)', // /send
     ]);
-    // Send with invoice saves it on the report leg, from its post-claim row.
-    expect(route).toContain('await savePretreatSentCopy(refreshed, projectCols, { reportReached: delivered_report, claimToken: deliveryClaimToken });');
+    // Send with invoice saves it on the report leg, from its post-claim row. A held send (GATE_WDO_REPORT_HOLD) sends
+    // no report, so it saves no copy; the release records the sent report.
+    expect(route).toContain('await savePretreatSentCopy(refreshed, projectCols, { reportReached: delivered_report && !hold.active, claimToken: deliveryClaimToken });');
   });
 });
 

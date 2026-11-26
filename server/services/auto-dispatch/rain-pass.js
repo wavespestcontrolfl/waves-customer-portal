@@ -26,7 +26,7 @@
  */
 const logger = require('../logger');
 const {
-  rainFitFor, rainClassOf, withCatalogKeys, inRainHorizon, boundedHourlyRain,
+  rainFitFor, rainClassOf, withCatalogKeys, inRainHorizon,
   RAIN_AFTER_HOURS, RAIN_DAYS,
 } = require('../scheduling/rain-fit');
 const { etParts, etDateString, addETDays, parseETDateTime, formatETTime, dateOnlyString } = require('../../utils/datetime-et');
@@ -59,6 +59,39 @@ const toMin = (hhmm) => {
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
 };
 const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+// The forecast, from the free NWS feed only (owner 2026-11-26): the booking
+// pages' boundedHourlyRain gives NWS 1.2 s and then falls back to the paid
+// Open-Meteo key, which an hourly cron with no one waiting must never spend.
+// The patient NWS read (getNwsHourlyRainPatient: long wait, one retry, shared
+// with both rain records). An area still unread is null, which the verdict
+// reads as no_forecast: never dry. One read per forecast area (the NWS grid,
+// 2 decimals) per run, a failed one included.
+// NWS down: after this many areas stay unread in one run, the rest of the run
+// makes no more NWS fetches (a fresh cached NWS answer is still used; else
+// no_forecast), so an outage cannot hold the hourly run for 20 s per area.
+const NWS_MAX_FAILED_AREAS = 2;
+const areaKey = (lat, lng) => `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
+
+function nwsOnlyReader(read) {
+  const reads = new Map();
+  let failed = 0;
+  const { getNwsHourlyRainPatient } = require('../weather-forecast');
+  const twice = (lat, lng) => getNwsHourlyRainPatient(lat, lng, { read })
+    .then((hours) => {
+      if (!hours) failed += 1;
+      return hours;
+    });
+  return (lat, lng) => {
+    const key = areaKey(lat, lng);
+    if (!reads.has(key)) {
+      reads.set(key, failed >= NWS_MAX_FAILED_AREAS
+        ? Promise.resolve().then(() => read(lat, lng, { cacheOnly: true })).catch(() => null).then((hours) => hours || null)
+        : twice(lat, lng));
+    }
+    return reads.get(key);
+  };
+}
+
 // A DATE column arrives as a Date at UTC midnight: its calendar date, not its ET day.
 const dateOnly = (value) => String(dateOnlyString(value) || '');
 
@@ -227,7 +260,7 @@ async function judgeStop(visit, ctx) {
   if (reach.ownStartMin < earliestMin) return { wet: false, reason: 'too_soon' };
   const point = areaPoint(visit.point);
   if (!point) return { wet: false, reason: 'no_point' };
-  const hourly = await (deps.hourlyRain || boundedHourlyRain)(point.lat, point.lng, true);
+  const hourly = await ctx.readHourly(point.lat, point.lng);
   const { peak, complete } = spanRain(hourly, date, reach.startMin, reach.endMin);
   if (peak == null) return { wet: false, reason: 'no_forecast' };
   // `dry` only when every hour was read: a missing hour is not a dry one.
@@ -272,6 +305,10 @@ async function planRainPass({ now = new Date(), db, deps = {} } = {}) {
   const stops = await (deps.loadStops || loadStops)(db, today, last);
   const ctx = {
     db, deps: deps, today, nowMin: parts.hour * 60 + parts.minute,
+    // A caller's own reader (the schedule rain record) is asked as before; the default is NWS only.
+    readHourly: deps.hourlyRain
+      ? (lat, lng) => deps.hourlyRain(lat, lng, true)
+      : nwsOnlyReader(deps.nwsHourlyRain || ((...args) => require('../weather-forecast').getNwsHourlyRain(...args))),
     occupancy: await loadDayOccupancy(today, last, deps), day: serviceDay(deps),
   };
   const rows = [];

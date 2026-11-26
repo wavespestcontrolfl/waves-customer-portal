@@ -22,6 +22,7 @@ const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSupplies
 const { INVOICE_DELIVERED_STATUSES } = require('./closeout-status');
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { promoteStagedServicePhotos } = require('./service-photos');
+const { isReportHeld } = require('./project-report-hold');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
@@ -151,6 +152,23 @@ function shouldAttachProjectToPortal({ profile = {}, customer = {}, recurringCus
 
 function projectReviewedForPortalAttachment(project = {}) {
   return String(project.status || '').toLowerCase() === 'sent' || Boolean(project.sent_at);
+}
+
+// A closeout mints the report's public link, except for a WDO report held until its invoice is paid
+// (GATE_WDO_REPORT_HOLD): while the hold is live (held or releasing) the closeout never touches the project's
+// report token or path (the release owns both) and the visit closes without them. The project row is read
+// under FOR UPDATE, so the hold state is the arming transaction's, not a stale read.
+async function closeoutReportLink(trx, project, customer) {
+  if (isReportHeld(project)) return { held: true, token: project.report_token || null, reportPath: null };
+  const token = project.report_token || crypto.randomBytes(16).toString('hex');
+  return { held: false, token, reportPath: await projectReportPathForProject(trx, { ...project, report_token: token }, customer) };
+}
+
+// A held report's release (automatic or by staff, its one sender) holding the delivery claim now, within the claim's
+// 10-minute takeover window.
+function heldSendInFlight(project) {
+  return project.report_hold_status === 'releasing' && String(project.delivery_status || '') === 'sending'
+    && Date.now() - new Date(project.updated_at || 0).getTime() < 10 * 60 * 1000;
 }
 
 function positiveMoney(value) {
@@ -399,18 +417,9 @@ function projectFollowupSuggestion({
   };
 }
 
-function buildServiceRecordInsert({
-  scheduledService,
-  project,
-  profile,
-  serviceRecordCols = {},
-  lifecycleUpdates = {},
-  portalAttached = false,
-  reportPath = null,
-}) {
-  const serviceDate = normalizeDateOnly(project.project_date)
-    || normalizeDateOnly(scheduledService.scheduled_date)
-    || etDateString();
+// The visit-history note a project completion writes (service_records.technician_notes, which the customer's service
+// history returns). A report held for payment keeps its recommendations out until the paid release writes them.
+function completionTechnicianNotes(project, { reportHeld = false } = {}) {
   // The recommendation copied here lands in service_records.technician_notes,
   // which the authenticated portal service-history API returns verbatim — so
   // a legacy narrative that predates the create/PUT write guard gets its
@@ -428,10 +437,26 @@ function buildServiceRecordInsert({
     }
     return safe;
   };
-  const notes = [
+  return [
     project.title ? `Project completed: ${scrubCompletionText(project.title)}` : 'Project completed.',
-    project.recommendations ? scrubCompletionText(project.recommendations) : '',
+    project.recommendations && !reportHeld ? scrubCompletionText(project.recommendations) : '',
   ].filter(Boolean).join('\n\n');
+}
+
+function buildServiceRecordInsert({
+  scheduledService,
+  project,
+  profile,
+  serviceRecordCols = {},
+  lifecycleUpdates = {},
+  portalAttached = false,
+  reportPath = null,
+  reportHeld = false,
+}) {
+  const serviceDate = normalizeDateOnly(project.project_date)
+    || normalizeDateOnly(scheduledService.scheduled_date)
+    || etDateString();
+  const notes = completionTechnicianNotes(project, { reportHeld });
   const structuredNotes = projectCompletionNotes({
     project,
     profile,
@@ -657,6 +682,16 @@ async function completeProjectBackedService({
       err.status = 404;
       throw err;
     }
+    // A held report being released right now (GATE_WDO_REPORT_HOLD, automatic or by staff): the release
+    // is publishing its link and portal stamps, and a closeout in between would write the visit's link as unsent.
+    // Closing waits a moment.
+    // (A claim older than the 10-minute takeover window is a crashed send: it does not block.)
+    if (heldSendInFlight(project)) {
+      const err = new Error('The report is being sent right now. Give it a moment, then close the project.');
+      err.status = 409;
+      err.code = 'release_in_progress';
+      throw err;
+    }
 
     const projectCols = await trx('projects').columnInfo().catch(() => ({}));
 
@@ -752,9 +787,7 @@ async function completeProjectBackedService({
       : portalAllowedByPolicy && !portalReviewed
         ? 'report_not_sent'
         : 'policy_not_met';
-    const token = project.report_token || crypto.randomBytes(16).toString('hex');
-    const reportProjectForPath = { ...project, report_token: token };
-    const reportPath = await projectReportPathForProject(trx, reportProjectForPath, customer);
+    const { held: reportHeld, token, reportPath } = await closeoutReportLink(trx, project, customer);
 
     let serviceRecord = null;
     if (project.service_record_id) {
@@ -823,6 +856,7 @@ async function completeProjectBackedService({
         lifecycleUpdates,
         portalAttached,
         reportPath,
+        reportHeld,
       });
       // Tier/provenance/callback snapshot — the SAME shared builder the
       // /complete and pest-recap paths use (completion-tier-snapshot.js):
@@ -1034,7 +1068,7 @@ async function completeProjectBackedService({
 
     const projectUpdate = {
       status: 'closed',
-      report_token: token,
+      ...(reportHeld ? {} : { report_token: token }),
       service_record_id: serviceRecord.id,
       updated_at: trx.fn.now(),
     };
@@ -1324,8 +1358,11 @@ async function resolveProjectPortalAttachment(project = {}, knex = db) {
 module.exports = {
   buildProjectCloseoutPreview,
   buildServiceRecordInsert,
+  completionTechnicianNotes,
   buildServiceRecordProjectCompletionUpdate,
+  closeoutReportLink,
   completeProjectBackedService,
+  heldSendInFlight,
   createProjectFollowupAlert,
   findExistingCompletionInvoice,
   hasMembership,
