@@ -85,6 +85,31 @@ describe('caps', () => {
   });
 });
 
+describe('local first (owner 2026-11-26)', () => {
+  test('Tampa and Pinellas together fill at most AWAY_CAP slots, even when they outscore local events', () => {
+    const { AWAY_CAP } = require('../services/newsletter-portfolio');
+    const away = [1, 2, 3, 4, 5, 6].map((i) => ev({
+      region_zone: i % 2 ? 'tampa' : 'pinellas', editorial_score: 98 - i, source_id: `a-${i}`, start_at: i % 2 ? DAY.sat : DAY.fri,
+    }));
+    const local = ['manatee', 'sarasota', 'south_sarasota', 'manatee', 'sarasota', 'south_sarasota'].map((z, i) => ev({
+      region_zone: z, editorial_score: 80 - i, source_id: `l-${i}`, start_at: i % 2 ? DAY.sun : DAY.sat,
+    }));
+    const result = selectPortfolio([...away, ...local]);
+    const awayCount = result.selected.filter((e) => ['tampa', 'pinellas'].includes(e.region_zone)).length;
+    expect(AWAY_CAP).toBe(2);
+    expect(awayCount).toBeLessThanOrEqual(AWAY_CAP);
+    expect(result.selected.length - awayCount).toBeGreaterThanOrEqual(5);
+  });
+
+  test('a thin local week ships fewer events instead of adding a third Tampa Bay event', () => {
+    const away = [1, 2, 3, 4].map((i) => ev({ region_zone: 'pinellas', editorial_score: 95 - i, source_id: `p-${i}`, venue_name: `PV ${i}` }));
+    const local = [ev({ region_zone: 'sarasota', editorial_score: 82, source_id: 'l-1' })];
+    const result = selectPortfolio([...away, ...local]);
+    expect(result.selected.filter((e) => e.region_zone === 'pinellas').length).toBe(2);
+    expect(result.selected.length).toBe(3);
+  });
+});
+
 describe('portfolio coverage', () => {
   // A rich, diverse pool: plenty of weekend/family/parents/free/hero/novel
   // candidates across 4 zones.
