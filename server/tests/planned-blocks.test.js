@@ -113,7 +113,8 @@ describe('attachPlannedBlocks', () => {
     ];
     attachPlannedBlocks(services, EARLY);
     expect(services[0]).toMatchObject({ plannedArrivalMin: 10 * 60, plannedMinutes: 35 });
-    expect(services[1]).toMatchObject({ plannedArrivalMin: 10 * 60 + 35, plannedMinutes: 35 });
+    // Owner 2026-11-26 per-service table: the recurring pest member plans 35, the lawn member 25.
+    expect(services[1]).toMatchObject({ plannedArrivalMin: 10 * 60 + 35, plannedMinutes: 25 });
   });
 
   it('draws a group member booked an hour later at its own modeled start, not the group arrival', () => {
@@ -151,8 +152,8 @@ describe('attachPlannedBlocks', () => {
     const by = Object.fromEntries(services.map((s) => [s.id, s]));
     expect(by.g1.plannedArrivalMin).toBe(8 * 60);
     expect(by.g2.plannedArrivalMin).toBe(8 * 60 + 35);
-    // The group is worked once (08:00 + 70), then one drive to the other stop.
-    expect(by.mid.plannedArrivalMin).toBe(8 * 60 + 70 + Math.max(1, driveMin(A, B)));
+    // The group is worked once (08:00 + 35 pest + 25 lawn, owner 2026-11-26 per-service table), then one drive to the other stop.
+    expect(by.mid.plannedArrivalMin).toBe(8 * 60 + 60 + Math.max(1, driveMin(A, B)));
   });
 
   it('counts a same-customer co-visit once: one stop, its work not doubled', () => {

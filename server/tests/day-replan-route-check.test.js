@@ -234,8 +234,11 @@ describe('one tech-day', () => {
     // A one-time pest stop at 14:00 with a 15-minute estimate and no window end: charged the table's minutes.
     const pest = stop('p1', '14:00:00', null, { service_type: 'One-Time Pest Control', estimated_duration_minutes: 15 });
     expect(rc.measureTechDay({ ...open, rows: [pest] })).toMatchObject({ stops: 1, endMin: 840 + PLANNING_MINUTES.oneTimePest });
-    // A service the table does not name keeps its own estimate.
-    expect(rc.measureTechDay({ ...open, rows: [{ ...pest, service_type: 'Mosquito' }] })).toMatchObject({ endMin: 855 });
+    // A service the table does not name keeps its own estimate (owner 2026-11-26 per-service table:
+    // mosquito is named now, so an unnamed wildlife job stands in).
+    expect(rc.measureTechDay({ ...open, rows: [{ ...pest, service_type: 'Wildlife Trapping Service' }] })).toMatchObject({ endMin: 855 });
+    // A named service plans the table's minutes, not its estimate.
+    expect(rc.measureTechDay({ ...open, rows: [{ ...pest, service_type: 'Mosquito' }] })).toMatchObject({ endMin: 840 + PLANNING_MINUTES.mosquito });
   });
 
   test("the last opening leaves the drive home before dispatch's day end; a block on the way home moves it earlier (round 30)", () => {
