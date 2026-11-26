@@ -352,17 +352,19 @@ async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigatio
   return withShellRefresh(() => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, startedAt, { customerShell, advanceLive }));
 }
 
-// The stored shell records whether it came from a customer app screen
-// (isSavedCopyPath). Only such a shell may answer a slow customer page load:
-// any other page's HTML can carry that page's own link preview (a report's
-// token-bearing image URL) or a staff page's manifest and title.
-const SHELL_SOURCE_HEADER = 'x-waves-shell-source';
-const CUSTOMER_SHELL_SOURCE = 'customer';
-function withShellSource(response, customerShell) {
-  const headers = new Headers(response.headers);
-  if (customerShell) headers.set(SHELL_SOURCE_HEADER, CUSTOMER_SHELL_SOURCE);
-  else headers.delete(SHELL_SOURCE_HEADER);
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+// The customer app's own saved copy, kept apart from '/': every page load
+// stores its HTML at '/', and a report or staff page's HTML can carry that
+// page's own link preview (a report's token-bearing image URL) or a staff
+// page's manifest and title. Only a customer app screen (isSavedCopyPath) or
+// the install writes this key, so a slow or failed customer load gets a
+// customer page even after a report or staff page moved '/'. Its build is
+// always retained (pruneStaleAssets), so its assets stay with it.
+const CUSTOMER_SHELL_URL = '/__waves/customer-shell';
+async function customerShellBuildId(cache) {
+  const shell = await cache.match(CUSTOMER_SHELL_URL);
+  if (!shell) return null;
+  const assets = shellAssetUrls(await shell.text());
+  return assets.length ? buildIdOf(assets) : null;
 }
 
 // advanceLive false: the page that asked for this refresh runs an older,
@@ -464,7 +466,10 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
       if (previousShell) await putShell(cache, previousShell.clone(), previousBuildId).catch(() => {});
     };
     try {
-      await putShell(cache, withShellSource(withoutUrl(shellResponse.clone()), customerShell), buildId);
+      await putShell(cache, withoutUrl(shellResponse.clone()), buildId);
+      // After '/' committed the generation. A failed write leaves the older
+      // customer copy, whose build the prune still retains.
+      if (customerShell) await cache.put(CUSTOMER_SHELL_URL, withoutUrl(shellResponse.clone())).catch(() => {});
       if (!supersedable) await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } }));
     } catch (err) {
       await restorePreviousShell();
@@ -547,6 +552,9 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
 function pruneStaleAssets(cache, retainedBuildIds, { firmOnly = false } = {}) {
   const retained = new Set(retainedBuildIds.filter(Boolean).map(claimIdOf));
   return withAssetWrites(async () => {
+    // The customer app's saved copy keeps its build in every prune.
+    const customerBuild = await customerShellBuildId(cache).catch(() => null);
+    if (customerBuild) retained.add(customerBuild);
     const requests = await cache.keys();
     await Promise.all(requests.map(async request => {
       const pathname = new URL(request.url).pathname;
@@ -738,8 +746,7 @@ function startNavigationFetch(request) {
 async function savedShell() {
   try {
     const cache = await caches.open(CACHE_NAME);
-    const shell = await cache.match(OFFLINE_URL);
-    return shell && shell.headers.get(SHELL_SOURCE_HEADER) === CUSTOMER_SHELL_SOURCE ? shell : null;
+    return (await cache.match(CUSTOMER_SHELL_URL)) || null;
   } catch {
     return null;
   }
@@ -769,25 +776,28 @@ function reconnectPage() {
 // must never get the saved copy, even when the network fails (its retry then
 // keeps the mark: the reconnect page reloads the same address).
 async function answerNavigation(request, attempt, { customer, networkOnly }, decide, navSeq) {
-  const mayServeSaved = customer && !networkOnly;
+  if (!customer) {
+    const { response } = await attempt;
+    decide('network');
+    return response || await offlineNavigationResponse(request);
+  }
   let timer;
   try {
-    if (mayServeSaved) {
+    // fetch() resolves once the headers land; the page can still stall or
+    // break off before the HTML that names its entry script arrives. So the
+    // network's page counts only with the whole (small) HTML body in hand:
+    // read a copy of it, which buffers the same bytes for the page itself.
+    const bodyReady = attempt.then(async outcome => {
+      if (!outcome.copy) return outcome;
+      try {
+        await outcome.copy.clone().text();
+        return outcome;
+      } catch {
+        return { ...outcome, bodyFailed: true };
+      }
+    });
+    if (!networkOnly) {
       const slow = new Promise(resolve => { timer = setTimeout(resolve, SLOW_NAV_MS, 'slow'); });
-      // fetch() resolves once the headers land; the page can still stall
-      // before the HTML that names its entry script arrives. So the network
-      // wins only with the whole (small) HTML body in hand: read a copy of
-      // it, which buffers the same bytes for the page's own response.
-      // A body that fails part-way is no page: the saved copy answers then.
-      const bodyReady = attempt.then(async outcome => {
-        if (!outcome.copy) return outcome;
-        try {
-          await outcome.copy.clone().text();
-          return outcome;
-        } catch {
-          return { ...outcome, bodyFailed: true };
-        }
-      });
       const first = await Promise.race([bodyReady, slow]);
       // Slow, a body that broke off, or no answer at all: the customer copy.
       if (first === 'slow' || first.bodyFailed || !first.response) {
@@ -802,17 +812,20 @@ async function answerNavigation(request, attempt, { customer, networkOnly }, dec
           return shell;
         }
       }
-      // No customer copy to give: wait for the whole page. HTML that breaks
-      // off gets the reconnect page, never a truncated page, and never the
-      // stored shell of another page (savedShell refused it already).
-      const outcome = await bodyReady;
-      if (outcome.bodyFailed) return reconnectPage();
-      if (outcome.response) return outcome.response;
-      return reconnectPage();
     }
-    const { response } = await attempt;
-    if (customer && !response) return networkOnly ? reconnectPage() : ((await savedShell()) || reconnectPage());
-    return response || await offlineNavigationResponse(request);
+    // Wait for the whole page. One that breaks off or never comes gets the
+    // reconnect page, never a truncated page; a heal reload (networkOnly)
+    // never gets the copy it is healing from, and its retry keeps the mark.
+    const outcome = await bodyReady;
+    if (outcome.response && !outcome.bodyFailed) return outcome.response;
+    if (!networkOnly) {
+      const shell = await savedShell();
+      if (shell) {
+        decide('saved');
+        return shell;
+      }
+    }
+    return reconnectPage();
   } finally {
     clearTimeout(timer);
     decide('network'); // no effect once 'saved' was decided

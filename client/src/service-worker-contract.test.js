@@ -557,7 +557,7 @@ describe('service-worker private link pages', () => {
     await worker.dispatchFetch('/manifest.json', { mode: 'cors' });
     await tick();
     const keys = [...cache.store.keys()].map(url => url.replace('https://portal.test', ''));
-    expect(keys.filter(key => !/^\/assets\/index-\d\.js$/.test(key)).sort()).toEqual(['/', '/manifest.json']);
+    expect(keys.filter(key => !/^\/assets\/index-\d\.js$/.test(key)).sort()).toEqual(['/', '/__waves/customer-shell', '/manifest.json']);
     expect([...cache.store.values()].map(response => response.url).filter(Boolean)).toEqual([]);
   });
 
@@ -1762,17 +1762,15 @@ describe('service-worker slow page loads', () => {
     };
     return { release, serve };
   }
-  // A stored shell as the worker writes it: marked when it came from a
-  // customer app screen. `saved: 'other'` stores another page's HTML.
-  function customerShell(html, saved) {
-    const response = fakeResponse(html);
-    if (saved !== 'other') response.headers.set('x-waves-shell-source', 'customer');
-    return response;
-  }
+  // Stored shells as the worker writes them: '/' holds the last page's HTML,
+  // and the customer app's own copy sits apart. `saved: 'other'` stores only
+  // another page's HTML at '/'.
+  const CUSTOMER_SHELL_URL = '/__waves/customer-shell';
   async function start({ saved = true } = {}) {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const cache = fakeCache();
-    if (saved) await cache.put('/', customerShell(savedHtml, saved));
+    if (saved) await cache.put('/', fakeResponse(savedHtml));
+    if (saved && saved !== 'other') await cache.put(CUSTOMER_SHELL_URL, fakeResponse(savedHtml));
     const worker = loadWorker(cache);
     const network = gatedNetwork();
     worker.setFetch(network.serve);
@@ -1925,13 +1923,33 @@ describe('service-worker slow page loads', () => {
     expect(bodyOf(await nav.promise)).toBe(networkHtml);
   });
 
-  it('marks the shell from a customer screen, and unmarks one from any other page', async () => {
+  it('keeps the customer copy, and its assets, when a report page moves the shell', async () => {
+    const { cache, worker, network, load } = await start();
+    const oldEntry = fakeResponse('old entry');
+    oldEntry.headers.set('x-waves-build', worker.buildIdOf(OLD));
+    await cache.put('/assets/index-OLD.js', oldEntry);
+    network.release();
+    // A report page of a new build stores its HTML at '/' and prunes.
+    await (await load(`/report/${'f'.repeat(32)}`).promise).settled();
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(savedHtml);
+    expect(await cache.match('/assets/index-OLD.js')).toBeTruthy();
+  });
+
+  it('a customer screen load refreshes the customer copy', async () => {
     const { cache, network, load } = await start();
     network.release();
-    await (await load(`/report/${'f'.repeat(32)}`).promise).settled();
-    expect((await cache.match('/')).headers.get('x-waves-shell-source')).toBeNull();
     await (await load('/').promise).settled();
-    expect((await cache.match('/')).headers.get('x-waves-shell-source')).toBe('customer');
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(networkHtml);
+  });
+
+  it('answers a failed home load offline with the customer copy after a report page moved the shell', async () => {
+    const { cache, worker, network, load } = await start();
+    network.release();
+    await (await load(`/report/${'f'.repeat(32)}`).promise).settled();
+    worker.setFetch(async () => { throw new TypeError('Failed to fetch'); });
+    expect(bodyOf(await load('/').promise)).toBe(savedHtml);
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
   });
 
   it('keeps the saved build live after the late refresh commits the new one', async () => {
@@ -1969,6 +1987,14 @@ describe('service-worker slow page loads', () => {
     it('shows the reconnect page, never the saved copy, when a marked load fails outright', async () => {
       const { worker, load } = await start();
       worker.setFetch(async () => { throw new TypeError('Failed to fetch'); });
+      expect(String(bodyOf(await load('/?waves-network=1').promise))).toContain('Reconnecting');
+    });
+
+    it('shows the reconnect page when a marked load breaks off mid-page', async () => {
+      const { worker, load } = await start();
+      worker.setFetch(async (request) => (request.mode === 'navigate'
+        ? gatedResponse(networkHtml, Promise.reject(new TypeError('network connection was lost')))
+        : fakeResponse(`asset:${request.url}`)));
       expect(String(bodyOf(await load('/?waves-network=1').promise))).toContain('Reconnecting');
     });
 
