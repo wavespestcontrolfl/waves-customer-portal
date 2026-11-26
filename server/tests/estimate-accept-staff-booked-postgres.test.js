@@ -193,17 +193,28 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
   });
 
   test.each([
-    ['a page that showed a hold', { existingAppointmentWasHold: true }],
-    ['a tab that predates the field', {}],
-  ])('accept by appointment id from %s is refused and the booked visit is untouched', async (_label, extra) => {
+    ['a page that showed a hold', { existingAppointmentWasHold: true }, false],
+    ['a tab that predates the field', {}, true],
+  ])('accept by appointment id from %s is refused and the booked visit is untouched', async (_label, extra, reloadRequired) => {
     const { customerId, estimateId, token } = await fixture(mockTransaction);
     const id = await staffBookedHold(mockTransaction, { customerId, estimateId });
     const before = await visitRow(id);
     const res = await putAccept(token, { existingAppointmentId: id, ...extra });
     expect(res.status).toBe(409);
-    expect((await res.json()).code).toBe('SLOT_UNAVAILABLE');
+    const body = await res.json();
+    expect(body.code).toBe('SLOT_UNAVAILABLE');
+    expect(body.reloadRequired).toBe(reloadRequired);
     expect(await visitRow(id)).toEqual(before);
     expect(await estimateStatus(estimateId)).toBe('sent');
+  });
+
+  test('accept by slot is refused when a second booking sits at the same slot', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await staffBookedHold(mockTransaction, { customerId, estimateId });
+    await staffBookedHold(mockTransaction, { customerId, estimateId });
+    const before = await visitRow(id);
+    expect((await putAccept(token, { slotId: SLOT_ID })).status).toBe(409);
+    expect(await visitRow(id)).toEqual(before);
   });
 
   test('accept by slot recovers the staff booking the customer picked and keeps it as the first visit', async () => {

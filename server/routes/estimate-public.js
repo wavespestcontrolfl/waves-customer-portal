@@ -1815,6 +1815,36 @@ function adoptableAppointmentStatuses() {
     : ['pending', 'confirmed'];
 }
 
+// This estimate's rows at a slot the customer submitted (a parsed slotId).
+function estimateRowsAtSlot(conn, estimate, slot) {
+  return conn('scheduled_services')
+    .where({
+      source_estimate_id: estimate.id,
+      scheduled_date: slot.date,
+      window_start: slot.windowStart,
+    })
+    .modify((q) => { if (slot.techId) q.where('technician_id', slot.techId); });
+}
+
+// A staff booking at a submitted slot is recoverable only when it stands alone:
+// no second booking and no unclaimed hold still live (or inside the commit
+// grace) beside it. Run before the accept transaction and again under the
+// date lock, since either can appear in between.
+async function recoveredSlotIsAmbiguous(conn, estimate, slot, bookedId, holdGraceMinutes) {
+  const secondBooking = await estimateRowsAtSlot(conn, estimate, slot)
+    .whereNotNull('customer_id')
+    .whereIn('status', adoptableAppointmentStatuses())
+    .whereNot({ id: bookedId })
+    .first();
+  if (secondBooking) return true;
+  const openHold = await estimateRowsAtSlot(conn, estimate, slot)
+    .whereNull('customer_id')
+    .whereNotNull('reservation_expires_at')
+    .whereRaw('reservation_expires_at >= NOW() - make_interval(mins => ?)', [holdGraceMinutes])
+    .first('id');
+  return !!openHold;
+}
+
 async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
   const conn = opts.database || db;
   const requestedId = opts.appointmentId ? String(opts.appointmentId) : '';
@@ -10771,65 +10801,59 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
 
     let reservationRow = null;
     // Set when the submitted slot turned out to be a visit staff booked for
-    // this customer: the accept then adopts that visit instead of a hold.
-    let recoveredStaffBooking = false;
+    // this customer: the accept then adopts that visit instead of a hold. The
+    // parsed slot is kept so the locked row is checked against what the
+    // customer picked, not only against the id.
+    let recoveredSlot = null;
     if (slotId) {
       const parsed = slotReservation._internals.parseSlotId(slotId);
       if (!parsed) return res.status(400).json({ error: 'invalid slotId format' });
 
-      // Rows for THIS estimate matching the requested slot. Prevents a
-      // malicious client from passing a slotId reserved for someone else's
-      // estimate.
-      const rowsAtSlot = () => db('scheduled_services')
-        .where({
-          source_estimate_id: estimate.id,
-          scheduled_date: parsed.date,
-          window_start: parsed.windowStart,
-        })
-        .modify((q) => { if (parsed.techId) q.where('technician_id', parsed.techId); });
       // A visit staff booked from this estimate's hold keeps the estimate link,
       // and often its old hold timestamp. It is a booking, never a hold.
-      const bookedAtSlot = () => rowsAtSlot().whereNotNull('customer_id').whereIn('status', adoptableAppointmentStatuses());
-      const staffBooked = await bookedAtSlot().first();
-      reservationRow = await rowsAtSlot()
-        .whereNull('customer_id')
-        .whereNotNull('reservation_expires_at')
-        // Grace measured by POSTGRES, not this process's clock (pre-push
-        // audit P1): commitReservation's authoritative check compares against
-        // NOW(), so a JS-side Date.now() comparison here could refuse — under
-        // app/DB clock skew — a hold the commit would have graduated. That is
-        // this very bug in miniature.
-        .select('*', db.raw('(reservation_expires_at < NOW() - make_interval(mins => ?)) AS _beyond_grace', [holdGraceMinutes]))
-        // NEWEST hold for the slot, explicitly (codex r3 P1). A customer
-        // whose hold lapsed can reserve the same slot again before the
-        // grace-delayed sweep removes the old row — reserveSlot ignores the
-        // expired one and mints a fresh live row, so two rows match here.
-        // Unordered, `.first()` could hand back the stale one: the grace
-        // would admit it, and commitReservation would then see the
-        // customer's OWN new live hold as a rival and refuse a perfectly
-        // good signup with SLOT_UNAVAILABLE (or a beyond-grace old row would
-        // 409 the preflight before the live row was ever considered).
-        .orderBy('reservation_expires_at', 'desc')
+      const staffBooked = await estimateRowsAtSlot(db, estimate, parsed)
+        .whereNotNull('customer_id')
+        .whereIn('status', adoptableAppointmentStatuses())
         .first();
-
       if (staffBooked) {
         // Staff booked this slot while the customer was choosing it. Recover
         // it only when unambiguous: one booked visit, this estimate's own
         // customer, and no live unclaimed hold beside it. Anything else sends
         // the customer back to the picker. The adoption lookup and the locked
         // recheck below then judge the visit like any adopted one.
-        const secondBooking = await bookedAtSlot().whereNot({ id: staffBooked.id }).first();
-        if (secondBooking
-          || (reservationRow && !reservationRow._beyond_grace)
-          || !estimate.customer_id
-          || String(staffBooked.customer_id) !== String(estimate.customer_id)) {
+        if (!estimate.customer_id
+          || String(staffBooked.customer_id) !== String(estimate.customer_id)
+          || await recoveredSlotIsAmbiguous(db, estimate, parsed, staffBooked.id, holdGraceMinutes)) {
           return res.status(409).json(HOLD_EXPIRED_409);
         }
-        recoveredStaffBooking = true;
+        recoveredSlot = parsed;
         existingAppointmentId = String(staffBooked.id);
         slotId = '';
-        reservationRow = null;
       } else {
+        // The estimate's unclaimed hold for the requested slot. Prevents a
+        // malicious client from passing a slotId reserved for someone else's
+        // estimate.
+        reservationRow = await estimateRowsAtSlot(db, estimate, parsed)
+          .whereNull('customer_id')
+          .whereNotNull('reservation_expires_at')
+          // Grace measured by POSTGRES, not this process's clock (pre-push
+          // audit P1): commitReservation's authoritative check compares against
+          // NOW(), so a JS-side Date.now() comparison here could refuse — under
+          // app/DB clock skew — a hold the commit would have graduated. That is
+          // this very bug in miniature.
+          .select('*', db.raw('(reservation_expires_at < NOW() - make_interval(mins => ?)) AS _beyond_grace', [holdGraceMinutes]))
+          // NEWEST hold for the slot, explicitly (codex r3 P1). A customer
+          // whose hold lapsed can reserve the same slot again before the
+          // grace-delayed sweep removes the old row — reserveSlot ignores the
+          // expired one and mints a fresh live row, so two rows match here.
+          // Unordered, `.first()` could hand back the stale one: the grace
+          // would admit it, and commitReservation would then see the
+          // customer's OWN new live hold as a rival and refuse a perfectly
+          // good signup with SLOT_UNAVAILABLE (or a beyond-grace old row would
+          // 409 the preflight before the live row was ever considered).
+          .orderBy('reservation_expires_at', 'desc')
+          .first();
+
         // Row gone = swept past the grace (or never reserved): same recovery
         // either way, the customer re-picks. Both 409s carry the code the
         // client keys its "hold expired" banner on.
@@ -10924,7 +10948,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     if (existingAppointmentId && !existingAppointmentRow) {
       // A staff booking recovered from the submitted slot that no longer
       // qualifies (status, service family, callback): the customer re-picks.
-      if (recoveredStaffBooking) return res.status(409).json(HOLD_EXPIRED_409);
+      if (recoveredSlot) return res.status(409).json(HOLD_EXPIRED_409);
       // The estimate's OWN hold, offered as an "existing appointment" on a
       // reload, drops out of the adoptable set the moment it lapses past the
       // grace — that is a hold expiry, not a linkage problem, and the client
@@ -10976,12 +11000,18 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // showed, so it re-reads first. A visit recovered from the submitted slot
     // is the customer's own pick and is exempt.
     const shownAsHold = req.body?.existingAppointmentWasHold;
-    if (existingAppointmentRow && !recoveredStaffBooking && !isReservationHeldAppointment(existingAppointmentRow)
+    if (existingAppointmentRow && !recoveredSlot && !isReservationHeldAppointment(existingAppointmentRow)
       && (shownAsHold === true
         || (typeof shownAsHold !== 'boolean' && existingAppointmentRow.customer_id != null
           && existingAppointmentRow.source_estimate_id != null
           && String(existingAppointmentRow.source_estimate_id) === String(estimate.id)))) {
-      return res.status(409).json({ code: 'SLOT_UNAVAILABLE', error: 'slot no longer available — re-pick a slot' });
+      // A tab that predates the field cannot send the boolean on a retry: the
+      // message tells that customer to reload the page (a new bundle sends it).
+      return res.status(409).json({
+        code: 'SLOT_UNAVAILABLE',
+        error: 'slot no longer available — reload this page to see your booked visit',
+        reloadRequired: typeof shownAsHold !== 'boolean',
+      });
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
     const pricingBundle = await buildPricingBundle(estimateForPricing);
@@ -12240,6 +12270,16 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // its own (hold ids are never reused), so no inversion opens.
       let acceptPreLockedDate = null;
       let acceptPreLockedTechId = null;
+      if (recoveredSlot) {
+        // A staff booking recovered from the submitted slot: take the date key
+        // first (before any row lock, like every booking writer) and prove it is
+        // still the only booking or hold there. Another row can land after the
+        // preflight read, and the locked row recheck below sees only this visit.
+        await acquireOccupancyLock(trx, recoveredSlot.date);
+        if (await recoveredSlotIsAmbiguous(trx, estimate, recoveredSlot, existingAppointmentRow.id, holdGraceMinutes)) {
+          throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
+        }
+      }
       {
         const acceptHoldRow = reservationRow
           || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow)
@@ -13509,6 +13549,18 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           // or changed it since must not have it restored here.
           const lockedOwnerChanged = !!lockedAdoptRow && existingAppointmentRow.customer_id != null
             && String(lockedAdoptRow.customer_id || '') !== String(existingAppointmentRow.customer_id);
+          // A visit recovered from the submitted slot must still be at that slot,
+          // from this estimate, for this customer: dispatch can move it after the
+          // preflight read, and the accept must not reprice a time the customer
+          // never picked.
+          if (recoveredSlot && lockedAdoptRow
+            && (dateOnly(lockedAdoptRow.scheduled_date) !== recoveredSlot.date
+              || String(lockedAdoptRow.window_start).slice(0, 5) !== String(recoveredSlot.windowStart).slice(0, 5)
+              || (recoveredSlot.techId && String(lockedAdoptRow.technician_id || '') !== String(recoveredSlot.techId))
+              || String(lockedAdoptRow.source_estimate_id || '') !== String(estimate.id)
+              || String(lockedAdoptRow.customer_id || '') !== String(estimate.customer_id || ''))) {
+            throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
+          }
           if (!lockedAdoptRow || lockedOwnerChanged || lockedAdoptRow.is_callback === true || !lockedFamilyOk || !lockedPropertyOk) {
             assertExistingAppointmentUpdateApplied(0);
           }
