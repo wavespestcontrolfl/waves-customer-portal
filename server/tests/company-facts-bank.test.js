@@ -35,16 +35,52 @@ describe('hard blocks', () => {
     ['a dollar sign and a space', 'The initial application is $ 50.', 'dollar_amount'],
     ['US$', 'The initial application is US$50.', 'dollar_amount'],
     ['US dollars', 'The initial application is 50 US dollars.', 'dollar_amount'],
-    ['a price with no currency sign', 'The initial application costs 99.', 'price_amount'],
-    ['a start-at price', 'Plans start at 49 a month.', 'price_amount'],
-    ['a per-visit price', 'The service is 99 per visit.', 'price_amount'],
-    ['a slash rate', 'Plans are 49/mo.', 'price_amount'],
-    ['a two-decimal figure', 'The fee is 129.99.', 'price_amount'],
-    ['a thousands figure after a price word', 'We charge 1,200 for the job.', 'price_amount'],
-    ['a thousands price per visit', 'Plans are 1,200 per visit.', 'price_amount'],
-    ['a decimal price per month', 'Plans are 12.50/mo.', 'price_amount'],
-    ['a plain price a month', 'Plans are 1200 a month.', 'price_amount'],
-    ['a rate word and a number', 'Our rate is 75 for a quarterly visit.', 'price_amount'],
+    ['a price with no currency sign', 'The initial application costs 99.', 'number_in_fact'],
+    ['a start-at price', 'Plans start at 49 a month.', 'number_in_fact'],
+    ['a per-visit price', 'The service is 99 per visit.', 'number_in_fact'],
+    ['a slash rate', 'Plans are 49/mo.', 'number_in_fact'],
+    ['a two-decimal figure', 'The fee is 129.99.', 'number_in_fact'],
+    ['a thousands figure after a price word', 'We charge 1,200 for the job.', 'number_in_fact'],
+    ['a thousands price per visit', 'Plans are 1,200 per visit.', 'number_in_fact'],
+    ['a decimal price per month', 'Plans are 12.50/mo.', 'number_in_fact'],
+    ['a plain price a month', 'Plans are 1200 a month.', 'number_in_fact'],
+    ['a price in words per month', 'Plans are forty-nine a month.', 'number_in_fact'],
+    ['a price in words per visit', 'The service is ninety-nine per visit.', 'number_in_fact'],
+    ['a price in words after a price word', 'The service costs forty nine.', 'number_in_fact'],
+    ['a hundred after a price word', 'Plans start at a hundred.', 'number_in_fact'],
+    ['hundreds in words', 'The fee is two hundred fifty.', 'number_in_fact'],
+    ['a thousand after a price word', 'Starting from a thousand.', 'number_in_fact'],
+    ['a one-digit word price per application', 'The add-on costs five per application.', 'number_in_fact'],
+    ['a one-digit word price a month', 'Plans are five a month.', 'number_in_fact'],
+    ['a one-digit word price with a slash', 'Plans are nine/mo.', 'number_in_fact'],
+    ['a one-digit word price right after costs', 'The add-on costs five.', 'number_in_fact'],
+    ['a one-digit word price after starts at', 'Lots start at nine.', 'number_in_fact'],
+    ['a one-digit word price after fee is', 'The fee is nine.', 'number_in_fact'],
+    ['a one-digit word price after priced at', 'Plans are priced at seven.', 'number_in_fact'],
+    ['a one-digit word price after billed', 'The service is billed three.', 'number_in_fact'],
+    ['a one-digit word price after as low as', 'Plans run as low as six.', 'number_in_fact'],
+    ['a promotional price: only and a decimal', 'The initial application is only 129.99.', 'number_in_fact'],
+    ['a promotional price: only and digits', 'The initial application is only 49.', 'number_in_fact'],
+    ['a promotional price: just and digits', 'We do it for just 99.', 'number_in_fact'],
+    ['a promotional price: only and a number word', 'The initial application is only forty-nine.', 'number_in_fact'],
+    ['a promotional price: only and a bare one-digit word', 'The service is only five.', 'number_in_fact'],
+    ['a bare two-decimal figure', 'The setup is 129.99.', 'number_in_fact'],
+    ['an amount before "in the morning" that is no hour', 'We charge 49 in the morning.', 'number_in_fact'],
+    ['an amount before pm that is no hour', 'We charge 99 pm.', 'number_in_fact'],
+    ['a word amount before a.m. that is no hour', 'The fee is ninety a.m.', 'number_in_fact'],
+    ['minutes out of range', 'The fee is 12:75 pm.', 'number_in_fact'],
+    ['an hour out of range', 'The fee is 13 pm.', 'number_in_fact'],
+    // Counts, measures and years block too: a bank fact states NO amount (intended; the owner rewords).
+    ['a cue and a count', 'The price covers three visits.', 'number_in_fact'],
+    ['a cue and a measurement', 'Lots start at twenty-five acres.', 'number_in_fact'],
+    ['a cue and a spaced measurement', 'Lots start at twenty five acres.', 'number_in_fact'],
+    ['a cue and a thousand-foot measurement', 'Lots start at 1,000 square feet.', 'number_in_fact'],
+    ['a cue and a word measurement', 'It costs one hundred twenty square feet of coverage.', 'number_in_fact'],
+    ['a cue and a year', 'Costs have gone up since 2024.', 'number_in_fact'],
+    ['a cue and a half', 'The deposit is half.', 'number_in_fact'],
+    ['a cue and a dozen', 'There is a discount of a dozen.', 'number_in_fact'],
+    ['a cue with the amount at the end of the sentence', 'Our rates changed after the long winter season to something near ninety.', 'number_in_fact'],
+    ['a rate word and a number', 'Our rate is 75 for a quarterly visit.', 'number_in_fact'],
     ['four lowercase sentences', 'we serve parrish. we serve ruskin. we serve wimauma. we serve palmetto.', 'too_many_sentences'],
     ['another currency symbol', 'The initial application is \u20AC50.', 'dollar_amount'],
     ['a percent', 'We take 10% off for members.', 'percent'],
@@ -104,25 +140,73 @@ describe('hard blocks', () => {
   });
 
   test.each([
-    'We make 3 visits a year.',
-    'We return every 90 days.',
-    'Visits take about 2 hours.',
-    'Lawns up to 1 acre are included.',
-    'We do 4 quarterly visits.',
-    'We started in 2009.',
-    'Costs have gone up since 2024.',
-    'We open at 8.30 am.',
-    'Only 3 visits are needed.',
-    'Just 2 visits are included.',
-    'Lots up to 0.25 acre are covered.',
-    'Only 12 visits are needed.',
-    'Only 120 visits are needed.',
-    'Lots start at 1,000 square feet.',
-    'Lots start at 1,000 sq ft.',
-    'Only 1,200 customers are covered.',
-    'We come back every 90 days for a quarterly visit.',
-  ])('not a price: %s', (text) => {
-    expect(blocksOf(text)).not.toContain('price_amount');
+    ['a count in digits', 'We make 3 visits a year.'],
+    ['a count in words', 'We make three visits a year.'],
+    ['a measure', 'We cover five acres.'],
+    ['a measure in digits', 'Lawns up to 1 acre are included.'],
+    ['a period in digits', 'We return every 90 days.'],
+    ['a period in words', 'We return every ninety days.'],
+    ['a counting one', 'One visit is included.'],
+    ['a counting one with a noun', 'We cover one acre lots.'],
+    ['a year', 'We started in 2009.'],
+    ['a decimal measure', 'Lots up to 0.25 acre are covered.'],
+    ['a count after only', 'Only three visits are needed.'],
+    ['a count with a unit after just', 'Just 2 hours are needed.'],
+    ['a twice-a-year count in words', 'We come out four times a year.'],
+    ['half', 'We treat half of the yard first.'],
+    ['a couple', 'A couple of visits are included.'],
+    ['a dozen', 'We carry a dozen products.'],
+    ['a million', 'We have served a million customers.'],
+    ['a thousand square feet', 'Lawns of 1,000 square feet are included.'],
+    ['zero', 'There is zero risk of that.'],
+    // No clock-time exception: a time is an amount too (intended; the owner rewords).
+    ['a clock time', 'Our office opens at nine a.m.'],
+    ['a clock time in digits', 'We open at 8:30 am.'],
+    ["a clock time with o'clock", "We open at ten o'clock."],
+    ['a clock time in the morning', 'We start at 8 in the morning.'],
+    ['a clock time in words in the morning', 'We start at nine in the morning.'],
+    ['a range of clock times', 'Crews work from 7 a.m. to 5 p.m.'],
+    ['an invalid time', 'We charge 49 in the morning.'],
+    // Any Unicode digit or number character.
+    ['fullwidth digits', 'We charge \uFF19\uFF19.'],
+    ['Arabic-Indic digits', 'We charge \u0664\u0669.'],
+    ['a superscript', 'We cover lot sizes of 5\u00B2.'],
+    ['a superscript alone', 'We cover lot \u00B2.'],
+    ['a vulgar fraction', 'We treat \u00BD of the yard.'],
+    ['a circled number', 'We treat zone \u2460.'],
+    // Multiplying and fraction words.
+    ['twice', 'We come out twice.'],
+    ['thrice', 'We come out thrice.'],
+    ['double', 'We apply a double treatment.'],
+    ['triple', 'We offer triple coverage.'],
+    ['quadruple', 'We offer quadruple coverage.'],
+    ['a quarter', 'We treat a quarter of the yard.'],
+    ['quarters', 'We treat the yard in quarters.'],
+    ['a third', 'We treat a third of the yard.'],
+    ['thirds', 'We treat the yard in thirds.'],
+    ['halves', 'We treat the yard in halves.'],
+  ])('number_in_fact blocks %s (intended)', (_label, text) => {
+    expect(blocksOf(text)).toContain('number_in_fact');
+  });
+
+  test.each([
+    'We offer quarterly, monthly, weekly and annual plans.',
+    'We work with a third-party lab, and a third party checks it.',
+    'We came out once and will come back.',
+    'Quarterly service keeps pests away.',
+    'One of our techs will call you back.',
+    'Ask one another.',
+    'There is no one at the office overnight.',
+    'Anyone can call, and someone will answer.',
+    'This one is included, and so is that one.',
+    'Which one do you need?',
+    'Each one is checked by a technician.',
+    'We offer a one-time service and a one-off visit.',
+    'A technician comes by, and an inspection is included.',
+    'The first visit and the second visit follow the same steps.',
+    'We service Palmetto and Parrish on Tuesdays.',
+  ])('number_in_fact lets this through: %s', (text) => {
+    expect(blocksOf(text)).not.toContain('number_in_fact');
   });
 
   test('lowercase sentence starts count, and abbreviations do not split a sentence', () => {
@@ -343,6 +427,90 @@ describe('snapshot', () => {
       ownerEvent(rows[4], { detail: null }),
     ];
     expect((await Bank._test.loadVerifiedFacts(fakeDb(rows, [], events))).map((f) => f.id)).toEqual([rows[0].id]);
+  });
+
+  test('the timing guard also runs across line boundaries (adjacent pairs), and never sees text over the 2,000-character SMS limit', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const timingCalls = [];
+    const spy = jest.spyOn(drafter, 'hasBannedCustomerCopy').mockImplementation((text, opts) => {
+      if (opts && opts.rainTimeGuard) {
+        timingCalls.push(text.length);
+        return /alpha/.test(text) && /bravo/.test(text); // a claim that only exists when the two lines sit together
+      }
+      return false;
+    });
+    try {
+      const alpha = approved(1, 'We service the alpha zone.');
+      const bravo = approved(2, 'We service the bravo zone.');
+      const filler = Array.from({ length: 20 }, (_, i) => approved(3 + (i % 6), `${'We service the zone beside the park number '.repeat(3)}${i}.`, { id: `00000000-0000-4000-8000-0000000002${String(i).padStart(2, '0')}` }));
+      expect((await Bank._test.loadVerifiedFacts(fakeDb([alpha]))).map((f) => f.id)).toEqual([alpha.id]);
+      expect(await Bank._test.loadVerifiedFacts(fakeDb([alpha, bravo]))).toEqual([]);
+      // Not adjacent, but the whole section fits the limit, so the joined section is checked too.
+      expect(Bank._test.sectionHasBannedCopy(['We service the alpha zone.', 'We cover it.', 'We service the bravo zone.'])).toBe(true);
+      expect(Bank._test.sectionHasBannedCopy(['We service the alpha zone.', 'We service the bravo zone.'])).toBe(true);
+      timingCalls.length = 0;
+      const long = ['We service the alpha zone.', ...filler.map((f) => f.fact_text), 'We service the bravo zone.'];
+      expect(long.join(' ').length).toBeGreaterThan(2000);
+      // Over the limit: only adjacent pairs are checked, so the two far-apart lines are not caught together (and no oversized text is sent).
+      expect(Bank._test.sectionHasBannedCopy(long)).toBe(false);
+      expect(timingCalls.length).toBeGreaterThan(0);
+      expect(Math.max(...timingCalls)).toBeLessThanOrEqual(2000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('EVERY contiguous run is judged: a claim the guard rejects in a short run is blocked even when a longer run passes', () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const calls = [];
+    // Rejects "alpha" + "bravo" together unless the run also holds "gamma" (a longer run passes).
+    const spy = jest.spyOn(drafter, 'hasBannedCustomerCopy').mockImplementation((text, opts) => {
+      if (!(opts && opts.rainTimeGuard)) return false;
+      calls.push(text.length);
+      return /alpha/.test(text) && /bravo/.test(text) && !/gamma/.test(text);
+    });
+    try {
+      expect(Bank._test.sectionHasBannedCopy(['We service alpha.', 'We service bravo.', 'We service gamma.'])).toBe(true);
+      expect(Bank._test.sectionHasBannedCopy(['We service alpha.', 'We service gamma.', 'We service bravo.'])).toBe(false); // every run holds gamma or one marker
+      calls.length = 0;
+      const twenty = Array.from({ length: 20 }, (_, i) => `We service the zone beside the park number ${i}.`);
+      Bank._test.sectionHasBannedCopy(twenty);
+      expect(calls.length).toBeLessThanOrEqual(190);
+      expect(calls.length).toBe(190); // all 190 runs of two or more lines fit 2,000 characters here
+      expect(Math.max(...calls)).toBeLessThanOrEqual(2000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('REAL guard: a timing context line and a claim line with a neutral line between them are judged together, also in a bank over 2,000 characters', () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const real = drafter.hasBannedCustomerCopy;
+    const lengths = [];
+    const spy = jest.spyOn(drafter, 'hasBannedCustomerCopy').mockImplementation((text, opts) => {
+      if (opts && opts.rainTimeGuard) lengths.push(text.length);
+      return real(text, opts);
+    });
+    try {
+      const context = 'Rain can change our plans.';
+      const neutral = 'We service Palmetto on Tuesdays.';
+      const claim = 'Tomorrow is fine.';
+      const filler = Array.from({ length: 35 }, (_, i) => `We service the zone beside the park number ${i} on request every week.`);
+      // Each line, and each adjacent pair, passes the real guard alone.
+      expect(Bank._test.sectionHasBannedCopy([context, neutral])).toBe(false);
+      expect(Bank._test.sectionHasBannedCopy([neutral, claim])).toBe(false);
+      expect(Bank._test.sectionHasBannedCopy([context, neutral, claim])).toBe(true);
+      lengths.length = 0;
+      const long = [context, neutral, claim, ...filler];
+      expect(long.join(' ').length).toBeGreaterThan(2000);
+      expect(Bank._test.sectionHasBannedCopy(long)).toBe(true);
+      expect(Math.max(...lengths)).toBeLessThanOrEqual(2000);
+      // The same lines with the context line more than a reply away from the claim: no reply holds both, so they are not judged together.
+      expect(Bank._test.sectionHasBannedCopy([context, ...filler, claim])).toBe(false);
+      expect(Math.max(...lengths)).toBeLessThanOrEqual(2000);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('"We use safe pesticides" written around the service is dropped at load', async () => {

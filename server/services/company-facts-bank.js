@@ -82,23 +82,30 @@ const ABBREVIATION_END_RE = /(?:\b[a-z]\.){2,}$|\b(?:mr|mrs|ms|dr|vs|approx|inc)
 // ("safe" is a hard block).
 const SAFETY_CLAIM_RE = /\bsafe(?:r|st|ly)?\b|\bnon[\s-]?toxic\b|\bharmless\b|\ball[\s-]?natural\b|\b(?:no|zero|without)\s+(?:harsh\s+|harmful\s+)?(?:chemicals?|toxins?|pesticides?)\b|\b(?:chemical|toxin|poison|pesticide)[\s-]?free\b|\b(?:eco|environmentally|child|kid|pet|family)[\s-]?friendly\b|\b(?:organic|green)\s+(?:pest|treatment|product|spray)/i;
 
-// Prices written without a currency sign. (1) a rate: a number per/a/each/slash a billing unit ("99 per visit", "49/mo", "49 a month");
-// (2) a number near a price word ("costs 99", "starts at 49", "the fee is 129.99"), unless it is a count or measure ("only 3 visits",
-// "costs 2 hours") or a year ("costs have risen since 2024"); (3) a two-decimal figure that is not a measure ("129.99").
-// Counts and times that are not prices ("3 visits", "every 90 days", "2 hours", "1 acre", "4 quarterly visits", years) pass.
-const AMOUNT_SRC = '\\d{1,3}(?:,\\d{3})+(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?';
-const UNIT_SRC = '(?:square|sq|visits?|days?|hours?|hrs?|minutes?|mins?|weeks?|months?|years?|acres?|feet|foot|ft|inch(?:es)?|miles?|times|treatments?|applications?|services?|stops?|trucks?|techs?|technicians?|people|customers?|properties|homes?|houses?|units?|zones?|rooms?|pests?|ants?|%|percent|a\\.?m\\.?|p\\.?m\\.?|st|nd|rd|th)\\b';
-const BILLING_UNIT_SRC = '(?:mo(?:nth)?|months?|visits?|applications?|treatments?|services?|years?|yr|quarters?|weeks?|wk|times?)\\b';
-const RATE_RE = new RegExp(`(?<![\\d.,])(?:${AMOUNT_SRC})(?!\\d|[.,]\\d)\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
-const PRICE_WORD_NUMBER_RE = new RegExp(`\\b(?:costs?|costing|price[ds]?|pricing|fees?|charged?|charges|rates?|quoted?|pays?|paying|billed|starts?\\s+at|starting\\s+(?:at|from)|as\\s+low\\s+as|only|just)\\b([^.\\d]{0,20})(?<![\\d.,])(${AMOUNT_SRC})(?!\\d|[.,]\\d)(?!\\s*${UNIT_SRC})`, 'gi');
-const DECIMAL_FIGURE_RE = new RegExp(`(?<![\\d.])\\d{1,4}\\.\\d{2}(?!\\d)(?!\\s*${UNIT_SRC})`, 'i');
-const YEAR_CONTEXT_RE = /\b(?:in|since|by|until|during|before|after|year|years)\b/i;
+// number_in_fact: a bank fact states NO amount at all (owner: facts state no prices, counts, measures or times; the agents read them as
+// policy, and every attempt to tell a price from a count by wording kept leaking). So the text may hold no digit of any script (any
+// Unicode decimal digit or other number character: fullwidth, Arabic-Indic, superscripts, vulgar fractions such as a half sign) and no
+// number word: zero to nineteen, the tens, hundred, thousand, million, billion, dozen, couple, and the multiplying or fraction words
+// half/halves, quarter(s), third(s) (but not "third-party"), twice, thrice, double, triple, quadruple. NO exception for clock times:
+// "Office opens at nine a.m." blocks (intended; the owner rewords). "Quarterly", "monthly", "weekly", "once", "first" and "second" are
+// not numbers. "Prices" and "rates" are not numbers either: the screens for those words are the soft warnings.
+const UNIT_WORD = 'one|two|three|four|five|six|seven|eight|nine';
+const TEEN_WORD = 'ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
+const NUMBER_WORD_RE = new RegExp(`\\b(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen|couple|half|halves|quarters?|thirds?(?![-\\s]party\\b)|twice|thrice|double|triple|quadruple)\\b`, 'gi');
+const NUMBER_CHAR_RE = /[\p{Nd}\p{No}]/u;
+// "one" as a pronoun or in a compound is not a number: "one of our techs", "one another", "no one", "this one", "which one", "one-time".
+// ("anyone", "someone" and "everyone" never match \b one \b.) A counting "one" ("one visit", "one acre") still blocks.
+const ONE_PRONOUN_AFTER_RE = /^(?:\s+(?:of|another)\b|-(?:time|off)\b)/i;
+const ONE_PRONOUN_BEFORE_RE = /\b(?:no|this|that|which|each|every)\s+$/i;
 
-function hasUnmarkedPrice(text) {
-  if (RATE_RE.test(text) || DECIMAL_FIGURE_RE.test(text)) return true;
-  for (const m of text.matchAll(PRICE_WORD_NUMBER_RE)) {
-    const isYear = /^(?:19|20)\d{2}$/.test(m[2]) && YEAR_CONTEXT_RE.test(m[1]);
-    if (!isYear) return true;
+/** True when the text states an amount: any digit or number character, or any number word. */
+function hasNumberInFact(text) {
+  const plain = String(text);
+  if (NUMBER_CHAR_RE.test(plain)) return true;
+  for (const m of plain.matchAll(NUMBER_WORD_RE)) {
+    const pronoun = m[0].toLowerCase() === 'one'
+      && (ONE_PRONOUN_AFTER_RE.test(plain.slice(m.index + 3)) || ONE_PRONOUN_BEFORE_RE.test(plain.slice(0, m.index)));
+    if (!pronoun) return true;
   }
   return false;
 }
@@ -139,14 +146,18 @@ function loadScreens() {
   return screens;
 }
 
-function countSentences(text) {
-  let count = 0;
-  let previous = '';
+/** Sentences of a line: split after . ! ? and white space (any case), but not after a dotted abbreviation. */
+function splitSentences(text) {
+  const out = [];
   for (const part of String(text).split(SENTENCE_END_RE).filter((piece) => piece.trim())) {
-    if (!previous || !ABBREVIATION_END_RE.test(previous.trim())) count += 1;
-    previous = part;
+    if (out.length && ABBREVIATION_END_RE.test(out[out.length - 1].trim())) out[out.length - 1] += ` ${part}`;
+    else out.push(part);
   }
-  return count;
+  return out;
+}
+
+function countSentences(text) {
+  return splitSentences(text).length;
 }
 
 /** The full catalog names (4+ characters, normalised) plus the explicit brand aliases. */
@@ -162,6 +173,31 @@ function productTokens(names) {
 function mentionsProduct(text, tokens) {
   const padded = ` ${normalise(text)} `;
   for (const token of tokens) if (padded.includes(` ${token} `)) return true;
+  return false;
+}
+
+/**
+ * The whole-bank check, as a reader renders the lines one after another. The plain banned-copy screen runs on the full section. The
+ * timing guard (rainfast, re-entry, drying) judges a line by the rain, pet and stay-off wording ANYWHERE in the same reply, so it runs on
+ * EVERY contiguous run of two or more lines whose joined text stays within the SMS reply limit (2,000 characters; no text over it ever
+ * reaches the guard), so a verdict that depends on how much text surrounds a claim cannot be dodged by the choice of window. With the
+ * 20-line cap that is at most 190 guard calls. Two lines more than a reply apart are not judged together, since no reply holds both.
+ */
+const SMS_REPLY_LIMIT = 2000;
+function* timingWindows(texts) {
+  for (let i = 0; i < texts.length - 1; i += 1) {
+    let joined = texts[i];
+    for (let j = i + 1; j < texts.length; j += 1) {
+      joined += ` ${texts[j]}`;
+      if (joined.length > SMS_REPLY_LIMIT) break;
+      yield joined;
+    }
+  }
+}
+function sectionHasBannedCopy(texts) {
+  if (!texts.length) return false;
+  if (hasBannedCopy(texts.map((t) => `- ${t}`).join('\n'), { timing: false })) return true;
+  for (const window of timingWindows(texts)) if (hasBannedCopy(window)) return true;
   return false;
 }
 
@@ -207,7 +243,7 @@ function checkFactText(rawText, ctx = {}) {
   const blocks = [];
   if (text.length > MAX_FACT_CHARS) blocks.push('too_long');
   if (countSentences(text) > MAX_SENTENCES) blocks.push('too_many_sentences');
-  if (hasUnmarkedPrice(text)) blocks.push('price_amount');
+  if (hasNumberInFact(text)) blocks.push('number_in_fact');
   for (const [code, re] of SHAPE_BLOCKS) if (re.test(text)) blocks.push(code);
   if (loadScreens().injection.test(withoutShapes(text))) blocks.push('injection_shape');
   if (mentionsProduct(text, productTokens(ctx.productNames))) blocks.push('product_brand');
@@ -426,7 +462,7 @@ async function approveChecks(trx, row, { acknowledgeWarnings }) {
   const check = checkFactText(row.fact_text, ctx);
   const others = await approvedTextsExcept(trx, row.supersedes_id);
   if (others.length >= MAX_ACTIVE_FACTS) check.blocks.push('bank_full');
-  if (!check.blocks.length && hasBannedCopy(renderBankFactsLines([...others, { text: row.fact_text }]), { timing: false })) check.blocks.push('section_banned_copy');
+  if (!check.blocks.length && sectionHasBannedCopy([...others.map((o) => o.text), row.fact_text])) check.blocks.push('section_banned_copy');
   if (check.blocks.length) throw new FactError('BLOCKED', 422, { blocks: check.blocks, warnings: check.warnings.map((w) => w.code) });
   if (check.warnings.length && !acknowledgeWarnings) {
     throw new FactError('WARNINGS_NOT_ACKNOWLEDGED', 409, { warnings: check.warnings });
@@ -629,7 +665,7 @@ async function loadVerifiedFacts(dbi) {
     kept.push(Object.freeze({ id: row.id, topic: row.topic, text: row.fact_text.trim(), sha: row.text_sha256, approvedAt: row.approved_at }));
   }
   // The whole ordered list, as a reader renders it: lines that pass alone can fail together once a retire changes which lines sit side by side.
-  if (kept.length && hasBannedCopy(renderBankFactsLines(kept), { timing: false })) {
+  if (kept.length && sectionHasBannedCopy(kept.map((f) => f.text))) {
     dropped.push('section:section_banned_copy');
     kept.length = 0;
   }
@@ -714,5 +750,5 @@ module.exports = {
   invalidate,
   startBankRefresh,
   stopBankRefresh,
-  _test: { sha256, normalise, countSentences, loadVerifiedFacts, resetSnapshot: () => { state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
+  _test: { sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
 };
