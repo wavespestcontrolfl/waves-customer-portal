@@ -286,7 +286,7 @@ describe('generateGroundedDraft — offered_times structural check shares the re
     mockOneOpenSlot();
     const drafter = freshDrafter();
     const client = makeClient([
-      { reply: 'Sure — I will check on that and get right back to you.', intended_actions: [], missing_info: null },
+      { reply: 'Thanks for reaching out, Dana.', intended_actions: [], missing_info: null },
       { supported: true, violations: [] },
     ]);
     const r = await drafter.generateGroundedDraft(argsFor(client));
@@ -434,7 +434,7 @@ describe('generateGroundedDraft — the verifier receives the draft\'s offered_t
     expect(userContent).toContain('- Tuesday, September 29: 9:00 AM - 11:00 AM');
 
     const client2 = makeClient([
-      { reply: 'Sure — I will check on that and get right back to you.', intended_actions: [], missing_info: null },
+      { reply: 'Thanks for reaching out, Dana.', intended_actions: [], missing_info: null },
       { supported: true, violations: [] },
     ]);
     await drafter.generateGroundedDraft({
@@ -646,7 +646,7 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
     const drafter = setup([]);
     const client = makeClient([
       { reply: 'So sorry — we will come back for a free re-service.', intended_actions: [], missing_info: null },
-      { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate' }], missing_info: null },
+      { reply: 'So sorry about that, and thank you for telling us.', intended_actions: [{ type: 'escalate', note: 'needs_person' }], missing_info: null },
       { supported: true, violations: [] },
     ]);
     const r = await drafter.generateGroundedDraft(args(client));
@@ -683,7 +683,7 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
       // Generic — no lane named — but the inbound reports ants (pest), and
       // only lawn is eligible.
       { reply: "Good news — we'll send your free re-service link now.", intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }], missing_info: null },
-      { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate' }], missing_info: null },
+      { reply: 'So sorry about that, and thank you for telling us.', intended_actions: [{ type: 'escalate', note: 'needs_person' }], missing_info: null },
       { supported: true, violations: [] },
     ]);
     const r = await drafter.generateGroundedDraft(args(client));
@@ -819,7 +819,7 @@ describe('generateGroundedDraft — factsGeneratedAt is the exact instant the SL
     // the closure read is its own seam (an open calendar here); an unreadable one gives the untimed phrase
     jest.spyOn(require('../services/sms-followup-sla'), 'loadFollowupClosedDates').mockResolvedValue(new Set());
     const client = makeClient([
-      { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], missing_info: null },
+      { reply: 'So sorry about that, and thank you for telling us.', intended_actions: [{ type: 'escalate', note: 'needs_person' }], missing_info: null },
       { supported: true, violations: [] },
     ]);
     const r = await drafter.generateGroundedDraft(args(client));
@@ -840,7 +840,7 @@ describe('generateGroundedDraft — factsGeneratedAt is the exact instant the SL
     // the closure read is its own seam (an open calendar here); an unreadable one gives the untimed phrase
     jest.spyOn(require('../services/sms-followup-sla'), 'loadFollowupClosedDates').mockResolvedValue(new Set());
     const client = makeClient([
-      { reply: 'So sorry about that — a manager will reach out by 9 AM tomorrow morning.', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], missing_info: null },
+      { reply: 'So sorry about that, and thank you for telling us.', intended_actions: [{ type: 'escalate', note: 'needs_person' }], missing_info: null },
       { supported: true, violations: [] },
     ]);
     const r = await drafter.generateGroundedDraft(args(client));

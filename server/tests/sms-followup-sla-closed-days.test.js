@@ -8,7 +8,7 @@ const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
 const sla = require('../services/sms-followup-sla');
 const drafter = require('../services/sms-shadow-drafter');
 
-const { followupSlaPhrase, quotesFactsSlaTiming, buildFactsBlock, buildSystemPrompt } = drafter;
+const { followupSlaPhrase, buildFactsBlock, buildSystemPrompt } = drafter;
 const THANKSGIVING = new Set(['2026-11-26']);
 const CHRISTMAS_2027 = new Set(['2027-12-24', '2027-12-25']); // Saturday Christmas closes Friday 12-24 too
 const at = (iso) => new Date(iso);
@@ -146,14 +146,20 @@ describe('the verifier side accepts the untimed phrase and keeps its strictness'
     expect(sla.slaPhraseStatus('A person will reply by 9 AM tomorrow morning.', at('2026-09-28T23:00:00Z'), new Set())).toBe('stale');
   });
 
-  test('the drafter\'s own check quotes only the phrase the facts state', () => {
-    const facts = `FOLLOW-UP SLA RIGHT NOW: ${REOPEN}\nBILLING:\n`;
-    expect(quotesFactsSlaTiming(`A person will reply ${REOPEN}.`, facts)).toBe(true);
-    expect(quotesFactsSlaTiming('A person will reply within the hour.', facts)).toBe(false);
-    expect(quotesFactsSlaTiming('A person will reply by 9 AM tomorrow morning.', facts)).toBe(false);
-    expect(quotesFactsSlaTiming(`A person will reply ${REOPEN} or within the hour.`, facts)).toBe(false);
-    expect(quotesFactsSlaTiming('Thanks!', facts)).toBe(false);
-    expect(quotesFactsSlaTiming(`A person will reply ${REOPEN}.`, 'FOLLOW-UP SLA RIGHT NOW: within the hour\nBILLING:\n')).toBe(false);
+  // owner 2026-11-25: the drafter no longer quotes the follow-up phrase at all (quotesFactsSlaTiming is gone); the facts block still carries it
+  // for the send seams above, and a draft that quotes it is refused.
+  test('the drafter refuses every follow-up phrase, whichever one the facts state', () => {
+    const prior = process.env.GATE_SMS_REAL_ANSWERS;
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    try {
+      for (const phrase of [REOPEN, 'within the hour', 'by 9 AM tomorrow morning']) {
+        expect(drafter.validateNoFollowupPromise({ reply: `A person will reply ${phrase}.` }).ok).toBe(false);
+      }
+      expect(drafter.validateNoFollowupPromise({ reply: 'Thanks!' }).ok).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+      else process.env.GATE_SMS_REAL_ANSWERS = prior;
+    }
   });
 });
 

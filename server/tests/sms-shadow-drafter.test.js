@@ -143,6 +143,7 @@ describe('sms shadow drafter — response parsing', () => {
     );
     expect(parsed).toEqual({
       reply: 'Hello Dale! You are on the schedule.',
+      kind: 'ANSWER',
       intended_actions: [],
       auto_send_safe: true,
       missing_info: null,
@@ -776,7 +777,7 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
   test('no Zelle facts (nothing resolved: no target invoice, unverifiable state) ⇒ card/ACH only: "do not mention Zelle", never a guessed Zelle contact', () => {
     process.env.ZELLE_RECIPIENT = 'payments@wavespestcontrol.com';
     const block = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 50 } });
-    expect(optionsLine(block)).toBe(`${OPTIONS_BASE}; do not mention Zelle; if they ask about it, say a teammate will confirm`);
+    expect(optionsLine(block)).toBe(`${OPTIONS_BASE}; do not mention Zelle; if they ask about it, promise no confirmation`);
     expect(block).not.toMatch(/Zelle to \S/);
     expect(block).not.toContain('payments@wavespestcontrol.com');
     // an unverifiable state is the same thing: no sentence exists
@@ -834,7 +835,8 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     expect(p).toMatch(/ANY dollar amount \(a balance, an invoice, the monthly plan price or card charge\), or anything about Zelle ONLY by copying one of those sentences word for word, as a whole sentence/i);
     expect(p).toMatch(/Never write a dollar figure any other way/i);
     expect(p).toMatch(/If none fits - or BILLING says none is on file - do NOT state, imply or deny any status/i);
-    expect(p).toMatch(/say a teammate will confirm, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW/i);
+    expect(p).toMatch(/promise no check, confirmation or reply: answer what the facts do cover or return ABSTAIN, and add \{"type":"escalate","note":"needs_person"\}/i);
+    expect(p).not.toMatch(/using the EXACT wording from FOLLOW-UP SLA RIGHT NOW/i);
     // the old row-reading rules (Recent payments / "via" tags / paid lines) are gone: the model never sees raw payment rows
     expect(p).not.toMatch(/Recent payments/i);
     expect(p).not.toMatch(/\(or Open invoice\)/i);
@@ -1020,7 +1022,7 @@ describe('sealed-lane dispatch budget (08-15 tuning, raised again 2026-09-26)', 
 });
 
 describe('auto-send fallback publication', () => {
-  async function runDraft(autoSendResult, draftArgs = {}) {
+  async function runDraft(autoSendResult, draftArgs = {}, modelOutput = { reply: 'We are checking on that for you.', intended_actions: [], missing_info: null }) {
     jest.resetModules();
     process.env.SHADOW_DRAFT_VERIFY = 'false';
     process.env.SHADOW_FEWSHOT = 'false';
@@ -1059,7 +1061,7 @@ describe('auto-send fallback publication', () => {
     jest.doMock('../services/llm/call', () => ({
       dispatchWithFallback: jest.fn(async () => ({
         ok: true,
-        text: JSON.stringify({ reply: 'We are checking on that for you.', intended_actions: [], missing_info: null }),
+        text: JSON.stringify(modelOutput),
         model: 'fixture-model',
       })),
     }));
@@ -1215,5 +1217,190 @@ describe('auto-send fallback publication', () => {
       if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
       else process.env.SHADOW_FEWSHOT = priorFewshot;
     }
+  });
+});
+
+// DRAFT KINDS (owner 2026-11-25): ANSWER / ACK / ABSTAIN. Only an ANSWER may leave the silent shadow lane.
+describe('draft kinds', () => {
+  const { DRAFT_KINDS, ACK_REPLY, ackAllowed, settleDraftKind, validateNoFollowupPromise } = require('../services/sms-shadow-drafter');
+
+  describe('parseShadowResponse reads the kind', () => {
+    test.each([
+      ['{"kind":"ANSWER","reply":"Your visit is Tuesday.","intended_actions":[]}', 'ANSWER'],
+      ['{"kind":"abstain","reply":"","intended_actions":[]}', 'ABSTAIN'],
+      ['{"kind":"ACK","reply":"","intended_actions":[{"type":"none"}]}', 'ACK'],
+      ['{"reply":"Your visit is Tuesday.","intended_actions":[]}', 'ANSWER'],
+      ['{"reply":"","intended_actions":[]}', 'ABSTAIN'],
+      ['{"kind":"SHRUG","reply":"Your visit is Tuesday.","intended_actions":[]}', 'ANSWER'],
+    ])('%s -> %s', (text, kind) => {
+      expect(parseShadowResponse(text).kind).toBe(kind);
+    });
+  });
+
+  describe('ackAllowed: only a text that asks for nothing and requests no action', () => {
+    test.each(['Thanks!', 'ok', 'Thank you so much', '👍', 'The gate is open', 'Gate is unlocked', 'Noted, thanks'])('allows %p', (text) => {
+      expect(ackAllowed(text, '')).toBe(true);
+    });
+    test.each([
+      'Can you come Tuesday?', 'Please cancel my service', 'I want to move my appointment', 'Cancel',
+      'How much is the next visit', 'I was charged twice', 'Thanks but the ants are back', 'Thanks, I still see roaches',
+      'This is my rental property', 'My landlord pays', 'The kids are sick', 'Thanks, can you call me', 'Who is coming?', 'The dogs are inside',
+      'Thank you. Not happy with the last visit', "That didn't work", 'Thanks!!! when is the next one',
+      'x'.repeat(130), '', '   ',
+    ])('blocks %p', (text) => {
+      expect(ackAllowed(text, '')).toBe(false);
+    });
+    test('an open loop in the facts blocks it', () => {
+      const facts = 'UPCOMING SERVICES:\n- none\nVISIT STATUS & OPEN LOOPS:\n- WE OWE THEM: callback — Call back about the quote\n';
+      expect(ackAllowed('Thanks!', facts)).toBe(false);
+    });
+  });
+
+  describe('settleDraftKind', () => {
+    const parsed = (over = {}) => ({ reply: 'Your visit is Tuesday.', kind: 'ANSWER', intended_actions: [{ type: 'send_portal_link' }], auto_send_safe: false, offered_times: [{ date: 'Tuesday', window: '9-11' }], missing_info: null, ...over });
+    test('an ANSWER stays as drafted', () => {
+      const out = settleDraftKind(parsed(), { inboundMessage: 'When is my visit?' });
+      expect(out).toEqual({ ...parsed(), deliverableReply: 'Your visit is Tuesday.' });
+    });
+    test('an ANSWER with no text becomes an ABSTAIN', () => {
+      const out = settleDraftKind(parsed({ reply: '  ' }), { inboundMessage: 'When is my visit?' });
+      expect(out.kind).toBe(DRAFT_KINDS.ABSTAIN);
+      expect(out.reply).toBe('');
+    });
+    test('an ABSTAIN keeps no text, no times and only its escalate / none actions; the raw-actions flag is untouched', () => {
+      const out = settleDraftKind(parsed({
+        kind: 'ABSTAIN', reply: 'We will get back to you within the hour.', auto_send_safe: true,
+        intended_actions: [{ type: 'send_payment_link' }, { type: 'escalate', note: 'cancel_request' }, { type: 'book_appointment' }],
+      }), { inboundMessage: 'Cancel my plan' });
+      expect(out).toMatchObject({ kind: 'ABSTAIN', reply: '', deliverableReply: '', offered_times: [], auto_send_safe: true });
+      expect(out.intended_actions).toEqual([{ type: 'escalate', note: 'cancel_request' }]);
+      expect(settleDraftKind(parsed({ kind: 'ABSTAIN', reply: '', intended_actions: [] }), {}).intended_actions).toEqual([{ type: 'none' }]);
+    });
+    test('an ACK is always the fixed line with no action and no times, never auto-send-safe', () => {
+      const out = settleDraftKind(parsed({ kind: 'ACK', reply: 'We will call you right back!', auto_send_safe: true }), { inboundMessage: 'Thanks!', allowAck: true });
+      expect(out).toMatchObject({ kind: 'ACK', reply: ACK_REPLY, deliverableReply: '', intended_actions: [{ type: 'none' }], offered_times: [], auto_send_safe: false });
+    });
+    test.each([
+      ['a text that asks for something', 'Can you cancel my service?', true],
+      ['a lane that never records an acknowledgement', 'Thanks!', false],
+    ])('an ACK for %s becomes an ABSTAIN', (_label, inboundMessage, allowAck) => {
+      const out = settleDraftKind(parsed({ kind: 'ACK', reply: '' }), { inboundMessage, allowAck });
+      expect(out).toMatchObject({ kind: 'ABSTAIN', reply: '' });
+    });
+  });
+
+  describe('validateNoFollowupPromise: a stall is never a valid ANSWER', () => {
+    let prior;
+    beforeEach(() => { prior = process.env.GATE_SMS_REAL_ANSWERS; process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+    afterEach(() => { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; });
+    test.each([
+      'A person will check and reply within the hour.',
+      'A person will check and reply as soon as the office reopens.',
+      "We'll get back to you shortly.",
+      "I'll confirm the time and let you know.",
+      'Someone from the team will reach out tomorrow.',
+      'The office will follow up on that.',
+      'A teammate will look into it.',
+      'You will hear back from us soon.',
+      "I'm checking with the office on that.",
+      'Your quote will be ready by 9 AM tomorrow morning.',
+      'A teammate will text you tomorrow.',
+      'Someone will call you back.',
+    ])('rejects %p', (reply) => {
+      expect(validateNoFollowupPromise({ reply }).ok).toBe(false);
+    });
+    test.each([
+      'Your next visit is Tuesday, June 16, 9:00 AM - 11:00 AM.',
+      'We check the traps at each visit.',
+      'The tech will check the traps on the next visit.',
+      'You can pay at portal.wavespestcontrol.com.',
+      // the hand-off the rules allow: a teammate texts the pay link or the free re-service booking link, no time (Codex #8543 r1)
+      'A teammate will text their free re-service booking link.',
+      'Sorry about the ants. A teammate will text you the link to book the free re-service.',
+      'A teammate will text their pay link.',
+      'Got it, thank you.',
+      '',
+    ])('accepts %p', (reply) => {
+      expect(validateNoFollowupPromise({ reply }).ok).toBe(true);
+    });
+    test('a gate-off draft is never judged by it', () => {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      expect(validateNoFollowupPromise({ reply: 'A person will check and reply within the hour.' }).ok).toBe(true);
+    });
+  });
+
+  describe('draftShadowReply: the kind rides on the row and only an ANSWER can be delivered', () => {
+    // runDraft is scoped to the 'auto-send fallback publication' describe, so this one scripts the same mocks itself.
+    async function run(modelOutput, inboundMessage) {
+      jest.resetModules();
+      process.env.SHADOW_DRAFT_VERIFY = 'false';
+      process.env.SHADOW_FEWSHOT = 'false';
+      const insertedRows = [];
+      const mockDb = jest.fn(() => ({
+        insert: jest.fn((row) => { insertedRows.push(row); return { returning: jest.fn(async () => [{ id: 'draft-1' }]) }; }),
+      }));
+      const maybeAutoSend = jest.fn(async () => ({ sent: true }));
+      const publishSuggestion = jest.fn(async () => 'decision-1');
+      // mirrors sms-suggest-mode suggestionEligible: no reply text is never routed to a card or a send (the real function is exercised below)
+      const resolveDeliveryMode = jest.fn(async ({ reply }) => (reply ? 'auto_send' : 'shadow'));
+      jest.doMock('../models/db', () => mockDb);
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/context-aggregator', () => ({
+        getContextForCustomer: jest.fn(async () => ({ summary: 'QA customer', flags: [], smsHistory: [], customer: { billingLane: null }, billing: { outstandingBalance: 0, recentPayments: [] } })),
+        authorizedDuesCents: jest.fn(() => []),
+      }));
+      jest.doMock('../services/voice-profile-distiller', () => ({ getApprovedVoiceProfile: jest.fn(async () => null) }));
+      jest.doMock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn(async () => ({ ok: true, text: JSON.stringify(modelOutput), model: 'fixture-model' })) }));
+      jest.doMock('@anthropic-ai/sdk', () => jest.fn(() => ({ messages: { create: jest.fn() } })));
+      jest.doMock('../services/sms-auto-send', () => ({ autoSendActionsSafe: jest.fn(() => true), maybeAutoSend }));
+      jest.doMock('../services/sms-suggest-mode', () => ({
+        AUTO_SEND_MODE: 'auto_send', SUGGESTED_STATUS: 'suggested', resolveDeliveryMode, publishSuggestion,
+        supersedeStaleSuggestions: jest.fn(async () => 0), hasRedactionPlaceholder: jest.fn(() => false), hasPriceQuote: jest.fn(() => false),
+      }));
+      jest.doMock('../services/comms-lint', () => ({ lintComms: jest.fn(() => ({ pass: true, failures: [] })), toFlags: jest.fn(() => []) }));
+      const { draftShadowReply } = require('../services/sms-shadow-drafter');
+      await draftShadowReply({
+        inboundMessage, fromPhone: '+19415550100', customer: { id: 'customer-1' }, smsLogId: 'sms-1',
+        intent: { intent: 'general_customer_sms_needs_review', confidence: 0.9 },
+      });
+      return { row: insertedRows[0], maybeAutoSend, publishSuggestion, resolveDeliveryMode };
+    }
+    const stored = (row) => JSON.parse(row.intended_actions);
+
+    test('an ABSTAIN stores an empty draft_response and its kind, and is never routed, published or sent', async () => {
+      const r = await run({ kind: 'ABSTAIN', reply: 'A person will reply within the hour.', intended_actions: [{ type: 'escalate', note: 'needs_person' }], missing_info: 'the visit time' }, 'When will the office call me about the invoice');
+      expect(r.row.draft_response).toBe('');
+      expect(stored(r.row)).toMatchObject({ draft_kind: 'ABSTAIN', actions: [{ type: 'escalate', note: 'needs_person' }] });
+      expect(r.resolveDeliveryMode).toHaveBeenCalledWith(expect.objectContaining({ reply: '' }));
+      expect(r.maybeAutoSend).not.toHaveBeenCalled();
+      expect(r.publishSuggestion).not.toHaveBeenCalled();
+    });
+    test('an ACK stores the fixed line and its kind, and is never routed, published or sent even with auto-send on', async () => {
+      const r = await run({ kind: 'ACK', reply: '', intended_actions: [{ type: 'none' }], missing_info: null }, 'Thanks!');
+      expect(r.row.draft_response).toBe(ACK_REPLY);
+      expect(stored(r.row)).toMatchObject({ draft_kind: 'ACK', actions: [{ type: 'none' }] });
+      // routing is told there is no deliverable text, so the ACK is not eligible for a card or a send
+      expect(r.resolveDeliveryMode).toHaveBeenCalledWith(expect.objectContaining({ reply: '' }));
+      expect(r.maybeAutoSend).not.toHaveBeenCalled();
+      expect(r.publishSuggestion).not.toHaveBeenCalled();
+    });
+    test('an ACK for a text with a request is stored as an ABSTAIN with no text', async () => {
+      const r = await run({ kind: 'ACK', reply: '', intended_actions: [{ type: 'none' }], missing_info: null }, 'Thanks, but please cancel my plan');
+      expect(r.row.draft_response).toBe('');
+      expect(stored(r.row).draft_kind).toBe('ABSTAIN');
+      expect(r.maybeAutoSend).not.toHaveBeenCalled();
+    });
+    test('the real routing rule: an empty reply is shadow whatever the delivery gates say', async () => {
+      jest.resetModules();
+      const { resolveDeliveryMode } = require('../services/sms-suggest-mode');
+      await expect(resolveDeliveryMode({ reply: '', customerId: 'customer-1', smsLogId: 'sms-1', intent: 'general_customer_sms_needs_review' })).resolves.toBe('shadow');
+    });
+    test('an ANSWER still goes through the delivery rules exactly as before', async () => {
+      const r = await run({ kind: 'ANSWER', reply: 'Your plan covers the exterior.', intended_actions: [], missing_info: null }, 'Does my plan cover the exterior?');
+      expect(r.row.draft_response).toBe('Your plan covers the exterior.');
+      expect(stored(r.row).draft_kind).toBe('ANSWER');
+      expect(r.resolveDeliveryMode).toHaveBeenCalledWith(expect.objectContaining({ reply: 'Your plan covers the exterior.' }));
+      expect(r.maybeAutoSend).toHaveBeenCalledTimes(1);
+    });
   });
 });

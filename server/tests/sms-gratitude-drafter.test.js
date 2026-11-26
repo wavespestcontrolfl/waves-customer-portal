@@ -165,6 +165,7 @@ describe('live-webhook gratitude drafter boundary', () => {
     });
     expect(JSON.parse(stored.intended_actions)).toEqual({
       actions: [{ type: 'none' }],
+      draft_kind: 'ANSWER',
       missing_info: null,
       verify: { passes: 1, converged: true },
       voice_profile_version: null,
@@ -241,7 +242,7 @@ describe('live-webhook gratitude drafter boundary', () => {
     expect(getContextForCustomer.mock.calls.map((c) => c[1].includeLiveEta)).toEqual([false, true]);
   });
 
-  test('gate on + an open loop + an empty model reply: revised, never passed as "no reply warranted"', async () => {
+  test('gate on + an open loop + an empty model reply: an ABSTAIN (a person handles it), recorded as one, never published or sent', async () => {
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
     const visitLoops = { lateAlert: null, pastWindow: null, weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back about the quote' }], customerWaiting: [] };
     const result = await runDraft({
@@ -249,11 +250,12 @@ describe('live-webhook gratitude drafter boundary', () => {
       intended_actions: [{ type: 'none', note: 'no reply warranted' }],
       missing_info: null,
     }, { deliveryMode: 'suggest', contextExtra: { visitLoops } });
-    // the empty draft failed the open-loop check and was sent back for revision
-    expect(result.dispatchWithFallback.mock.calls.length).toBeGreaterThan(1);
-    // still empty after the revision budget: unconverged, so nothing is published or sent
-    expect(result.publishSuggestion).not.toHaveBeenCalled();
-    expect(result.maybeAutoSend).not.toHaveBeenCalled();
+    // owner 2026-11-25: an open loop no longer forces a reply; the empty draft is an ABSTAIN and is not revised
+    expect(result.dispatchWithFallback.mock.calls.length).toBe(1);
+    expect(result.insertedRows[0].draft_response).toBe('');
+    expect(JSON.parse(result.insertedRows[0].intended_actions).draft_kind).toBe('ABSTAIN');
+    // routing is told there is no deliverable text (the real routing rule turns that into shadow; this harness mocks it)
+    expect(result.resolveDeliveryMode).toHaveBeenCalledWith(expect.objectContaining({ reply: '' }));
   });
 
   test('gate on + nothing that must be answered (a tracking gap only): still a gratitude candidate', async () => {

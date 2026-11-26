@@ -34,6 +34,8 @@ const MODELS = require('../config/models');
 // Codex round-18 P1: the gate-on facts block ALSO carries the owner-approved COMPANY FACTS "Paying:"
 // policy (sms-company-facts.js — the technician takes card, check or cash at the visit; customers can also pay by the
 // card or bank account on file, or by check or cash through the office; checks are mailed to the office, owner 2026-10-22), so a correct "You can mail us a check" is grounded there and must not be flagged.
+// Real answers (owner 2026-11-25): a draft promises no follow-up. The drafter returns an empty reply (ABSTAIN) when the facts do not answer.
+const FOLLOWUP_PROMISE_BULLET = 'Warm acknowledgments and generic brand voice are fine, but a promise that a person, the office, a teammate or the team will check, confirm, reply, call, text or get back to the customer (or any follow-up timing such as "within the hour") is a VIOLATION: the facts never license it. The one allowed hand-off is a teammate texting the pay link or the free re-service booking link, with no time promised, which is fine';
 const PAYMENT_METHOD_BULLET = `
 - a payment method or contact for HOW TO PAY (a Zelle phone/email, a specific "we take card/ACH" claim) — grounded ONLY if it matches the Payment options line in BILLING exactly OR the owner-approved COMPANY FACTS payment policy (the "Paying:" fact: which methods are accepted or declined — e.g. the technician can take a card, check or cash at the visit, and customers can also pay by the card or bank account on file, or by check or cash through the office — and where a check goes); a contact or method that matches one of those two sources is fine, one that appears in NEITHER is a fabrication (an unlisted method — Venmo, PayPal, a phone number, a made-up address — stays a fabrication)
 - a payment, invoice, refund or balance STATUS ("we received your $120 payment", "your invoice is paid", "it was refunded", "you're all paid up", "nothing is owed") — grounded ONLY if it is a word-for-word copy of one "Payment status sentences" line in BILLING (the whole sentence, unchanged); a status said in any other words, or one that adds a method, date, amount or reason the sentence does not state, is a fabrication`;
@@ -57,7 +59,7 @@ Check EVERY concrete detail in the draft, one by one — each:
 A detail is GROUNDED only if it appears in the FACTS, or in what the customer LITERALLY wrote. It is a VIOLATION if you cannot point to the exact source. Rules:
 - DEFAULT TO FLAGGING. If you are not certain a detail is grounded, flag it.
 - The customer's message supports ONLY their literal words — never an inference. A message about "spiders" does NOT support "flying bugs"; a message that just gives a name does NOT support a "pickup" request; "the trap" does NOT support "the attic trap".
-- Warm acknowledgments, generic brand voice, and offers to confirm/follow up are fine. But a SPECIFIC commitment, date, place, or job detail is a violation unless grounded.
+- ${realAnswers ? FOLLOWUP_PROMISE_BULLET : 'Warm acknowledgments, generic brand voice, and offers to confirm/follow up are fine.'} But a SPECIFIC commitment, date, place, or job detail is a violation unless grounded.
 - VALUE MATCHING — match the exact value, not just the category. A date, day, or time is grounded ONLY if that EXACT value is in the FACTS. A date that DIFFERS from the facts — even by one day — is a VIOLATION, never "close enough". Example: FACTS say next service 6/15, draft says "Tuesday June 16" → VIOLATION (wrong date, not the 6/15 on file). Seeing "there is a date in the facts" is NOT enough; the value must match.
 - AN ETA CLAIM ("about N minutes away", "N minutes out", "on the way, N minutes out") is grounded ONLY if the FACTS contain a "LIVE ETA" line for today's visit stating that EXACT number of minutes — a different number, a rounded-off number, or no LIVE ETA line at all, is a VIOLATION. "The tech is on the way" alone (no minutes stated) only needs a LIVE STATUS en-route line, same as before.
 - BILLING is high-stakes — any statement about billing status or resolution ("paid in full", "you're all set", "your payment went through", "that charge was an error", "it appears to be a mistake") is a VIOLATION unless that exact status is in BALANCE/FACTS. A reassurance the facts don't confirm is unsafe.
@@ -181,12 +183,14 @@ function parseVerifierResponse(text) {
   return { supported, violations };
 }
 
-function buildReviseAddendum(violations) {
+function buildReviseAddendum(violations, { realAnswers = false } = {}) {
   const list = (violations || []).map((v) => `- ${v}`).join('\n');
   return `Your previous draft was REJECTED by fact-check for asserting details the facts above do NOT support:
 ${list}
 
-Rewrite the reply now. State ONLY facts present in the context above. For anything you don't have — an exact time, a tech name, what was found, a billing detail — do NOT invent it: acknowledge warmly and say you'll confirm and get right back to them. Respond with the same JSON object format.`;
+Rewrite the reply now. State ONLY facts present in the context above. For anything you don't have — an exact time, a tech name, what was found, a billing detail — do NOT invent it: ${realAnswers
+    ? 'leave it out and promise no check, confirmation or reply. Answer only the parts the facts cover; when nothing is left, return "kind": "ABSTAIN" with an empty reply.'
+    : "acknowledge warmly and say you'll confirm and get right back to them."} Respond with the same JSON object format.`;
 }
 
 module.exports = {
