@@ -34,19 +34,42 @@ const cancelStyle = {
 
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export default function ProfileEditCard({ customer, enabled, refreshCustomer }) {
+// Which fields the customer changed since the form opened. Only these are sent and checked, so a name-only save
+// never rewrites an email another session corrected meanwhile, and a customer with no email can fix a name.
+function editedFields(form, opened) {
+  const next = { firstName: form.firstName.trim(), lastName: form.lastName.trim(), email: form.email.trim() };
+  const edited = {};
+  for (const key of Object.keys(next)) if (next[key] !== opened[key]) edited[key] = next[key];
+  return edited;
+}
+
+function fieldProblem(edited) {
+  if ('firstName' in edited && !edited.firstName) return 'Enter your first name.';
+  if ('email' in edited && !EMAIL_SHAPE.test(edited.email)) return 'Enter a valid email address.';
+  return '';
+}
+
+// The card shows only while /auth/me says the gate is on, for an account holder whose account is active.
+function profileEditAvailable(customer) {
+  return customer?.profileEdit === true && customer?.cancelled !== true && customer?.actor?.kind !== 'contact';
+}
+
+export default function ProfileEditCard({ customer, refreshCustomer }) {
   const [open, setOpen] = useState(false);
+  const [opened, setOpened] = useState({ firstName: '', lastName: '', email: '' });
   const [form, setForm] = useState({ firstName: '', lastName: '', email: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [saved, setSaved] = useState(false);
+  const [notice, setNotice] = useState('');
 
-  if (!enabled) return null;
+  if (!profileEditAvailable(customer)) return null;
 
   const begin = () => {
-    setForm({ firstName: customer?.firstName || '', lastName: customer?.lastName || '', email: customer?.email || '' });
+    const current = { firstName: customer?.firstName || '', lastName: customer?.lastName || '', email: customer?.email || '' };
+    setOpened(current);
+    setForm(current);
     setError('');
-    setSaved(false);
+    setNotice('');
     setOpen(true);
   };
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
@@ -54,15 +77,16 @@ export default function ProfileEditCard({ customer, enabled, refreshCustomer }) 
   const submit = async (e) => {
     e.preventDefault();
     if (busy) return;
-    const next = { firstName: form.firstName.trim(), lastName: form.lastName.trim(), email: form.email.trim() };
-    if (!next.firstName) { setError('Enter your first name.'); return; }
-    if (!EMAIL_SHAPE.test(next.email)) { setError('Enter a valid email address.'); return; }
+    const edited = editedFields(form, opened);
+    if (!Object.keys(edited).length) { setNotice('No changes to save.'); setOpen(false); return; }
+    const problem = fieldProblem(edited);
+    if (problem) { setError(problem); return; }
     setBusy(true);
     setError('');
     try {
-      await api.updateCustomerProfile(next);
+      const result = await api.updateCustomerProfile(edited);
       try { await refreshCustomer?.(); } catch { /* the save worked; the menu updates on the next load */ }
-      setSaved(true);
+      setNotice(Array.isArray(result?.changed) && result.changed.length ? 'Saved.' : 'No changes to save.');
       setOpen(false);
     } catch (err) {
       setError(err?.message || 'We could not save that. Please try again.');
@@ -75,7 +99,7 @@ export default function ProfileEditCard({ customer, enabled, refreshCustomer }) 
     return (
       <div>
         <button type="button" data-testid="profile-edit-open" onClick={begin} style={linkStyle}>Edit name and email</button>
-        {saved && <div role="status" style={{ fontSize: 14, color: SHELL.muted }}>Saved. We emailed you a note about the change.</div>}
+        {notice && <div role="status" style={{ fontSize: 14, color: SHELL.muted }}>{notice}</div>}
       </div>
     );
   }
@@ -91,7 +115,7 @@ export default function ProfileEditCard({ customer, enabled, refreshCustomer }) 
       <label style={labelStyle}>Email
         <input aria-label="Email" type="email" value={form.email} onChange={set('email')} maxLength={150} autoComplete="email" inputMode="email" style={inputStyle} />
       </label>
-      <div style={{ fontSize: 14, color: SHELL.muted }}>Your phone number is how you sign in, so it cannot be changed here. We email your old and new address when your email changes.</div>
+      <div style={{ fontSize: 14, color: SHELL.muted }}>Your phone number is how you sign in, so it cannot be changed here.</div>
       {error && <div role="alert" style={{ fontSize: 14, color: '#B42318' }}>{error}</div>}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
         <button type="submit" disabled={busy} data-testid="profile-edit-save" style={{ ...saveStyle, opacity: busy ? 0.65 : 1 }}>{busy ? 'Saving' : 'Save'}</button>

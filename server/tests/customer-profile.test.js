@@ -23,16 +23,25 @@ jest.mock('../middleware/auth', () => {
 
 let mockRow;
 let mockUpdates;
+let mockOrder;
+let mockLockedWhere;
 const mockTrxBuilder = () => {
   const b = {
-    where: jest.fn(() => b),
+    where: jest.fn((cond) => { if (!mockLockedWhere) mockLockedWhere = cond; return b; }),
     whereNull: jest.fn(() => b),
     forUpdate: jest.fn(() => b),
     first: jest.fn(async () => mockRow),
-    update: jest.fn(async (patch) => { mockUpdates.push(patch); return 1; }),
+    update: jest.fn(async (patch) => { mockOrder.push('update'); mockUpdates.push(patch); return 1; }),
   };
   return b;
 };
+const mockLockEmails = jest.fn(async () => { mockOrder.push('lock'); return []; });
+jest.mock('../utils/customer-comms-lock', () => ({ lockAssignedCustomerEmails: (...a) => mockLockEmails(...a) }));
+const mockEmailFanout = jest.fn(async () => { mockOrder.push('emailFanout'); return { pendingConfirmation: null, heldNewsletterResume: null }; });
+const mockResend = jest.fn(async () => {});
+jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: (...a) => mockEmailFanout(...a), resendPendingConfirmation: (...a) => mockResend(...a) }));
+const mockNameFanout = jest.fn(async () => { mockOrder.push('nameFanout'); });
+jest.mock('../services/customer-contact-fanout', () => ({ propagateCustomerNameChange: (...a) => mockNameFanout(...a) }));
 const mockDb = { transaction: jest.fn(async (fn) => fn(Object.assign(() => mockTrxBuilder(), { fn: { now: () => 'NOW' } }))) };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -69,8 +78,14 @@ beforeEach(() => {
   seq += 1;
   CUSTOMER_ID = `11111111-1111-4111-8111-${String(seq).padStart(12, '0')}`;
   mockSession = { customerId: CUSTOMER_ID };
-  mockRow = { id: CUSTOMER_ID, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL };
+  mockRow = { id: CUSTOMER_ID, active: true, first_name: 'Pat', last_name: 'Sample', email: OLD_EMAIL };
   mockUpdates = [];
+  mockOrder = [];
+  mockLockedWhere = null;
+  mockLockEmails.mockClear();
+  mockEmailFanout.mockClear();
+  mockNameFanout.mockClear();
+  mockResend.mockClear();
   mockDb.transaction.mockClear();
   mockAudit.mockClear();
   mockSend.mockClear();
@@ -150,7 +165,7 @@ describe('PUT /api/customer/profile', () => {
     expect(mockSend).toHaveBeenCalledTimes(2);
     const [toOld, toNew] = mockSend.mock.calls.map((c) => c[0]);
     expect(toOld.contactOverride).toEqual({ email: OLD_EMAIL, name: 'Pat' });
-    expect(toNew.contactOverride).toBeUndefined();
+    expect(toNew.contactOverride).toEqual({ email: 'new.address@example.test', name: 'Pat' });
     for (const call of [toOld, toNew]) {
       expect(call).toMatchObject({ customerId: CUSTOMER_ID, actorCustomerId: CUSTOMER_ID, alwaysNotify: true });
       expect(call.changedItems).toEqual([{ key: 'email', label: 'Email address', oldValue: OLD_EMAIL, newValue: 'new.address@example.test' }]);
@@ -164,7 +179,7 @@ describe('PUT /api/customer/profile', () => {
     expect(mockUpdates).toEqual([{ first_name: 'Sam', updated_at: 'NOW' }]);
     await flush();
     expect(mockSend).toHaveBeenCalledTimes(1);
-    expect(mockSend.mock.calls[0][0].contactOverride).toBeUndefined();
+    expect(mockSend.mock.calls[0][0].contactOverride).toEqual({ email: OLD_EMAIL, name: 'Sam' });
     expect(mockSend.mock.calls[0][0].changedItems).toEqual([{ key: 'name', label: 'Name', oldValue: 'Pat Sample', newValue: 'Sam Sample' }]);
   });
 
@@ -174,7 +189,54 @@ describe('PUT /api/customer/profile', () => {
     expect(res.status).toBe(200);
     await flush();
     expect(mockSend).toHaveBeenCalledTimes(1);
-    expect(mockSend.mock.calls[0][0].contactOverride).toBeUndefined();
+    expect(mockSend.mock.calls[0][0].contactOverride).toEqual({ email: 'first.address@example.test', name: 'Pat' });
+  });
+
+  test('a name-only edit for a customer with no email on file saves and sends nothing', async () => {
+    mockRow.email = null;
+    const res = await put({ firstName: 'Sam' });
+    expect(res).toMatchObject({ status: 200, body: { changed: ['firstName'] } });
+    expect(mockEmailFanout).not.toHaveBeenCalled();
+    await flush();
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('email change: locked read requires active, lock order is row then address key then write then fan-out', async () => {
+    await put({ email: 'new.address@example.test' });
+    expect(mockLockedWhere).toEqual({ id: CUSTOMER_ID, active: true });
+    expect(mockOrder).toEqual(['lock', 'update', 'emailFanout']);
+    expect(mockLockEmails.mock.calls[0][1]).toEqual({ email: 'new.address@example.test' });
+    const [args] = mockEmailFanout.mock.calls[0];
+    expect(args.before).toMatchObject({ email: OLD_EMAIL, first_name: 'Pat' });
+    expect(args.after).toMatchObject({ email: 'new.address@example.test', first_name: 'Pat' });
+    expect(args.reviewReasonCodes).toEqual(['customer_email_missing']);
+    expect(mockNameFanout).not.toHaveBeenCalled();
+  });
+
+  test('name change fans out to open records with the locked before/after rows', async () => {
+    await put({ firstName: 'Sam' });
+    expect(mockNameFanout).toHaveBeenCalledTimes(1);
+    const [args] = mockNameFanout.mock.calls[0];
+    expect(args.before).toMatchObject({ first_name: 'Pat' });
+    expect(args.after).toMatchObject({ first_name: 'Sam', last_name: 'Sample' });
+    expect(mockEmailFanout).not.toHaveBeenCalled();
+  });
+
+  test('a deferred DOI confirmation from the fan-out is sent after commit', async () => {
+    mockEmailFanout.mockResolvedValueOnce({ pendingConfirmation: { id: 'sub-1', email: 'new.address@example.test' } });
+    await put({ email: 'new.address@example.test' });
+    expect(mockResend).toHaveBeenCalledWith({ id: 'sub-1', email: 'new.address@example.test' });
+  });
+
+  test('a row cancelled after authenticate (no active row under the lock) is refused and nothing is sent', async () => {
+    mockRow = undefined;
+    const res = await put({ email: 'new.address@example.test' });
+    expect(res.status).toBe(404);
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockAudit).not.toHaveBeenCalled();
+    expect(mockEmailFanout).not.toHaveBeenCalled();
+    await flush();
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
   test('nothing changed: 200, no update, no audit row, no email', async () => {
@@ -182,6 +244,8 @@ describe('PUT /api/customer/profile', () => {
     expect(res).toMatchObject({ status: 200, body: { changed: [] } });
     expect(mockUpdates).toHaveLength(0);
     expect(mockAudit).not.toHaveBeenCalled();
+    expect(mockLockEmails).not.toHaveBeenCalled();
+    expect(mockEmailFanout).not.toHaveBeenCalled();
     await flush();
     expect(mockSend).not.toHaveBeenCalled();
   });

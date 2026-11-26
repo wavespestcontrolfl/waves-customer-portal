@@ -19239,7 +19239,7 @@ export default function PortalPage() {
                     </div>
                   </div>
                   {/* Edit own name and email (GATE_CUSTOMER_PROFILE_EDIT): /auth/me profileEdit is true only while the gate is on. */}
-                  <ProfileEditCard customer={customer} enabled={customer.profileEdit === true && !cancelledAccount && !contactSession} refreshCustomer={refreshCustomer} />
+                  <ProfileEditCard customer={customer} refreshCustomer={refreshCustomer} />
                 </div>
                 {propertiesError && (
                   <div role="alert" style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}`, background: '#FFF7ED' }}>

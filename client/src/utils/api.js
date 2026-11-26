@@ -439,10 +439,11 @@ export class ApiClient {
   }
 
   // The signed-in holder edits their own name and email (GATE_CUSTOMER_PROFILE_EDIT).
-  updateCustomerProfile({ firstName, lastName, email }) {
+  // Pass only the fields that changed: an omitted field is left as it is on the server.
+  updateCustomerProfile(fields) {
     return this.request('/customer/profile', {
       method: 'PUT',
-      body: JSON.stringify({ firstName, lastName, email }),
+      body: JSON.stringify(fields),
     });
   }
 
