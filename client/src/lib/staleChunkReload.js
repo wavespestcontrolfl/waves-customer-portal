@@ -94,6 +94,44 @@ import {
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 
+// A page the service worker opened from its saved copy (public/sw.js, when the
+// network was slow) can ask for a chunk the server replaced. Its one reload
+// must reach the network, or the worker hands it the same saved copy again.
+// So the reload first tells the worker to skip the saved copy for the next
+// page load, and waits for its ack. The wait is short and bounded: with no
+// worker, no ack or a failed message the reload still runs. Every reload that
+// heals a missing chunk goes through here.
+export const NETWORK_NEXT_MESSAGE = 'waves:network-next-navigation';
+const NETWORK_NEXT_WAIT_MS = 300;
+
+export function reloadFromNetwork(reload = () => window.location.reload()) {
+  let controller = null;
+  try { controller = navigator.serviceWorker?.controller || null; } catch { /* no worker API */ }
+  if (!controller) {
+    reload();
+    return;
+  }
+  let timer = null;
+  let channel = null;
+  let reloaded = false;
+  const go = () => {
+    if (reloaded) return;
+    reloaded = true;
+    clearTimeout(timer);
+    if (channel) channel.port1.close();
+    reload();
+  };
+  try {
+    channel = new MessageChannel();
+    channel.port1.onmessage = go;
+    controller.postMessage({ type: NETWORK_NEXT_MESSAGE }, [channel.port2]);
+  } catch {
+    go();
+    return;
+  }
+  timer = setTimeout(go, NETWORK_NEXT_WAIT_MS);
+}
+
 // The error for a chunk the live build no longer serves: the browser's own
 // for a module script (Chrome, Safari, Firefox), webpack's name, and Vite's
 // for a page stylesheet gone the same way.
@@ -345,7 +383,7 @@ export function markStaleChunkReloadPending() {
 
 // Call right before location.assign. Returns the call that closes the window
 // when the navigation did not start.
-export function markPageNavigating(reload = () => window.location.reload()) {
+export function markPageNavigating(reload = reloadFromNetwork) {
   const until = Date.now() + NAVIGATION_WINDOW_MS;
   navigatingUntil = until;
   // The page is still here: the navigation never committed, and React.lazy
@@ -371,7 +409,7 @@ export function markPageNavigating(reload = () => window.location.reload()) {
 
 // One-shot guard (takeChunkReload) so a genuine outage still surfaces instead
 // of reload-looping.
-export function handleVitePreloadError(event, reload = () => window.location.reload()) {
+export function handleVitePreloadError(event, reload = reloadFromNetwork) {
   if (pageNavigating()) {
     chunkHeld = true;
     event.preventDefault();
@@ -447,7 +485,7 @@ export function missingCodeIsNewVersion(newer, offline) {
 export async function reloadForMissingCode({
   pathname,
   current = () => true,
-  reload = () => window.location.reload(),
+  reload = reloadFromNetwork,
   now,
 } = {}) {
   const atPage = () => samePage(window.location.pathname, pathname);

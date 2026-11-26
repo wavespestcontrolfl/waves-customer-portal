@@ -679,6 +679,116 @@ function withoutUrl(response) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
+// A page load that the network has not answered in SLOW_NAV_MS is answered
+// from the saved app copy (the shell stored under OFFLINE_URL), when the
+// current bucket holds one. On weak cell signal a fetch often hangs instead
+// of failing, so waiting for it to throw left the screen blank for a minute.
+// The fetch keeps running: when it lands ok the saved copy is refreshed
+// (refreshShellAfterNavigation), so the next open is current. With no saved
+// copy the load waits for the network, as before.
+const SLOW_NAV_MS = 3000;
+
+// A page that opened from the saved copy may ask for a chunk the server no
+// longer has, and reloads once to heal (client/src/lib/staleChunkReload.js).
+// That reload must wait for the network, or it opens the same saved copy
+// again. The page sends this message first; the next page load, within
+// NETWORK_NEXT_MS and once only, skips the SLOW_NAV_MS race. The page waits
+// for the ack on the message's port, so the flag is set before it reloads.
+const NETWORK_NEXT_MESSAGE = 'waves:network-next-navigation';
+const NETWORK_NEXT_ACK = 'waves:network-next-ack';
+const NETWORK_NEXT_MS = 30000;
+let networkNextUntil = 0;
+
+function takeNetworkNext() {
+  const active = Date.now() < networkNextUntil;
+  networkNextUntil = 0;
+  return active;
+}
+
+self.addEventListener('message', event => {
+  if (!event.data || event.data.type !== NETWORK_NEXT_MESSAGE) return;
+  networkNextUntil = Date.now() + NETWORK_NEXT_MS;
+  const port = event.ports && event.ports[0];
+  if (port) port.postMessage({ type: NETWORK_NEXT_ACK });
+});
+
+// The network's answer to a page load. It never rejects: a failed fetch is
+// { response: null }. `copy` is cloned the moment the response lands, before
+// the page can lock the body, for the shell refresh; only an ok response has one.
+function startNavigationFetch(request) {
+  return fetch(request).then(
+    response => (response && response.ok ? { response, copy: response.clone() } : { response }),
+    () => ({ response: null }),
+  );
+}
+
+async function savedShell() {
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    return (await cache.match(OFFLINE_URL)) || null;
+  } catch {
+    return null;
+  }
+}
+
+// The network failed: the saved copy, or a page that retries by itself. A
+// bare Response always, never undefined, so iOS standalone PWAs never render
+// a blank screen on flaky cellular.
+async function offlineNavigationResponse(request) {
+  const currentCache = await caches.open(CACHE_NAME);
+  const cached = (await currentCache.match(OFFLINE_URL)) || (await currentCache.match(request));
+  if (cached) return cached;
+  return new Response(OFFLINE_FALLBACK_HTML, {
+    status: 200,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+  });
+}
+
+// The page's response. `decide` tells the shell refresh which one the page
+// got: 'saved' (the saved copy, on a slow network) or 'network'.
+async function answerNavigation(request, attempt, mayServeSaved, decide) {
+  let timer;
+  try {
+    if (mayServeSaved) {
+      const slow = new Promise(resolve => { timer = setTimeout(resolve, SLOW_NAV_MS, 'slow'); });
+      if ((await Promise.race([attempt, slow])) === 'slow') {
+        const shell = await savedShell();
+        if (shell) {
+          decide('saved');
+          return shell;
+        }
+      }
+    }
+    const { response } = await attempt;
+    return response || await offlineNavigationResponse(request);
+  } finally {
+    clearTimeout(timer);
+    decide('network'); // no effect once 'saved' was decided
+  }
+}
+
+// Refresh the saved copy only after all of the HTML's hashed assets are
+// available (cacheCompleteShellResponse). The page is served already; if
+// this refresh fails, the last complete shell remains intact. When the page
+// got the network's HTML, advance the live build before the (serialized,
+// possibly slow) refresh lands, so chunks this page loads meanwhile are
+// tagged with its own build. When the page got the SAVED copy it runs the
+// saved build, not this response's, so the live build stays where it was.
+// A shell without assets is not a build.
+function refreshShellAfterNavigation(attempt, choice, navSeq, startedAt) {
+  return Promise.all([attempt, choice]).then(([{ copy }, chosen]) => {
+    if (!copy) return undefined;
+    const advance = chosen === 'saved' ? Promise.resolve() : copy.clone().text().then(html => {
+      const assets = shellAssetUrls(html);
+      if (assets.length) advanceLiveBuild(buildIdOf(assets), navSeq);
+    });
+    return Promise.all([
+      advance.catch(() => {}),
+      cacheCompleteShellResponse(copy, navSeq, { startedAt }).catch(() => {}),
+    ]);
+  }).catch(() => {});
+}
+
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
@@ -705,34 +815,18 @@ self.addEventListener('fetch', event => {
     // after a later request answered by the newer one.
     const navSeq = ++navigationSeq;
     const startedAt = Date.now();
-    event.respondWith((async () => {
-      try {
-        const response = await fetch(event.request);
-        // Refresh the offline shell only after all of the HTML's hashed assets
-        // are available. Keep serving the current page immediately; if this
-        // background refresh fails, the last complete shell remains intact.
-        if (response && response.ok) {
-          // Advance the live build before the (serialized, possibly slow)
-          // refresh lands, so chunks this page loads meanwhile are tagged
-          // with its own build. A shell without assets is not a build.
-          event.waitUntil(response.clone().text().then(html => {
-            const assets = shellAssetUrls(html);
-            if (!assets.length) return;
-            advanceLiveBuild(buildIdOf(assets), navSeq);
-          }).catch(() => {}));
-          event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq, { startedAt }).catch(() => {}));
-        }
-        return response;
-      } catch {
-        const currentCache = await caches.open(CACHE_NAME);
-        const cached = (await currentCache.match(OFFLINE_URL)) || (await currentCache.match(event.request));
-        if (cached) return cached;
-        return new Response(OFFLINE_FALLBACK_HTML, {
-          status: 200,
-          headers: { 'Content-Type': 'text/html; charset=utf-8' },
-        });
-      }
-    })());
+    // Only a GET page load may be answered from the saved copy when the
+    // network is slow, and one that follows a reload for a missing chunk
+    // (NETWORK_NEXT_MESSAGE) never is. A form POST leaves the flag unread.
+    const mayServeSaved = event.request.method === 'GET' && !takeNetworkNext();
+    const attempt = startNavigationFetch(event.request);
+    let decide;
+    const choice = new Promise(resolve => { decide = resolve; });
+    // Registered here, in the handler's own turn: the background work must
+    // outlive a response sent before the network answers, and waitUntil can
+    // throw once respondWith has settled.
+    event.waitUntil(refreshShellAfterNavigation(attempt, choice, navSeq, startedAt));
+    event.respondWith(answerNavigation(event.request, attempt, mayServeSaved, decide));
     return;
   }
 

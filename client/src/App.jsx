@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from '
 import { reportError } from './lib/reportError';
 import {
   CHUNK_RELOAD_FLAG, isChunkError, isStaleChunkReloadPending, markStaleChunkReloadPending, missingCodeIsNewVersion,
-  noteChunkLoaded, reloadForMissingCode, staffTab, takeChunkReload, trackStaffImport, usedOnPageInView,
+  noteChunkLoaded, reloadForMissingCode, reloadFromNetwork, staffTab, takeChunkReload, trackStaffImport, usedOnPageInView,
 } from './lib/staleChunkReload';
 import { PortalUpdateBar, PortalUpdateGate, useBrowserOffline, useHoldAwareReload, useNewerBuild, usePageUse } from './components/PortalUpdate';
 import { AuthProvider, useAuth } from './hooks/useAuth';
@@ -310,7 +310,7 @@ function ChunkLoadFallback({ newVersion = false, staff = false }) {
       <CustomerFailureScreen
         title="Couldn’t load this page"
         message="Check your connection and try again."
-        onRetry={() => { clearChunkReloadFlag(); window.location.reload(); }}
+        onRetry={() => { clearChunkReloadFlag(); reloadFromNetwork(); }}
       />
     );
   }
@@ -424,7 +424,7 @@ export function lazyWithRetry(factory) {
         // opened meanwhile, past that page's holds.
         if (takeChunkReload()) {
           markStaleChunkReloadPending();
-          window.location.reload();
+          reloadFromNetwork();
           return { default: RouteFallback };
         }
         // Already auto-reloaded once, or no session storage to stop a loop —

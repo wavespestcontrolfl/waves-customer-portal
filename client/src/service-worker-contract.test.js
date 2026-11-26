@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -114,6 +114,10 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
     Headers,
     URL,
     fetch: async (request) => fakeResponse(`asset:${request.url}`),
+    // Looked up when called, so a test's fake timers (installed before the
+    // worker loads or after) drive the slow-network timer.
+    setTimeout: (...args) => setTimeout(...args),
+    clearTimeout: (timer) => clearTimeout(timer),
     clients: workerClients,
     console,
   };
@@ -121,11 +125,11 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
   vm.runInContext(`${source}\n;this.__exports = { cacheCompleteShellResponse, pruneStaleAssets, buildIdOf, shellAssetUrls };`, sandbox);
   // Simulate the page requesting a URL: returns the handler's response after
   // its extend-lifetime work has settled (unless the caller wants to hold it).
-  async function dispatchFetch(pathname, { mode = 'no-cors', settle = true } = {}) {
+  async function dispatchFetch(pathname, { mode = 'no-cors', settle = true, method = 'GET' } = {}) {
     const pending = [];
     let responded;
     listeners.fetch({
-      request: { url: `https://portal.test${pathname}`, mode, destination: mode === 'navigate' ? 'document' : 'script' },
+      request: { url: `https://portal.test${pathname}`, method, mode, destination: mode === 'navigate' ? 'document' : 'script' },
       respondWith(promise) { responded = promise; },
       waitUntil(promise) { pending.push(promise); },
     });
@@ -144,6 +148,12 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
     const pending = [];
     listeners.activate({ waitUntil(promise) { pending.push(promise); } });
     await Promise.all(pending);
+  }
+  // A page's message to the worker; the reply port records the ack.
+  function dispatchMessage(data) {
+    const port = { postMessage: vi.fn() };
+    listeners.message({ data, ports: [port] });
+    return port;
   }
   async function dispatchPush(data) {
     const pending = [];
@@ -164,7 +174,7 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
     return close;
   }
   return {
-    ...sandbox.__exports, dispatchFetch, setFetch, dispatchInstall, dispatchActivate, dispatchPush,
+    ...sandbox.__exports, dispatchFetch, setFetch, dispatchInstall, dispatchActivate, dispatchPush, dispatchMessage,
     dispatchNotificationClick, showNotification, skipWaiting, workerClients, cacheNames: names,
   };
 }
@@ -1735,5 +1745,170 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(tags).toContain(buildIdOf(['/assets/index-CCC.js', '/assets/Shared-XYZ.js']));
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-DDD.js'])));
     expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-CCC.js', '/assets/index-DDD.js']);
+  });
+});
+
+// On weak cell signal a page load hangs instead of failing, so the worker
+// answers it from the saved app copy after SLOW_NAV_MS, while the fetch runs on.
+describe('service-worker slow page loads', () => {
+  const OLD = ['/assets/index-OLD.js'];
+  const NEW = ['/assets/index-NEW.js'];
+  const savedHtml = shellHtml(OLD);
+  const networkHtml = shellHtml(NEW);
+  afterEach(() => { vi.useRealTimers(); });
+
+  // The network answers a page load only once the test releases `gate`.
+  function gatedNetwork() {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const serve = async (request) => {
+      if (request.mode === 'navigate') { await gate; return fakeResponse(networkHtml); }
+      if (request.url.includes('/build-assets.json')) return fakeResponse('[]', false);
+      return fakeResponse(`asset:${request.url}`);
+    };
+    return { release, serve };
+  }
+  async function start({ saved = true } = {}) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const cache = fakeCache();
+    if (saved) await cache.put('/', fakeResponse(savedHtml));
+    const worker = loadWorker(cache);
+    const network = gatedNetwork();
+    worker.setFetch(network.serve);
+    // dispatchFetch resolves when the page's response does: track it.
+    const load = (pathname = '/dashboard', options = {}) => {
+      const state = { done: false };
+      state.promise = worker.dispatchFetch(pathname, { mode: 'navigate', settle: false, ...options })
+        .then(result => { state.done = true; return result; });
+      return state;
+    };
+    return { cache, worker, network, load };
+  }
+  const bodyOf = (result) => result.response.body;
+
+  it('serves the saved copy at 3 s, and the late network page still refreshes the saved copy', async () => {
+    const { cache, network, load } = await start();
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(nav.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    expect(await (await cache.match('/')).text()).toBe(savedHtml);
+    network.release();
+    await result.settled();
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+  });
+
+  it('does not move the live build to the late response the page never ran', async () => {
+    const { cache, worker, network, load } = await start();
+    // The new build's entry file 404s, so its refresh cannot commit and only
+    // an advance from the late response could move the live build.
+    const serve = network.serve;
+    worker.setFetch(async (request) => (request.url.includes('index-NEW.js') ? fakeResponse('gone', false) : serve(request)));
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await nav.promise;
+    network.release();
+    await result.settled();
+    await worker.dispatchFetch('/assets/Lazy-XYZ.js');
+    const lead = (await cache.match('/assets/Lazy-XYZ.js')).headers.get('x-waves-build').split(',')[0].replace(/^~/, '');
+    expect(lead).toBe(worker.buildIdOf(OLD));
+  });
+
+  it('waits for the network when no saved copy exists, and returns its page', async () => {
+    const { network, load } = await start({ saved: false });
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    network.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it('answers a fast network at once, as before, and leaves no timer behind', async () => {
+    const { cache, network, load } = await start();
+    network.release();
+    const result = await load().promise;
+    expect(bodyOf(result)).toBe(networkHtml);
+    await result.settled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+  });
+
+  it('still falls back to the saved copy when the network fails outright', async () => {
+    const { worker, load } = await start();
+    worker.setFetch(async () => { throw new TypeError('Failed to fetch'); });
+    expect(bodyOf(await load().promise)).toBe(savedHtml);
+  });
+
+  it('starts no timer for a non-GET page load', async () => {
+    const { network, load } = await start();
+    const nav = load('/dashboard', { method: 'POST' });
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    network.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it('leaves an offer link to the browser, with no timer', async () => {
+    const { load } = await start();
+    const result = await load(`/careers/offer/${'a'.repeat(64)}`).promise;
+    expect(result.response).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  describe('the network-next message', () => {
+    it('acks, then makes the next page load wait for the network, once', async () => {
+      const { worker, network, load } = await start();
+      const port = worker.dispatchMessage({ type: 'waves:network-next-navigation' });
+      expect(port.postMessage).toHaveBeenCalledWith({ type: 'waves:network-next-ack' });
+      const first = load();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(first.done).toBe(false);
+      network.release();
+      expect(bodyOf(await first.promise)).toBe(networkHtml);
+      // The flag was used up: a slow load is answered from the saved copy
+      // again (the first load's refresh stored the network page there).
+      const next = gatedNetwork();
+      worker.setFetch(next.serve);
+      const second = load();
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(bodyOf(await second.promise)).toBe(networkHtml);
+    });
+
+    it('is not used up by a POST page load or an offer link', async () => {
+      const { worker, network, load } = await start();
+      worker.dispatchMessage({ type: 'waves:network-next-navigation' });
+      network.release();
+      await load('/dashboard', { method: 'POST' }).promise;
+      await load(`/careers/offer/${'b'.repeat(64)}`).promise;
+      const next = gatedNetwork();
+      worker.setFetch(next.serve);
+      const nav = load();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(nav.done).toBe(false);
+      next.release();
+      await nav.promise;
+    });
+
+    it('expires after 30 s', async () => {
+      const { worker, load } = await start();
+      worker.dispatchMessage({ type: 'waves:network-next-navigation' });
+      await vi.advanceTimersByTimeAsync(30001);
+      const nav = load();
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(bodyOf(await nav.promise)).toBe(savedHtml);
+    });
+
+    it('ignores any other message', async () => {
+      const { worker, load } = await start();
+      const port = worker.dispatchMessage({ type: 'something-else' });
+      expect(port.postMessage).not.toHaveBeenCalled();
+      const nav = load();
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(bodyOf(await nav.promise)).toBe(savedHtml);
+    });
   });
 });
