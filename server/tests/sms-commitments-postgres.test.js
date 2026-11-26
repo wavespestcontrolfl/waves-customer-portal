@@ -2915,9 +2915,9 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   describe('owner 2026-10-03: a customer who texted for a call back and then spoke with a person by phone was answered', () => {
-    const callbackAsk = async ({ basis = 'request' } = {}) => {
+    const callbackAsk = async ({ basis = 'request', quote = 'Can someone call me back?' } = {}) => {
       result.facts = [];
-      result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis, answered_by_payment: false, quote: 'Can someone call me back?',
+      result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis, answered_by_payment: false, quote,
         description: 'call the customer back', due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
       await recordMessageOperations(mockPg, message, result, context);
       return new Date(message.created_at.getTime() + 1000);
@@ -2959,6 +2959,38 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 300000) })).toMatchObject({ fulfilled: 1 });
       expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ record_type: 'call', record_id: call.id });
       expect(await mockPg('notifications').whereNull('done_at')).toHaveLength(0);
+    });
+
+    test('a text sent while the phone rang is answered by the call, judged by when it ended; a call over before the text is not', async () => {
+      const after = await callbackAsk();
+      await callIn(new Date(message.created_at.getTime() - 200000));
+      const ringing = await callIn(new Date(message.created_at.getTime() - 30000));
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 120000) })).toMatchObject({ fulfilled: 1 });
+      const { fulfillment } = await mockPg('call_commitments').first();
+      expect(fulfillment).toMatchObject({ basis: 'person_reply', record_type: 'call', record_id: ringing.id });
+      expect(new Date(fulfillment.matched_at).getTime()).toBe(message.created_at.getTime() + 40000);
+      expect(dispatchWithFallback).not.toHaveBeenCalled();
+    });
+
+    test('a call back that a cached "open" verdict judged is closed now, with no model call', async () => {
+      const after = await callbackAsk();
+      await outboundCall(after, { source: 'admin-callback', metadata: { customer_leg: { status: 'completed', duration_seconds: 163 } } });
+      const now = new Date(after.getTime() + 120000);
+      const row = await mockPg('call_commitments').first();
+      const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
+      const { evidenceHash } = fulfillmentFingerprint(current, await loadSmsFulfillmentEvidence(mockPg, current, message, now));
+      await mockPg('call_commitments').where({ id: row.id }).update({ sms_context: { ...row.sms_context,
+        fulfillment_check: { verdict: 'open', evidence_hash: evidenceHash, retry_after: null } } });
+      expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ fulfilled: 1 });
+      expect(dispatchWithFallback).not.toHaveBeenCalled();
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('a call-back text that names an email address is still answered by the call', async () => {
+      const after = await callbackAsk({ quote: 'Call me back about the email I sent from me@example.com' });
+      const call = await callIn(after);
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 120000) })).toMatchObject({ fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ record_type: 'call', record_id: call.id });
     });
 
     test('a promise Waves made to call back is not kept by the customer calling in', async () => {
