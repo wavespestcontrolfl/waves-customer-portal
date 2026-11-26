@@ -203,19 +203,12 @@ function hardscapeOf(lotSqFt, propertyType = 'single_family', features = {}) {
 }
 
 // PEST — documented formula: max(floor, base + round(footprintAdj) + featureAdj + propAdj) × freqMult
-// Year-built pressure bump — frozen mirror of modifiers.js pestAgeAdj (no constant
-// exists for it): age ≥ 60 → $8, ≥ 40 → $5, ≥ 20 → $2, else $0 (codex r14 P2).
-// Age is taken from the EASTERN calendar year (server/utils/datetime-et.js
-// etParts — AGENTS.md America/New_York discipline). Production's pestAgeAdj
-// uses the UTC year on a TZ=UTC Railway box, so for the five hours after
-// 00:00 UTC on 1 January — still 31 December in Eastern time — this
-// expectation legitimately DISAGREES with the engine at an age threshold
-// (report finding AGE-001) instead of mirroring the drift (codex r18 P1).
 const currentETYear = () => etParts(new Date()).year;
-function pestAgeAdjOf(yearBuilt) {
-  if (!yearBuilt) return 0;
-  const age = currentETYear() - Number(yearBuilt);
-  return age >= 60 ? 8 : age >= 40 ? 5 : age >= 20 ? 2 : 0;
+// Year-built: NO pest price carries a home-age step (owner 2026-11-26, "yes remove home ag colecivley"),
+// so the expectation is $0 for every year. (modifiers.js pestAgeAdj still derives the old $2 / $5 / $8 step
+// for a quote priced before that change; the engine reads it only when replaying such a quote.)
+function pestAgeAdjOf() {
+  return 0;
 }
 function expectPest({ homeSqFt, stories = 1, features = {}, propertyType = 'single_family', frequency = 'quarterly', yearBuilt = null }) {
   const { PEST, PROPERTY_TYPE_ADJ } = constants;
@@ -501,21 +494,24 @@ function expectTermiteBait({ homeSqFt, stories = 1, complexity = 'standard', sys
   return { system, spacingFt, complexity, perimMult, footprint: fp, perimeter, stations, installMaterial: round2(installMaterial), installLabor: round2(installLabor), installPrice, installMarkupOnMaterial: T.installMultiplier - 1, constructionMult, foundationAdj, monitoringMonthly, monitoringAnnual, perApp, visits: T.monitoringVisitsPerYear };
 }
 
-// ONE-TIME PEST — max(floor, round(quarterlyBase × 2.2)) × urgency; 15% perk; strict > visit-1 clamp
+// ONE-TIME PEST — max(floor, round(quarterlyBase × 1.8), round((quarterlyBase + setup) × 1.10)) × urgency; 15% perk; strict > visit-1 clamp
 function expectOneTimePest({ homeSqFt, stories = 1, features = {}, propertyType = 'single_family', urgency = 'NONE', afterHours = false, isRecurringCustomer = false }) {
   const q = expectPest({ homeSqFt, stories, features, propertyType, frequency: 'quarterly' });
   const O = constants.ONE_TIME.pest;
-  const multiplied = Math.round(q.basePrice * O.multiplier);
-  const preUrgency = Math.max(O.floor, multiplied);
+  const multiplied = Math.round(q.basePrice * O.newRule.multiplier);
+  // Owner 2026-11-26: never under 10% over the first visit of a plan (quarterly + the $99 setup), in cents then dollars.
+  const firstVisitMin = Math.round(round2((q.basePrice + constants.PEST.initialFee) * (1 + O.newRule.firstVisitBufferPct)));
+  // A new quote's floor is the code constant (ONE_TIME.pest.newRule.floor), never the live onetime_pest.floor.
+  const preUrgency = Math.max(O.newRule.floor, multiplied, firstVisitMin);
   const u = constants.URGENCY[String(urgency).toUpperCase()] || constants.URGENCY.NONE;
   const mult = afterHours ? (u.afterHours || u.standard || 1) : (u.standard || 1);
   const perkRate = isRecurringCustomer ? constants.WAVEGUARD.recurringCustomerOneTimePerk : 0;
   const discounted = Math.round(preUrgency * mult * (1 - perkRate));
-  let price = Math.max(O.floor, discounted);
+  let price = Math.max(O.newRule.floor, discounted);
   const visitOne = round2(q.basePrice + constants.PEST.initialFee);
   const clamped = price <= visitOne;
   if (clamped) price = visitOne + 1;
-  return { quarterlyBase: q.basePrice, multiplied, preUrgency, urgencyMult: mult, perkRate, price, visitOne, clamped };
+  return { quarterlyBase: q.basePrice, multiplied, firstVisitMin, preUrgency, urgencyMult: mult, perkRate, price, visitOne, clamped };
 }
 
 // TREE & SHRUB — cost buildup ÷ (1 − TREE_SHRUB.marginTarget; 0.40 since the 2026-10-21 owner audit), monthly floor, annual = round2(monthly×12)

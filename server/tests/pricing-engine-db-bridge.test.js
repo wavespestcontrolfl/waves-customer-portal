@@ -281,7 +281,8 @@ describe('pricing engine DB bridge', () => {
 
     await expect(syncConstantsFromDB(db)).resolves.toBe(true);
 
-    expect(constants.ONE_TIME.pest).toEqual({ floor: 199, multiplier: 2.2 });
+    // `newRule` is code (1.8x, 10%), not a row key: the sync leaves it alone.
+    expect(constants.ONE_TIME.pest).toEqual({ floor: 199, multiplier: 2.2, newRule: { multiplier: 1.8, firstVisitBufferPct: 0.1, floor: 199 } });
     expect(constants.ONE_TIME.lawn.floor).toBe(115);
     expect(constants.ONE_TIME.lawn.oneTimeMultiplier).toBe(1.5);
     expect(constants.ONE_TIME.lawn.treatmentMultipliers.fungicide).toBe(1.38);

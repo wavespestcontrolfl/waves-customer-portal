@@ -10,11 +10,13 @@ const {
   constants,
 } = require('../services/pricing-engine');
 
-// One-time pest = max(floor, quarterlyPerApp × multiplier). Pure multiple off
-// the quarterly rate; keeps a one-off visit above recurring visit-1.
+// One-time pest = max(floor, quarterlyPerApp × multiplier, (quarterlyPerApp + setup) × (1 + buffer))
+// (owner 2026-11-26: 1.8x, and never under 10% over the first visit of a plan).
 function expectedOneTimePest(quarterlyPerApp) {
-  const { multiplier, floor } = constants.ONE_TIME.pest;
-  return Math.max(floor, Math.round(quarterlyPerApp * multiplier));
+  const { floor } = constants.ONE_TIME.pest;
+  const { multiplier, firstVisitBufferPct } = constants.ONE_TIME.pest.newRule;
+  const firstVisitMin = Math.round(Math.round((quarterlyPerApp + constants.PEST.initialFee) * (1 + firstVisitBufferPct) * 100) / 100);
+  return Math.max(floor, Math.round(quarterlyPerApp * multiplier), firstVisitMin);
 }
 
 function property(overrides = {}) {
@@ -50,7 +52,7 @@ describe('pricing engine one-time treatment rules', () => {
 
     expect(recurringBase).toBe(112);
     expect(result.quarterlyPerApp).toBe(112);
-    expect(result.multiplier).toBe(constants.ONE_TIME.pest.multiplier);
+    expect(result.multiplier).toBe(constants.ONE_TIME.pest.newRule.multiplier);
     expect(result.price).toBe(expectedOneTimePest(recurringBase));
     // One-time must cost strictly more than recurring visit 1 ($99 setup + quarterly rate).
     expect(result.price).toBeGreaterThan(recurringBase + constants.PEST.initialFee);
@@ -80,7 +82,13 @@ describe('pricing engine one-time treatment rules', () => {
     });
     const recurringBase = pricePestControl(p, { frequency: 'quarterly' }).basePrice;
     const preDiscount = expectedOneTimePest(recurringBase);
-    const expected = Math.max(constants.ONE_TIME.pest.floor, Math.round(preDiscount * 0.85));
+    // 15% off, then never to or under recurring visit 1 (quarterly + $99): on a big home the 10% first-visit
+    // minimum on the list price (owner 2026-11-26) leaves the perk's result under visit 1, so the clamp holds it $1 above.
+    const expected = Math.max(
+      constants.ONE_TIME.pest.floor,
+      Math.round(preDiscount * 0.85),
+      recurringBase + constants.PEST.initialFee + 1,
+    );
     const direct = priceOneTimePest(p, { urgency: 'NONE', isRecurringCustomer: true });
 
     expect(direct.recurringCustomerDiscountRate).toBe(0.15);

@@ -1590,8 +1590,16 @@ const ONE_TIME = {
   // always exceeds a recurring customer's visit-1 cost ($99 setup + quarterly),
   // preserving the incentive to commit to recurring. 2.2 keeps a typical home
   // (~$117 quarterly) at ~$257.
+  //
+  // New quotes (owner 2026-11-26, "only new estimtes"): max(floor, round(newRule.multiplier x quarterly),
+  // round((quarterly + PEST.initialFee) x (1 + newRule.firstVisitBufferPct))). `multiplier` (2.2) is untouched: it is
+  // still the price of every quote saved before the rule (legacyOneTimePestBuffer stamp, one-time-pest-price.js).
+  // `newRule` is CODE, not a Setting: no pricing_config row, db-bridge or admin save reaches it, so an edit can never move the
+  // price on a link already sent. A future change of these numbers is a new code rule with its own stamp. The new rule's floor is code too
+  // ($199, newRule.floor); only a quote saved before the rule reads the live `floor` below (its existing path, unchanged).
   pest: {
     multiplier: 2.2,
+    newRule: Object.freeze({ multiplier: 1.8, firstVisitBufferPct: 0.10, floor: r(199) }),
     floor: r(199),
   },
   lawn: {

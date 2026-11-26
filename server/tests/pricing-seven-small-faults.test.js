@@ -85,6 +85,8 @@ describe('replay: the price rules an estimate was priced with ride its own stamp
     const path = require('path');
     const route = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
     expect(route).toContain('legacyPricingRules: estimate.pricingMetadata.legacyPricingRules,');
+    // The one-time pest rule (2026-11-26) rides the same save, with its own stamp.
+    expect(route).toContain('legacyOneTimePestBuffer: estimate.pricingMetadata.legacyOneTimePestBuffer');
     expect(route).toContain('...(typeof item.legacyPricingRules === \'boolean\' ? { legacyPricingRules: item.legacyPricingRules } : {})');
     // The projected shape (a line with only the stamp and a service) still reads back as priced under the fixes.
     expect(savedLegacyPricingRulesSignal({ engineResult: { lineItems: [{ service: 'one_time_lawn', price: 192, legacyPricingRules: false }] } }))
@@ -137,6 +139,8 @@ describe('replay: the price rules an estimate was priced with ride its own stamp
     expect(savedLegacyPricingRulesSignal(compacted)).toEqual({ legacyPricingRules: false });
     const route = require('fs').readFileSync(require('path').join(__dirname, '../services/lead-estimate-automation.js'), 'utf8');
     expect(route).toContain('legacyPricingRules: estimate.pricingMetadata.legacyPricingRules,');
+    // The one-time pest rule (2026-11-26) rides the same save, with its own stamp.
+    expect(route).toContain('legacyOneTimePestBuffer: estimate.pricingMetadata.legacyOneTimePestBuffer');
   });
 
   test('no evidence returns an explicit undefined, so a value in the stored inputs cannot select the old rules', () => {
@@ -251,7 +255,7 @@ describe('fix 1: the palm per-visit minimum holds after the per-palm credit', ()
 
   test('adding a service to a palm estimate keeps the sold minimum (revision builder applies the saved signals)', () => {
     const request = require('fs').readFileSync(require('path').join(__dirname, '../services/estimate-add-service-request.js'), 'utf8');
-    expect(request).toContain("for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'currentRulesServices', 'palmMinPerVisitReplay'])");
+    expect(request).toContain("for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyOneTimePestBuffer', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay'])");
   });
 
   test('an estimate priced before the fix keeps the credit it was quoted with', () => {

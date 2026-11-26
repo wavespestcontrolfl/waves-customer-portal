@@ -10,6 +10,7 @@ const {
   BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, MOSQUITO_MISTING, TERMITE, RODENT, ONE_TIME, AREA_ADDONS, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
+const { newRuleListPrice } = require('./one-time-pest-price');
 const { areaAddOnLimitVerdict, limitText } = require('./area-addon-limits');
 const { areaAddOnKnobsFor } = require('./area-addon-config');
 const { resolveLawnCostPlusBasis, costPlusFloorTuning, liveLawnMarketSchedule } = require('./lawn-cost-plus-knobs');
@@ -1526,7 +1527,9 @@ function pricePestControl(property, options = {}) {
     featureWarnings,
     featureNormalization,
   } = normalizePestFeatures(property.features || {});
-  const pestAgeMeta = normalizePestAgeAdjustment(modifiers.pestAgeAdj);
+  // Home age changes no NEW pest price (owner 2026-11-26): only a quote saved before the rule keeps the step it was sold with
+  // (options.legacyOneTimePestBuffer, from the quote's own stamp).
+  const pestAgeMeta = normalizePestAgeAdjustment(options.legacyOneTimePestBuffer === true ? modifiers.pestAgeAdj : 0);
   const poolCageMeta = resolvePoolCagePricing(normalizedFeatures);
   const attachedGarageAdj = hasAttachedGarageForPest({ ...property, features: normalizedFeatures })
     ? (PEST.additionalAdjustments.attachedGarage || 0)
@@ -6441,6 +6444,8 @@ function priceOneTimePest(property, options = {}) {
     recurringPestPerApp = null,
     roachType: requestedRoachTypeInput = 'none',
   } = options;
+  // A quote saved before the new rule (legacyOneTimePestBuffer stamp) runs the existing multiplier path below unchanged.
+  const legacy = options.legacyOneTimePestBuffer === true;
 
   const roachMeta = normalizeRoachType(requestedRoachTypeInput);
   const footprintResolution = resolvePestFootprint(property);
@@ -6463,7 +6468,7 @@ function priceOneTimePest(property, options = {}) {
     baseSource = 'recurringPestPerApp';
   } else {
     if (hasValue(recurringPestPerApp)) warnings.push('invalid_recurring_pest_per_app_ignored');
-    baselinePest = pricePestControl(property, { frequency: 'quarterly', roachType: 'none' });
+    baselinePest = pricePestControl(property, { frequency: 'quarterly', roachType: 'none', legacyOneTimePestBuffer: legacy });
     base = baselinePest.basePrice;
     baseSource = 'computed_quarterly_baseline';
   }
@@ -6474,18 +6479,25 @@ function priceOneTimePest(property, options = {}) {
   // context-only. The multiplier >= 2 (+ the $199 floor) keeps a one-off
   // visit above a recurring customer's visit-1 cost ($99 setup + quarterly),
   // preserving the incentive to commit.
-  const multiplier = Number.isFinite(Number(ONE_TIME.pest.multiplier)) && Number(ONE_TIME.pest.multiplier) > 0
-    ? Number(ONE_TIME.pest.multiplier)
-    : 1;
-  const multipliedPrice = Math.round(base * multiplier);
+  // New quotes: max(newRuleMultiplier x quarterly, the first-visit minimum) from one-time-pest-price.js; the floor, urgency, perk
+  // and visit-1 clamp below are the same for both.
+  const newRule = legacy ? null : newRuleListPrice(base);
+  // The new rule's floor is a code constant too (ONE_TIME.pest.newRule.floor); a legacy quote keeps the live onetime_pest.floor.
+  const otFloor = newRule ? ONE_TIME.pest.newRule.floor : ONE_TIME.pest.floor;
+  const multiplier = newRule
+    ? newRule.multiplier
+    : (Number.isFinite(Number(ONE_TIME.pest.multiplier)) && Number(ONE_TIME.pest.multiplier) > 0
+      ? Number(ONE_TIME.pest.multiplier)
+      : 1);
+  const multipliedPrice = newRule ? newRule.price : Math.round(base * multiplier);
   const preUrgencyPrice = applyOneTimeFloor(
     multipliedPrice,
-    ONE_TIME.pest.floor
+    otFloor
   );
   const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
   const discountBase = preUrgencyPrice * urgencyMultiplier;
   const discounted = applyOneTimeRecurringCustomerDiscount(discountBase, { isRecurringCustomer });
-  let price = applyOneTimeFloor(discounted.price, ONE_TIME.pest.floor);
+  let price = applyOneTimeFloor(discounted.price, otFloor);
 
   // Recurring-incentive clamp. The 15% loyalty perk is applied AFTER the floor,
   // so on small homes (where the multiple sits near the floor) it could push a
@@ -6508,11 +6520,12 @@ function priceOneTimePest(property, options = {}) {
     basePrice: Math.round(base * 100) / 100,
     quarterlyPerApp: Math.round(base * 100) / 100,
     multiplier,
+    ...(newRule ? { firstVisitBufferPct: newRule.bufferPct, firstVisitBufferPrice: newRule.bufferPrice } : {}),
     recurringVisitOneCost,
     recurringIncentiveClampApplied,
     baseSource,
     baselinePestBasePrice: baselinePest?.basePrice ?? null,
-    selectedFloor: ONE_TIME.pest.floor,
+    selectedFloor: otFloor,
     floorAppliedBeforeUrgency: preUrgencyPrice > multipliedPrice,
     floorAppliedAfterDiscount: price > discounted.price,
     requestedRoachType: roachMeta.requestedRoachType,
