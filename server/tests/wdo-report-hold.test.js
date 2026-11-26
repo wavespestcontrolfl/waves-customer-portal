@@ -1194,7 +1194,7 @@ describe('audit fixes', () => {
       await releaseOnce(wdoProject({ report_hold_status: 'held', findings }));
       const keyOf = () => ProjectEmail.sendProjectReportReady.mock.calls.map(([a]) => a).find((a) => a.recipient.email === 'closing@abctitle.com').idempotencyKey;
       const first = keyOf();
-      expect(first).toMatch(/:release:[0-9a-f]{8}$/);
+      expect(first).toMatch(/:release:[0-9a-f]{8}:[0-9a-f]{8}$/);
       ProjectEmail.sendProjectReportReady.mockClear();
       await releaseOnce(wdoProject({ report_hold_status: 'held', findings: { ...findings, wdo_evidence: 'Frass at the garage door and the lanai' } }));
       expect(keyOf()).not.toBe(first);
@@ -2386,6 +2386,40 @@ describe('audit fixes', () => {
       expect(releaseEmails()).toHaveLength(1);
     });
 
+    test('a new link reaches the requestor copies and the text again (their keys name the link)', async () => {
+      const releaseWith = async (token) => {
+        ProjectEmail.sendProjectReportReady.mockClear();
+        const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: token, findings: { ...FINDINGS, report_sent_to: 'closing@abctitle.com' } }), invoice: invoiceRow({ status: 'paid' }) });
+        await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+        const copy = ProjectEmail.sendProjectReportReady.mock.calls.map(([x]) => x).find((x) => x.recipient.email === 'closing@abctitle.com');
+        const smsMark = (updates.projects || []).map((u) => String(u.delivery_channels?.bindings?.[0] || '')).find((b) => b.includes('release_sms'));
+        return { copyKey: copy?.idempotencyKey, smsMark };
+      };
+      const a = await releaseWith('a'.repeat(32));
+      const b = await releaseWith('b'.repeat(32));
+      expect(a.copyKey).toBeTruthy();
+      expect(a.smsMark).toBeTruthy();
+      expect(b.copyKey).not.toBe(a.copyKey);
+      expect(b.smsMark).not.toBe(a.smsMark);
+    });
+
+    test('a held send claims only the invoice status it read, and gives a first delivery its send-day due date', async () => {
+      const helpers = jest.requireActual('../services/invoice-helpers');
+      // a draft past its due day goes out due on the send day; a delivered bill or a future due date keeps its day
+      expect(helpers.firstDeliveryDueDateOf({ status: 'draft', due_date: '2026-11-01' }, '2026-11-26')).toBe('2026-11-26');
+      expect(helpers.firstDeliveryDueDateOf({ status: 'sent', sent_at: 'x', due_date: '2026-11-01' }, '2026-11-26')).toBe('2026-11-01');
+      expect(helpers.firstDeliveryDueDateOf({ status: 'draft', due_date: '2026-12-10' }, '2026-11-26')).toBe('2026-12-10');
+      expect(helpers.firstDeliveryDueDateOf({ status: 'draft', due_date: null }, '2026-11-26')).toBeNull();
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const claim = (updates.invoices || []).find((u) => u.status === 'sending');
+      expect(String(claim.due_date?.sql || '')).toContain('AND due_date < ?::date THEN ?::date ELSE due_date END');
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
+      expect(source).toContain('.where((q) => { if (invoiceClaimToken) q.where({ status: previousInvoiceStatus }); })');
+      // the fingerprint confirms the due date the first delivery carries
+      expect(source).toContain("require('../services/invoice-helpers').firstDeliveryDueDateOf(inv, etDateString()),");
+    });
+
     test('a held report sent another way takes back its link in the same write', () => {
       const fields = projectsRouter._private.heldReleaseFieldsInSql
         ? projectsRouter._private.heldReleaseFieldsInSql('sent_outside')
@@ -2978,7 +3012,9 @@ describe('audit fixes, round 2', () => {
     test('a manual Send report of a held report texts through the release marker: a takeover after the sweep texted sends no second text', async () => {
       const base = wdoProject({ report_hold_status: 'held' });
       const filing = archived(base);
-      const mark = `inv-1:${require('crypto').createHash('sha1').update([filing.content_hash, filing.signed_at, filing.photo_set_hash].map((v) => String(v ?? '')).join('|')).digest('hex').slice(0, 8)}`;
+      const sha = (v) => require('crypto').createHash('sha1').update(v).digest('hex').slice(0, 8);
+      // per invoice, filing and link (this row's link as the release reads it)
+      const mark = `inv-1:${sha([filing.content_hash, filing.signed_at, filing.photo_set_hash].map((v) => String(v ?? '')).join('|'))}:${sha(String(base.report_token || ''))}`;
       mockTables({ project: { ...base, invoice_id: 'inv-1', delivery_channels: { release_filing: filing, release_sms: mark } }, invoice: invoiceRow({ status: 'paid' }) });
       mockS3Send.mockResolvedValueOnce({ Body: Readable.from([Buffer.from('archived-bytes')]) });
       await withServer(async (baseUrl) => { expect((await post(baseUrl, '/admin/projects/project-1/send')).status).toBe(200); });

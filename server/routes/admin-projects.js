@@ -4751,8 +4751,9 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
     attachment: wdoPdf ? wdoPdf.attachment : null,
     excludeEmails: [emailRecipient.email],
     isResend: false,
-    // each copy is keyed to the filing it carries, so a corrected filing after a retry reaches the requestors
-    keyPart: `release:${filingKeyPart(wdoFiling)}`,
+    // each copy is keyed to the filing and the link it carries, so a corrected filing or a new link after a retry
+    // reaches the requestors (a taken-back link would otherwise stay their only one)
+    keyPart: `release:${filingKeyPart(wdoFiling)}:${linkKeyPart(refreshed.report_token)}`,
     ownClaim,
     copyHandoff: (copyEmail, state) => heldReportCopyHandoff({
       customerId: customer.id, copyEmail, primaryEmail: emailRecipient.email, state, ownClaim, invoice, requireSettled: !staffSend,
@@ -4766,7 +4767,8 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
 // dispatched, fenced on the release claim: a retry after a crash finds the mark and never texts twice. The text
 // is at-most-once: a crash between the mark and the provider loses a courtesy copy, never repeats it.
 async function sendHeldReportTextOnce({ project, customer, invoice, reportUrl, wdoFiling, ownClaim, requireSettled }) {
-  const mark = `${invoice.id}:${filingKeyPart(wdoFiling)}`;
+  // ...per invoice, filing and link: a new link (the old one taken back) is texted again.
+  const mark = `${invoice.id}:${filingKeyPart(wdoFiling)}:${linkKeyPart(project.report_token)}`;
   const stored = typeof project.delivery_channels === 'string' ? safeJsonParse(project.delivery_channels) : project.delivery_channels;
   if (stored?.release_sms === mark) return { ok: true, deduped: true };
   const claimed = await db('projects').where(ownClaim).update({
@@ -5345,8 +5347,9 @@ function billingFingerprint(inv) {
   return JSON.stringify([
     require('../services/invoice-helpers').approvedInvoiceVersionDigest(inv),
     money(inv.subtotal), money(inv.discount_amount), money(inv.tax_amount), Number(inv.tax_rate) || 0,
-    // ...and the title, due date and billing address the email and PDF print.
-    String(inv.title || ''), inv.due_date ? require('../utils/date-only').dateOnlyString(inv.due_date) : null,
+    // ...and the title, due date and billing address the email and PDF print. The due date is the one a first delivery
+    // carries (a draft past its due day goes out due on the send day), so the preview confirms what is sent.
+    String(inv.title || ''), require('../services/invoice-helpers').firstDeliveryDueDateOf(inv, etDateString()),
     typeof inv.customer_address_snapshot === 'string' ? inv.customer_address_snapshot : JSON.stringify(inv.customer_address_snapshot ?? null),
   ]);
 }
@@ -5685,6 +5688,15 @@ async function heldInvoiceEmailRecipient(customer, invoice) {
 // closeout); the office bell asks staff to check with the customer. A first delivery parks the invoice for review the
 // way a stale send is (still payable from the link the customer may hold, so payment still releases the report). An
 // invoice already sent (sent, viewed, overdue) keeps its status: its earlier delivery still stands.
+// A held send's invoice claim: its own token, and the first-delivery due date (a draft past its due day goes out due
+// on the send day, as every first send does). It claims only the status this request read, so the rollback and the
+// unknown-outcome park restore the status it really had. A plain send claims as before.
+function heldInvoiceClaimFields(claimToken) {
+  return claimToken
+    ? { send_claim_token: claimToken, due_date: require('../services/invoice-helpers').firstDeliveryDueDate(db, etDateString()) }
+    : {};
+}
+
 // The combined send's invoice claim: a held send's claim carries its own token (see the claim), a plain send's none.
 function invoiceClaimWhere(id, claimToken) {
   return { id, status: 'sending', ...(claimToken ? { send_claim_token: claimToken } : {}) };
@@ -6096,11 +6108,16 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       // an opened/overdue invoice works (getByToken flips sent → viewed once
       // the customer opens the pay link).
       .whereIn('status', ['draft', 'scheduled', 'sent', 'viewed', 'overdue'])
-      .update({ status: 'sending', ...(invoiceClaimToken ? { send_claim_token: invoiceClaimToken } : {}), updated_at: db.fn.now() });
+      .where((q) => { if (invoiceClaimToken) q.where({ status: previousInvoiceStatus }); })
+      .update({ status: 'sending', ...heldInvoiceClaimFields(invoiceClaimToken), updated_at: db.fn.now() });
     if (!claimedRows) {
       return res.status(409).json({ error: 'Invoice send already in progress', invoice_id: invoice.id });
     }
     claimedInvoice = { id: invoice.id, previousStatus: previousInvoiceStatus, claimToken: invoiceClaimToken };
+    // The email and PDF print the due date the claim wrote (the fingerprint already confirmed it).
+    if (invoiceClaimToken) {
+      invoice.due_date = require('../services/invoice-helpers').firstDeliveryDueDateOf({ ...invoice, status: 'sending' }, etDateString());
+    }
 
     // Shared project delivery claim (see hoist comment): one claim namespace
     // across /send and /send-with-invoice so the two routes can't race each
