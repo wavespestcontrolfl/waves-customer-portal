@@ -2326,6 +2326,41 @@ describe('audit fixes', () => {
     });
   });
 
+  describe('audit round 27', () => {
+    test('a crash after the email handoff began (queued, in progress) keeps the key: no second FDACS email', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'email send held by provider_retry_in_progress' });
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const writes = updates.projects || [];
+      expect(writes.some((u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks'))).toBe(false);
+      expect(writes.some((u) => String(u.delivery_channels?.sql || '').includes('release_email_unknown'))).toBe(true);
+    });
+
+    test.each([['paid', {}], ['voided', { status: 'void' }], ['fully credited', { credit_applied: 175 }]])(
+      'an invoice %s from the email before the text skips the pay-link text',
+      async (_label, patch) => {
+        const { updates } = mockTables();
+        await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+        const token = (updates.projects || []).find((u) => u.delivery_status === 'sending').delivery_claim_token;
+        const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'admin_project_report_with_invoice')[0];
+        mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token }), invoice: invoiceRow({ status: 'paid', ...patch }) });
+        const dispatch = jest.fn();
+        expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false }));
+        expect(dispatch).not.toHaveBeenCalled();
+      },
+    );
+
+    test('the pay-link text still goes when the invoice is open', async () => {
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const token = (updates.projects || []).find((u) => u.delivery_status === 'sending').delivery_claim_token;
+      const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'admin_project_report_with_invoice')[0];
+      mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token }), invoice: invoiceRow({ status: 'sent' }) });
+      const dispatch = jest.fn(async () => ({ ok: true }));
+      expect(await sms.withSmsHandoff(dispatch)).toEqual({ ok: true });
+    });
+  });
+
   describe('advisor redesign phase 4: a crashed release is handed back wherever its claim is cleared', () => {
     test('an edit that clears a crashed claim also gives a releasing report back to held', () => {
       const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');

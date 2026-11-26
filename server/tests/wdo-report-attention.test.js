@@ -119,6 +119,10 @@ describe('findAttentionItems — held reports that nobody is releasing', () => {
     // a release stuck past the stale-claim recovery
     expect(has('where', 'p.report_hold_status', 'releasing')).toBe(true);
     expect(log.find((l) => l[1] === 'p.report_hold_locked_at')[3]).toEqual(new Date('2026-11-02T11:00:00Z'));
+    // an invoice parked for review after an unknown-outcome email (a missed bell must not hide it)
+    expect(has('where', 'i.status', 'scheduled')).toBe(true);
+    expect(has('whereNull', 'i.scheduled_send_at')).toBe(true);
+    expect(log.find((l) => l[1] === 'i.scheduled_send_error')[3]).toMatch(/^Recovered from stale sending claim.*%$/);
   });
 });
 

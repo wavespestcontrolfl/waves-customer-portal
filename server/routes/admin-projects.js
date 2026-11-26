@@ -4640,7 +4640,9 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
     // Unknown outcome: the first attempt's timeout after the handoff (deliveryOutcome 'uncertain'), or a later attempt
     // with the same key that the library holds back. Either way the link stays and the key stays.
     const unknownOutcomeHeld = !result.ok && !result.blocked && (result.deliveryOutcome === 'uncertain'
-      || /email send held by provider_retry_(ambiguous|exhausted)/.test(String(result.error || '')));
+      // every hold the library puts on an earlier attempt with this key: ambiguous, exhausted, in progress (a crash
+      // after the handoff began left it queued), or scheduled
+      || /email send held by provider_retry_/.test(String(result.error || '')));
     // A boundary refusal because the invoice is no longer settled (a refund or a reversal): the report is correctly
     // held again, so this is no delivery failure (no block counted, no attempt, no bell).
     const unsettledAtHandoff = !result.ok && handoffState.boundaryBlock?.code === 'HELD_INVOICE_UNSETTLED';
@@ -5473,10 +5475,13 @@ function heldInvoiceSmsHandoff({ customerId, phone, projectId, invoiceId, delive
     try {
       return await withSmsConsentLock(db, { phone, customerId }, async (trx) => {
         const liveCustomer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id', 'phone');
-        const liveInvoice = await trx('invoices').where({ id: invoiceId }).forShare().first('customer_id');
+        const liveInvoice = await trx('invoices').where({ id: invoiceId }).forShare().first();
         const liveProject = await trx('projects').where({ id: projectId }).forShare().first();
         if (!liveCustomer || normalizeUsPhone(liveCustomer.phone) !== phone
           || String(liveInvoice?.customer_id) !== String(customerId)
+          // paid from the email meanwhile (or voided): no second request to pay
+          || ['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'].includes(String(liveInvoice?.status || '').toLowerCase())
+          || !(require('../services/invoice-helpers').invoiceAmountDue(liveInvoice) > 0)
           || String(liveProject?.customer_id) !== String(customerId)
           || String(liveProject?.delivery_claim_token || '') !== String(deliveryClaimToken)
           || liveProject?.report_hold_status !== 'held') return refused;

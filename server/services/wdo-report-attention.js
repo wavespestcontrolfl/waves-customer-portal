@@ -36,6 +36,7 @@ const { etDateString } = require('../utils/datetime-et');
 const SIGNED_UNSENT_HOURS = 48;
 const STUCK_APPT_HOURS = 24;
 const HOLD_ATTENTION_ATTEMPTS = 5;
+const { STALE_SEND_PARK_ERROR } = require('./invoice-helpers');
 const UNSETTLEABLE_INVOICE_STATUSES = ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible'];
 const REMIND_DAYS = 7;
 const CATEGORY = 'wdo_report_attention';
@@ -111,7 +112,10 @@ async function findAttentionItems(now = new Date()) {
           .orWhereNull('i.id')
           .orWhereIn('i.status', UNSETTLEABLE_INVOICE_STATUSES)
           .orWhere((draft) => draft.where('i.status', 'draft').where('i.updated_at', '<', dayAgo))
-          .orWhere((free) => free.whereNotIn('i.status', ['paid', 'prepaid']).where('i.total', '<=', 0))))
+          .orWhere((free) => free.whereNotIn('i.status', ['paid', 'prepaid']).where('i.total', '<=', 0))
+          // an invoice email of unknown outcome, parked for review a day ago (a missed bell must not hide it)
+          .orWhere((parked) => parked.where('i.status', 'scheduled').whereNull('i.scheduled_send_at')
+            .where('i.scheduled_send_error', 'like', `${STALE_SEND_PARK_ERROR}%`).where('i.updated_at', '<', dayAgo))))
       .orWhere((releasing) => releasing
         .where('p.report_hold_status', 'releasing')
         .where('p.report_hold_locked_at', '<', new Date(now.getTime() - 60 * 60e3))))
