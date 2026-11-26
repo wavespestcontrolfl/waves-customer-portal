@@ -696,3 +696,38 @@ describe('fingerprint: the text-back state', () => {
     expect(agent.fingerprintOf(missed, tl('sent:none'), NOW)).toBe(agent.fingerprintOf(missed, tl('sent:none'), NOW));
   });
 });
+
+describe('property access codes never reach the model', () => {
+  test('a gate code in a customer text, a voicemail transcript and a Waves text is masked in every line and in the whole prompt', () => {
+    const text = agent.smsEvent({ id: 's', direction: 'inbound', created_at: after(5), message_body: 'The gate code is 4821, lockbox 9988, alarm code 1234' }).line;
+    expect(text).not.toMatch(/4821|9988|1234/);
+    expect(agent.voicemailNote({ transcription: 'hi it is Pat the gate code to my community is 3345 please call', recording_sid: 'RE1' }, true)).not.toMatch(/3345/);
+    const input = agent.judgeInput(alertRow({ title: 'Voicemail: door code 7731' }),
+      timelineOf([ev({ line: 'WAVES STAFF TEXT: use gate code 5566 on arrival' })], { ctx: ['CUSTOMER TEXT: alarm code is 8080'] }), agent.computeFacts(timelineOf()));
+    expect(input).not.toMatch(/7731|5566|8080/);
+    expect(input).toMatch(/FIXED FACTS/);
+    expect(agent.redactForModel('call me at 941 555 0100 about Friday')).toBe('call me at 941 555 0100 about Friday');
+  });
+});
+
+describe('the model never closes a silent missed call early', () => {
+  const missed = alertRow({ category: 'missed_call', title: 'Unknown caller', link: '/admin/communications#tab=calls&call=33333333-3333-4333-8333-333333333333' });
+  const run = async (call) => {
+    const deps = makeDeps({
+      candidates: async () => [missed],
+      timeline: async () => timelineOf([], { customerKnown: false, call }),
+      judge: jest.fn(async () => ({ outcome: 'nothing_to_answer', why: 'looks like a robocall', proof: null, model: 'm' })),
+    });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    return saved(deps)[0];
+  };
+
+  test('a silent call (no voicemail): nothing_to_answer from the model becomes still_owed', async () => {
+    expect(await run({ customerId: null, hasVoicemail: false, textBackSent: false })).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'silent_call_wait' });
+    expect(await run({ customerId: 'c1', hasVoicemail: false, textBackSent: false })).toMatchObject({ outcome: 'still_owed', rule: 'silent_call_wait' });
+  });
+
+  test('a call with a voicemail keeps the model\'s nothing_to_answer (a wrong number, a sales call)', async () => {
+    expect(await run({ customerId: null, hasVoicemail: true, textBackSent: false })).toMatchObject({ outcome: 'nothing_to_answer', source: 'ai' });
+  });
+});

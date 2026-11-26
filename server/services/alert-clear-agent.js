@@ -49,6 +49,7 @@ const { anthropicText } = require('./llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { scrubPans } = require('../utils/pan-scrub');
 const { redactSecrets, newState } = require('../utils/signed-link-redaction');
+const { redactAccessCodes } = require('./context-aggregator');
 const { phoneIdentityKey } = require('../utils/phone');
 const { callStartedAt } = require('../utils/call-timeline');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -121,10 +122,11 @@ const linkParam = (link, name) => {
 };
 // Free text on its way to the model: bearer links, tokens and credentials out (signed-link-redaction.js), card numbers masked, one
 // line, cut. Redaction runs BEFORE the cut so a token is never half-kept.
-const clean = (text, max = BODY_CHARS) => {
-  const redacted = scrubPans(String(redactSecrets(String(text ?? ''), newState())));
-  return redacted.replace(/\s+/g, ' ').trim().slice(0, max);
-};
+// THE one redaction step for anything the model reads: property access codes (gate, door, alarm, lockbox: the repo's
+// redactAccessCodes), bearer links, tokens and credentials (signed-link-redaction), and card numbers. clean() and the final pass
+// over the whole prompt both go through it, so no reader can skip a part.
+const redactForModel = (text) => scrubPans(String(redactSecrets(redactAccessCodes(String(text ?? '')), newState())));
+const clean = (text, max = BODY_CHARS) => redactForModel(text).replace(/\s+/g, ' ').trim().slice(0, max);
 const etLabel = (date) => toDate(date).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const dailyCap = () => {
   const n = Number(process.env.ALERT_CLEAR_AGENT_DAILY_CAP);
@@ -641,10 +643,19 @@ function listedEvents(timeline) {
 // More citable records than the prompt can carry: the model could not see every one, so the timeline is not trusted.
 const proofOverflow = (timeline) => timeline.events.filter((e) => e.proof).length > MODEL_PROOF_LINES;
 
+// One timeline line on its way to the model: the label before the first ": " is built by this module and stays; everything after it goes
+// through the one redaction step again (access codes, links, credentials, card numbers), whatever built the line. The access-code
+// helper masks capitalised words near a code noun, so it never runs over the label or the prompt's fixed words.
+function redactLine(line) {
+  const text = String(line ?? '');
+  const at = text.indexOf(': ');
+  return at < 0 ? redactForModel(text) : `${text.slice(0, at + 2)}${redactForModel(text.slice(at + 2))}`;
+}
+
 function judgeInput(alert, timeline, facts) {
   const listed = listedEvents(timeline);
   const yesNo = (v) => (v ? 'yes' : 'no');
-  const after = listed.length ? listed.map((e) => `${e.ref} | ${etLabel(e.at)} | ${e.line}`).join('\n') : '(nothing recorded)';
+  const after = listed.length ? listed.map((e) => `${e.ref} | ${etLabel(e.at)} | ${redactLine(e.line)}`).join('\n') : '(nothing recorded)';
   const text = [
     `ALERT (${alert.category}) about a contact on ${etLabel(timeline.alertAt)}: ${clean(alert.title, 160)}`,
     'FIXED FACTS (computed by Waves code):',
@@ -656,12 +667,11 @@ function judgeInput(alert, timeline, facts) {
     `- only unsent drafts after the alert: ${yesNo(facts.onlyDrafts)}`,
     `- the contact is a customer on file: ${yesNo(facts.customerOnFile)}`,
     'BEFORE AND AT THE ALERT:',
-    timeline.ctx.join('\n') || '(nothing recorded)',
+    timeline.ctx.map(redactLine).join('\n') || '(nothing recorded)',
     'AFTER THE ALERT (id | time | what):',
     after,
   ].join('\n');
-  // A last pass over the whole text: no bearer link, token or credential and no card number goes out, whatever built the line.
-  return scrubPans(String(redactSecrets(text, newState())));
+  return text;
 }
 
 function parseJudgeReply(raw) {
@@ -701,6 +711,12 @@ function checkedProof(reply, timeline) {
   const event = reply.proof ? timeline.events.find((e) => e.ref === reply.proof) : null;
   if (!event || !event.proof || event.draft || !(event.at > timeline.alertAt)) return null;
   return event;
+}
+
+// A silent missed call (no voicemail) is nothing_to_answer only by rule 1, after its 24 hours of silence: the model never gets there early.
+function guardSilentCall(v, alert, timeline) {
+  if (v.outcome !== 'nothing_to_answer' || alert.category !== 'missed_call' || !timeline.call || timeline.call.hasVoicemail) return v;
+  return verdict('still_owed', v.source, 'silent_call_wait', 'a silent missed call waits for the 24-hour rule', { model: v.model });
 }
 
 function settleAiReply(reply, timeline) {
@@ -815,7 +831,7 @@ async function aiVerdict(alert, timeline, fingerprint, { deps, budget }) {
     logger.warn(`[alert-clear-agent] model failed: ${err?.status || err?.name || 'error'}`);
     v = verdict('still_owed', 'ai', 'ai_error', 'the model could not decide', { model: MODELS.ALERT_CLEAR });
   }
-  return { v: guardBareYes(v, timeline), reservation };
+  return { v: guardBareYes(guardSilentCall(v, alert, timeline), timeline), reservation };
 }
 
 async function processAlert(alert, { now, deps, last, budget }) {
@@ -873,6 +889,6 @@ async function runAlertClearAgent({ now = new Date(), deps: override = {} } = {}
 module.exports = {
   runAlertClearAgent,
   // exported for tests
-  defaultDeps, scopeToContact, buildTimeline, computeFacts, fingerprintOf, ruleVerdict, settleAiReply, parseJudgeReply, judgeInput, isOwedAlert, guardBareYes,
+  defaultDeps, scopeToContact, redactForModel, buildTimeline, computeFacts, fingerprintOf, ruleVerdict, settleAiReply, parseJudgeReply, judgeInput, isOwedAlert, guardBareYes,
   makeBudget, unchanged, voicemailNote, proofOverflow, listedEvents, textBackWasSent, messagesBase, smsEvent, callEvent, callModel, NoKeyError, clean, MAX_ALERTS, SYSTEM_PROMPT,
 };
