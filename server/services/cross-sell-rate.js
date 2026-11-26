@@ -24,7 +24,7 @@
  *       quote_wizard                   -> website_quote
  *       any other estimate             -> estimate
  *   no estimate: scheduled_services.source starting quote-wizard -> website_quote;
- *   source_call_log_id set or booking_source phone_call -> phone_call; source starting square_ -> imported; else office.
+ *   source_call_log_id set or booking_source phone_call -> phone_call; source ending _import_YYYY_MM or _cleanup_YYYY_MM -> imported; else office.
  */
 const { dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
@@ -47,6 +47,7 @@ const FAMILY_BY_SERVICE_TYPE_WORD = [
   ['shrub', 'tree_shrub'],
   ['mosquito', 'mosquito'],
   ['termite', 'termite'],
+  ['rodent%bait', 'rodent_bait'],
   ['bait', 'termite'],
   ['pest', 'pest'],
 ];
@@ -86,14 +87,18 @@ const COUNTED_VISITS_SQL = `
   held AS (
     SELECT v.customer_id, v.fam
     FROM v
-    JOIN customers c ON c.id = v.customer_id AND c.deleted_at IS NULL AND (c.churned_at IS NULL OR c.churned_at > CAST(? AS date))
+    JOIN customers c ON c.id = v.customer_id AND c.deleted_at IS NULL
+      -- A churn stamp on or before the day drops the customer, unless this visit was booked after it (a reactivation).
+      AND (c.churned_at IS NULL OR c.churned_at > CAST(? AS date) OR v.created_at > c.churned_at)
     WHERE v.fam IS NOT NULL
+      -- Only visits already booked by the end of the day (ET): a later purchase never rewrites a closed month.
+      AND v.created_at < (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York'
       AND v.scheduled_date BETWEEN CAST(? AS date) - ${WINDOW_DAYS} AND CAST(? AS date) + ${WINDOW_DAYS}
     GROUP BY v.customer_id, v.fam
   )`;
 
 function asOfBindings(asOf) {
-  return [asOf, asOf, asOf];
+  return [asOf, asOf, asOf, asOf];
 }
 
 function requireDate(value) {
@@ -103,13 +108,15 @@ function requireDate(value) {
 }
 
 const startsWith = (value, prefix) => typeof value === 'string' && value.startsWith(prefix);
+// The June 2026 bulk loads of visits from the old booking system stamp source '<name>_import_2026_06' or '<name>_cleanup_2026_06'.
+const IMPORT_SOURCE_RE = /_(?:import|cleanup)_\d{4}_\d{2}$/;
 
 /** How a service came in, from the earliest visit's fields (see the header). */
 function classifySource({ estimateId, estimateSource, source, sourceCallLogId, bookingSource } = {}) {
   if (estimateId) return SOURCE_BY_ESTIMATE_SOURCE[estimateSource] || 'estimate';
   if (startsWith(source, 'quote-wizard')) return 'website_quote';
   if (sourceCallLogId || bookingSource === 'phone_call') return 'phone_call';
-  if (startsWith(source, 'square_')) return 'imported';
+  if (typeof source === 'string' && IMPORT_SOURCE_RE.test(source)) return 'imported';
   return 'office';
 }
 
@@ -238,6 +245,8 @@ async function getCrossSellSummary({ months = 12, db = require('../models/db'), 
   const limit = Math.max(1, Math.min(36, parseInt(months, 10) || 12));
   const stored = await db('monthly_financial_snapshots')
     .whereNotNull('recurring_customers')
+    // A month before the June 2026 visit import holds no booked visits (0 of 0): it is not a reading.
+    .where('recurring_customers', '>', 0)
     .orderBy('month', 'desc')
     .limit(limit)
     .select('month', 'recurring_customers', 'multi_service_customers');

@@ -2,7 +2,7 @@
 //
 // Cross-sell snapshot backfill (owner approved 2026-11-26). DRY RUN by default: nothing is written.
 //
-// For each closed month from 2026-03 through last month, counts the customers with recurring service and those with two or
+// For each closed month from 2026-07 (the first full month after the June 2026 visit import) through last month, counts the customers with recurring service and those with two or
 // more kinds (services/cross-sell-rate.js, the same function the 2nd-of-the-month cron uses) as of the month's last day, and
 // prints one line per month. With --apply it UPDATEs only recurring_customers, multi_service_customers and
 // multi_service_sources on the monthly_financial_snapshots row that already exists for that month. It never touches another
@@ -15,7 +15,7 @@ require('dotenv').config();
 const { monthOffset, monthWindow } = require('../services/monthly-financial-snapshot');
 const { snapshotColumns, crossSellForMonthEnd, share } = require('../services/cross-sell-rate');
 
-const FIRST_MONTH = '2026-03-01';
+const FIRST_MONTH = '2026-07-01';
 
 /** The closed months to fill, oldest first: FIRST_MONTH through last month (the current, unfinished month is never included). */
 function monthsToFill(now = new Date()) {

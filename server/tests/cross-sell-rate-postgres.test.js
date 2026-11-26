@@ -41,7 +41,8 @@ postgres('cross-sell rate (live Postgres)', () => {
   const visit = async (customerId, fields = {}) => {
     const id = randomUUID();
     await trx('scheduled_services').insert({
-      id, customer_id: customerId, scheduled_date: M, service_type: 'Sample Visit', status: 'confirmed', is_recurring: true, ...fields,
+      id, customer_id: customerId, scheduled_date: M, service_type: 'Sample Visit', status: 'confirmed', is_recurring: true,
+      created_at: '2026-01-01T12:00:00Z', ...fields,
     });
     return id;
   };
@@ -117,6 +118,7 @@ postgres('cross-sell rate (live Postgres)', () => {
       [null, 'Mosquito Barrier', 'mosquito'],
       [null, 'Termite Bait Stations', 'termite'],
       [null, 'Bait Stations', 'termite'],
+      [null, 'Rodent Bait Station Service', 'rodent_bait'],
       [null, 'Quarterly Pest Control', 'pest'],
       [null, 'Cockroach Control', null],
     ];
@@ -181,6 +183,29 @@ postgres('cross-sell rate (live Postgres)', () => {
       expect(await counts()).toEqual({ recurringCustomers: 1, multiServiceCustomers: 1 });
     });
 
+    test('a keyed and an unkeyed rodent bait visit are one family, not rodent bait plus termite', async () => {
+      const c = await customer('RodentBoth');
+      await visit(c, { service_key_snapshot: 'rodent_bait_quarterly', service_type: 'Rodent Bait' });
+      await visit(c, { service_key_snapshot: null, service_type: 'Rodent Bait Station Service', scheduled_date: await dayFrom(M, -30) });
+      expect(await counts()).toEqual({ recurringCustomers: 1, multiServiceCustomers: 0 });
+    });
+
+    test('a service booked after the day does not count for that day', async () => {
+      const c = await customer('BookedLater');
+      await visit(c, { ...PEST });
+      await visit(c, { ...LAWN, scheduled_date: await dayFrom(M, 20), created_at: '2026-11-05T12:00:00Z' });
+      expect(await counts()).toEqual({ recurringCustomers: 1, multiServiceCustomers: 0 });
+      expect(await counts('2026-11-30')).toEqual({ recurringCustomers: 1, multiServiceCustomers: 1 });
+    });
+
+    test('a customer who came back after an old churn stamp counts on the visits booked after it', async () => {
+      const c = await customer('CameBack', { churned_at: '2026-05-01' });
+      await visit(c, { ...PEST, created_at: '2026-01-01T12:00:00Z', scheduled_date: '2026-04-15' });
+      await visit(c, { ...PEST, created_at: '2026-08-01T12:00:00Z' });
+      await visit(c, { ...LAWN, created_at: '2026-08-02T12:00:00Z' });
+      expect(await counts()).toEqual({ recurringCustomers: 1, multiServiceCustomers: 1 });
+    });
+
     test('the same family twice is one family, not two', async () => {
       const c = await customer('Twice');
       await visit(c, { ...PEST });
@@ -207,7 +232,7 @@ postgres('cross-sell rate (live Postgres)', () => {
       await added({ source_estimate_id: await estimate('manual', null) });
       await added({ source: 'quote-wizard' });
       await added({ booking_source: 'phone_call' });
-      await added({ source: 'square_booking' });
+      await added({ source: 'rebooking_import_2026_06' });
       await added({ source: 'admin' });
       const result = await svc.crossSellForMonthEnd(trx, M);
       expect(result.multiServiceCustomers).toBe(9);
@@ -293,20 +318,20 @@ postgres('cross-sell rate (live Postgres)', () => {
       await seed();
       const now = new Date('2026-11-26T15:00:00Z');
       await trx('monthly_financial_snapshots').insert([
-        { month: '2026-03-01', office_cost: 111.11, paid_stops: 7, cash_revenue: 222.22, net_income: -5, pnl_complete: true },
+        { month: '2026-07-01', office_cost: 111.11, paid_stops: 7, cash_revenue: 222.22, net_income: -5, pnl_complete: true },
         { month: '2026-10-01', office_cost: 333.33, paid_stops: 9, cash_revenue: 444.44, net_income: 12, recurring_customers: 1, multi_service_customers: 0 },
-        { month: '2026-02-01', office_cost: 1, paid_stops: 1 }, // before 2026-03: not touched
+        { month: '2026-06-01', office_cost: 1, paid_stops: 1 }, // before 2026-07: not touched
       ]);
       const before = await trx('monthly_financial_snapshots').orderBy('month');
 
       const dry = await backfill.backfillCrossSell(trx, { apply: false, now });
-      expect(dry).toHaveLength(8);
+      expect(dry).toHaveLength(4);
       expect(await trx('monthly_financial_snapshots').orderBy('month')).toEqual(before);
 
       const lines = [];
       const report = await backfill.backfillCrossSell(trx, { apply: true, now, log: (l) => lines.push(l) });
-      expect(lines).toHaveLength(8);
-      expect(report.filter((r) => r.stored).map((r) => r.month)).toEqual(['2026-03-01', '2026-10-01']);
+      expect(lines).toHaveLength(4);
+      expect(report.filter((r) => r.stored).map((r) => r.month)).toEqual(['2026-07-01', '2026-10-01']);
 
       const after = await trx('monthly_financial_snapshots').orderBy('month');
       expect(after).toHaveLength(3); // no row inserted

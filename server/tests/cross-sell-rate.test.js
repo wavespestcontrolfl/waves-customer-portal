@@ -26,7 +26,7 @@ describe('classifySource', () => {
     expect(svc.classifySource({ source: 'quote-wizard-onetime' })).toBe('website_quote');
     expect(svc.classifySource({ sourceCallLogId: 'call-1', source: 'admin' })).toBe('phone_call');
     expect(svc.classifySource({ bookingSource: 'phone_call' })).toBe('phone_call');
-    expect(svc.classifySource({ source: 'square_booking' })).toBe('imported');
+    expect(svc.classifySource({ source: 'rebooking_import_2026_06' })).toBe('imported');
     expect(svc.classifySource({ source: 'admin' })).toBe('office');
     expect(svc.classifySource({})).toBe('office');
     expect(svc.classifySource()).toBe('office');
@@ -123,7 +123,7 @@ function makeDb({ raws = [], updates = [], stored = [] } = {}) {
 }
 
 describe('crossSellForMonthEnd and the snapshot columns', () => {
-  test('reads once, as of the given day (all three date bindings), and stores the split as JSON text', async () => {
+  test('reads once, as of the given day (all four date bindings), and stores the split as JSON text', async () => {
     const rows = [
       { customer_id: 'a', fam: 'pest', created_at: new Date('2025-01-01T00:00:00Z') },
       { customer_id: 'a', fam: 'lawn', created_at: new Date('2026-01-01T00:00:00Z'), source: 'quote-wizard' },
@@ -132,7 +132,7 @@ describe('crossSellForMonthEnd and the snapshot columns', () => {
     const db = makeDb({ raws: [{ rows }] });
     const columns = await svc.crossSellColumns(db, new Date('2026-10-31T12:00:00Z'));
     expect(db.calls.raw).toHaveLength(1);
-    expect(db.calls.raw[0].bindings).toEqual(['2026-10-31', '2026-10-31', '2026-10-31']);
+    expect(db.calls.raw[0].bindings).toEqual(['2026-10-31', '2026-10-31', '2026-10-31', '2026-10-31']);
     expect(db.calls.raw[0].sql).toContain('JOIN customers c ON c.id = v.customer_id AND c.deleted_at IS NULL');
     expect(db.calls.raw[0].sql).toContain('c.churned_at > CAST(? AS date)');
     expect(db.calls.raw[0].sql).toContain("ss.status <> 'cancelled'");
@@ -152,7 +152,7 @@ describe('pestOnlyCustomers', () => {
     expect(await svc.pestOnlyCustomers(db, '2026-11-26')).toEqual([
       { id: 'c1', firstName: 'Sample', lastName: 'Alpha', city: 'Parrish', pestServiceKey: 'pest_general_quarterly' },
     ]);
-    expect(db.calls.raw[0].bindings).toEqual(['2026-11-26', '2026-11-26', '2026-11-26']);
+    expect(db.calls.raw[0].bindings).toEqual(['2026-11-26', '2026-11-26', '2026-11-26', '2026-11-26']);
     expect(db.calls.raw[0].sql).toContain('LIMIT 500');
     expect(db.calls.raw[0].sql).toContain('ORDER BY LOWER(c.last_name)');
   });
@@ -189,31 +189,31 @@ describe('getCrossSellSummary', () => {
 describe('backfill', () => {
   const now = new Date('2026-11-26T15:00:00Z');
 
-  test('fills 2026-03 through last month, never the current month', () => {
+  test('fills 2026-07 through last month, never the current month', () => {
     const months = backfill.monthsToFill(now);
-    expect(months[0]).toBe('2026-03-01');
+    expect(months[0]).toBe('2026-07-01');
     expect(months[months.length - 1]).toBe('2026-10-01');
-    expect(months).toHaveLength(8);
+    expect(months).toHaveLength(4);
   });
 
   test('a dry run writes nothing and prints one line per month', async () => {
     const lines = [];
-    const db = makeDb({ raws: Array.from({ length: 8 }, () => ({ rows: [] })) });
+    const db = makeDb({ raws: Array.from({ length: 4 }, () => ({ rows: [] })) });
     const report = await backfill.backfillCrossSell(db, { apply: false, now, log: (l) => lines.push(l) });
-    expect(report).toHaveLength(8);
+    expect(report).toHaveLength(4);
     expect(report.every((r) => r.stored === false)).toBe(true);
-    expect(lines).toHaveLength(8);
+    expect(lines).toHaveLength(4);
     expect(db.calls.chain).toHaveLength(0);
   });
 
   test('--apply updates only the three new columns on the existing row, by month, and skips a month with no row', async () => {
     const rows = [{ customer_id: 'a', fam: 'pest', created_at: new Date('2025-01-01T00:00:00Z') }];
-    const db = makeDb({ raws: Array.from({ length: 8 }, () => ({ rows })), updates: [0, 1, 1, 1, 1, 1, 1, 1] });
+    const db = makeDb({ raws: Array.from({ length: 4 }, () => ({ rows })), updates: [0, 1, 1, 1] });
     const lines = [];
     const report = await backfill.backfillCrossSell(db, { apply: true, now, log: (l) => lines.push(l) });
-    expect(report.map((r) => r.stored)).toEqual([false, true, true, true, true, true, true, true]);
+    expect(report.map((r) => r.stored)).toEqual([false, true, true, true]);
     expect(lines[0]).toContain('skipped');
-    expect(db.calls.chain).toHaveLength(8);
+    expect(db.calls.chain).toHaveLength(4);
     for (const entry of db.calls.chain) {
       expect(entry.table).toBe('monthly_financial_snapshots');
       expect(entry.calls.map(([method]) => method)).toEqual(['where', 'update']);
