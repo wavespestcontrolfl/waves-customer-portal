@@ -668,3 +668,31 @@ describe('what the model reads is part of the fingerprint, and the facts and not
     expect(agent.voicemailNote({ recording_sid: 'RE1', transcription: 'please call me back' }, true)).toMatch(/please call me back/);
   });
 });
+
+describe('the prompt carries every citable record, drafts after them', () => {
+  test('citable records are listed before drafts, drafts are capped, and more than the prompt can hold makes the timeline incomplete', async () => {
+    const proofs = Array.from({ length: 5 }, (_x, i) => ev({ type: 'visit', id: `v${i}`, key: `visit:v${i}:booked`, proof: 'booking', at: after(10 + i), line: `VISIT ${i}` }));
+    const drafts = Array.from({ length: 25 }, (_x, i) => ev({ type: 'email', id: `d${i}`, key: `email:d${i}:draft`, draft: true, at: after(100 + i), line: `DRAFT ${i}` }));
+    const listed = agent.listedEvents(timelineOf([...proofs, ...drafts]));
+    expect(listed.filter((e) => e.proof)).toHaveLength(5);
+    expect(listed.filter((e) => e.draft)).toHaveLength(10);
+    expect(agent.proofOverflow(timelineOf(proofs))).toBe(false);
+
+    const many = Array.from({ length: 31 }, (_x, i) => ev({ type: 'visit', id: `w${i}`, key: `visit:w${i}:booked`, proof: 'booking', at: after(10 + i), line: `VISIT ${i}` }));
+    expect(agent.proofOverflow(timelineOf(many))).toBe(true);
+    const deps = makeDeps({ timeline: async () => timelineOf([...many, staffText()]) });
+    const out = await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(out.incomplete).toBe(1);
+    expect(deps.save).not.toHaveBeenCalled();
+    expect(deps.reserve).not.toHaveBeenCalled();
+  });
+});
+
+describe('fingerprint: the text-back state', () => {
+  test('only the claim moving (dispatching to sent) changes it', () => {
+    const missed = alertRow({ category: 'missed_call' });
+    const tl = (state) => timelineOf([], { customerKnown: false, call: { customerId: null, hasVoicemail: false, textBackSent: state === 'sent:none', textBackState: state } });
+    expect(agent.fingerprintOf(missed, tl('dispatching:none'), NOW)).not.toBe(agent.fingerprintOf(missed, tl('sent:none'), NOW));
+    expect(agent.fingerprintOf(missed, tl('sent:none'), NOW)).toBe(agent.fingerprintOf(missed, tl('sent:none'), NOW));
+  });
+});

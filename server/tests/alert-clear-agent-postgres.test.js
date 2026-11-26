@@ -281,13 +281,11 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(timeline.events.filter((e) => e.proof === 'date_change').map((e) => e.id)).toEqual([String(real)]);
   });
 
-  test('a known customer keeps a person\'s text to the resolved number even when that row has no customer id', async () => {
+  test('a known customer keeps a person\'s text to the resolved number even when that row has no customer id (number not shared)', async () => {
     const cid = await customer();
-    const other = await customer();
     const number = phone(41);
     const sid = `SM${tag}i`;
     await sms({ customer_id: cid, direction: 'inbound', from_phone: number, twilio_sid: sid, message_body: 'hello', created_at: T0, status: 'received' });
-    await sms({ customer_id: other, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'to another customer on a shared number', created_at: at(5), metadata: { human_authored: 'true' } });
     const unlinked = await sms({ customer_id: null, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'unlinked text to the number', created_at: at(8), metadata: { human_authored: 'true' } });
     const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
     const timeline = await agent.buildTimeline(row);
@@ -384,6 +382,84 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const row = await alert('inbound_email', 'Email from Test', '/admin/communications#tab=email', { payload: { emailId: mail.id } });
     const timeline = await agent.buildTimeline(row);
     expect(timeline.events.filter((e) => e.proof === 'staff_text').map((e) => e.id)).toEqual([String(unlinked)]);
+  });
+
+  test('recruiting messages in the unified inbox never reach the timeline, even for a customer who is also an applicant', async () => {
+    const cid = await customer();
+    const number = phone(81);
+    const [conv] = await db('conversations').insert({ channel: 'sms', customer_id: cid, contact_phone: number }).returning('id');
+    made.conversations.push(conv.id);
+    const inbox = (row) => db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', ...row });
+    await inbox({ body: 'Here is my resume and availability', message_type: 'job_applicant_reply', twilio_sid: `SM${tag}r1`, created_at: at(10) });
+    await inbox({ body: 'my ant problem got worse', twilio_sid: `SM${tag}r2`, created_at: at(12) });
+    const sid = `SM${tag}r0`;
+    await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'hello', created_at: T0, status: 'received' });
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
+    const timeline = await agent.buildTimeline(row);
+    const lines = timeline.events.map((e) => e.line).join('\n');
+    expect(lines).toMatch(/ant problem got worse/);
+    expect(lines).not.toMatch(/resume/);
+    // the trigger itself: a recruiting message is never resolved as the text a bell is about
+    await inbox({ body: 'applicant reply as trigger', message_type: 'job_applicant_reply', twilio_sid: `SM${tag}r3`, created_at: at(-5) });
+    const trig = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=SM${tag}r3`);
+    const trigTimeline = await agent.buildTimeline(trig);
+    expect(trigTimeline.ctx.join('\n')).not.toMatch(/applicant reply as trigger/);
+  });
+
+  test('a shared phone admits only rows tied to the customer; an unshared one also admits unlinked rows', async () => {
+    const number = phone(82);
+    const mine = await customer({ phone: number });
+    await customer({ phone: number });
+    const sid = `SM${tag}s1`;
+    await sms({ customer_id: mine, direction: 'inbound', from_phone: number, twilio_sid: sid, message_body: 'hi', created_at: T0, status: 'received' });
+    await sms({ customer_id: null, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'unlinked text to a shared number', created_at: at(5), metadata: { human_authored: 'true' } });
+    const linked = await sms({ customer_id: mine, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'text tied to this customer', created_at: at(6), metadata: { human_authored: 'true' } });
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${mine}&message=${sid}`);
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.complete).toBe(true);
+    expect(timeline.events.filter((e) => e.proof === 'staff_text').map((e) => e.id)).toEqual([String(linked)]);
+  });
+
+  test('the offer behind a "yes" is the last text the customer received, however many rows sit between', async () => {
+    const cid = await customer();
+    const sid = `SM${tag}o1`;
+    await sms({ customer_id: cid, direction: 'outbound', message_type: 'manual', status: 'delivered', message_body: 'Friday at 10 am works for the visit?', created_at: at(-600), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', message_type: 'manual', status: 'queued', message_body: 'never delivered text', created_at: at(-100), metadata: { human_authored: 'true' } });
+    for (let i = 0; i < 15; i += 1) await sms({ customer_id: cid, direction: 'inbound', message_body: `chatter ${i}`, created_at: at(-500 + i), status: 'received' });
+    await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'Yes', created_at: T0, status: 'received' });
+    const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`));
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Friday at 10 am works for the visit?' });
+  });
+
+  test('a visit that ran is filtered, ordered and dated by completed_at; a cancelled one and one with no completed_at are not', async () => {
+    const cid = await customer();
+    const sid = `SM${tag}v1`;
+    await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'did you finish', created_at: T0, status: 'received' });
+    const visit = async (row) => {
+      const [r] = await db('scheduled_services').insert({ customer_id: cid, scheduled_date: '2027-01-10', service_type: 'Pest Control', created_at: at(-900), ...row }).returning('id');
+      made.visits.push(r.id);
+      return r.id;
+    };
+    const ran = await visit({ status: 'completed', completed_at: at(30), updated_at: at(-800) });
+    await visit({ status: 'cancelled', completed_at: at(31) });
+    await visit({ status: 'completed', completed_at: null, updated_at: at(32) });
+    const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`));
+    const done = timeline.events.filter((e) => e.type === 'visit');
+    expect(done.map((e) => e.id)).toEqual([String(ran)]);
+    expect(done[0].at).toEqual(at(30));
+    expect(done[0].proof).toBeNull();
+  });
+
+  test('a text-back claim that moves from dispatching to sent changes the fingerprint on its own', async () => {
+    const number = phone(83);
+    const [c] = await db('call_log').insert({ from_phone: number, to_phone: '+15550003333', direction: 'inbound', status: 'no-answer', created_at: at(-2), duration_seconds: 4, metadata: JSON.stringify({}) }).returning('id');
+    made.calls.push(c.id);
+    await db('missed_call_text_claims').insert({ phone: number, outcome: 'dispatching', call_log_id: c.id });
+    const row = await alert('missed_call', 'Missed call', `/admin/communications#tab=calls&call=${c.id}`, { payload: { callLogId: c.id } });
+    const before = agent.fingerprintOf(row, await agent.buildTimeline(row), new Date());
+    await db('missed_call_text_claims').where({ call_log_id: c.id }).update({ outcome: 'sent' });
+    const after = agent.fingerprintOf(row, await agent.buildTimeline(row), new Date());
+    expect(after).not.toBe(before);
   });
 
   test('the open alerts are paged from a cursor and wrap around', async () => {

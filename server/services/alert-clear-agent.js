@@ -52,7 +52,7 @@ const { redactSecrets, newState } = require('../utils/signed-link-redaction');
 const { phoneIdentityKey } = require('../utils/phone');
 const { callStartedAt } = require('../utils/call-timeline');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
-const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+const { excludeRecruitingSmsLog, hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { personSentFilter, emailCustomerLink, extractEmailAddresses, capturedRecipients } = require('./email/email-customer-link');
@@ -60,7 +60,7 @@ const { phoneIdentitySql } = require('./sms-response-policy');
 const { callEndedAtSql } = require('./sms-pending-conversations');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
-const { HOLD_VOICEMAIL_AT_SQL } = require('./admin-alert-contact-witnesses');
+const { HOLD_VOICEMAIL_AT_SQL, sharedPhoneItems } = require('./admin-alert-contact-witnesses');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -76,6 +76,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const ROW_CAP = 300;
 const MODEL_CONTEXT_LINES = 12;
 const MODEL_PROOF_LINES = 30;
+const MODEL_DRAFT_LINES = 10;
 const BODY_CHARS = 400;
 const MAX_WHY_WORDS = 14;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -184,7 +185,7 @@ const visitEvent = (row) => ({
 });
 // A visit that finished after the alert is context only: a finished visit does not answer a question about its result.
 const doneVisitEvent = (row) => ({
-  type: 'visit', id: String(row.id), key: `visit:${row.id}:completed`, at: toDate(row.updated_at), inbound: false, proof: null, draft: false,
+  type: 'visit', id: String(row.id), key: `visit:${row.id}:completed`, at: toDate(row.completed_at), inbound: false, proof: null, draft: false,
   line: `VISIT completed after the alert (it was for ${dateText(row.scheduled_date)}); this does not answer a question about the result`,
 });
 const estimateEvent = (row, at) => ({
@@ -272,9 +273,12 @@ function callsAfter(conn, anchor, key, ownCallId) {
 
 // The inbound texts the unified inbox holds (the SMS webhook writes it first; the text log is best effort): the same contact
 // evidence as sms_log, read the way the contact witnesses read it.
+// Every read of the unified inbox starts here: recruiting messages (job_*, an applicant's replies) are left out, so an applicant who is
+// also a customer never sends a recruiting reply into the prompt (the same exclusion smsBase gives the text log).
+const messagesBase = (conn) => hideRecruitingThreadsFromNonAdmin(conn('messages as m').join('conversations as c', 'c.id', 'm.conversation_id'), null, 'm.message_type');
 const MESSAGE_PHONE = "COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, ''))";
 function canonicalInboundAfter(conn, anchor, key) {
-  const q = conn('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')
+  const q = messagesBase(conn)
     .where('m.channel', 'sms').where('m.direction', 'inbound').where('m.created_at', '>', anchor)
     .orderBy('m.created_at', 'asc').limit(ROW_CAP)
     .select('m.id', 'm.created_at', 'm.twilio_sid', conn.raw('left(m.body, 1500) as body'));
@@ -326,8 +330,11 @@ async function customerRecordsAfter(r, anchor, customerId) {
   const [booked, done, estimates, moves] = await Promise.all([
     read('visits', () => whereLiveBooking(conn('scheduled_services').where('customer_id', customerId).where('created_at', '>', anchor))
       .orderBy('created_at', 'asc').limit(ROW_CAP).select('id', 'created_at', 'scheduled_date', 'status')),
-    read('visits-done', () => conn('scheduled_services').where('customer_id', customerId).where('status', 'completed')
-      .where('updated_at', '>', anchor).orderBy('updated_at', 'asc').limit(ROW_CAP).select('id', 'updated_at', 'scheduled_date')),
+    // A visit that ran: completed_at set, after the alert, in a status that is not one that never ran; filtered, ordered and dated by
+    // completed_at (the contact witnesses' completedVisitRows).
+    read('visits-done', () => conn('scheduled_services').where('customer_id', customerId).whereNotNull('completed_at').where('completed_at', '>', anchor)
+      .where((w) => w.whereNull('status').orWhereNotIn('status', VISIT_NEVER_RAN_STATUSES))
+      .orderBy('completed_at', 'asc').limit(ROW_CAP).select('id', 'completed_at', 'scheduled_date')),
     read('estimates', () => whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), anchor), customerId)
       .limit(ROW_CAP).select(HANDOFF_COLS(conn))),
     read('reschedules', () => conn('reschedule_log').where('customer_id', customerId).where('created_at', '>', anchor)
@@ -370,7 +377,7 @@ async function eventsAfter(r, anchor, key, { ownCallId = null, threadId = null, 
 // resolveTexts). Gives the time it arrived, its customer and the sender's number.
 async function resolveInboundText(r, sid) {
   const { conn, read } = r;
-  const canonical = await read('trigger-message', () => conn('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')
+  const canonical = await read('trigger-message', () => messagesBase(conn)
     .where('m.channel', 'sms').where('m.direction', 'inbound').where('m.twilio_sid', sid)
     .select('m.created_at', 'c.customer_id', conn.raw('left(m.body, 1500) as body'), conn.raw("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, '')) as phone")));
   const legacy = await read('trigger-sms', () => excludeUnresolvedSendReservations(conn('sms_log as os').where('os.direction', 'inbound').where('os.twilio_sid', sid), 'os')
@@ -394,8 +401,26 @@ async function smsContext(r, anchor, key, trigger) {
   const lastIn = hasTrigger ? { message_body: trigger.body, created_at: anchor } : [...ordered].reverse().find((x) => x.direction === 'inbound');
   if (hasTrigger) ctx.push(`CUSTOMER TEXT (the text this alert is about): ${clean(trigger.body)}`);
   const lastAt = lastIn ? toDate(lastIn.created_at) : null;
-  const before = lastAt ? ordered.filter((x) => x.direction !== 'inbound' && toDate(x.created_at) < lastAt).pop() : null;
-  return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: before ? String(before.message_body || '') : '' } : null };
+  const offer = lastAt ? await lastDeliveredText(r, lastAt, key) : '';
+  return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: offer } : null };
+}
+
+// The last outbound text the customer actually received (delivered, or accepted by their app) before the reply, found by its own query:
+// never "the latest outbound row that happens to sit in the excerpt".
+async function lastDeliveredText(r, before, key) {
+  const rows = await r.read('prev-offer', () => scopeToContact(smsBase(r.conn).where('os.direction', 'outbound').whereRaw(smsDeliveredSql('os'))
+    .where('os.created_at', '<', before), key, { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone'] })
+    .orderBy('os.created_at', 'desc').limit(1).select(r.conn.raw('left(os.message_body, 1500) as message_body')));
+  return rows[0] ? String(rows[0].message_body || '') : '';
+}
+
+// The contact to read for: the customer, plus the resolved phone ONLY when no other customer is tied to that number (the contact
+// witnesses' shared-phone check). On a shared phone a row with no customer id says nothing about who it reached, so only ids count.
+async function trustedContact(r, customerId, phone, anchor) {
+  if (!customerId) return { customerId: null, phone: phone || null };
+  if (!phoneIdentityKey(phone)) return { customerId, phone: null };
+  const shared = await r.read('shared-phone', async () => [...await sharedPhoneItems(r.conn, [{ peers: new Set([phoneIdentityKey(phone)]), customerId: String(customerId) }], anchor)]);
+  return { customerId, phone: shared.length ? null : phone };
 }
 
 // What every timeline carries. `trigger` names the record the bell is about and when the bell last rang, so a re-ring is a new look.
@@ -413,8 +438,8 @@ async function smsTimeline(r, alert, bellAt) {
   const text = sid ? await resolveInboundText(r, String(sid)) : null;
   const customerId = threadCustomer || text?.customerId || null;
   const anchor = text?.at || bellAt;
-  const contact = customerId || text?.phone ? { customerId, phone: text?.phone || null } : null;
-  if (!contact) return unreadable(anchor, bellAt);
+  if (!customerId && !text?.phone) return unreadable(anchor, bellAt);
+  const contact = await trustedContact(r, customerId, text?.phone, anchor);
   const { ctx, reply } = await smsContext(r, anchor, contact, text);
   const events = await eventsAfter(r, anchor, contact, { replyTo: null });
   return timelineOf(anchor, bellAt, `sms:${sid || 'none'}`, { customerKnown: !!customerId, ctx, events, reply });
@@ -435,9 +460,12 @@ async function emailTimeline(r, alert, bellAt) {
   const replyTo = extractEmailAddresses(mail.from_address)[0] || null;
   // The linked customer's own number: texts and calls on it count too (the contact witnesses' rule).
   const person = customerId ? await r.read('customer-phone', () => r.conn('customers').where('id', customerId).whereNull('deleted_at').select('phone')) : [];
-  const events = await eventsAfter(r, anchor, { customerId, phone: person[0]?.phone || null }, { threadId: mail.gmail_thread_id, replyTo });
-  const offer = before.find((x) => !x.inbound);
-  const reply = { lastBody: String(mail.body_text || '').split(/On .{5,60} wrote:/)[0].slice(0, 600), prevOutbound: offer ? String(offer.b || '') : '' };
+  const contact = await trustedContact(r, customerId, person[0]?.phone || null, anchor);
+  const events = await eventsAfter(r, anchor, contact, { threadId: mail.gmail_thread_id, replyTo });
+  // The last email Waves actually sent in the thread before the reply, by its own query (not the four context lines).
+  const offer = await r.read('thread-offer', () => r.conn('emails as er').where('er.gmail_thread_id', mail.gmail_thread_id).whereRaw(personSentFilter('er'))
+    .where('er.received_at', '<', anchor).orderBy('er.received_at', 'desc').limit(1).select(r.conn.raw('left(er.body_text, 600) as b')));
+  const reply = { lastBody: String(mail.body_text || '').split(/On .{5,60} wrote:/)[0].slice(0, 600), prevOutbound: offer[0] ? String(offer[0].b || '') : '' };
   return timelineOf(anchor, bellAt, `email:${emailId}`, { customerKnown: !!customerId, ctx, events, reply });
 }
 
@@ -453,11 +481,14 @@ async function loadCall(r, callId) {
 async function textBackWasSent(r, callId) {
   const { CLAIM, MESSAGE_TYPE } = require('./missed-call-text-back');
   const [claims, texts] = await Promise.all([
-    r.read('text-back-claim', () => r.conn('missed_call_text_claims').where({ call_log_id: callId, outcome: CLAIM.SENT }).limit(1).select('phone')),
+    r.read('text-back-claim', () => r.conn('missed_call_text_claims').where({ call_log_id: callId }).limit(1).select('outcome')),
     r.read('text-back', () => smsBase(r.conn).where('os.direction', 'outbound').where('os.message_type', MESSAGE_TYPE)
-      .whereIn('os.status', ['sent', 'delivered', 'read']).whereRaw("os.metadata->>'call_log_id' = ?", [String(callId)]).limit(1).select('os.id')),
+      .whereRaw("os.metadata->>'call_log_id' = ?", [String(callId)]).limit(1).select('os.status')),
   ]);
-  return claims.length > 0 || texts.length > 0;
+  const claim = claims[0]?.outcome || 'none';
+  const text = texts[0]?.status || 'none';
+  // `state` rides in the fingerprint: a claim that moves (dispatching to sent) or a text that settles is a new look.
+  return { sent: claim === CLAIM.SENT || ['sent', 'delivered', 'read'].includes(text), state: `${claim}:${text}` };
 }
 
 // Did the caller leave a voicemail? The missed-call bell's own evidence: a recording that is pending, failed or holds speech is a
@@ -504,11 +535,11 @@ async function callTimeline(r, alert, bellAt) {
   const anchor = hold ? bellAt : (callStartedAt(call) || toDate(call.created_at));
   const hasVoicemail = voicemailLeft(call);
   const ctx = [`CALLER: ${clean(alert.title, 120)}. Rang ${call.duration_seconds || 0} sec. ${voicemailNote(call, hasVoicemail)}`];
-  const events = await eventsAfter(r, anchor, { customerId, phone }, { ownCallId: call.id });
-  const textBackSent = alert.category === 'missed_call' && !customerId && await textBackWasSent(r, call.id);
+  const events = await eventsAfter(r, anchor, await trustedContact(r, customerId, phone, anchor), { ownCallId: call.id });
+  const textBack = alert.category === 'missed_call' && !customerId ? await textBackWasSent(r, call.id) : { sent: false, state: '' };
   // The trigger carries the call's voicemail evidence and customer link: a late transcript or a late link is a new look.
   const trigger = `call:${callId}:vm${hasVoicemail ? 1 : 0}:t${call.transcription_status || ''}:c${customerId || ''}`;
-  return timelineOf(anchor, bellAt, trigger, { customerKnown: !!customerId, ctx, events, call: { customerId, hasVoicemail, textBackSent } });
+  return timelineOf(anchor, bellAt, trigger, { customerKnown: !!customerId, ctx, events, call: { customerId, hasVoicemail, textBackSent: textBack.sent, textBackState: textBack.state } });
 }
 
 // The timeline of one alert (everything after it, with the proof kind of every event set in code).
@@ -550,7 +581,7 @@ function fingerprintOf(alert, timeline, now) {
   const parts = [timeline.trigger || '', timeline.bellAt ? toDate(timeline.bellAt).toISOString() : '', toDate(timeline.alertAt).toISOString(), contextHash,
     // Each event with a hash of what the model reads of it (body, summary, status notes), not just its id and state.
     ...(timeline.unreadable ? [] : timeline.events.map((e) => `${e.key}:${crypto.createHash('sha1').update(String(e.line || '')).digest('hex').slice(0, 12)}`).sort())];
-  if (alert.category === 'missed_call') parts.push(now - timeline.alertAt >= DAY_MS ? 'q24' : 'q0');
+  if (alert.category === 'missed_call') parts.push(now - timeline.alertAt >= DAY_MS ? 'q24' : 'q0', `tb:${timeline.call?.textBackState || ''}`);
   return crypto.createHash('sha1').update(parts.join('|')).digest('hex');
 }
 
@@ -595,13 +626,17 @@ function guardBareYes(v, timeline) {
 
 // The lines the model sees: every proof event (so any answer is citable) and the latest context lines; all of them with an id.
 function listedEvents(timeline) {
-  const proofs = timeline.events.filter((e) => e.proof || e.draft).slice(0, MODEL_PROOF_LINES);
+  const proofs = timeline.events.filter((e) => e.proof).slice(0, MODEL_PROOF_LINES);
+  const drafts = timeline.events.filter((e) => e.draft).slice(-MODEL_DRAFT_LINES);
   const context = timeline.events.filter((e) => !e.proof && !e.draft).slice(-MODEL_CONTEXT_LINES);
-  const listed = [...proofs, ...context].sort((a, b) => a.at - b.at);
+  const listed = [...proofs, ...drafts, ...context].sort((a, b) => a.at - b.at);
   timeline.events.forEach((e) => { delete e.ref; });
   listed.forEach((e, i) => { e.ref = `E${i + 1}`; });
   return listed;
 }
+
+// More citable records than the prompt can carry: the model could not see every one, so the timeline is not trusted.
+const proofOverflow = (timeline) => timeline.events.filter((e) => e.proof).length > MODEL_PROOF_LINES;
 
 function judgeInput(alert, timeline, facts) {
   const listed = listedEvents(timeline);
@@ -783,8 +818,8 @@ async function aiVerdict(alert, timeline, fingerprint, { deps, budget }) {
 async function processAlert(alert, { now, deps, last, budget }) {
   const timeline = await deps.timeline(alert, now);
   // A timeline with a failed or capped read is never trusted, not even for a rule: no verdict, one log line.
-  if (!timeline.complete) {
-    logger.warn('[alert-clear-agent] incomplete timeline; alert skipped');
+  if (!timeline.complete || proofOverflow(timeline)) {
+    logger.warn(`[alert-clear-agent] ${timeline.complete ? 'more citable records than the prompt carries' : 'incomplete timeline'}; alert skipped`);
     return 'incomplete';
   }
   const fingerprint = fingerprintOf(alert, timeline, now);
@@ -836,5 +871,5 @@ module.exports = {
   runAlertClearAgent,
   // exported for tests
   defaultDeps, scopeToContact, buildTimeline, computeFacts, fingerprintOf, ruleVerdict, settleAiReply, parseJudgeReply, judgeInput, isOwedAlert, guardBareYes,
-  makeBudget, unchanged, voicemailNote, smsEvent, callEvent, callModel, NoKeyError, clean, MAX_ALERTS, SYSTEM_PROMPT,
+  makeBudget, unchanged, voicemailNote, proofOverflow, listedEvents, textBackWasSent, messagesBase, smsEvent, callEvent, callModel, NoKeyError, clean, MAX_ALERTS, SYSTEM_PROMPT,
 };
