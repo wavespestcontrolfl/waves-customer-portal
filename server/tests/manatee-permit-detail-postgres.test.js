@@ -236,4 +236,22 @@ postgres('permit detail collector on PostgreSQL', () => {
     // Fetch date is a plain date.
     expect((await findPermitBuildingFacts({ parcelPin: '1111111111' })).fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
+
+  test('read helper: a 9-digit parcel number finds its permit stored under the padded 10-digit pin', async () => {
+    const facts = (n) => ({ detail_status: 'ok', detail_fetched_at: ago(3), conditioned_sqft: n, stories: 1 });
+    await insert('BLD9806-0001', { parcel_pin: '5133090590', address_loose_key: '700sample34212', address_raw: '700 SAMPLE TRL  BRADENTON 34212', ...facts(2400) });
+    // The estimator carries the county's 9-digit number: the padded tier finds the permit as a parcel match.
+    expect(await findPermitBuildingFacts({ parcelPin: '513309059', looseKey: '700sample34212', addressMatches: (raw) => raw === '700 SAMPLE TRL  BRADENTON 34212' }))
+      .toMatchObject({ permitNo: 'BLD9806-0001', conditionedSqft: 2400, matchedBy: 'parcel' });
+    // A padded pin can be another parcel's own number: the street check holds for that tier too.
+    expect(await findPermitBuildingFacts({ parcelPin: '513309059', looseKey: '700sample34212', addressMatches: () => false })).toBeNull();
+    // The padded pin with ANOTHER loose key may be a different parcel's own 10-digit number: no parcel match,
+    // and the address tier has no row for this key.
+    expect(await findPermitBuildingFacts({ parcelPin: '513309059', looseKey: '900other34212' })).toBeNull();
+    // Without a loose key the padded pin alone is not asked.
+    expect(await findPermitBuildingFacts({ parcelPin: '513309059' })).toBeNull();
+    // A pin-less row on the loose key still passes the guard for a 9-digit parcel; another clean pin still does not.
+    await insert('BLD9806-0002', { parcel_pin: '7777777777', address_loose_key: '800sample34212', ...facts(3100) });
+    expect(await findPermitBuildingFacts({ parcelPin: '613309059', looseKey: '800sample34212' })).toBeNull();
+  });
 });
