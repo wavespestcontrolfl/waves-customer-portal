@@ -562,12 +562,20 @@ describe('the model tier is selectable in the switchboard', () => {
 });
 
 describe('an empty contact matches nothing', () => {
+  // A query stand-in that records every call and runs the callbacks it is given.
   const recorder = () => {
     const calls = [];
-    const q = { where(...a) { calls.push(['where', ...a]); if (typeof a[0] === 'function') a[0]({ orWhereRaw: (...b) => calls.push(['orWhereRaw', ...b]) }); return q; }, whereRaw(...a) { calls.push(['whereRaw', ...a]); return q; } };
+    const q = new Proxy({}, {
+      get: (_t, name) => (...args) => {
+        calls.push([name, ...args.map((x) => (typeof x === 'function' ? 'fn' : x))]);
+        args.filter((x) => typeof x === 'function').forEach((fn) => fn(q));
+        return q;
+      },
+    });
     return { q, calls };
   };
   const scope = { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone', 'os.from_phone'] };
+  const names = (calls) => calls.map((c) => c[0]);
 
   test.each([
     ['a null phone and no customer', { customerId: null, phone: null }],
@@ -581,14 +589,22 @@ describe('an empty contact matches nothing', () => {
     expect(calls).toEqual([['whereRaw', '1 = 0']]);
   });
 
-  test('a customer id wins, and a real phone scopes by phone identity', () => {
+  test('a customer alone scopes by id; a phone alone by phone identity', () => {
     const byCustomer = recorder();
-    agent.scopeToContact(byCustomer.q, { customerId: ' cust-1 ', phone: '+19415550100' }, scope);
+    agent.scopeToContact(byCustomer.q, { customerId: ' cust-1 ', phone: null }, scope);
     expect(byCustomer.calls).toEqual([['where', 'os.customer_id', 'cust-1']]);
     const byPhone = recorder();
     agent.scopeToContact(byPhone.q, { customerId: null, phone: '+19415550100' }, scope);
-    expect(byPhone.calls.filter((c) => c[0] === 'orWhereRaw')).toHaveLength(2);
-    expect(byPhone.calls.some((c) => c[0] === 'whereRaw')).toBe(false);
+    expect(names(byPhone.calls).filter((n) => n === 'orWhereRaw')).toHaveLength(2);
+    expect(names(byPhone.calls)).not.toContain('whereNull');
+  });
+
+  test('a known customer with a resolved phone also keeps rows with NO customer id on that number (the witnesses\' rule), never another customer\'s', () => {
+    const { q, calls } = recorder();
+    agent.scopeToContact(q, { customerId: 'cust-1', phone: '+19415550100' }, scope);
+    expect(calls).toContainEqual(['where', 'os.customer_id', 'cust-1']);
+    expect(calls).toContainEqual(['whereNull', 'os.customer_id']);
+    expect(names(calls).filter((n) => n === 'orWhereRaw')).toHaveLength(2);
   });
 });
 
@@ -609,5 +625,18 @@ describe('a bare yes by email is held like one by text', () => {
     const deps = makeDeps({ timeline: async () => timelineOf([staffText()], { reply, trigger: 'email:E1' }), candidates: async () => [alertRow({ category: 'inbound_email' })] });
     await agent.runAlertClearAgent({ now: NOW, deps });
     expect(saved(deps)[0]).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
+  });
+});
+
+describe('quiet missed call: later call rows are contact evidence', () => {
+  test('a later call row, even one with no end stamp or an outbound one, blocks the silence rule', async () => {
+    const missed = alertRow({ category: 'missed_call', title: 'Unknown caller', link: '/admin/communications#tab=calls&call=33333333-3333-4333-8333-333333333333' });
+    const unended = { type: 'call', id: 'c9', key: 'call:c9:n:o', at: after(300), inbound: false, proof: null, draft: false, line: 'CALL outbound' };
+    const deps = makeDeps({
+      candidates: async () => [missed],
+      timeline: async () => timelineOf([unended], { customerKnown: false, call: { customerId: null, hasVoicemail: false, textBackSent: true } }),
+    });
+    await agent.runAlertClearAgent({ now: new Date(ALERT_AT.getTime() + 25 * 3600 * 1000), deps });
+    expect(saved(deps).every((r) => r.rule !== 'quiet_unknown_missed_call')).toBe(true);
   });
 });

@@ -23,7 +23,7 @@ const phone = (n) => `+1555${String(Math.abs(parseInt(tag, 16) % 9000) + 1000)}$
 postgres('alert clear-up agent: readers on a real schema', () => {
   let db;
   let agent;
-  const made = { notifications: [], customers: [], smsLog: [], calls: [], emails: [], visits: [], estimates: [], conversations: [] };
+  const made = { notifications: [], customers: [], smsLog: [], calls: [], emails: [], visits: [], estimates: [], conversations: [], reschedules: [] };
 
   const customer = async (extra = {}) => {
     const [row] = await db('customers').insert({ first_name: `Test${tag}`, phone: phone(Math.floor(Math.random() * 900)), ...extra }).returning('id');
@@ -54,8 +54,10 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     await db('alert_clear_verdicts').whereIn('notification_id', made.notifications).del();
     await db('notifications').whereIn('id', made.notifications).del();
     await db('sms_log').whereIn('id', made.smsLog).del();
+    await db('missed_call_text_claims').whereIn('call_log_id', made.calls).del();
     await db('call_log').whereIn('id', made.calls).del();
     await db('emails').whereIn('id', made.emails).del();
+    await db('reschedule_log').whereIn('id', made.reschedules).del();
     await db('scheduled_services').whereIn('id', made.visits).del();
     await db('estimates').whereIn('id', made.estimates).del();
     await db('messages').whereIn('conversation_id', made.conversations).del();
@@ -259,6 +261,117 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
     const timeline = await agent.buildTimeline(row);
     expect(timeline.complete).toBe(false);
+  });
+
+  test('a missed-appointment reschedule row (no new date) is never a date change; a real move is', async () => {
+    const cid = await customer();
+    const sid = `SM${tag}h`;
+    await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'move it', created_at: T0, status: 'received' });
+    const [visit] = await db('scheduled_services').insert({ customer_id: cid, scheduled_date: '2027-01-10', service_type: 'Pest Control', status: 'pending', created_at: at(-600) }).returning('id');
+    made.visits.push(visit.id);
+    const move = async (newDate) => {
+      const [r] = await db('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: cid, original_date: '2027-01-10', new_date: newDate, reason_code: 'x', created_at: at(20) }).returning('id');
+      made.reschedules.push(r.id);
+      return r.id;
+    };
+    await move(null);
+    const real = await move('2027-01-12');
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.events.filter((e) => e.proof === 'date_change').map((e) => e.id)).toEqual([String(real)]);
+  });
+
+  test('a known customer keeps a person\'s text to the resolved number even when that row has no customer id', async () => {
+    const cid = await customer();
+    const other = await customer();
+    const number = phone(41);
+    const sid = `SM${tag}i`;
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, twilio_sid: sid, message_body: 'hello', created_at: T0, status: 'received' });
+    await sms({ customer_id: other, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'to another customer on a shared number', created_at: at(5), metadata: { human_authored: 'true' } });
+    const unlinked = await sms({ customer_id: null, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'unlinked text to the number', created_at: at(8), metadata: { human_authored: 'true' } });
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.events.filter((e) => e.proof === 'staff_text').map((e) => e.id)).toEqual([String(unlinked)]);
+  });
+
+  test('missed-call silence: the canonical inbox, an unended later call and the claim for THIS call are all read', async () => {
+    const claim = (phoneNumber, callId) => db('missed_call_text_claims').insert({ phone: phoneNumber, outcome: 'sent', call_log_id: callId });
+    const missedCall = async (number, extra = {}) => {
+      const [r] = await db('call_log').insert({ from_phone: number, to_phone: '+15550003333', direction: 'inbound', status: 'no-answer', created_at: at(-2), duration_seconds: 4, metadata: JSON.stringify({}), ...extra }).returning('id');
+      made.calls.push(r.id);
+      return r.id;
+    };
+    const missedAlert = (callId) => alert('missed_call', 'Missed call', `/admin/communications#tab=calls&call=${callId}`, { payload: { callLogId: callId } });
+    const day = new Date(T0.getTime() + 25 * 3600 * 1000);
+
+    // quiet: claim for this call, nothing since
+    const quietNumber = phone(51);
+    const quietCall = await missedCall(quietNumber);
+    await claim(quietNumber, quietCall);
+    const quietTimeline = await agent.buildTimeline(await missedAlert(quietCall));
+    expect(quietTimeline.call.textBackSent).toBe(true);
+    expect(agent.ruleVerdict({ category: 'missed_call' }, quietTimeline, false, day)).toMatchObject({ outcome: 'nothing_to_answer', rule: 'quiet_unknown_missed_call' });
+
+    // a text-back claimed for ANOTHER call is not this call's text-back
+    const otherNumber = phone(52);
+    const earlier = await missedCall(otherNumber, { created_at: at(-600) });
+    const later = await missedCall(otherNumber);
+    await claim(otherNumber, earlier);
+    expect((await agent.buildTimeline(await missedAlert(later))).call.textBackSent).toBe(false);
+
+    // the unified inbox holds a reply the text log never got: contact, so no silence
+    const inboxNumber = phone(53);
+    const inboxCall = await missedCall(inboxNumber);
+    await claim(inboxNumber, inboxCall);
+    const [conv] = await db('conversations').insert({ channel: 'sms', contact_phone: inboxNumber }).returning('id');
+    made.conversations.push(conv.id);
+    await db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'who called me', twilio_sid: `SM${tag}j`, created_at: at(30) });
+    const inboxTimeline = await agent.buildTimeline(await missedAlert(inboxCall));
+    expect(inboxTimeline.events.some((e) => e.inbound && e.type === 'sms')).toBe(true);
+    expect(agent.ruleVerdict({ category: 'missed_call' }, inboxTimeline, false, day)).toBeNull();
+
+    // a later call row with no end stamp (a recovered, post-call row) is contact too
+    const droppedNumber = phone(54);
+    const droppedCall = await missedCall(droppedNumber);
+    await claim(droppedNumber, droppedCall);
+    await missedCall(droppedNumber, { created_at: at(40), direction: 'inbound', duration_seconds: null, metadata: JSON.stringify({ source: 'twilio_recording_status_recovered' }) });
+    const droppedTimeline = await agent.buildTimeline(await missedAlert(droppedCall));
+    expect(droppedTimeline.events.some((e) => e.type === 'call')).toBe(true);
+    expect(droppedTimeline.events.filter((e) => e.type === 'call').every((e) => e.proof === null)).toBe(true);
+    expect(agent.ruleVerdict({ category: 'missed_call' }, droppedTimeline, false, day)).toBeNull();
+  });
+
+  test('an inbound call that went from hold to voicemail answers only up to the hold', async () => {
+    const cid = await customer();
+    const call = async (row) => {
+      const [r] = await db('call_log').insert({ customer_id: cid, from_phone: '+15550007777', to_phone: '+15550003333', direction: 'inbound', status: 'completed', answered_by: 'human', duration_seconds: 600, ...row }).returning('id');
+      made.calls.push(r.id);
+      return r.id;
+    };
+    const holdMeta = (voicemailAt, endedAt) => JSON.stringify({ ended_at: endedAt.toISOString(), conference_path: { hold: { voicemail_at: voicemailAt.toISOString() } } });
+    const duringBell = await call({ created_at: at(10), metadata: holdMeta(at(12), at(40)) });
+    await call({ created_at: at(-20), metadata: holdMeta(at(-15), at(40)) });
+    const sid = `SM${tag}k`;
+    await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'call me', created_at: T0, status: 'received' });
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
+    const timeline = await agent.buildTimeline(row);
+    const human = timeline.events.filter((e) => e.proof === 'human_call');
+    expect(human.map((e) => e.id)).toEqual([String(duringBell)]);
+    expect(human[0].at).toEqual(at(12));
+  });
+
+  test('"voicemail left" follows the recording and its transcription status, as the missed-call bell reads it', async () => {
+    const hasVoicemail = async (row) => {
+      const [c] = await db('call_log').insert({ from_phone: phone(60 + made.calls.length), to_phone: '+15550003333', direction: 'inbound', status: 'no-answer', created_at: at(-2), duration_seconds: 20, metadata: JSON.stringify({}), ...row }).returning('id');
+      made.calls.push(c.id);
+      const timeline = await agent.buildTimeline(await alert('missed_call', 'Missed call', `/admin/communications#tab=calls&call=${c.id}`, { payload: { callLogId: c.id } }));
+      return timeline.call.hasVoicemail;
+    };
+    expect(await hasVoicemail({ recording_sid: 'RE1', transcription_status: 'pending' })).toBe(true);
+    expect(await hasVoicemail({ recording_sid: 'RE2', transcription_status: 'failed' })).toBe(true);
+    expect(await hasVoicemail({ recording_sid: 'RE3', transcription_status: 'completed', transcription: '[NO SPEECH]' })).toBe(false);
+    expect(await hasVoicemail({ recording_sid: 'RE4', transcription_status: 'completed', transcription: 'please call me about ants' })).toBe(true);
+    expect(await hasVoicemail({})).toBe(false);
   });
 
   test('the open alerts are paged from a cursor and wrap around', async () => {

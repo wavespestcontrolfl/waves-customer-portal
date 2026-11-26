@@ -59,6 +59,7 @@ const { phoneIdentitySql } = require('./sms-response-policy');
 const { callEndedAtSql } = require('./sms-pending-conversations');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
+const { HOLD_VOICEMAIL_AT_SQL } = require('./admin-alert-contact-witnesses');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -218,18 +219,21 @@ function makeReader(conn) {
 }
 
 
-// The one place a contact becomes a WHERE. An empty, null or blank customer id or phone matches NOTHING: never the rows whose phone
-// identity is '' (a call with no number, a text with a blank one).
+// The one place a contact becomes a WHERE. An empty, null or blank customer id AND phone matches NOTHING: never the rows whose phone
+// identity is '' (a call with no number, a text with a blank one). The contact witnesses' rule (namesItem): a row tied to a customer
+// names this one only by id; a row tied to no customer names it by the resolved peer phone, so a known customer keeps those too.
 function scopeToContact(q, key, { customerColumn, phoneColumns }) {
   const customerId = typeof key?.customerId === 'string' ? key.customerId.trim() : '';
-  if (customerId) return q.where(customerColumn, customerId);
   const peer = phoneIdentityKey(key?.phone);
+  const byPhone = (b) => phoneColumns.forEach((col) => b.orWhereRaw(`${phoneIdentitySql(col)} = ?`, [peer]));
+  if (customerId && !peer) return q.where(customerColumn, customerId);
+  if (customerId) return q.where((b) => b.where(customerColumn, customerId).orWhere((w) => w.whereNull(customerColumn).where(byPhone)));
   if (!peer) return q.whereRaw('1 = 0');
-  return q.where((b) => phoneColumns.forEach((col) => b.orWhereRaw(`${phoneIdentitySql(col)} = ?`, [peer])));
+  return q.where(byPhone);
 }
 const SMS_SCOPE = { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone', 'os.from_phone'] };
 
-const SMS_COLUMNS = ['os.id', 'os.created_at', 'os.direction', 'os.message_type', 'os.status'];
+const SMS_COLUMNS = ['os.id', 'os.created_at', 'os.direction', 'os.message_type', 'os.status', 'os.twilio_sid'];
 const smsBase = (conn) => excludeRecruitingSmsLog(excludeUnresolvedSendReservations(conn('sms_log as os'), 'os'), 'os.message_type');
 
 // Every text after the anchor, for the customer or, with none on file, the number.
@@ -249,16 +253,35 @@ function staffTextIds(conn, anchor, key) {
 
 function callsAfter(conn, anchor, key, ownCallId) {
   const ended = callEndedAtSql('cl');
+  // An inbound call a person answered counts only until a star-key hold sent it to voicemail (the witnesses' rule).
+  const counted = `CASE WHEN cl.direction = 'inbound' THEN COALESCE(${HOLD_VOICEMAIL_AT_SQL}, ${ended}) ELSE ${ended} END`;
+  // A later call with no end stamp is still a later call: contact evidence (never proof), so a dropped row cannot prove silence.
   const q = conn('call_log as cl').modify((b) => whereNotSandboxCall(b, 'cl.source'))
-    .where('cl.created_at', '>', new Date(anchor.getTime() - DAY_MS)).whereRaw(`${ended} > ?`, [anchor])
+    .where('cl.created_at', '>', new Date(anchor.getTime() - DAY_MS))
+    .where((b) => b.whereRaw(`${counted} > ?`, [anchor]).orWhere((w) => w.whereRaw(`${counted} IS NULL`).where('cl.created_at', '>', anchor)))
     .orderBy('cl.created_at', 'asc').limit(ROW_CAP)
     .select('cl.id', 'cl.created_at', 'cl.direction', 'cl.answered_by', 'cl.call_summary', 'cl.ai_summary',
-      conn.raw(`${ended} as ended_at`),
+      conn.raw(`${counted} as ended_at`),
       conn.raw(`(cl.direction = 'outbound' AND cl.status = 'completed' AND ${personCallBackSql('cl')}) as person_back`),
       conn.raw("(cl.direction = 'inbound' AND cl.status = 'completed' AND cl.answered_by = 'human') as human_in"));
   if (ownCallId) q.whereNot('cl.id', ownCallId);
   return scopeToContact(q, key, { customerColumn: 'cl.customer_id', phoneColumns: ['cl.from_phone', 'cl.to_phone'] });
 }
+
+// The inbound texts the unified inbox holds (the SMS webhook writes it first; the text log is best effort): the same contact
+// evidence as sms_log, read the way the contact witnesses read it.
+const MESSAGE_PHONE = "COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, ''))";
+function canonicalInboundAfter(conn, anchor, key) {
+  const q = conn('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')
+    .where('m.channel', 'sms').where('m.direction', 'inbound').where('m.created_at', '>', anchor)
+    .orderBy('m.created_at', 'asc').limit(ROW_CAP)
+    .select('m.id', 'm.created_at', 'm.twilio_sid', conn.raw('left(m.body, 1500) as body'));
+  return scopeToContact(q, key, { customerColumn: 'c.customer_id', phoneColumns: [MESSAGE_PHONE] });
+}
+const canonicalInboundEvent = (row) => ({
+  type: 'sms', id: `message:${row.id}`, key: `message:${row.id}`, at: toDate(row.created_at), inbound: true, proof: null, draft: false,
+  line: `CUSTOMER TEXT: ${clean(row.body)}`,
+});
 
 // Emails a person sent that provably reached THIS customer (emailCustomerLink), or, for a sender with no customer record, that
 // were addressed to the sender. A Gmail DRAFT carries no SENT label, so it can never match personSentFilter.
@@ -306,7 +329,7 @@ async function customerRecordsAfter(r, anchor, customerId) {
     read('estimates', () => whereEstimateCustomerOwnership(handedOffWithin(conn('estimates'), anchor), customerId)
       .limit(ROW_CAP).select(HANDOFF_COLS(conn))),
     read('reschedules', () => conn('reschedule_log').where('customer_id', customerId).where('created_at', '>', anchor)
-      .whereRaw('new_date IS DISTINCT FROM original_date')
+      .whereNotNull('new_date').whereRaw('new_date IS DISTINCT FROM original_date')
       .whereExists(function liveVisit() {
         this.select(conn.raw('1')).from('scheduled_services as s').whereRaw('s.id = reschedule_log.scheduled_service_id')
           .whereRaw('COALESCE(s.status, \'\') NOT IN (' + VISIT_NEVER_RAN_STATUSES.map(() => '?').join(', ') + ')', VISIT_NEVER_RAN_STATUSES);
@@ -320,8 +343,9 @@ async function customerRecordsAfter(r, anchor, customerId) {
 // Every record after the anchor for this contact, to a safety cap. Texts, calls and staff email for the customer or the number.
 async function eventsAfter(r, anchor, key, { ownCallId = null, threadId = null, replyTo = null } = {}) {
   const { conn, read } = r;
-  const [texts, staffIds, calls, emails, drafts, incoming] = await Promise.all([
+  const [texts, inbox, staffIds, calls, emails, drafts, incoming] = await Promise.all([
     read('texts-after', () => smsAfter(conn, anchor, key)),
+    read('inbox-after', () => canonicalInboundAfter(conn, anchor, key)),
     read('staff-texts', () => staffTextIds(conn, anchor, key)),
     read('calls-after', () => callsAfter(conn, anchor, key, ownCallId)),
     staffEmailsAfter(r, anchor, { customerId: key.customerId, threadId, replyTo }),
@@ -334,7 +358,9 @@ async function eventsAfter(r, anchor, key, { ownCallId = null, threadId = null, 
   ]);
   const staff = new Set(staffIds.map((x) => String(x.id)));
   const records = key.customerId ? await customerRecordsAfter(r, anchor, key.customerId) : [];
-  return [...texts.map((x) => smsEvent(x, staff.has(String(x.id)))), ...calls.map(callEvent), ...emails,
+  const logged = new Set(texts.map((x) => x.twilio_sid).filter(Boolean));
+  const inboxOnly = inbox.filter((x) => !(x.twilio_sid && logged.has(x.twilio_sid)));
+  return [...texts.map((x) => smsEvent(x, staff.has(String(x.id)))), ...inboxOnly.map(canonicalInboundEvent), ...calls.map(callEvent), ...emails,
     ...drafts.map(draftEmailEvent), ...incoming.map(customerEmailEvent), ...records];
 }
 
@@ -385,7 +411,7 @@ async function smsTimeline(r, alert, bellAt) {
   const text = sid ? await resolveInboundText(r, String(sid)) : null;
   const customerId = threadCustomer || text?.customerId || null;
   const anchor = text?.at || bellAt;
-  const contact = customerId ? { customerId } : (text?.phone ? { customerId: null, phone: text.phone } : null);
+  const contact = customerId || text?.phone ? { customerId, phone: text?.phone || null } : null;
   if (!contact) return unreadable(anchor, bellAt);
   const { ctx, reply } = await smsContext(r, anchor, contact, text);
   const events = await eventsAfter(r, anchor, contact, { replyTo: null });
@@ -414,16 +440,28 @@ async function emailTimeline(r, alert, bellAt) {
 async function loadCall(r, callId) {
   const rows = await r.read('call', () => r.conn('call_log').where('id', callId)
     .select('id', 'from_phone', 'to_phone', 'direction', 'created_at', 'duration_seconds', 'transcription', 'call_summary', 'ai_summary',
-      'customer_id', 'metadata', r.conn.raw("metadata->>'voicemail_transcription' AS vt")));
+      'recording_sid', 'recording_url', 'transcription_status', 'customer_id', 'metadata', r.conn.raw("metadata->>'voicemail_transcription' AS vt")));
   return rows[0] || null;
 }
 
-// The missed-call text-back (sent to this number at or after the call): the rule-1 fact.
-async function textBackWasSent(r, phone, anchor) {
-  const sent = await r.read('text-back', () => scopeToContact(smsBase(r.conn).where('os.direction', 'outbound').where('os.message_type', 'missed_call_text_back')
-    .whereIn('os.status', ['sent', 'delivered', 'read']), { customerId: null, phone }, { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone'] })
-    .where('os.created_at', '>=', new Date(anchor.getTime() - 60 * 1000)).limit(1).select('os.id'));
-  return sent.length > 0;
+// The missed-call text-back sent for THIS call: the lane's own claim names the originating call (missed_call_text_claims.call_log_id,
+// outcome sent), and the text it sent carries the same call_log_id in its metadata. Never "some text to the number a minute later".
+async function textBackWasSent(r, callId) {
+  const { CLAIM, MESSAGE_TYPE } = require('./missed-call-text-back');
+  const [claims, texts] = await Promise.all([
+    r.read('text-back-claim', () => r.conn('missed_call_text_claims').where({ call_log_id: callId, outcome: CLAIM.SENT }).limit(1).select('phone')),
+    r.read('text-back', () => smsBase(r.conn).where('os.direction', 'outbound').where('os.message_type', MESSAGE_TYPE)
+      .whereIn('os.status', ['sent', 'delivered', 'read']).whereRaw("os.metadata->>'call_log_id' = ?", [String(callId)]).limit(1).select('os.id')),
+  ]);
+  return claims.length > 0 || texts.length > 0;
+}
+
+// Did the caller leave a voicemail? The missed-call bell's own evidence: a recording that is pending, failed or holds speech is a
+// voicemail; a finished recording with no speech is none. With no recording, a transcript text is the evidence.
+function voicemailLeft(call) {
+  const { isEmptyVoicemailRecording } = require('./missed-call-bell');
+  if (call.recording_sid || call.recording_url) return !isEmptyVoicemailRecording(call);
+  return !!(call.transcription || call.vt);
 }
 
 // The call a bell is about, from the bell's own fields: payload, the top-level id a hold voicemail bell carries, or the link.
@@ -452,11 +490,11 @@ async function callTimeline(r, alert, bellAt) {
   const anchor = hold ? bellAt : (callStartedAt(call) || toDate(call.created_at));
   const voicemail = clean(call.transcription || call.vt || call.ai_summary || call.call_summary, 600);
   const ctx = [`CALLER: ${clean(alert.title, 120)}. Rang ${call.duration_seconds || 0} sec. ${voicemail ? `Voicemail or call text: ${voicemail}` : 'No voicemail left.'}`];
-  const events = await eventsAfter(r, anchor, customerId ? { customerId } : { customerId: null, phone }, { ownCallId: call.id });
-  const textBackSent = alert.category === 'missed_call' && !customerId && await textBackWasSent(r, phone, anchor);
-  const hasVoicemail = !!(call.transcription || call.vt);
+  const events = await eventsAfter(r, anchor, { customerId, phone }, { ownCallId: call.id });
+  const hasVoicemail = voicemailLeft(call);
+  const textBackSent = alert.category === 'missed_call' && !customerId && await textBackWasSent(r, call.id);
   // The trigger carries the call's voicemail evidence and customer link: a late transcript or a late link is a new look.
-  const trigger = `call:${callId}:vm${hasVoicemail ? 1 : 0}:c${customerId || ''}`;
+  const trigger = `call:${callId}:vm${hasVoicemail ? 1 : 0}:t${call.transcription_status || ''}:c${customerId || ''}`;
   return timelineOf(anchor, bellAt, trigger, { customerKnown: !!customerId, ctx, events, call: { customerId, hasVoicemail, textBackSent } });
 }
 
@@ -509,7 +547,7 @@ function quietMissedCall(alert, timeline, now) {
   const call = timeline.call;
   if (alert.category !== 'missed_call' || !call || call.customerId || call.hasVoicemail || !call.textBackSent) return null;
   if (!timeline.complete || now - timeline.alertAt < DAY_MS) return null;
-  if (timeline.events.some((e) => e.inbound || e.proof)) return null;
+  if (timeline.events.some((e) => e.inbound || e.proof || e.type === 'call')) return null;
   return verdict('nothing_to_answer', 'rule', 'quiet_unknown_missed_call', 'unknown caller, no voicemail, texted back, silent 24 hours');
 }
 
