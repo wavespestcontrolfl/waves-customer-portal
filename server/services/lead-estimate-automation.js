@@ -7,6 +7,12 @@ const CONFIDENCE_RANK = {
 const MIN_AUTOMATION_CONFIDENCE = 'medium';
 const DEFAULT_HOME_SQFT = 2000;
 const DEFAULT_LOT_SQFT = 8000;
+// The website quote's residential home bound (public-quote.js HOME_CAP) and its hold reason. A lead that states a bigger home is
+// never priced automatically: pest keeps rising with the footprint above 5,500 sq ft (owner 2026-11-26), and the webhook body is
+// unauthenticated, so a typo or a junk post (a home of 1e12 sq ft) would price a premium that overflows estimates.annual_total,
+// where the flat top read $128. The draft parks for a hand price instead, as the website quote does.
+const LEAD_HOME_SQFT_LIMIT = 20000;
+const HOME_SIZE_ABOVE_LIMIT_REASON = 'home_size_above_public_limit';
 
 const { generateEstimate } = require('./pricing-engine');
 const { withTrustedCatalogPricing } = require('./pricing-engine/trusted-catalog-pricing');
@@ -333,10 +339,14 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   const county = !statedHomeSqFt && !statedLotSqFt && measurements?.homeSqFt && measurements?.lotSqFt
     ? measurements
     : null;
-  const homeSqFt = statedHomeSqFt || county?.homeSqFt || null;
+  // A stated home above the residential bound parks the draft (see LEAD_HOME_SQFT_LIMIT). The size kept for staff is bounded at ten
+  // times the limit, as on the website quote, so the provisional figure stays a number a column can hold.
+  const homeSizeAboveLimit = !!statedHomeSqFt && statedHomeSqFt > LEAD_HOME_SQFT_LIMIT;
+  const homeSqFt = (homeSizeAboveLimit ? Math.min(statedHomeSqFt, LEAD_HOME_SQFT_LIMIT * 10) : statedHomeSqFt) || county?.homeSqFt || null;
   const lotSqFt = statedLotSqFt || county?.lotSqFt || null;
   const review = [];
   if (!homeSqFt || !lotSqFt) review.push(DEFAULTED_REVIEW);
+  if (homeSizeAboveLimit) review.push(HOME_SIZE_ABOVE_LIMIT_REASON);
   // A review reason like any other: the auto-send lane parks the draft
   // until LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS names it.
   if (county) review.push(FROM_COUNTY_REVIEW);
@@ -397,6 +407,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       address: leadDraftAddress({ intake, customer }),
     },
     review,
+    homeSizeAboveLimit,
     // 'lead': the form or the customer row gave a size; 'county_assessed':
     // both from the county record; 'default': neither, so both defaults.
     sizeSource: county ? MEASUREMENTS_SOURCE : (statedHomeSqFt || statedLotSqFt ? 'lead' : 'default'),
@@ -618,7 +629,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
     const trustedInput = await withTrustedCatalogPricing(engineInput.input);
     const estimate = generateEstimate(trustedInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter(lineRequiresReview);
-    const quoteRequired = manualQuoteLines.length > 0;
+    // A stated home above the residential bound is a hand price whatever the lead asks for (see LEAD_HOME_SQFT_LIMIT): the saved
+    // totals are zero and the draft is never auto-sendable.
+    const quoteRequired = manualQuoteLines.length > 0 || engineInput.homeSizeAboveLimit;
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     const oneTimeTotal = quoteRequired ? 0 : (
@@ -663,6 +676,7 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
       };
     }
     automation.quoteRequiredReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
+      || (engineInput.homeSizeAboveLimit ? HOME_SIZE_ABOVE_LIMIT_REASON : null)
       || (typeUnresolved ? 'property_type_unresolved' : null)
       || (fieldVerifyRequired ? parkingFieldVerifyFlags[0] : null);
 
@@ -814,6 +828,10 @@ function evaluateLeadEstimateAutomationReadiness({
   if (!address.city && !address.zip) review.push('city_or_zip_missing');
   if (!firstNonEmpty(intake.email, customer.email)) review.push('email_missing_sms_only');
   // The home size only: the customer row's property_sqft is treated lawn area (see buildLeadEngineInput), not a home measurement.
+  // A size the form itself states (the raw body) is deliberately NOT read here, as on main: the intake record never carried one, so
+  // this reason is already on every lead whose records hold no home size, and a draft that carries it is never auto-sent. Reading
+  // the body here would make a draft priced on a form-typed size eligible for the automatic send: a send-policy change, not part
+  // of a price change.
   if (!numberOrNull(customer.home_sqft, intake.homeSqFt, intake.squareFootage)) {
     review.push('property_measurements_defaulted');
   }

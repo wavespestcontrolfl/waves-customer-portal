@@ -171,6 +171,28 @@ describe('the draft builder\'s cache read', () => {
     expect(pestPerApp(stated)).toBe(148);
   });
 
+  test('a stated home above 20,000 sq ft is never an automatic price: the draft parks for a hand price and saves no total', async () => {
+    // The webhook body is unauthenticated and pest has no flat top any more: a junk size would price a premium no column can hold.
+    for (const homeSqFt of [20001, 45000, 1e9, 1e12, 1e300, '25,000,000']) {
+      const lead = readyLead({ body: { homeSqFt, lotSqFt: 9000 } });
+      const draft = await buildAutomatedLeadDraftEstimate(lead);
+      expect(draft.automation).toMatchObject({
+        status: 'manual_review_required', generated: false, quoteRequired: true, quoteRequiredReason: 'home_size_above_public_limit',
+      });
+      expect(draft.automation.review).toContain('home_size_above_public_limit');
+      expect([draft.monthly, draft.annual, draft.oneTimeTotal]).toEqual([0, 0, 0]);
+      expect(draft.estimateData).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'home_size_above_public_limit', annual: 0 });
+      // The size staff see is bounded (ten times the limit), so the provisional figure is a number a decimal(10,2) column can hold.
+      expect(draft.automation.engineInput.homeSqFt).toBeLessThanOrEqual(200000);
+      expect(draft.automation.provisionalTotals.annual).toBeLessThan(100000);
+    }
+    // At the bound and under it the draft prices as entered: 20,000 sq ft on one floor is $128 + $8 x 14.5.
+    const atLimit = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 20000, lotSqFt: 9000 } }));
+    expect(atLimit.automation).toMatchObject({ quoteRequired: false, quoteRequiredReason: null });
+    expect(atLimit.automation.review).not.toContain('home_size_above_public_limit');
+    expect(atLimit.estimateData.engineResult.lineItems.find((l) => l.service === 'pest_control').perApp).toBe(244);
+  });
+
   test('measurements passed in (the background lookup) skip the cache read', async () => {
     process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP = 'true';
     const draft = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: { homeSqFt: 3100, lotSqFt: 14500, source: 'county_assessed' } });
