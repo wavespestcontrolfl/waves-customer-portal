@@ -559,10 +559,7 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
         && require('../services/estimate-roof-style-replay').estimateHasUnmeasuredBarrelExclusion(siblingData)) {
         return { sibling, statusCode: 409, code: 'BARREL_EAVE_FOOTAGE_REQUIRED' };
       }
-      if (siblingData?.proposal?.enabled !== true && estimateNeverIssued(sibling)
-        && require('../services/estimate-roof-style-replay').estimateTwoStoryPriceUnreviewed(siblingData)) {
-        return { sibling, statusCode: 409, code: 'TWO_STORY_ROOF_PRICE_STALE' };
-      }
+      try { await assertTwoStoryRoofPriceReviewed(sibling); } catch (err) { return { sibling, statusCode: 409, code: err.code || 'TWO_STORY_ROOF_PRICE_STALE' }; }
     }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
     // time — schedule and immediate alike — so the operator hears it now,
@@ -663,6 +660,30 @@ function palmCountGateFor(row, carriedCount) {
   const cleared = ['scheduled', 'sending'].includes(String(row.status || ''));
   const confirmedPalmCount = carriedCount ?? (cleared ? scheduledSendReceipt(row)?.scheduleReview?.confirmedPalmCount : null);
   return { confirmedPalmCount, palmCountCleared: cleared && confirmedPalmCount == null };
+}
+
+// A draft never issued, with no evidence of how it was priced (inputs only: no priced rows, no rule stamp) and an exclusion
+// request, was saved before the two-story roof rule. The email reads its stored one-time total while the send snapshot publishes
+// the current rules' price, so the send is refused unless the authoritative recompute (the same one the send path prices with:
+// request translation, then inputs, current rules) agrees with the stored total to the cent. A recompute that fails, or a missing
+// stored total, holds the send too (fail closed). Staff regenerate and save, which writes the rule stamp.
+async function assertTwoStoryRoofPriceReviewed(estimate, deps = {}) {
+  const data = parseEstimateData(estimate?.estimate_data || estimate?.estimateData);
+  if (!data || data.proposal?.enabled === true || !estimateNeverIssued(estimate)) return;
+  const replay = require('../services/estimate-floor-signal-replay');
+  if (replay.savedLegacyTwoStoryRoofSignal(data).legacyTwoStoryRoof !== undefined) return;
+  if (!replay.storedRequestsExclusion(data)) return;
+  const hold = (why) => Object.assign(new Error(`This draft was saved before the two-story roof rule (${why}). Open it in the estimate tool, generate it again and save, then send.`), { statusCode: 409, code: 'TWO_STORY_ROOF_PRICE_STALE' });
+  const cents = (value) => Math.round(Number(value) * 100);
+  const stored = estimate.onetime_total ?? estimate.onetimeTotal;
+  if (stored == null || stored === '' || !Number.isFinite(cents(stored))) throw hold('no stored total to compare');
+  let recomputed;
+  try {
+    recomputed = await (deps.recompute || require('../services/admin-estimate-persistence').serverRecomputeFromEstimateData)(data, deps.recomputeDeps || {});
+  } catch { throw hold('its price could not be checked'); }
+  const priced = recomputed?.recomputed === true ? recomputed.serverTotals?.onetimeTotal : undefined;
+  if (priced == null || !Number.isFinite(cents(priced))) throw hold('its price could not be checked');
+  if (cents(priced) !== cents(stored)) throw hold('its price now differs');
 }
 
 function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ...palmCountGate } = {}) {
@@ -798,15 +819,6 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ..
     const err = new Error('A barrel tile roof needs its eave footage entered before this quote can be sent.');
     err.statusCode = 400;
     err.code = 'BARREL_EAVE_FOOTAGE_REQUIRED';
-    throw err;
-  }
-  // A draft whose stored price was reviewed before the two-story roof rule would email that total while the send snapshot
-  // publishes today's price: hold it until staff regenerate and save (the estimate-tool save writes the rule stamp).
-  if (!isAuthoredProposal && estimateNeverIssued(estimate)
-    && require('../services/estimate-roof-style-replay').estimateTwoStoryPriceUnreviewed(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
-    const err = new Error('This draft was priced before the two-story roof rule, and its price now differs. Open it in the estimate tool, generate it again and save, then send.');
-    err.statusCode = 409;
-    err.code = 'TWO_STORY_ROOF_PRICE_STALE';
     throw err;
   }
   if (!isAuthoredProposal && estimateDataHasBlockingLeadAutomation(estimate.estimate_data || estimate.estimateData)) {
@@ -1717,6 +1729,7 @@ async function sendPreviewHandler(req, res, next) {
     const preview = await buildEstimateSendPreview(estimate);
     try {
       assertEstimateSendable(estimate, { palmCountCleared: true });
+      await assertTwoStoryRoofPriceReviewed(estimate);
     } catch (err) {
       preview.blockReason = err.message;
       preview.requiresEngineReview = err.code === 'ENGINE_REVIEW_REQUIRED';
@@ -1778,6 +1791,7 @@ async function sendEstimateHandler(req, res, next) {
       reviewedMessages = preview.messages;
     }
     assertEstimateSendable(estimate, { engineReviewAcknowledged, confirmedPalmCount });
+    await assertTwoStoryRoofPriceReviewed(estimate);
     // A typed satellite palm count passed on this pre-read row (it equals
     // confirmedPalmCount). Pin it (pre-push audit P1): the claims below check
     // it against the row they claim, and a schedule records it for the cron
@@ -2979,6 +2993,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     ...palmCountGateFor(estimate, options.confirmedPalmCount),
   };
   assertEstimateSendable(estimate, sendGateOptions);
+  await assertTwoStoryRoofPriceReviewed(estimate);
 
   // Send-time lead-with-one-service (GATE_ESTIMATE_LEAD_SERVICE_SEND): parks
   // the non-lead recurring lines as staff opt-out events BEFORE any delivery
@@ -6885,6 +6900,7 @@ module.exports = router;
 // one. Lazy-required by services to avoid load-order cycles.
 module.exports.buildEstimateSendSnapshot = buildEstimateSendSnapshot;
 module.exports.estimateIssuedBeforeSend = estimateIssuedBeforeSend;
+module.exports.assertTwoStoryRoofPriceReviewed = assertTwoStoryRoofPriceReviewed;
 module.exports.applyLeadServiceForSend = applyLeadServiceForSend;
 module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
 module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;

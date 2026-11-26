@@ -270,24 +270,47 @@ describe('replay: the estimate-level rule stamp decides the factor', () => {
     expect(route.match(/issuedBefore: estimateIssuedBeforeSend\((estimate|sibling)\)/g)).toHaveLength(3);
   });
 
-  test('a never-issued draft priced before the rule (inputs only) is held at send, so the email and the snapshot cannot disagree', () => {
-    const { assertEstimateSendable } = require('../routes/admin-estimates')._internals;
+  test('a never-issued draft with no pricing evidence is held at send unless the authoritative recompute agrees with the stored total', async () => {
+    const { assertTwoStoryRoofPriceReviewed } = require('../routes/admin-estimates');
+    const recomputeDeps = { needsSync: () => false };
     const row = (data, extra = {}) => ({
-      id: 'est-1', token: 'tok', status: 'draft', sent_at: null, viewed_at: null, onetime_total: 600, estimate_data: data,
-      ...extra,
+      id: 'est-1', token: 'tok', status: 'draft', sent_at: null, viewed_at: null, onetime_total: 600, estimate_data: data, ...extra,
     });
-    const holds = (data, extra) => { try { assertEstimateSendable(row(data, extra)); return null; } catch (err) { return err.code || err.message; } };
-    // Two stories, 4 advanced points, stored inputs only: the first send would mail the stored $600 and publish $780.
-    expect(holds({ engineInputs: REQUEST() })).toBe('TWO_STORY_ROOF_PRICE_STALE');
-    expect(holds(JSON.stringify({ engineInputs: REQUEST() }))).toBe('TWO_STORY_ROOF_PRICE_STALE');
-    // Nothing moves, so nothing holds: one story, standard points only, no exclusion.
-    expect(holds({ engineInputs: baseInput({ stories: 1, services: { exclusion: { pricingVersion: 'v2', ...ADV_ONLY } } }) })).toBeNull();
-    expect(holds({ engineInputs: baseInput({ stories: 2, services: { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 8, waiveInspection: true } } }) })).toBeNull();
-    expect(holds({ engineInputs: baseInput({ stories: 2, services: { flea: {} } }) })).toBeNull();
-    // A draft saved under the rule (stamped), one that carries priced rows, and an estimate already issued all agree with their stored price.
-    expect(holds(freshQuote())).toBeNull();
-    expect(holds(preChangeQuote())).toBeNull();
-    expect(holds({ engineInputs: REQUEST() }, { sent_at: '2026-11-20T15:00:00Z', status: 'sent' })).toBeNull();
+    const verdict = async (data, extra, deps = {}) => {
+      try { await assertTwoStoryRoofPriceReviewed(row(data, extra), { recomputeDeps, ...deps }); return null; } catch (err) { return err.code; }
+    };
+    const HELD = 'TWO_STORY_ROOF_PRICE_STALE';
+    // Inputs only, two stories, 4 advanced points, stored $600: the recompute prices $780, so the send is held.
+    expect(await verdict({ engineInputs: REQUEST() })).toBe(HELD);
+    expect(await verdict(JSON.stringify({ engineInputs: REQUEST() }))).toBe(HELD);
+    // The same draft saved at $780 (staff reviewed the current price) sends.
+    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: 780 })).toBeNull();
+    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: '780.00' })).toBeNull();
+    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: 780.01 })).toBe(HELD);
+    // An admin draft carrying engineRequest with flattened inputs that hold no exclusion: the request is what prices (the
+    // recompute's own precedence), so the stored $600 against the $780 recompute is held.
+    const adminDraft = {
+      engineRequest: { profile: { homeSqFt: 2000, lotSqFt: 10000, stories: 2, propertyType: 'single_family' }, selectedServices: ['EXCLUSION'], options: { exclAdvancedWireMesh: 4, exclWaiveInspection: true } },
+      engineInputs: baseInput({ stories: 2, services: { pest: { frequency: 'quarterly' } } }),
+    };
+    expect(await verdict(adminDraft)).toBe(HELD);
+    expect(await verdict(adminDraft, { onetime_total: 780 })).toBeNull();
+    // Fail closed: a recompute that throws, one that cannot run, and a missing stored total all hold.
+    expect(await verdict({ engineInputs: REQUEST() }, {}, { recompute: async () => { throw new Error('engine down'); } })).toBe(HELD);
+    expect(await verdict({ engineInputs: REQUEST() }, {}, { recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }) })).toBe(HELD);
+    expect(await verdict({ engineInputs: REQUEST() }, { onetime_total: null })).toBe(HELD);
+    // Not affected: one story (the recompute equals the stored $600), no exclusion asked, a draft with priced rows or a stamp,
+    // an authored proposal, and an estimate already issued.
+    expect(await verdict({ engineInputs: baseInput({ stories: 1, services: { exclusion: { pricingVersion: 'v2', ...ADV_ONLY } } }) })).toBeNull();
+    expect(await verdict({ engineInputs: baseInput({ stories: 2, services: { flea: {} } }) })).toBeNull();
+    expect(await verdict(freshQuote(), { onetime_total: 780 })).toBeNull();
+    expect(await verdict(preChangeQuote())).toBeNull();
+    expect(await verdict({ engineInputs: REQUEST(), proposal: { enabled: true } })).toBeNull();
+    expect(await verdict({ engineInputs: REQUEST() }, { sent_at: '2026-11-20T15:00:00Z', status: 'sent' })).toBeNull();
+    // Wired into the send path: the claim stage, the schedule route, the preview and the group preflight.
+    const route = require('fs').readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    expect(route.match(/await assertTwoStoryRoofPriceReviewed\(/g)).toHaveLength(4);
+    expect(route).not.toContain('estimateTwoStoryPriceUnreviewed');
   });
 
   test('the bundle drop freezes every rule stamp from its own evidence, not just one', () => {
