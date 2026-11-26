@@ -15,6 +15,8 @@ const row = (n, fields = {}) => ({
   office_cost: 100, paid_stops: 10, owner_allowance: 0, owner_field_allowance: 0, owner_paid_profit: 200, sde: 300,
   recurring_revenue: 600, recurring_mature_revenue: 300, ...fields,
 });
+// Eligible (test accounts left out) revenue by month, 1200 a month for the 24 months used here, as the live query would give.
+const eligible = (rows, perMonth = 1200) => new Map(rows.map((r) => [r.month.slice(0, 7), perMonth]));
 const run = (from, to, fields) => Array.from({ length: to - from + 1 }, (_, i) => row(from + i, typeof fields === 'function' ? fields(from + i) : fields));
 
 describe('splitWindows', () => {
@@ -52,12 +54,20 @@ describe('revenue and growth', () => {
 
 describe('the other tiles', () => {
   test('recurring share is plan revenue over completed-visit revenue; the mature part is shown against both', () => {
-    expect(view.recurringMetric(view.splitWindows(run(1, 12)))).toMatchObject({ share: 50, matureShareOfRecurring: 50, matureShareOfRevenue: 25, monthsCounted: 12 });
+    const all = run(1, 12);
+    expect(view.recurringMetric(view.splitWindows(all), eligible(all))).toMatchObject({ share: 50, matureShareOfRecurring: 50, matureShareOfRevenue: 25, monthsCounted: 12 });
   });
 
   test('a month stored before the column existed is left out of the sums and of the revenue it is divided by', () => {
     const rows = run(1, 12, (n) => (n <= 6 ? { recurring_revenue: null, recurring_mature_revenue: null } : {}));
-    expect(view.recurringMetric(view.splitWindows(rows))).toMatchObject({ share: 50, monthsCounted: 6 });
+    expect(view.recurringMetric(view.splitWindows(rows), eligible(rows))).toMatchObject({ share: 50, monthsCounted: 6 });
+  });
+
+  test('the share is divided by eligible revenue (test accounts left out), not the stored completed-visit revenue that includes them', () => {
+    const rows = run(1, 12, { completed_job_revenue: 5000 }); // the stored figure carries a big test-account month
+    expect(view.recurringMetric(view.splitWindows(rows), eligible(rows, 800))).toMatchObject({ share: 75 }); // 600 / 800, not 600 / 5000
+    expect(view.recurringMetric(view.splitWindows(rows), null)).toMatchObject({ share: null, matureShareOfRevenue: null }); // the live read failed
+    expect(view.recurringMetric(view.splitWindows(rows), new Map())).toMatchObject({ share: null }); // no eligible revenue at all
   });
 
   test('gross margin: book margin is total book profit over total revenue; per-job margin is weighted by completed-visit revenue', () => {
@@ -107,8 +117,9 @@ describe('plan revenue kept windows', () => {
 
 describe('getBuyerView', () => {
   // Only the snapshot table answers; every other table throws, like a failed live query.
-  const dbWith = (rows) => {
+  const dbWith = (rows, financials = { owner_office_hourly_rate: '25.00', owner_field_hourly_rate: '25.00' }) => {
     const db = (table) => {
+      if (table === 'company_financials') return { orderBy: () => ({ first: async () => financials }) };
       if (table !== 'monthly_financial_snapshots') throw new Error(`no ${table} here`);
       const q = { orderBy: () => q, limit: () => q, then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) };
       return q;
@@ -123,7 +134,8 @@ describe('getBuyerView', () => {
     expect(payload.ownerFieldHoursPerWeek).toEqual({ error: 'unavailable' });
     expect(payload.revenue.value).toBe(12000);
     expect(payload.months).toEqual({ count: 12, from: '2026-01-01', to: '2026-12-01' });
-    expect(logger.error).toHaveBeenCalledTimes(2);
+    expect(payload.recurring).toMatchObject({ share: null, recurringRevenue: 7200 }); // the live denominator failed: no share, never a wrong one
+    expect(logger.error).toHaveBeenCalledTimes(3);
   });
 
   test('no stored months is an empty, honest payload: dashes, zero months, no growth', async () => {
@@ -134,6 +146,21 @@ describe('getBuyerView', () => {
     expect(payload.ownerProfit.marginPct).toBeNull();
     expect(payload.officeCost.perStop).toBeNull();
     expect(payload.prepaidOwed).toBeNull();
+  });
+
+  test('the owner-time metrics say the hourly rate is a placeholder, worded from the stored rate, not a fixed number', async () => {
+    const stored = await view.getBuyerView({ db: dbWith(run(1, 24), { owner_office_hourly_rate: '31.50', owner_field_hourly_rate: '28.00' }), now: new Date('2026-11-26T15:00:00Z'), logger });
+    expect(stored.ownerProfit.basis).toContain('The owner office rate is $31.5 an hour, a placeholder, not a final rate');
+    expect(stored.ownerProfit.basis).toContain('The owner field wage is $28 an hour, a placeholder, not a final rate');
+    expect(stored.grossMargin.basis).toContain('The owner field wage is $28 an hour, a placeholder, not a final rate');
+    expect(stored.officeCost.basis).toContain('The owner office rate is $31.5 an hour, a placeholder, not a final rate');
+    expect(stored.ownerRates).toEqual({ officeHourly: '31.50', fieldHourly: '28.00' });
+    expect(JSON.stringify(stored)).not.toContain('$25 an hour');
+    // No rate stored: it says that time is not counted, and never invents a placeholder figure.
+    const none = await view.getBuyerView({ db: dbWith(run(1, 24), { owner_office_hourly_rate: null, owner_field_hourly_rate: '0.00' }), now: new Date('2026-11-26T15:00:00Z'), logger });
+    expect(none.ownerProfit.basis).toContain('No owner office rate is set, so that owner time is not counted.');
+    expect(none.grossMargin.basis).toContain('No owner field wage is set');
+    expect(none.officeCost.basis).not.toContain('placeholder');
   });
 
   test('every metric carries its basis in words', async () => {

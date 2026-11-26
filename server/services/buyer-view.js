@@ -68,6 +68,16 @@ function splitWindows(rows) {
   };
 }
 
+/**
+ * The sentence about one owner rate, worded from the stored value: the rate is a placeholder until the owner sets a final one.
+ * `what` names the time it pays for ("owner field wage", "owner office rate").
+ */
+function rateNote(what, hourlyRate) {
+  const rate = Number(hourlyRate);
+  if (!(rate > 0)) return `No ${what} is set, so that owner time is not counted.`;
+  return `The ${what} is $${rate} an hour, a placeholder, not a final rate; the figure changes when it is set.`;
+}
+
 function revenueMetric({ window, prior }) {
   const now = sumColumn(window, 'cash_revenue');
   const before = sumColumn(prior, 'cash_revenue');
@@ -83,24 +93,42 @@ function revenueMetric({ window, prior }) {
   };
 }
 
-function recurringMetric({ window }) {
+/**
+ * Completed-visit revenue by month ('YYYY-MM') for the same customers the recurring numerator counts: every customer except
+ * the internal test accounts. The snapshot's completed_job_revenue includes those accounts, so it is not the denominator.
+ */
+async function eligibleRevenueByMonth(db, from, to) {
+  const rows = await db('service_records as sr')
+    .join('customers as c', 'c.id', 'sr.customer_id')
+    .whereBetween('sr.service_date', [from, to])
+    .whereNotNull('sr.revenue')
+    .modify(excludeInternalTestCustomers(db))
+    .groupByRaw("to_char(sr.service_date, 'YYYY-MM')")
+    .select(db.raw("to_char(sr.service_date, 'YYYY-MM') AS ym"), db.raw('SUM(sr.revenue)::text AS total'));
+  return new Map(rows.map((r) => [r.ym, num(r.total)]));
+}
+
+function recurringMetric({ window }, eligibleByMonth = null) {
   const recurring = sumColumn(window, 'recurring_revenue');
   const mature = sumColumn(window, 'recurring_mature_revenue');
-  const total = sumColumn(window.filter((r) => r.recurring_revenue != null), 'completed_job_revenue');
+  const total = eligibleByMonth
+    ? window.filter((r) => r.recurring_revenue != null).reduce((sum, r) => sum + (eligibleByMonth.get(String(r.month).slice(0, 7)) || 0), 0)
+    : 0;
   return {
-    share: pctOf(recurring.total, total.total),
+    share: pctOf(recurring.total, total),
     matureShareOfRecurring: pctOf(mature.total, recurring.total),
-    matureShareOfRevenue: pctOf(mature.total, total.total),
+    matureShareOfRevenue: pctOf(mature.total, total),
     recurringRevenue: round2(recurring.total),
     monthsCounted: recurring.months,
-    basis: 'Visit revenue from plan customers over all completed-visit revenue, same 12 months. A visit is plan revenue when it belongs '
-      + 'to a recurring series or an annual-prepay term, or when the customer held a real WaveGuard tier and had started and not yet '
-      + 'churned on the visit date (test accounts left out). "Mature" = plans at least 12 months old at the start of the month. Visit revenue is job-costing\'s '
-      + 'figure for each visit (annual-prepay visits at their prepay share), not cash.',
+    basis: 'Visit revenue from plan customers over the revenue of all completed visits, same months, test accounts left out of both. A visit is '
+      + 'plan revenue when it belongs to a recurring series or an annual-prepay term, or when the customer held a real WaveGuard tier and '
+      + 'had started and not yet churned on the visit date. "Mature" = plans at least 12 months old at the start of the month: plan age '
+      + 'is the earliest recurring-series visit or prepay term, and only a customer with a tier and no such record uses their customer-since '
+      + 'date. Visit revenue is job-costing\'s figure for each visit (annual-prepay visits at their prepay share), not cash.',
   };
 }
 
-function grossMarginMetric({ window }) {
+function grossMarginMetric({ window }, rates = {}) {
   // Book margin is total book gross profit (dollars) over total cash revenue of the same months, so a month with no or
   // negative revenue still carries its profit or loss and never drops out of the year.
   const profit = sumColumn(window, 'book_gross_profit');
@@ -115,11 +143,12 @@ function grossMarginMetric({ window }) {
     basis: 'From the books: cash revenue less cost-of-goods expenses (supplies, materials, chemicals), less pay-run wages when the '
       + 'P&L counts them, less the owner\'s field wage; total over the months, divided by their total revenue. Per job, at standard '
       + 'minutes: completed-visit revenue less job costs where on-site time is the standard 25 minutes for pest and 20 for lawn '
-      + 'plus drive (the dashboard tile\'s formula).',
+      + 'plus drive (the dashboard tile\'s formula, unchanged: stored month by month and weighted by each month\'s revenue). '
+      + rateNote('owner field wage', rates.fieldHourly),
   };
 }
 
-function ownerProfitMetric({ window }) {
+function ownerProfitMetric({ window }, rates = {}) {
   const profit = sumColumn(window.filter((r) => r.owner_paid_profit != null), 'owner_paid_profit');
   const revenue = sumColumn(window.filter((r) => r.owner_paid_profit != null), 'cash_revenue');
   const sde = sumColumn(window, 'sde');
@@ -133,11 +162,12 @@ function ownerProfitMetric({ window }) {
     sdeMonthsCounted: sde.months,
     ownerPay: { officeMonths, fieldMonths, months: window.length },
     basis: 'EBITDA (P&L net income with depreciation and interest added back) less the owner\'s own time: office hours x office rate '
-      + 'and field hours x field wage. The books hold no pay for the owner. SDE is the same EBITDA before any owner pay.',
+      + 'and field hours x field wage. The books hold no pay for the owner. SDE is the same EBITDA before any owner pay. '
+      + `${rateNote('owner office rate', rates.officeHourly)} ${rateNote('owner field wage', rates.fieldHourly)}`,
   };
 }
 
-function officeCostMetric({ window }) {
+function officeCostMetric({ window }, rates = {}) {
   const cost = sumColumn(window, 'office_cost');
   const stops = sumColumn(window, 'paid_stops');
   const revenue = sumColumn(window, 'cash_revenue');
@@ -148,7 +178,8 @@ function officeCostMetric({ window }) {
     paidStops: stops.total,
     monthsCounted: cost.months,
     basis: 'Office cost (ledger office categories plus the owner\'s office time) summed over the 12 months, over paid stops '
-      + '(sum over sum, not an average of months), and over cash revenue.',
+      + '(sum over sum, not an average of months), and over cash revenue. '
+      + rateNote('owner office rate', rates.officeHourly),
   };
 }
 
@@ -161,10 +192,10 @@ function keptWindows(now) {
 }
 
 /**
- * Plan revenue kept: customers who were on a plan in the earlier 12 closed months (a visit that was plan revenue on its own
- * date, PLAN_VISIT_SQL, so a customer whose tier was cleared when they left still counts) and had been customers since before
- * that window; what each paid in the earlier 12 months (visit revenue), against what each pays in the latest 12 closed months,
- * capped at the earlier amount, so a price rise or an add-on never offsets a loss. A customer who left pays 0.
+ * Plan revenue kept: customers whose plan began before the earlier 12 closed months (PLAN_START_SQL) and who had plan revenue
+ * in them; what each paid in plan revenue then (PLAN_VISIT_SQL, judged on each visit's own date, so a customer whose tier was
+ * cleared when they left still counts), against what each pays in plan revenue in the latest 12 closed months, capped at the
+ * earlier amount. Only plan revenue is counted on both sides, so a one-time job after a cancelled plan never offsets the loss.
  * Pays: sum of capped / sum of earlier.
  */
 async function planRevenueKept(db, now) {
@@ -180,12 +211,10 @@ async function planRevenueKept(db, now) {
     .groupBy('sr.customer_id')
     .select(
       'sr.customer_id',
-      db.raw(`SUM(sr.revenue) FILTER (WHERE ${inEarlier}) AS then_revenue`, [then.start, then.end]),
-      db.raw('SUM(sr.revenue) FILTER (WHERE sr.service_date BETWEEN ?::date AND ?::date) AS now_revenue', [current.start, current.end]),
-      db.raw(`BOOL_OR(${PLAN_VISIT_SQL} AND ${inEarlier}) AS plan_then`, [then.start, then.end]),
+      db.raw(`SUM(sr.revenue) FILTER (WHERE ${PLAN_VISIT_SQL} AND ${inEarlier}) AS then_revenue`, [then.start, then.end]),
+      db.raw(`SUM(sr.revenue) FILTER (WHERE ${PLAN_VISIT_SQL} AND sr.service_date BETWEEN ?::date AND ?::date) AS now_revenue`, [current.start, current.end]),
     );
   const row = await db.from(per.as('per'))
-    .where('per.plan_then', true)
     .where('per.then_revenue', '>', 0)
     .select(
       db.raw('COUNT(*)::int AS customers'),
@@ -200,10 +229,10 @@ async function planRevenueKept(db, now) {
     thenRevenue: round2(thenTotal),
     keptRevenue: round2(row && row.kept_total),
     windows: { earlier: then, latest: current },
-    basis: 'Customers who were on a plan in the 12 months ending '
-      + `${then.end} and customers for at least a year before that: what each paid then, against what each paid in the 12 months ending `
-      + `${current.end}, never counting more than the earlier amount. Visit revenue per customer; a customer who left counts as 0 now. `
-      + 'Blank until there are plan customers that old.',
+    basis: 'Customers whose plan began before the 12 months ending '
+      + `${then.end}: their plan revenue in those 12 months, against their plan revenue in the 12 months ending `
+      + `${current.end}, never counting more than the earlier amount. Plan revenue only on both sides (one-time jobs are left out); `
+      + 'a customer who left counts as 0 now. Blank until there are plan customers that old.',
   };
 }
 
@@ -231,22 +260,40 @@ async function getBuyerView({ db = require('../models/db'), now = new Date(), lo
   const rows = (await db('monthly_financial_snapshots').orderBy('month', 'desc').limit(2 * WINDOW_MONTHS))
     .map((r) => ({ ...r, month: dateOnlyString(r.month) }));
   const windows = splitWindows(rows);
-  const [kept, hours] = await Promise.all([
+  const latest = windows.window[windows.window.length - 1] || null;
+  // The owner rates in effect now, so each basis names the stored value (a placeholder until the owner sets a final one).
+  const financials = await settled('owner rates', logger, () => db('company_financials')
+    .orderBy('effective_date', 'desc').first('owner_office_hourly_rate', 'owner_field_hourly_rate'));
+  const rates = {
+    officeHourly: financials && !financials.error ? financials.owner_office_hourly_rate : null,
+    fieldHourly: financials && !financials.error ? financials.owner_field_hourly_rate : null,
+  };
+  const [kept, hours, eligible] = await Promise.all([
     settled('plan revenue kept', logger, () => planRevenueKept(db, now)),
     settled('owner hours', logger, () => ownerHoursPerWeek(db, now)),
+    latest
+      ? settled('eligible revenue', logger, () => eligibleRevenueByMonth(db, windows.window[0].month, monthWindow(latest.month).endDate))
+      : Promise.resolve(null),
   ]);
-  const latest = windows.window[windows.window.length - 1] || null;
   return {
     asOf: etDateString(now),
     months: { count: windows.window.length, from: windows.window[0] ? windows.window[0].month : null, to: latest ? latest.month : null },
     revenue: revenueMetric(windows),
-    recurring: recurringMetric(windows),
+    recurring: recurringMetric(windows, eligible instanceof Map ? eligible : null),
     planRevenueKept: kept,
-    grossMargin: grossMarginMetric(windows),
-    ownerProfit: ownerProfitMetric(windows),
-    officeCost: officeCostMetric(windows),
+    grossMargin: grossMarginMetric(windows, rates),
+    ownerProfit: ownerProfitMetric(windows, rates),
+    officeCost: officeCostMetric(windows, rates),
+    ownerRates: rates,
     ownerFieldHoursPerWeek: hours,
-    prepaidOwed: latest && latest.prepaid_owed != null ? { value: round2(latest.prepaid_owed), month: latest.month } : null,
+    prepaidOwed: latest && latest.prepaid_owed != null
+      ? {
+        value: round2(latest.prepaid_owed),
+        month: latest.month,
+        basis: 'Annual-prepay money collected by month end for visits not yet done. A term\'s coverage status is read as of the day the '
+          + 'month was stored, and no refund history is kept, so an older month stored later may differ from what it would have shown then.',
+      }
+      : null,
     pnlIncompleteMonths: windows.window.filter((r) => r.pnl_complete === false).map((r) => r.month),
   };
 }
@@ -254,6 +301,7 @@ async function getBuyerView({ db = require('../models/db'), now = new Date(), lo
 module.exports = {
   getBuyerView,
   planRevenueKept,
+  eligibleRevenueByMonth,
   ownerHoursPerWeek,
   splitWindows,
   sumColumn,
@@ -263,5 +311,6 @@ module.exports = {
   grossMarginMetric,
   ownerProfitMetric,
   officeCostMetric,
+  rateNote,
   keptWindows,
 };

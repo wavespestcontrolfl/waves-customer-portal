@@ -61,6 +61,10 @@ postgres('buyer view (live Postgres)', () => {
       scheduled_service_id: scheduledServiceId, ...fields,
     });
   };
+  // The start of a recurring series: a scheduled visit (never done here) that is the first of the series.
+  const series = (customerId, date) => trx('scheduled_services').insert({
+    id: randomUUID(), customer_id: customerId, scheduled_date: date, service_type: 'Pest Control Visit', status: 'cancelled', is_recurring: true,
+  });
   const group = async (customerId, date) => {
     const id = randomUUID();
     await trx('service_visits').insert({ id, customer_id: customerId, scheduled_date: date, stop_base_key: `sample:${id}`, created_by: 'test' });
@@ -195,6 +199,7 @@ postgres('buyer view (live Postgres)', () => {
       const other = await technician({ role: 'technician' });
       // Offboarded: tier cleared, churned 2026-10-10. Their series visit on 10-02 stays plan revenue; a one-off after does not.
       const left = await customer({ waveguard_tier: null, member_since: '2024-01-01', churned_at: '2026-10-10' });
+      await series(left, '2024-02-01');
       await visit(left, '2026-10-02', { revenue: 50, technician_id: other }, { is_recurring: true });
       await visit(left, '2026-10-20', { revenue: 7, technician_id: other });
       // Still tiered but churned 2026-10-10: before the churn date counts, after does not.
@@ -208,11 +213,27 @@ postgres('buyer view (live Postgres)', () => {
       // A prepay-term visit counts with no tier at all; a one-time customer's plain visit does not.
       const term = await trx('annual_prepay_terms').insert({ customer_id: left, prepay_amount: 100, term_start: '2026-06-01', term_end: '2027-05-31', status: 'active' }).returning('id');
       const prepaid = await customer({ waveguard_tier: null, member_since: '2024-01-01' });
+      await trx('annual_prepay_terms').insert({ customer_id: prepaid, prepay_amount: 100, term_start: '2024-03-01', term_end: '2025-02-28', status: 'cancelled' });
       await visit(prepaid, '2026-10-12', { revenue: 20, technician_id: other }, { annual_prepay_term_id: term[0].id || term[0] });
       await visit(await customer({ waveguard_tier: 'One-Time' }), '2026-10-13', { revenue: 500, technician_id: other });
       const result = await cols.recurringRevenue(trx, '2026-10-01', '2026-10-31', NOW);
       expect(result.recurring_revenue).toBe(50 + 100 + 30 + 20);
       expect(result.recurring_mature_revenue).toBe(50 + 100 + 20); // started 2026-10-15 is not a mature plan
+    });
+
+    it('plan age comes from plan evidence, not customer tenure: a long-time customer whose plan began recently is not mature; a tier-only customer uses member_since', async () => {
+      const other = await technician({ role: 'technician' });
+      const lateStart = await customer({ waveguard_tier: 'Gold', member_since: '2020-01-01' }); // customer for years, plan since June
+      await series(lateStart, '2026-06-01');
+      await visit(lateStart, '2026-10-05', { revenue: 80, technician_id: other }, { is_recurring: true });
+      const seriesOld = await customer({ waveguard_tier: 'Gold', member_since: '2026-09-01' }); // tenure says new, series says old
+      await series(seriesOld, '2025-02-01');
+      await visit(seriesOld, '2026-10-06', { revenue: 60, technician_id: other }, { is_recurring: true });
+      const tierOnly = await customer({ waveguard_tier: 'Silver', member_since: '2024-01-01' }); // no series or term: member_since
+      await visit(tierOnly, '2026-10-07', { revenue: 40, technician_id: other });
+      const result = await cols.recurringRevenue(trx, '2026-10-01', '2026-10-31', NOW);
+      expect(result.recurring_revenue).toBe(180);
+      expect(result.recurring_mature_revenue).toBe(100); // seriesOld 60 + tierOnly 40
     });
 
     it('stores field time, the books margin, SDE and owner-paid profit with the owner\'s allowances taken out', async () => {
@@ -264,6 +285,23 @@ postgres('buyer view (live Postgres)', () => {
       expect(payload.ownerProfit.sde).toBe(Number(stored.sde));
       expect(payload.ownerProfit.ownerPay).toEqual({ officeMonths: 1, fieldMonths: 1, months: 1 });
       expect(payload.officeCost.paidStops).toBe(Number(stored.paid_stops));
+    });
+  });
+
+  describe('the recurring share denominator', () => {
+    it('is the revenue of every customer except the internal test accounts, by month', async () => {
+      const plan = await customer({ waveguard_tier: 'Gold', member_since: '2024-01-01' });
+      const oneTime = await customer({ waveguard_tier: 'One-Time' });
+      const testAccount = await customer({ first_name: 'Adam', last_name: 'Martinez', waveguard_tier: 'Gold', member_since: '2024-01-01' });
+      await visit(plan, '2026-10-02', { revenue: 100 });
+      await visit(oneTime, '2026-10-03', { revenue: 100 });
+      await visit(testAccount, '2026-10-04', { revenue: 5000 });
+      await visit(plan, '2026-09-30', { revenue: 7000 }); // outside the range asked for
+      expect(await view.eligibleRevenueByMonth(trx, '2026-10-01', '2026-10-31')).toEqual(new Map([['2026-10', 200]]));
+      // End to end: a stored month (which counts the test account in completed_job_revenue) is divided by the eligible 200.
+      await trx('monthly_financial_snapshots').insert({ month: '2026-10-01', cash_revenue: 300, completed_job_revenue: 5200, recurring_revenue: 100, recurring_mature_revenue: 100 });
+      const payload = await view.getBuyerView({ db: trx, now: NOW });
+      expect(payload.recurring).toMatchObject({ share: 50, matureShareOfRevenue: 50 }); // 100 / 200, not 100 / 5200
     });
   });
 
@@ -338,11 +376,34 @@ postgres('buyer view (live Postgres)', () => {
     it('a customer who cancelled and had their tier cleared still counts in what was paid earlier: two equal customers, one leaves, is 50%', async () => {
       const stays = await member();
       const leaves = await member();
-      for (const id of [stays, leaves]) await visit(id, '2025-03-01', { revenue: 1000 }, { is_recurring: true });
+      for (const id of [stays, leaves]) {
+        await series(id, '2023-02-01');
+        await visit(id, '2025-03-01', { revenue: 1000 }, { is_recurring: true });
+      }
       await visit(stays, '2026-03-01', { revenue: 1000 }, { is_recurring: true });
       // Offboarding clears the tier and the rate and stamps the churn date; nothing is paid after it.
       await trx('customers').where({ id: leaves }).update({ waveguard_tier: null, monthly_rate: null, churned_at: '2025-12-15' });
       expect(await view.planRevenueKept(trx, NOW)).toMatchObject({ customers: 2, thenRevenue: 2000, keptRevenue: 1000, pct: 50 });
+    });
+
+    it('only plan revenue counts on both sides: a cancelled $500 plan and a later $500 one-time job is 0% kept, not 100%', async () => {
+      const gone = await member();
+      await series(gone, '2023-02-01');
+      await visit(gone, '2025-03-01', { revenue: 500 }, { is_recurring: true });
+      await trx('customers').where({ id: gone }).update({ waveguard_tier: null, monthly_rate: null, churned_at: '2025-12-15' });
+      await visit(gone, '2026-03-01', { revenue: 500 }); // a one-time job after the plan ended
+      expect(await view.planRevenueKept(trx, NOW)).toMatchObject({ customers: 1, thenRevenue: 500, keptRevenue: 0, pct: 0 });
+      // The same customer who kept their tier and churn date: the later job is still after the churn, so still not plan revenue.
+      await trx('customers').where({ id: gone }).update({ waveguard_tier: 'Gold' });
+      expect(await view.planRevenueKept(trx, NOW)).toMatchObject({ keptRevenue: 0, pct: 0 });
+    });
+
+    it('a customer whose plan began inside the earlier window is not in the cohort, whatever their customer-since date', async () => {
+      const young = await member({ member_since: '2020-01-01' });
+      await series(young, '2025-01-01');
+      await visit(young, '2025-03-01', { revenue: 600 }, { is_recurring: true });
+      await visit(young, '2026-03-01', { revenue: 600 }, { is_recurring: true });
+      expect(await view.planRevenueKept(trx, NOW)).toMatchObject({ customers: 0, pct: null });
     });
 
     it('a tiered customer\'s earlier visits count when the visit has no series marker, as of the visit date; a tier-less customer with no marker never was a plan', async () => {

@@ -40,6 +40,12 @@ describe("BuyerViewRow", () => {
     expect(screen.queryByText(/of 12 months/)).not.toBeInTheDocument();
   });
 
+  test("SDE and the profit margin each say their own month count", () => {
+    const data = { ...DATA, ownerProfit: { ...DATA.ownerProfit, sdeMonthsCounted: 11, monthsCounted: 8 } };
+    render(<BuyerViewRow data={data} />);
+    expect(screen.getByText(/SDE \$31.0k \(11 of 12 months\) · margin from 8 of 12 months/)).toBeInTheDocument();
+  });
+
   test("every metric's basis is in the how-calculated list", () => {
     render(<BuyerViewRow data={DATA} />);
     for (const text of ["Revenue basis text.", "Recurring basis text.", "Kept basis text.", "Margin basis text.", "Profit basis text.", "Office basis text."]) {
@@ -62,7 +68,7 @@ describe("BuyerViewRow", () => {
     expect(screen.getByText(/growth needs 24 stored months · 5 of 12 months/)).toBeInTheDocument();
     expect(screen.getByText(/no plan revenue yet/)).toBeInTheDocument();
     expect(screen.getByText(/needs plan customers over 24 months old/)).toBeInTheDocument();
-    expect(screen.getByText(/SDE — · 0 of 12 months · owner field wage not counted/)).toBeInTheDocument();
+    expect(screen.getByText(/SDE — \(0 of 12 months\) · margin from 0 of 12 months · owner field wage not counted/)).toBeInTheDocument();
     expect(screen.queryByText("$0.00")).not.toBeInTheDocument();
     expect(screen.queryByText("0%")).not.toBeInTheDocument();
   });

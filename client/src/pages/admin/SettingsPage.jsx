@@ -892,12 +892,14 @@ const OVH_FIELDS_UI = [
 // standard minutes, not clock time) in the dashboard's Buyer view profit and gross margin.
 const OWNER_OFFICE_FIELDS_UI = [
   { key: "ownerOfficeHoursPerMonth", col: "owner_office_hours_per_month", label: "Your office hours", hint: "hours a month you spend on office work instead of in the field", unit: "hours / month", max: 9999.99 },
-  { key: "ownerOfficeHourlyRate", col: "owner_office_hourly_rate", label: "Your office hourly rate", hint: "what an hour of your office time is worth", unit: "$ / hour", max: 999999.99 },
-  { key: "ownerFieldHourlyRate", col: "owner_field_hourly_rate", label: "Your field hourly wage", hint: "what an hour of your field work is worth as a technician wage; counted for your completed stops at the standard minutes", unit: "$ / hour", max: 999999.99 },
+  { key: "ownerOfficeHourlyRate", col: "owner_office_hourly_rate", label: "Your office hourly rate", hint: "what an hour of your office time is worth", unit: "$ / hour", max: 999999.99, rate: true },
+  { key: "ownerFieldHourlyRate", col: "owner_field_hourly_rate", label: "Your field hourly wage", hint: "what an hour of your field work is worth as a technician wage; counted for your completed stops at the standard minutes", unit: "$ / hour", max: 999999.99, rate: true },
 ];
 // The server (admin-revenue.js OWNER_OFFICE_FIELDS) refuses anything else: plain digits, at most two decimals, up to max.
 const OWNER_OFFICE_NUMBER = /^\d+(\.\d{1,2})?$/;
 const ALL_COST_FIELDS_UI = [...OVH_FIELDS_UI, ...OWNER_OFFICE_FIELDS_UI];
+// An owner rate is a placeholder until he sets a final one: the help line names the figure in the box (stored or typed).
+const rateHelp = (f, value) => (f.rate && Number(value) > 0 ? `${f.hint}. $${Number(value)} an hour is a placeholder, not a final rate.` : f.hint);
 
 function OperatingCostsSettingsTab() {
   const [row, setRow] = useState(null); // latest company_financials row
@@ -1057,7 +1059,7 @@ function OperatingCostsSettingsTab() {
         <CardBody className="divide-y divide-zinc-200">
           {OWNER_OFFICE_FIELDS_UI.map((f) => (
             <div key={f.key} className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0 sm:flex-row sm:items-end sm:justify-between">
-              <Field label={f.label} help={f.hint} className="min-w-0 flex-1 sm:max-w-md">
+              <Field label={f.label} help={rateHelp(f, valueOf(f))} className="min-w-0 flex-1 sm:max-w-md">
                 <Input
                   type="number"
                   step="0.01"

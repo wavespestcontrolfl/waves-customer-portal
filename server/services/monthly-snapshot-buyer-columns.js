@@ -113,12 +113,21 @@ function profitColumns({ pnl, officeAllowance, field, cashRevenue }) {
  * Is this visit plan revenue, as of the visit's own date? Needs service_records `sr`, a LEFT JOIN of scheduled_services
  * `ss` and customers `c`. Yes when the visit carries a plan marker (it belongs to a recurring series or to an annual-prepay
  * term: facts of the visit that no later change to the customer undoes), or the customer holds a real WaveGuard tier
- * (billing-lane MEMBERSHIP_TIER_SQL) and, on that date, had started (member_since, else created) and had not yet churned
+ * (billing-lane MEMBERSHIP_TIER_SQL) and, on that date, had started (PLAN_START_SQL) and had not yet churned
  * (customers.churned_at). Offboarding clears the tier, so the markers and the churn date are what keep a departed
  * customer's earlier plan visits counted. No cancel date exists for a customer whose tier was cleared without churned_at,
  * so those are kept only through the visit markers.
  */
-const PLAN_START_SQL = "COALESCE(c.member_since, (c.created_at AT TIME ZONE 'America/New_York')::date)";
+// When the customer's plan began: the earliest plan evidence (the first scheduled visit of a recurring series or annual-prepay
+// term, or an annual-prepay term's start), else, for a customer with a tier and no such evidence, member_since (customer
+// tenure), else created. Evidence wins because a customer can be a customer for years before the plan.
+const PLAN_START_SQL = `COALESCE(
+  LEAST(
+    (SELECT MIN(pv.scheduled_date) FROM scheduled_services pv
+      WHERE pv.customer_id = c.id AND (pv.is_recurring IS TRUE OR pv.recurring_parent_id IS NOT NULL OR pv.annual_prepay_term_id IS NOT NULL)),
+    (SELECT MIN(pt.term_start) FROM annual_prepay_terms pt WHERE pt.customer_id = c.id)),
+  c.member_since,
+  (c.created_at AT TIME ZONE 'America/New_York')::date)`;
 const PLAN_VISIT_SQL = `(
   ss.is_recurring IS TRUE OR ss.recurring_parent_id IS NOT NULL OR ss.annual_prepay_term_id IS NOT NULL
   OR (${MEMBERSHIP_TIER_SQL}
@@ -127,6 +136,7 @@ const PLAN_VISIT_SQL = `(
 
 /**
  * Visit revenue of plan members in the window (PLAN_VISIT_SQL), with the part from members at least 12 months old at the window start
+ * (plan age by PLAN_START_SQL: plan evidence where it exists, member_since only for a tier-only customer)
  * and the part from customers on chargeable autopay (as of now: no history of a customer's payment method is kept).
  * Same revenue basis as the snapshot's completed_job_revenue, so recurring_revenue is a slice of it.
  */

@@ -186,6 +186,17 @@ describe("Settings new UI foundation", () => {
     expect(JSON.parse(call[1].body)).toEqual({ ownerOfficeHoursPerMonth: 12.5, ownerOfficeHourlyRate: 40 });
   });
 
+  it("says each owner hourly rate is a placeholder, naming the figure in the box, and says nothing while the box is empty", async () => {
+    mount("operating-costs");
+    const rate = await screen.findByLabelText("Your office hourly rate");
+    expect(screen.queryByText(/is a placeholder, not a final rate/)).not.toBeInTheDocument();
+    fireEvent.change(rate, { target: { value: "31.5" } });
+    fireEvent.change(screen.getByLabelText("Your field hourly wage"), { target: { value: "28" } });
+    expect(screen.getByText(/\$31.5 an hour is a placeholder, not a final rate/)).toBeInTheDocument();
+    expect(screen.getByText(/\$28 an hour is a placeholder, not a final rate/)).toBeInTheDocument();
+    expect(screen.queryByText(/\$25 an hour/)).not.toBeInTheDocument();
+  });
+
   it("saves the owner's field hourly wage in the same PUT, and the preview rounds like the snapshot (hundredths of an hour x cents, once)", async () => {
     mount("operating-costs");
     fireEvent.change(await screen.findByLabelText("Your office hours"), { target: { value: "2.5" } });

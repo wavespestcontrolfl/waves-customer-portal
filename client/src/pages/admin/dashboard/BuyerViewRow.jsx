@@ -11,6 +11,8 @@ const dash = "—";
 const pct = (n) => (n == null ? dash : `${n}%`);
 const signedPct = (n) => (n == null ? dash : `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n)}%`);
 const partial = (counted, wanted = 12) => (counted < wanted ? ` · ${counted} of ${wanted} months` : "");
+// A count that belongs to one figure, written beside it: "SDE $31.0k (5 of 12 months)".
+const coverage = (counted, wanted = 12) => (counted < wanted ? ` (${counted} of ${wanted} months)` : "");
 
 function tiles(data, arDays) {
   const { revenue, recurring, planRevenueKept, grossMargin, ownerProfit, officeCost, ownerFieldHoursPerWeek: hours } = data;
@@ -19,6 +21,8 @@ function tiles(data, arDays) {
   const ownerTimeNote = ownerPay.months && ownerPay.fieldMonths === 0
     ? " · owner field wage not counted"
     : ownerPay.months && ownerPay.fieldMonths < ownerPay.months ? ` · field wage in ${ownerPay.fieldMonths} of ${ownerPay.months} months` : "";
+  // SDE and the profit margin cover different months (the margin needs the owner's pay worked out), so each says its own count.
+  const profitCoverage = ownerProfit.monthsCounted < 12 ? ` · margin from ${ownerProfit.monthsCounted} of 12 months` : "";
   const hoursText = hours && hours.value != null ? ` · you work ${hours.value} field hrs/week` : "";
   return [
     {
@@ -46,7 +50,7 @@ function tiles(data, arDays) {
     {
       label: "Owner-paid profit",
       value: pct(ownerProfit.marginPct),
-      sub: `SDE ${ownerProfit.sdeMonthsCounted ? fmtMoneyCompact(ownerProfit.sde) : dash}${partial(ownerProfit.monthsCounted)}${ownerTimeNote}${hoursText}`,
+      sub: `SDE ${ownerProfit.sdeMonthsCounted ? fmtMoneyCompact(ownerProfit.sde) : dash}${coverage(ownerProfit.sdeMonthsCounted)}${profitCoverage}${ownerTimeNote}${hoursText}`,
     },
     {
       label: "Office cost per stop",
