@@ -663,6 +663,9 @@ export function AuthProvider({ children }) {
     tokenRelease.finally(() => {
       if (logoutTokenReleaseRef.current === tokenRelease) logoutTokenReleaseRef.current = null;
     });
+    // Resolves once the saved credentials are gone (the Face ID lock waits on
+    // it before it opens /login; existing callers ignore it).
+    return tokenRelease;
   };
 
   // Stable identity (uncapped codex r1t P1): the tabs re-read the list from
@@ -795,6 +798,12 @@ export function AuthProvider({ children }) {
       {children}
     </AuthContext.Provider>
   );
+}
+
+// Same as useAuth, but null outside an AuthProvider (the Face ID lock also
+// renders in isolated tests).
+export function useOptionalAuth() {
+  return useContext(AuthContext);
 }
 
 export function useAuth() {

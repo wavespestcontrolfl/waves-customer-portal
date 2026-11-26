@@ -3,41 +3,48 @@ import { isNativeApp } from './platform';
 /**
  * Face ID / Touch ID app-lock helper (native only).
  *
- * Fail-OPEN is deliberate but NARROW — only when biometry could never run here:
- * on the web, when the native plugin isn't in this build (the shell loads the
- * LIVE portal, so newer web code can run inside an older binary), or when the
- * device has no biometry / nothing enrolled. We must not trap a logged-in
- * customer behind a lock the build/device can't satisfy.
+ * Results: true = unlocked, false = still locked (cancel/fail), NEEDS_PHONE_CODE =
+ * the Face ID plugin is missing from this build (the shell loads the LIVE portal,
+ * so newer web code can run inside an older binary) or its probe threw. Owner
+ * 11-26: the fallback there is the phone number code sign-in, never an open app.
+ *
+ * Fail-OPEN stays only on the web and when the device has no biometry / nothing
+ * enrolled.
  *
  * CRUCIALLY, biometric LOCKOUT (too many failed attempts) is NOT fail-open — that
  * would reward failed attempts by opening the app. On lockout we still require an
  * explicit unlock via the device passcode (allowDeviceCredential). Only an
  * explicit cancelled/failed prompt keeps the app locked.
  */
+export const NEEDS_PHONE_CODE = 'needs-phone-code';
+
 let biometryUnavailable = false;
+let pluginBroken = false;
 
 export async function authenticateBiometric(reason = 'Unlock Waves') {
   if (!isNativeApp()) return true;
+  if (pluginBroken) return NEEDS_PHONE_CODE;
   if (biometryUnavailable) return true;
 
-  // Load the plugin. Missing in this build (older binary, newer web code) → open.
+  // Load the plugin. Missing in this build (older binary, newer web code) →
+  // phone code sign-in.
   let BiometricAuth;
   let BiometryErrorType;
   try {
     ({ BiometricAuth, BiometryErrorType } = await import('@aparajita/capacitor-biometric-auth'));
   } catch {
-    biometryUnavailable = true;
-    return true;
+    pluginBroken = true;
+    return NEEDS_PHONE_CODE;
   }
 
   // Probe availability. A throw here means the plugin isn't implemented in this
-  // build → fail open.
+  // build → phone code sign-in.
   let info;
   try {
     info = await BiometricAuth.checkBiometry();
   } catch {
-    biometryUnavailable = true;
-    return true;
+    pluginBroken = true;
+    return NEEDS_PHONE_CODE;
   }
 
   if (!info?.isAvailable) {
