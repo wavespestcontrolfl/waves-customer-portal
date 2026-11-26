@@ -240,7 +240,7 @@ postgres('mailed record on PostgreSQL', () => {
     await markBatch({ batch: 'frozen', now: NOW });
     const page = await getHomePage(token);
     expect(page.price).toEqual({ monthly: 50, annual: 600, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' });
-    expect(page.heldUntil).toBeNull(); // no hold until booking honors the printed price
+    expect(page.heldUntil).toBe('2027-01-23'); // 60 days after 2026-11-24
   });
 
   test('labelsFor: the would-be batch before marking, the batch after (frozen price, hold from mailed_at); office line by city', async () => {
@@ -252,7 +252,7 @@ postgres('mailed record on PostgreSQL', () => {
     const first = (list) => list.find((l) => l.name === 'Alex & Jamie Tester');
     expect(first(before.labels)).toEqual({
       name: 'Alex & Jamie Tester', price: '50.09', perApplication: '150.26', slug: (await stored(lwr)).page_slug, token: (await stored(lwr)).page_token,
-      textNumber: '(941) 318-7612', setupFee: null,
+      textNumber: '(941) 318-7612', heldUntil: null, setupFee: null, // not mailed yet: no hold date
     });
     expect(bySlug(before.labels, null)).toMatchObject({ name: 'Sam Sample', price: '50', perApplication: '150', textNumber: '(941) 297-3337', token: (await stored(venice)).page_token, setupFee: '99' });
     expect((await stored(lwr)).mailed_at).toBeNull(); // read only
@@ -261,7 +261,7 @@ postgres('mailed record on PostgreSQL', () => {
     await conn('mail_prospects').where({ id: venice }).update({ page_typed_views: 3 });
     const after = await labelsFor({ batch: 'b-1' });
     expect(after.labels.map((l) => l.price).sort()).toEqual(['50', '50.09']);
-    expect(after.labels.every((l) => !('heldUntil' in l))).toBe(true); // no hold date until booking honors it
+    expect(after.labels.every((l) => l.heldUntil === 'Jan 23')).toBe(true); // counted from mailed_at
     expect((await labelsFor({ batch: 'no-such-batch' })).labels).toEqual([]);
   });
 

@@ -11,10 +11,10 @@
 //   go in a new batch, so a label export of a batch is always the run that was printed), a mailed home is never touched
 //   again, and the table refuses any later change to its price. The price hold on the label (60 days) counts from this day.
 // - --labels <out.json> (read only unless --execute is also given): writes, for the homes of --batch (or, with no --batch,
-//   the homes a dry run would mark), [{ name, price, perApplication, slug, token, textNumber, setupFee }] for the label print tool:
+//   the homes a dry run would mark), [{ name, price, perApplication, slug, token, textNumber, heldUntil, setupFee }] for the label print tool:
 //   name = the buyers as the label shows them, price = the monthly price (whole dollars bare), perApplication = the price
 //   of one application (annual / 4, from whole cents; 4 a year), textNumber = the office line of the home's city or ZIP,
-//   setupFee = the one-time fee or null. No hold date until booking honors the printed price. The file holds buyer names and page tokens: it is written 0600; keep it out of the repo.
+//   heldUntil = "Mon D" (the last day booking holds the printed price), setupFee = the one-time fee or null. The file holds buyer names and page tokens: it is written 0600; keep it out of the repo.
 //   Labels come ONLY from a named batch that is already marked (--labels needs --batch): print what was marked, so a home
 //   priced between a preview and the mark can never be marked mailed without a card, and the hold date matches the label.
 // - No customer comms, no paid calls.

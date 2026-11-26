@@ -17,7 +17,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { toPrice } = require('../prospects/mail-list');
-const { printedPriceOf } = require('./mailed-record');
+const { printedPriceOf, heldUntilOf } = require('./mailed-record');
 
 const LIST_KEY = 'new_home'; // services/mail/new-home-list.js LIST_KEY
 const LIVE_STATUSES = ['eligible', 'held_back'];
@@ -74,8 +74,8 @@ async function getHomePage(token, { recordView = false } = {}) {
     price,
     plan: PLAN,
     // The day the printed price is held until (YYYY-MM-DD), only for a mailed home that shows its price.
-    // null until booking honors the printed price (it re-prices live today); the booking change sets it from mailed_at.
-    heldUntil: null,
+    // The last Eastern day the printed price is held (home-book.js books at it through that day).
+    heldUntil: price && row.mailed_at ? heldUntilOf(row.mailed_at) : null,
   };
 }
 

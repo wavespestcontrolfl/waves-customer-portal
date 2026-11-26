@@ -257,6 +257,43 @@ it('posts the exact offer, the typed contact and the shown price, then shows the
   expect(screen.queryByRole('button', { name: 'Book this visit' })).not.toBeInTheDocument();
 });
 
+it('shows the lower price when the booking was made below the price on the page, and nothing extra otherwise', async () => {
+  // The page showed 444 a year; the booking answered 400 (our price went down while the card's price was held).
+  renderPage(pageFetch({ book: response(200, { booked: true, date: '2026-11-30', window: { start: '09:00', end: '11:00' }, price: { annual: 400, monthly: 33.33, setupFee: 99 } }) }));
+  await pickFirstTime();
+  fillAndSubmit();
+  expect(await screen.findByTestId('booked-price')).toHaveTextContent('Your price is now $100 per application.');
+  // The price card above shows the booked price too.
+  expect(screen.getByTestId('application-price')).toHaveTextContent('$100');
+  expect(screen.getByTestId('monthly-price')).toHaveTextContent('About $33.33 a month');
+});
+
+it('shows the lower setup fee when only the fee dropped', async () => {
+  renderPage(pageFetch({ book: response(200, { booked: true, date: '2026-11-30', window: { start: '09:00', end: '11:00' }, price: { annual: 444, monthly: 37, setupFee: 49 } }) }));
+  await pickFirstTime();
+  fillAndSubmit();
+  expect(await screen.findByTestId('booked-setup')).toHaveTextContent('Your one-time setup is now $49.');
+  expect(screen.queryByTestId('booked-price')).not.toBeInTheDocument();
+});
+
+it('says there is no setup fee when the booked fee is zero', async () => {
+  renderPage(pageFetch({ book: response(200, { booked: true, date: '2026-11-30', window: { start: '09:00', end: '11:00' }, price: { annual: 444, monthly: 37, setupFee: 0 } }) }));
+  await pickFirstTime();
+  fillAndSubmit();
+  expect(await screen.findByTestId('booked-setup')).toHaveTextContent('No setup fee.');
+  // The price card above agrees: the setup line it showed is gone.
+  expect(screen.queryByText(/One-time setup: \$99/)).not.toBeInTheDocument();
+});
+
+it('a booking at the price on the page shows no price line', async () => {
+  renderPage(pageFetch({ book: response(200, { booked: true, date: '2026-11-30', window: { start: '09:00', end: '11:00' }, price: { annual: 444, monthly: 37, setupFee: 99 } }) }));
+  await pickFirstTime();
+  fillAndSubmit();
+  await screen.findByTestId('booked');
+  expect(screen.queryByTestId('booked-price')).not.toBeInTheDocument();
+  expect(screen.queryByTestId('booked-setup')).not.toBeInTheDocument();
+});
+
 it('sends a missing setup fee as 0, a JSON number', async () => {
   const fetchMock = renderPage(async (url, init) => (/\/(times|book)$/.test(String(url))
     ? pageFetch()(url, init)
