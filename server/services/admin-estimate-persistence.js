@@ -2072,6 +2072,51 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
   }
 }
 
+// Specialty prices (2026-11-26 evening: bed bug added rooms, mosquito above 2 acres, wasp level; new quotes only): a client-priced
+// (browser fallback) save that carries NEWLY priced or repriced bed bug, mosquito or wasp rows (a $0 on-program wasp included) must say
+// it was priced under the new rule (pricingMetadata.legacySpecialty1126 === false). The browser NEVER stamps these rows (it does not
+// mirror the $349 rooms, the $85 acres or the wasp levels), so every such save is refused (409, reload) and priced by the server. A browser bundle that predates the rule sends no stamp and priced the old
+// numbers, which must not be saved as a new quote. Rows exactly as the trusted stored estimate has them (a saved pre-rule estimate
+// edited elsewhere) are not a new price: they keep the STORED stamp, never the browser's (an older browser sends none, a forged one
+// could send false). Same pattern as the one-time pest checks above.
+function specialtyRowsSignature(estimateData) {
+  const root = estimateResultRoot(estimateData);
+  const results = root?.results && typeof root.results === 'object' ? root.results : {};
+  const rows = [
+    ...(Array.isArray(root?.oneTime?.items) ? root.oneTime.items : []),
+    ...(Array.isArray(root?.oneTime?.specItems) ? root.oneTime.specItems : []),
+    // The browser's full specialty list, which keeps the $0 on-program rows (a wasp included with a recurring pest plan) that the
+    // one-time list drops.
+    ...(Array.isArray(root?.specItems) ? root.specItems : []),
+    ...(Array.isArray(results.oneTime) ? results.oneTime : []),
+  ].filter((item) => item && typeof item === 'object' && /^(bed[ _]?bug|wasp|stinging)/i.test(String(item.name || item.service || '')))
+    .map((item) => Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'legacySpecialty1126')));
+  const mosquito = Array.isArray(results.mq) && results.mq.length > 0 ? results.mq : null;
+  return { mosquito, rows, any: !!mosquito || rows.length > 0 };
+}
+
+function assertSpecialtyRuleStampForClientPayload(estimateData, { storedEstimateData = null } = {}) {
+  const root = estimateResultRoot(estimateData);
+  if (!root || typeof root !== 'object') return;
+  const recurring = root.recurring && typeof root.recurring === 'object' ? root.recurring : null;
+  const isClientEngineResult = !!recurring && Object.prototype.hasOwnProperty.call(recurring, 'pestProgramFloorApplied');
+  if (!isClientEngineResult) return;
+  const submitted = specialtyRowsSignature(estimateData);
+  if (!submitted.any) return;
+  if (storedEstimateData) {
+    const stored = specialtyRowsSignature(storedEstimateData);
+    if (isDeepStrictEqual({ ...submitted, any: undefined }, { ...stored, any: undefined })) {
+      const flag = require('./estimate-floor-signal-replay').savedLegacySpecialty1126Signal(storedEstimateData).legacySpecialty1126;
+      if (typeof flag === 'boolean') root.pricingMetadata = { ...(root.pricingMetadata || {}), legacySpecialty1126: flag };
+      else if (root.pricingMetadata) delete root.pricingMetadata.legacySpecialty1126;
+      return;
+    }
+  }
+  if (root.pricingMetadata?.legacySpecialty1126 !== false) {
+    throw errorWithStatus('This estimator is out of date for bed bug, mosquito and wasp pricing — reload the page and regenerate the estimate.', 409);
+  }
+}
+
 // Client-priced saves can't server-recompute (the legacy builder ships no
 // replayable engineRequest), so a stale client bundle could persist
 // yesterday's bond rates after an admin edits pricing_config.termite_bond
@@ -2232,6 +2277,11 @@ async function resolveEstimateWritePayload({
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
   assertLivePestBaseForClientPayload(trustedEstimateData, { liveConfigVerified, storedEstimateData });
+  // A staff revision re-prices on the CURRENT rules by design (owner 2026-09-26 ruling, the same decision as #8626, #8631 and the pest
+  // price PR): the stored stamps are NOT wired into this path, so a delivered wasp quote revised by staff goes $250 -> $275. A customer
+  // replay of the sent quote (replaySavedPricingKnobs) keeps the sent price. This guard only keeps a stale browser fallback from
+  // saving old numbers as a new quote.
+  assertSpecialtyRuleStampForClientPayload(trustedEstimateData, { storedEstimateData });
   assertNoDarkTermiteBondPayload(trustedEstimateData);
   assertNoDarkTermiteRentalPayload(trustedEstimateData);
   assertLiveTermiteBondRates(trustedEstimateData);
@@ -4156,6 +4206,7 @@ module.exports = {
   estimateEditVersion,
   detectUnlinkedMemberAddress,
   assertLivePestBaseForClientPayload,
+  assertSpecialtyRuleStampForClientPayload,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   assertNoDarkTermiteRentalPayload,

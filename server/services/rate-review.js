@@ -999,7 +999,7 @@ const CADENCE_REKEY = Object.freeze({
 // than at today's list: the retired pest curve (services.pest.version),
 // frozen floors/minimums, legacy rodent posture, termite knob snapshots.
 const REPLAY_PIN_KEYS = ['manualDiscount', 'serviceSpecificDiscounts', 'serviceSpecificCredits', 'pestProgramFloorArmed', 'pestProgramFloorPerVisit',
-  'lawnProgramMinimumMonthly', 'lawnMinimumPerVisitAfterDiscount', 'legacyPricingRules', 'legacyTwoStoryRoof', 'legacyOneTimePestBuffer', 'oneTimePestCurrentServices', 'useLawnCostFloor', 'lawnCostPlusList', 'lawnCostPlusListBasis', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs', 'mistingPricingKnobs', 'preSlabTermiticidePricingKnobs', 'trenchingTermiticidePricingKnobs'];
+  'lawnProgramMinimumMonthly', 'lawnMinimumPerVisitAfterDiscount', 'legacyPricingRules', 'legacyTwoStoryRoof', 'legacyOneTimePestBuffer', 'legacySpecialty1126', 'specialty1126CurrentServices', 'oneTimePestCurrentServices', 'useLawnCostFloor', 'lawnCostPlusList', 'lawnCostPlusListBasis', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs', 'mistingPricingKnobs', 'preSlabTermiticidePricingKnobs', 'trenchingTermiticidePricingKnobs'];
 const REPLAY_PIN_SERVICE_KEYS = Object.freeze({ pest: ['version', 'pricingVersion'], lawn: ['programMinimumMonthly', 'useLawnCostFloor', 'costPlusList'] });
 
 // `activeFamilies`: the customer's plan lines TODAY, as

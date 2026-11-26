@@ -426,7 +426,19 @@ function expectMosquito({ homeSqFt, stories = 1, lotSqFt, propertyType = 'single
   else if (pricingSqFt >= rampStart) pressure += ((pricingSqFt - rampStart) / (halfStart - rampStart)) * f.lot_half;
   if (waterMult > 1) pressure *= waterMult;
   pressure = Math.min(pressure, M.pressureCap);
-  const perVisit = Math.round(base * pressure);
+  let perVisit = Math.round(base * pressure);
+  // Owner 2026-11-26 (evening): a lot above 2 acres (87,120 sq ft, gross lot or treatable) is priced, not held for a hand price: this
+  // model's own answer for the SAME home on exactly 2 acres (its own hardscape, treatable area and pressure), plus $85 a visit for
+  // each acre past the second (pro-rated), the monthly program at its ratio to seasonal at 2 acres (seasonal 9-visit at the default
+  // pressure: 2 ac $117, 3 ac $202, 4 ac $287). A quote made before this keeps the flat price.
+  const lotUsedSqFt = Math.max(lotSqFt, treatable);
+  if (lotUsedSqFt > 87120) {
+    const args = { homeSqFt, stories, propertyType, features, stationCount, dunkCount };
+    const twoSeasonal = expectMosquito({ ...args, lotSqFt: Math.min(lotSqFt, 87120), program: 'seasonal9' }).perVisit;
+    const twoProgram = expectMosquito({ ...args, lotSqFt: Math.min(lotSqFt, 87120), program }).perVisit;
+    const seasonalAbove = twoSeasonal + 85 * ((lotUsedSqFt - 87120) / 43560);
+    perVisit = Math.round(program === 'seasonal9' || !(twoSeasonal > 0) ? seasonalAbove : seasonalAbove * (twoProgram / twoSeasonal));
+  }
   const visits = M.tierVisits[program];
   // Recurring add-ons are ANNUAL charges (station $39/yr, dunk $4/yr), never
   // per visit; counts round to integers and clamp at 0 (codex r10 P2).

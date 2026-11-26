@@ -64,7 +64,12 @@ const express = require('express');
 jest.setTimeout(30000);
 
 /**
- * Owner 2026-11-26 ("fix this"): a recurring mosquito lot above 2 acres (87,120 sq ft) waits for the owner's
+ * SUPERSEDED FOR NEW QUOTES (owner 2026-11-26 evening): a lot above 2 acres is now priced ($85 per visit per added acre;
+ * specialty-prices-20261126.test.js). This suite pins the hand-price hold for a quote priced BEFORE that: every legacy case
+ * passes legacySpecialty1126: true, the estimate-level stamp an older estimate replays under. The route block at the bottom
+ * pins that a new website quote now shows a price.
+ *
+ * Owner 2026-11-26 ("fix this"): a recurring mosquito lot above 2 acres (87,120 sq ft) waited for the owner's
  * hand price. The curve is flat past ~64,500 sq ft, so 2, 3 and 5 acres all priced $1,053/yr. The line's own
  * review mark (requiresManualReview / manualReviewReasons) is the one mechanism every system send path reads,
  * so this suite pins each path for a 3-acre lot and pins that nothing at or below 2 acres changed price.
@@ -78,9 +83,10 @@ const { leadEstimateAutoSendEligibility } = require('../services/lead-estimate-a
 const ACRE = 43560;
 const REASON = 'mosquito_lot_above_2_acres';
 const STAFF_TEXT = 'Lot above 2 acres: set the mosquito price by hand';
+const LEGACY = { legacySpecialty1126: true };
 const mosquitoLine = (acres, extra = {}) => generateEstimate({
   homeSqFt: 2000, lotSqFt: Math.round(acres * ACRE), stories: 1, yearBuilt: 2005,
-  services: { mosquito: { tier: 'seasonal9' } }, ...extra,
+  services: { mosquito: { tier: 'seasonal9' } }, ...LEGACY, ...extra,
 }).lineItems.find((l) => l.service === 'mosquito');
 
 describe('recurring mosquito above 2 acres: the line', () => {
@@ -93,8 +99,8 @@ describe('recurring mosquito above 2 acres: the line', () => {
   });
 
   test('exactly 87,120 sq ft (2 acres) is not above 2 acres; one more square foot is', () => {
-    const at = generateEstimate({ homeSqFt: 2000, lotSqFt: 87120, services: { mosquito: { tier: 'seasonal9' } } }).lineItems.find((l) => l.service === 'mosquito');
-    const over = generateEstimate({ homeSqFt: 2000, lotSqFt: 87121, services: { mosquito: { tier: 'seasonal9' } } }).lineItems.find((l) => l.service === 'mosquito');
+    const at = generateEstimate({ homeSqFt: 2000, lotSqFt: 87120, ...LEGACY, services: { mosquito: { tier: 'seasonal9' } } }).lineItems.find((l) => l.service === 'mosquito');
+    const over = generateEstimate({ homeSqFt: 2000, lotSqFt: 87121, ...LEGACY, services: { mosquito: { tier: 'seasonal9' } } }).lineItems.find((l) => l.service === 'mosquito');
     expect(at.manualReviewReasons).not.toContain(REASON);
     expect(over.manualReviewReasons[0]).toBe(REASON);
   });
@@ -114,7 +120,7 @@ describe('recurring mosquito above 2 acres: the line', () => {
   });
 
   test('an explicit treatable area above 2 acres also holds', () => {
-    const line = generateEstimate({ homeSqFt: 2000, lotSqFt: 100000, mosquitoTreatableSqFt: 90000, services: { mosquito: { tier: 'monthly12' } } })
+    const line = generateEstimate({ homeSqFt: 2000, lotSqFt: 100000, mosquitoTreatableSqFt: 90000, ...LEGACY, services: { mosquito: { tier: 'monthly12' } } })
       .lineItems.find((l) => l.service === 'mosquito');
     expect(line.manualReviewReasons[0]).toBe(REASON);
   });
@@ -150,7 +156,7 @@ describe('recurring mosquito above 2 acres: no system send path sends it', () =>
     expect(verdict.reasons).toContain('lane_review_reason');
   });
 
-  test('lead automation: the draft parks as manual review with no price shown, and auto-send refuses it', async () => {
+  test('lead automation: a NEW draft carries no 2-acre hand-price reason (the 1-acre-and-up review still parks it), and auto-send refuses it', async () => {
     const draft = await buildAutomatedLeadDraftEstimate({
       readiness: {
         status: 'ready', ready: true, confidence: 'medium', minimumConfidence: 'medium', missing: [], review: [],
@@ -159,11 +165,12 @@ describe('recurring mosquito above 2 acres: no system send path sends it', () =>
       intake: { serviceInterest: 'Recurring Mosquito Control', fullAddress: '123 Main St, Venice, FL 34285' },
       body: { homeSqFt: 2200, lotSqFt: 3 * ACRE },
     });
+    // The lot is priced now (specialty-prices-20261126.test.js); the review a lot of an acre or more already had (the existing
+    // acre_or_larger_property hold, the same one a 1.5-acre lot gets) still parks the draft, so nothing is sent unreviewed.
     expect(draft.automation.status).toBe('manual_review_required');
     expect(draft.automation.generated).toBe(false);
-    expect(draft.quoteRequired).toBe(true);
-    expect(draft.annual).toBe(0);
-    expect(draft.automation.quoteRequiredReason).toBe(REASON);
+    expect(draft.automation.quoteRequiredReason).toBe('acre_or_larger_property');
+    expect(draft.automation.quoteRequiredReason).not.toBe(REASON);
     const eligibility = leadEstimateAutoSendEligibility({
       source: 'lead_webhook', status: 'draft', pricing_authority: 'SERVER', customer_phone: '+19415550199',
       created_at: new Date(Date.now() - 3600000).toISOString(), estimate_data: draft.estimateData,
@@ -199,14 +206,14 @@ describe('POST /api/public/quote/calculate: recurring mosquito above 2 acres', (
     return { status: res.status, body: await res.json() };
   };
 
-  test('3 acres: no price is shown, the reason is named, the customer is told the team prices it', async () => {
+  test('3 acres (a new quote): the hand-price reason is gone; the 1-acre-and-up review holds it like a 1.5-acre lot', async () => {
     const { status, body } = await quote(3);
-    expect(status).toBe(202);
-    expect(body.quote_required).toBe(true);
-    expect(body.reason).toBe(REASON);
-    expect(body.monthly_total).toBeUndefined();
-    expect(body.message).toMatch(/priced by our team/);
-    expect(body.message).not.toMatch(/Commercial/);
+    const mid = await quote(1.5);
+    expect(status).toBe(mid.status);
+    expect(body.reason).toBe(mid.body.reason);
+    expect(body.reason).toBe('acre_or_larger_property');
+    expect(body.reason).not.toBe(REASON);
+    expect(JSON.stringify(body)).not.toContain(STAFF_TEXT);
   });
 
   test('half an acre still shows a price', async () => {
@@ -215,11 +222,11 @@ describe('POST /api/public/quote/calculate: recurring mosquito above 2 acres', (
     expect(body.monthly_total).toBeGreaterThan(0);
   });
 
-  test('the office bell says to set the price by hand', async () => {
+  test('the office bell no longer says to set the price by hand for a new quote', async () => {
     const { notifyAdmin } = require('../services/notification-service');
     notifyAdmin.mockClear();
     await quote(3);
     const bell = notifyAdmin.mock.calls.find((c) => /Manual quote needed/.test(c[1]));
-    expect(bell[2]).toContain(STAFF_TEXT);
+    expect(bell[2]).not.toContain(STAFF_TEXT);
   });
 });
