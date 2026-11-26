@@ -219,18 +219,18 @@
       "tmBait": null
     },
     "oneTime": {
-      "total": 250,
+      "total": 275,
       "tmInstall": 0,
       "items": [],
       "specItems": [
         {
           "name": "Stinging Insect",
-          "price": 250
+          "price": 275
         }
       ]
     },
     "totals": {
-      "year1": 250,
+      "year1": 275,
       "year2": 0
     }
   },

@@ -485,7 +485,7 @@ Required inputs: positive integer `rooms`, `method`, `severity` (`light`, `moder
 
 Heat and hybrid require `equipment` (`INHOUSE` or `SUBCONTRACT`) and `heatScope` (`ROOMS_ONLY` or `WHOLE_HOME`). Subcontract heat requires positive `subcontractCost`.
 
-Chemical is a 35% cost-ratio model: `price = directCost / 0.35`, which produces roughly 65% gross margin before modifiers. Light chemical infestations include 2 visits; moderate and heavy include 3 visits. Severe infestations require quote/inspection.
+Chemical is a 35% cost-ratio model: `price = directCost / 0.35`, which produces roughly 65% gross margin before modifiers. Light chemical infestations include 2 visits; moderate and heavy include 3 visits. Severe infestations require quote/inspection. Since 2026-11-26 (new quotes only, estimate stamp `legacySpecialty1126`) the price is the one-room price (with the modifiers below) plus `BED_BUG.chemical.addedRoomPrice` ($349, flat, no modifier) for each room after the first.
 
 Modifiers apply after base price: footprint, severity, prep, occupancy, stories, then urgency. Prep refused requires quote/inspection. Poor prep adds a callback-risk warning.
 
@@ -542,11 +542,11 @@ tiers, bracket tables, or fixed floors as identified below.
 | Pre-slab Termidor | 55% | — | bottle $152.10, 1250 sqft; volume disc 10+ 15% / 5+ 10% |
 | Foam-drill | 55% | none (default floor 0) | cost/margin formula; tiered by treatment points (5/10/15/20) |
 | German roach cleanout (`german_roach`) | fixed tiers | $350/$450/$550 all-in | light/moderate/heavy include 2/3/4 visits; no setup or footprint factor |
-| Bed bug chemical/IPM | 65% gross margin from 35% cost ratio | $400 base + $250/extra room | 2 visits light; 3 visits moderate/heavy; severe quote |
+| Bed bug chemical/IPM | 65% gross margin from 35% cost ratio | room 1: cost-ratio price or $400 minimum, with the modifiers; +$349 flat per extra room on that final price (new quotes from 2026-11-26; older quotes: $400 + $250/extra room curve) | 2 visits light; 3 visits moderate/heavy; severe quote |
 | Bed bug heat | — | $1000/$850/$750 by room count | requires equipment and heat scope; post-inspection included |
 | Bed bug hybrid | — | heat base + $175 + $75/room residual add-on | explicit method only; not full heat + full chemical |
 | Flea initial | — | floor $185 (base $225) | follow-up floor $95 |
-| Wasp | — | tiered $150/$250/$435/$775 | free with recurring pest |
+| Wasp / hornet / yellow jacket | — | tiered $150/$275/$435/$775 (level 2 was $250 before 2026-11-26) | free with recurring pest (tier-1 paper wasp / mud dauber only) |
 | Rodent exclusion V2 | fixed item/bracket model | $195 point-only; $295 with linear mesh | mesh points, bird boxes, and linear feet from `RODENT.exclusionV2`; $75 inspection subject to waiver rules |
 | Legacy exclusion V1 | fixed item/bracket model | home-size minimums from $395 | $50/$95/$195 simple/moderate/advanced points from `SPECIALTY.exclusion`; $75 inspection subject to waiver rules |
 | WDO inspection | fixed | $250 | flat code default for every footprint; database pricing may override defaults |

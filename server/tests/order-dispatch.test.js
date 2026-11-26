@@ -424,6 +424,62 @@ test('ambiguous post-submit error → needs_review, never retried', async () => 
   const err = new Error('504 after POST'); err.ambiguous = true;
   expect(await run(mockAdapter({ place: jest.fn(async () => { throw err; }) }))).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
   expect(ledgerStatus()).toBe('needs_review');
+  expect(JSON.parse(lastLedgerPatch().evidence)).not.toHaveProperty('landedAfterReceive'); // the request is still open
+  expect(requestStatus()).toBeUndefined();
+});
+
+// An order that exists, or may, on a request that changed while the vendor call ran. The park reads
+// the request under its own locks, like stale recovery: without the marker a received request would
+// settle the row and the live-order guard would let a replacement be bought.
+describe('a post-submit park on a request that changed during the vendor call', () => {
+  const ambiguous = () => Object.assign(new Error('504 after POST'), { ambiguous: true });
+  // The request changes while the vendor call is in flight; then the call ends as given.
+  const placeDuring = (status, end) => jest.fn(async () => { mockState.freshRequestStatus = status; return end(); });
+  const evidence = () => JSON.parse(lastLedgerPatch().evidence);
+  // The green-path record (the 3rd transaction) fails, so the placed order falls back to its park.
+  const withFailedRecord = async (fn) => {
+    const dbFn = require('../models/db');
+    const realTx = dbFn.transaction;
+    let n = 0;
+    dbFn.transaction = async (cb) => { n += 1; if (n === 3) throw new Error('audit insert lost connection'); return cb(dbFn); };
+    try { return await fn(); } finally { dbFn.transaction = realTx; }
+  };
+
+  test('an ambiguous submit on a request received meanwhile parks WITH landedAfterReceive', async () => {
+    const r = await run(mockAdapter({ place: placeDuring('received', () => { throw ambiguous(); }) }));
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+    expect(lastLedgerPatch().placed_at).toBeInstanceOf(Date);
+    expect(evidence().landedAfterReceive).toEqual(expect.any(String));
+    expect(requestStatus()).toBeUndefined(); // received stays received: its stock was counted
+  });
+
+  test('an ambiguous submit on a request cancelled meanwhile restores it to ordered', async () => {
+    const r = await run(mockAdapter({ place: placeDuring('cancelled', () => { throw ambiguous(); }) }));
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+    expect(evidence().reopenedFromCancelledAt).toEqual(expect.any(String));
+    expect(evidence()).not.toHaveProperty('landedAfterReceive');
+    expect(mockState.updates.find((u) => u.table === 'product_restock_requests').row).toMatchObject({ status: 'ordered', closed_at: null });
+  });
+
+  test('a placed order whose record failed, on a request received meanwhile, parks WITH landedAfterReceive', async () => {
+    const r = await withFailedRecord(() => run(mockAdapter({ place: placeDuring('received', () => ({ externalOrderNumber: 'SM-1', amountCents: 31400, evidence: { totalSource: 'vendor' } })) })));
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'persist_after_placement' });
+    expect(lastLedgerPatch().external_order_number).toBe('SM-1');
+    expect(evidence()).toMatchObject({ landedAfterReceive: expect.any(String), totalSource: 'vendor' });
+  });
+
+  test('a pre-submit park reads nothing of the request and marks nothing: no order exists', async () => {
+    mockState.freshRequestStatus = 'received';
+    const refused = Object.assign(new Error('account has 0 payment methods; exactly one is required'), { refuse: 'no_payment' });
+    expect(await run(mockAdapter({ place: jest.fn(async () => { throw refused; }) }))).toMatchObject({ status: 'needs_review', reason: 'no_payment' });
+    expect(lastLedgerPatch().placed_at).toBeUndefined();
+    expect(evidence()).not.toHaveProperty('landedAfterReceive');
+    mockState.freshRequestStatus = 'cancelled';
+    mockState.updates = [];
+    expect(await run(mockAdapter({ place: jest.fn(async () => { throw refused; }) }))).toMatchObject({ status: 'needs_review', reason: 'no_payment' });
+    expect(evidence()).not.toHaveProperty('reopenedFromCancelledAt');
+    expect(requestStatus()).toBeUndefined();
+  });
 });
 
 test('definite adapter error → failed + bell', async () => {
