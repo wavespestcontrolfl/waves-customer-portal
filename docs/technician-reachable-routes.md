@@ -617,3 +617,4 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/knowledge/queries/:id/file-back` | knowledge |
 | POST | `/api/knowledge/queries/:id/rate` | knowledge |
 | POST | `/api/knowledge/query` | knowledge |
+| GET | `/api/tech/visual-moments/clip-week` | visual-service-moments |

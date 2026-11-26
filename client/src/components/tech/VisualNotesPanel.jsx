@@ -100,8 +100,62 @@ function mediaLabel(value) {
   return '';
 }
 
+function isVideoFile(file) {
+  return String(file?.type || '').startsWith('video/');
+}
+
 function canRemoveMoment(moment) {
   return ['internal_only', 'draft_customer'].includes(moment?.visibilityStatus);
+}
+
+function ClipWeekLine({ clipWeek }) {
+  if (!clipWeek) return null;
+  return (
+    <div style={{ fontSize: 12, color: DARK.muted, marginBottom: 8 }}>
+      Clips OK to post this week:{' '}
+      <span style={{ color: DARK.text, fontWeight: 500 }}>
+        {clipWeek.okClips} of {clipWeek.goalMin}-{clipWeek.goalMax}
+      </span>
+    </div>
+  );
+}
+
+function YoutubeOkBox({ media, checked, disabled, onChange }) {
+  if (!isVideoFile(media)) return null;
+  return (
+    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10, cursor: 'pointer' }}>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        disabled={disabled}
+        style={{ marginTop: 2 }}
+      />
+      <span>
+        <span style={{ display: 'block', fontSize: 12, color: DARK.text, fontWeight: 500 }}>
+          OK to post on the Waves YouTube channel
+        </span>
+        <span style={{ display: 'block', fontSize: 11, color: DARK.muted, marginTop: 2 }}>
+          Only if no faces, house numbers, car plates, gate codes or inside of the home show.
+        </span>
+      </span>
+    </label>
+  );
+}
+
+function OkToPostChip({ moment }) {
+  if (!moment.youtubeOk) return null;
+  return (
+    <span style={{
+      border: `1px solid ${DARK.green}`,
+      borderRadius: 4,
+      color: DARK.green,
+      padding: '1px 6px',
+      whiteSpace: 'nowrap',
+    }}>
+      OK to post
+    </span>
+  );
 }
 
 export default function VisualNotesPanel({ service }) {
@@ -116,6 +170,8 @@ export default function VisualNotesPanel({ service }) {
   const [momentsError, setMomentsError] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [youtubeOk, setYoutubeOk] = useState(false);
+  const [clipWeek, setClipWeek] = useState(null);
   const photoInputRef = useRef(null);
   const videoInputRef = useRef(null);
 
@@ -144,11 +200,35 @@ export default function VisualNotesPanel({ service }) {
     loadMoments();
   }, [loadMoments]);
 
+  // Weekly clip goal line. Fails quietly: any error hides the line.
+  const loadClipWeek = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/tech/visual-moments/clip-week`, {
+        headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !Number.isFinite(data.okClips)) throw new Error('clip week unavailable');
+      setClipWeek(data);
+    } catch {
+      setClipWeek(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadClipWeek();
+  }, [loadClipWeek]);
+
   const resetForm = () => {
     setSelectedTag(null);
     setLocationArea('');
     setNote('');
     setMedia(null);
+    setYoutubeOk(false);
+  };
+
+  const pickMedia = (file) => {
+    setMedia(file || null);
+    setYoutubeOk(false);
   };
 
   const deleteMoment = async (moment) => {
@@ -189,6 +269,7 @@ export default function VisualNotesPanel({ service }) {
       if (gps.gpsLatitude != null) fd.append('gpsLatitude', String(gps.gpsLatitude));
       if (gps.gpsLongitude != null) fd.append('gpsLongitude', String(gps.gpsLongitude));
       if (media) fd.append('media', media);
+      if (isVideoFile(media)) fd.append('youtubeOk', youtubeOk ? 'true' : 'false');
       const res = await fetch(`${API}/api/jobs/${service.id}/visual-moments`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
@@ -198,7 +279,7 @@ export default function VisualNotesPanel({ service }) {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       setMessage(data.message || 'Visual note saved.');
       resetForm();
-      await loadMoments();
+      await Promise.all([loadMoments(), loadClipWeek()]);
       window.setTimeout(() => setMessage((current) => current === 'Visual note saved.' ? '' : current), 3500);
     } catch (err) {
       setError(err.message || 'Could not save visual note');
@@ -252,6 +333,8 @@ export default function VisualNotesPanel({ service }) {
           </div>
         )}
       </div>
+
+      <ClipWeekLine clipWeek={clipWeek} />
 
       {!selectedTag ? (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7 }}>
@@ -378,7 +461,7 @@ export default function VisualNotesPanel({ service }) {
             accept="image/*"
             capture="environment"
             style={{ display: 'none' }}
-            onChange={(e) => setMedia(e.target.files?.[0] || null)}
+            onChange={(e) => pickMedia(e.target.files?.[0])}
           />
           <input
             ref={videoInputRef}
@@ -386,13 +469,14 @@ export default function VisualNotesPanel({ service }) {
             accept="video/*"
             capture="environment"
             style={{ display: 'none' }}
-            onChange={(e) => setMedia(e.target.files?.[0] || null)}
+            onChange={(e) => pickMedia(e.target.files?.[0])}
           />
           {media && (
             <div style={{ fontSize: 11, color: DARK.muted, marginBottom: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {media.name}
             </div>
           )}
+          <YoutubeOkBox media={media} checked={youtubeOk} disabled={saving} onChange={setYoutubeOk} />
           <div style={{ display: 'flex', gap: 8 }}>
             <button
               type="button"
@@ -528,7 +612,11 @@ export default function VisualNotesPanel({ service }) {
                       color: DARK.muted,
                       fontSize: 11,
                       fontWeight: 500,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
                     }}>
+                      <OkToPostChip moment={moment} />
                       {statusLabel(moment.visibilityStatus)}
                     </div>
                     {canRemoveMoment(moment) && (

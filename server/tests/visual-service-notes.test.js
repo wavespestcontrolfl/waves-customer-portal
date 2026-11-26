@@ -4,6 +4,9 @@ const {
   formatVisualMoment,
   invalidateVisualMomentReportPdfCache,
   isVisualServiceNotesEnabled,
+  normalizeMomentInsert,
+  youtubeOkColumns,
+  countOkClipsThisWeek,
   serviceTypeKey,
   templateCaptionForMoment,
 } = require('../services/visual-service-notes');
@@ -140,5 +143,78 @@ describe('visual service notes', () => {
       ['where', { scheduled_service_id: 'scheduled-1' }],
       ['update', { pdf_storage_key: null }],
     ]);
+  });
+
+  describe('OK to post mark', () => {
+    const job = { id: 'job-1', customer_id: null, technician_id: 'tech-1' };
+    const insertFor = (media, body) => normalizeMomentInsert({
+      body: { tagCode: 'bugs_seen', ...body }, job, technicianId: 'tech-1', media,
+    });
+
+    test('a video clip with youtubeOk true is stamped, and customer visibility stays internal', () => {
+      const row = insertFor({ mediaType: 'video' }, { youtubeOk: 'true' });
+      expect(row.youtube_ok_at).toBeInstanceOf(Date);
+      expect(row.youtube_ok_by).toBe('tech-1');
+      expect(row.visibility_status).toBe('internal_only');
+    });
+
+    test('a photo or a note with no media ignores youtubeOk', () => {
+      for (const mediaType of ['photo', 'none']) {
+        const row = insertFor({ mediaType }, { youtubeOk: 'true' });
+        expect(row).not.toHaveProperty('youtube_ok_at');
+        expect(row).not.toHaveProperty('youtube_ok_by');
+      }
+    });
+
+    test('youtubeOk false on a clip clears both columns; an absent field changes nothing', () => {
+      expect(youtubeOkColumns({ mediaType: 'video', youtubeOk: false, technicianId: 't' }))
+        .toEqual({ youtube_ok_at: null, youtube_ok_by: null });
+      expect(youtubeOkColumns({ mediaType: 'video', youtubeOk: 'false', technicianId: 't' }))
+        .toEqual({ youtube_ok_at: null, youtube_ok_by: null });
+      expect(youtubeOkColumns({ mediaType: 'video', technicianId: 't' })).toEqual({});
+      expect(youtubeOkColumns({ mediaType: 'video', youtubeOk: 'maybe', technicianId: 't' })).toEqual({});
+    });
+
+    test('formatted moment exposes youtubeOk and youtubeOkAt', () => {
+      const at = new Date('2026-11-24T15:00:00Z');
+      expect(formatVisualMoment({ id: 'm', youtube_ok_at: at, media_type: 'video' }))
+        .toMatchObject({ youtubeOk: true, youtubeOkAt: at });
+      expect(formatVisualMoment({ id: 'm', youtube_ok_at: null })).toMatchObject({ youtubeOk: false, youtubeOkAt: null });
+    });
+  });
+
+  describe('clip week count', () => {
+    function fakeKnex(count) {
+      const seen = { where: null, raw: [] };
+      const q = {
+        where(c) { seen.where = c; return q; },
+        whereNull() { return q; },
+        whereNotNull() { return q; },
+        whereRaw(sql, bindings) { seen.raw.push([sql, bindings]); return q; },
+        count() { return q; },
+        first() { return Promise.resolve({ n: String(count) }); },
+      };
+      return { knex: () => q, seen };
+    }
+
+    test.each([
+      ['Sunday 11:30 PM ET is still the old week', '2026-11-23T04:30:00Z', '2026-11-16'],
+      ['Monday 00:10 ET starts the new week', '2026-11-23T05:10:00Z', '2026-11-23'],
+      ['fall-back Sunday (DST ends) belongs to the week before', '2026-11-01T12:00:00Z', '2026-10-26'],
+      ['Monday after fall-back', '2026-11-02T05:10:00Z', '2026-11-02'],
+      ['spring-forward Sunday belongs to the week before', '2026-03-08T15:00:00Z', '2026-03-02'],
+    ])('%s', async (_name, nowIso, weekStart) => {
+      const { knex, seen } = fakeKnex(2);
+      const out = await countOkClipsThisWeek('tech-1', { knex, now: new Date(nowIso) });
+      expect(out).toEqual({ weekStart, okClips: 2, goalMin: 1, goalMax: 3 });
+      expect(seen.where).toEqual({ technician_id: 'tech-1', media_type: 'video' });
+      expect(seen.raw.every(([sql, b]) => sql.includes('America/New_York') && b[0] === weekStart)).toBe(true);
+    });
+
+    test('no technician id counts zero without a query', async () => {
+      const knex = () => { throw new Error('no query expected'); };
+      await expect(countOkClipsThisWeek(null, { knex, now: new Date('2026-11-24T15:00:00Z') }))
+        .resolves.toMatchObject({ okClips: 0, goalMin: 1, goalMax: 3 });
+    });
   });
 });

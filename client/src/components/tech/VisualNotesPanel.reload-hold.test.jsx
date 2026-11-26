@@ -38,3 +38,31 @@ it('holds an out-of-date tab reload from Save moment while the location is read,
   await waitFor(() => expect(reloadHoldNames()).not.toContain('visual-note'));
   expect(posts).toEqual([expect.stringContaining('/api/jobs/svc-1/visual-moments')]);
 });
+
+it('shows the weekly clip line, and the OK-to-post box only for a clip', async () => {
+  vi.mocked(fetch).mockImplementation(async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => (String(url).includes('clip-week')
+      ? { weekStart: '2026-11-23', okClips: 2, goalMin: 1, goalMax: 3 }
+      : { moments: [{ id: 'm1', tagLabel: 'Weeds', mediaType: 'video', visibilityStatus: 'internal_only', youtubeOk: true }] }),
+  }));
+  const { container } = render(<VisualNotesPanel service={{ id: 'svc-1' }} />);
+  expect(await screen.findByText('2 of 1-3')).toBeTruthy();
+  expect(await screen.findByText('OK to post')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Weeds' }));
+  expect(screen.queryByText(/OK to post on the Waves YouTube channel/)).toBeNull();
+  const video = container.querySelector('input[accept="video/*"]');
+  fireEvent.change(video, { target: { files: [new File(['x'], 'a.mp4', { type: 'video/mp4' })] } });
+  expect(screen.getByText(/OK to post on the Waves YouTube channel/)).toBeTruthy();
+  expect(screen.getByText(/no faces, house numbers, car plates, gate codes/)).toBeTruthy();
+});
+
+it('hides the clip line when the week endpoint fails', async () => {
+  vi.mocked(fetch).mockImplementation(async (url) => (String(url).includes('clip-week')
+    ? { ok: false, status: 500, json: async () => ({}) }
+    : { ok: true, status: 200, json: async () => ({ moments: [] }) }));
+  render(<VisualNotesPanel service={{ id: 'svc-1' }} />);
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText(/Clips OK to post this week/)).toBeNull();
+});

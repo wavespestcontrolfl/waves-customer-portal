@@ -18,6 +18,8 @@ const {
   tagForCode,
   truncateText,
   invalidateVisualMomentReportPdfCache,
+  youtubeOkColumns,
+  countOkClipsThisWeek,
 } = require('../services/visual-service-notes');
 
 const router = express.Router();
@@ -92,6 +94,16 @@ async function formatRows(rows, includeInternal) {
     return formatVisualMoment(row, { mediaUrl, includeInternal });
   }));
 }
+
+// GET /api/tech/visual-moments/clip-week
+// The requesting tech's "OK to post" clip count for the current ET week.
+router.get('/tech/visual-moments/clip-week', authStack, async (req, res, next) => {
+  try {
+    return res.json(await countOkClipsThisWeek(req.technicianId));
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/jobs/:jobId/visual-moments
 router.get('/jobs/:jobId/visual-moments', authStack, async (req, res, next) => {
@@ -242,6 +254,11 @@ router.patch('/visual-moments/:momentId', authStack, async (req, res, next) => {
     if (req.techRole === 'admin' && Object.prototype.hasOwnProperty.call(req.body || {}, 'customerCaption')) {
       updates.customer_caption = truncateText(req.body.customerCaption, 1500);
     }
+    Object.assign(updates, youtubeOkColumns({
+      mediaType: moment.media_type,
+      youtubeOk: req.body.youtubeOk,
+      technicianId: req.technicianId,
+    }));
     if (Object.keys(updates).length === 0) {
       const [formatted] = await formatRows([moment], req.techRole === 'admin');
       return res.json({ moment: formatted });
