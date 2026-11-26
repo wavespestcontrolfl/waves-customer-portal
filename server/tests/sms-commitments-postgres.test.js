@@ -3012,6 +3012,15 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     });
 
+    test('a callback-card call that reached voicemail is never a witness, even with both legs over 60 s', async () => {
+      const after = await callbackAsk();
+      const card = await outboundCall(after, { source: 'admin-callback', ai_extraction_enriched: { meta: { is_voicemail: true } },
+        metadata: { callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 75 } } });
+      dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `call:${card.id}`, quote: 'Talked it through with the customer.' } });
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 120000) })).toMatchObject({ fulfilled: 0 });
+      expect((await mockPg('call_commitments').first()).sms_context.fulfillment_check).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+    });
+
     test('a call back that a cached "open" verdict judged is closed now, with no model call', async () => {
       const after = await callbackAsk();
       await outboundCall(after, { source: 'admin-callback', metadata: { customer_leg: { status: 'completed', duration_seconds: 163 } } });

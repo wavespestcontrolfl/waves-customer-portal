@@ -973,12 +973,14 @@ function customerWitness(record, commitment, records = []) {
     // A call in that a person answered answers a text call-back ask only.
     // For one, a call back that reached the customer (personCallBackFor)
     // counts whatever the staff leg's length, and a callback-card attempt
-    // counts only once its customer leg completed (cardLegReached), for the
-    // model too.
+    // counts only on that full proof with its customer leg completed
+    // (personCallBackFor, the cardLegSql bar), for the model too.
     call: () => {
       if (record.direction === 'inbound') return textCallbackAsk(commitment) && personAnsweredCallIn(record);
       if (record.status !== 'completed') return false;
-      if (textCallbackAsk(commitment)) return cardLegReached(record) && (Number(record.duration_seconds) >= 60 || personCallBack(record));
+      if (textCallbackAsk(commitment)) {
+        return record.card_attempt ? personCallBackFor(record) : Number(record.duration_seconds) >= 60 || personCallBack(record);
+      }
       // A general ask takes only a call back that reached the customer.
       return Number(record.duration_seconds) >= 60 && (commitment.kind !== 'other' || personCallBack(record));
     },
