@@ -2088,29 +2088,22 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
 // posts, and whether or not it changed (no unchanged-resave exception, so nothing to compare). At or under 5,500 sq ft the premium is
 // zero and the browser's price is the server's price. The check sits where the pricing authority is decided, not behind a
 // browser-shape test.
+// There is NO exemption for a row that says it is priced another way (a commercial pest row, a unit priced by its bedroom count):
+// on this branch the server verified nothing, so a row cannot prove its pricing basis, and a marker that exempts a row is a marker
+// that hides one (an exemption was tried and dropped for that reason). The cost is a reload while the engine is broken. Production
+// holds no browser-priced estimate at all (pricing_authority CLIENT_FALLBACK: 0 rows, read 2026-11-26), and the first send of one is
+// already refused (GATE_SEND_REQUIRES_SERVER_PRICING).
 const PEST_ROW_SERVICES = new Set(['pest_control', 'one_time_pest']);
 const NOT_A_PEST_ROW_NAME = /termite|mosquito|rodent|lawn|shrub|palm|mist|wdo|exclusion|flea|roach|bed ?bug/i;
 const PEST_ROW_PRICE_KEYS = ['pa', 'perApp', 'perVisit', 'perTreatment', 'basePrice', 'mo', 'monthly', 'monthlyBase', 'ann', 'annual',
   'annualTotal', 'annualAfterDiscount', 'price', 'amount', 'priceAfterDiscount', 'estimatedPrice', 'total'];
 const SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$/;
 const isPlainRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
-// The premium prices the residential footprint table only. A commercial pest row (its own pricer) and a bedroom-band row (a unit
-// priced by its bedroom count) say so on the row itself, and are not rows this rule can move: they are left out before the search.
-const isOtherBasisPestRow = (row) => /commercial/i.test(`${row.service || ''} ${row.name || ''} ${row.label || ''}`)
-  || row.footprintSource === 'bedroom_band' || row.pricingBasis === 'caller_stated_bedroom_count';
-function withoutOtherBasisPestRows(node) {
-  const keep = (value) => !(isPlainRecord(value) && isOtherBasisPestRow(value));
-  if (Array.isArray(node)) return node.filter(keep).map(withoutOtherBasisPestRows);
-  if (isPlainRecord(node)) return Object.fromEntries(Object.entries(node).filter(([, value]) => keep(value)).map(([key, value]) => [key, withoutOtherBasisPestRows(value)]));
-  return node;
-}
-// True when the saved blob holds a footprint-priced pest row anywhere outside its input carriers: the browser's plan rows
-// (results.pest, pestTiers under `results` or straight under the result), a recurring or one-time row, or an engine line, in
-// `result`, `engineResult`, the bare data or the send snapshot. The stamp reader's own list of saved pest shapes
-// (storedPestServices, shared with the public page) is asked first, so a shape that page can show is never one this check cannot
-// see; a reader that fails counts as a row.
-function saveHoldsPestRow(rawEstimateData) {
-  const estimateData = withoutOtherBasisPestRows(rawEstimateData);
+// True when the saved blob holds a pest row anywhere outside its input carriers: the browser's plan rows (results.pest, pestTiers
+// under `results` or straight under the result), a recurring or one-time row, or an engine line, in `result`, `engineResult`, the
+// bare data or the send snapshot. The stamp reader's own list of saved pest shapes (storedPestServices, shared with the public
+// page) is asked first, so a shape that page can show is never one this check cannot see; a reader that fails counts as a row.
+function saveHoldsPestRow(estimateData) {
   try {
     if (require('./estimate-floor-signal-replay').storedPestServices(estimateData).size > 0) return true;
   } catch { return true; }
@@ -2121,7 +2114,7 @@ function saveHoldsPestRow(rawEstimateData) {
     if (Array.isArray(node)) return node.some(walk);
     if (PEST_ROW_SERVICES.has(String(node.service || ''))) return true;
     // A row named for pest (the browser and the mapper name rows, they do not always key them), carrying any price.
-    const label = String(node.name || node.label || node.service || '');
+    const label = String(node.name || node.label || '');
     if (/pest/i.test(label) && !NOT_A_PEST_ROW_NAME.test(label) && PEST_ROW_PRICE_KEYS.some((key) => Number(node[key]) > 0)) return true;
     return Object.entries(node).some(([key, value]) => {
       if (SAVE_INPUT_CARRIER_KEY.test(key)) return false;
@@ -2163,7 +2156,7 @@ function assertPestAboveTableClientFallbackSave(estimateData, { storedEstimateDa
   // read at the size the server already holds.
   const footprints = [...savedPestFootprints(estimateData), ...savedPestFootprints(storedEstimateData)];
   if (!footprints.some((footprint) => footprint > Number(pricingEngine.constants.PEST.aboveTableStartSqFt))) return;
-  throw errorWithStatus('This home is above 5,500 sq ft, and the browser cannot price pest for it — reload the page and regenerate the estimate so the server prices it.', 409);
+  throw errorWithStatus('The server could not price this estimate, and the browser cannot price pest for a building above 5,500 sq ft — reload the page and regenerate the estimate so the server prices it.', 409);
 }
 // The stamp of a browser-priced save is the server's, never the browser's: a revision keeps the stored estimate's (a quote sold before
 // the rule stays on it), a first save is new. A save that passed the check above holds no pest row the two rules price differently,
