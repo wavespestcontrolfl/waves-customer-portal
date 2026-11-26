@@ -1664,6 +1664,40 @@ describe('technician shift hours', () => {
     expect(await prove(Object.assign(shiftDeps({ startMin: 8 * 60, endMin: 12 * 60 + 45, source: 'roster' }), { loadDayStops: jest.fn(async () => short) }))).toEqual({ reason: 'past_shift_end' });
   });
 
+  test('the route check on the moved day is handed the shift end, and its shift_end answer refuses the hour', async () => {
+    const deps = shiftDeps(hours(8, 13));
+    await check({ deps });
+    const { placement } = deps.evaluated.find((e) => e.placement.windowStart === '09:00');
+    expect(placement).toEqual({ windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60, shiftEndMin: 13 * 60 });
+    // No set hours: the option is not passed at all.
+    const none = shiftDeps(null);
+    await check({ deps: none });
+    expect(none.evaluated.every((e) => !('shiftEndMin' in e.placement))).toBe(true);
+    // The engine's refusal names the shift end.
+    const late = shiftDeps(hours(8, 13), { evaluateArrivalPlacement: jest.fn((_context, asked) => (asked.shiftEndMin === 13 * 60
+      ? { feasible: false, reason: 'shift_end' } : { feasible: true, detourMinutes: ROUTE_DETOUR_MIN })) });
+    expect(await prove(late)).toEqual({ reason: 'route_shift_end' });
+    const { report } = await check({ deps: shiftDeps(hours(8, 13), { evaluateArrivalPlacement: late.evaluateArrivalPlacement }) });
+    expect(at9(report)).toBeUndefined();
+    expect(report.byReason.route_shift_end).toBeGreaterThan(0);
+  });
+
+  test('a stop the modeled route finishes after the shift end refuses the hour, though the engine saw no change from the new visit', async () => {
+    // The engine passes the route; its arrivals say when each stop ends.
+    const ends = (dEnd, eEnd = '14:00') => jest.fn(() => ({ feasible: true, detourMinutes: ROUTE_DETOUR_MIN, arrivals: [
+      { id: 'visit-b', arrival: '10:00', departure: '11:00' }, { id: 'visit-c', arrival: '11:00', departure: '12:00' },
+      { id: 'visit-d', arrival: '12:10', departure: dEnd }, { id: 'visit-e', arrival: '13:00', departure: eEnd },
+    ] }));
+    // A moved stop (D, moved to 12:00) ends at 13:10.
+    expect(await prove(shiftDeps(hours(8, 13), { evaluateArrivalPlacement: ends('13:10', '13:00') }))).toEqual({ reason: 'route_shift_end' });
+    // A stop after the moved ones (E, not moved) ends at 14:01.
+    expect(await prove(shiftDeps(hours(8, 14), { evaluateArrivalPlacement: ends('13:00', '14:01') }))).toEqual({ reason: 'route_shift_end' });
+    // The exact shift end is kept.
+    expect((await prove(shiftDeps(hours(8, 14), { evaluateArrivalPlacement: ends('13:10', '14:00') }))).moves).toHaveLength(3);
+    // No set hours: the ends are not read.
+    expect((await prove(shiftDeps(null, { evaluateArrivalPlacement: ends('23:00', '23:30') }))).moves).toHaveLength(3);
+  });
+
   test('the real dependencies are the gate reader and the shift loader', () => {
     const deps = _internals.defaultDeps();
     expect(deps.shiftHoursOn).toBe(require('../config/feature-gates').techShiftHoursLive);

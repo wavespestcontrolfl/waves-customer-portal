@@ -2003,7 +2003,9 @@ extend, accept) also hold the hour to its technician's shift that day: the
 new visit starts and ends inside the shift, and each moved stop, at its
 longer of window and service length, still ends by the shift end. An hour
 that fails is not offered, and a proof that fails is the ordinary
-`SLOT_UNAVAILABLE`. A failed read of the hours offers nothing and fails the
+`SLOT_UNAVAILABLE`. The route check on the moved day is held to the same
+shift end: an hour the route reaches late, so the visit ends after it, fails
+the same way. A failed read of the hours offers nothing and fails the
 proof. Gate off: the hours are not read.
 The hold stores the stops that would move in
 `scheduled_services.make_room_moves`. While that hold is live its moves'
