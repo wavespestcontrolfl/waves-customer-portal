@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Customer-app fixes of 2026-11-26: real request status near the top of Home, retry on the
-// money and schedule dead ends, "You're paid up" on Billing, tappable arrival-checklist rows and
+// money and schedule dead ends, tappable arrival-checklist rows and
 // a Reschedule button on a missed visit, "You're offline" on a failed save, "View report" on a
 // completed visit with no "N/A" tile, and Add to Calendar on every upcoming visit.
 import React from 'react';
@@ -29,7 +29,7 @@ vi.mock('../utils/api', () => {
 
 import api from '../utils/api';
 import CustomerDialogHost from '../components/brand/CustomerDialogHost';
-import { BillingTab, DashboardTab, MyRequestsCard, ScheduleTab, ServiceTracker, ServicesTab } from './PortalPage';
+import { DashboardTab, MyRequestsCard, ScheduleTab, ServiceTracker, ServicesTab } from './PortalPage';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -139,61 +139,6 @@ describe('fix 5: money and schedule dead ends on Home retry', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText('Recovered visit')).toBeInTheDocument();
     expect(api.getNextService).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe('fix 5: Billing says whether the account is paid up', () => {
-  const renderBilling = () => render(<BillingTab customer={customer} refreshCustomer={vi.fn()} />);
-
-  it('names the last payment when the balance is zero', async () => {
-    api.getBalance.mockResolvedValue({ currentBalance: 0 });
-    api.getPayments.mockResolvedValue({ payments: [
-      { id: 'p1', date: '2026-10-01', amount: 89, status: 'paid', type: 'recurring', receiptUrl: '/receipt/a' },
-      { id: 'p2', date: '2026-11-01', amount: 120, status: 'paid', type: 'one_time', receiptUrl: '/receipt/b' },
-    ] });
-    renderBilling();
-    expect(await screen.findByText("You're paid up. Last payment $120.00 on Nov 1, 2026.")).toBeInTheDocument();
-  });
-
-  it('shows what was charged when the payment was partly refunded', async () => {
-    api.getPayments.mockResolvedValue({ payments: [
-      { id: 'p1', date: '2026-11-01', amount: 100, refundAmount: 20, status: 'paid', type: 'one_time', stripeReceiptUrl: 'https://pay.stripe.test/r' },
-    ] });
-    renderBilling();
-    expect(await screen.findByText("You're paid up. Last payment $100.00 on Nov 1, 2026.")).toBeInTheDocument();
-  });
-
-  it('says nothing when no paid row carries a receipt (the server withholds them when it cannot rule out a third-party payer)', async () => {
-    api.getPayments.mockResolvedValue({ payments: [
-      { id: 'p1', date: '2026-11-01', amount: 100, status: 'paid', type: 'one_time', receiptUrl: null, stripeReceiptUrl: null },
-    ] });
-    renderBilling();
-    await screen.findByText('Account balance');
-    expect(screen.queryByText(/You're paid up/)).not.toBeInTheDocument();
-  });
-
-  it('says so when a bank payment is still processing', async () => {
-    api.getBalance.mockResolvedValue({ currentBalance: 0 });
-    api.getPayments.mockResolvedValue({ payments: [
-      { id: 'p1', date: '2026-10-01', amount: 89, status: 'paid', type: 'recurring', receiptUrl: '/receipt/a' },
-      { id: 'p2', date: '2026-11-24', amount: 89, status: 'processing', type: 'recurring' },
-    ] });
-    renderBilling();
-    expect(await screen.findByText("You're paid up. Last payment $89.00 on Oct 1, 2026. A payment of $89.00 is still processing.")).toBeInTheDocument();
-  });
-
-  it('says nothing when money is owed or there is no payment on file', async () => {
-    api.getBalance.mockResolvedValue({ currentBalance: 55 });
-    api.getPayments.mockResolvedValue({ payments: [{ id: 'p1', date: '2026-10-01', amount: 89, status: 'paid', type: 'recurring', receiptUrl: '/receipt/a' }] });
-    const owed = renderBilling();
-    await screen.findByText('Balance due');
-    expect(screen.queryByText(/You're paid up/)).not.toBeInTheDocument();
-    owed.unmount();
-    api.getBalance.mockResolvedValue({ currentBalance: 0 });
-    api.getPayments.mockResolvedValue({ payments: [] });
-    renderBilling();
-    await screen.findByText('Account balance');
-    expect(screen.queryByText(/You're paid up/)).not.toBeInTheDocument();
   });
 });
 
@@ -351,6 +296,26 @@ describe('fix 9: visits', () => {
       render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
       await screen.findByRole('button', { name: 'Add to Calendar' });
       await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(screen.queryByRole('button', { name: 'Add to Calendar' })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps Add to Calendar through the inclusive deadline and drops it 1 ms after, on Home and on Visits', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    try {
+      const deadline = new Date(Date.now() + 3000).toISOString();
+      const visit = { id: 'a', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', calendarUrl: '/api/appointments/tok-a/calendar.ics', calendarExpiresAt: deadline };
+      api.getSchedule.mockResolvedValue({ upcoming: [visit] });
+      api.getNextService.mockResolvedValue({ next: visit });
+      render(<><ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} /><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></>);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+      expect(screen.getAllByRole('button', { name: 'Add to Calendar' })).toHaveLength(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(2990); });
+      // Now is exactly the deadline: the server still serves the file.
+      expect(screen.getAllByRole('button', { name: 'Add to Calendar' })).toHaveLength(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(screen.queryByRole('button', { name: 'Add to Calendar' })).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();

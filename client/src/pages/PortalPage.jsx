@@ -331,12 +331,13 @@ const calendarLinkStillLive = (svc) => {
 // ruling: visit promises are day-only). The server nulls calendarUrl for every
 // visit it would refuse a file for, so no button shows then.
 function AddToCalendarButton({ visit, style }) {
-  // Re-render when the server deadline passes, so a Visits tab left open stops offering a file the route now refuses
-  // (same timer as the Home card). `tick` re-arms it when the delay saturates the setTimeout ceiling.
+  // Re-render just after the server deadline, so an idle page stops offering a file the route now refuses. The
+  // server serves the file while the deadline is >= now (inclusive), so the timer fires 1 ms past it, never at it.
+  // `tick` re-arms the timer when the delay saturates the setTimeout ceiling.
   const [tick, setTick] = useState(0);
   const deadline = calendarLinkEndsAt(visit)?.getTime();
   useEffect(() => {
-    const ms = deadline - Date.now();
+    const ms = deadline - Date.now() + 1;
     if (!(ms > 0)) return undefined;
     const timer = setTimeout(() => setTick((t) => t + 1), Math.min(ms, 2147483647));
     return () => clearTimeout(timer);
@@ -3067,23 +3068,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
   const nextScopeStale = scopeEchoMismatch(nextRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (nextScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [nextScopeStale, onSavedScopeUnavailable]);
   const nextService = nextScopeStale ? null : (nextRead.data?.next || null);
-  // The Add-to-Calendar button hides itself once the arrival window closes,
-  // but an idle dashboard never rerenders to notice. Fire a one-shot timer at
-  // the deadline so the button disappears on its own (codex #3249 r4 P2).
-  const [calendarWindowTick, setCalendarWindowTick] = useState(0);
-  useEffect(() => {
-    const endsAt = calendarLinkEndsAt(nextService);
-    if (!nextService?.calendarUrl || !endsAt) return undefined;
-    const ms = endsAt.getTime() - Date.now();
-    if (ms <= 0) return undefined;
-    // setTimeout saturates past ~24.8 days; the window is hours away, but
-    // clamp so a far-future visit can't wrap to an immediate fire.
-    const timer = setTimeout(() => setCalendarWindowTick(t => t + 1), Math.min(ms, 2147483647));
-    return () => clearTimeout(timer);
-    // calendarWindowTick is a dependency ON PURPOSE: when the delay saturates
-    // the setTimeout ceiling the timer fires early, and without re-running
-    // here it would never be rescheduled toward the real deadline (codex r5).
-  }, [nextService, calendarWindowTick]);
   const nextServiceStatus = nextRead.error ? 'error' : nextRead.data ? 'ready' : 'loading';
   const [confirmingVisit, setConfirmingVisit] = useState(false);
   // Visit prep photos, app entry (GATE_VISIT_PREP_PHOTOS): the sheet mounts
@@ -3528,20 +3512,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
                   Server nulls calendarUrl for every case the route would 404
                   (gate dark, pre-token row, no window, window elapsed), so no
                   fallback needed here. */}
-              {/* The dashboard fetches the next visit once, so a page left
-                  open past the arrival window would keep a calendarUrl the
-                  .ics route now 404s. Re-check the window client-side on each
-                  render against the same 2-hour promise (codex r3 P2). */}
-              {nextService.calendarUrl && calendarLinkStillLive(nextService) && (
-                <button type="button" onClick={() => {
-                  downloadCalendarIcs(nextService.calendarUrl).catch(() => {
-                    showCustomerAlert('Could not download the calendar file. Please try again.');
-                  });
-                }} data-glass-accent="" style={{
-                  ...dashboardSecondaryButton,
-                  position: 'relative',
-                }}>Add to Calendar</button>
-              )}
+              {/* The shared button re-checks the server deadline on its own timer, so an idle
+                  dashboard drops it when the window closes (same rule as the Visits tab). */}
+              <AddToCalendarButton visit={nextService} style={{ ...dashboardSecondaryButton, position: 'relative' }} />
               {/* GATE_VISIT_PREP_PHOTOS (dark): shown only when the server's
                   own eligibility says this visit currently takes photos —
                   the same rule the appointment page's own block uses. */}
@@ -6868,25 +6841,6 @@ function BillingChannelSelect({ field, channels, usable, saving, onChange }) {
 // views, so the root stays the same <div> across them.
 const BILLING_COLUMN = { display: 'flex', flexDirection: 'column', gap: 16 };
 
-// "Are my payments current?" answered in one plain line: shown when the balance is zero and
-// the payment history already loaded on this tab has a paid row. A bank payment still in
-// flight is named too. Returns null when there is nothing true to say.
-// Payer ownership: the history route withholds every receipt link when it could not rule out a
-// third-party (Bill-To) payer's payments, so the line needs the last paid row to carry one.
-// A paid row with no receipt at all (cash, check) shows no line: better silent than wrong.
-// The amount is what was charged; a partial refund stays in Payment History.
-function paidUpSummary({ loading, loadError, balance, payments, formatMoney }) {
-  const dayOf = (p) => parseDate(p.date);
-  const last = payments
-    .filter((p) => p.status === 'paid' && p.amount > 0 && (p.receiptUrl || p.stripeReceiptUrl) && !Number.isNaN(dayOf(p).getTime()))
-    .sort((a, b) => dayOf(b) - dayOf(a))[0];
-  const inFlight = payments.find((p) => p.status === 'processing' && p.amount > 0);
-  const when = last && dayOf(last).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  const paidUp = `You're paid up. Last payment ${formatMoney(last?.amount)} on ${when}.`;
-  const processing = inFlight ? ` A payment of ${formatMoney(inFlight.amount)} is still processing.` : '';
-  return !loading && !loadError && balance && last && Number(balance.currentBalance) <= 0 ? paidUp + processing : null;
-}
-
 function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, openAddCard = false, onSwitchTab = null }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
@@ -7835,7 +7789,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
   const balanceTone = B.glassNavy;
-  const paidUpLine = paidUpSummary({ loading, loadError, balance, payments, formatMoney: money });
   // Open-invoice pay links (GATE_PORTAL_PAY_NOW; server includes them only
   // while the gate is on). Each entry carries the invoice's existing
   // tokenized /pay URL — the same checkout the SMS/email links open — so
@@ -8047,7 +8000,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
             <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
               {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
             </div>
-            <div hidden={!paidUpLine} style={{ marginTop: 8, fontSize: 14, color: B.glassNavy, fontWeight: 700, lineHeight: 1.4 }}>{paidUpLine}</div>
             {primaryOpenInvoice && (
               <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
                 <a href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, width: '100%', boxSizing: 'border-box' }} data-glass-accent="">
