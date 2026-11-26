@@ -5846,7 +5846,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             conflicts={stripCoversRouteWarning(availability, { currentDate: apptDate ? String(apptDate).split('T')[0] : null, currentStart: windowStart })
               ? (slotConflicts || []).filter((conflict) => !conflict.warning)
               : slotConflicts}
-            shiftWarning={slotShiftWarning}
+            // No line for the default hour behind "Choose a time" (requireTimeChoice): nothing is picked yet.
+            shiftWarning={timeChosen ? slotShiftWarning : null}
             style={{ marginBottom: 10 }}
           />
           <AvailabilityStrip
