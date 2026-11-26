@@ -797,12 +797,23 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
  * with an hour-old draft_claimed_at either settle against an existing
  * thread draft or release back to NULL for a clean retry.
  */
+// A released claim is re-drafted for a customer request, scheduling email or complaint, and for a lead email only
+// when THIS email created the lead from a real sender (the one case handleLeadInquiry drafts). A reclassified
+// email that kept an older claim, a skipped lead and a relay sender get no new-customer reply.
+function redraftEligible(row) {
+  if (['customer_request', 'scheduling', 'complaint'].includes(row.classification)) return true;
+  if (row.classification !== 'lead_inquiry') return false;
+  if (row.auto_action !== 'lead_created' || !row.lead_id) return false;
+  const { isAutomatedSender } = require('./email-actions');
+  return !isAutomatedSender(row.from_address);
+}
+
 async function reconcilePendingDrafts(now = new Date()) {
   const staleCutoff = new Date(now.getTime() - 3600000);
   const rows = await db('emails')
     .where('draft_gmail_id', 'pending')
     .where('draft_claimed_at', '<', staleCutoff)
-    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'snippet', 'label_ids', 'classification', 'message_id', 'reply_to', 'received_at');
+    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'snippet', 'label_ids', 'classification', 'message_id', 'reply_to', 'received_at', 'auto_action', 'lead_id');
   const counts = { settled: 0, released: 0, redrafted: 0 };
   for (const row of rows) {
     try {
@@ -831,8 +842,7 @@ async function reconcilePendingDrafts(now = new Date()) {
       // (draftReplyForEmail re-claims atomically and no-ops when the gate is
       // off or the row is non-inbound). Lazy require: email-actions requires
       // this module.
-      // lead_inquiry: only a new lead's draft claim reaches here (handleLeadInquiry is its one claimer).
-      if (n && !hasDraft && !hasNewerSent && ['customer_request', 'scheduling', 'complaint', 'lead_inquiry'].includes(row.classification)) {
+      if (n && !hasDraft && !hasNewerSent && redraftEligible(row)) {
         try {
           const { draftReplyForEmail } = require('./email-actions');
           const customer = await db('customers').where('email', normalizeAddress(row.from_address)).first();

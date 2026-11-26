@@ -1136,7 +1136,7 @@ function emailAutoDraftsEnabled() {
 }
 
 // The Gmail signature for the shared inbox, as the HTML block Gmail itself appends. Owner-controlled Gmail settings
-// HTML, so it is NOT escaped. Any failure drafts without a signature; it never blocks the draft.
+// HTML, so it is NOT escaped. Any failure returns '' and the caller makes no draft (owner 2026-10-29).
 async function signatureHtml(email) {
   try {
     const signature = await gmailClient.getSendAsSignature();
@@ -1315,6 +1315,14 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
       logger.warn(`[email-actions] pre-create thread check failed (email ${email.id}) — claim retained: ${e.message}`);
       return null;
     }
+    // Owner 2026-10-29: every outside email Waves drafts ends with the Waves signature. Read it BEFORE the AI call:
+    // with no signature, no draft is made and no AI call is spent. The claim stays pending, so the hourly
+    // reconciler releases it and tries again.
+    const signature = await signatureHtml(email);
+    if (!signature) {
+      logger.warn(`[email-actions] no Waves signature for the reply draft (email ${email.id}) — claim retained for reconciler retry`);
+      return null;
+    }
     const MODELS = require('../../config/models');
     const { dispatchWithFallback } = require('../llm/call');
     // Greeting name comes ONLY from the operator-curated customer record —
@@ -1371,7 +1379,7 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
     }
     const htmlBody = escapeHtml(replyText).split(/\n{2,}/)
       .map((p) => `<p>${p.replace(/\n/g, '<br/>')}</p>`).join('');
-    const htmlWithSignature = htmlBody + await signatureHtml(email);
+    const htmlWithSignature = htmlBody + signature;
     // In-Reply-To/References carry the inbound Message-ID — Gmail needs them
     // (plus threadId and a matching subject) for the draft to join the
     // source thread. Pre-migration rows without a stored message_id fetch it

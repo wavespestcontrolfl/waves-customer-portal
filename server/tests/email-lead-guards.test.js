@@ -25,7 +25,7 @@ jest.mock('../services/email/gmail-client', () => ({
   modifyLabels: jest.fn(),
   getThread: jest.fn(async () => ({ messages: [{ labelIds: ['INBOX'] }] })),
   createDraft: jest.fn(async () => ({ id: 'draft-1' })),
-  getSendAsSignature: jest.fn(async () => ''),
+  getSendAsSignature: jest.fn(async () => '<b>Waves Pest Control</b>'),
 }));
 jest.mock('../services/llm/call', () => ({
   dispatchWithFallback: jest.fn(async () => ({ ok: true, text: 'Hi there,\n\nThanks for reaching out. What is the service address?' })),
@@ -174,6 +174,7 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     expect(system).toContain('Never quote a price, a visit date or a time.');
     expect(system).toContain('Greeting name: there.');
     expect(system).not.toContain('FACTS FROM WAVES RECORDS');
+    expect(gmailClient.createDraft.mock.calls[0][2].split('class="gmail_signature"')).toHaveLength(2);
   });
 
   test('a relay sender (lead from a no-reply form) gets no draft: the reply would go to the relay', async () => {

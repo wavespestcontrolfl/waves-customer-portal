@@ -23,7 +23,7 @@ jest.mock('../services/email/gmail-client', () => ({
   getThread: jest.fn(),
   getMessageLabels: jest.fn(async () => ['Label_42']),
   createDraft: jest.fn(async () => ({ id: 'draft-1' })),
-  getSendAsSignature: jest.fn(async () => ''),
+  getSendAsSignature: jest.fn(async () => '<b>Waves Pest Control</b>'),
 }));
 jest.mock('../services/email/email-draft-facts', () => ({
   buildEmailDraftFacts: jest.fn(async () => ''),
@@ -465,12 +465,30 @@ describe('reconcilePendingDrafts', () => {
     expect(patches).toEqual(['reconciled_existing_draft', null]);
   });
 
+  test.each([
+    ['a reclassified email that created no lead', { auto_action: 'lead_skipped_existing_customer', lead_id: null }],
+    ['a lead email that joined an existing lead', { auto_action: 'linked_to_existing_lead', lead_id: 'lead-1' }],
+    ['a relay sender', { auto_action: 'lead_created', lead_id: 'lead-1', from_address: 'no-reply@forms.example' }],
+  ])('a released lead claim is NOT re-drafted for %s', async (_label, patch) => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb({}, {
+      emails: [[{
+        ...EMAIL, id: 'e-lead', gmail_thread_id: 't-lead', classification: 'lead_inquiry',
+        from_address: 'lead@prospect.example', label_ids: '[]', ...patch,
+      }]],
+    });
+    gmailClient.getThread.mockResolvedValue({ messages: [{ labelIds: ['INBOX'] }] });
+    const counts = await reconcilePendingDrafts(new Date('2026-07-28T12:00:00Z'));
+    expect(counts).toEqual({ settled: 0, released: 1, redrafted: 0 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
   test('a released lead claim is re-drafted with the lead rules and no customer facts', async () => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
     setupDb({ customers: [{ id: 'c-1', first_name: 'Should', email: 'lead@prospect.example' }] }, {
       emails: [[{
         ...EMAIL, id: 'e-lead', gmail_thread_id: 't-lead', classification: 'lead_inquiry',
-        from_address: 'lead@prospect.example', label_ids: '[]',
+        from_address: 'lead@prospect.example', label_ids: '[]', auto_action: 'lead_created', lead_id: 'lead-1',
       }]],
     });
     gmailClient.getThread.mockResolvedValue({ messages: [{ labelIds: ['INBOX'] }] });
@@ -666,7 +684,7 @@ describe('draftReplyForEmail signature and grounded facts', () => {
   const WITH_COMPANY = (base) => `${base}\n${COMPANY_ENTRY}`;
 
   afterEach(() => {
-    gmailClient.getSendAsSignature.mockImplementation(async () => '');
+    gmailClient.getSendAsSignature.mockImplementation(async () => '<b>Waves Pest Control</b>');
     buildEmailDraftFacts.mockImplementation(async () => '');
   });
 
@@ -682,14 +700,21 @@ describe('draftReplyForEmail signature and grounded facts', () => {
     )).toBe(true);
   });
 
-  test('a signature read failure still creates the draft, without a signature', async () => {
+  // Owner 2026-10-29: every outside email Waves drafts ends with the Waves signature.
+  test.each([
+    ['a signature read failure', async () => { throw new Error('insufficient scope'); }],
+    ['an empty signature', async () => ''],
+  ])('%s makes no draft and spends no AI call; the claim stays for the reconciler', async (_label, impl) => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
-    setupDb();
-    gmailClient.getSendAsSignature.mockImplementation(async () => { throw new Error('insufficient scope'); });
+    const state = setupDb();
+    gmailClient.getSendAsSignature.mockImplementation(impl);
     const result = await draftReplyForEmail({ ...FACTS_EMAIL }, { customer: CUSTOMER });
-    expect(result).toBe('draft-1');
-    expect(gmailClient.createDraft.mock.calls[0][2]).not.toContain('gmail_signature');
-    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('signature unavailable'));
+    expect(result).toBeNull();
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+    const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.draft_gmail_id);
+    expect(patches).toEqual(['pending']);
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('no Waves signature'));
   });
 
   test('facts and rules ride the SYSTEM channel, the email stays in the user channel', async () => {
