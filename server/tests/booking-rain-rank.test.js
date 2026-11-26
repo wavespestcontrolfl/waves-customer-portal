@@ -63,6 +63,9 @@ describe('rainFitFor', () => {
     [['Foam Spot Treatment'], 'avoid'],
     [['Termite Foam Service', 'General Pest Control'], 'avoid'],
     [['Foaming Treatment'], 'avoid'],
+    // The bare legacy "Termite Foam" label is the spot treatment (termite_spot_treatment): it needs a dry slot.
+    [['Termite Foam'], 'avoid'],
+    [['termite foam '], 'avoid'],
     [[], 'neutral'],
     [[''], 'neutral'],
   ])('%j → %s', (types, fit) => {

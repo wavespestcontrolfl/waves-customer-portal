@@ -43,7 +43,11 @@ const OUTDOOR = new RegExp(`exterior|${OUTDOOR_WORDS}|treat`, 'i');
 // foam_recurring: owner 2026-11-01, #7381), so the words agree. Its names
 // say "Foam Treatment" / "Foam Drill Treatment": "treat" does not make a
 // foam service outdoor, but every other outdoor word still does.
+// The bare legacy label "Termite Foam" is the spot treatment
+// (service-completion-profiles: termite_foam -> termite_spot_treatment), which
+// needs a dry slot, so it stays outdoor.
 const FOAM = /\bfoam\b/i;
+const LEGACY_SPOT_FOAM = /^\s*termite\s+foam\s*$/i;
 const OUTDOOR_BESIDE_FOAM = new RegExp(`exterior|${OUTDOOR_WORDS}`, 'i');
 
 // Interior-only lanes whose catalog names say "treatment" without saying
@@ -55,7 +59,7 @@ const INDOOR_TREATMENT = /bed ?bugs?|german (cock)?roach|cockroach treatment/i;
 function rainOkService(name) {
   if (/exterior/i.test(name)) return false;
   if (INDOOR_TREATMENT.test(name)) return true;
-  if (FOAM.test(name)) return !OUTDOOR_BESIDE_FOAM.test(name);
+  if (FOAM.test(name) && !LEGACY_SPOT_FOAM.test(name)) return !OUTDOOR_BESIDE_FOAM.test(name);
   if (OUTDOOR.test(name)) return false;
   if (RAIN_OK.test(name)) return true;
   return RODENT.test(name) && RODENT_CHECK.test(name);
