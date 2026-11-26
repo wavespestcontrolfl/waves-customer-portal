@@ -1696,6 +1696,34 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cache.match('/__waves/customer-shell')).toBeUndefined();
   });
 
+  it('removes a first root shell too when its generation rolls back', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse } = loadWorker(cache);
+    cache.failPut = (url) => url === 'https://portal.test/__waves/customer-shell';
+    await expect(cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js'])), undefined, { customerShell: true }))
+      .rejects.toThrow(/Quota/);
+    expect(await cache.match('/')).toBeUndefined();
+    expect(await cachedAssets(cache)).toEqual([]);
+  });
+
+  it('keeps the customer copy\'s files by path after they lose its build tag', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse } = loadWorker(cache);
+    const customer = shellHtml(['/assets/index-000.js', '/assets/shared.css']);
+    await cacheCompleteShellResponse(fakeResponse(customer), undefined, { customerShell: true });
+    // Staff builds that share the stylesheet push the customer build's tag
+    // off the cap, then stop using it.
+    for (const build of ['AAA', 'BBB', 'CCC', 'DDD']) {
+      await cacheCompleteShellResponse(fakeResponse(shellHtml([`/assets/index-${build}.js`, '/assets/shared.css'])));
+    }
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-EEE.js'])));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-FFF.js'])));
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(customer);
+    const left = await cachedAssets(cache);
+    expect(left).toContain('/assets/index-000.js');
+    expect(left).toContain('/assets/shared.css');
+  });
+
   it('skips a superseded refresh: an earlier navigation whose response lands after a newer one', async () => {
     // Codex #4335 P1: navigation A begins before a deploy but its response is
     // slow; navigation B begins later, is answered by the new build and its

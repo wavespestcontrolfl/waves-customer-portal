@@ -263,6 +263,19 @@ async function cachedBuildId(cache) {
 // straddles either edge refuses to publish — and leave the memo describing
 // what the cache actually holds, or null when that is not known (a write
 // that failed part-way leaves the entry unread).
+// A first commit rolled back: no prior shell to put back, so '/' goes, and
+// the memo with it (sequence bumped like a write, so no straddling read
+// publishes the build just removed).
+async function dropShell(cache) {
+  cachedShellSeq += 1;
+  try {
+    await cache.delete(OFFLINE_URL);
+  } finally {
+    cachedShellSeq += 1;
+    knownCachedBuild = null;
+  }
+}
+
 async function putShell(cache, response, buildId) {
   cachedShellSeq += 1;
   let stored = false;
@@ -360,11 +373,19 @@ async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigatio
 // customer page even after a report or staff page moved '/'. Its build is
 // always retained (pruneStaleAssets), so its assets stay with it.
 const CUSTOMER_SHELL_URL = '/__waves/customer-shell';
-async function customerShellBuildId(cache) {
+// What every prune keeps for the customer copy: its build, and its files by
+// path, the HTML's own assets and the files its build's list names. By path
+// too, because a file several builds share can lose the customer build's tag
+// to the tag cap and would then go with the last build that still tags it.
+async function customerShellKeep(cache) {
   const shell = await cache.match(CUSTOMER_SHELL_URL);
   if (!shell) return null;
   const assets = shellAssetUrls(await shell.text());
-  return assets.length ? buildIdOf(assets) : null;
+  if (!assets.length) return null;
+  const buildId = buildIdOf(assets);
+  const paths = new Set(assets);
+  for (const owned of (await ownedAssetsOf(cache, buildId)) || []) paths.add(owned);
+  return { buildId, paths };
 }
 
 // advanceLive false: the page that asked for this refresh runs an older,
@@ -468,6 +489,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     const previousCustomerShell = customerShell ? await cache.match(CUSTOMER_SHELL_URL) : null;
     const restorePreviousShell = async () => {
       if (previousShell) await putShell(cache, previousShell.clone(), previousBuildId).catch(() => {});
+      else await dropShell(cache).catch(() => {});
       if (!customerShell) return;
       if (previousCustomerShell) await cache.put(CUSTOMER_SHELL_URL, previousCustomerShell.clone()).catch(() => {});
       else await cache.delete(CUSTOMER_SHELL_URL).catch(() => {});
@@ -560,8 +582,8 @@ function pruneStaleAssets(cache, retainedBuildIds, { firmOnly = false } = {}) {
   const retained = new Set(retainedBuildIds.filter(Boolean).map(claimIdOf));
   return withAssetWrites(async () => {
     // The customer app's saved copy keeps its build in every prune.
-    const customerBuild = await customerShellBuildId(cache).catch(() => null);
-    if (customerBuild) retained.add(customerBuild);
+    const customerKeep = await customerShellKeep(cache).catch(() => null);
+    if (customerKeep) retained.add(customerKeep.buildId);
     const requests = await cache.keys();
     await Promise.all(requests.map(async request => {
       const pathname = new URL(request.url).pathname;
@@ -576,6 +598,7 @@ function pruneStaleAssets(cache, retainedBuildIds, { firmOnly = false } = {}) {
         return;
       }
       if (!pathname.startsWith('/assets/')) return;
+      if (customerKeep && customerKeep.paths.has(pathname)) return;
       const cached = await cache.match(request);
       // firmOnly: a chunk survives only if a RETAINED build really listed it.
       // Chunks kept alive solely by a provisional claim go, freeing the space
