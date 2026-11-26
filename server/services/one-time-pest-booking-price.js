@@ -32,7 +32,11 @@ function sameHome(property, customer) {
   const propertyStreet = streetKey(property.address_line1);
   const customerStreet = streetKey(customer.address_line1);
   if (!propertyStreet || !customerStreet || propertyStreet !== customerStreet) return false;
-  if (fold(property.address_line2) !== fold(customer.address_line2)) return false;
+  // The effective unit: the second line, else a unit embedded in the street line
+  // ("100 Main St Apt 2"), so two units at one street never read as one home.
+  const { unitKey, streetEmbeddedUnitKey } = require('./customer-property-address-keys');
+  const unitOf = (row) => unitKey(row.address_line2 || '') || streetEmbeddedUnitKey(row.address_line1);
+  if (unitOf(property) !== unitOf(customer)) return false;
   if (!fold(property.city) || !fold(customer.city) || fold(property.city) !== fold(customer.city)) return false;
   const propertyZip = normalizeZip(property.zip);
   const customerZip = normalizeZip(customer.zip);

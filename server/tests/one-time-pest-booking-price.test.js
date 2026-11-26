@@ -121,6 +121,20 @@ describe('one-time pest system price (read only)', () => {
       expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('not an active property'));
     });
 
+    test('two units at one street, with the unit in the street line, are different homes (codex #8607 r1)', async () => {
+      mockResolveContext.mockResolvedValue({ propertyInput: HOME, hasHomeSqFt: true });
+      const UNIT_CUSTOMER = { ...PRIMARY_CUSTOMER, address_line1: '100 Main St Apt 1', address_line2: null };
+      const UNIT_TWO = { ...RENTAL, is_primary: true, address_line1: '100 Main St Apt 2', address_line2: null, city: 'Bradenton', zip: '34201' };
+      await oneTimePestBookingPrice('cust-1', { conn: conn(UNIT_CUSTOMER, UNIT_TWO), propertyId: 'prop-2' });
+      expect(mockResolveContext.mock.calls[0][0].customer).not.toBe(UNIT_CUSTOMER);
+      expect(mockResolveContext.mock.calls[0][0].customer).toMatchObject({ address_line1: '100 Main St Apt 2' });
+      mockResolveContext.mockClear();
+      // The same unit written on line 2 for one and in the street line for the other is one home.
+      const SAME_UNIT = { ...UNIT_TWO, address_line1: '100 Main St', address_line2: 'Apt 1' };
+      await oneTimePestBookingPrice('cust-1', { conn: conn(UNIT_CUSTOMER, SAME_UNIT), propertyId: 'prop-2' });
+      expect(mockResolveContext.mock.calls[0][0].customer).toBe(UNIT_CUSTOMER);
+    });
+
     test('a selected primary property whose row names a DIFFERENT address than the customer row is read with its own facts, never the customer row\'s', async () => {
       mockResolveContext.mockResolvedValue({ propertyInput: HOME, hasHomeSqFt: true });
       const MOVED_PRIMARY = { ...RENTAL, is_primary: true };
