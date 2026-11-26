@@ -1444,7 +1444,9 @@ const BANK_SENTENCES_MAX = 80;
 // Answer force is read like the reply guard reads a reply: on the sentence, on every clause of it, and on each with the friendly ends
 // (greeting, thanks, apology) peeled off, so "Thanks, absolutely." and "Hello, yes." carry their answer past no screen.
 function carriesAnswerForce(text) {
-  const clauses = text.split(/\s*[,;:]\s*|\s+[-\u2013\u2014]+\s+/).filter((c) => c.trim());
+  // the reply guard's own clause boundaries (clausesOf: commas, semicolons, colons, em dashes with or without spaces, "--", and the
+  // conjunctions and, but, so, then ...), never a second splitter
+  const clauses = clausesOf(text).map((c) => c.clause);
   return [text, ...clauses].some((part) => hasAnswerForce(part) || hasAnswerForce(peelFriendlyEnds(part)));
 }
 function isNeutralBankPiece(piece) {
