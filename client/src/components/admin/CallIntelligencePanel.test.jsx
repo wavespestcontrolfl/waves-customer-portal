@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import CallIntelligencePanel, { commitmentStatusTone } from "./CallIntelligencePanel";
+import CallIntelligencePanel, { SoundCheckRows, commitmentStatusTone } from "./CallIntelligencePanel";
 
 const CALL_ID = "11111111-2222-4333-8444-555555555555";
 
@@ -140,6 +140,38 @@ describe("CallIntelligencePanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
     await waitFor(() => expect(screen.getByText("Complete")).toBeInTheDocument());
     expect(screen.queryByText(/Not caller's own number/)).not.toBeInTheDocument();
+  });
+
+  it("shows the call sound check note inside the panel: caller mood, staff, and a risky claim", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (String(url).includes("/intelligence")) {
+        const view = intelligence({ sound_check: { status: "done", no_conversation: false, caller_tone_start: "worried", caller_tone_end: "calm", caller_upset: true, talk_over_count: 1, agent_sounded_rushed: false, risky_claim: { flag: true, what: "Said the spray is safe for any pet." } } });
+        return { ok: true, status: 200, json: async () => ({ intelligence: view, features: { commitments: true, admin: true } }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    }));
+    render(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    await waitFor(() => expect(screen.getByText("Complete")).toBeInTheDocument());
+    expect(screen.getByText("worried → calm · upset at some point")).toBeInTheDocument();
+    expect(screen.getByText("talked over the caller 1 time · did not sound rushed")).toBeInTheDocument();
+    expect(screen.getByText("Said the spray is safe for any pet.")).toBeInTheDocument();
+  });
+
+  it("shows no sound check rows when the call has none, and one state line for an unfinished check", () => {
+    const { container, rerender } = render(<SoundCheckRows check={null} />);
+    expect(container).toBeEmptyDOMElement();
+    rerender(<SoundCheckRows check={{ status: "skipped", reason: "too_long" }} />);
+    expect(screen.getByText("not checked: recording too long")).toBeInTheDocument();
+    rerender(<SoundCheckRows check={{ status: "started", at: null }} />);
+    expect(screen.getByText("check started · no result saved")).toBeInTheDocument();
+    rerender(<SoundCheckRows check={{ status: "failed", reason: "timeout" }} />);
+    expect(screen.getByText("could not check this call")).toBeInTheDocument();
+    rerender(<SoundCheckRows check={{ status: "done", no_conversation: true }} />);
+    expect(screen.getByText("no conversation heard")).toBeInTheDocument();
+    rerender(<SoundCheckRows check={{ status: "done", no_conversation: false, caller_tone_start: "calm", caller_tone_end: "calm", caller_upset: false, talk_over_count: 0, agent_sounded_rushed: false, risky_claim: { flag: false, what: null } }} />);
+    expect(screen.queryByText("Risky claim")).not.toBeInTheDocument();
+    expect(screen.getByText("talked over the caller 0 times · did not sound rushed")).toBeInTheDocument();
   });
 
   it("hands the verbatim quote to the transcript on Jump", async () => {

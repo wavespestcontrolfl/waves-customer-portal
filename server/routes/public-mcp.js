@@ -161,36 +161,46 @@ function howToRequestQuote() {
 const PUBLIC_MCP_TOOLS = [
   {
     name: 'list_services',
+    title: 'List Waves Pest Control Services',
     description: 'List the customer-visible Waves Pest Control service catalog (pest, lawn, mosquito, termite, rodent, WDO inspection, tree & shrub, specialty): names, categories, billing type, and visit frequency. Service descriptions live on the website (see https://www.wavespestcontrol.com/llms.txt); published price ranges via get_pricing_ranges.',
     inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     execute: () => listServices(),
   },
   {
     name: 'get_service',
+    title: 'Get Waves Pest Control Service Details',
     description: 'Fetch one customer-visible catalog service by service_key (name, category, billing type, frequency, visits per year).',
     inputSchema: {
       type: 'object',
       properties: { service_key: { type: 'string' } },
       required: ['service_key'],
     },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     execute: (args) => getService(args.service_key),
   },
   {
     name: 'get_pricing_ranges',
+    title: 'Get Waves Pest Control Pricing Ranges',
     description: 'Published price ranges (low/high per service, engine-derived, refreshed from live pricing configuration). The same data as https://www.wavespestcontrol.com/pricing.md. Exact per-property quotes require customer contact details — see how_to_request_quote.',
     inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     execute: () => getPricingRanges(),
   },
   {
     name: 'get_service_areas',
+    title: 'List Waves Pest Control Service Areas',
     description: 'List the Southwest Florida cities and counties Waves Pest Control serves.',
     inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     execute: () => getServiceAreas(),
   },
   {
     name: 'how_to_request_quote',
+    title: 'Explain How to Request a Waves Quote',
     description: 'How to get an EXACT quote for a specific property: the HTTP contract of the public quote endpoint (required contact fields, accepted service keys, response shape, side effects) plus human-facing alternatives (quote page, online booking, phone).',
     inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     execute: () => howToRequestQuote(),
   },
 ];
@@ -202,6 +212,7 @@ const rpc = createMcpRpc({
   serverInfo: { name: 'waves-public', version: '1.0.0' },
   protocolVersion: PROTOCOL_VERSION,
   logPrefix: 'public-mcp',
+  includeToolMetadata: true,
 });
 
 // The gate runs here too so the router stays dark even if mounted without

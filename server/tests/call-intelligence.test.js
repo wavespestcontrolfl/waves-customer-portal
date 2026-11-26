@@ -5,6 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { buildCallIntelligence, describeProcessing, nextAction } = require('../services/call-intelligence');
+const { recordingKey } = require('../services/call-sound-check');
 
 const V2 = {
   meta: { call_summary: 'Caller has ants in the kitchen and wants a price.', is_voicemail: false, is_spam: false, schema_version: '1.10.0' },
@@ -149,6 +150,47 @@ describe('buildCallIntelligence', () => {
     expect(view.property.address).toBeNull();
     expect(view.transcript_segments).toBeNull();
     expect(view.evidence).toEqual([]);
+  });
+});
+
+describe('sound_check — the call sound check note on the panel', () => {
+  const URL = 'https://api.twilio.com/2010-04-01/Accounts/AC_fixture/Recordings/RE_fixture.mp3';
+  const withCheck = (record, url = URL) => ({ ...CALL, recording_url: url, metadata: JSON.stringify({ sound_check: record }) });
+  const NOTE = {
+    no_conversation: false, caller_tone_start: 'worried', caller_tone_end: 'calm', caller_upset: false,
+    talk_over_count: 2, agent_sounded_rushed: true, risky_claim: { flag: true, what: 'Said the spray is safe for any pet.' },
+  };
+
+  test('a done record for the current recording shows the note, never its spend, usage or recording digest', () => {
+    const view = buildCallIntelligence({ call: withCheck({ status: 'done', note: NOTE, model: 'fixture-audio', spent_usd: 0.02, usage: { inputTokens: 900 }, recording_key: recordingKey(URL), at: '2026-11-26T14:09:00Z' }) });
+    expect(view.sound_check).toEqual({
+      status: 'done', reason: null, at: '2026-11-26T14:09:00Z', no_conversation: false,
+      caller_tone_start: 'worried', caller_tone_end: 'calm', caller_upset: false, talk_over_count: 2,
+      agent_sounded_rushed: true, risky_claim: { flag: true, what: 'Said the spray is safe for any pet.' }, model: 'fixture-audio',
+    });
+  });
+
+  test('a record for a recording the call no longer holds describes other audio: absent', () => {
+    const other = 'https://api.twilio.com/2010-04-01/Accounts/AC_fixture/Recordings/RE_other.mp3';
+    expect(buildCallIntelligence({ call: withCheck({ status: 'done', note: NOTE, recording_key: recordingKey(other) }) }).sound_check).toBeNull();
+    expect(buildCallIntelligence({ call: withCheck({ status: 'done', note: NOTE, recording_key: recordingKey(URL) }, null) }).sound_check).toBeNull();
+    expect(buildCallIntelligence({ call: CALL }).sound_check).toBeNull();
+  });
+
+  test('started, failed, skipped and no-conversation records say only their state', () => {
+    const key = recordingKey(URL);
+    expect(buildCallIntelligence({ call: withCheck({ status: 'started', recording_key: key, reserved_usd: 0.05 }) }).sound_check).toEqual({ status: 'started', reason: null, at: null });
+    expect(buildCallIntelligence({ call: withCheck({ status: 'failed', reason: 'timeout', recording_key: key }) }).sound_check).toMatchObject({ status: 'failed', reason: 'timeout' });
+    expect(buildCallIntelligence({ call: withCheck({ status: 'skipped', reason: 'too_long', recording_key: key }) }).sound_check).toMatchObject({ status: 'skipped', reason: 'too_long' });
+    expect(buildCallIntelligence({ call: withCheck({ status: 'done', note: { no_conversation: true }, recording_key: key }) }).sound_check).toEqual({ status: 'done', reason: null, at: null, no_conversation: true });
+    expect(buildCallIntelligence({ call: withCheck({ status: 'mystery', recording_key: key }) }).sound_check).toBeNull();
+  });
+
+  test('a note with the wrong value types reads those fields as unknown, not as a finding', () => {
+    const bad = { caller_tone_start: 7, caller_upset: 'yes', talk_over_count: 1.5, agent_sounded_rushed: null, risky_claim: { flag: 'true', what: 'x' } };
+    expect(buildCallIntelligence({ call: withCheck({ status: 'done', note: bad, recording_key: recordingKey(URL) }) }).sound_check).toMatchObject({
+      caller_tone_start: null, caller_upset: null, talk_over_count: null, agent_sounded_rushed: null, risky_claim: { flag: null, what: null },
+    });
   });
 });
 

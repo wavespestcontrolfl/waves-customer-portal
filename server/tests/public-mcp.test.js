@@ -129,8 +129,43 @@ describe('JSON-RPC surface', () => {
 
   test('tools/list exposes exactly the 5 public read-only tools', async () => {
     const { body } = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
-    const names = body.result.tools.map((t) => t.name);
-    expect(names).toEqual(['list_services', 'get_service', 'get_pricing_ranges', 'get_service_areas', 'how_to_request_quote']);
+    expect(body.result.tools.map(({ name, title, annotations }) => ({ name, title, annotations }))).toEqual([
+      {
+        name: 'list_services',
+        title: 'List Waves Pest Control Services',
+        annotations: {
+          readOnlyHint: true, destructiveHint: false, openWorldHint: false, title: 'List Waves Pest Control Services',
+        },
+      },
+      {
+        name: 'get_service',
+        title: 'Get Waves Pest Control Service Details',
+        annotations: {
+          readOnlyHint: true, destructiveHint: false, openWorldHint: false, title: 'Get Waves Pest Control Service Details',
+        },
+      },
+      {
+        name: 'get_pricing_ranges',
+        title: 'Get Waves Pest Control Pricing Ranges',
+        annotations: {
+          readOnlyHint: true, destructiveHint: false, openWorldHint: false, title: 'Get Waves Pest Control Pricing Ranges',
+        },
+      },
+      {
+        name: 'get_service_areas',
+        title: 'List Waves Pest Control Service Areas',
+        annotations: {
+          readOnlyHint: true, destructiveHint: false, openWorldHint: false, title: 'List Waves Pest Control Service Areas',
+        },
+      },
+      {
+        name: 'how_to_request_quote',
+        title: 'Explain How to Request a Waves Quote',
+        annotations: {
+          readOnlyHint: true, destructiveHint: false, openWorldHint: false, title: 'Explain How to Request a Waves Quote',
+        },
+      },
+    ]);
     // Registry entries never leak execute fns over the wire
     body.result.tools.forEach((t) => expect(t.execute).toBeUndefined());
   });

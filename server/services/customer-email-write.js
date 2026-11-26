@@ -28,8 +28,13 @@
  * intake writers keep their own drop-the-email guard
  * (customer-email-fanout.js applyCustomerUpdatesWithEmailClaimGuard).
  *
+ * `rowAllowed` (optional, default none): a caller that must judge more than "exists" passes a predicate over the LOCKED
+ * row (the customer-app profile edit: active, and the session's account). A false answer returns
+ * { outcome: 'not_allowed' } before the address key is taken and before any write; the admin callers pass none.
+ *
  * Returns one of:
  *   { outcome: 'customer_not_found' }
+ *   { outcome: 'not_allowed' }          (only when rowAllowed refused)
  *   { outcome: 'email_in_use', conflict: { id, account_id } }
  *   { outcome: 'unchanged', before, emailSync: null }
  *   { outcome: 'changed', before, emailSync }
@@ -77,7 +82,7 @@ async function findCrossAccountEmailConflict(conn, { customerId, accountId, emai
   return aliasRows.find(otherAccount) || null;
 }
 
-async function applyOperatorCustomerEmail(trx, { customerId, email, source = 'operator edit' }) {
+async function applyOperatorCustomerEmail(trx, { customerId, email, source = 'operator edit', rowAllowed = null }) {
   if (!trx || !trx.isTransaction) {
     // The row lock and the advisory key are transaction-scoped: outside a
     // transaction both release immediately and the ownership check is
@@ -93,6 +98,7 @@ async function applyOperatorCustomerEmail(trx, { customerId, email, source = 'op
   // for relinking.
   const before = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
   if (!before) return { outcome: 'customer_not_found' };
+  if (rowAllowed && !rowAllowed(before)) return { outcome: 'not_allowed' };
   await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { email: newEmail });
   const conflict = await findCrossAccountEmailConflict(trx, {
     customerId, accountId: before.account_id || before.id, email: newEmail,
