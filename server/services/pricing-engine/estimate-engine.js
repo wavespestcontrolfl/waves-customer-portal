@@ -1028,8 +1028,6 @@ function pestPropertyWithPhotoFacts(property, facts) {
 
 // Price rules fixed 2026-11-26 (owner, "fix all seven"): the palm credit minimum, the one-time lawn flat-stretch rise,
 // the barrel hold, commercial interior area and the urgent removal.
-// (The exclusion two-story roof-point factor, owner 2026-11-26 "fix this", does NOT use this stamp: quotes stamped false
-// were already sent without it. Its own row stamp twoStoryRoofRule carries it, see estimate-roof-style-replay.js.)
 // An estimate priced BEFORE them keeps its price on every replay: the saved-estimate readers derive
 // input.legacyPricingRules from the estimate's own pricingMetadata stamp (estimate-floor-signal-replay.js), and an
 // estimate with priced lines but no stamp was priced before the fixes. A fresh quote never sets it, and the engine
@@ -1042,6 +1040,17 @@ function legacyPricingRules(input, serviceKey = null) {
   // A service this very revision ADDS (input.addedServiceKeys, the add-service rail) was never quoted: current rules.
   // So is one an earlier revision added (input.currentRulesServices, replayed from the saved stamp).
   return input?.legacyPricingRules === true
+    && !(serviceKey && [input.addedServiceKeys, input.currentRulesServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
+}
+
+// Two-story roof points (owner 2026-11-26 "fix this"): the rodent exclusion's roof/high points take the two-story factor.
+// It rides the same replay mechanism as the rules above with its own stamp (pricingMetadata.legacyTwoStoryRoof), because
+// quotes priced after the seven fixes and before this rule carry legacyPricingRules false yet were sold without the factor.
+// input.legacyTwoStoryRoof is derived from the estimate's own stamp (estimate-floor-signal-replay.js
+// savedLegacyTwoStoryRoofSignal): a priced estimate with no stamp predates the rule and keeps its price. A fresh quote never sets it.
+const TWO_STORY_ROOF_SERVICES = new Set(['rodent_exclusion']);
+function legacyTwoStoryRoof(input, serviceKey = null) {
+  return input?.legacyTwoStoryRoof === true
     && !(serviceKey && [input.addedServiceKeys, input.currentRulesServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
 }
 
@@ -1280,9 +1289,11 @@ function generateEstimate(input) {
     // Which price rules THIS run used (2026-11-26 fixes, see legacyPricingRules above): true = the rules before them.
     // Persisted so a replay of a quote priced under the fixes prices under them, and an older quote keeps its price.
     legacyPricingRules: legacyPricingRules(input),
+    // Two-story roof-point stamp (see legacyTwoStoryRoof above): true = priced before the rule, no factor.
+    legacyTwoStoryRoof: legacyTwoStoryRoof(input),
     // On a legacy estimate: the services priced under the CURRENT rules (added by this or an earlier revision), so the
     // next revision and replay keep them there while the older lines keep theirs.
-    ...(legacyPricingRules(input)
+    ...(legacyPricingRules(input) || legacyTwoStoryRoof(input)
       ? { currentRulesServices: [...new Set([...(input.currentRulesServices || []), ...(input.addedServiceKeys || [])])] }
       : {}),
     pestProgramFloorArmed,
@@ -2491,12 +2502,10 @@ function generateEstimate(input) {
         approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
-        // Two or more stories: the roof/high points take the two-story factor (owner 2026-11-26). A stored quote replays the
-        // factor its own rows were priced with (input.twoStoryRoofReplay, read from the saved rows, honored only on a replay).
+        // Two or more stories: the roof/high points take the two-story factor (owner 2026-11-26), unless the quote was
+        // priced before the rule (input.legacyTwoStoryRoof, derived from the estimate's own stamp).
         stories: services.exclusion.stories || property.stories || 1,
-        ...(input.savedEstimateReplay === true && input.twoStoryRoofReplay
-          ? { frozenTwoStoryFactor: input.twoStoryRoofReplay.factor }
-          : {}),
+        legacyTwoStory: legacyTwoStoryRoof(input, 'rodent_exclusion'),
         ...wholeHomeSeal,
         ...(wholeHomeSeal ? { roofType: exclusionRoofType(wholeHomeSeal.roofType) } : {}),
         ...roofStyle,
@@ -3482,6 +3491,7 @@ function generateEstimate(input) {
   // that keeps the lines but drops pricingMetadata (the public wizard, the browser fallback) still replays them under
   // the rules that priced them.
   for (const line of lineItems) {
+    if (line && TWO_STORY_ROOF_SERVICES.has(line.service)) line.legacyTwoStoryRoof = legacyTwoStoryRoof(input, line.service);
     if (line && PRICE_RULE_FIX_SERVICES.has(line.service)) line.legacyPricingRules = legacyPricingRules(input, line.service === 'commercial_pest' ? 'pest_control' : null);
   }
 

@@ -911,6 +911,9 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // the rebuild below replays under them (a stamp-only snapshot carries the answer to the replay reader).
   const priorRules = require('../services/estimate-floor-signal-replay').savedLegacyPricingRulesSignal(estimateData).legacyPricingRules;
   if (typeof priorRules === 'boolean') estimateDataForBundle.sendSnapshot = { legacyPricingRules: priorRules };
+  // The same for the two-story roof-point rule (rodent exclusion, 2026-11-26): its own stamp, read before the snapshot is dropped.
+  const priorTwoStory = require('../services/estimate-floor-signal-replay').savedLegacyTwoStoryRoofSignal(estimateData).legacyTwoStoryRoof;
+  if (typeof priorTwoStory === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyTwoStoryRoof: priorTwoStory };
   const snapshotAt = now().toISOString();
   const sendSnapshot = {
     ...(estimateData.sendSnapshot || {}),
@@ -945,6 +948,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
     // The rules this bundle was actually built under, frozen beside it: the saved-estimate reader finds sold prices that
     // live only in the snapshot and replays them under these rules. No evidence on the estimate = current rules (false).
     sendSnapshot.legacyPricingRules = priorRules === true;
+    sendSnapshot.legacyTwoStoryRoof = priorTwoStory === true;
     // A prior send's persisted error was spread in above — a successful
     // rebuild must clear it or the validated-bundle check downstream
     // rejects a fresh bundle (GH codex P1).

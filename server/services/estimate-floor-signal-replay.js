@@ -205,26 +205,25 @@ const lineCarriesPrice = (line) => !!line && typeof line === 'object'
     'oneTimeTotal', 'anchorOneTimePrice', 'monthlyTotal', 'annualTotal']
     .some((key) => Number(line[key]) > 0);
 
-function savedLegacyPricingRulesSignal(estData) {
+// One reader for every "which rules priced this estimate" stamp (legacyPricingRules, legacyTwoStoryRoof): the stamp lives
+// at pricingMetadata[key] (or routingMetadata), on the lines the rule touches, or on the frozen send snapshot, and a priced estimate with
+// none of them predates the rule. Returns { container, flag } where flag is the stamped
+// boolean, true for a priced estimate with no stamp, or undefined for an estimate with nothing priced.
+function readRuleStamp(estData, key) {
   // The authoritative stored container only (a revision can keep a stale engineResult beside the current result).
   const container = require('./estimate-result-container').storedEstimateContainer(estData) || estData || {};
   const metadataFlag = [container.pricingMetadata, container.routingMetadata]
-    .map((m) => m?.legacyPricingRules)
+    .map((m) => m?.[key])
     .find((flag) => typeof flag === 'boolean');
-  if (metadataFlag !== undefined) {
-    // The services a legacy estimate priced under the CURRENT rules (added after the fixes): they keep them across revisions.
-    const current = [container.pricingMetadata, container.routingMetadata]
-      .map((m) => m?.currentRulesServices).find((list) => Array.isArray(list));
-    return { legacyPricingRules: metadataFlag, currentRulesServices: current };
-  }
-  // A save path that keeps the lines but drops pricingMetadata: the lines the fixes touch carry the same stamp.
+  if (metadataFlag !== undefined) return { container, flag: metadataFlag, from: 'metadata' };
+  // A save path that keeps the lines but drops pricingMetadata: the lines the rule touches carry the same stamp.
   const lineFlag = [].concat(container.lineItems || [])
-    .map((line) => line?.legacyPricingRules)
+    .map((line) => line?.[key])
     .find((flag) => typeof flag === 'boolean');
-  if (lineFlag !== undefined) return { legacyPricingRules: lineFlag };
+  if (lineFlag !== undefined) return { container, flag: lineFlag, from: 'lines' };
   // A sent estimate can hold its prices only in the frozen send snapshot (stamped when the snapshot was built).
   const snapshot = estData?.sendSnapshot && typeof estData.sendSnapshot === 'object' ? estData.sendSnapshot : null;
-  if (typeof snapshot?.legacyPricingRules === 'boolean') return { legacyPricingRules: snapshot.legacyPricingRules };
+  if (typeof snapshot?.[key] === 'boolean') return { container, flag: snapshot[key], from: 'snapshot' };
   // Priced in any saved shape: engine lines, the keyed v1 results, the older one-time / recurring containers, the
   // specialty rows (oneTime.specItems, specItems) or the frozen pricing bundle of a sent estimate.
   const bundle = snapshot?.pricingBundle && typeof snapshot.pricingBundle === 'object' ? snapshot.pricingBundle : null;
@@ -237,9 +236,40 @@ function savedLegacyPricingRulesSignal(estData) {
     || Object.values(container.results || {}).some((v) => v && (Array.isArray(v) ? v.length > 0 : true))
     || (!!bundle && [].concat(bundle, bundle.oneTimeBreakdown?.items || [], bundle.services || [], bundle.frequencies || [])
       .some(lineCarriesPrice));
+  return { container, flag: priced ? true : undefined, from: 'priced' };
+}
+
+function savedLegacyPricingRulesSignal(estData) {
+  const { container, flag, from } = readRuleStamp(estData, 'legacyPricingRules');
+  if (from === 'metadata') {
+    // The services a legacy estimate priced under the CURRENT rules (added after the fixes): they keep them across revisions.
+    const current = [container.pricingMetadata, container.routingMetadata]
+      .map((m) => m?.currentRulesServices).find((list) => Array.isArray(list));
+    return { legacyPricingRules: flag, currentRulesServices: current };
+  }
   // No evidence: the key is explicitly undefined so a value left in the stored engineInputs never selects the old
   // rules (the public replay spreads these over the inputs).
-  return priced ? { legacyPricingRules: true } : { legacyPricingRules: undefined };
+  return flag === undefined ? { legacyPricingRules: undefined } : { legacyPricingRules: flag };
+}
+
+// Two-story roof points (owner 2026-11-26 "fix this": rodent exclusion roof/high points on a home of two or more stories).
+// Its own stamp, because an estimate priced after the seven fixes above and before this rule carries legacyPricingRules false
+// yet was sold without the factor: true = no two-story factor. An estimate with priced lines and no stamp predates the rule
+// and keeps its price; one with no priced lines pins nothing.
+function savedLegacyTwoStoryRoofSignal(estData) {
+  const { flag } = readRuleStamp(estData, 'legacyTwoStoryRoof');
+  return { legacyTwoStoryRoof: flag };
+}
+
+// Before a send snapshot's pricing bundle is dropped (a tier change, a relabel), freeze the rule stamps its prices were read
+// under onto the snapshot: the bundle is the only evidence of a snapshot-only quote's prices, and without a stamp the reader
+// would find nothing priced and replay it on today's rule. Mutates estData.sendSnapshot (a copy of it); no-op when the
+// snapshot already carries the stamp or the estimate prices nothing.
+function freezeSnapshotRuleStamps(estData) {
+  if (!estData || typeof estData !== 'object' || !estData.sendSnapshot || typeof estData.sendSnapshot !== 'object') return;
+  if (typeof estData.sendSnapshot.legacyTwoStoryRoof === 'boolean') return;
+  const { legacyTwoStoryRoof } = savedLegacyTwoStoryRoofSignal(estData);
+  if (typeof legacyTwoStoryRoof === 'boolean') estData.sendSnapshot = { ...estData.sendSnapshot, legacyTwoStoryRoof };
 }
 
 // ── the shared signal set ───────────────────────────────────────
@@ -277,6 +307,7 @@ function savedFloorReplaySignals(estData) {
   if (minSignal != null) signals.lawnProgramMinimumMonthly = minSignal;
   Object.assign(signals, savedLawnMinimumAfterDiscountSignal(estData));
   Object.assign(signals, savedLegacyPricingRulesSignal(estData));
+  Object.assign(signals, savedLegacyTwoStoryRoofSignal(estData));
   const pest = estimatePestFloorSignal(estData);
   if (typeof pest.armed === 'boolean') signals.pestProgramFloorArmed = pest.armed;
   if (pest.perVisit != null) signals.pestProgramFloorPerVisit = pest.perVisit;
@@ -291,5 +322,7 @@ module.exports = {
   estimatePestFloorSignal,
   savedLawnMinimumAfterDiscountSignal,
   savedLegacyPricingRulesSignal,
+  savedLegacyTwoStoryRoofSignal,
+  freezeSnapshotRuleStamps,
   savedFloorReplaySignals,
 };

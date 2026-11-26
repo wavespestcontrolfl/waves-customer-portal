@@ -194,6 +194,32 @@ describe('estimate add-service request workflow', () => {
     expect(stingingPrice(fresh)).toBe(637.5);
   });
 
+  test('adding a service keeps a sold two-story exclusion price (no two-story factor on a quote priced before the rule)', async () => {
+    const withExclusion = (resultExtra = {}) => baseEstimate({
+      estimate_data: {
+        inputs: {
+          ...baseEstimate().estimate_data.inputs,
+          stories: 2,
+          services: {
+            pest: { frequency: 'quarterly', version: 'v1', roachType: 'none' },
+            exclusion: { pricingVersion: 'v2', advancedWireMeshPoints: 4, waiveInspection: true },
+          },
+        },
+        result: { oneTime: { items: [{ service: 'rodent_exclusion', price: 600 }] }, ...resultExtra },
+      },
+    });
+    const exclusionTotal = (revision) => [].concat(revision.draftEstimateData.result.oneTime.specItems || [], revision.draftEstimateData.result.oneTime.items || [])
+      .filter((row) => row.service === 'rodent_exclusion')
+      .reduce((sum, row) => sum + Number(row.price || 0), 0);
+    // Priced before the rule, even though the seven-fixes stamp reads false: the existing exclusion stays on its $600 base
+    // ($510 once the 15% recurring perk applies) when mosquito is added, not $780 ($663).
+    expect(exclusionTotal(await buildEstimateServiceRevisionDraft(withExclusion({ pricingMetadata: { legacyPricingRules: false } }), 'Seasonal Mosquito'))).toBe(510);
+    expect(exclusionTotal(await buildEstimateServiceRevisionDraft(withExclusion(), 'Seasonal Mosquito'))).toBe(510);
+    // Priced under the rule (its own stamp false): the factor stays on the roof points.
+    expect(exclusionTotal(await buildEstimateServiceRevisionDraft(
+      withExclusion({ pricingMetadata: { legacyPricingRules: false, legacyTwoStoryRoof: false } }), 'Seasonal Mosquito'))).toBe(663);
+  });
+
   test('adding a service keeps a sold palm minimum through a Settings edit (the saved palm row freezes it)', async () => {
     const { PALM } = require('../services/pricing-engine/constants');
     const withPalm = (palmRow) => baseEstimate({

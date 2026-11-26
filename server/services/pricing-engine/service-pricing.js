@@ -10208,15 +10208,11 @@ function priceRodentExclusionV2(options = {}) {
 
   // Two-story factor (owner 2026-11-26, "fix this"): the roof/high points of a home of two or more stories take
   // RODENT.exclusionV2.modifiers.twoStory on top of the roof-style multiplier. Roof/high points ONLY: ground points,
-  // bird boxes, linear mesh, the barrel closure, the job floor and the inspection never take it. Every priced row carries
-  // the rule version and the factor it was priced with (twoStoryRoofRule, twoStoryRoofFactor); a replay restores that
-  // factor (options.frozenTwoStoryFactor, estimate-roof-style-replay.js twoStoryRoofReplaySignal), and a saved row with no
-  // stamp was priced before the rule, so it replays with factor 1.
-  const twoStoryLive = Number(cfg.modifiers && cfg.modifiers.twoStory) > 0 ? Number(cfg.modifiers.twoStory) : 1;
-  const twoStoryFrozen = Number(options.frozenTwoStoryFactor) > 0 ? Number(options.frozenTwoStoryFactor) : null;
-  // A frozen factor (replay only) is the factor the quote was sold with: it wins whatever the stories say now. Stories decide
-  // only on live pricing.
-  const twoStoryFactor = twoStoryFrozen ?? (Number(options.stories) >= 2 ? twoStoryLive : 1);
+  // bird boxes, linear mesh, the barrel closure, the job floor and the inspection never take it. A quote priced before
+  // the rule keeps its price: options.legacyTwoStory (from input.legacyTwoStoryRoof, the estimate-level rule stamp the
+  // estimate engine reads, see estimate-floor-signal-replay.js) drops the factor. Stories come from the inputs being priced.
+  const twoStoryRaw = Number(cfg.modifiers && cfg.modifiers.twoStory);
+  const twoStoryFactor = options.legacyTwoStory !== true && Number(options.stories) >= 2 && twoStoryRaw > 0 ? twoStoryRaw : 1;
   const advancedPointRate = cfg.wireMeshPoints.advancedRoofHigh * (roof ? roof.multiplier : 1) * twoStoryFactor;
 
   const wireMeshPointSubtotal =
@@ -10287,9 +10283,6 @@ function priceRodentExclusionV2(options = {}) {
     ...wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLinearMeshLF),
     ...roofStyleFields(roof),
     ...barrelHoldFields,
-    // The two-story rule this row was priced under (1 = the factor applies to the roof/high points of a two-story home).
-    twoStoryRoofRule: 1,
-    twoStoryRoofFactor: twoStoryFactor,
   };
 
   const parts = [];
