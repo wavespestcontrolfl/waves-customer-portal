@@ -2093,13 +2093,14 @@ const isSpecialtyRecord = (value) => !!value && typeof value === 'object' && !Ar
 // True when the saved blob names one of the three anywhere outside its input carriers, in `result`, `engineResult`, the bare data or
 // the send snapshot. A row is known by whatever names it: its service key or its name under ANY field (service, serviceKey,
 // service_key, key, name, label, displayName, title, n, a detail line), or the key it sits under (a results.mosquito block, a bedBug
-// item, the browser's `mq` tier rows). So every string is read, and every key with something under it: there is no list of identity
-// fields or row shapes to keep complete. No product is left out by its label either (the misting system and the one-time mosquito
-// visit are refused too): on this branch the server verified nothing, so a row cannot prove what it is. A real browser estimate
-// with none of the three services holds none of these words (specialty-prices-20261126.test.js prices one and checks).
-const specialtyKeyHoldsSomething = (value) => (value && typeof value === 'object'
-  ? Object.keys(value).length > 0
-  : value !== null && value !== undefined && value !== false && value !== 0 && value !== '');
+// item, the browser's `mq` tier rows). So every string is read, and every key that holds a block or a list: there is no list of
+// identity fields or row shapes to keep complete. No product is left out by its label either (the misting system and the one-time
+// mosquito visit are refused too): on this branch the server verified nothing, so a row cannot prove what it is.
+// A NUMBER or a word under such a key is not a row: every priced estimate carries the home's own mosquito measurements
+// (property.mosquitoTreatableSqFt, property.mosquitoLotCategory, modifiers.mosquitoWaterMult). A real browser estimate and the
+// server's own result with none of the three services hold none of the words in a string, and no block under such a key
+// (specialty-prices-20261126.test.js prices both and checks).
+const specialtyKeyHoldsRows = (value) => !!value && typeof value === 'object' && Object.keys(value).length > 0;
 function saveHoldsSpecialtyRow(estimateData) {
   const seen = new Set();
   const walk = (node) => {
@@ -2109,7 +2110,7 @@ function saveHoldsSpecialtyRow(estimateData) {
     if (Array.isArray(node)) return node.some(walk);
     return Object.entries(node).some(([key, value]) => {
       if (SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key)) return false;
-      if ((key === 'mq' || SPECIALTY_ROW_WORDS.test(key)) && specialtyKeyHoldsSomething(value)) return true;
+      if ((key === 'mq' || SPECIALTY_ROW_WORDS.test(key)) && specialtyKeyHoldsRows(value)) return true;
       return walk(value);
     });
   };

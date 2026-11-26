@@ -669,11 +669,35 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
     throws409({ result: { results: { bedBug: { price: 1026, rooms: 2 } } } });
     throws409({ result: { oneTime: { stinging_insect: { price: 275 } } } });
     throws409({ result: { results: { wasp: [{ price: 275 }] } } });
-    throws409({ result: { totals: { mosquitoAnnual: 1053 } } });
-    // An empty or switched-off block under such a key is not a row.
+    // An empty or switched-off block under such a key is not a row, and neither is a number or a word: every priced estimate
+    // carries the home's own mosquito measurements.
     const empty = plain();
     Object.assign(empty.result.results, { mosquito: null, mq: [], bedBug: {}, wasp: false, stingingInsect: 0, hornetNests: '' });
+    Object.assign(empty.result, { property: { mosquitoTreatableSqFt: 8865, mosquitoLotCategory: 'QUARTER' }, modifiers: { mosquitoWaterMult: 1 } });
     expect(() => assertFallback(empty)).not.toThrow();
+  });
+
+  test('the server\'s own result with none of the three services is not refused when a save posts it back (a preview, a stored estimate)', () => {
+    // A preview the server priced can come back on a save it cannot price (no replayable input): its rows are the server's.
+    for (const services of [
+      { pest: { frequency: 'quarterly' } },
+      { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', tier: 'enhanced' }, termiteBait: {} },
+      { treeShrub: { tier: 'standard' } },
+    ]) {
+      const raw = generateEstimate(HOME({ lawnSqFt: 4000, services }));
+      expect(raw.lineItems.length).toBeGreaterThan(0);
+      // The home profile on it names mosquito (a measurement), and that is not a row.
+      expect(raw.property.mosquitoTreatableSqFt).toBeGreaterThan(0);
+      expect(() => assertFallback({ result: mapV1ToLegacyShape(raw), engineResult: raw })).not.toThrow();
+    }
+    // The same result with one of the three on it is refused.
+    const withMosquito = generateEstimate(HOME({ services: { pest: { frequency: 'quarterly' }, mosquito: { tier: 'seasonal9' } } }));
+    throws409({ result: mapV1ToLegacyShape(withMosquito) });
+    throws409({ engineResult: withMosquito });
+    const withWasp = generateEstimate(HOME({ services: { stinging: { tier: 2 } } }));
+    expect(withWasp.lineItems.some((l) => /sting/i.test(l.service))).toBe(true);
+    throws409({ result: mapV1ToLegacyShape(withWasp) });
+    throws409({ engineResult: withWasp });
   });
 
   test('a real browser estimate: with none of the three services the save passes, with any of them it is refused', () => {
