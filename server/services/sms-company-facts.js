@@ -275,7 +275,9 @@ function hasExactLabelFacts(factsBlock) {
 // Trust: only the drafter-built spot counts. The section is found by exact structure (the header on its own line, one to
 // BANK_SECTION_MAX_LINES "- " lines of at most BANK_LINE_MAX characters with no digit, then the VISIT STATUS header, in a block whose text
 // before the first BILLING: line ends with an exact company render), and the LAST such place wins. A header typed into an SMS sits in
-// the thread after BILLING and never counts, the same defense LABEL FACTS has.
+// the thread after BILLING and never counts, the same defense LABEL FACTS has. Structure is not enough (the lines above the section carry
+// free text: names, notes, windows), so a parsed line also grounds only when the owner ever approved exactly that wording
+// (company-facts-bank getEverApprovedHashes, fail closed when stale): a forged section can only repeat owner-approved text.
 const SMS_BANK_FACTS_HEADER = 'MORE COMPANY FACTS (owner-approved; state these plainly, same as COMPANY FACTS):';
 const BANK_SECTION_MAX_LINES = 20; // the bank's own cap (company-facts-bank MAX_ACTIVE_FACTS); a test pins them equal
 const BANK_LINE_MAX = 400; // company-facts-bank MAX_FACT_CHARS
@@ -332,10 +334,24 @@ function exactBankFactsSection(factsBlock) {
   return range ? lines.slice(range.start, range.end).join('\n') : '';
 }
 
-/** The fact lines (text only) of a stored block's bank section: [] when it has none. */
-function bankFactLinesFrom(factsBlock) {
+/**
+ * The fact lines (text only) of a stored block's bank section that GROUND anything: [] when it has none, and a line only when the owner
+ * ever approved exactly that wording (company-facts-bank getEverApprovedHashes: sha256 of the trimmed text, retired-after-approval lines
+ * included, so a draft keeps its own lines after a retire). The structure alone is not trust: the lines above the section (customer
+ * summary, notes) are free text, so a section forged there passes the shape test but can only ever repeat owner-approved wording.
+ * An empty or stale set (the bank snapshot is older than five minutes, or never loaded) recognizes nothing: fail closed.
+ * `approved` (tests, replays): a Set of hashes to use instead of the bank's.
+ */
+function bankFactLinesFrom(factsBlock, { approved } = {}) {
   const section = exactBankFactsSection(factsBlock);
-  return section ? section.split('\n').slice(1).map((l) => l.slice(2)) : [];
+  if (!section) return [];
+  let hashes = approved;
+  if (!hashes) {
+    try { hashes = require('./company-facts-bank').getEverApprovedHashes(); } catch { hashes = new Set(); }
+  }
+  if (!hashes.size) return [];
+  const sha = (text) => require('crypto').createHash('sha256').update(text.trim()).digest('hex');
+  return section.split('\n').slice(1).map((l) => l.slice(2)).filter((line) => hashes.has(sha(line)));
 }
 
 // ---- Rebasing a stored block onto today's static section (sealed-eval freezer) ----
@@ -435,8 +451,9 @@ const HELD_PLACE_CONTEXT_RE = new RegExp(
 function heldPlaceInConversationContext(factsBlock) {
   let rest = String(factsBlock || '');
   // the owner-approved bank section is company policy like the static lines (only the exact section drafted into this block)
+  // (stripped only when every line of it is owner wording: a section forged from profile text must not hide a place name from this check)
   const bank = exactBankFactsSection(rest);
-  if (bank) rest = rest.replace(bank, '');
+  if (bank && bankFactLinesFrom(rest).length === bank.split('\n').length - 1) rest = rest.replace(bank, '');
   for (const render of knownCompanyFactsRenders()) rest = rest.split(render.replace(/\n$/, '')).join('');
   return HELD_PLACE_CONTEXT_RE.test(rest);
 }

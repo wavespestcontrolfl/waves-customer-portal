@@ -1012,15 +1012,8 @@ function englishLexicon() {
     englishLexiconCache = new Set([...SUPPORTED_PROFILES.en, ...SMS_CORE_WORDS, ...ENGLISH_COMMON, ...ENGLISH_EXTRA]);
     // the domain words the owner approved (COMPANY FACTS, product-free) are English by construction
     for (const fact of require('./sms-company-facts').COMPANY_FACTS) for (const w of wordsOf(stripMarks(fact.toLowerCase()))) englishLexiconCache.add(w);
-    // ...and the owner-approved bank lines (company-facts-bank) the snapshot holds now; later ones join as a draft's block or a send-time snapshot carries them
-    try { addEnglishWords(require('./company-facts-bank').getApprovedBankFacts().map((f) => f.text)); } catch { /* no bank: the static words are enough */ }
   }
   return englishLexiconCache;
-}
-// Grow-only: owner-approved bank sentences are English by construction, so their words join the lexicon (never leave it).
-function addEnglishWords(texts) {
-  const lex = englishLexicon();
-  for (const text of texts || []) if (typeof text === 'string') for (const w of wordsOf(stripMarks(text.toLowerCase()))) lex.add(w);
 }
 // a token is known English when it, or the stem of a regular inflection of it (plural, past, -ing, -ly, -er), is in the lexicon
 function englishKnown(word) {
@@ -1438,29 +1431,39 @@ function companyFactSentences() {
   }
   return companySentenceCache;
 }
-// Bank sentences (owner-approved lines of company-facts-bank, read from a draft's OWN stored block or its send-time snapshot) are company
-// sentences too. Anything that is not a plain bounded string without a digit is dropped: the bank states no amount, so a forged list
-// cannot authorize one.
+// Bank sentences (owner-approved lines of company-facts-bank, read from a draft's OWN stored block or its send-time snapshot) are GENERAL
+// company sentences only. A bank sentence never authorizes a label, re-entry, rainfast or timing answer (AGENTS.md: that guidance is
+// LABEL FACTS only): a sentence that is a question, carries answer force ("Absolutely.", "Yes."), a clearance, a duration or clock time, or
+// any label-context word (rain, dry, pets, wait ...) is not copyable here, and only whole sentences or whole lines count, never a piece
+// after a colon. Anything that is not a plain bounded string without a digit is dropped too: the bank states no amount.
 const BANK_SENTENCE_MAX = 400;
 const BANK_SENTENCES_MAX = 80;
+function isNeutralBankSentence(sentence) {
+  const text = canonText(sentence).toLowerCase();
+  return !/\?/.test(text) && !hasAnswerForce(text) && !LABEL_CONTEXT_RE.test(text) && !hasDuration(text) && !hasClockTime(text)
+    && !CLEARANCE_ANY_RE.test(text) && !RAINFAST_RE.test(text) && !UNTIL_DRY_HOLD_RE.test(text);
+}
 function cleanBankSentences(list) {
   if (!Array.isArray(list)) return [];
   const out = new Set();
   for (const sentence of list) {
-    if (typeof sentence === 'string' && sentence.trim() && sentence.length <= BANK_SENTENCE_MAX && !/\p{N}/u.test(sentence) && !COMPANY_RAIN_LINE_TEXT_RE.test(sentence)) out.add(sentence);
+    if (typeof sentence === 'string' && sentence.trim() && sentence.length <= BANK_SENTENCE_MAX && !/\p{N}/u.test(sentence)
+      && !COMPANY_RAIN_LINE_TEXT_RE.test(sentence) && isNeutralBankSentence(sentence)) out.add(sentence);
     if (out.size >= BANK_SENTENCES_MAX) break;
   }
   return [...out];
 }
+// The copyable units of one bank line: the whole line and each of its sentences (no "Label: text" piece).
+const bankUnitsOf = (line) => [line, ...line.split(/(?<=[.!?])\s+/)];
 /**
- * The copyable bank sentences of a stored facts block ('MORE COMPANY FACTS' section found by exact structure only: a header typed into an
- * SMS grounds nothing). Registers their words with the English lexicon (grow-only). [] when the block has no bank section.
+ * The copyable bank sentences of a stored facts block: the 'MORE COMPANY FACTS' section found by exact structure, and only lines whose
+ * text the owner ever approved (sms-company-facts bankFactLinesFrom: a section forged from customer profile text grounds nothing).
+ * [] when the block has none. The words of a bank line are NOT added to the English lexicon: it is process-wide, and a stored draft's
+ * vocabulary must not change other customers' language checks (a copy is marked out of the reply before the language check reads it).
  */
 function bankSentencesFromBlock(factsBlock) {
   const lines = require('./sms-company-facts').bankFactLinesFrom(factsBlock);
-  if (!lines.length) return [];
-  addEnglishWords(lines);
-  return cleanBankSentences(lines.flatMap(copyableSentencesOf));
+  return lines.length ? cleanBankSentences(lines.flatMap(bankUnitsOf)) : [];
 }
 // The bank sentences a reply copies whole (what a draft's snapshot carries to its send-time recheck).
 function bankSentencesCopiedIn(reply, bankSentences) {
@@ -1864,7 +1867,6 @@ module.exports = {
   hasUngroundedLabelClaim,
   bankSentencesFromBlock,
   bankSentencesCopiedIn,
-  addEnglishWords,
   labelFactsSnapshotFor,
   labelFactsSendBlockReason,
   inboundRefersToOtherVisit,

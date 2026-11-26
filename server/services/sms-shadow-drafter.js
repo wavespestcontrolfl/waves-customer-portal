@@ -5437,7 +5437,6 @@ function buildFactsBlock(context, extras = {}) {
   const bankFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? renderSmsBankFactsSection(extras.bankFacts)
     : '';
-  if (bankFactsSection) labelFactsLib.addEnglishWords(bankFactsSection.trimEnd().split('\n').slice(1).map((line) => line.slice(2)));
   // VISIT STATUS & OPEN LOOPS (SMS facts-gap PR 1): gate-on only, '' gate-off
   // (byte-identical). Rendered right after UPCOMING SERVICES — NOT between COMPANY
   // FACTS and BILLING: sms-sealed-eval's factPresent, sms-shadow-judge and

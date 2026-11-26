@@ -653,6 +653,8 @@ async function factHistory(id, { dbi = db } = {}) {
 /* ── Snapshot ─────────────────────────────────────────────────────────── */
 
 let state = { facts: Object.freeze([]), loadedAt: 0 };
+// Hashes of every wording the owner ever approved (approved now, or retired after approval): not a list of live lines. See getEverApprovedHashes.
+let approvedHashes = { set: Object.freeze(new Set()), loadedAt: 0 };
 let generation = 0;
 let startedReads = 0; // refreshes started, in order
 let appliedRead = 0; // the newest-started read whose result is in `state`
@@ -676,6 +678,21 @@ async function readApprovers(dbi, ids) {
     approvers.get(e.fact_id).push({ actor: e.actor_id, sha: detail.text_sha256 });
   }
   return approvers;
+}
+
+/**
+ * text_sha256 of every wording with an OWNER approval event, whatever became of the row afterwards (still approved, retired, replaced).
+ * Events are append-only, so the set only grows. A stored texting draft carries its bank section as plain text; this set lets its readers
+ * accept a parsed line only when it is exact owner-approved wording (a section forged from customer text can then ground nothing new).
+ */
+async function readEverApprovedHashes(dbi) {
+  const events = await dbi('company_fact_bank_events').where({ action: 'approved' }).select('detail');
+  const out = new Set();
+  for (const e of events) {
+    const detail = e.detail && typeof e.detail === 'object' ? e.detail : {};
+    if (detail.owner === true && typeof detail.text_sha256 === 'string' && /^[0-9a-f]{64}$/.test(detail.text_sha256)) out.add(detail.text_sha256);
+  }
+  return out;
 }
 
 /** True when the owner ticked for every warning code the screens find today (the acknowledgement stored with the approval). */
@@ -740,9 +757,11 @@ async function refreshBankFacts({ dbi = db, now = Date.now } = {}) {
   const startedAt = now();
   try {
     const facts = await loadVerifiedFacts(dbi);
+    const everApproved = await readEverApprovedHashes(dbi);
     if (startedIn === generation && myRead > appliedRead) {
       appliedRead = myRead;
       state = { facts, loadedAt: startedAt };
+      approvedHashes = { set: Object.freeze(everApproved), loadedAt: startedAt };
     }
   } catch (err) {
     logger.warn(`[company-facts-bank] snapshot refresh failed (code ${err?.code || 'unknown'}); keeping the last copy until it goes stale`);
@@ -764,6 +783,16 @@ const readVerifiedFacts = async ({ dbi = db } = {}) => {
 function freshFacts(now) {
   if (!state.loadedAt || now - state.loadedAt > STALE_MS) return [];
   return state.facts;
+}
+
+/**
+ * The hashes (sha256 of the trimmed text) of every wording the owner ever approved, as a Set. SYNC, same age rule as the snapshot: empty
+ * before the first load and after STALE_MS (fail closed: nothing is then recognized as owner wording). A retire does not remove a hash,
+ * so a stored draft that carries a since-retired line still reads it as owner wording. An invalidate() keeps the set (it only grows).
+ */
+function getEverApprovedHashes({ now = Date.now() } = {}) {
+  if (!approvedHashes.loadedAt || now - approvedHashes.loadedAt > STALE_MS) return new Set();
+  return approvedHashes.set;
 }
 
 /**
@@ -819,6 +848,7 @@ module.exports = {
   getFact,
   factHistory,
   getApprovedBankFacts,
+  getEverApprovedHashes,
   readVerifiedFacts,
   refreshBankFacts,
   renderBankFactsLines,
@@ -827,5 +857,5 @@ module.exports = {
   invalidate,
   startBankRefresh,
   stopBankRefresh,
-  _test: { setLazyStart: (on) => { lazyStartInTests = on === true; }, sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = null; stopped = false; state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
+  _test: { setLazyStart: (on) => { lazyStartInTests = on === true; }, sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = null; stopped = false; state = { facts: Object.freeze([]), loadedAt: 0 }; approvedHashes = { set: Object.freeze(new Set()), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
 };
