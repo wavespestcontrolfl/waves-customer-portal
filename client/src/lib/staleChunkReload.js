@@ -94,6 +94,52 @@ import {
 
 export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 
+// A page the service worker opened from its saved copy (public/sw.js, when the
+// network was slow) can ask for a chunk the server replaced. Its one reload
+// must reach the network, or the worker hands it the same saved copy again.
+// So on the screens the worker can answer that way (home and login, as
+// isSavedCopyPath in public/sw.js), the reload loads the same address with
+// NETWORK_ONLY_PARAM added, which the worker never answers from the saved
+// copy; the app removes it again at start (stripNetworkOnlyParam, main.jsx).
+// It runs at once, like location.reload, so the guards a caller just ran
+// still hold. Every other page reloads as before. Every reload that heals a
+// missing chunk goes through here.
+export const NETWORK_ONLY_PARAM = 'waves-network';
+const SAVED_COPY_PATHS = new Set(['/', '/login', '/login/']);
+
+export function networkOnlyUrl(href) {
+  const url = new URL(href);
+  if (!SAVED_COPY_PATHS.has(url.pathname)) return null;
+  url.searchParams.set(NETWORK_ONLY_PARAM, '1');
+  return url.toString();
+}
+
+// Only a page a worker controls can have come from the saved copy; any other
+// page reloads plainly.
+function controlledByWorker() {
+  try { return Boolean(navigator.serviceWorker?.controller); } catch { return false; }
+}
+
+export function reloadFromNetwork(reload = () => window.location.reload(), replace = (href) => window.location.replace(href)) {
+  let target = null;
+  try {
+    if (controlledByWorker() && SAVED_COPY_PATHS.has(window.location.pathname)) target = networkOnlyUrl(window.location.href);
+  } catch { /* no usable address */ }
+  if (target) replace(target);
+  else reload();
+}
+
+// Removes NETWORK_ONLY_PARAM from the address at start, without a history
+// entry, so tab links and a later refresh never carry it.
+export function stripNetworkOnlyParam() {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has(NETWORK_ONLY_PARAM)) return;
+    url.searchParams.delete(NETWORK_ONLY_PARAM);
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  } catch { /* the address keeps the mark; the worker only skips its saved copy */ }
+}
+
 // The error for a chunk the live build no longer serves: the browser's own
 // for a module script (Chrome, Safari, Firefox), webpack's name, and Vite's
 // for a page stylesheet gone the same way.
@@ -345,7 +391,7 @@ export function markStaleChunkReloadPending() {
 
 // Call right before location.assign. Returns the call that closes the window
 // when the navigation did not start.
-export function markPageNavigating(reload = () => window.location.reload()) {
+export function markPageNavigating(reload = reloadFromNetwork) {
   const until = Date.now() + NAVIGATION_WINDOW_MS;
   navigatingUntil = until;
   // The page is still here: the navigation never committed, and React.lazy
@@ -371,7 +417,7 @@ export function markPageNavigating(reload = () => window.location.reload()) {
 
 // One-shot guard (takeChunkReload) so a genuine outage still surfaces instead
 // of reload-looping.
-export function handleVitePreloadError(event, reload = () => window.location.reload()) {
+export function handleVitePreloadError(event, reload = reloadFromNetwork) {
   if (pageNavigating()) {
     chunkHeld = true;
     event.preventDefault();
@@ -447,7 +493,7 @@ export function missingCodeIsNewVersion(newer, offline) {
 export async function reloadForMissingCode({
   pathname,
   current = () => true,
-  reload = () => window.location.reload(),
+  reload = reloadFromNetwork,
   now,
 } = {}) {
   const atPage = () => samePage(window.location.pathname, pathname);
