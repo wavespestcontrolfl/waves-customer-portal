@@ -102,7 +102,7 @@ function smsBlocked(extractions) {
 // carries no termite key (WDO has none) and no flag names it.
 function termiteRequested(extractions) {
   return extractions.some((x) => /termite|wdo/i.test([
-    JSON.stringify(x.service_request || {}), x.service_interest, x.service_type, x.service_requested,
+    JSON.stringify(x.service_request || {}), x.requested_service, x.matched_service, x.service_interest,
   ].filter((v) => typeof v === 'string').join(' ')));
 }
 
@@ -119,6 +119,8 @@ function hasContact(f) {
   const { context } = f;
   const hasEmail = !!((context?.leadIsForThisCall && context?.lead?.email)
     || (!context?.customerPhoneAmbiguous && context?.customer?.email));
+  // A do-not-contact request vetoes both channels.
+  if (f.extractions.some((x) => x.consent?.do_not_contact_request === true || x.do_not_contact_request === true)) return false;
   return (!!f.draftPhone && !smsBlocked(f.extractions)) || hasEmail;
 }
 
@@ -128,7 +130,8 @@ const HOLD_RULES = [
   // the draft composes while the processor is still routing, so no booking
   // outcome exists yet. A confirmed time whose booking was then blocked
   // also holds, which is the safe side (the office already owns that call).
-  ['booked_on_call', (f) => bookedOnCall(f.context?.extraction)],
+  // Either original extraction may be the one that drives the booking.
+  ['booked_on_call', (f) => f.extractions.some(bookedOnCall)],
   ['quote_not_promised', (f) => !quotePromisedOnCall(f.extractions)],
   ['termite_hold', (f) => f.serviceKeys.some((k) => /termite|wdo/i.test(k)) || /termite|wdo|swarmer/i.test(f.flags)
     || termiteRequested(f.extractions)],
