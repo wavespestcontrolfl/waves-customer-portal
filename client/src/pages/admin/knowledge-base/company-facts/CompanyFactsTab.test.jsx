@@ -548,6 +548,22 @@ describe("Company facts tab", () => {
     expect(screen.getByLabelText(/Topic/)).toHaveValue("My new topic");
   });
 
+  it("tells an editor that its draft was deleted without claiming a reload, and keeps what was typed (NOT_FOUND)", async () => {
+    serve({
+      owner: true,
+      pages: { draft: { first: { facts: [fact({ id: ID_A, topic: "Topic A" })], nextCursor: null } } },
+      failWith: (method) => (method === "PATCH" ? { code: "NOT_FOUND", status: 404 } : null),
+    });
+    mount();
+    await screen.findByText("Topic A");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "My new topic" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("This draft was deleted. Your text is still here to copy.")).toBeInTheDocument();
+    expect(screen.queryByText(/reloaded/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Topic/)).toHaveValue("My new topic");
+  });
+
   it("recovers from a changed field the same way as a changed wording (STALE_FACT)", async () => {
     const patches = [];
     serve({
@@ -811,7 +827,7 @@ describe("Company facts tab", () => {
 
   it.each([
     ["approved meanwhile", { code: "NOT_A_DRAFT", status: 409 }, /already approved or changed this draft/],
-    ["deleted meanwhile", { code: "NOT_FOUND", status: 404 }, /already gone/],
+    ["deleted meanwhile", { code: "NOT_FOUND", status: 404 }, /already deleted\. The list was reloaded/],
   ])("closes the discard confirmation, reloads the list and says so when the draft was %s", async (_label, failure, message) => {
     const reads = [];
     serve({

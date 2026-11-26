@@ -1,18 +1,35 @@
 /**
  * Company facts bank PR 3: the voice and email readers. An empty (or stale) bank leaves both byte-identical; an approved
  * line reaches the next call and the next draft; a call keeps the lines it started with; the bank hash is stamped.
- * Fakes only: the Anthropic SDK is stubbed so no model call is made.
+ *
+ * No test here can reach a paid provider: the provider API keys are removed before anything loads, every SDK or relay client
+ * constructor is a stub that records any use, the model round itself is stubbed (a call stops after its prompt is frozen), fetch is a
+ * recording stub, and every test fails afterwards if a provider call or a fetch was recorded.
  */
+// Before any module loads: the relay builds its provider clients at load time from these keys.
+const PROVIDER_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'ELEVENLABS_API_KEY', 'DEEPGRAM_API_KEY'];
+const SAVED_KEYS = Object.fromEntries(PROVIDER_KEYS.map((k) => [k, process.env[k]]));
+PROVIDER_KEYS.forEach((k) => { delete process.env[k]; });
+
+const providerUse = []; // every attempted use of a provider client or the network, by name
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
+// A client whose every method records the use and fails. Constructing one is harmless; using one is a test failure.
+const mockStubClient = (name) => new Proxy({}, { get: (_t, prop) => (prop === 'then' ? undefined : (...args) => { global.__providerUse.push(`${name}.${String(prop)}`); throw new Error(`no provider calls in tests (${name})`); }) });
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
-  messages: {
-    create: jest.fn().mockRejectedValue(new Error('no model calls in tests')),
-    stream: jest.fn(() => { throw new Error('no model calls in tests'); }),
-  },
+  messages: new Proxy({}, { get: (_t, prop) => () => { global.__providerUse.push(`anthropic.messages.${String(prop)}`); throw new Error('no provider calls in tests (anthropic)'); } }),
 })));
+jest.mock('../services/voice-agent/relay-openai-client', () => ({
+  ...jest.requireActual('../services/voice-agent/relay-openai-client'),
+  OpenAIRelayClient: jest.fn().mockImplementation(() => mockStubClient('openai-relay')),
+}));
+jest.mock('openai', () => jest.fn().mockImplementation(() => mockStubClient('openai')), { virtual: true });
+jest.mock('@google/genai', () => ({ GoogleGenAI: jest.fn().mockImplementation(() => mockStubClient('gemini')) }), { virtual: true });
+global.__providerUse = providerUse;
+const realFetch = global.fetch;
+global.fetch = jest.fn((...args) => { providerUse.push(`fetch ${String(args[0])}`); throw new Error('no network in tests'); });
 
 const crypto = require('crypto');
 const Bank = require('../services/company-facts-bank');
@@ -43,7 +60,25 @@ const company = () => renderCompanyFactsSection().replace(/\n$/, '');
 const ENTRY_TAIL = '\nUse only the lines that answer what the customer asked. They promise no visit, date, price, or contact; the rules above still apply.';
 const FRAME = '\nThese facts answer general questions.';
 
-beforeEach(() => { Bank._test.resetSnapshot(); });
+// The model round itself: a call runs up to the point its prompt is frozen, then stops without any provider turn.
+let spies = [];
+beforeEach(() => {
+  Bank._test.resetSnapshot();
+  providerUse.length = 0;
+  spies = [
+    jest.spyOn(RelayConversation.prototype, '_runModelRound').mockResolvedValue(null),
+    jest.spyOn(RelayConversation.prototype, '_modelAttempt').mockImplementation(async () => { providerUse.push('_modelAttempt'); throw new Error('no provider calls in tests'); }),
+  ];
+});
+afterEach(() => {
+  spies.forEach((spy) => spy.mockRestore());
+  expect(providerUse).toEqual([]); // no provider client method, fetch or model attempt ran
+});
+afterAll(() => {
+  PROVIDER_KEYS.forEach((k) => { if (SAVED_KEYS[k] === undefined) delete process.env[k]; else process.env[k] = SAVED_KEYS[k]; });
+  global.fetch = realFetch;
+  delete global.__providerUse;
+});
 
 describe('the bank section', () => {
   test('is empty for an empty bank, and its wording passes the banned-copy screen', async () => {

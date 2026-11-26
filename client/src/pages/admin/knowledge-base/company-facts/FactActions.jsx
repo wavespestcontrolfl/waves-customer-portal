@@ -21,6 +21,12 @@ function useReportEditing(id, mode, onEditing) {
   }, [id, editing, onEditing]);
 }
 
+// Said only where the reload really runs (useAction below). The editor path has its own wording in factCopy.js and reloads nothing.
+const GONE_NOTICES = {
+  NOT_A_DRAFT: "Someone else already approved or changed this draft. The list was reloaded. Nothing was deleted.",
+  NOT_FOUND: "That draft was already deleted. The list was reloaded.",
+};
+
 // One in-flight request at a time per card. run() reports success through onDone(message) and failure as one plain sentence.
 function useAction(onDone, onStale) {
   const [busy, setBusy] = useState(false);
@@ -35,7 +41,8 @@ function useAction(onDone, onStale) {
       await work();
       onDone(doneMessage, switchTo);
     } catch (requestError) {
-      const message = errorMessage(requestError);
+      // A fact that left this list is said as it is: the reload below is what these two sentences report.
+      const message = GONE_NOTICES[requestError.code] || errorMessage(requestError);
       setError(message);
       if (["STALE_TEXT", "STALE_FACT", "STATUS_CHANGED"].includes(requestError.code)) {
         // The fact changed under this action: refresh the card, and let the caller close what it had open.
