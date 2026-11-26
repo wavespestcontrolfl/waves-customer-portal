@@ -57,6 +57,12 @@ describe("CrossSellCard", () => {
     expect(screen.getByText("Pest-only customers (0)")).toBeInTheDocument();
   });
 
+  test("a capped list shows the full count and says only the first names are listed", () => {
+    render(<CrossSellCard data={{ ...DATA, pestOnlyTotal: 612 }} />);
+    expect(screen.getByText("Pest-only customers (612)")).toBeInTheDocument();
+    expect(screen.getByText("Showing the first 2 by last name.")).toBeInTheDocument();
+  });
+
   test("shows a loading note until the data arrives", () => {
     render(<CrossSellCard data={null} />);
     expect(screen.getByText("Loading…")).toBeInTheDocument();

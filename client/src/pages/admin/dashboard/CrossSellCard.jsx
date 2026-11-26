@@ -83,12 +83,16 @@ function SourceList({ sources }) {
   );
 }
 
-function PestOnlyList({ rows }) {
+function PestOnlyList({ rows, total }) {
+  const count = Number.isFinite(total) && total > rows.length ? total : rows.length;
   return (
     <details className="mt-4">
       <summary className="min-h-11 cursor-pointer list-none select-none py-2.5 text-ui-body font-medium text-zinc-900 underline decoration-dotted underline-offset-2 u-focus-ring">
-        Pest-only customers ({fmtInt(rows.length)})
+        Pest-only customers ({fmtInt(count)})
       </summary>
+      {count > rows.length ? (
+        <div className="mt-1 text-ui-caption text-ink-secondary">Showing the first {fmtInt(rows.length)} by last name.</div>
+      ) : null}
       {rows.length === 0 ? (
         <div className="mt-1 text-ui-caption text-ink-secondary">Every recurring customer has more than pest control.</div>
       ) : (
@@ -132,7 +136,7 @@ export default function CrossSellCard({ data }) {
       </div>
 
       <SourceList sources={data.sources} />
-      <PestOnlyList rows={pestOnly} />
+      <PestOnlyList rows={pestOnly} total={Number(data.pestOnlyTotal)} />
 
       <div className="mt-3 text-ui-caption text-ink-secondary">Counts recurring visits on the schedule. Sends nothing.</div>
     </UiSurface>

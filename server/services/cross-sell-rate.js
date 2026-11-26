@@ -66,30 +66,42 @@ const PEST_ONLY_LIMIT = 500;
 // Both lists are constants in this file, never user input, so they are written into the SQL as literals.
 const sqlLiteral = (text) => `'${String(text).replaceAll("'", "''")}'`;
 
-function familySql(alias = 'ss') {
+function familySql(alias = 'ss', typeColumn = 'service_type') {
   const byKey = FAMILY_BY_KEY_PREFIX
     .map(([prefix, family]) => `WHEN starts_with(${alias}.service_key_snapshot, ${sqlLiteral(prefix)}) THEN ${sqlLiteral(family)}`)
     .join(' ');
   const byType = FAMILY_BY_SERVICE_TYPE_WORD
-    .map(([word, family]) => `WHEN ${alias}.service_type ILIKE ${sqlLiteral(`%${word}%`)} THEN ${sqlLiteral(family)}`)
+    .map(([word, family]) => `WHEN ${alias}.${typeColumn} ILIKE ${sqlLiteral(`%${word}%`)} THEN ${sqlLiteral(family)}`)
     .join(' ');
   return `CASE WHEN ${alias}.service_key_snapshot IS NOT NULL THEN CASE ${byKey} END ELSE CASE ${byType} END END`;
 }
 
 // The counted visits, each with its family; and the (customer, family) pairs held on day `as of` (?, ?, ?).
 const COUNTED_VISITS_SQL = `
-  v AS (
+  plan_visits AS (
     SELECT ss.id, ss.customer_id, ss.scheduled_date, ss.created_at, ss.service_key_snapshot, ss.service_type,
-           ss.source_estimate_id, ss.source, ss.source_call_log_id, ss.booking_source, ${familySql('ss')} AS fam
+           ss.source_estimate_id, ss.source, ss.source_call_log_id, ss.booking_source
     FROM scheduled_services ss
-    WHERE ss.is_recurring = true AND COALESCE(ss.is_callback, false) = false AND ss.status <> 'cancelled'
+    -- A legacy series child carries recurring_parent_id with no is_recurring flag; a NULL status is open.
+    WHERE (ss.is_recurring = true OR ss.recurring_parent_id IS NOT NULL)
+      AND COALESCE(ss.is_callback, false) = false AND ss.status IS DISTINCT FROM 'cancelled'
+  ),
+  v AS (
+    SELECT pv.*, ${familySql('pv')} AS fam FROM plan_visits pv
+    UNION ALL
+    -- A service riding on a plan visit as an add-on (termite bait, mosquito, rodent bait) is a service the customer holds.
+    SELECT a.id, pv.customer_id, pv.scheduled_date, a.created_at, a.service_key_snapshot, a.service_name AS service_type,
+           pv.source_estimate_id, pv.source, pv.source_call_log_id, pv.booking_source, ${familySql('a', 'service_name')} AS fam
+    FROM scheduled_service_addons a
+    JOIN plan_visits pv ON pv.id = a.scheduled_service_id
   ),
   held AS (
     SELECT v.customer_id, v.fam
     FROM v
     JOIN customers c ON c.id = v.customer_id AND c.deleted_at IS NULL
       -- A churn stamp on or before the day drops the customer, unless this visit was booked after it (a reactivation).
-      AND (c.churned_at IS NULL OR c.churned_at > CAST(? AS date) OR v.created_at > c.churned_at)
+      AND (c.churned_at IS NULL OR CAST(c.churned_at AS date) > CAST(? AS date)
+           OR CAST(v.created_at AT TIME ZONE 'America/New_York' AS date) > CAST(c.churned_at AS date))
     WHERE v.fam IS NOT NULL
       -- Only visits already booked by the end of the day (ET): a later purchase never rewrites a closed month.
       AND v.created_at < (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York'
@@ -123,13 +135,13 @@ function classifySource({ estimateId, estimateSource, source, sourceCallLogId, b
 const emptySources = () => Object.fromEntries(SOURCE_BUCKETS.map((bucket) => [bucket, 0]));
 const createdAtMs = (row) => (row.created_at ? new Date(row.created_at).getTime() : Number.NEGATIVE_INFINITY);
 
-/** The customer's added service: the family whose earliest recurring visit is the newest (ties: the later family name). */
+/**
+ * The customer's SECOND service: one row per family (its earliest visit), ordered by when that visit was booked
+ * (ties: family name); the second one is the service that made them a cross-sell customer.
+ */
 function addedServiceVisit(visits) {
-  return visits.reduce((newest, visit) => {
-    const delta = createdAtMs(visit) - createdAtMs(newest);
-    if (delta > 0 || (delta === 0 && String(visit.fam) > String(newest.fam))) return visit;
-    return newest;
-  });
+  const ordered = [...visits].sort((a, b) => (createdAtMs(a) - createdAtMs(b)) || String(a.fam).localeCompare(String(b.fam)));
+  return ordered[Math.min(1, ordered.length - 1)];
 }
 
 function summarizeHeldFamilies(rows) {
@@ -182,6 +194,11 @@ async function crossSellForMonthEnd(db, monthEndDate) {
  * by last name, at most 500. pestServiceKey is the stored key of their latest pest visit (the service type text when no key is stored).
  */
 async function pestOnlyCustomers(db, asOfDate) {
+  return (await pestOnlySummary(db, asOfDate)).rows;
+}
+
+/** The pest-only list plus its full count (the list stops at 500; the count does not). */
+async function pestOnlySummary(db, asOfDate) {
   const asOf = requireDate(asOfDate);
   const { rows } = await db.raw(`
     WITH ${COUNTED_VISITS_SQL},
@@ -195,19 +212,22 @@ async function pestOnlyCustomers(db, asOfDate) {
       WHERE v.fam = 'pest'
       ORDER BY v.customer_id, v.scheduled_date DESC, v.id
     )
-    SELECT c.id, c.first_name, c.last_name, c.city, l.pest_service_key
+    SELECT c.id, c.first_name, c.last_name, c.city, l.pest_service_key, COUNT(*) OVER () AS total_count
     FROM latest_pest l
     JOIN customers c ON c.id = l.customer_id
     ORDER BY LOWER(c.last_name), LOWER(c.first_name), c.id
     LIMIT ${PEST_ONLY_LIMIT}
   `, asOfBindings(asOf));
-  return rows.map((r) => ({
+  return {
+    total: rows.length ? Number(rows[0].total_count) : 0,
+    rows: rows.map((r) => ({
     id: r.id,
     firstName: r.first_name,
     lastName: r.last_name,
     city: r.city,
     pestServiceKey: r.pest_service_key,
-  }));
+  })),
+  };
 }
 
 /** A crossSellForMonthEnd result as the three monthly_financial_snapshots columns. */
@@ -219,9 +239,21 @@ function snapshotColumns(result) {
   };
 }
 
-/** The snapshot columns for a month: counts and the source split. */
-async function crossSellColumns(db, monthEndDate) {
-  return snapshotColumns(await crossSellForMonthEnd(db, monthEndDate));
+// 'YYYY-MM' of the month before the one `day` ('YYYY-MM-DD') falls in. String arithmetic: no clock, no zone.
+function previousMonthKey(day) {
+  const [year, month] = day.split('-').map(Number);
+  return month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, '0')}`;
+}
+
+/**
+ * The snapshot columns for a month: counts and the source split. Only the month just closed (or a later one) is
+ * read: the monthly job also rewrites the month before it, and an older reading must stay what it was at that
+ * month's end, so for those this returns {} and the upsert leaves the three columns as they are.
+ */
+async function crossSellColumns(db, monthEndDate, today = etDateString()) {
+  const asOf = requireDate(monthEndDate);
+  if (asOf.slice(0, 7) < previousMonthKey(requireDate(today))) return {};
+  return snapshotColumns(await crossSellForMonthEnd(db, asOf));
 }
 
 const share = (multi, recurring) => (recurring > 0 ? Math.round((multi / recurring) * 10000) / 10000 : null);
@@ -251,7 +283,7 @@ async function getCrossSellSummary({ months = 12, db = require('../models/db'), 
     .limit(limit)
     .select('month', 'recurring_customers', 'multi_service_customers');
   const live = await crossSellForMonthEnd(db, today);
-  const pestOnly = await pestOnlyCustomers(db, today);
+  const pestOnly = await pestOnlySummary(db, today);
   return {
     series: stored.map(seriesPoint).reverse(),
     now: {
@@ -261,7 +293,8 @@ async function getCrossSellSummary({ months = 12, db = require('../models/db'), 
       share: share(live.multiServiceCustomers, live.recurringCustomers),
     },
     sources: live.sources,
-    pestOnly,
+    pestOnly: pestOnly.rows,
+    pestOnlyTotal: pestOnly.total,
   };
 }
 
@@ -277,6 +310,7 @@ module.exports = {
   summarizeHeldFamilies,
   crossSellForMonthEnd,
   pestOnlyCustomers,
+  pestOnlySummary,
   snapshotColumns,
   crossSellColumns,
   share,

@@ -40,7 +40,16 @@ describe('classifySource', () => {
 describe('summarizeHeldFamilies', () => {
   const visit = (customer, fam, createdAt, extra = {}) => ({ customer_id: customer, fam, created_at: new Date(createdAt), ...extra });
 
-  test('the added service is the family whose earliest visit is the newest', () => {
+  test('the added service is the second family booked, not the newest', () => {
+    const added = svc.addedServiceVisit([
+      visit('c1', 'pest', '2024-01-01T00:00:00Z'),
+      visit('c1', 'lawn', '2025-01-01T00:00:00Z', { source_call_log_id: 'call-1' }),
+      visit('c1', 'mosquito', '2026-06-01T00:00:00Z', { estimate_source: 'one_tap_purchase', source_estimate_id: 'e9' }),
+    ]);
+    expect(added.fam).toBe('lawn');
+  });
+
+  test('with two families the added service is the later one', () => {
     const added = svc.addedServiceVisit([
       visit('c1', 'pest', '2025-01-01T00:00:00Z', { source: 'admin' }),
       visit('c1', 'lawn', '2026-06-01T00:00:00Z', { source: 'quote-wizard' }),
@@ -48,7 +57,7 @@ describe('summarizeHeldFamilies', () => {
     expect(added.fam).toBe('lawn');
   });
 
-  test('counts customers with one family, two families and three, and splits only the multi-service ones', () => {
+  test('counts customers with one family, two families and three, and splits only the multi-service ones by their SECOND service', () => {
     const rows = [
       visit('single', 'pest', '2025-01-01T00:00:00Z'),
       visit('two', 'pest', '2025-01-01T00:00:00Z', { source: 'admin' }),
@@ -61,7 +70,7 @@ describe('summarizeHeldFamilies', () => {
       recurringCustomers: 3,
       multiServiceCustomers: 2,
       sources: {
-        app: 1, service_report_card: 0, website_quote: 0, estimate: 0, phone_call: 1, imported: 0, office: 0,
+        app: 1, service_report_card: 0, website_quote: 0, estimate: 0, phone_call: 0, imported: 0, office: 1,
       },
     });
   });
@@ -130,12 +139,12 @@ describe('crossSellForMonthEnd and the snapshot columns', () => {
       { customer_id: 'b', fam: 'pest', created_at: new Date('2025-01-01T00:00:00Z') },
     ];
     const db = makeDb({ raws: [{ rows }] });
-    const columns = await svc.crossSellColumns(db, new Date('2026-10-31T12:00:00Z'));
+    const columns = await svc.crossSellColumns(db, new Date('2026-10-31T12:00:00Z'), '2026-11-02');
     expect(db.calls.raw).toHaveLength(1);
     expect(db.calls.raw[0].bindings).toEqual(['2026-10-31', '2026-10-31', '2026-10-31', '2026-10-31']);
     expect(db.calls.raw[0].sql).toContain('JOIN customers c ON c.id = v.customer_id AND c.deleted_at IS NULL');
-    expect(db.calls.raw[0].sql).toContain('c.churned_at > CAST(? AS date)');
-    expect(db.calls.raw[0].sql).toContain("ss.status <> 'cancelled'");
+    expect(db.calls.raw[0].sql).toContain('CAST(c.churned_at AS date) > CAST(? AS date)');
+    expect(db.calls.raw[0].sql).toContain("ss.status IS DISTINCT FROM 'cancelled'");
     expect(db.calls.raw[0].sql).toContain('COALESCE(ss.is_callback, false) = false');
     expect(columns).toMatchObject({ recurring_customers: 2, multi_service_customers: 1 });
     expect(JSON.parse(columns.multi_service_sources)).toMatchObject({ website_quote: 1, office: 0 });
@@ -186,6 +195,21 @@ describe('getCrossSellSummary', () => {
   });
 });
 
+describe('crossSellColumns keeps an older reading', () => {
+  test('a month before the one just closed is not read again (the upsert leaves its columns)', async () => {
+    const db = { raw: jest.fn() };
+    expect(await svc.crossSellColumns(db, '2026-09-30', '2026-11-02')).toEqual({});
+    expect(db.raw).not.toHaveBeenCalled();
+  });
+
+  test('January keeps December of the year before as the month just closed', async () => {
+    const db = { raw: jest.fn() };
+    expect(await svc.crossSellColumns(db, '2026-11-30', '2027-01-02')).toEqual({});
+    db.raw.mockResolvedValue({ rows: [] });
+    expect(await svc.crossSellColumns(db, '2026-12-31', '2027-01-02')).toMatchObject({ recurring_customers: 0 });
+  });
+});
+
 describe('backfill', () => {
   const now = new Date('2026-11-26T15:00:00Z');
 
@@ -216,7 +240,7 @@ describe('backfill', () => {
     expect(db.calls.chain).toHaveLength(4);
     for (const entry of db.calls.chain) {
       expect(entry.table).toBe('monthly_financial_snapshots');
-      expect(entry.calls.map(([method]) => method)).toEqual(['where', 'update']);
+      expect(entry.calls.map(([method]) => method)).toEqual(['where', 'whereNull', 'update']);
       const update = entry.calls.find(([method]) => method === 'update')[1];
       expect(Object.keys(update).sort()).toEqual(['multi_service_customers', 'multi_service_sources', 'recurring_customers']);
     }

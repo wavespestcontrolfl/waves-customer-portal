@@ -237,7 +237,7 @@ describe('computeMonthSnapshot', () => {
     });
     expect(mockBuildPnl).toHaveBeenCalledWith(db, '2026-10-01', '2026-10-31');
     // The cross-sell count is taken on the month's last day.
-    expect(mockCrossSellColumns).toHaveBeenCalledWith(db, '2026-10-31');
+    expect(mockCrossSellColumns).toHaveBeenCalledWith(db, '2026-10-31', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
     // The buyer columns get the month's window, the settings row in effect, the P&L, the office allowance and cash revenue.
     expect(mockBuyerColumns).toHaveBeenCalledWith(db, expect.objectContaining({
       startDate: '2026-10-01', endDate: '2026-10-31', officeAllowance: 500, cashRevenue: 9000,

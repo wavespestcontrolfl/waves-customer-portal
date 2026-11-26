@@ -206,6 +206,24 @@ postgres('cross-sell rate (live Postgres)', () => {
       expect(await counts()).toEqual({ recurringCustomers: 1, multiServiceCustomers: 1 });
     });
 
+    test('a service riding on a plan visit as an add-on counts as its own family', async () => {
+      const c = await customer('AddOn');
+      const v = await visit(c, { ...PEST });
+      await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v, service_name: 'Termite Bait Monitoring', service_key_snapshot: 'termite_bait', created_at: '2026-02-01T12:00:00Z' });
+      const plain = await customer('AddOnNoFamily');
+      const v2 = await visit(plain, { ...PEST });
+      await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v2, service_name: 'WaveGuard Membership', service_key_snapshot: 'waveguard_membership', created_at: '2026-02-01T12:00:00Z' });
+      expect(await counts()).toEqual({ recurringCustomers: 2, multiServiceCustomers: 1 });
+    });
+
+    test('a series child with no recurring flag still counts', async () => {
+      const c = await customer('LegacyChild');
+      const parent = await visit(c, { ...PEST, scheduled_date: '2026-01-15' });
+      await visit(c, { ...PEST, is_recurring: null, recurring_parent_id: parent });
+      // The parent is outside the window; only the flagless child is in it, and it alone makes a recurring customer.
+      expect(await counts()).toEqual({ recurringCustomers: 1, multiServiceCustomers: 0 });
+    });
+
     test('the same family twice is one family, not two', async () => {
       const c = await customer('Twice');
       await visit(c, { ...PEST });
@@ -291,7 +309,7 @@ postgres('cross-sell rate (live Postgres)', () => {
 
     test('the 2nd-of-month write stores the three columns on the month row', async () => {
       await seed();
-      await snapshot.upsertMonthSnapshot('2026-10', trx);
+      await snapshot.upsertMonthSnapshot('2026-10', trx, new Date('2026-11-02T12:00:00Z'));
       const row = await trx('monthly_financial_snapshots').where({ month: '2026-10-01' }).first();
       expect(row.recurring_customers).toBe(2);
       expect(row.multi_service_customers).toBe(1);
@@ -331,7 +349,10 @@ postgres('cross-sell rate (live Postgres)', () => {
       const lines = [];
       const report = await backfill.backfillCrossSell(trx, { apply: true, now, log: (l) => lines.push(l) });
       expect(lines).toHaveLength(4);
-      expect(report.filter((r) => r.stored).map((r) => r.month)).toEqual(['2026-07-01', '2026-10-01']);
+      // October already held a reading: kept. July had none: filled.
+      expect(report.filter((r) => r.stored).map((r) => r.month)).toEqual(['2026-07-01']);
+      const forced = await backfill.backfillCrossSell(trx, { apply: true, force: true, now });
+      expect(forced.filter((r) => r.stored).map((r) => r.month)).toEqual(['2026-07-01', '2026-10-01']);
 
       const after = await trx('monthly_financial_snapshots').orderBy('month');
       expect(after).toHaveLength(3); // no row inserted

@@ -9,7 +9,7 @@
 // column and never inserts a row (a month with no stored row is reported and skipped; the monthly cron stores it).
 // Reads scheduled_services, customers and estimates; sends nothing to anyone and calls no paid service.
 //
-// Usage: node server/scripts/backfill-cross-sell-snapshots.js [--apply]
+// Usage: node server/scripts/backfill-cross-sell-snapshots.js [--apply] [--force]  (--force also rewrites months that hold a reading)
 require('dotenv').config();
 
 const { monthOffset, monthWindow } = require('../services/monthly-financial-snapshot');
@@ -30,18 +30,21 @@ const percent = (multi, recurring) => (recurring > 0 ? `${(share(multi, recurrin
  * Fill the months. Returns one report row per month: { month, recurringCustomers, multiServiceCustomers, sources, stored }.
  * `stored` is true only when --apply updated an existing row.
  */
-async function backfillCrossSell(db, { apply = false, now = new Date(), log = () => {} } = {}) {
+async function backfillCrossSell(db, { apply = false, force = false, now = new Date(), log = () => {} } = {}) {
   const report = [];
   for (const month of monthsToFill(now)) {
     const { endDate } = monthWindow(month);
     const result = await crossSellForMonthEnd(db, endDate);
     let stored = false;
     if (apply) {
-      const updated = await db('monthly_financial_snapshots').where({ month }).update(snapshotColumns(result));
+      // A month that already holds a reading keeps it unless --force: a re-run must not rewrite a stored trend.
+      const target = db('monthly_financial_snapshots').where({ month });
+      if (!force) target.whereNull('recurring_customers');
+      const updated = await target.update(snapshotColumns(result));
       stored = updated > 0;
     }
     report.push({ month, ...result, stored });
-    const note = apply && !stored ? '  (no stored row for this month: skipped)' : '';
+    const note = apply && !stored ? '  (no stored row, or a reading is already stored: skipped)' : '';
     log(`${month}  recurring ${String(result.recurringCustomers).padStart(4)}  multi ${String(result.multiServiceCustomers).padStart(3)}  `
       + `${percent(result.multiServiceCustomers, result.recurringCustomers).padStart(6)}  ${JSON.stringify(result.sources)}${note}`);
   }
@@ -50,10 +53,12 @@ async function backfillCrossSell(db, { apply = false, now = new Date(), log = ()
 
 async function main() {
   const db = require('../models/db');
-  const apply = process.argv.slice(2).includes('--apply');
+  const args = process.argv.slice(2);
+  const apply = args.includes('--apply');
+  const force = args.includes('--force');
   console.log(`${apply ? 'APPLY' : 'DRY RUN'}: cross-sell number, ${FIRST_MONTH.slice(0, 7)} through last month`);
   try {
-    await backfillCrossSell(db, { apply, log: (line) => console.log(line) });
+    await backfillCrossSell(db, { apply, force, log: (line) => console.log(line) });
     if (!apply) console.log('Dry run: nothing written. Re-run with --apply to store these on the existing monthly rows.');
   } finally {
     await db.destroy();

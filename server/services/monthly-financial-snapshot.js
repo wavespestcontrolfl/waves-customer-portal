@@ -167,7 +167,7 @@ async function financialsEffectiveOn(db, onDate) {
 }
 
 /** Everything one month's snapshot row holds. Pure reads; writes nothing. */
-async function computeMonthSnapshot(month, db = require('../models/db')) {
+async function computeMonthSnapshot(month, db = require('../models/db'), asOfNow = new Date()) {
   const { month: monthStart, startDate, endDate } = monthWindow(month);
   const [ledger, stops, jobs, financials, pnl] = await Promise.all([
     officeLedgerCost(db, startDate, endDate),
@@ -180,7 +180,8 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
   const officeCost = round2(ledger + allowance);
   const cashRevenue = round2(pnl.revenue.total);
   const buyer = await buyerColumns(db, { startDate, endDate, financials, pnl, officeAllowance: allowance, cashRevenue });
-  const crossSell = await crossSellColumns(db, endDate);
+  // The run's own clock decides which month the cross-sell reading belongs to (see crossSellColumns).
+  const crossSell = await crossSellColumns(db, endDate, etDateString(asOfNow));
   return {
     month: monthStart,
     completed_job_revenue: jobs.revenue,
@@ -208,7 +209,7 @@ const SNAPSHOT_ISOLATION = { isolationLevel: 'repeatable read' };
 
 /** Compute and store one month on `trx` (already a snapshot transaction): one row per month, a re-run replaces it. */
 async function writeMonthSnapshot(month, trx, computedAt) {
-  const snapshot = await computeMonthSnapshot(month, trx);
+  const snapshot = await computeMonthSnapshot(month, trx, computedAt);
   await trx('monthly_financial_snapshots')
     .insert({ ...snapshot, computed_at: computedAt })
     .onConflict('month')
