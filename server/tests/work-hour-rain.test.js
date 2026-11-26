@@ -56,6 +56,22 @@ describe('parseObs', () => {
     expect(obs.SPG).toEqual({});
   });
 
+  test('a CRLF reply parses like an LF one: a trace reads 0, an empty or M field reads nothing, spaces are trimmed', () => {
+    const crlf = [
+      'station,valid,p01i',
+      'SRQ,2026-11-25 09:53,T',
+      'SRQ,2026-11-25 10:53,',
+      'SRQ,2026-11-25 11:53,M',
+      'SRQ,2026-11-25 12:53,0.03',
+      ' VNC , 2026-11-25 09:55 , 0.02 ',
+      'VNC,2026-11-25 10:55,T',
+    ].join('\r\n') + '\r\n';
+    const obs = w.parseObs(crlf, '2026-11-25');
+    expect(obs.SRQ).toEqual({ 9: 0, 12: 0.03 });
+    expect(obs.VNC).toEqual({ 9: 0.02, 10: 0 });
+    expect(w.parseObs(crlf.replace(/\r\n/g, '\n'), '2026-11-25')).toEqual(obs);
+  });
+
   test('the response that is not the CSV (the rate limit text) is null, never dry', () => {
     expect(w.parseObs('Too many requests from your IP address, slow down.', '2026-11-25')).toBeNull();
   });

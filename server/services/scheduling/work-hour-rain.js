@@ -65,11 +65,12 @@ function bucketOf(valid) {
 
 /** { SRQ: { 7: 0.08, ... }, ... } for `day`, from the CSV, or null when it is not the CSV. */
 function parseObs(csv, day) {
-  const lines = String(csv || '').trim().split('\n');
-  if (!lines[0].startsWith('station,valid,p01i')) return null;
+  // CRLF or LF; every field trimmed, so a stray carriage return or space never turns 'T' or a station name into a miss.
+  const lines = String(csv || '').trim().split(/\r?\n/);
+  if (!lines[0].trim().startsWith('station,valid,p01i')) return null;
   const obs = Object.fromEntries(Object.keys(STATIONS).map((s) => [s, {}]));
   for (const line of lines.slice(1)) {
-    const [station, valid, raw] = line.split(',');
+    const [station, valid, raw] = line.split(',').map((f) => f.trim());
     const bucket = obs[station] && bucketOf(String(valid || ''));
     if (!bucket || bucket.date !== day) continue;
     const inches = raw === 'T' ? 0 : raw === 'M' || raw === '' || raw == null ? null : Number(raw);

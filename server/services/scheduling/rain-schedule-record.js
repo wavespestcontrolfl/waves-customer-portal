@@ -175,21 +175,15 @@ async function dryDayFor(row, hourly, ctx) {
 }
 
 /**
- * The same-day hour this reorder takes, always LATER than the visit's own start: rain-pass's nearest dry open hour when it is
- * later, else (it is earlier, or an earlier proposal for the same technician holds it) the nearest later one that is dry, open
- * and not held. null when none is left; the visit then goes on to the next work day or the call list.
+ * The same-day hour this reorder takes: the nearest start LATER than the visit's own whose hours and drying hours read dry
+ * on `hourly` (the visit's one forecast snapshot), that is open and not held by an earlier proposal. null when none is left;
+ * the visit then goes on to the next work day or the call list.
  */
-async function reorderStart(row, ctx) {
-  const { day, read, taken } = ctx;
-  const { reach } = row.visit;
-  const length = reach.endMin - reach.startMin;
-  const before = reach.ownStartMin - reach.startMin;
-  const fits = (own) => !clashes(taken, techOf(row), day, own - before, own - before + length);
-  // Owner 2026-11-26: a rain text moves a visit to LATER the same day only (morning rain: afternoon). rain-pass's nearest dry
-  // hour can be an earlier one; then, and when an earlier proposal holds the hour, the search starts after the original start.
-  if (!row.proposal) return null;
-  if (toMin(row.proposal) > reach.ownStartMin && fits(toMin(row.proposal))) return toMin(row.proposal);
-  const hourly = await read(row.visit.point.lat, row.visit.point.lng);
+async function reorderStart(row, ctx, hourly) {
+  const { day, taken } = ctx;
+  // Owner 2026-11-26: a rain text moves a visit to LATER the same day only (morning rain: afternoon). rain-pass's own proposal
+  // is not used: it was judged on an earlier read and may be an earlier hour; the search below walks later starts on the
+  // visit's one snapshot, so the whole decision reads the same hours.
   if (!Array.isArray(hourly)) return null;
   // The nearest later start whose own hours and drying hours read fully below DRY_PCT and are free (the earliest, as every
   // candidate is later than the visit's own start).
@@ -254,8 +248,11 @@ async function proposeFor(row, ctx) {
   base.peak = row.peak;
   const { reach } = row.visit;
   const length = reach.endMin - reach.startMin;
+  // ONE forecast snapshot for this visit's whole decision (the NWS read is cached by grid cell, but a cache can expire between
+  // two reads): the same hours judge the reorder, the unread check and the next work day.
+  const hourly = await read(row.visit.point.lat, row.visit.point.lng);
   // A hour already taken by an earlier proposal is never offered, over the cap or not.
-  const own = await reorderStart(row, ctx);
+  const own = await reorderStart(row, ctx, hourly);
   if (own != null) {
     if (!open) return { ...base, decision: 'cap', would: 'reorder', to_start: toHHMM(own) };
     const start = own - (reach.ownStartMin - reach.startMin);
@@ -264,9 +261,8 @@ async function proposeFor(row, ctx) {
   }
   // No later dry open hour on the day. Owner ruling 2026-11-26, per visit: later the same day first, then the next work day,
   // then the office call list, whatever the rest of the day reads (the 'wholly wet day' gate of plan v2 is gone). The point's
-  // own hours are read again (the NWS read is cached by grid cell). The move is checked against the accepted targets before
-  // the cap is named: a stop over the cap is `cap` only when a valid move exists, else it keeps its true reason.
-  const hourly = await read(row.visit.point.lat, row.visit.point.lng);
+  // own hours are the snapshot read above. The move is checked against the accepted targets before the cap is named: a stop
+  // over the cap is `cap` only when a valid move exists, else it keeps its true reason.
   if (!Array.isArray(hourly)) return { ...base, decision: 'none', reason: 'unread_forecast' };
   // A later hour with no reading could still have been dry: unread, never a move or a call.
   if (laterHourUnread(row, hourly, ctx)) return { ...base, decision: 'none', reason: 'unread_forecast' };
