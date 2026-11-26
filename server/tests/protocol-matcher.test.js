@@ -449,6 +449,9 @@ describe('a later stage named anywhere in a flea, cockroach or bed bug name', ()
     ['Bed Bug Treatment Follow-Up', ['bed_bug', 3, 'bed_bug_followup']],
     ['Bed Bug Treatment Service Visit #2', ['bed_bug', 3, 'bed_bug_followup']],
     ['Bed Bug Treatment Service Third Treatment', ['bed_bug', 3, 'bed_bug_followup']],
+    // An explicit stage stands when the name also lists an extra.
+    ['Flea Control Service Visit 2 with Recheck', ['flea', 2, 'flea_followup']],
+    ['German Roach Treatment 2 + Follow-up', ['cockroach', 3, 'cockroach_followup']],
   ])('%s is the later card', (name, expected) => {
     expect(stage(name)).toEqual(expected);
   });
@@ -464,6 +467,11 @@ describe('a later stage named anywhere in a flea, cockroach or bed bug name', ()
     ['German Roach Cleanout with Recheck', ['cockroach', 1, 'german_roach_cleanout']],
     ['Flea Control Service & Follow-Up', ['flea', 1, 'flea_service']],
     ['Flea Treatment including a 14-day recheck', ['flea', 1, 'flea_service']],
+    ['Flea Control Service with a free follow-up', ['flea', 1, 'flea_service']],
+    ['German Roach Treatment (Follow-up included)', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Flea Control Service, recheck is included', ['flea', 1, 'flea_service']],
+    ['German Roach Treatment 2-Visit Package', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Bed Bug Treatment Service 2 Treatments', ['bed_bug', 2, 'bed_bug_treatment']],
     ['Vehicle German Roach Treatment (2 Visits)', ['cockroach', 1, 'german_roach_cleanout']],
     ['German Roach Initial Service (3-Visit)', ['cockroach', 1, 'german_roach_cleanout']],
     ['Bed Bug Treatment Service', ['bed_bug', 2, 'bed_bug_treatment']],

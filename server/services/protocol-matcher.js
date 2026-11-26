@@ -517,15 +517,20 @@ function mistingSystemMatchOverride(serviceType, serviceKey) {
 const STAGE_BY_NAME_RULES = { bed_bug: 'bed_bug_followup', flea: 'flea_followup', cockroach: 'cockroach_followup' };
 const LATER_STAGE_WORD = '(?:re-?check|follow[\\s-]?up|clearance)';
 const LATER_STAGE_RE = new RegExp(`\\b${LATER_STAGE_WORD}\\b`, 'i');
-// "Treatment 2", "Visit #3", "2nd treatment", "third visit". Not a count of visits sold: "Treatment (2 Visits)", "2 treatments".
-const NUMBERED_STAGE_RE = /\b(?:treatment|visit|service)\s*#?\s*[23]\b(?!\s*(?:visits?|treatments?|services?|pack|x)\b)|\b(?:second|third|2nd|3rd)\s+(?:treatment|visit|service)\b/i;
-// A package sold on the first visit names its later visit as an extra: "Cleanout + 14 Day Follow-up", "Treatment with Recheck".
-const PACKAGE_EXTRA_RE = new RegExp(`(?:\\+|&|\\b(?:and|with|plus|incl|includes|including)\\b)[^a-z0-9]*(?:an?\\s+|one\\s+|free\\s+)?(?:\\d+[\\s-]*(?:day|week)s?[\\s-]*)?${LATER_STAGE_WORD}\\b`, 'i');
+// "Treatment 2", "Visit #3", "2nd treatment", "third visit". Not a count of visits sold: "Treatment (2 Visits)", "Treatment 2-Visit
+// Package", "2 treatments".
+const NUMBERED_STAGE_RE = /\b(?:treatment|visit|service)\s*#?\s*[23]\b(?![\s-]*(?:visits?|treatments?|services?|pack(?:age)?s?|x)\b)|\b(?:second|third|2nd|3rd)\s+(?:treatment|visit|service)\b/i;
+// A package sold on the first visit names its later visit as an extra: "Cleanout + 14 Day Follow-up", "Service with a free
+// follow-up", "Treatment (Follow-up included)". Those phrases are taken out, and the rest of the name is read for a stage, so
+// "Visit 2 with Recheck" is still visit 2.
+const PACKAGE_EXTRA_RES = [
+  new RegExp(`(?:\\+|&|\\b(?:and|with|plus|incl|includes|including)\\b)(?:[^a-z0-9]*[a-z0-9]+){0,4}?[^a-z0-9]*${LATER_STAGE_WORD}\\b(?:[^a-z0-9]*includ(?:ed|ing)\\b)?`, 'gi'),
+  new RegExp(`\\b${LATER_STAGE_WORD}\\b[^a-z0-9]*(?:is\\s+|are\\s+)?includ(?:ed|ing)\\b`, 'gi'),
+];
 
 function namesLaterStage(serviceType) {
-  const raw = String(serviceType || '');
-  if (PACKAGE_EXTRA_RE.test(raw)) return false;
-  return LATER_STAGE_RE.test(raw) || NUMBERED_STAGE_RE.test(raw);
+  const own = PACKAGE_EXTRA_RES.reduce((name, extra) => name.replace(extra, ' '), String(serviceType || ''));
+  return LATER_STAGE_RE.test(own) || NUMBERED_STAGE_RE.test(own);
 }
 
 // The rule for a booking: the first rule of its program whose terms the name carries, or the rule that claims its catalog
