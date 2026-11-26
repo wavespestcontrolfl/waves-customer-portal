@@ -114,6 +114,8 @@ function makeDb(estimate, { customerRow = existingMember, liveSeriesCustomerId =
       whereNull(column) { this.nullColumns = [...(this.nullColumns || []), column]; return this; },
       whereNotNull() { return this; },
       whereRaw() { return this; },
+      leftJoin() { return this; },
+      select() { return this; },
       orderBy() { return this; },
       forUpdate() { return this; },
       async first() {
@@ -179,6 +181,8 @@ function makeRacingDb(baseEstimate, staleData, freshData) {
       whereNull(column) { this.nullColumns = [...(this.nullColumns || []), column]; return this; },
       whereNotNull() { return this; },
       whereRaw() { return this; },
+      leftJoin() { return this; },
+      select() { return this; },
       orderBy() { return this; },
       forUpdate() { forUpdateCalled = true; return this; },
       first: async () => {
