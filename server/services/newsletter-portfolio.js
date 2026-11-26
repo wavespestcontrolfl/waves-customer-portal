@@ -35,6 +35,7 @@
 
 const { etParts } = require('../utils/datetime-et');
 const { featureScoreFloor, heroScoreFloor } = require('./event-scoring');
+const { cityToZone } = require('./event-freshness');
 
 const TARGET_COUNT = 8;
 const MIN_COUNT = 5;
@@ -46,10 +47,13 @@ const VENUE_CAP = 2;
 const SOURCE_CAP = 2;
 const CLASS_CAP = 1;
 // Tampa Bay zones are 45-75 minutes from most readers: together they fill at
-// most AWAY_CAP slots. An event with no region_zone is not counted as away.
+// most AWAY_CAP slots. An event with no region_zone falls back to its city
+// (the normalizer's own cityToZone map), so an untagged Clearwater event
+// still counts as away.
 const AWAY_ZONES = new Set(['tampa', 'pinellas']);
 const AWAY_CAP = 2;
-const isAway = (event) => AWAY_ZONES.has(norm(event?.region_zone));
+const awayZoneOf = (event) => norm(event?.region_zone) || cityToZone(event?.city) || '';
+const isAway = (event) => AWAY_ZONES.has(awayZoneOf(event));
 
 const MIN_WEEKEND = 4;
 const MIN_WEEKEND_DAYS = 2;

@@ -101,7 +101,17 @@ describe('local first (owner 2026-11-26)', () => {
     expect(result.selected.length - awayCount).toBeGreaterThanOrEqual(5);
   });
 
-  test('a thin local week ships fewer events instead of adding a third Tampa Bay event', () => {
+  test('an away event with no region_zone counts by its city', () => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'tampa', editorial_score: 96 - i, source_id: `t-${i}` }));
+    const untagged = ev({ region_zone: null, city: 'clearwater', editorial_score: 93, source_id: 'u-1' });
+    const local = ['manatee', 'sarasota', 'south_sarasota', 'manatee', 'sarasota'].map((z, i) => ev({
+      region_zone: z, editorial_score: 80 - i, source_id: `l-${i}`, start_at: i % 2 ? DAY.sun : DAY.sat,
+    }));
+    const result = selectPortfolio([...tagged, untagged, ...local]);
+    expect(result.selected.map((e) => e.id)).not.toContain(untagged.id);
+  });
+
+  test('a thin local week selects fewer events (below the minimum the issue skips) instead of a third Tampa Bay event', () => {
     const away = [1, 2, 3, 4].map((i) => ev({ region_zone: 'pinellas', editorial_score: 95 - i, source_id: `p-${i}`, venue_name: `PV ${i}` }));
     const local = [ev({ region_zone: 'sarasota', editorial_score: 82, source_id: 'l-1' })];
     const result = selectPortfolio([...away, ...local]);
