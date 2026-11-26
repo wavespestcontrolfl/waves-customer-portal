@@ -2085,7 +2085,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     );
     return base + addonDur;
   })();
-  const { conflicts: slotConflicts } = useSlotConflicts({
+  const { conflicts: slotConflicts, shiftWarning: slotShiftWarning } = useSlotConflicts({
     serviceId: service.id,
     technicianId: form.technicianId || null,
     date: form.scheduledDate,
@@ -6033,6 +6033,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 conflicts={stripCoversRouteWarning(availability, stripCurrent)
                   ? slotConflicts.filter((conflict) => !conflict.warning)
                   : slotConflicts}
+                shiftWarning={slotShiftWarning}
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <AvailabilityStrip
@@ -9598,7 +9599,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // it). Suggested options are left unannotated: the server already ranks
   // them.
   const manualBlock = windowFor(manualTime);
-  const { conflicts: manualConflicts } = useSlotConflicts({
+  const { conflicts: manualConflicts, shiftWarning: manualShiftWarning } = useSlotConflicts({
     serviceId: service.id,
     technicianId: service.technicianId || service.technician_id || null,
     date: manualDate,
@@ -9809,6 +9810,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       durationMinutes={durationMinutes}
       handleManualReschedule={handleManualReschedule}
       manualConflicts={manualConflicts}
+      manualShiftWarning={manualShiftWarning}
       manualAvailability={manualAvailability}
       onClose={onClose}
     />

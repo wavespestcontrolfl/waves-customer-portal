@@ -35,3 +35,24 @@ it('durationEdit rides only when the caller saves the duration (edit form); a mo
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
   expect('durationEdit' in sentTarget(fetch, 2)).toBe(false);
 });
+
+// GATE_TECH_SHIFT_HOURS: the shift line of the picked slot, beside the overlap rows.
+it('gives back the shift line of the picked slot, null without one, and clears it when the slot changes', async () => {
+  const LINE = "Synthetic Tech's shift is 8:00 AM to 5:00 PM. This visit is outside those hours.";
+  let resolveSecond;
+  const fetch = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, results: [{ conflicts: [], shiftWarning: LINE }] }) })
+    .mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve; }));
+  vi.stubGlobal('fetch', fetch);
+  const { result, rerender } = renderHook((props) => useSlotConflicts({ ...slot, ...props }), { initialProps: {} });
+  expect(result.current.shiftWarning).toBeNull();
+  await waitFor(() => expect(result.current.shiftWarning).toBe(LINE));
+  // A new slot: the old line goes at once, before the new answer.
+  rerender({ windowStart: '15:00', windowEnd: '16:00' });
+  expect(result.current.shiftWarning).toBeNull();
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  // An answer with no key (the gate off), or a key that is no text: no line.
+  resolveSecond({ ok: true, json: async () => ({ ok: true, results: [{ conflicts: [], shiftWarning: { text: LINE } }] }) });
+  await waitFor(() => expect(result.current.checking).toBe(false));
+  expect(result.current.shiftWarning).toBeNull();
+});
