@@ -415,10 +415,15 @@ async function editApprovedRow(trx, row, f, actor) {
 /** What the editor (or the discard button) saw when it opened, as sent: { baseTextSha256, baseUpdatedAt, expectStatus }, every part optional. */
 function openedState(input) {
   const open = input && typeof input === 'object' ? input : {};
+  const given = (key) => open[key] !== undefined && open[key] !== null;
+  // A precondition that is sent but malformed is a bad request, never silently ignored (an ignored guard would let the write through).
+  if (given('baseTextSha256') && !(typeof open.baseTextSha256 === 'string' && /^[0-9a-f]{64}$/i.test(open.baseTextSha256.trim()))) throw new FactError('INVALID_PRECONDITION', 400);
+  if (given('baseUpdatedAt') && !(typeof open.baseUpdatedAt === 'string' && !Number.isNaN(Date.parse(open.baseUpdatedAt)))) throw new FactError('INVALID_PRECONDITION', 400);
+  if (given('expectStatus') && !['draft', 'approved'].includes(open.expectStatus)) throw new FactError('INVALID_PRECONDITION', 400);
   return {
-    base: typeof open.baseTextSha256 === 'string' ? open.baseTextSha256.trim().toLowerCase() : '',
-    baseUpdatedAt: typeof open.baseUpdatedAt === 'string' ? Date.parse(open.baseUpdatedAt) : NaN,
-    expectStatus: ['draft', 'approved'].includes(open.expectStatus) ? open.expectStatus : '',
+    base: given('baseTextSha256') ? open.baseTextSha256.trim().toLowerCase() : '',
+    baseUpdatedAt: given('baseUpdatedAt') ? Date.parse(open.baseUpdatedAt) : NaN,
+    expectStatus: given('expectStatus') ? open.expectStatus : '',
   };
 }
 

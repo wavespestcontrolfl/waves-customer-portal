@@ -371,6 +371,22 @@ describe('the reviewed text hash the page sends', () => {
     expect(deleted).toEqual(['company_fact_bank']);
   });
 
+  test('a malformed precondition is a 400 INVALID_PRECONDITION for an edit and a discard, and nothing is read or written', async () => {
+    const never = { transaction: () => { throw new Error('must not open a transaction'); } };
+    const good = { baseTextSha256: sha256('x'), baseUpdatedAt: '2026-11-25T15:00:00.123Z', expectStatus: 'draft' };
+    const bad = [
+      { baseTextSha256: 'not-hex' }, { baseTextSha256: 'a'.repeat(63) }, { baseTextSha256: 12 }, { baseTextSha256: '' },
+      { baseUpdatedAt: 'yesterday' }, { baseUpdatedAt: 20261125 }, { baseUpdatedAt: '' },
+      { expectStatus: 'retired' }, { expectStatus: '' }, { expectStatus: ['draft'] },
+    ];
+    for (const part of bad) {
+      await expect(Bank.editFact(ID, { topic: 'Areas', ...good, ...part }, owner, { dbi: never })).rejects.toMatchObject({ code: 'INVALID_PRECONDITION', status: 400 });
+      if (!('expectStatus' in part)) await expect(Bank.discardDraft(ID, owner, { dbi: never, ...good, ...part })).rejects.toMatchObject({ code: 'INVALID_PRECONDITION', status: 400 });
+    }
+    // Not sent (undefined or null) is fine: an older caller has no guard to check.
+    await expect(Bank.editFact(ID, { topic: 'Areas', baseTextSha256: null, baseUpdatedAt: undefined }, owner, { dbi: dbFor('We service Parrish.') })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+  });
+
   // A transaction that answers every read with "nothing" and the locked draft with `row`, enough to reach the approve checks.
   const approveDb = (text) => {
     const row = { id: ID, status: 'draft', fact_text: text, text_sha256: sha256(text.trim()), supersedes_id: null };

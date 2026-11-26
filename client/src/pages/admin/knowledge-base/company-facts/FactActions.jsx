@@ -26,7 +26,7 @@ function useAction(onDone, onStale) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const busyRef = useRef(false);
-  const run = async (work, doneMessage, switchTo) => {
+  const run = async (work, doneMessage, switchTo, onRefused) => {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
@@ -36,7 +36,11 @@ function useAction(onDone, onStale) {
       onDone(doneMessage, switchTo);
     } catch (requestError) {
       setError(errorMessage(requestError));
-      if (["STALE_TEXT", "STALE_FACT", "STATUS_CHANGED"].includes(requestError.code)) onStale();
+      if (["STALE_TEXT", "STALE_FACT", "STATUS_CHANGED"].includes(requestError.code)) {
+        // The fact changed under this action: refresh the card, and let the caller close what it had open.
+        onStale();
+        onRefused?.();
+      }
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -95,7 +99,7 @@ export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing })
       {mode === "discard" && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-ui-body">Discard this draft for good?</span>
-          <Button variant="danger" loading={busy} onClick={() => run(() => send(`/${fact.id}`, "DELETE", discardBase), "Draft discarded.")}>Discard</Button>
+          <Button variant="danger" loading={busy} onClick={() => run(() => send(`/${fact.id}`, "DELETE", discardBase), "Draft discarded.", undefined, () => setMode("view"))}>Discard</Button>
           <Button variant="secondary" onClick={() => setMode("view")}>Keep</Button>
         </div>
       )}

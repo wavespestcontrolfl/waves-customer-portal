@@ -13,7 +13,8 @@
  *   PATCH  /:id             edit a draft in place; an edit of an approved fact makes a NEW draft that supersedes it. Send only the
  *                           fields that changed, plus what the editor opened: baseTextSha256 (409 STALE_TEXT when the wording changed),
  *                           baseUpdatedAt (the fact's updated_at; 409 STALE_FACT when any field changed) and expectStatus 'draft' or
- *                           'approved' (409 STATUS_CHANGED, so a draft approved meanwhile is not edited into a replacement)
+ *                           'approved' (409 STATUS_CHANGED, so a draft approved meanwhile is not edited into a replacement); a malformed one is
+ *                           400 INVALID_PRECONDITION
  *   DELETE /:id             discard a draft; body { baseTextSha256?, baseUpdatedAt? } (what the page showed): a draft changed since is
  *                           refused 409 STALE_TEXT / STALE_FACT and not deleted
  *   POST   /:id/approve     OWNER ACCOUNT ONLY (requireFullAccess); { textSha256 (the hash the page showed; 409 STALE_TEXT

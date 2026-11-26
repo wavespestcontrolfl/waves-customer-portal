@@ -43,7 +43,7 @@ function FactList({ list, status, onDone, onStale, onEditing, focusId }) {
         <FactCard key={fact.id} fact={fact} ownerActions={list.ownerActions} onDone={onDone} onStale={onStale} onEditing={onEditing} highlight={fact.id === focusId} />
       ))}
       {list.error && <ActionFeedback error>{list.error}</ActionFeedback>}
-      {list.nextCursor && <Button variant="secondary" loading={list.loadingMore} onClick={list.loadMore}>Load more</Button>}
+      {list.nextCursor && <Button variant="secondary" loading={list.loadingMore} disabled={list.refreshing} onClick={list.loadMore}>Load more</Button>}
     </div>
   );
 }
