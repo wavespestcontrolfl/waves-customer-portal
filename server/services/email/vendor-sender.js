@@ -28,8 +28,13 @@ function registrableSenderDomain(address) {
  * LIMIT 1 lookup for an earlier vendor row in emails. `email.id` is left out
  * of that lookup so a row never vouches for itself.
  * A failed lookup answers true: keeping a promo sender is the safe side.
+ *
+ * `strict` (the spam-block path): history counts only money evidence — a
+ * vendor_invoice row or an expense_/invoice_ action. A classifier
+ * "vendor_communication" label alone is not enough to exempt a spammer
+ * from the block list; it still stops an automatic unsubscribe.
  */
-async function isVendorWeUse(email) {
+async function isVendorWeUse(email, { strict = false } = {}) {
   const reg = registrableSenderDomain(email && email.from_address);
   if (!reg) return false;
   if (KEEP_PROMO_DOMAINS.includes(reg)) return true;
@@ -45,7 +50,7 @@ async function isVendorWeUse(email) {
         [`%@${reg}`, `%@${reg}>`, `%.${reg}`, `%.${reg}>`],
       )
       .where((qb) => qb
-        .whereIn('classification', VENDOR_CLASSIFICATIONS)
+        .whereIn('classification', strict ? ['vendor_invoice'] : VENDOR_CLASSIFICATIONS)
         .orWhere('auto_action', 'like', 'expense\\_%')
         .orWhere('auto_action', 'like', 'invoice\\_%'));
     if (email.id != null) q.whereNot('id', email.id);

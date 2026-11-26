@@ -75,6 +75,13 @@ describe('isVendorWeUse', () => {
     expect(calls.emails).toContainEqual(['whereNot', 'id', 'e9']);
   });
 
+  test('strict mode (spam block) counts only money evidence, not a vendor_communication label', async () => {
+    const calls = mockTables({ priorEmail: { id: 'e0' } });
+    expect(await isVendorWeUse({ id: 'e9', from_address: 'promo@news.supplier.example' }, { strict: true })).toBe(true);
+    expect(calls.emails).toContainEqual(['whereIn', 'classification', ['vendor_invoice']]);
+    expect(calls.emails).toContainEqual(['orWhere', 'auto_action', 'like', 'expense\\_%']);
+  });
+
   test('a sender with no vendor history is not a vendor', async () => {
     mockTables();
     expect(await isVendorWeUse({ id: 1, from_address: 'deals@retailer.example.com' })).toBe(false);

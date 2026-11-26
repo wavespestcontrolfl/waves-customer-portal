@@ -441,6 +441,8 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
     const spy = jest.spyOn(vendorSender, 'isVendorWeUse').mockResolvedValue(true);
     await blockSpamSender({ id: 3, from_address: 'deals@promo.supplier.example' });
     expect(db).not.toHaveBeenCalled();
+    // The block path asks in strict mode: a classifier label alone never exempts a spammer.
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 3 }), { strict: true });
     // Not a vendor: it reaches the ordinary lookups.
     spy.mockResolvedValue(false);
     db.mockImplementation(() => { throw new Error('lookup reached'); });
