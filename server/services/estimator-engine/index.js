@@ -3216,10 +3216,30 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       return result;
     }
 
+    // Returning-customer setup fee rule (owner 2026-11-24 and 2026-11-25, GATE_RETURNING_SETUP_FEE_GAP). The
+    // draft decides as a staff save does: on the plan the engine priced, from the visits of the customer the
+    // draft links (trustedCustomer: an ambiguous phone match links nobody). A waiver marks the engine result
+    // the draft stores (mapWithReturningWaiver) and rides the draft as the operator waiver, so the page, the
+    // accept and a later staff save read one answer. Decided once, here: a second pass over a marked result
+    // would find no fee to waive. Gate off, no linked customer or an active member = no history, no map, no
+    // change. A failed read or map keeps the fee: this step never costs a draft.
+    let returningSetupFeeWaiver = null;
+    try {
+      const Returning = require('../returning-setup-fee-waiver');
+      const history = await Returning.loadReturningVisitHistory(db, { customerId: trustedCustomer?.id });
+      if (history) {
+        ({ waiver: returningSetupFeeWaiver } = Returning.mapWithReturningWaiver(
+          engineResult, require('../pricing-engine/v1-legacy-mapper').mapV1ToLegacyShape, { history },
+        ));
+      }
+    } catch (err) {
+      logger.warn(`[estimator-engine] returning setup fee read skipped: ${err.message}`);
+    }
+
     let draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
       propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
-      membershipSnapshot, priorQualifyingServices, origin,
+      membershipSnapshot, priorQualifyingServices, origin, returningSetupFeeWaiver,
     });
 
     if (draft.blocked && UNIT_FENCE_QUIET_REASONS.includes(draft.duplicateBlock?.reason)) {
@@ -3271,7 +3291,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           draft = await createDraftEstimate({
             intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
             propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
-            membershipSnapshot, priorQualifyingServices, origin,
+            membershipSnapshot, priorQualifyingServices, origin, returningSetupFeeWaiver,
           });
         }
       }
