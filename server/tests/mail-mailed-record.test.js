@@ -101,3 +101,49 @@ describe('markBatch input', () => {
     expect(printedPriceOf(snap(12345)).pricedAt).toBeNull();
   });
 });
+
+describe('the label fields kept with the price', () => {
+  const { printedLabelOf, labelFieldsOf } = require('../services/mail/mailed-record');
+  const row = { recipient_names: ['TESTER ALEX J', 'TESTER JAMIE'], city: 'LAKEWOOD RANCH', zip: '34202' };
+  test('labelFieldsOf: the name and the office line', () => {
+    expect(labelFieldsOf(row)).toEqual({ name: 'Alex & Jamie Tester', nameCheck: false, textNumber: expect.any(String), officeByDefault: false });
+  });
+  test('printedLabelOf: only a mailed row with whole fields; an older snapshot has none', () => {
+    const label = labelFieldsOf(row);
+    const snap = { plan: 'pest_quarterly', annual: 600, monthly: 50, setupFee: 0, pricedAt: null, label };
+    expect(printedLabelOf({ mailed_at: new Date(), mailed_price: snap })).toEqual(label);
+    expect(printedLabelOf({ mailed_at: new Date(), mailed_price: JSON.stringify(snap) })).toEqual(label);
+    expect(printedLabelOf({ mailed_at: null, mailed_price: snap })).toBeNull();
+    expect(printedLabelOf({ mailed_at: new Date(), mailed_price: { ...snap, label: undefined } })).toBeNull();
+    expect(printedLabelOf({ mailed_at: new Date(), mailed_price: { ...snap, label: { name: 'A', textNumber: '' } } })).toBeNull();
+    expect(printedLabelOf({ mailed_at: new Date(), mailed_price: '{nope' })).toBeNull();
+  });
+});
+
+describe('knownToWavesNow', () => {
+  const home = { address_line1: '101 EXAMPLE TRL', city: 'LAKEWOOD RANCH', state: 'FL', zip: '34202' };
+  const load = (known, member) => {
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    const addressKnownToWaves = jest.fn(async () => known);
+    const memberStatusOf = typeof member === 'function' ? jest.fn(member) : jest.fn(async () => member);
+    jest.doMock('../services/mail/prospect-store', () => ({ addressKnownToWaves }));
+    jest.doMock('../services/mail/home-quote', () => ({ memberStatusOf, memberAtAddressOn: (conn) => ({ on: conn }) }));
+    return { ...require('../services/mail/mailed-record'), addressKnownToWaves, memberStatusOf };
+  };
+  afterEach(() => { jest.dontMock('../services/mail/prospect-store'); jest.dontMock('../services/mail/home-quote'); jest.resetModules(); });
+
+  test('a customers row at the address, or a member at or near it, is known; both checks run on the given connection', async () => {
+    const conn = { trx: 1 };
+    const stranger = load(false, null);
+    expect(await stranger.knownToWavesNow(home, conn)).toBe(false);
+    expect(stranger.addressKnownToWaves).toHaveBeenCalledWith('101 EXAMPLE TRL', '34202', conn);
+    expect(stranger.memberStatusOf).toHaveBeenCalledWith(home, { on: conn });
+    expect(await load(true, null).knownToWavesNow(home, conn)).toBe(true);
+    expect(await load(false, 'exact').knownToWavesNow(home, conn)).toBe(true);
+    expect(await load(false, 'near').knownToWavesNow(home, conn)).toBe(true);
+  });
+  test('a check that cannot finish throws: it never reads as a stranger', async () => {
+    await expect(load(false, async () => { throw new Error('lookup down'); }).knownToWavesNow(home, {})).rejects.toThrow('lookup down');
+  });
+});

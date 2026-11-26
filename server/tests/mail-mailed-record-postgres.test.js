@@ -32,7 +32,14 @@ const slugMigration = require('../models/migrations/20261124040000_mail_prospect
 const mailedMigration = require('../models/migrations/20261124160000_mail_prospects_mailed_record');
 const keepViewsMigration = require('../models/migrations/20261124160100_mail_prospects_keep_typed_views');
 const { dueForPrice, savePriceResult } = require('../services/mail/home-price-store');
-const { markBatch, wouldMark, labelsFor } = require('../services/mail/mailed-record');
+const record = require('../services/mail/mailed-record');
+
+// This schema has no customers table: the customer check is a stand-in that knows the ids in `knownIds`.
+const knownIds = new Set();
+const DEPS = { knownToWaves: async (row) => knownIds.has(row.id) };
+const markBatch = (args, conn) => record.markBatch(args, conn, DEPS);
+const wouldMark = (args, conn) => record.wouldMark(args, conn, DEPS);
+const labelsFor = (args, conn) => record.labelsFor(args, conn, DEPS);
 const { getHomePage } = require('../services/mail/home-page');
 
 jest.setTimeout(60000);
@@ -82,6 +89,7 @@ postgres('mailed record on PostgreSQL', () => {
   });
   beforeEach(async () => {
     await conn('mail_prospects').del();
+    knownIds.clear();
   });
 
   let seq = 0;
@@ -137,6 +145,34 @@ postgres('mailed record on PostgreSQL', () => {
     expect(await stored(id)).toMatchObject({ mailed_at: null });
   });
 
+  test('a home Waves knows now is not marked and not listed; it stays as it was', async () => {
+    const stranger = await row();
+    const customerNow = await row();
+    knownIds.add(customerNow);
+    const dry = await wouldMark();
+    expect(dry.homes.map((h) => h.id)).toEqual([stranger]);
+    expect(dry.knownNow).toEqual([customerNow]);
+    expect((await labelsFor()).labels).toHaveLength(1);
+    const result = await markBatch({ batch: 'recheck', ids: [stranger, customerNow], now: NOW });
+    expect(result).toEqual({ marked: [stranger], knownNow: [customerNow], notMailable: [customerNow] });
+    expect(await stored(customerNow)).toMatchObject({ mailed_at: null, mail_batch: null, mailed_price: null, status: 'eligible' });
+    // A check that cannot finish marks nothing at all.
+    const failing = { knownToWaves: async () => { throw new Error('lookup down'); } };
+    await row();
+    await expect(record.markBatch({ batch: 'recheck-2', now: NOW }, undefined, failing)).rejects.toThrow('lookup down');
+    expect(await conn('mail_prospects').where({ mail_batch: 'recheck-2' }).first('id')).toBeUndefined();
+  });
+
+  test('a reprint of a marked batch prints the name and office line it was marked with', async () => {
+    const id = await row();
+    await markBatch({ batch: 'print-1', now: NOW });
+    expect((await stored(id)).mailed_price.label).toEqual({ name: 'Alex & Jamie Tester', nameCheck: false, textNumber: expect.any(String), officeByDefault: false });
+    const first = (await labelsFor({ batch: 'print-1' })).labels;
+    // The Clerk's names and the town change after the cards are in the mail.
+    await conn('mail_prospects').where({ id }).update({ recipient_names: JSON.stringify(['OTHER PAT']), city: 'VENICE', zip: '34285' });
+    expect((await labelsFor({ batch: 'print-1' })).labels).toEqual(first);
+  });
+
   test('markBatch: marks only eligible, priced, not-yet-mailed homes, with the printed price frozen; a second run marks nothing', async () => {
     const a = await row({ price_annual: 601.02 }); // 50.085 a month: rounded from whole cents to 50.09
     const b = await row();
@@ -153,7 +189,7 @@ postgres('mailed record on PostgreSQL', () => {
     const marked = await stored(a);
     expect(marked.mailed_at.toISOString()).toBe(NOW.toISOString());
     expect(marked.mail_batch).toBe('2026-11-a');
-    expect(marked.mailed_price).toEqual({ plan: 'pest_quarterly', annual: 601.02, monthly: 50.09, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' });
+    expect(marked.mailed_price).toEqual({ plan: 'pest_quarterly', annual: 601.02, monthly: 50.09, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z', label: expect.objectContaining({ name: 'Alex & Jamie Tester' }) });
     for (const id of [held, unpriced, other]) expect((await stored(id)).mailed_at).toBeNull();
 
     const again = await markBatch({ batch: '2026-11-b', now: new Date(NOW.getTime() + 86400000) });
