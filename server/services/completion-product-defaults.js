@@ -90,7 +90,7 @@
  * with no products prefilled.
  */
 
-const { matchServiceProtocol, MATCH_RULES } = require('./protocol-matcher');
+const { matchServiceProtocol, followupVisitMatch } = require('./protocol-matcher');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
 
@@ -185,37 +185,6 @@ function completionApplicationMethodForName(visit, name) {
 
 // -- visit resolution + precedence (pure) ------------------------------
 
-// The program's own follow-up rule, resolved from protocol-matcher's rule
-// table rather than a hard-coded visit number (Codex r3 P1, PR #5049):
-// MATCH_RULES carries exactly one `_followup`-reasoned rule for a program
-// that has a follow-up stage today (bed_bug_followup, cockroach_followup,
-// rodent_followup, palm_followup) — a program with none (pest, mosquito,
-// termite, tree & shrub) returns null and the caller's normal text-matched
-// visit stands. Tracks protocols.json/protocol-matcher.js as programs and
-// visit numbers change, instead of hard-coding "cockroach visit 3".
-function followupRuleForProgram(programKey) {
-  if (!programKey) return null;
-  return MATCH_RULES.find((rule) => rule.programKey === programKey && /_followup$/.test(rule.reason || '')) || null;
-}
-
-function findVisitByNumber(program, visitNumber) {
-  return (program?.visits || []).find((visit) => Number(visit.visit) === Number(visitNumber)) || null;
-}
-
-// Applies the isFollowup override (see resolveCompletionDefaultProductNames'
-// own doc above) to a raw matchServiceProtocol result, isolated from the
-// precedence logic below so each stays independently readable.
-function resolveEffectiveVisit(match, programKey, isFollowup) {
-  const visit = match?.matchedVisit || null;
-  const matchReason = match?.reason || null;
-  const matched = !!match?.matched;
-  if (!isFollowup || !programKey || !match?.program) return { visit, matchReason, matched };
-  const rule = followupRuleForProgram(programKey);
-  const followupVisit = rule ? findVisitByNumber(match.program, rule.visit) : null;
-  if (!followupVisit) return { visit, matchReason, matched };
-  return { visit: followupVisit, matchReason: rule.reason, matched: true };
-}
-
 // Resolves which protocol visit a service maps to and, from it, the
 // ordered product NAMES to prefill (before any catalog lookup), plus each
 // name's protocol-specified application method (methodsByName, keyed
@@ -229,7 +198,7 @@ function resolveEffectiveVisit(match, programKey, isFollowup) {
 // SOURCE visit (a booked follow-up to "Cockroach Control Service" matches
 // visit 1's own terms, never visit 3's "roach follow"/"roach recheck"
 // wording, since its service_type carries neither). When true, and the
-// matched program has its own follow-up visit (followupRuleForProgram),
+// matched program has its own follow-up visit (protocol-matcher's followupVisitMatch),
 // this overrides the resolved visit to THAT visit instead — today that is
 // cockroach visit 3, which carries no completionDefaultProducts, so it
 // resolves to source 'none' (a deliberate "nothing curated for a
@@ -244,8 +213,9 @@ function resolveCompletionDefaultProductNames({
     match = null;
   }
   const programKey = match?.programKey || null;
-  const { visit, matchReason, matched } = resolveEffectiveVisit(match, programKey, isFollowup);
-  const matchedVisit = { visit: visit?.visit ?? null, reason: matchReason, matched };
+  const effective = followupVisitMatch(match, isFollowup);
+  const visit = effective?.matchedVisit || null;
+  const matchedVisit = { visit: visit?.visit ?? null, reason: effective?.reason || null, matched: !!effective?.matched };
 
   // Lawn already has its own governed completion-defaults mechanism
   // (lawn-completion-defaults.js) — this resolver must never seed a

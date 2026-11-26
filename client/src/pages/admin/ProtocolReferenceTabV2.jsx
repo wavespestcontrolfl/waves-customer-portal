@@ -20,12 +20,13 @@ const FALLBACK_SERVICE_PROGRAMS = [
   {
     key: "pest",
     name: "Pest Control Protocol",
-    visits: 6,
+    visits: 5,
   },
   { key: "rodent", name: "Rodent Control Protocol", visits: 4 },
   { key: "mosquito", name: "Mosquito Control Protocol", visits: 3 },
   { key: "palm_injection", name: "Palm Injection Protocol", visits: 3 },
   { key: "cockroach", name: "Cockroach Control Protocol", visits: 3 },
+  { key: "flea", name: "Flea Control Protocol", visits: 2 },
   { key: "bed_bug", name: "Bed Bug Control Protocol", visits: 3 },
   { key: "termite", name: "Termite Control Protocol", visits: 6 },
 ];

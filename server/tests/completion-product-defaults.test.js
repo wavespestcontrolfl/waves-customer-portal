@@ -222,6 +222,12 @@ describe('resolveCompletionDefaultProductNames isFollowup (Codex r3 P1, PR #5049
     expect(result.names).toEqual([]);
   });
 
+  test('a heat-only bed bug booking gets no prefilled spray products', () => {
+    const result = resolveCompletionDefaultProductNames({ protocols: require('../config/protocols.json'), serviceType: 'Bed Bug Heat Treatment' });
+    expect(result.matchedVisit).toEqual({ visit: 1, reason: 'bed_bug_heat_scope_review', matched: true });
+    expect(result.names).toEqual([]);
+  });
+
   test('without isFollowup the same service still resolves visit 1 as usual (regression)', () => {
     const result = resolveCompletionDefaultProductNames({ protocols, serviceType: 'Cockroach Control Service' });
     expect(result.programKey).toBe('cockroach');
@@ -358,10 +364,9 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
       });
   });
 
-  test('pest visit 2 carries no completion defaults — every real roach service routes to the cockroach program', () => {
-    // The pest program is prefilled by pest-default-mix.js (owner ruling
-    // 2026-09-27), so a list here could never reach the drawer.
-    expect(realProtocols.pest.visits.find((v) => v.visit === 2).completionDefaultProducts).toBeUndefined();
+  test('the pest program has no German-roach copy — every real roach service routes to the cockroach program', () => {
+    // Pest visit 2 was a thinner copy of cockroach visit 1; it is retired (2026-11-25), so one card exists.
+    expect(realProtocols.pest.visits.find((v) => v.visit === 2)).toBeUndefined();
     for (const serviceType of [
       'Cockroach Treatment Service', 'German Roach Cleanout Service',
       'German Roach Initial Service (3-Visit)', 'Initial German Roach Knockdown Service',
@@ -370,6 +375,36 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
       expect(result.programKey).toBe('cockroach');
       expect(result.matchedVisit.visit).toBe(1);
       expect(result.names).toEqual(['Atticus Antapex WSG', 'Gentrol Complete EC3', 'Advion Evolution Cockroach Gel Bait']);
+    }
+  });
+
+  test('flea: treatment 1 prefills the adulticide and the growth regulator; a booked follow-up prefills nothing', () => {
+    const first = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Flea Control Service', serviceKey: 'flea_tick' });
+    expect([first.programKey, first.matchedVisit.visit, first.source]).toEqual(['flea', 1, 'protocol_visit']);
+    expect(first.names).toEqual(['Atticus Antapex WSG', 'Tekko Pro IGR']);
+    expect(first.methodsByName).toEqual({ 'atticus antapex wsg': 'spot_treatment', 'tekko pro igr': 'spot_treatment' });
+    // Day 14: the growth regulator label allows no indoor repeat before day 21, so treatment 2 seeds no product.
+    const second = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Flea Control Service', serviceKey: 'flea_tick', isFollowup: true });
+    expect([second.programKey, second.matchedVisit.visit, second.matchedVisit.reason, second.source]).toEqual(['flea', 2, 'flea_followup', 'none']);
+    expect(second.names).toEqual([]);
+  });
+
+  test('bed bug: treatment 1 prefills the mattress spray and the crack-and-crevice spray; treatment 2 prefills nothing', () => {
+    const first = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Bed Bug Treatment Service' });
+    expect([first.programKey, first.matchedVisit.visit, first.source]).toEqual(['bed_bug', 2, 'protocol_visit']);
+    expect(first.names).toEqual(['MGK Crossfire Bed Bug Concentrate', 'Atticus Antapex WSG']);
+    const second = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Bed Bug Treatment Service', isFollowup: true });
+    expect([second.matchedVisit.visit, second.matchedVisit.reason, second.source]).toEqual([3, 'bed_bug_followup', 'none']);
+  });
+
+  test('every curated default and every lineMeta hint on the flea, bed bug and cockroach cards names a card line', () => {
+    for (const key of ['flea', 'bed_bug', 'cockroach']) {
+      for (const visit of realProtocols[key].visits) {
+        const lines = `${visit.primary}\n${visit.secondary}`.split('\n');
+        for (const line of Object.keys(visit.lineMeta || {})) expect(lines).toContain(line);
+        const hinted = Object.values(visit.lineMeta || {}).flatMap((m) => m.catalogProductHints || []);
+        for (const name of visit.completionDefaultProducts || []) expect(hinted).toContain(name);
+      }
     }
   });
 

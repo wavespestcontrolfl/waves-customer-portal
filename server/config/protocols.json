@@ -1897,44 +1897,6 @@
         "notes": "Default recurring pest template for quarterly, bimonthly, and monthly visits. Keep interior treatment targeted."
       },
       {
-        "visit": 2,
-        "month": "Any",
-        "primary": "German roach cleanout\nCockroach gel bait in kitchen, bath, hinges, appliances, and plumbing voids\nCrack-and-crevice treatment\nInsect growth regulator point-source or aerosol where label allows",
-        "secondary": "Vacuum visible aggregation before application\nPlace monitors and document count/location\nSchedule 10-14 day follow-up when live activity is confirmed",
-        "lineMeta": {
-          "Cockroach gel bait in kitchen, bath, hinges, appliances, and plumbing voids": {
-            "scope": "interior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Advion Evolution Cockroach Gel Bait"
-            ]
-          },
-          "Crack-and-crevice treatment": {
-            "scope": "interior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Atticus Antapex WSG"
-            ]
-          },
-          "Insect growth regulator point-source or aerosol where label allows": {
-            "scope": "interior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Gentrol Complete EC3"
-            ]
-          }
-        },
-        "material_cost": "inventory",
-        "labor_cost": "elevated",
-        "tiers": {
-          "bronze": false,
-          "silver": false,
-          "enhanced": true,
-          "premium": true
-        },
-        "notes": "Non-repellent and bait-first protocol. Do not contaminate bait placements with pyrethroid spray."
-      },
-      {
         "visit": 3,
         "month": "Any",
         "primary": "Ant service\nIdentify species and trail source before applying\nAnt gel or granular bait along active trails\nNon-repellent treatment (interior + exterior) for ghost or trailing ants",
@@ -1972,7 +1934,7 @@
       {
         "visit": 4,
         "month": "Any",
-        "primary": "Flea/Tick Treatment\nInterior crack/edge treatment where pets rest\nExterior shaded harborage, fence lines, and transition zones\nIGR where label allows",
+        "primary": "Tick Treatment\nInterior crack/edge treatment where pets rest\nExterior shaded harborage, fence lines, and transition zones\nIGR where label allows",
         "secondary": "Customer must vacuum before and after service\nPet treatment is required through veterinarian or approved pet product\nSecond treatment may be needed in 10-14 days",
         "material_cost": "inventory",
         "labor_cost": "elevated",
@@ -1982,7 +1944,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Do not guarantee resolution unless pet treatment and vacuum protocol are followed."
+        "notes": "Flea jobs use the Flea Control card. Do not guarantee resolution unless pet treatment and vacuum protocol are followed."
       },
       {
         "visit": 5,
@@ -2364,25 +2326,125 @@
       }
     ]
   },
-  "bed_bug": {
-    "name": "Bed Bug Control Protocol",
+  "flea": {
+    "name": "Flea Control Protocol",
     "notes": [
-      "Bed bug work is inspection-led and prep-dependent. Do not treat without documenting rooms, evidence, method, prep status, and follow-up plan.",
-      "Pricing and scope depend on method: chemical/IPM, heat, or hybrid. Keep quote-required cases out of generic pest workflows.",
-      "Customer prep, laundry, clutter reduction, and follow-up timing are part of the protocol, not optional extras."
+      "Flea is two treatments, 14 days apart. There is no third treatment (owner ruling 2026-11-23). If fleas remain after treatment 2, confirm the pet got a vet flea product, look for wildlife or stray cats, then call the office.",
+      "The growth regulator goes down once, at treatment 1. It lasts up to 7 months indoors, and its label allows no indoor repeat before 21 days, so treatment 2 at day 14 has none.",
+      "Same tank, by the labels: the growth regulator label says it \"may be combined with an EPA registered adulticide\" and \"No label dosage rates may be exceeded\". Its own mix is 1 fl oz per gallon sprayed at 1 gallon per 1,500 sq ft. The Antapex label fixes 10 g per gallon at 1 gallon per 1,000 sq ft. So the shared tank carries the growth regulator at 0.66 fl oz per gallon: just under its label amount on the floor, never more. Do not mix it stronger.",
+      "Never fog a flea job. The treatment 2 adulticide label says \"DO NOT use this product as a fogger\", and the treatment 1 adulticide is labeled indoors for spot, crack-and-crevice and surface spray only.",
+      "Use only the products on this card. Fleas are not on the label of the cockroach growth regulator mix, and the outdoor perimeter pyrethroid is labeled for fleas outdoors only."
     ],
     "safety_rules": [
-      "Confirm customer prep and vacancy instructions before treatment.",
-      "Do not apply products to mattresses, furniture, or belongings unless the label explicitly allows that use.",
-      "Protect occupants, pets, aquariums, sensitive items, and heat-sensitive materials.",
-      "Schedule or recommend follow-up inspection according to the treatment method."
+      "People and pets stay out of treated rooms until the spray is dry. Cover or remove fish tanks, pet bowls and pet toys before spraying.",
+      "Do not spray pets. The customer gets a flea product from the vet in the same week.",
+      "Spray surfaces to damp, not wet. Do not apply as a fog or a space spray.",
+      "Outdoors, keep spray off open blooms and at least 25 ft from ponds, lakes and canals."
     ],
     "visits": [
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Bed Bug Inspection / Scope\nInspect sleeping and resting areas, mattress seams, box spring, bed frame, headboard, baseboards, furniture seams, luggage zones, outlets, and adjacent rooms\nDocument live bugs, cast skins, eggs, fecal spotting, bites reported, rooms affected, prep status, and occupancy type\nClassify method: chemical/IPM, heat, or hybrid",
-        "secondary": "Photograph evidence before quoting or treating\nSend prep instructions and confirm customer can comply\nEscalate severe, multi-unit, or cluttered jobs for office review",
+        "primary": "Flea Treatment 1\nInspect with a white-sock walk or a flea comb, and find where pets rest\nInterior spray: Antapex 10 g per gallon, 1 gallon per 1,000 sq ft, on carpet, rugs, floors, under furniture, under cushions, pet beds and closet floors\nGrowth regulator in the same tank: Tekko Pro 0.66 fl oz per gallon at 1 gallon per 1,000 sq ft (just under its label amount, 1 fl oz per 1,500 sq ft)",
+        "secondary": "Exterior, shaded pet zones only when pets rest outside: the same tank mix, 1 gallon per 1,000 sq ft\nConfirm the customer vacuumed and washed pet bedding before the visit\nTell the customer: vacuum every day for 14 days, and expect to see some fleas for up to 2 weeks as eggs hatch\nBook treatment 2 for day 14",
+        "lineMeta": {
+          "Interior spray: Antapex 10 g per gallon, 1 gallon per 1,000 sq ft, on carpet, rugs, floors, under furniture, under cushions, pet beds and closet floors": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Atticus Antapex WSG"
+            ],
+            "completionApplicationMethod": "spot_treatment",
+            "tankRatePerGallon": {
+              "amount": 10,
+              "unit": "g"
+            }
+          },
+          "Growth regulator in the same tank: Tekko Pro 0.66 fl oz per gallon at 1 gallon per 1,000 sq ft (just under its label amount, 1 fl oz per 1,500 sq ft)": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Tekko Pro IGR"
+            ],
+            "completionApplicationMethod": "spot_treatment",
+            "tankRatePerGallon": {
+              "amount": 0.66,
+              "unit": "fl_oz"
+            }
+          },
+          "Exterior, shaded pet zones only when pets rest outside: the same tank mix, 1 gallon per 1,000 sq ft": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Atticus Antapex WSG",
+              "Tekko Pro IGR"
+            ]
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "elevated",
+        "tiers": {
+          "bronze": false,
+          "silver": true,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "Do not guarantee the result unless the pet is treated and the customer vacuums daily.",
+        "completionDefaultProducts": [
+          "Atticus Antapex WSG",
+          "Tekko Pro IGR"
+        ]
+      },
+      {
+        "visit": 2,
+        "month": "Any",
+        "primary": "Flea Treatment 2 (day 14)\nRepeat the white-sock walk or flea comb check in the same rooms and note the count\nCheck that the pet got its vet flea product and that the customer vacuumed daily",
+        "secondary": "Spot treat only where live fleas are found: Onslaught FastCap 0.5 fl oz per gallon, 1 gallon per 1,000 sq ft, fine fan spray\nDo not apply the growth regulator again at this visit\nFleas still present: look for wildlife, stray cats or an untreated pet, then call the office. There is no third treatment",
+        "lineMeta": {
+          "Spot treat only where live fleas are found: Onslaught FastCap 0.5 fl oz per gallon, 1 gallon per 1,000 sq ft, fine fan spray": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Onslaught Fastcap"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "follow_up",
+        "tiers": {
+          "bronze": false,
+          "silver": true,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "Treatment 2 is a check first. Spray only where live fleas are found."
+      }
+    ]
+  },
+  "bed_bug": {
+    "name": "Bed Bug Control Protocol",
+    "notes": [
+      "Bed bug is inspection first, then 2 treatments 14 days apart, then a clearance check. A third treatment is for heavy jobs only (owner ruling 2026-11-23).",
+      "Three cards: the inspection, treatment 1, and one follow-up card for every later visit (treatment 2 at day 14, each clearance check, and the third treatment on a heavy job).",
+      "Heavy job, book 3 treatments at the sale if any one is true: more than 20 live bugs seen; 2 or more rooms; bugs off the bed (sofa, baseboards, outlets, wall hangings); heavy clutter or prep not done; an attached unit with the neighbor not checked; bug bombs, a failed treatment or a problem older than 3 months.",
+      "Add the third treatment later if, at day 14, there is a live adult or large nymph or more than 10 bugs in the cups, or if, at day 28, any bug was caught since day 14.",
+      "The job is clear when the interceptor cups are empty at 2 checks 14 days apart and the tech finds no live bugs.",
+      "Waves does not sell heat treatment and does not fog bed bug jobs. No growth regulator is used on bed bugs.",
+      "Bed bug jobs go last in the day. Bag vacuum waste before it leaves the room, and carry tools in a sealed tote."
+    ],
+    "safety_rules": [
+      "Confirm the prep is done before treating: bedding and clothes bagged for a hot dryer cycle, clutter cleared from the bed area.",
+      "Only the mattress-labeled spray goes on a mattress or box spring. The crack-and-crevice spray and the dust never do.",
+      "People and pets stay out until the spray is dry. Cover fish tanks and turn off their air pumps.",
+      "Do not apply any product as a fog or space spray. Keep dust out of electrical boxes and off surfaces people touch."
+    ],
+    "visits": [
+      {
+        "visit": 1,
+        "month": "Any",
+        "primary": "Bed Bug Inspection / Scope\nInspect sleeping and resting areas, mattress seams, box spring, bed frame, headboard, baseboards, furniture seams, luggage zones, outlets, and adjacent rooms\nDocument live bugs, cast skins, eggs, fecal spotting, bites reported, rooms affected, prep status, and occupancy type\nGrade the job: standard (2 treatments) or heavy (3 treatments), using the heavy rule on this card",
+        "secondary": "Photograph evidence before quoting or treating\nSend prep instructions and confirm customer can comply\nPlace interceptor cups under each bed and sofa leg and note the count\nEscalate severe, multi-unit, or cluttered jobs for office review\nA booking named heat or hybrid: Waves does not sell heat. Call the office to review the scope before any treatment",
         "material_cost": "inspection",
         "labor_cost": "inspection",
         "tiers": {
@@ -2391,13 +2453,13 @@
           "enhanced": false,
           "premium": true
         },
-        "notes": "Inspection must identify rooms affected and treatment method before any customer promise."
+        "notes": "The inspection must name the rooms affected and the grade (standard or heavy) before any customer promise."
       },
       {
         "visit": 2,
         "month": "Any",
-        "primary": "Bed Bug Treatment\nUse approved chemical/IPM, heat, or hybrid method from the estimate scope\nTreat cracks, crevices, bed frame, baseboards, furniture voids, and harborages where label allows\nUse dust, residual, contact, steam, vacuum, encasement, or heat steps only when included in method and label/site fit",
-        "secondary": "Bag or isolate items according to prep guide\nDocument rooms treated, products/method, re-entry timing, and inaccessible areas\nSchedule follow-up or post-treatment inspection window",
+        "primary": "Bed Bug Treatment 1\nVacuum live bugs and eggs from seams, frames and baseboards, and bag the waste in the room\nCrossfire on mattress and box spring seams, bed frame, headboard and furniture seams: 13 fl oz in 115 fl oz of water makes 1 gallon for 1,000 sq ft, damp not wet\nAntapex 20 g per gallon as a crack-and-crevice and spot spray on baseboards, carpet edges and furniture frames, never on a mattress",
+        "secondary": "Silica dust (CimeXa) in wall voids, bed frame joints and under the box spring cover: a light film, about 2 oz per 100 sq ft, and none inside electrical boxes\nFit mattress and box spring encasements after the spray is dry, when the customer bought them\nPlace or reset interceptor cups under each bed and sofa leg\nDocument rooms treated, products, re-entry time and any area that could not be reached\nBook the follow-up visit for day 14",
         "material_cost": "inventory",
         "labor_cost": "room_count",
         "tiers": {
@@ -2406,13 +2468,61 @@
           "enhanced": false,
           "premium": true
         },
-        "notes": "Do not merge bed bug with general pest. This is a specialty treatment with separate prep, pricing, and follow-up."
+        "notes": "Do not merge bed bug with general pest. This is a specialty treatment with its own prep, price and follow-up.",
+        "lineMeta": {
+          "Crossfire on mattress and box spring seams, bed frame, headboard and furniture seams: 13 fl oz in 115 fl oz of water makes 1 gallon for 1,000 sq ft, damp not wet": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "MGK Crossfire Bed Bug Concentrate"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          },
+          "Antapex 20 g per gallon as a crack-and-crevice and spot spray on baseboards, carpet edges and furniture frames, never on a mattress": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Atticus Antapex WSG"
+            ],
+            "completionApplicationMethod": "spot_treatment",
+            "tankRatePerGallon": {
+              "amount": 20,
+              "unit": "g"
+            }
+          }
+        },
+        "completionDefaultProducts": [
+          "MGK Crossfire Bed Bug Concentrate",
+          "Atticus Antapex WSG"
+        ]
       },
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Bed Bug Follow-Up / Post-Treatment Inspection\nReinspect treated rooms and adjacent rooms\nCheck monitors, mattress seams, furniture seams, baseboards, and customer-reported areas\nDocument live activity, new evidence, or no activity",
-        "secondary": "Spot treat only where label and scope allow\nReinforce laundry, bagging, clutter, and travel/luggage precautions\nEscalate ongoing activity for method review or additional treatment scope",
+        "primary": "Bed Bug Follow-Up Visit (every visit after treatment 1)\nCount and empty the interceptor cups, and note the count for each bed\nReinspect treated rooms and the rooms next to them: mattress seams, bed frame, furniture seams, baseboards and customer-reported areas\nDocument live activity, new evidence, or no activity",
+        "secondary": "Live bugs or fresh eggs found: first look for missed hiding places and untreated rooms, then retreat with Crossfire only where they are found\nBugs found off the bed: Antapex 20 g per gallon on those baseboards and furniture frames, never on a mattress\nTop up silica dust only where it was cleaned away\nDay 14, a live adult or large nymph, or more than 10 bugs in the cups: tell the office to add the third treatment\nDay 28 or later, any bug caught since the last visit: tell the office to add the third treatment\nA standard job gets 2 treatments and a heavy job 3. Never more without the office\nCups empty at 2 checks 14 days apart and no live bugs found: the job is clear. Nothing is sprayed at a clear check\nNot clear yet: book the next visit 14 days out, and reinforce laundry, bagging, clutter and luggage precautions",
+        "lineMeta": {
+          "Live bugs or fresh eggs found: first look for missed hiding places and untreated rooms, then retreat with Crossfire only where they are found": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "MGK Crossfire Bed Bug Concentrate"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          },
+          "Bugs found off the bed: Antapex 20 g per gallon on those baseboards and furniture frames, never on a mattress": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Atticus Antapex WSG"
+            ],
+            "completionApplicationMethod": "spot_treatment",
+            "tankRatePerGallon": {
+              "amount": 20,
+              "unit": "g"
+            }
+          }
+        },
         "material_cost": "inventory",
         "labor_cost": "follow_up",
         "tiers": {
@@ -2421,7 +2531,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Follow-up determines whether the original method is working or the scope needs revision."
+        "notes": "Every bed bug visit after treatment 1 uses this card: treatment 2 at day 14, each clearance check, and the third treatment on a heavy job. It is a check first. Spray only where live bugs or fresh eggs are found."
       }
     ]
   },

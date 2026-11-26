@@ -214,6 +214,14 @@ function initTimeTrackingCrons() {
     logger.info('[time-tracking-cron] Running 11 PM force auto-clock-out');
     try {
       await runExclusive('time-tracking-11pm-autoclose', async () => {
+      // A truck-set shift (truck-start-apply) that passed its clock check before 11 PM is committed
+      // before this scan lists the open shifts; one that starts later reads a clock past 11 PM and
+      // writes nothing. A barrier that cannot be taken never stops the close.
+      try {
+        await require('./truck-start-apply').waitForTruckStartWrites();
+      } catch (err) {
+        logger.error(`[time-tracking-cron] truck start barrier failed: ${errTag(err)}`);
+      }
       const activeShifts = await db('time_entries')
         .where({ entry_type: 'shift', status: 'active' })
         .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
@@ -277,6 +285,26 @@ function initTimeTrackingCrons() {
       });
     } catch (err) {
       logger.error('[time-tracking-cron] 11 PM force clock-out job failed', { error: err.message });
+    }
+  }, { timezone: 'America/New_York' });
+
+  // -------------------------------------------------------------------------
+  // 5. Every 2 minutes — the truck sets the shift start (GATE_TRUCK_CLOCK_IN=start,
+  //    owner 2026-11-26). Reads the truck_clock_in_shadow rows of today's Eastern work day
+  //    and writes the shift (services/truck-start-apply.js). The tick does nothing unless
+  //    the gate reads exactly `start`, and nothing while staff maintenance mode is on. No
+  //    runExclusive: each row is claimed with FOR UPDATE SKIP LOCKED, so an overlapping tick
+  //    (a deploy overlap, a second instance) never takes the same row twice.
+  // -------------------------------------------------------------------------
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      const { applyTruckStarts } = require('./truck-start-apply');
+      const result = await applyTruckStarts();
+      if (result.applied || result.skipped || result.bells || result.errors) {
+        logger.info(`[time-tracking-cron] truck start tick: ${JSON.stringify(result)}`);
+      }
+    } catch (err) {
+      logger.error(`[time-tracking-cron] truck start tick failed: ${errTag(err)}`);
     }
   }, { timezone: 'America/New_York' });
 

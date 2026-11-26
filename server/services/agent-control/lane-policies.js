@@ -135,6 +135,9 @@ const LANE_RUNTIME = {
   // no cross-provider answer — a miss records no commitment rows.
   // Live-call upset check (GATE_LIVE_CALL_UPSET_ALERT): one Haiku read of the last two minutes, at most 8 per call; a miss is no alert.
   live_call_upset: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_duration_ms: 5_000, stall_after_ms: 60_000, hard_timeout_ms: 60_000 },
+  // Call sound check: one Gemini listen per call recording; the answer is a note on the call.
+  // offline: no second provider hears audio; a miss leaves the call without a note.
+  call_sound_check: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_duration_ms: 30_000, stall_after_ms: 150_000, hard_timeout_ms: 150_000 },
   call_commitments: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
   // Shadow only (GATE_DAY_AGREEMENT_SHADOW): one model call per call or quiet text thread that agreed a day; writes day_agreement_decisions rows, no visit, no text.
   day_agreement: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M0', workflow_id: 'day-agreement-shadow', ...LONG_BATCH },

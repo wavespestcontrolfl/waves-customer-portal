@@ -38,7 +38,7 @@ const {
   chooseNewsletterPoll, pollInIssue, hasQuizToken, buildQuizSubstitutions, neutralizeQuizTokens, pollResultLine, recordQuizResponse, newsletterLastPoll,
 } = require('../services/newsletter-quiz');
 const {
-  assembleBeehiivNewsletter, buildFlagshipTextBody, createNewsletterDraft, GREETING_NAME_TOKEN, CITY_TOKEN, GRASS_TYPE_TOKEN,
+  assembleWeeklyNewsletter, buildFlagshipTextBody, createNewsletterDraft, GREETING_NAME_TOKEN, CITY_TOKEN, GRASS_TYPE_TOKEN,
 } = require('../services/newsletter-draft');
 const { buildFeedbackSubstitutions } = require('../services/newsletter-feedback');
 const { buildEvclickSubstitutions } = require('../services/newsletter-event-clicks');
@@ -52,13 +52,12 @@ function draft(eventCount = 4) {
     selectedSubject: 'Local picks',
     events: Array.from({ length: eventCount }, (_, i) => ({
       eventId: `a0000000-0000-4000-8000-0000000000${String(i).padStart(2, '0')}`,
-      title: `Event ${i + 1}`,
-      emoji: '🌊',
-      description: `Description ${i + 1}`,
+      sourceTitle: `Event ${i + 1}`,
+      startAt: `2026-12-0${3 + (i % 4)}T23:00:00Z`,
+      town: 'Sarasota',
+      why: `Reason ${i + 1}.`,
       eventUrl: `https://events.example.com/2026/11/a-long-event-page-name-${i}?ref=calendar`,
     })),
-    closingHeading: 'See You Out There',
-    closingText: 'Closing words.',
     signoff: '— The Waves Team',
   };
 }
@@ -115,17 +114,19 @@ describe('Waves Newsletter polls', () => {
     expect(pollInIssue(null)).toBeNull();
   });
 
-  test('the flagship carries the poll once, after the closing and before the sign-off, in both parts', async () => {
-    const html = await assembleBeehiivNewsletter(draft(), { pollQuizId: P3 });
+  test('the flagship carries the poll once, after the events and before the closing line and sign-off, in both parts', async () => {
+    const html = await assembleWeeklyNewsletter(draft(), { pollQuizId: P3 });
     const text = buildFlagshipTextBody(draft(), { pollQuizId: P3 });
     const htmlToken = `{{quiz:${P3}}}`;
     const textToken = `{{quiz-text:${P3}}}`;
     expect(html.split(htmlToken)).toHaveLength(2);
     expect(html).toContain('Quick poll');
-    expect(html.indexOf('Closing words.')).toBeLessThan(html.indexOf(htmlToken));
-    expect(html.indexOf(htmlToken)).toBeLessThan(html.indexOf('Catch you out there this week.'));
+    // After the last event, before the "Dates can change" line and the sign-off.
+    expect(html.indexOf('Event 4')).toBeLessThan(html.indexOf(htmlToken));
+    expect(html.indexOf(htmlToken)).toBeLessThan(html.indexOf('Dates can change. Check before you go.'));
     expect(text.split(textToken)).toHaveLength(2);
-    expect(text.indexOf('Closing words.')).toBeLessThan(text.indexOf(textToken));
+    expect(text.indexOf('Event 4')).toBeLessThan(text.indexOf(textToken));
+    expect(text.indexOf(textToken)).toBeLessThan(text.indexOf('Dates can change. Check before you go.'));
     expect(text.indexOf(textToken)).toBeLessThan(text.indexOf('— The Waves Team'));
   });
 
@@ -146,8 +147,9 @@ describe('Waves Newsletter polls', () => {
     db.mockImplementation(() => lineupQuery);
     mockDispatch.mockResolvedValue({ ok: true, json: {
       selectedSubject: 'Local picks',
-      events: [{ eventId, title: 'Harbor Art Walk', emoji: '🎨', description: 'Go see it.' }],
-      closingHeading: 'See You Out There', closingText: 'Closing words.', signoff: '— The Waves Team',
+      weekendPoints: ['Art walk Saturday in Bradenton', 'Harbor views all afternoon', 'Local artists on the water'],
+      events: [{ eventId, why: 'Local artists show their work along the harbor.' }],
+      signoff: '— The Waves Team',
       textBody: 'WRITER TEXT WITH NO POLL',
     } });
     try {
@@ -166,18 +168,57 @@ describe('Waves Newsletter polls', () => {
   });
 
   test.each([
+    ['only two weekend points', { weekendPoints: ['One', 'Two'] }, /exactly 3/],
+    ['a blank weekend point', { weekendPoints: ['One', '  ', 'Three'] }, /exactly 3/],
+    ['no weekend points at all', { weekendPoints: undefined }, /exactly 3/],
+    ['a blank sentence for an event', { events: [{ eventId: 'b0000000-0000-4000-8000-000000000001', why: '   ' }] }, /no sentence/],
+    ['a sentence that is only a URL', { events: [{ eventId: 'b0000000-0000-4000-8000-000000000001', why: 'https://spam.example/x' }] }, /no sentence/],
+  ])('the weekly draft is refused before it is saved when the writer gives %s', async (_name, change, message) => {
+    const eventId = 'b0000000-0000-4000-8000-000000000001';
+    mockEventRows.splice(0, mockEventRows.length, {
+      id: eventId, title: 'Harbor Art Walk', description: 'Local artists along the harbor.',
+      start_at: '2026-12-05T22:00:00Z', end_at: null, venue_name: 'Harbor Park', venue_address: '1 Harbor Way',
+      city: 'Bradenton', event_url: 'https://events.example.com/art-walk', image_url: null, categories: ['arts'],
+      is_free: true, admin_status: 'approved', event_type: 'one_time', recurrence_type: 'none',
+      freshness_status: 'fresh_one_time', times_featured: 0, last_featured_at: null, pulled_at: '2026-11-28T12:00:00Z',
+      price_text: null, family_friendly: true, audience_tags: [], novelty_type: null, region_zone: null,
+      score_breakdown: {}, source_name: 'Synthetic source',
+    });
+    const lineupQuery = {};
+    ['leftJoin', 'select', 'whereIn', 'whereNull', 'whereNotIn', 'orderByRaw']
+      .forEach((m) => { lineupQuery[m] = jest.fn(() => lineupQuery); });
+    db.mockImplementation(() => lineupQuery);
+    mockDispatch.mockResolvedValue({ ok: true, json: {
+      selectedSubject: 'Local picks',
+      weekendPoints: ['Art walk Saturday', 'Harbor views', 'Local artists'],
+      events: [{ eventId, why: 'Local artists show their work along the harbor.' }],
+      signoff: '— The Waves Team',
+      ...change,
+    } });
+    try {
+      await expect(createNewsletterDraft({
+        prompt: 'Weekend events.', eventIds: [eventId], newsletterType: 'local-weekly-fresh-events',
+        issueReference: '2026-12-01T11:00:00Z', persist: false,
+      })).rejects.toThrow(message);
+    } finally {
+      db.mockReset();
+      mockDispatch.mockReset();
+    }
+  });
+
+  test.each([
     ['no poll', undefined],
     ['a quiz that is not a poll', 'lawn-headache-v1'],
     ['an unknown id', 'nl-poll-unknown-v1'],
   ])('the flagship carries no poll for %s', async (_name, pollQuizId) => {
-    const html = await assembleBeehiivNewsletter(draft(), { pollQuizId });
+    const html = await assembleWeeklyNewsletter(draft(), { pollQuizId });
     const text = buildFlagshipTextBody(draft(), { pollQuizId });
     expect(hasQuizToken(html) || hasQuizToken(text)).toBe(false);
     expect(html).not.toContain('Quick poll');
   });
 
   test('a reader gets one vote link per answer; with no reader (archive, Monday copy) the poll shows without links or a free-check line', async () => {
-    const html = await assembleBeehiivNewsletter(draft(), { pollQuizId: P1 });
+    const html = await assembleWeeklyNewsletter(draft(), { pollQuizId: P1 });
     const text = buildFlagshipTextBody(draft(), { pollQuizId: P1 });
     const subs = buildQuizSubstitutions(`${html}\n${text}`, { token: TOKEN });
     const votePaths = ['beach', 'park', 'home', 'out-to-eat']
@@ -206,7 +247,7 @@ describe('Waves Newsletter polls', () => {
     const urlById = new Map(issue.events.map((e) => [e.eventId.toLowerCase(), e.eventUrl]));
     for (const poll of NEWSLETTER_POLL_IDS) {
       const body = [
-        await assembleBeehiivNewsletter(issue, { pollQuizId: poll }),
+        await assembleWeeklyNewsletter(issue, { pollQuizId: poll }),
         buildFlagshipTextBody(issue, { pollQuizId: poll }),
       ].join('\n');
       const subs = {

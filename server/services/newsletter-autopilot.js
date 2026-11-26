@@ -343,6 +343,24 @@ function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
  *
  * @returns {{ skipped: boolean, reason?: string, sendId?: number, eventCount?: number }}
  */
+/**
+ * Refill a thinned lineup from a best-first pool of floor-passing events. Each refill must respect
+ * the portfolio caps against the SURVIVING lineup (the local-first away cap
+ * included): an alternate ranked as a replacement for one pick can otherwise
+ * land beside both away picks.
+ */
+function refillWithinCaps({ safeEventIds, refillPool, refillExisting, lineupEvents }) {
+  // The portfolio selector with the survivors seeded: its cardinality repair
+  // finds a fuller lineup when a greedy refill would strand one (two caps
+  // competing for the last slots).
+  const ids = safeEventIds.map(String);
+  const survivors = lineupEvents.filter((ev) => ids.includes(String(ev.id)));
+  const pool = refillPool.filter((ev) => refillExisting.has(String(ev.id)) && !ids.includes(String(ev.id)));
+  const { selected } = selectPortfolio(pool, { seeded: survivors, maxCount: MAX_PORTFOLIO });
+  const added = selected.map((ev) => String(ev.id)).filter((id) => !ids.includes(id));
+  return [...ids, ...added];
+}
+
 async function autoDraftFlagship() {
   logger.info('[newsletter-autopilot] Starting weekly auto-draft');
 
@@ -577,20 +595,33 @@ async function autoDraftFlagship() {
   if (staleCount > 0) {
     logger.info(`[newsletter-autopilot] Dropped ${staleCount} stale locked event id(s)`);
   }
-  if (safeEventIds.length < 5 && lineupAlternates.length > 0) {
-    const refillCandidates = lineupAlternates
-      .map((ev) => String(ev.id))
-      .filter((id) => uuidRe.test(id) && !safeEventIds.includes(id));
-    if (refillCandidates.length) {
+  // Operator-full slates (5+ calendar picks) are the operator's intent: no
+  // automatic refill. Automatic slates refill from the WHOLE floor-passing
+  // pool, best first by effective score, checked against the survivors: the
+  // stored alternates are only top one-for-one replacements and under the
+  // local-first away cap they can all be away events.
+  let refillPool = [];
+  if (safeEventIds.length < 5 && eligiblePreferred.length < 5) {
+    refillPool = [...lineupAlternates, ...scored.filter(floorPassed)]
+      .filter((ev) => ev && uuidRe.test(String(ev.id)) && !safeEventIds.includes(String(ev.id)))
+      .filter((ev, i, arr) => arr.findIndex((o) => String(o.id) === String(ev.id)) === i)
+      .sort((x, y) => effectiveScore(y) - effectiveScore(x));
+    if (refillPool.length) {
       const refillExisting = new Set(
-        (await db('events_raw').whereIn('id', refillCandidates).pluck('id')).map(String),
+        (await db('events_raw').whereIn('id', refillPool.map((ev) => String(ev.id))).pluck('id')).map(String),
       );
-      for (const id of refillCandidates) {
-        if (safeEventIds.length >= MAX_PORTFOLIO) break;
-        if (refillExisting.has(id)) safeEventIds.push(id);
-      }
-      logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from ranked alternates`);
+      safeEventIds = refillWithinCaps({
+        safeEventIds, refillPool, refillExisting, lineupEvents,
+      });
+      logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from the ranked pool`);
     }
+  }
+  // Recheck BEFORE the paid draft call whenever stale rows were dropped: a
+  // thinned lineup the refill could not restore skips the week here.
+  if (staleCount > 0 || refillPool.length) {
+    const poolById = new Map([...lineupEvents, ...refillPool].map((ev) => [String(ev.id), ev]));
+    const refilledPreflight = preflightDigest(safeEventIds.map((id) => poolById.get(String(id))).filter(Boolean), reqs);
+    if (!refilledPreflight.pass) return skipWeek(refilledPreflight);
   }
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
@@ -874,6 +905,7 @@ async function autoDraftFlagship() {
 }
 
 module.exports = {
+  refillWithinCaps,
   autoDraftFlagship,
   buildDigestPlan,
   preflightDigest,

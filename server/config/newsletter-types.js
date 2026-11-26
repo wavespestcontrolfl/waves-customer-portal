@@ -36,18 +36,20 @@ const NEWSLETTER_TYPES = {
         'tampa',
       ],
     },
-    // Beehiiv comedic format (owner reversal 2026-07-28, late evening —
-    // supersedes the same-day compact spec): conceptual coverage boxes the
-    // generator fills; audience/road-trip coverage is ALSO enforced upstream
-    // as portfolio constraints (newsletter-portfolio.js), which is retained.
+    // Short, scannable weekly format (owner 2026-11-26, "ok go" on the plan
+    // page): 3 "This weekend" points, a subscribe line for forwarded copies,
+    // then events under day headers (name · town, one fixed fact line, one
+    // sentence, details link). SUPERSEDES the owner's 2026-07-28 "Beehiiv
+    // comedic format" reversal (GIFs, joke headlines, scoop bullets, pro tips,
+    // checklist, P.S. joke) for this type; the old devices are gone from the
+    // writer prompt and the renderer. Conceptual boxes the generator fills;
+    // audience/road-trip coverage is ALSO enforced upstream as portfolio
+    // constraints (newsletter-portfolio.js), which is retained.
     requiredSections: [
-      'local_intro',
-      'fresh_this_week',
-      'just_starting',
-      'weekend_picks',
-      'family_or_low_key_pick',
-      'road_trip_pick',
-      'waves_cta',
+      'intro',
+      'this_weekend',
+      'events_by_day',
+      'dates_can_change',
     ],
     // AI-generated customer copy → the hallucinated-claim hard-block
     // (prices, free-admission, safety/efficacy) runs at the send gates.
