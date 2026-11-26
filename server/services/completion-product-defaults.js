@@ -93,6 +93,7 @@
 const { matchServiceProtocol, followupVisitMatch } = require('./protocol-matcher');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
+const { completionRateFields } = require('../utils/protocol-label-rate');
 
 // -- name parsing / dedupe (pure) --------------------------------------
 
@@ -168,19 +169,65 @@ function resolveCatalogProductForName(name, catalogRows = [], { exactOnly = fals
 // completionApplicationMethod) — a name can appear in more than one
 // line's hints (rare), so the FIRST line naming it wins, matching
 // dedupeEntries' own first-seen rule.
-function completionApplicationMethodForName(visit, name) {
+function lineMetaForName(visit, name) {
   const lineMeta = visit?.lineMeta;
   if (!lineMeta || typeof lineMeta !== 'object') return null;
   const target = normalizeName(name);
   if (!target) return null;
   for (const meta of Object.values(lineMeta)) {
     if (!meta || !Array.isArray(meta.catalogProductHints)) continue;
-    if (!meta.catalogProductHints.some((hint) => normalizeName(hint) === target)) continue;
-    return typeof meta.completionApplicationMethod === 'string' && meta.completionApplicationMethod
-      ? meta.completionApplicationMethod
-      : null;
+    if (meta.catalogProductHints.some((hint) => normalizeName(hint) === target)) return meta;
   }
   return null;
+}
+
+function completionApplicationMethodForName(visit, name) {
+  const meta = lineMetaForName(visit, name);
+  return typeof meta?.completionApplicationMethod === 'string' && meta.completionApplicationMethod
+    ? meta.completionApplicationMethod
+    : null;
+}
+
+// Each name's protocol application method (methodsByName) and the lineMeta of a line that carries its label's rate for this pest
+// (labelRateMetaByName, checked against the resolved row's EPA number at shaping), both keyed lower-case.
+function lineFactsByName(visit, names) {
+  const methodsByName = {};
+  const labelRateMetaByName = {};
+  for (const name of names) {
+    const method = completionApplicationMethodForName(visit, name);
+    if (method) methodsByName[name.toLowerCase()] = method;
+    const meta = lineMetaForName(visit, name);
+    if (meta?.labelRatePerGallon) labelRateMetaByName[name.toLowerCase()] = meta;
+  }
+  return { methodsByName, labelRateMetaByName };
+}
+
+// The catalog product hints the cards of a visit's booked add-ons list, lower-case; null when the add-ons could not be read.
+async function addonCardHints(db, serviceId, protocols) {
+  try {
+    const rows = await db('scheduled_service_addons as a')
+      .leftJoin('services as s', 'a.service_id', 's.id')
+      .where({ 'a.scheduled_service_id': serviceId })
+      .select('a.service_name', db.raw('COALESCE(a.service_key_snapshot, s.service_key) as service_key'));
+    const hints = new Set();
+    for (const row of rows) {
+      const card = matchServiceProtocol(protocols, String(row.service_name || ''), { serviceKey: row.service_key || null })?.matchedVisit;
+      for (const meta of Object.values(card?.lineMeta || {})) {
+        for (const hint of meta?.catalogProductHints || []) hints.add(String(hint).toLowerCase());
+      }
+    }
+    return hints;
+  } catch {
+    return null;
+  }
+}
+
+// A line's meta, marked sharedRate when a booked add-on's card lists one of its products (that card may mix it at another rate)
+// or the add-ons are unknown: completionRateFields then starts its rate blank. A line with no label rate passes through.
+function labelRateFor(meta, hints) {
+  if (!meta?.labelRatePerGallon) return meta;
+  const shared = !hints || (meta.catalogProductHints || []).some((hint) => hints.has(String(hint).toLowerCase()));
+  return shared ? { ...meta, sharedRate: true } : meta;
 }
 
 // -- visit resolution + precedence (pure) ------------------------------
@@ -227,12 +274,7 @@ function resolveCompletionDefaultProductNames({
   const entries = dedupeEntries(visit?.completionDefaultProducts);
   const protocolNames = entries.map(entry => entry.name);
   if (protocolNames.length) {
-    const methodsByName = {};
-    for (const name of protocolNames) {
-      const method = completionApplicationMethodForName(visit, name);
-      if (method) methodsByName[name.toLowerCase()] = method;
-    }
-    return { programKey, matchedVisit, source: 'protocol_visit', entries, names: protocolNames, methodsByName };
+    return { programKey, matchedVisit, source: 'protocol_visit', entries, names: protocolNames, ...lineFactsByName(visit, protocolNames) };
   }
 
   return { programKey, matchedVisit, source: 'none', entries: [], names: [], methodsByName: {} };
@@ -250,6 +292,8 @@ function shapeCompletionProductLine(row, resolved, name) {
     rateUnit: row.rate_unit || null,
     defaultRate: row.default_rate ?? null,
     defaultUnit: row.default_unit || null,
+    // The prefill and the review ceiling for a line that carries its label's rate for this pest (protocol-label-rate.js).
+    ...completionRateFields(resolved.labelRateMetaByName?.[String(name || '').toLowerCase()], row),
     applicationMethod: row.application_method || null,
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work -> 'spot_treatment') — overrides the client's
@@ -359,11 +403,12 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     // Month selects the visit in month-keyed programs such as T&S.
     const month = monthFromDateColumn(scheduled.scheduled_date);
 
+    // Lazy require keeps this module free of a hard load-time dependency
+    // on the config file for callers that pass their own (e.g. tests
+    // with synthetic protocols).
+    const protocolSet = protocols || require('../config/protocols.json');
     const resolved = resolveCompletionDefaultProductNames({
-      // Lazy require keeps this module free of a hard load-time dependency
-      // on the config file for callers that pass their own (e.g. tests
-      // with synthetic protocols).
-      protocols: protocols || require('../config/protocols.json'),
+      protocols: protocolSet,
       serviceType: scheduled.service_type,
       serviceKey: scheduled.service_key_snapshot || null,
       month,
@@ -388,6 +433,12 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
         source: resolved.source, products: [], unresolved: [], holds,
       };
     }
+
+    // A booked add-on whose own card lists the same product may mix it at another rate (a cockroach cleanout with a flea add-on:
+    // Tekko Pro at 2 and at 0.66 fl oz per gallon): that product's rate starts blank (labelRateFor). An add-on that never uses it
+    // keeps the card rate.
+    const hints = await addonCardHints(db, serviceId, protocolSet);
+    resolved.labelRateMetaByName = Object.fromEntries(Object.entries(resolved.labelRateMetaByName || {}).map(([name, meta]) => [name, labelRateFor(meta, hints)]));
 
     const catalogRows = await loadActiveCatalogWithAliases(db);
     const products = [];
@@ -415,6 +466,8 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
 }
 
 module.exports = {
+  addonCardHints,
+  labelRateFor,
   resolveCompletionDefaultProductNames,
   resolveCatalogProductForName,
   resolveCompletionProductDefaults,

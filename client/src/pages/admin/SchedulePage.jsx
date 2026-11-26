@@ -144,6 +144,7 @@ import {
 } from "../../lib/pest-default-mix";
 import {
   protocolCompletionDefaultSelections,
+  cardRateRow,
 } from "../../lib/protocol-completion-defaults";
 import {
   applyTaurusYearlyLimit,
@@ -17564,7 +17565,9 @@ export function CompletionPanel({
       && !(propertyAreaKey === "lawn" && /snapshot|landscape bed/i.test([product.name, ...(Array.isArray(product.target_pests) ? product.target_pests : [])].join(" ")));
   }
 
-  function buildSelectedProduct(product, { applicationMethodOverride } = {}) {
+  function buildSelectedProduct(catalogProduct, { applicationMethodOverride: methodOverride } = {}) {
+    // A card-rate product (Tekko Pro on the cockroach card) keeps its card's rate and method however it lands on the form.
+    const { product, applicationMethodOverride } = cardRateRow(protocolCompletionDefaults, catalogProduct, methodOverride);
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work on the German-roach protocol) wins over the
     // catalog-inferred default — Codex r2, PR #5049: Alpine WSG and

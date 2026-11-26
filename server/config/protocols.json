@@ -2234,7 +2234,7 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "German Roach Cleanout\nInspect kitchen, bathrooms, hinges, appliance motors, plumbing voids, cabinet seams, and food storage areas\nApply cockroach gel bait in targeted placements\nUse non-repellent crack-and-crevice treatment where label allows\nApply IGR point-source or aerosol where label allows",
+        "primary": "German Roach Cleanout\nInspect kitchen, bathrooms, hinges, appliance motors, plumbing voids, cabinet seams, and food storage areas\nApply cockroach gel bait in targeted placements\nUse non-repellent crack-and-crevice treatment where label allows\nApply growth regulator as a crack-and-crevice spray, 1 gallon per 1,000 sq ft",
         "secondary": "Vacuum visible aggregation before application when practical\nPlace monitors and record count/location\nExplain sanitation and follow-up requirements",
         "lineMeta": {
           "Apply cockroach gel bait in targeted placements": {
@@ -2253,13 +2253,19 @@
             ],
             "completionApplicationMethod": "spot_treatment"
           },
-          "Apply IGR point-source or aerosol where label allows": {
+          "Apply growth regulator as a crack-and-crevice spray, 1 gallon per 1,000 sq ft": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Gentrol Complete EC3"
+              "Tekko Pro IGR"
             ],
-            "completionApplicationMethod": "spot_treatment"
+            "completionApplicationMethod": "spot_treatment",
+            "labelRatePerGallon": {
+              "amount": 2,
+              "unit": "fl_oz",
+              "use": "cockroaches",
+              "epa": "53883-335"
+            }
           }
         },
         "material_cost": "inventory",
@@ -2270,10 +2276,10 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Bait-first, non-repellent approach. Schedule 10-14 day follow-up for confirmed live German roach activity.",
+        "notes": "Bait-first, non-repellent approach. The growth regulator goes down once: its label gives up to 6 months of activity on roach nymphs, so the follow-up visit has none. Schedule a 10-14 day follow-up for confirmed live German roach activity.",
         "completionDefaultProducts": [
           "Atticus Antapex WSG",
-          "Gentrol Complete EC3",
+          "Tekko Pro IGR",
           "Advion Evolution Cockroach Gel Bait"
         ]
       },
@@ -2322,7 +2328,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Progress should be measured by monitor counts and live sightings, not just product applied."
+        "notes": "Progress should be measured by monitor counts and live sightings, not just product applied. No growth regulator at the follow-up: the first visit's gives up to 6 months of activity on roach nymphs."
       }
     ]
   },
@@ -2333,7 +2339,7 @@
       "The growth regulator goes down once, at treatment 1. It lasts up to 7 months indoors, and its label allows no indoor repeat before 21 days, so treatment 2 at day 14 has none.",
       "Same tank, by the labels: the growth regulator label says it \"may be combined with an EPA registered adulticide\" and \"No label dosage rates may be exceeded\". Its own mix is 1 fl oz per gallon sprayed at 1 gallon per 1,500 sq ft. The Antapex label fixes 10 g per gallon at 1 gallon per 1,000 sq ft. So the shared tank carries the growth regulator at 0.66 fl oz per gallon: just under its label amount on the floor, never more. Do not mix it stronger.",
       "Never fog a flea job. The treatment 2 adulticide label says \"DO NOT use this product as a fogger\", and the treatment 1 adulticide is labeled indoors for spot, crack-and-crevice and surface spray only.",
-      "Use only the products on this card. Fleas are not on the label of the cockroach growth regulator mix, and the outdoor perimeter pyrethroid is labeled for fleas outdoors only."
+      "Use only the products on this card. The growth regulator is the same product as on the cockroach card, at a different rate: mix it at this card's flea rate, never the cockroach card's 2 fl oz per gallon. The outdoor perimeter pyrethroid is labeled for fleas outdoors only."
     ],
     "safety_rules": [
       "People and pets stay out of treated rooms until the spray is dry. Cover or remove fish tanks, pet bowls and pet toys before spraying.",
