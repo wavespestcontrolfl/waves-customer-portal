@@ -182,8 +182,13 @@ describe('completion estimate evidence', () => {
     // The per-visit share comes from whole cents: $600.30 over 4 visits is $150.08 (a float divide gives $150.07), and
     // 10% off is $135.07.
     const fourVisits = lawnRow({ annual: 540.27, annualAfterDiscount: 540.27, visitsPerYear: 4 }, 135.07);
-    expect(quote(fourVisits, silver([engineLawn({ frequency: 4, annual: 600.3, annualBeforeDiscount: 600.3, annualAfterDiscount: 540.27 })])))
-      .toEqual([150.08, 135.07, [['WaveGuard Silver', 15.01, 10, true]]]);
+    const engineFour = (perApp) => engineLawn({ frequency: 4, annual: 600.3, annualBeforeDiscount: 600.3, annualAfterDiscount: 540.27, perApp });
+    expect(quote(fourVisits, silver([engineFour(undefined)]))).toEqual([150.08, 135.07, [['WaveGuard Silver', 15.01, 10, true]]]);
+    // The per-visit list price the engine saved wins when it is the share under either rounding ($150.07, a float
+    // divide; the $135.07 net sits a cent off 10% of it, as the engine discounts the annual); a saved price that is neither
+    // conflicts with the annual: one line.
+    expect(quote(fourVisits, silver([engineFour(150.07)]))).toEqual([150.07, 135.07, [['WaveGuard Silver', 15, 10, true]]]);
+    expect(quote(fourVisits, silver([engineFour(150.2)]))).toEqual([135.07, 135.07, []]);
     // A list-price row that saved $150.07 for that same annual (a float divide) still proves the tier at $135.07.
     const floatSaved = { ...line, perApplicationPrice: 135.07, parentRecurringDiscounted: true, sourceLine: { service: 'pest_control',
       perTreatment: 150.07, annual: 600.3, annualAfterDiscount: 540.27, visitsPerYear: 4 } };

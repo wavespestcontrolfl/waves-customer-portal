@@ -347,18 +347,23 @@ function engineListBasis(raw, line, amount, ownBase, context = {}) {
 }
 
 // The engine line's list price for one visit, in cents, when its figures are the row's and the tier's: the same visit
-// count, the same net annual, that net annual is the tier rate on the list annual (in whole cents), and the list
-// annual's per-visit share at the tier rate is the visit's net. Else null.
+// count, the same net annual, and that net annual is the tier rate on the list annual (in whole cents). Else null.
 function engineListCents(raw, item, rate, amount) {
   const visits = visitCount(raw);
   const listAnnual = money(item.annualBeforeDiscount);
   const netAnnual = money(item.annualAfterDiscount);
   if (!visits || visitCount(item) !== visits || !(listAnnual > 0) || netAnnual === null) return null;
   const cents = (value) => Math.round(value * 100);
-  const listCents = Math.round(cents(listAnnual) / visits);
-  const agrees = money(raw.annualAfterDiscount) === netAnnual && tierNetCents(cents(listAnnual), rate).includes(cents(netAnnual))
-    && tierNetCents(listCents, rate).includes(cents(amount));
-  return agrees ? listCents : null;
+  // The per-visit list price the engine saved (perApp), when it is the annual's share under either rounding at a half
+  // cent; with none saved, the share in whole cents. A saved figure that is neither conflicts: one line.
+  const shares = [Math.round((listAnnual / visits) * 100), Math.round(cents(listAnnual) / visits)];
+  const savedPerApp = money(item.perApp);
+  const listCents = savedPerApp === null ? shares[1] : shares.includes(cents(savedPerApp)) ? cents(savedPerApp) : null;
+  if (listCents === null) return null;
+  // The visit's net is the net annual's share: tierPricedRow proves that, and the tier on the list annual, as for every
+  // list-price row (the engine discounts the annual, so the share can sit a cent off the rate on the list share).
+  const agrees = money(raw.annualAfterDiscount) === netAnnual && tierNetCents(cents(listAnnual), rate).includes(cents(netAnnual));
+  return agrees && listCents >= cents(amount) ? listCents : null;
 }
 
 function acceptedPricing(line, discountContext = {}) {
