@@ -12,8 +12,8 @@
  *   - retires the cost-plus list-side minimum (costPlusList.minimumPerVisit
  *     55 → 0). Cost-plus pricing is off; cost bases stamped on saved quotes
  *     keep their own value, so nothing already sent moves.
- * (The engine read the minimum only behind a gate when this shipped; the gate
- * was removed once live. A value of 0 turns the rule off.)
+ * The engine reads the minimum only while GATE_LAWN_MIN_AFTER_DISCOUNT is on,
+ * so this row edit changes no price by itself.
  * Only an untouched seeded value is changed; admin edits are left alone.
  * Saved quotes replay with the stamped pricingMetadata value (0 when the
  * quote predates this rule), so only new quotes price with it.
