@@ -37,6 +37,14 @@ function lowerTermsOf(bookedPrice, shownPrice) {
   return Object.keys(lower).length ? lower : null;
 }
 
+// The price the card shows: none after a price_changed answer; the booked price when a booking of THIS home (token)
+// was made lower (a late answer of another link's booking never changes this card); else the page's price.
+function cardPriceOf(price, priceStale, bookedPrice, token) {
+  if (priceStale || !price) return null;
+  const bookedHere = bookedPrice && bookedPrice.token === token ? bookedPrice.price : null;
+  return bookedHere ? { ...price, ...bookedHere } : price;
+}
+
 // The booked screen's state from the booking answer. A lower booked price also goes to the price card above (through
 // onBookedLower), so the card agrees with this screen.
 function bookedStateOf(body, picked, price, onBookedLower) {
@@ -484,7 +492,7 @@ export default function MailHomePage() {
   const city = addressCase(data.address.city) || null;
   const price = data.price;
   // The price card shows no price once a booking answered price_changed; the picker keeps the price it was opened with.
-  const cardPrice = priceStale ? null : (bookedPrice && price ? { ...price, ...bookedPrice } : price);
+  const cardPrice = cardPriceOf(price, priceStale, bookedPrice, token);
   const setupFee = cardPrice && Number(cardPrice.setupFee) > 0 ? Number(cardPrice.setupFee) : null;
 
   return (
@@ -534,7 +542,7 @@ export default function MailHomePage() {
         )}
       </BrandCard>
 
-      {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} onPriceChanged={() => setPriceStale(true)} onBookedLower={setBookedPrice} /> : null}
+      {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} onPriceChanged={() => setPriceStale(true)} onBookedLower={(booked) => setBookedPrice({ token, price: booked })} /> : null}
 
       <BrandCard style={{ marginTop: SP.md }}>
         <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>What the plan includes</h2>

@@ -84,15 +84,22 @@ async function loadHome(token) {
   const row = await db('mail_prospects')
     .where({ page_token: token, list_key: LIST_KEY, status: 'eligible', price_status: 'priced' })
     .first('id', 'address_line1', 'city', 'state', 'zip', 'price_annual', 'price_setup_fee', 'home_sqft', 'home_sqft_source',
-      'home_stories', 'lot_sqft', 'mailed_at');
+      'home_stories', 'lot_sqft', 'mailed_at', 'mailed_price');
   if (!row) return null;
-  const price = toPrice(row);
-  if (price.annual == null) return null;
+  const price = rowPriceOf(row);
+  if (!price || price.annual == null) return null;
   const facts = {
     homeSqft: numOrNull(row.home_sqft), homeSqftSource: row.home_sqft_source, stories: numOrNull(row.home_stories), lotSqft: numOrNull(row.lot_sqft),
   };
   if (facts.homeSqft == null || facts.stories == null || facts.lotSqft == null || !facts.homeSqftSource) return null;
   return { row, facts, price, held: priceIsHeld(row.mailed_at) };
+}
+
+// The price the page shows for this row (home-page.js): a mailed home's PRINTED price (the frozen snapshot, never the
+// columns), else the row's own price. Null when a mailed home's snapshot cannot be read (the page shows no price then).
+function rowPriceOf(row) {
+  if (!row.mailed_at) return toPrice(row);
+  return require('./mailed-record').printedPriceOf(row);
 }
 
 // The postcard's price hold (the card says "Held 60 days"): a mailed home, through the Eastern day heldUntilOf gives
@@ -461,9 +468,9 @@ async function markEstimate(estimateId, prospectId, terms, shownKey, deps) {
   const conn = deps.db || db;
   const set = { source: 'quote_wizard', lead_source: LEAD_SOURCE, lead_source_detail: LEAD_SOURCE_DETAIL };
   const merged = { mailProspectId: String(prospectId), mailShownKey: shownKey };
-  // A card that promised no setup fee while the engine now has one freezes an explicit ZERO: an absent quote reads as a
-  // legacy estimate and a later conversion would add the live fee (estimate-converter shouldIncludeWaveGuardSetupFeeForRecurring).
-  if (terms.setupCents > 0 || terms.liveSetupCents > 0) merged.setupFeeQuote = { amount: terms.setupCents / 100, kind: 'waveguard_membership' };
+  // Terms settled on the hold freeze the setup fee explicitly, a ZERO too (the card promised none, or the live fee fell to
+  // none): an absent quote reads as a legacy estimate and a later conversion would add the live fee (estimate-converter shouldIncludeWaveGuardSetupFeeForRecurring).
+  if (terms.setupCents > 0 || terms.held) merged.setupFeeQuote = { amount: terms.setupCents / 100, kind: 'waveguard_membership' };
   set.estimate_data = conn.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(merged)]);
   await conn('estimates').where({ id: estimateId, status: 'draft' }).whereNull('archived_at').update(set);
 }
@@ -600,10 +607,12 @@ function commitGuardFor(home, shown, estimateId, deps, terms = shown) {
     const row = await trx('mail_prospects')
       .where({ id: home.row.id, list_key: LIST_KEY, status: 'eligible', price_status: 'priced' })
       .forShare()
-      .first('price_annual', 'price_setup_fee');
-    if (!row || toCents(row.price_annual) !== shown.annualCents || toCents(row.price_setup_fee || 0) !== shown.setupCents) return false;
-    // A held price ends at the end of its last Eastern day, also for a booking that started before it.
-    if (terms.held && !priceIsHeld(home.row.mailed_at)) return false;
+      .first('price_annual', 'price_setup_fee', 'mailed_at', 'mailed_price');
+    // The same price the page shows: a mailed home's printed snapshot, else the columns.
+    const rowPrice = row && rowPriceOf(row);
+    if (!rowPrice || rowPrice.annual == null || toCents(rowPrice.annual) !== shown.annualCents || toCents(rowPrice.setupFee || 0) !== shown.setupCents) return false;
+    // The hold is read from the locked row (a home marked mailed after the page loaded gets its hold; never the reverse).
+    if (terms.held && !priceIsHeld(row.mailed_at)) return false;
     const draft = await draftHoldingShownPrice(trx, estimateId, terms);
     if (!draft) return false;
     if (!(await noMemberAtHome(trx, home, deps))) return false;

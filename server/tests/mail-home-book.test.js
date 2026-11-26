@@ -789,7 +789,12 @@ describe('bookHome', () => {
 // the card, and the lower live price when ours went down).
 describe('the printed price is held for a mailed home', () => {
   const daysAgo = (n) => new Date(Date.now() - n * 86400000);
-  const held = (over) => row({ mailed_at: daysAgo(3), ...over });
+  const snap = (annual, setupFee) => ({ plan: 'pest_quarterly', annual, monthly: Math.round((annual * 100) / 12) / 100, setupFee, pricedAt: '2026-11-22T22:00:00.000Z' });
+  // A mailed home: the printed price lives in the snapshot (the columns are frozen to the same amounts).
+  const held = (over = {}) => {
+    const base = row({ mailed_at: daysAgo(3), ...over });
+    return { mailed_price: snap(Number(base.price_annual), Number(base.price_setup_fee)), ...base };
+  };
   const savedAt = (annual) => saveEstimate.mockImplementation(async (body) => ({ estimate: { id: 'est-1', annual_total: annual, address: body.address }, reused: false, memberLinkageWarning: null }));
 
   test('priceIsHeld: through the 60th Eastern day after mailing, never for a home that was not mailed', () => {
@@ -882,6 +887,31 @@ describe('the printed price is held for a mailed home', () => {
     expect(shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: recurring, estimateData: frozen })).toBe(false);
   });
 
+  test('the live fee fell to zero: the draft freezes an explicit zero too', async () => {
+    mockRow = held({ price_setup_fee: '99.00' });
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 627, priceSetupFee: 0, priceDigest: 'd6' });
+    const res = await bookHome(TOKEN, { ...INPUT(), price: { annual: 627, setupFee: 99 } }, deps);
+    expect(res).toMatchObject({ status: 200, body: { price: { setupFee: 0 } } });
+    const frozen = JSON.parse(updates[0].estimate_data.bindings[0]);
+    expect(frozen.setupFeeQuote).toEqual({ amount: 0, kind: 'waveguard_membership' });
+    const { shouldIncludeWaveGuardSetupFeeForRecurring } = require('../services/estimate-converter');
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: [{ service: 'pest_control', name: 'Pest Control' }], estimateData: frozen })).toBe(false);
+  });
+
+  test('a mailed home books on its PRINTED price (the snapshot the page shows), never the columns', async () => {
+    // The page shows 627.01 from the snapshot; the columns say 700.
+    mockRow = { ...row({ mailed_at: daysAgo(3), price_annual: '700.00' }), mailed_price: snap(627.01, 0) };
+    quote.priceHome.mockResolvedValue({ status: 'priced', priceAnnual: 627.01, priceSetupFee: 0, priceDigest: 'd7' });
+    quote.judge.mockReturnValue({ price: { annual: 627.01, setupFee: 0, digest: 'd7' } });
+    const res = await bookHome(TOKEN, { ...INPUT(), price: { annual: 627.01, setupFee: 0 } }, deps);
+    expect(res).toMatchObject({ status: 200, body: { booked: true } });
+    // The columns' price is not the shown one.
+    expect(await bookHome(TOKEN, { ...INPUT(), price: { annual: 700, setupFee: 0 } }, deps)).toEqual({ status: 409, body: { error: 'price_changed' } });
+    // A mailed home whose snapshot cannot be read has no page price: the same 404 as an unknown token.
+    mockRow = { ...row({ mailed_at: daysAgo(3) }), mailed_price: { plan: 'pest_quarterly' } };
+    expect(await bookHome(TOKEN, INPUT(), deps)).toBeNull();
+  });
+
   test('a concurrent submission that createSelfBooking answers as a replay carries no price', async () => {
     booking.createSelfBooking.mockResolvedValue({ ok: true, body: { replayed: true, booking: { id: 'b1' } } });
     const res = await bookHome(TOKEN, INPUT(), deps);
@@ -907,9 +937,12 @@ describe('the printed price is held for a mailed home', () => {
   test('the commit guard checks the draft at the terms, and refuses held terms once the hold has ended', async () => {
     const shown = { annualCents: 62700, setupCents: 0 };
     const terms = { annualCents: 60000, setupCents: 0, discountCents: 0, liveSetupCents: 0, held: true };
-    const trxFor = (draft) => {
+    const lockedRow = (mailedAt) => (mailedAt
+      ? { price_annual: '627.00', price_setup_fee: '0.00', mailed_at: mailedAt, mailed_price: snap(627, 0) }
+      : { price_annual: '627.00', price_setup_fee: '0.00', mailed_at: null, mailed_price: null });
+    const trxFor = (draft, locked = lockedRow(daysAgo(3))) => {
       const prospect = {}; prospect.where = jest.fn(() => prospect); prospect.forShare = jest.fn(() => prospect);
-      prospect.first = jest.fn(async () => ({ price_annual: '627.00', price_setup_fee: '0.00' }));
+      prospect.first = jest.fn(async () => locked);
       const estimate = {}; estimate.where = jest.fn(() => estimate); estimate.forShare = jest.fn(() => estimate); estimate.first = jest.fn(async () => draft);
       const live = {}; for (const m of ['join', 'whereRaw', 'whereNot', 'whereNotIn']) live[m] = jest.fn(() => live);
       live.first = jest.fn(async () => undefined);
@@ -924,12 +957,14 @@ describe('the printed price is held for a mailed home', () => {
     expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, terms)(trxFor(draftAt('600.00')))).toBe(true);
     expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, terms)(trxFor(draftAt('627.00')))).toBe(false);
     // The hold ended between the price check and the commit.
-    expect(await commitGuardFor(home(daysAgo(62)), shown, 'est-1', deps, terms)(trxFor(draftAt('600.00')))).toBe(false);
+    expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, terms)(trxFor(draftAt('600.00'), lockedRow(daysAgo(62))))).toBe(false);
     // A discount that brings the price back to the shown one still relies on the hold (the amounts are equal).
     const discounted = { annualCents: 62700, setupCents: 0, discountCents: 3300, liveSetupCents: 0, held: true };
     expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, discounted)(trxFor(draftAt('627.00')))).toBe(true);
-    expect(await commitGuardFor(home(daysAgo(62)), shown, 'est-1', deps, discounted)(trxFor(draftAt('627.00')))).toBe(false);
+    expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, discounted)(trxFor(draftAt('627.00'), lockedRow(daysAgo(62))))).toBe(false);
+    // The locked row's printed snapshot is the price compared, not its columns.
+    expect(await commitGuardFor(home(daysAgo(3)), shown, 'est-1', deps, discounted)(trxFor(draftAt('627.00'), { ...lockedRow(daysAgo(3)), mailed_price: snap(650, 0) }))).toBe(false);
     // Terms equal to the shown price need no hold.
-    expect(await commitGuardFor(home(null), shown, 'est-1', deps)(trxFor(draftAt('627.00')))).toBe(true);
+    expect(await commitGuardFor(home(null), shown, 'est-1', deps)(trxFor(draftAt('627.00'), lockedRow(null)))).toBe(true);
   });
 });
