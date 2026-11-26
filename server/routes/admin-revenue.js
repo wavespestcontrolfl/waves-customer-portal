@@ -193,6 +193,10 @@ router.get('/settings', async (req, res, next) => {
 //   operating overhead (Phase 5): ovhOfficePayroll, ovhRent, ovhInsurance,
 //     ovhSoftware, ovhVehicleFixed, ovhOtherGa — finite numbers ≥ 0 (null
 //     clears one); any overhead key present stamps overhead_entered_at.
+//   owner office time (office cost per stop): ownerOfficeHoursPerMonth,
+//     ownerOfficeHourlyRate — finite numbers ≥ 0 (null clears one). Null or 0 =
+//     the owner's time is not counted. These do not stamp overhead_entered_at:
+//     they are not part of the EBITDA bridge's overhead block.
 const SETTINGS_FIELDS = {
   loadedLaborRate: 'loaded_labor_rate',
   driveCostPerStop: 'drive_cost_per_stop',
@@ -207,6 +211,11 @@ const OVH_FIELDS = {
   ovhVehicleFixed: 'ovh_vehicle_fixed',
   ovhOtherGa: 'ovh_other_ga',
 };
+// Owner office-time allowance inputs (services/monthly-financial-snapshot.js).
+const OWNER_OFFICE_FIELDS = {
+  ownerOfficeHoursPerMonth: 'owner_office_hours_per_month',
+  ownerOfficeHourlyRate: 'owner_office_hourly_rate',
+};
 
 // DATE cell → 'YYYY-MM-DD' via LOCAL getters (node-postgres parses DATE
 // columns to local-midnight Dates; toISOString/String() would drift or fail).
@@ -215,6 +224,20 @@ function effectiveDateStr(v) {
   if (typeof v === 'string') return v.slice(0, 10);
   const d = new Date(v);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Copies each sent field of `fields` onto `row`: a finite number ≥ 0, or null to clear it.
+// Returns { touched } (any field present) or { error }.
+function applyNullableNumbers(row, body, fields) {
+  let touched = false;
+  for (const [key, col] of Object.entries(fields)) {
+    if (body[key] === undefined) continue;
+    touched = true;
+    const v = body[key] === null ? null : (typeof body[key] === 'number' ? body[key] : parseFloat(body[key]));
+    if (v !== null && (!Number.isFinite(v) || v < 0)) return { error: `${key} must be a number ≥ 0 (or null to clear)` };
+    row[col] = v;
+  }
+  return { touched };
 }
 
 function buildSettingsRow(latest, body, todayStr, now = new Date()) {
@@ -231,16 +254,12 @@ function buildSettingsRow(latest, body, todayStr, now = new Date()) {
     if (!Number.isFinite(v) || v < 0) return { error: `${key} must be a number ≥ 0` };
     row[col] = v;
   }
-  let touchedOverhead = false;
-  for (const [key, col] of Object.entries(OVH_FIELDS)) {
-    if (body[key] === undefined) continue;
-    touchedOverhead = true;
-    if (body[key] === null) { row[col] = null; continue; } // deliberate clear
-    const v = typeof body[key] === 'number' ? body[key] : parseFloat(body[key]);
-    if (!Number.isFinite(v) || v < 0) return { error: `${key} must be a number ≥ 0 (or null to clear)` };
-    row[col] = v;
-  }
-  if (touchedOverhead) row.overhead_entered_at = now;
+  // Both blocks take a number ≥ 0 or null (a deliberate clear); only the overhead block stamps overhead_entered_at.
+  const overhead = applyNullableNumbers(row, body, OVH_FIELDS);
+  if (overhead.error) return { error: overhead.error };
+  if (overhead.touched) row.overhead_entered_at = now;
+  const ownerTime = applyNullableNumbers(row, body, OWNER_OFFICE_FIELDS);
+  if (ownerTime.error) return { error: ownerTime.error };
 
   // Vehicle deduction method election (Schedule C line 9) — server-owned
   // allow-list: 'standard_mileage' | 'actual_expenses' | null (un-elect).

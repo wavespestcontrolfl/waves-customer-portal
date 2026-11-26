@@ -2173,6 +2173,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // MONTHLY, 2ND 5:35 AM ET — monthly financial snapshot (office cost per stop). Writes last month's row and
+  // re-writes the month before it (late ledger entries). Days 3-7 at 5:35 are the catch-up for a lost tick on
+  // the 2nd: they write only while last month's row is missing, so a finished month is never written twice.
+  // Writes one table (monthly_financial_snapshots), sends nothing. runExclusive: a deploy overlap must not
+  // double-write.
+  // =========================================================================
+  cron.schedule('35 5 2-7 * *', async () => {
+    try {
+      const { etDateString: etToday } = require('./../utils/datetime-et');
+      const catchUp = Number(etToday().slice(8, 10)) > 2;
+      await runExclusive('monthly-financial-snapshot', async () => {
+        const { runMonthlyFinancialSnapshots } = require('./monthly-financial-snapshot');
+        await runMonthlyFinancialSnapshots({ catchUp });
+      });
+    } catch (err) {
+      logger.error(`[monthly-financial-snapshot] cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:20AM — ROUTE-TIERS nightly intra-day reorder (tier 3: 72h–7d
   // band). Rewrites route_order per tech-day via the shared optimizer when
   // savings clear the floor; NEVER moves a visit's date/window/tech, skips any

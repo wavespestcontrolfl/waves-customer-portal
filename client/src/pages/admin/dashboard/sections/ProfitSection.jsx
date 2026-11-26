@@ -9,6 +9,7 @@ import DashboardSection from "../DashboardSection";
 import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile } from "../KpiTile";
 import EbitdaBridgeCard from "../EbitdaBridgeCard";
+import OfficeCostPerStopCard from "../OfficeCostPerStopCard";
 import MarginByLineBars from "../MarginByLineBars";
 
 // PROFIT — what's helping or hurting margin: fully-burdened gross margin,
@@ -23,6 +24,7 @@ export default function ProfitSection({
   kpiHistory,
   mix,
   ebitda,
+  officeCost,
   revenueOverview,
   isMobile,
   pending = {},
@@ -115,6 +117,15 @@ export default function ProfitSection({
         >
           <DashboardFeed value={mix} pending={pending.mix} label="service mix" onRetry={onRetry}>
             <ServiceMixDonut mix={mix?.mix || []} />
+          </DashboardFeed>
+        </ChartCard>
+      </div>
+
+      {/* Office cost per stop — the stored monthly snapshots (written on the 2nd of each month). */}
+      <div className="mb-4 md:mb-5">
+        <ChartCard title="Office cost per stop" sub="office costs ÷ paid stops · stored monthly">
+          <DashboardFeed value={officeCost} pending={pending.officeCost} label="office cost per stop" onRetry={onRetry}>
+            <OfficeCostPerStopCard data={officeCost} />
           </DashboardFeed>
         </ChartCard>
       </div>
