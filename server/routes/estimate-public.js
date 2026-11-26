@@ -98,7 +98,8 @@ const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, areaAddOnConfig } = require('../services/pricing-engine/constants');
-const { storedOneTimeAnchorPerApp, oneTimePestNoHomeAgeReplaySignal } = require('../services/pricing-engine/one-time-pest-home-age');
+const { storedOneTimeAnchorPerApp, oneTimePestNoHomeAgeReplaySignal, quarterlyPerAppWithoutHomeAge } = require('../services/pricing-engine/one-time-pest-home-age');
+const { newRuleChoiceAmount } = require('../services/pricing-engine/one-time-pest-price');
 const { isRetiredTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
@@ -156,6 +157,7 @@ const {
   estimateLawnFloorArmed,
   lawnRowsShowFloorEnforcement,
   savedFloorReplaySignals,
+  savedOneTimePestRuleLegacy,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
 const SignupSingleEmail = require('../services/signup-single-email');
@@ -21264,9 +21266,18 @@ function oneTimePestChoiceAmountFromBreakdown(breakdown = {}) {
   return oneTimeChoiceAmountFromBreakdown(breakdown, 'pest_control');
 }
 
-function oneTimePestChoiceAmountFromPerApp(perApp) {
+// `legacy` = a quote saved before the one-time pest rule (2026-11-26, new quotes only): the existing 2.2 path below, unchanged.
+// A new quote shows the engine's own new-rule amount (one-time-pest-price.js).
+function oneTimePestChoiceAmountFromPerApp(perApp, legacy = false, ageStep = 0, savedFloor = null) {
   const amount = Number(perApp);
   if (!Number.isFinite(amount) || amount <= 0) return null;
+  if (pestChoiceTrace && pestChoiceTrace.anchor === null) {
+    pestChoiceTrace.anchor = legacy || !(ageStep > 0) ? amount : quarterlyPerAppWithoutHomeAge(amount, ageStep, savedFloor);
+  }
+  // A new one-time visit beside a plan saved before the rule anchors on the plan's age-free quarterly (ageStep is the plan's saved
+  // home-age step; the plan itself keeps its aged price).
+  // The same helper the engine uses, with the plan's saved quote-time floor (never today's).
+  if (!legacy) return newRuleChoiceAmount(ageStep > 0 ? quarterlyPerAppWithoutHomeAge(amount, ageStep, savedFloor) : amount);
   const multiplier = Number(ONE_TIME.pest?.multiplier);
   const floor = Number(ONE_TIME.pest?.floor);
   return Math.max(
@@ -21302,7 +21313,7 @@ function pestTierPerApp(row = {}) {
   return null;
 }
 
-function oneTimePestChoiceAmountFromResultStats(estData = {}) {
+function oneTimePestChoiceAmountFromResultStats(estData = {}, legacy = false, ageStep = 0, savedFloor = null) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData && typeof estData === 'object' ? estData : {});
@@ -21315,7 +21326,7 @@ function oneTimePestChoiceAmountFromResultStats(estData = {}) {
   ];
   if (!tiers.length) return null;
   const tier = tiers.find(rowLooksQuarterly) || tiers[0];
-  return oneTimePestChoiceAmountFromPerApp(pestTierPerApp(tier));
+  return oneTimePestChoiceAmountFromPerApp(pestTierPerApp(tier), legacy, ageStep, savedFloor);
 }
 
 function pestPerAppFromFrequency(frequency = {}) {
@@ -21324,39 +21335,119 @@ function pestPerAppFromFrequency(frequency = {}) {
   return pestTierPerApp(pestRow);
 }
 
-function oneTimePestChoiceAmountFromFrequencies(frequencies = []) {
+function oneTimePestChoiceAmountFromFrequencies(frequencies = [], legacy = false, ageStep = 0, savedFloor = null) {
   if (!Array.isArray(frequencies) || !frequencies.length) return null;
   const ordered = [
     ...frequencies.filter(rowLooksQuarterly),
     ...frequencies.filter((row) => !rowLooksQuarterly(row)),
   ];
   for (const frequency of ordered) {
-    const amount = oneTimePestChoiceAmountFromPerApp(pestPerAppFromFrequency(frequency));
+    const amount = oneTimePestChoiceAmountFromPerApp(pestPerAppFromFrequency(frequency), legacy, ageStep, savedFloor);
     if (amount) return amount;
   }
   return null;
 }
 
-function oneTimePestChoiceAmountFromRecurringServices(recurringServices = []) {
+function oneTimePestChoiceAmountFromRecurringServices(recurringServices = [], legacy = false, ageStep = 0, savedFloor = null) {
   const services = Array.isArray(recurringServices) ? recurringServices : [];
   for (const service of services) {
     if (!isPestServiceName(service?.name || service?.label || service?.service)) continue;
-    const amount = oneTimePestChoiceAmountFromPerApp(pestTierPerApp(service));
+    const amount = oneTimePestChoiceAmountFromPerApp(pestTierPerApp(service), legacy, ageStep, savedFloor);
     if (amount) return amount;
   }
   return null;
 }
 
+// Is this estimate's pest priced from a bedroom-band row (the engine's own verdict), not the footprint ladder? The authoritative
+// priced pest line decides (a band line carries its basis; a priced footprint line is footprint-priced even when a signed band row
+// still sits in the stored inputs: measured square feet or a roach program sent it to the ladder). When only the inputs survive,
+// the same helper the engine asks (trustedUnitBand) is asked again with the same arguments.
+// The home-age step the saved pest PLAN carries (raw line, or the mapped plan row): 0 for a plan priced on the new rule.
+function savedPlanAgeStep(estData = {}) {
+  const container = require('../services/estimate-result-container').storedEstimateContainer(estData) || estData || {};
+  const line = [].concat(container.lineItems || []).find((l) => l?.service === 'pest_control');
+  const age = Number(line?.pestAgeAdj ?? container.results?.pest?.pestAgeAdj);
+  return Number.isFinite(age) && age > 0 ? age : 0;
+}
+
+function normalizeStoredEstimateData(raw) {
+  if (typeof raw !== 'string') return raw && typeof raw === 'object' ? raw : null;
+  try { const parsed = JSON.parse(raw); return parsed && typeof parsed === 'object' ? parsed : null; } catch { return null; }
+}
+
+function isBedroomBandEstimate(estData = {}) {
+  const container = require('../services/estimate-result-container').storedEstimateContainer(estData) || estData || {};
+  const pestLines = [].concat(container.lineItems || []).filter((l) => l && ['pest_control', 'one_time_pest'].includes(l.service));
+  if (pestLines.some((l) => l.pricingBasis === 'caller_stated_bedroom_count' || l.baseSource === 'unit_band_row')) return true;
+  if (pestLines.some((l) => !l.quoteRequired && Number(l.price ?? l.annual) > 0)) return false;
+  // The mapped result drops the raw lines but keeps the engine's own band marker on the pest plan row and its tiers (pricingVersion).
+  if ([container.results?.pest, ...[].concat(container.results?.pestTiers || []), ...[].concat(container.pestTiers || [])]
+    .some((row) => row && row.pricingVersion === 'unit_band')) return true;
+  const inputs = rawEngineInputs(estData);
+  // Only the stamped send snapshot survives: the bundle (or the snapshot itself, once the bundle is dropped) froze the engine's verdict
+  // beside its rows when it was built (bandPricedPest).
+  if (!inputs?.unitBandPricing || typeof inputs.unitBandPricing !== 'object') {
+    const snap = normalizeStoredEstimateData(estData)?.sendSnapshot;
+    return snap?.pricingBundle?.bandPricedPest === true || snap?.bandPricedPest === true;
+  }
+  const { trustedUnitBand } = require('../services/pricing-engine/unit-band-pricing');
+  const services = inputs.services || {};
+  const isBand = (verdict) => ['trusted', 'untrusted'].includes(verdict.status);
+  if (services.pest && isBand(trustedUnitBand(inputs, 'pest', {
+    requestedFrequency: services.pest.frequency || undefined, roachType: services.pest.roachType || 'none',
+  }))) return true;
+  // The one-time visit beside a plan keeps the plan's roach program when it names none of its own, as the page offers it.
+  const offered = { ...(services.oneTimePest && typeof services.oneTimePest === 'object' ? services.oneTimePest : {}) };
+  return isBand(trustedUnitBand(inputs, 'oneTimePest', { roachType: offered.roachType || services.pest?.roachType || 'none' }));
+}
+
+// What the send freezes beside its rows (bundle.oneTimePestChoice = { amount, legacy, anchor }): the RESOLVED one-time pest choice, computed
+// by the same function the page uses on the full rows. A link served from the snapshot alone (no rows) shows and accepts that amount
+// directly and never rebuilds it from frequency rows or the per-service markers. Internal: stripped from every customer response.
+let pestChoiceTrace = null;
+function frozenOneTimePestChoice(estData = {}, pricingBundle = null) {
+  const snapshot = estData?.sendSnapshot && typeof estData.sendSnapshot === 'object' ? estData.sendSnapshot : null;
+  const frozen = snapshot?.oneTimePestChoice ?? snapshot?.pricingBundle?.oneTimePestChoice ?? pricingBundle?.oneTimePestChoice;
+  const amount = Number(frozen?.amount);
+  if (!(Number.isFinite(amount) && amount > 0)) return null;
+  // A caller tracing the detail gets the frozen legacy flag and anchor too, so a re-freeze never turns a legacy choice into a new-rule one.
+  if (pestChoiceTrace) { pestChoiceTrace.legacy = frozen.legacy === true; pestChoiceTrace.anchor = frozen.anchor ?? null; }
+  return amount;
+}
+
+function oneTimePestChoiceDetail(estimate = {}, estData = {}, pricingBundle = null) {
+  const trace = { anchor: null, legacy: null };
+  pestChoiceTrace = trace;
+  let amount;
+  try { amount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle); } finally { pestChoiceTrace = null; }
+  return { amount: amount > 0 ? amount : null, legacy: trace.legacy === true, anchor: trace.anchor };
+}
+
 function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
+  // Snapshot-only (the container holds no pest row of its own): the amount the send froze, not a rebuild from partial data.
+  const frozenChoice = frozenOneTimePestChoice(estData, pricingBundle);
+  if (frozenChoice !== null && require('../services/estimate-floor-signal-replay').storedPestServices({ ...estData, sendSnapshot: undefined }).size === 0) return frozenChoice;
   // GATE_ONE_TIME_PEST_NO_HOME_AGE (owner 2026-11-26): a plan priced on that rule
   // saved the quarterly rate with no home-age adjustment. The one-time choice is
   // built from that saved rate, so it shows and charges the same amount whatever
   // the gate says later. No saved rate = the amount derived as before.
-  return oneTimePestChoiceAmountFromPerApp(storedOneTimeAnchorPerApp(estData))
-    || oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies)
-    || oneTimePestChoiceAmountFromResultStats(estData)
+  // One-time pest rule (new quotes only, owner 2026-11-26): a quote saved before it keeps the amount it was sold with (the existing
+  // 2.2 path below); a new quote shows the engine's own new-rule amount. Read from the estimate's own stamps, never today's setting.
+  // A bedroom-band (unit) estimate is never on the new rule: its one-time price is the band path's, so its choice stays on the
+  // existing calculation whatever the stamp says (the new rule is for footprint-priced one-time pest only).
+  const legacy = savedOneTimePestRuleLegacy(estData) || isBedroomBandEstimate(estData);
+  if (pestChoiceTrace) pestChoiceTrace.legacy = legacy;
+  const ageStep = legacy ? 0 : savedPlanAgeStep(estData);
+  // The floor the plan was priced with (the engine's replay signal), not today's.
+  const savedFloor = require('../services/estimate-floor-signal-replay').estimatePestFloorSignal(estData).perVisit;
+  return oneTimePestChoiceAmountFromPerApp(storedOneTimeAnchorPerApp(estData), legacy) // the gate's saved anchor is already age-free
+    || oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies, legacy, ageStep, savedFloor)
+    || oneTimePestChoiceAmountFromResultStats(estData, legacy, ageStep, savedFloor)
     || oneTimePestChoiceAmountFromRecurringServices(
       recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
+      legacy,
+      ageStep,
+      savedFloor,
     )
     || oneTimePestChoiceAmountFromBreakdown(
       pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData),
@@ -30120,6 +30211,8 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
   const out = {};
   for (const [key, nested] of Object.entries(value)) {
     if (key === 'marginFloorMonthly') continue;
+    // Internal evidence frozen into the send snapshot (one-time pest rule): never customer-facing.
+    if (key === 'bandPricedPest' || key === 'oneTimePestCurrentServices' || key === 'oneTimePestChoice') continue;
     // An area add-on row's price knobs include the target margin: internal, like the margin floor.
     if (key === 'pricingKnobs' && value.service === 'area_addon') continue;
     out[key] = stripInternalMarginFieldsDeep(nested, depth + 1);
@@ -30299,8 +30392,27 @@ function addMissingBilledPerApplicationFlags(bundle) {
 // by the same page, and a lookup that succeeds for one call and fails for the
 // other would tell it two contradictory things about the same plan.
 async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
-  const bundle = await buildPricingBundleInner(estimate);
+  let bundle = await buildPricingBundleInner(estimate);
   if (!bundle || typeof bundle !== 'object') return bundle;
+  // A bedroom-band offer freezes the engine's own verdict beside its rows, so a link served from the snapshot alone (no inputs, no
+  // lines) keeps the band's one-time path at display and acceptance instead of the new footprint rule (isBedroomBandEstimate).
+  // The per-service one-time pest rule freezes the same way: on a legacy estimate a revision may have added a pest service under the
+  // new rule (its line stamp false), and a snapshot-only link has no line to read it from. Both markers are INTERNAL: stripped from
+  // every customer-bound response (stripInternalMarginFieldsDeep), kept in the stored snapshot.
+  try {
+    const estData = normalizeStoredEstimateData(estimate?.estimate_data);
+    if (estData) {
+      if (bundle.bandPricedPest !== true && isBedroomBandEstimate(estData)) bundle = { ...bundle, bandPricedPest: true };
+      if (!bundle.oneTimePestChoice && estimate?.show_one_time_option !== false) {
+        const detail = oneTimePestChoiceDetail({ show_one_time_option: true }, estData, bundle);
+        if (detail.amount) bundle = { ...bundle, oneTimePestChoice: detail };
+      }
+      if (!Array.isArray(bundle.oneTimePestCurrentServices)) {
+        const current = require('../services/estimate-floor-signal-replay').savedOneTimePestCurrentServices(estData);
+        if (current.length) bundle = { ...bundle, oneTimePestCurrentServices: current };
+      }
+    }
+  } catch { /* the markers are best-effort evidence; a read failure never blocks the bundle */ }
   // The SAME fail-closed resolver the hero and /data cta use (codex #3128
   // r10). This was the last caller reading the fail-OPEN predicate, and the
   // flags are not merely a disclosure note: PriceCard treats their ABSENCE as

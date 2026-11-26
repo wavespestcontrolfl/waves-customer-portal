@@ -179,7 +179,7 @@ describe('pricing audit — mosquito, rodent bait, termite bait', () => {
 
 describe('pricing audit — one-time pest, discounts, tiers', () => {
   test.each([800, 1200, 2000, 3000, 5500].flatMap((sqft) => [false, true].map((rc) => [sqft, rc])))(
-    'one-time pest %s sf recurringCustomer=%s: max(floor, 2.2×quarterly) with the strict visit-1 clamp',
+    'one-time pest %s sf recurringCustomer=%s: max(floor, 1.8×quarterly, 10% over visit 1) with the strict visit-1 clamp',
     (sqft, rc) => {
       const exp = audit.expectOneTimePest({ homeSqFt: sqft, isRecurringCustomer: rc });
       const li = line(generateEstimate({ ...BASE, homeSqFt: sqft, recurringCustomer: rc, isRecurringCustomer: rc, services: { oneTimePest: {} } }), 'one_time_pest');
@@ -404,7 +404,7 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
     ["mosquito monthly12 15,000 sf lot", { ...BASE, lotSqFt: 15000, lawnSqFt: undefined, services: { mosquito: { tier: "monthly12" } } }, "mosquito", { perVisit: 72, annual: 864, monthly: 72 }],
     ["rodent bait 2,000 sf", { ...BASE, services: { rodentBait: {} } }, "rodent_bait", { perVisit: 89, annual: 356, monthly: 29.67, visitsPerYear: 4 }],
     ["termite bait (Trelona) 2,000 sf monitoring", { ...BASE, services: { termite: { system: "trelona" } } }, "termite_bait", { perApp: 72, annual: 288, monthly: 24, visitsPerYear: 4 }],
-    ["one-time pest 2,000 sf", { ...BASE, services: { oneTimePest: {} } }, "one_time_pest", { price: 246, priceAfterDiscount: 246, multiplier: 2.2, basePrice: 112, selectedFloor: 199 }],
+    ["one-time pest 2,000 sf", { ...BASE, services: { oneTimePest: {} } }, "one_time_pest", { price: 232, priceAfterDiscount: 232, multiplier: 1.8, firstVisitBufferPrice: 232, basePrice: 112, selectedFloor: 199 }],
     // The remaining independently audited customer-price families (codex r18 P2):
     // tree & shrub tiers, palm injection, German roach, WDO — an edit to
     // TREE_SHRUB.tiers, PALM or SPECIALTY moves the engine AND the formula-parity

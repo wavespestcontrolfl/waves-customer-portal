@@ -74,9 +74,18 @@ environment that carries the row (prod does), **editing
   Every other margin/program floor stays disarmed and report-only: do not
   flag "below floor" outside lawn, and do not add a floor without an owner
   ruling. The owner-set one-time list minimums stay
-  live and re-apply after the 15% recurring-customer perk: one-time pest
-  $199 (`ONE_TIME.pest.floor`) and one-time mosquito $199
-  (`ONE_TIME.mosquito.floor`, owner 2026-10-25).
+  live and re-apply after the 15% recurring-customer perk: one-time mosquito
+  $199 (`ONE_TIME.mosquito.floor`, owner 2026-10-25) and, for quotes made
+  BEFORE 2026-11-26, one-time pest $199 (`ONE_TIME.pest.floor`, the live
+  `onetime_pest.floor`). **New one-time pest quotes are the exception**
+  (owner 2026-11-26, "only new estimtes"): their 1.8x multiple, 10% first-visit
+  minimum and $199 floor are CODE constants (`ONE_TIME.pest.newRule`), not
+  Settings, so an edit can never move the price on a link already sent; a
+  change of those numbers is a new code rule with its own stamp
+  (`pricingMetadata.legacyOneTimePestBuffer`). The `onetime_pest` row's
+  `floor` and `multiplier` now price only quotes made before 11-26 and
+  apartment/condo (bedroom-priced) quotes; new house quotes use a fixed
+  $199 / 1.8x / 10% minimum.
 - **One-time mosquito ladder** (owner 2026-10-25): starts at $199 and each
   extra 5,000 sq ft adds a little less than the one before. Keep the
   per-segment slope non-increasing, over-acre step included, when repricing.

@@ -3361,6 +3361,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               ...(typeof estimate.pricingMetadata.legacyTwoStoryRoof === 'boolean'
                 ? { legacyTwoStoryRoof: estimate.pricingMetadata.legacyTwoStoryRoof }
                 : {}),
+              // One-time pest rule (new quotes only, 2026-11-26): its own stamp.
+              ...(typeof estimate.pricingMetadata.legacyOneTimePestBuffer === 'boolean'
+                ? { legacyOneTimePestBuffer: estimate.pricingMetadata.legacyOneTimePestBuffer }
+                : {}),
             } }
             : {}),
           lineItems: (estimate?.lineItems || []).map(item => ({
@@ -3368,6 +3372,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             name: item.name || item.label || item.displayName,
             ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
             ...(typeof item.legacyTwoStoryRoof === 'boolean' ? { legacyTwoStoryRoof: item.legacyTwoStoryRoof } : {}),
+            ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
             annual: item.annualAfterDiscount ?? item.annual ?? null,
             monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
             price: item.priceAfterDiscount ?? item.price ?? null,

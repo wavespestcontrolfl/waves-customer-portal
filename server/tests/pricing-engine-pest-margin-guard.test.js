@@ -271,8 +271,12 @@ describe('one-time pest anchors on the quarterly rate', () => {
     const oneTime = priceOneTimePest({ footprint: 2000 }, {});
     const recurringVisitOne = oneTime.quarterlyPerApp + constants.PEST.initialFee;
     expect(oneTime.price).toBeGreaterThan(recurringVisitOne);
-    // Pure multiple off the quarterly rate.
-    expect(oneTime.price).toBe(Math.max(constants.ONE_TIME.pest.floor, Math.round(oneTime.quarterlyPerApp * constants.ONE_TIME.pest.multiplier)));
+    // The multiple off the quarterly rate, or 10% over visit 1 when that is more (owner 2026-11-26).
+    expect(oneTime.price).toBe(Math.max(
+      constants.ONE_TIME.pest.floor,
+      Math.round(oneTime.quarterlyPerApp * constants.ONE_TIME.pest.newRule.multiplier),
+      Math.round((recurringVisitOne) * (1 + constants.ONE_TIME.pest.newRule.firstVisitBufferPct)),
+    ));
   });
 
   test('loyalty perk never drops one-time below recurring visit 1 (small-home clamp)', () => {

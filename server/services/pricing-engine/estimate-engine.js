@@ -1054,6 +1054,26 @@ function legacyTwoStoryRoof(input, serviceKey = null) {
     && !(serviceKey && [input.addedServiceKeys, input.currentRulesServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
 }
 
+// One-time pest for NEW quotes (owner 2026-11-26, "only new estimtes": 1.8x the quarterly visit, a 10% minimum over the first visit
+// of a plan, no home-age step in any pest price). It rides the same replay mechanism with its own stamp
+// (pricingMetadata.legacyOneTimePestBuffer): input.legacyOneTimePestBuffer is derived from the estimate's own stamp
+// (estimate-floor-signal-replay.js savedLegacyOneTimePestBufferSignal), a priced estimate with no stamp predates the rule, and a
+// legacy quote runs the existing code path unchanged (the 2.2 multiple, the plan's age step). A fresh quote never sets it.
+// A service is current for THIS rule only on evidence it was priced under it: this revision adds it (addedServiceKeys), or its
+// saved line carries legacyOneTimePestBuffer=false (input.oneTimePestCurrentServices, read from those line stamps). The flat
+// currentRulesServices history predates the rule and is never read here (an older revision's entry is no evidence).
+const ONE_TIME_PEST_RULE_SERVICES = new Set(['pest_control', 'one_time_pest']);
+function legacyOneTimePestBuffer(input, serviceKey = null) {
+  return input?.legacyOneTimePestBuffer === true
+    && !(serviceKey && [input.addedServiceKeys, input.oneTimePestCurrentServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
+}
+
+// The plan line's quarterly per-app rate without its home-age step (a new one-time visit has none): the one shared helper
+// (one-time-pest-home-age.js quarterlyPerAppWithoutHomeAge), also used by the estimate page, with the quote-time floor.
+function ageFreeQuarterly(planLine, floor) {
+  return quarterlyPerAppWithoutHomeAge(planLine?.basePrice, planLine?.pestAgeAdj, floor);
+}
+
 function generateEstimate(input) {
   const services = input.services || {};
   // Lawn cost-floor ENFORCEMENT arm state (owner ruling 2026-07-17: floors
@@ -1291,6 +1311,8 @@ function generateEstimate(input) {
     legacyPricingRules: legacyPricingRules(input),
     // Two-story roof-point stamp (see legacyTwoStoryRoof above): true = priced before the rule, no factor.
     legacyTwoStoryRoof: legacyTwoStoryRoof(input),
+    // One-time pest stamp (see legacyOneTimePestBuffer above): true = priced before the rule (2.2 multiple, plan age step).
+    legacyOneTimePestBuffer: legacyOneTimePestBuffer(input),
     // On a legacy estimate: the services priced under the CURRENT rules (added by this or an earlier revision), so the
     // next revision and replay keep them there while the older lines keep theirs.
     ...(legacyPricingRules(input) || legacyTwoStoryRoof(input)
@@ -1441,6 +1463,8 @@ function generateEstimate(input) {
         pricingVersion: services.pest.version || undefined,
         roachType: services.pest.roachType || 'none',
         modifiers,
+        // A quote priced before the one-time pest rule keeps the home-age step it was sold with.
+        legacyOneTimePestBuffer: legacyOneTimePestBuffer(input, 'pest_control'),
         pestProgramFloorArmed,
         pestProgramFloorPerVisit: pestProgramFloorPerVisitResolved,
       });
@@ -2052,8 +2076,17 @@ function generateEstimate(input) {
         // Anchor on the QUARTERLY rate (basePrice), never the selected-frequency
         // perApp — a monthly/bimonthly perApp is discounted and would understate
         // the one-time price.
-        recurringPestPerApp: services.pest ? (planPestLine?.oneTimeAnchorPerApp ?? planPestLine?.basePrice) : null,
+        // A one-time visit added to a plan saved before the rule anchors on the plan's age-free quarterly (the age step skipped for the
+        // anchor only; the retained plan keeps its aged price). A legacy visit, and the gate's saved anchor, are the existing path.
+        recurringPestPerApp: services.pest
+          ? (planPestLine?.oneTimeAnchorPerApp ?? (legacyOneTimePestBuffer(input, 'one_time_pest')
+            ? planPestLine?.basePrice
+            : ageFreeQuarterly(planPestLine, pestProgramFloorPerVisitResolved)))
+          : null,
         roachType: services.oneTimePest.roachType || 'none',
+        // A quote priced before the rule keeps the 2.2 multiple (the existing path, unchanged). A bedroom-band plan's one-time visit
+        // is never on the new rule: it keeps the existing band-anchored path whatever the stamp says (new rule = footprint-priced only).
+        legacyOneTimePestBuffer: legacyOneTimePestBuffer(input, 'one_time_pest') || planPestLine?.pricingBasis === 'caller_stated_bedroom_count',
       });
       lineItems.push(result);
     }
@@ -3492,6 +3525,7 @@ function generateEstimate(input) {
   // the rules that priced them.
   for (const line of lineItems) {
     if (line && TWO_STORY_ROOF_SERVICES.has(line.service)) line.legacyTwoStoryRoof = legacyTwoStoryRoof(input, line.service);
+    if (line && ONE_TIME_PEST_RULE_SERVICES.has(line.service)) line.legacyOneTimePestBuffer = legacyOneTimePestBuffer(input, line.service);
     if (line && PRICE_RULE_FIX_SERVICES.has(line.service)) line.legacyPricingRules = legacyPricingRules(input, line.service === 'commercial_pest' ? 'pest_control' : null);
   }
 

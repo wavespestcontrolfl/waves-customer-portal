@@ -149,10 +149,13 @@ describe('pest-control pricing hardening', () => {
       constants.PEST.additionalAdjustments.attachedGarage = originalAttachedGarage;
     }
 
-    const clamped = pricePestControl(base, { modifiers: { pestAgeAdj: 200 } });
+    // Home age adds nothing to a new pest price (owner 2026-11-26): the modifier is ignored unless a replay asks for it.
+    expect(pricePestControl(base, { modifiers: { pestAgeAdj: 8 } }).pestAgeAdj).toBe(0);
+    expect(pricePestControl(base, { modifiers: { pestAgeAdj: 8 } }).basePrice).toBe(pricePestControl(base, {}).basePrice);
+    const clamped = pricePestControl(base, { modifiers: { pestAgeAdj: 200 }, legacyOneTimePestBuffer: true });
     expect(clamped.pestAgeAdj).toBe(75);
     expect(clamped.pestAgeAdjWarnings).toContain('pest_age_adjustment_clamped');
-    expect(pricePestControl(base, { modifiers: { pestAgeAdj: 'old' } }).pestAgeAdjWarnings)
+    expect(pricePestControl(base, { modifiers: { pestAgeAdj: 'old' }, legacyOneTimePestBuffer: true }).pestAgeAdjWarnings)
       .toContain('invalid_pest_age_adjustment_defaulted_to_zero');
   });
 
@@ -338,11 +341,11 @@ describe('pest-control pricing hardening', () => {
     expect(result).toEqual(expect.objectContaining({
       basePrice: 112,
       baseSource: 'computed_quarterly_baseline',
-      preUrgencyPrice: 246,
+      preUrgencyPrice: 232,
       urgencyMultiplier: 1.25,
-      subtotalBeforeRecurringCustomerDiscount: 308,
-      price: 261,
-      recurringCustomerDiscountAmount: 47,
+      subtotalBeforeRecurringCustomerDiscount: 290,
+      price: 247,
+      recurringCustomerDiscountAmount: 43,
     }));
 
     const guarded = priceOneTimePest(p, { recurringPestPerApp: 'bad' });

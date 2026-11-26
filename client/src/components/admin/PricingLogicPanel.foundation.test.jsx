@@ -53,6 +53,21 @@ describe("PricingLogicPanel foundation", () => {
     expect(await screen.findByText(expectedTimestamp)).toBeInTheDocument();
   });
 
+  it("says the one-time pest floor and multiple price only quotes made before 11-26 (new quotes use fixed numbers)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (url === "/api/admin/pricing-config") {
+        return response({ configs: [{ config_key: "onetime_pest", name: "One-Time Pest Pricing", category: "one_time", data: { floor: 199, multiplier: 2.2 } }] });
+      }
+      if (url === "/api/admin/pricing-config/audit-log?limit=30") return response({ logs: [] });
+      throw new Error(`Unexpected request: GET ${url}`);
+    }));
+
+    render(<PricingLogicPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "One-time" }));
+    fireEvent.click(await screen.findByText("One-Time Pest Pricing"));
+    expect(screen.getAllByText("Applies to quotes made before 11-26 and to apartment/condo (bedroom-priced) quotes. New house quotes use a fixed $199 / 1.8x / 10% minimum.")).toHaveLength(2);
+  });
+
   it("keeps an unsaved raw JSON draft open when its request fails", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
       if (url === "/api/admin/pricing-config") return response({ configs: [pricingConfig] });

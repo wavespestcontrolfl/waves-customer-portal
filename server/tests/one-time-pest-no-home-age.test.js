@@ -1,6 +1,9 @@
 /**
  * Owner ruling 2026-11-26: an older home and a newer home pay the same
  * one-time pest price (GATE_ONE_TIME_PEST_NO_HOME_AGE, dark).
+ * A NEW quote has no home-age step at all, under either gate state (owner "only new estimtes": one-time-pest-price.js, stamp
+ * legacyOneTimePestBuffer=false). The gate's behavior below is that of a quote saved BEFORE the rule (legacyOneTimePestBuffer=true):
+ * the existing code path, unchanged.
  * Behavior: with the gate on, the engine saves the quarterly rate with no
  * home-age adjustment on the plan line; the one-time line on the same
  * estimate and the estimate page's one-time choice are priced from it. The
@@ -44,6 +47,8 @@ const YEAR = new Date().getFullYear();
 const NEWER = YEAR - 5;
 const OLDER = YEAR - 65;
 const line = (result, service) => result.lineItems.find((l) => l.service === service);
+// A quote saved before the one-time pest rule (the existing code path): the rule stamp reads legacy.
+const LEGACY = { legacyOneTimePestBuffer: true };
 const SHOWN = { show_one_time_option: true };
 const pageChoice = (engineResult) => oneTimeChoiceAmountForEstimate(SHOWN, { engineResult });
 
@@ -54,34 +59,47 @@ describe('one-time pest price and home age', () => {
     else process.env[GATE] = before;
   });
 
-  test('gate off: the older home pays more for the one-time job, as before, and nothing is stamped', () => {
+  test('a fresh quote is age-independent under both gate states: the plan and the one-time price', () => {
+    for (const gate of [undefined, 'true']) {
+      if (gate === undefined) delete process.env[GATE]; else process.env[GATE] = gate;
+      const newer = generateEstimate(inputFor(BOTH, NEWER));
+      const older = generateEstimate(inputFor(BOTH, OLDER));
+      expect(line(older, 'pest_control').pestAgeAdj).toBe(0);
+      expect(line(older, 'pest_control').basePrice).toBe(line(newer, 'pest_control').basePrice);
+      expect(line(older, 'one_time_pest').price).toBe(line(newer, 'one_time_pest').price);
+      expect(pageChoice(generateEstimate(inputFor(PLAN, OLDER)))).toBe(pageChoice(generateEstimate(inputFor(PLAN, NEWER))));
+      expect(older.pricingMetadata.legacyOneTimePestBuffer).toBe(false);
+    }
+  });
+
+  test('legacy quote, gate off: the older home pays more for the one-time job, as before, and nothing is stamped', () => {
     delete process.env[GATE];
-    const newer = generateEstimate(inputFor(BOTH, NEWER));
-    const older = generateEstimate(inputFor(BOTH, OLDER));
+    const newer = generateEstimate(inputFor(BOTH, NEWER, LEGACY));
+    const older = generateEstimate(inputFor(BOTH, OLDER, LEGACY));
     expect(line(older, 'pest_control').pestAgeAdj).toBeGreaterThan(0);
     expect(line(older, 'one_time_pest').price).toBeGreaterThan(line(newer, 'one_time_pest').price);
     expect(line(older, 'pest_control').oneTimeAnchorPerApp).toBeUndefined();
-    expect(pageChoice(generateEstimate(inputFor(PLAN, OLDER)))).toBeGreaterThan(pageChoice(generateEstimate(inputFor(PLAN, NEWER))));
+    expect(pageChoice(generateEstimate(inputFor(PLAN, OLDER, LEGACY)))).toBeGreaterThan(pageChoice(generateEstimate(inputFor(PLAN, NEWER, LEGACY))));
   });
 
-  test('gate on: both homes pay the same one-time price and the plan keeps its age adjustment', () => {
+  test('legacy quote, gate on: both homes pay the same one-time price and the plan keeps its age adjustment', () => {
     process.env[GATE] = 'true';
-    const newer = generateEstimate(inputFor(BOTH, NEWER));
-    const older = generateEstimate(inputFor(BOTH, OLDER));
+    const newer = generateEstimate(inputFor(BOTH, NEWER, LEGACY));
+    const older = generateEstimate(inputFor(BOTH, OLDER, LEGACY));
     expect(line(older, 'pest_control').basePrice).toBeGreaterThan(line(newer, 'pest_control').basePrice);
     expect(line(older, 'one_time_pest').price).toBe(line(newer, 'one_time_pest').price);
     expect(line(older, 'pest_control').oneTimeAnchorPerApp).toBe(line(newer, 'pest_control').basePrice);
     // The rule is stamped even when the home has no age adjustment today.
     expect(line(newer, 'pest_control').oneTimeAnchorPerApp).toBe(line(newer, 'pest_control').basePrice);
     // The estimate page's choice beside a plan agrees with the engine's one-time line.
-    expect(pageChoice(generateEstimate(inputFor(PLAN, OLDER)))).toBe(line(newer, 'one_time_pest').price);
+    expect(pageChoice(generateEstimate(inputFor(PLAN, OLDER, LEGACY)))).toBe(line(newer, 'one_time_pest').price);
   });
 
-  test('the page amount of a priced estimate does not move when the gate flips', () => {
+  test('the page amount of a priced legacy estimate does not move when the gate flips', () => {
     delete process.env[GATE];
-    const pricedOff = generateEstimate(inputFor(PLAN, OLDER));
+    const pricedOff = generateEstimate(inputFor(PLAN, OLDER, LEGACY));
     process.env[GATE] = 'true';
-    const pricedOn = generateEstimate(inputFor(PLAN, OLDER));
+    const pricedOn = generateEstimate(inputFor(PLAN, OLDER, LEGACY));
     const shownOn = pageChoice(pricedOn);
     expect(pageChoice(pricedOff)).toBeGreaterThan(shownOn);
     delete process.env[GATE];
@@ -90,19 +108,19 @@ describe('one-time pest price and home age', () => {
 
   test('a saved estimate re-priced as sold follows its own stamp, not the gate or the home\'s new age', () => {
     delete process.env[GATE];
-    const soldWithAge = generateEstimate(inputFor(BOTH, OLDER));
+    const soldWithAge = generateEstimate(inputFor(BOTH, OLDER, LEGACY));
     process.env[GATE] = 'true';
-    const soldWithoutAge = generateEstimate(inputFor(BOTH, NEWER));
+    const soldWithoutAge = generateEstimate(inputFor(BOTH, NEWER, LEGACY));
     expect(oneTimePestNoHomeAgeReplaySignal({ engineResult: soldWithAge })).toBe(false);
     expect(oneTimePestNoHomeAgeReplaySignal({ engineResult: soldWithoutAge })).toBe(true);
 
     // Gate now on, quote sold with the age adjustment: the replay keeps it.
-    const replayOld = generateEstimate(inputFor(BOTH, OLDER, { savedEstimateReplay: true }));
+    const replayOld = generateEstimate(inputFor(BOTH, OLDER, { ...LEGACY, savedEstimateReplay: true }));
     expect(line(replayOld, 'one_time_pest').price).toBe(line(soldWithAge, 'one_time_pest').price);
     // Gate now off, and the home has since crossed an age threshold: a quote
     // sold on the rule keeps its one-time price.
     delete process.env[GATE];
-    const replayNew = generateEstimate(inputFor(BOTH, OLDER, { savedEstimateReplay: true, oneTimePestNoHomeAgeReplay: true }));
+    const replayNew = generateEstimate(inputFor(BOTH, OLDER, { ...LEGACY, savedEstimateReplay: true, oneTimePestNoHomeAgeReplay: true }));
     expect(line(replayNew, 'one_time_pest').price).toBe(line(soldWithoutAge, 'one_time_pest').price);
     expect(storedOneTimeAnchorPerApp({ engineResult: replayNew })).toBe(line(soldWithoutAge, 'pest_control').basePrice);
   });

@@ -4,6 +4,7 @@ import {
   applyServerPestPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
+  oneTimePestNewRuleChoice,
 } from "./estimateEngine";
 
 // Fallback-engine input (no enriched property): mirrors the shape
@@ -207,7 +208,7 @@ describe("applyServerPestPricingConfig — live pest floor re-arm in the fallbac
     // One-time pest anchors on the same quarterly base — it moves too.
     const ot = tuned.oneTime?.items?.find?.((i) => i.service === "one_time_pest")
       ?? (tuned.results.oneTime || []).find?.((i) => i.service === "one_time_pest");
-    if (ot) expect(Number(ot.price ?? ot.amount)).toBeGreaterThanOrEqual(Math.round(120 * 2.2));
+    if (ot) expect(Number(ot.price ?? ot.amount)).toBeGreaterThanOrEqual(Math.round(120 * 1.8)); // new-quote multiple (owner 2026-11-26)
 
     // Absent/invalid resets the in-code default — the kill-value pattern.
     applyServerPestPricingConfig({});
@@ -466,5 +467,29 @@ describe('client fallback flags an EXPLICIT oversized bed area too', () => {
     expect(meta.manualReviewReasons).toContain('bed_area_at_or_above_8000');
     const warning = (meta.warnings || []).find((w) => w.includes('14,000 sq ft'));
     expect(warning).toContain('priced IN FULL');
+  });
+});
+
+describe("one-time pest for new quotes in the fallback engine", () => {
+  const priced = () => calculateEstimate(lawnInput({ svcLawn: false, svcOnetimePest: true }));
+  const oneTime = (result) => result.oneTime.items.find((item) => item.service === "one_time_pest").price;
+
+  it("prices max(1.8x quarterly, 10% over visit 1), floor $199, and stamps the new-quote rule", () => {
+    const result = priced();
+    expect(result.pricingMetadata.legacyOneTimePestBuffer).toBe(false);
+    // The price is the new-rule amount of some quarterly visit (and moves with the live settings below).
+    const candidates = new Set(Array.from({ length: 300 }, (_, i) => oneTimePestNewRuleChoice(89 + i)));
+    expect(candidates.has(oneTime(result))).toBe(true);
+    expect(oneTime(result)).toBeGreaterThanOrEqual(199);
+  });
+
+  it("uses the code constants (no fetch, no setting): 1.8x, 10% over visit 1, floor $199, strictly above visit 1", () => {
+    // Zero-buffer ties do not arise: at the fixed 10% the list always clears visit 1 ($99 + quarterly) on its own.
+    for (const q of [60, 89, 100, 108, 126, 150, 187, 300]) {
+      const amount = oneTimePestNewRuleChoice(q);
+      expect(amount).toBe(Math.max(199, Math.round(q * 1.8), Math.round(Math.round((q + 99) * 1.1 * 100) / 100)));
+      expect(amount).toBeGreaterThan(q + 99);
+    }
+    expect(oneTimePestNewRuleChoice(120)).toBe(Math.max(199, 216, 241));
   });
 });

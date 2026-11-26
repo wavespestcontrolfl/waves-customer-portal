@@ -916,6 +916,25 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // resend alike, so the email total, the link and a failed-build readback all show the price staff saved.
   const priorTwoStory = require('../services/estimate-floor-signal-replay').savedLegacyTwoStoryRoofSignal(estimateData).legacyTwoStoryRoof;
   if (typeof priorTwoStory === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyTwoStoryRoof: priorTwoStory };
+  // The same for the one-time pest rule (new quotes only, 2026-11-26): its own stamp, read before the snapshot is dropped. An
+  // unstamped estimate that kept only its inputs and asks for pest is a quote saved before the rule, on a first send and a resend alike.
+  const priorPestBuffer = require('../services/estimate-floor-signal-replay').savedLegacyOneTimePestBufferSignal(estimateData).legacyOneTimePestBuffer;
+  if (typeof priorPestBuffer === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyOneTimePestBuffer: priorPestBuffer };
+  // The one-time pest evidence a prior send froze (the resolved choice, the band verdict, the per-service rule): a snapshot-only quote
+  // has no rows to recompute it from, so it rides the rebuild and is never replaced by an absent value. When rows exist the rebuild
+  // recomputes them from those rows and its own answer stands.
+  const priorSnapshot = estimateData.sendSnapshot && typeof estimateData.sendSnapshot === 'object' ? estimateData.sendSnapshot : null;
+  const priorBundle = priorSnapshot?.pricingBundle && typeof priorSnapshot.pricingBundle === 'object' ? priorSnapshot.pricingBundle : null;
+  const PEST_FROZEN_MARKERS = ['oneTimePestChoice', 'bandPricedPest', 'oneTimePestCurrentServices'];
+  const priorMarkers = {};
+  for (const key of PEST_FROZEN_MARKERS) {
+    const value = priorSnapshot?.[key] ?? priorBundle?.[key];
+    if (value !== undefined && value !== null) priorMarkers[key] = value;
+  }
+  const rebuildHasPestRows = require('../services/estimate-floor-signal-replay').storedPestServices({ ...estimateData, sendSnapshot: undefined }).size > 0;
+  if (Object.keys(priorMarkers).length && !rebuildHasPestRows) {
+    estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), ...priorMarkers };
+  }
   const snapshotAt = now().toISOString();
   const sendSnapshot = {
     ...(estimateData.sendSnapshot || {}),
@@ -951,6 +970,13 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
     // live only in the snapshot and replays them under these rules. No evidence on the estimate = current rules (false).
     sendSnapshot.legacyPricingRules = priorRules === true;
     sendSnapshot.legacyTwoStoryRoof = priorTwoStory === true;
+    sendSnapshot.legacyOneTimePestBuffer = priorPestBuffer === true;
+    // Carry the frozen one-time pest evidence onto the new bundle when there were no rows to recompute it from (never frozen -> absent).
+    if (!rebuildHasPestRows) {
+      for (const [key, value] of Object.entries(priorMarkers)) {
+        if (sendSnapshot.pricingBundle && typeof sendSnapshot.pricingBundle === 'object') sendSnapshot.pricingBundle = { ...sendSnapshot.pricingBundle, [key]: value };
+      }
+    }
     // A prior send's persisted error was spread in above — a successful
     // rebuild must clear it or the validated-bundle check downstream
     // rejects a fresh bundle (GH codex P1).

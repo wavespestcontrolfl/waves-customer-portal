@@ -285,12 +285,131 @@ function savedLegacyTwoStoryRoofSignal(rawEstData) {
   return { legacyTwoStoryRoof: flag };
 }
 
+// One-time pest for NEW quotes (owner 2026-11-26, "only new estimtes": 1.8x, a 10% minimum over the first visit of a plan, no
+// home-age step). Its own stamp, read by the same reader: true = priced before the rule (the 2.2 multiple and the plan's age step,
+// the existing code path), false = priced under it. An estimate with priced lines and no stamp predates the rule; one with no priced
+// lines pins nothing. An estimate that kept only its inputs but asks for pest or one-time pest was saved before the rule too: it
+// reads legacy on a first send, a resend and every replay (a fresh draft the engine priced carries its stamp, false).
+function storedRequestsPest(estData) {
+  const data = normalizeStored(estData);
+  if (!data || typeof data !== 'object') return false;
+  const container = require('./estimate-result-container').storedEstimateContainer(data) || null;
+  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
+  // The builder request names its services as tokens (PEST = the plan, OT_PEST = the one-time visit), as it names EXCLUSION.
+  if (request && Array.isArray(request.selectedServices)
+    && request.selectedServices.some((key) => ['PEST', 'OT_PEST'].includes(String(key || '').toUpperCase()))) return true;
+  return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
+    .some((carrier) => carrier && typeof carrier === 'object' && carrier.services && typeof carrier.services === 'object'
+      && !!(carrier.services.pest || carrier.services.oneTimePest));
+}
+
+// Which pest services a stored estimate priced (or asked for), from EVERY shape the estimate page's choice and breakdown readers read
+// (routes/estimate-public.js: oneTimePestChoiceAmountFromResultStats / FromRecurringServices / FromBreakdown, normalizeOneTimeBreakdown,
+// recurringServicesWithSupplements). One list of shapes, kept here so the stamp reader and the page cannot drift (a table test names each).
+// Returns a Set of 'pest_control' (the plan) and 'one_time_pest' (the visit).
+const hasNumber = (row, keys) => !!row && typeof row === 'object' && keys.some((k) => Number(row[k]) > 0);
+const PLAN_PRICE_KEYS = ['pa', 'perApp', 'perVisit', 'perTreatment', 'basePrice', 'mo', 'monthly', 'monthlyBase', 'ann', 'annual', 'annualTotal', 'annualAfterDiscount'];
+const PEST_NAME = /pest/i;
+const NOT_PEST_PLAN = /termite|mosquito|rodent|lawn|shrub|palm|mist|wdo|exclusion|flea|roach|bed ?bug/i;
+function storedPestServices(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const out = new Set();
+  const container = require('./estimate-result-container').storedEstimateContainer(estData) || {};
+  // A bare estimate_data (the priced rows at its top level, neither result nor engineResult) is its own container, as the page's readers take it.
+  const sources = [container, estData?.result && typeof estData.result === 'object' ? estData.result : null,
+    estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null,
+    !estData?.result && !estData?.engineResult && estData && typeof estData === 'object' ? estData : null].filter(Boolean);
+  for (const src of sources) {
+    // The plan: result.pestTiers, results.pestTiers / results.pest, recurring.services pest rows, raw lines.
+    if ([].concat(src.pestTiers || []).some((t) => hasNumber(t, PLAN_PRICE_KEYS))) out.add('pest_control');
+    if ([].concat(src.results?.pestTiers || []).some((t) => hasNumber(t, PLAN_PRICE_KEYS))) out.add('pest_control');
+    if (hasNumber(src.results?.pest, PLAN_PRICE_KEYS)) out.add('pest_control');
+    if ([].concat(src.recurring?.services || []).some((r) => PEST_NAME.test(String(r?.name || r?.label || r?.service || ''))
+      && !NOT_PEST_PLAN.test(String(r?.name || r?.label || r?.service || '')) && hasNumber(r, PLAN_PRICE_KEYS))) out.add('pest_control');
+    if ([].concat(src.lineItems || []).some((l) => l?.service === 'pest_control' && hasNumber(l, [...PLAN_PRICE_KEYS, 'annualAfterDiscount']))) out.add('pest_control');
+    // The one-time visit: its line, the mapped one-time rows (items, specItems, nested results.oneTime as a list or with items/specItems).
+    const nested = src.results?.oneTime;
+    const oneTimeRows = [].concat(src.lineItems || [], src.oneTime?.items || [], src.oneTime?.specItems || [],
+      Array.isArray(nested) ? nested : [].concat(nested?.items || [], nested?.specItems || []));
+    if (oneTimeRows.some((r) => r?.service === 'one_time_pest' && !r.quoteRequired && hasNumber(r, ['price', 'amount', 'priceAfterDiscount']))) out.add('one_time_pest');
+  }
+  // The frozen send snapshot's bundle: frequencies rows and the one-time breakdown.
+  const bundle = estData?.sendSnapshot?.pricingBundle;
+  if (bundle && typeof bundle === 'object') {
+    // A frequency row carries every plan in the cart: it counts only when it names the pest plan.
+    if ([].concat(bundle.frequencies || []).some((f) => hasNumber(f, ['monthly', 'annual', 'perVisit', 'pa']) && /pest[_ ]control/i.test(JSON.stringify(f)))) out.add('pest_control');
+    if ([].concat(bundle.oneTimeBreakdown?.items || []).some((r) => r?.service === 'one_time_pest' && hasNumber(r, ['amount', 'price']))) out.add('one_time_pest');
+  }
+  return out;
+}
+
+function savedLegacyOneTimePestBufferSignal(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { flag } = readRuleStamp(estData, 'legacyOneTimePestBuffer');
+  // No stamp: a priced pest row in ANY shape the page reads, or inputs that request pest, predates the rule.
+  if (flag === undefined && (storedRequestsPest(estData) || storedPestServices(estData).size > 0)) return { legacyOneTimePestBuffer: true };
+  return { legacyOneTimePestBuffer: flag };
+}
+
+// On a legacy estimate, the pest services priced under the NEW rule: those whose saved line carries legacyOneTimePestBuffer=false
+// (a revision added them; the engine stamped the line). That is the only evidence for this rule: the flat currentRulesServices
+// history predates it, so an older revision's entry never turns the rule on.
+function savedOneTimePestCurrentServices(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { container } = readRuleStamp(estData, 'legacyOneTimePestBuffer');
+  return [...new Set([
+    ...pestRuleRows(container).filter((r) => r.flag === false).map((r) => r.service),
+    ...frozenPestCurrentServices(estData),
+  ])];
+}
+
+// The per-service rule a send snapshot froze when its rows could no longer say (the bundle's marker, or the snapshot's own copy
+// left when the bundle was dropped): services priced under the new rule on an estimate that is otherwise old.
+function frozenPestCurrentServices(estData) {
+  const snapshot = estData?.sendSnapshot && typeof estData.sendSnapshot === 'object' ? estData.sendSnapshot : null;
+  const list = snapshot?.oneTimePestCurrentServices ?? snapshot?.pricingBundle?.oneTimePestCurrentServices;
+  return Array.isArray(list) ? list.filter((k) => ['pest_control', 'one_time_pest'].includes(k)) : [];
+}
+
+// The per-service stamp wherever a saved shape keeps it: the engine's raw lines, or the mapped result (which drops the lines): the
+// plan row (results.pest) and the one-time pest rows (oneTime.items / specItems, results.oneTime as an array or with items).
+function pestRuleRows(container) {
+  const rows = [];
+  const add = (service, row) => { if (row && typeof row === 'object' && typeof row.legacyOneTimePestBuffer === 'boolean') rows.push({ service, flag: row.legacyOneTimePestBuffer }); };
+  for (const l of [].concat(container.lineItems || [])) if (l && ['pest_control', 'one_time_pest'].includes(l.service)) add(l.service, l);
+  add('pest_control', container.results?.pest);
+  const nested = container.results?.oneTime;
+  for (const list of [container.oneTime?.items, container.oneTime?.specItems, Array.isArray(nested) ? nested : nested?.items, nested?.specItems]) {
+    for (const row of [].concat(list || [])) if (row && row.service === 'one_time_pest') add('one_time_pest', row);
+  }
+  return rows;
+}
+
+// Is the one-time pest rule still the OLD one for this saved estimate (the estimate page's "both choices" amount asks)? The
+// estimate-wide stamp says it predates the rule; a pest line carrying its own stamp, or the flat list of services a revision added
+// under the current rules, says that service was priced on the new one.
+function savedOneTimePestRuleLegacy(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { container } = readRuleStamp(estData, 'legacyOneTimePestBuffer');
+  const flag = savedLegacyOneTimePestBufferSignal(estData).legacyOneTimePestBuffer;
+  if (flag !== true) return false;
+  // The one-time visit's own stamp decides the page's one-time choice when that line exists; the plan's stamp only for a plan-only offer
+  // (a retained legacy plan beside a one-time visit a revision added shows the visit's rule).
+  const rows = pestRuleRows(container);
+  const row = rows.find((r) => r.service === 'one_time_pest') || rows[0];
+  if (row) return row.flag;
+  // No row to read (snapshot-only): the per-service marker the snapshot froze. The visit's own entry decides first, then the plan's.
+  const frozen = frozenPestCurrentServices(estData);
+  return !(frozen.includes('one_time_pest') || frozen.includes('pest_control'));
+}
+
 // Every rule stamp a send snapshot's pricing bundle can be the only evidence for, each read from its OWN evidence (a priced,
 // unstamped snapshot is evidence for several rules at once). A later branch that adds a "which rules priced this estimate" stamp
 // adds its key here.
 const FROZEN_RULE_STAMPS = [
   ['legacyPricingRules', (data) => readRuleStamp(data, 'legacyPricingRules').flag],
   ['legacyTwoStoryRoof', (data) => savedLegacyTwoStoryRoofSignal(data).legacyTwoStoryRoof],
+  ['legacyOneTimePestBuffer', (data) => savedLegacyOneTimePestBufferSignal(data).legacyOneTimePestBuffer],
 ];
 
 // Before a send snapshot's pricing bundle is dropped (a tier change, a relabel), freeze the rule stamps its prices were read
@@ -304,6 +423,15 @@ function freezeSnapshotRuleStamps(estData) {
     if (typeof estData.sendSnapshot[key] === 'boolean') continue;
     const flag = read(estData);
     if (typeof flag === 'boolean') frozen[key] = flag;
+  }
+  // The per-service one-time pest rule rides the bundle; keep it on the snapshot itself when the bundle goes.
+  const bundledChoice = estData.sendSnapshot.pricingBundle?.oneTimePestChoice;
+  if (bundledChoice && !estData.sendSnapshot.oneTimePestChoice) frozen.oneTimePestChoice = bundledChoice;
+  // The bedroom-band verdict rides the bundle the same way.
+  if (estData.sendSnapshot.pricingBundle?.bandPricedPest === true && estData.sendSnapshot.bandPricedPest !== true) frozen.bandPricedPest = true;
+  if (estData.sendSnapshot.pricingBundle && !Array.isArray(estData.sendSnapshot.oneTimePestCurrentServices)) {
+    const current = savedOneTimePestCurrentServices(estData);
+    if (current.length) frozen.oneTimePestCurrentServices = current;
   }
   if (Object.keys(frozen).length) estData.sendSnapshot = { ...estData.sendSnapshot, ...frozen };
 }
@@ -344,6 +472,15 @@ function savedFloorReplaySignals(estData) {
   Object.assign(signals, savedLawnMinimumAfterDiscountSignal(estData));
   Object.assign(signals, savedLegacyPricingRulesSignal(estData));
   Object.assign(signals, savedLegacyTwoStoryRoofSignal(estData));
+  Object.assign(signals, savedLegacyOneTimePestBufferSignal(estData));
+  // Only when a saved line carries the evidence; a posted copy in the stored inputs is stripped by the identity fields.
+  // A removal prunes the plan's rows (and the line stamp with them); its server-recorded event kept the per-service stamp the
+  // opt-out captured (provenance.floorSignals), so a restore prices the plan under the rule it was added on.
+  const removedPest = (Array.isArray(saved.serviceOptOut?.events) ? saved.serviceOptOut.events : [])
+    .filter((event) => event?.included === false)
+    .flatMap((event) => [].concat(event?.provenance?.floorSignals?.oneTimePestCurrentServices || []));
+  const currentPest = [...new Set([...savedOneTimePestCurrentServices(estData), ...removedPest])];
+  if (currentPest.length) signals.oneTimePestCurrentServices = currentPest;
   const pest = estimatePestFloorSignal(estData);
   if (typeof pest.armed === 'boolean') signals.pestProgramFloorArmed = pest.armed;
   if (pest.perVisit != null) signals.pestProgramFloorPerVisit = pest.perVisit;
@@ -359,6 +496,10 @@ module.exports = {
   savedLawnMinimumAfterDiscountSignal,
   savedLegacyPricingRulesSignal,
   savedLegacyTwoStoryRoofSignal,
+  savedLegacyOneTimePestBufferSignal,
+  savedOneTimePestRuleLegacy,
+  savedOneTimePestCurrentServices,
+  storedPestServices,
   freezeSnapshotRuleStamps,
   savedFloorReplaySignals,
 };

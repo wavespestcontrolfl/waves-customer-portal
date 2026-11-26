@@ -689,6 +689,41 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     expect(neverDelivered.sendSnapshot.scope).toBeUndefined();
   });
 
+  test('one-time pest (new quotes only): an unstamped inputs-only pest draft is a pre-rule quote on its FIRST send and a resend; a fresh stamped draft stays new', async () => {
+    const inputs = { homeSqFt: 1800, lotSqFt: 8000, stories: 1, services: { pest: { frequency: 'quarterly' } } };
+    const draft = (estimateData, extra = {}) => estimateRow({ status: 'sending', sent_at: null, viewed_at: null, estimate_data: JSON.stringify(estimateData), ...extra });
+    const first = await router.buildEstimateSendSnapshot(draft({ engineInputs: inputs }));
+    expect(first.sendSnapshot.legacyOneTimePestBuffer).toBe(true);
+    const resend = await router.buildEstimateSendSnapshot(draft({ engineInputs: inputs }, { sent_at: '2026-11-20T12:00:00.000Z' }));
+    expect(resend.sendSnapshot.legacyOneTimePestBuffer).toBe(true);
+    // A draft the engine priced under the rule carries its stamp (false): its first send, and every send after, stays new.
+    const fresh = await router.buildEstimateSendSnapshot(draft({ engineInputs: inputs, pricingMetadata: { legacyOneTimePestBuffer: false } }));
+    expect(fresh.sendSnapshot.legacyOneTimePestBuffer).toBe(false);
+    const freshResend = await router.buildEstimateSendSnapshot(draft({ engineInputs: inputs, pricingMetadata: { legacyOneTimePestBuffer: false } }, { sent_at: '2026-11-20T12:00:00.000Z' }));
+    expect(freshResend.sendSnapshot.legacyOneTimePestBuffer).toBe(false);
+    // A draft with no pest in it pins nothing.
+    const lawn = await router.buildEstimateSendSnapshot(draft({ engineInputs: { ...inputs, services: { lawn: {} } } }));
+    expect(lawn.sendSnapshot.legacyOneTimePestBuffer).toBe(false);
+  });
+
+  test('one-time pest: a second send of a snapshot-only mixed-rule quote keeps the frozen choice, band verdict and per-service rule', async () => {
+    const frequencies = [{ key: 'quarterly', monthly: 36, annual: 432, perVisit: 108, perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', perApp: 108 }] }];
+    const prior = (choice, current) => ({
+      sendSnapshot: {
+        legacyOneTimePestBuffer: true,
+        pricingBundle: { frequencies, oneTimePestChoice: choice, oneTimePestCurrentServices: current, bandPricedPest: true },
+      },
+    });
+    for (const [choice, current] of [[{ amount: 228, legacy: false, anchor: 108 }, ['one_time_pest']], [{ amount: 238, legacy: true, anchor: 108 }, ['pest_control']]]) {
+      const resend = await router.buildEstimateSendSnapshot(estimateRow({ status: 'sent', sent_at: '2026-11-20T12:00:00.000Z', estimate_data: JSON.stringify(prior(choice, current)) }));
+      const bundle = resend.sendSnapshot.pricingBundle;
+      expect(bundle.oneTimePestChoice).toEqual(choice);
+      expect(bundle.oneTimePestCurrentServices).toEqual(current);
+      expect(bundle.bandPricedPest).toBe(true);
+      expect(resend.sendSnapshot.legacyOneTimePestBuffer).toBe(true);
+    }
+  });
+
   test('a PENDING invalidation recorded during delivery is COMPLETED by the claim release', async () => {
     const { state, estimateUpdates, leadUpdates } = statefulMock();
     // Mid-delivery, the reconciler defers behind the live claim by writing

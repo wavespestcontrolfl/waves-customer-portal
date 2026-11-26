@@ -1982,7 +1982,44 @@ function assertLiveTermiteRentalRates(estimateData, { liveConfigVerified = false
 // (their totals are server-recomputed); legacy pre-flag payloads keep the
 // floor machinery's untouched posture — they also predate the fallback flag
 // entirely.
-function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified = false } = {}) {
+// The pest rows a payload prices, in one comparable shape: the plan rows and the one-time pest rows.
+function pestRowsSignature(estimateData) {
+  const root = estimateResultRoot(estimateData);
+  const results = root?.results && typeof root.results === 'object' ? root.results : {};
+  const oneTime = [
+    ...(Array.isArray(root?.oneTime?.items) ? root.oneTime.items : []),
+    ...(Array.isArray(results.oneTime) ? results.oneTime : []),
+  ].filter((item) => item && item.service === 'one_time_pest');
+  // The rule stamps are not part of the comparison (an older browser sends none); they are copied from the stored row when equal.
+  const unstamped = (row) => (row && typeof row === 'object' && !Array.isArray(row)
+    ? Object.fromEntries(Object.entries(row).filter(([key]) => key !== 'legacyOneTimePestBuffer')) : row);
+  return [unstamped(results.pest) ?? null, results.pestTiers ?? null, oneTime.map(unstamped)];
+}
+
+// Identical pest rows are the stored estimate's own: they keep the stored rule, never the browser's (an older browser sends no stamp,
+// a forged one could send false). The estimate-wide stamp and each pest row's stamp are copied from the trusted stored row.
+function copyStoredPestRuleStamps(estimateData, storedEstimateData) {
+  const root = estimateResultRoot(estimateData);
+  const storedRoot = estimateResultRoot(storedEstimateData);
+  const flag = require('./estimate-floor-signal-replay').savedLegacyOneTimePestBufferSignal(storedEstimateData).legacyOneTimePestBuffer;
+  if (typeof flag === 'boolean') root.pricingMetadata = { ...(root.pricingMetadata || {}), legacyOneTimePestBuffer: flag };
+  else if (root.pricingMetadata) delete root.pricingMetadata.legacyOneTimePestBuffer;
+  const stampOf = (row) => (row && typeof row.legacyOneTimePestBuffer === 'boolean' ? row.legacyOneTimePestBuffer : undefined);
+  const copy = (target, source) => {
+    if (!target || typeof target !== 'object') return;
+    const stamp = stampOf(source);
+    if (stamp === undefined) delete target.legacyOneTimePestBuffer; else target.legacyOneTimePestBuffer = stamp;
+  };
+  copy(root.results?.pest, storedRoot.results?.pest);
+  const pestItems = (r) => [
+    ...(Array.isArray(r?.oneTime?.items) ? r.oneTime.items : []),
+    ...(Array.isArray(r?.results?.oneTime) ? r.results.oneTime : []),
+  ].filter((item) => item && item.service === 'one_time_pest');
+  const [submitted, stored] = [pestItems(root), pestItems(storedRoot)];
+  submitted.forEach((item, index) => copy(item, stored[index]));
+}
+
+function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified = false, storedEstimateData = null } = {}) {
   const root = estimateResultRoot(estimateData);
   const results = root?.results;
   if (!results || typeof results !== 'object') return;
@@ -2018,6 +2055,20 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
   const stamped = Number(root?.pricingMetadata?.pestBasePerVisit);
   if (!Number.isFinite(stamped) || Math.abs(stamped - liveBase) > 0.005) {
     throw errorWithStatus('Pest pricing has changed since this quote was generated — regenerate the estimate to price at the live base.', 409);
+  }
+  // One-time pest rule (new quotes only, 2026-11-26): a NEW fallback pest quote must say it was priced under the new rule. A browser
+  // bundle that predates it sends no stamp and priced the old multiple, which must not be saved as a new quote. Quotes already saved
+  // are untouched (this gate runs only on a save of client-priced pest rows).
+  // A revision that leaves the pest rows exactly as the trusted stored row has them (a saved pre-rule estimate edited elsewhere) is
+  // not a new pest price: it saves unchanged. Only newly priced pest rows need the stamp (the new rule's multiple, buffer and floor are
+  // code constants shared by the browser and the server, so no price check is needed beside it).
+  // Key-order independent (a re-serialized stored row can reorder keys), array order kept.
+  if (storedEstimateData && isDeepStrictEqual(pestRowsSignature(estimateData), pestRowsSignature(storedEstimateData))) {
+    copyStoredPestRuleStamps(estimateData, storedEstimateData);
+    return;
+  }
+  if (root?.pricingMetadata?.legacyOneTimePestBuffer !== false) {
+    throw errorWithStatus('This estimator is out of date for one-time pest pricing — reload the page and regenerate the estimate.', 409);
   }
 }
 
@@ -2180,7 +2231,7 @@ async function resolveEstimateWritePayload({
     throw errorWithStatus('Live pricing configuration is unavailable. Retry when pricing is available; no estimate was saved.', 503);
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
-  assertLivePestBaseForClientPayload(trustedEstimateData, { liveConfigVerified });
+  assertLivePestBaseForClientPayload(trustedEstimateData, { liveConfigVerified, storedEstimateData });
   assertNoDarkTermiteBondPayload(trustedEstimateData);
   assertNoDarkTermiteRentalPayload(trustedEstimateData);
   assertLiveTermiteBondRates(trustedEstimateData);

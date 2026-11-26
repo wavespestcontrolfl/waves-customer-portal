@@ -15,6 +15,7 @@ import {
   applyServerRodentBaitBracketsPricingConfig,
   applyServerRodentSetupFeePricingConfig,
   applyServerPalmPricingConfig,
+  oneTimePestNewRuleChoice,
   applyServerRodentWaveguardPricingConfig,
   collectMarginReviewNotes,
   fmt,
@@ -909,7 +910,7 @@ export function nextFormForTierExtension(form, estimate, customerId) {
   if (!offered.length) return (form.tierExtensionPick || null) === prior ? form : { ...form, tierExtensionPick: prior };
   return { ...form, tierExtensionPick: { customerId, offered, unticked: prior ? prior.unticked : [] } };
 }
-const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
+// The one-time pest choice beside a plan (new quotes, owner 2026-11-26): the engine's code-constant mirror (no setting).
 // Dead Rodent Removal & Odor Treatment access choices. The values are the engine's tiers
 // (reachable | attic | in_wall); the empty value is the placeholder, never a default tier.
 const DEAD_ANIMAL_ACCESS_OPTIONS = [
@@ -1145,10 +1146,7 @@ function oneTimePestChoiceAmountFromTier(tier = {}) {
   if (!tier || typeof tier !== "object") return null;
   const perApp = pestTierPerAppForOneTimeChoice(tier);
   if (!perApp) return null;
-  return Math.max(
-    ONE_TIME_PEST_CHOICE.floor,
-    Math.round(perApp * ONE_TIME_PEST_CHOICE.multiplier),
-  );
+  return oneTimePestNewRuleChoice(perApp);
 }
 
 function oneTimePestChoiceAmountForPreview(R = {}, form = {}) {
