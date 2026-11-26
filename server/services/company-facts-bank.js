@@ -414,9 +414,12 @@ async function editApprovedRow(trx, row, f, actor) {
 /** A draft is edited in place; an approved row is never touched: its edit is a NEW draft that supersedes it. */
 async function editFact(id, patch, actor, { dbi = db } = {}) {
   const f = cleanFields(patch, { requireAll: false });
+  const base = patch && typeof patch.baseTextSha256 === 'string' ? patch.baseTextSha256.trim().toLowerCase() : '';
   return dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status === 'retired') throw new FactError('RETIRED_USE_RESTORE', 409);
+    // The editor sends the hash of the wording it opened: a concurrent edit of the wording is refused, never overwritten.
+    if (base && base !== row.text_sha256) throw new FactError('STALE_TEXT', 409);
     return row.status === 'draft' ? editDraftRow(trx, row, f, actor) : editApprovedRow(trx, row, f, actor);
   });
 }

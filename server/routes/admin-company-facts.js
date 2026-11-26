@@ -5,9 +5,13 @@
  *                           answers { facts, nextCursor, viewer: { ownerActions } } (nextCursor null on the last page; ownerActions
  *                           is true for the owner account only, so the page can hide Approve)
  *   POST   /                add a draft { topic, factText, question?, ownerWords?, source?, sourceRef? }
+ *   GET    /preview         the approved lines exactly as the agents' snapshot serves them: { lines, count, version, ids } (the rows
+ *                           that fail the checks again are left out, so this can be shorter than the approved list)
  *   GET    /:id             one fact
  *   GET    /:id/history     its events, oldest first, each with actor_name (the staff member's name, null when gone)
- *   PATCH  /:id             edit a draft in place; an edit of an approved fact makes a NEW draft that supersedes it
+ *   PATCH  /:id             edit a draft in place; an edit of an approved fact makes a NEW draft that supersedes it. Send only the
+ *                           fields that changed; baseTextSha256 (the hash of the wording the editor opened) is refused 409 STALE_TEXT
+ *                           when the wording changed since
  *   DELETE /:id             discard a draft
  *   POST   /:id/approve     OWNER ACCOUNT ONLY (requireFullAccess); { textSha256 (the hash the page showed; 409 STALE_TEXT
  *                           when the wording changed since), ownerWords?, acknowledgeWarnings (literal true) }
@@ -57,6 +61,12 @@ router.get('/', handle('list', { needsId: false }, async (req, actor) => ({
 })));
 
 router.post('/', handle('create', { needsId: false, status: 201 }, async (req, actor) => withCheck(await Bank.createDraft(req.body, actor))));
+
+// Before /:id. Re-reads the verified approved rows first, so the owner sees what the agents can receive now, not a minute-old copy.
+router.get('/preview', handle('preview', { needsId: false }, async () => {
+  const facts = await Bank.refreshBankFacts();
+  return { lines: Bank.renderBankFactsLines(facts), count: facts.length, version: Bank.bankVersionHash(facts), ids: facts.map((f) => f.id) };
+}));
 
 router.get('/:id/history', handle('history', {}, async (req) => ({ events: await Bank.factHistory(req.params.id) })));
 

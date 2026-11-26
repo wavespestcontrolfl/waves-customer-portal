@@ -29,16 +29,27 @@ const fact = (over = {}) => ({
 });
 
 // Routes the page calls; `state` decides each answer, the mock records every request.
+function listAnswer(state, url) {
+  const status = url.searchParams.get("status");
+  const page = state.pages?.[status]?.[url.searchParams.get("cursor") || "first"] || { facts: [], nextCursor: null };
+  return { ...page, viewer: { ownerActions: state.owner } };
+}
+
+function previewAnswer(state) {
+  const approved = [...(state.pages?.approved?.first?.facts || [])].sort((a, b) => new Date(a.approved_at) - new Date(b.approved_at));
+  const kept = approved.filter((f) => !state.excluded?.includes(f.id));
+  return { lines: kept.map((f) => `- ${f.fact_text.trim()}`).join("\n"), count: kept.length, version: "v", ids: kept.map((f) => f.id) };
+}
+
 function serve(state) {
   adminFetch.mockImplementation(async (path, options = {}) => {
     const method = options.method || "GET";
     const url = new URL(path, "http://x");
-    if (method === "GET" && url.pathname === "/admin/company-facts") {
-      const status = url.searchParams.get("status");
-      const page = state.pages?.[status]?.[url.searchParams.get("cursor") || "first"] || { facts: [], nextCursor: null };
-      return { ...page, viewer: { ownerActions: state.owner } };
-    }
+    if (method === "GET" && url.pathname === "/admin/company-facts") return listAnswer(state, url);
     if (method === "GET" && url.pathname.endsWith("/history")) return { events: state.events || [] };
+    if (method === "GET" && url.pathname === "/admin/company-facts/preview") return previewAnswer(state);
+    if (state.hold?.method === method) await state.hold.promise;
+    state.onRequest?.(path, options);
     const failure = state.fail?.[`${method} ${url.pathname.split("/").pop()}`];
     if (failure) throw Object.assign(new Error(failure.code), failure);
     return { fact: fact(), check: null };
@@ -83,6 +94,7 @@ describe("Company facts tab", () => {
     fireEvent.click(screen.getByRole("button", { name: "Approved" }));
     const preview = await screen.findByLabelText("How the approved facts will read");
     expect(preview.textContent).toBe("- First line.\n- Second line.");
+    expect(adminFetch).toHaveBeenCalledWith("/admin/company-facts/preview");
     expect(screen.getAllByRole("button", { name: "Retire" })).toHaveLength(2);
 
     fireEvent.click(screen.getByRole("button", { name: "Retired" }));
@@ -230,5 +242,107 @@ describe("Company facts tab", () => {
     expect(within(list).getByText(/Drafted/).closest("li")).toHaveTextContent("by Virginia");
     expect(within(list).getByText(/Approved/).closest("li")).toHaveTextContent("by Adam");
     expect(list).toHaveTextContent("yes, say that");
+  });
+
+  it("builds the preview from what the server serves and says when an approved fact is left out", async () => {
+    serve({
+      owner: true,
+      excluded: ["a2"],
+      pages: { approved: { first: { facts: [
+        fact({ id: "a1", topic: "First", fact_text: "First line.", status: "approved", approved_at: "2026-11-25T16:00:00Z" }),
+        fact({ id: "a2", topic: "Noon", fact_text: "We open at noon.", status: "approved", approved_at: "2026-11-25T17:00:00Z" }),
+      ], nextCursor: null } } },
+    });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    const preview = await screen.findByLabelText("How the approved facts will read");
+    expect(preview.textContent).toBe("- First line.");
+    expect(await screen.findByText(/1 approved fact is not in this list/)).toBeInTheDocument();
+  });
+
+  it("gives each draft's I checked this tick its own id, so one card's label never ticks another's", async () => {
+    const warning = { blocks: [], warnings: [{ code: "price_words", words: ["free"] }] };
+    serve({ owner: true, pages: { draft: { first: { facts: [
+      fact({ id: "d1", topic: "One", check_result: warning }),
+      fact({ id: "d2", topic: "Two", check_result: warning }),
+    ], nextCursor: null } } } });
+    mount();
+    await screen.findByText("One");
+    const boxes = screen.getAllByLabelText("I checked this");
+    expect(new Set(boxes.map((box) => box.id)).size).toBe(2);
+    fireEvent.click(boxes[1]);
+    const [first, second] = screen.getAllByRole("button", { name: "Approve" });
+    expect(first).toBeDisabled();
+    expect(second).toBeEnabled();
+  });
+
+  it("drops the tick when the wording changes under it, so it never covers new text", async () => {
+    const state = {
+      owner: true,
+      text: "We run a free inspection.",
+      fail: { "POST approve": { code: "STALE_TEXT", status: 409 } },
+      pages: {},
+    };
+    const warning = { blocks: [], warnings: [{ code: "price_words", words: ["free"] }] };
+    Object.defineProperty(state.pages, "draft", { get: () => ({ first: { facts: [fact({ fact_text: state.text, check_result: warning })], nextCursor: null } }), enumerable: true });
+    serve(state);
+    mount();
+    await screen.findByText("We run a free inspection.");
+    fireEvent.click(screen.getByLabelText("I checked this"));
+    state.text = "We run a free estimate.";
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await screen.findByText("We run a free estimate.");
+    expect(screen.getByLabelText("I checked this")).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
+  });
+
+  it("edits send only the changed fields and the hash of the wording that was opened", async () => {
+    const sha = "a".repeat(64);
+    const patches = [];
+    serve({ owner: true, pages: { draft: { first: { facts: [fact({ text_sha256: sha, question: "Where?" })], nextCursor: null } } }, onRequest: (path, options) => { if (options.method === "PATCH") patches.push(JSON.parse(options.body)); } });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("Nothing has changed yet.")).toBeInTheDocument();
+    expect(patches).toEqual([]);
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "Service area, renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(patches).toEqual([{ topic: "Service area, renamed", baseTextSha256: sha }]));
+  });
+
+  it("starts a replacement of an approved fact with empty owner's words", async () => {
+    serve({ owner: true, pages: { approved: { first: { facts: [fact({ status: "approved", approved_at: "2026-11-25T16:00:00Z", owner_words: "yes, say that" })], nextCursor: null } } } });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    expect(screen.getByLabelText(/Owner's words/)).toHaveValue("");
+  });
+
+  it("ignores a save that finishes after the admin left that tab", async () => {
+    let release;
+    const promise = new Promise((resolve) => { release = resolve; });
+    serve({
+      owner: true,
+      hold: { method: "PATCH", promise },
+      pages: {
+        draft: { first: { facts: [fact()], nextCursor: null } },
+        approved: { first: { facts: [fact({ id: "a1", topic: "Approved one", status: "approved", approved_at: "2026-11-25T16:00:00Z" })], nextCursor: null } },
+      },
+    });
+    mount();
+    await screen.findByText("Service area");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText(/Topic/), { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approved" }));
+    await screen.findByText("Approved one");
+    release();
+    await waitFor(() => expect(adminFetch.mock.calls.some(([, options]) => options?.method === "PATCH")).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByText("Approved one")).toBeInTheDocument();
+    expect(screen.queryByText("Service area")).not.toBeInTheDocument();
   });
 });

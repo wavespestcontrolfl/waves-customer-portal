@@ -22,6 +22,9 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const mockBank = {
   listFacts: jest.fn(async () => ({ facts: [], nextCursor: null })),
+  refreshBankFacts: jest.fn(async () => [{ id: 'f1', text: 'We service Parrish.' }, { id: 'f2', text: 'We offer a plan.' }]),
+  renderBankFactsLines: jest.fn((facts) => facts.map((f) => `- ${f.text}`).join('\n')),
+  bankVersionHash: jest.fn(() => 'v1'),
   createDraft: jest.fn(async () => ({ id: 'f1', status: 'draft', check_result: { blocks: ['banned_copy'], warnings: [] } })),
   getFact: jest.fn(async () => ({ id: 'f1', status: 'draft', check_result: null })),
   factHistory: jest.fn(async () => [{ action: 'drafted' }]),
@@ -64,7 +67,7 @@ async function call(target, method = 'GET', body) {
 }
 
 const EVERY_ROUTE = [
-  ['GET', ''], ['POST', ''], ['GET', `/${ID}`], ['GET', `/${ID}/history`], ['PATCH', `/${ID}`], ['DELETE', `/${ID}`],
+  ['GET', ''], ['GET', '/preview'], ['POST', ''], ['GET', `/${ID}`], ['GET', `/${ID}/history`], ['PATCH', `/${ID}`], ['DELETE', `/${ID}`],
   ['POST', `/${ID}/approve`], ['POST', `/${ID}/retire`], ['POST', `/${ID}/restore`],
 ];
 
@@ -127,6 +130,16 @@ describe('any admin may draft, edit, discard, retire and restore', () => {
     expect(mockBank.retireFact).toHaveBeenCalledWith(ID, { reason: 'wrong' }, expect.objectContaining({ isOwner: false }));
     expect((await call(url(`/${ID}/restore`), 'POST')).status).toBe(201);
     expect((await call(url(`/${ID}/history`))).body.events).toEqual([{ action: 'drafted' }]);
+  });
+});
+
+describe('preview', () => {
+  test('any admin gets the lines the agents snapshot serves, from a fresh read, and the route is not taken for an id', async () => {
+    mockEmail = 'someone.else@example.test';
+    const res = await call(url('/preview'));
+    expect(res).toEqual({ status: 200, body: { lines: '- We service Parrish.\n- We offer a plan.', count: 2, version: 'v1', ids: ['f1', 'f2'] } });
+    expect(mockBank.refreshBankFacts).toHaveBeenCalledTimes(1);
+    expect(mockBank.getFact).not.toHaveBeenCalled();
   });
 });
 

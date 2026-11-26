@@ -15,9 +15,20 @@ export default function FactForm({ mode, initial = {}, onSubmit, onCancel }) {
   const [topic, setTopic] = useState(initial.topic || "");
   const [factText, setFactText] = useState(initial.fact_text || "");
   const [question, setQuestion] = useState(initial.question || "");
-  const [ownerWords, setOwnerWords] = useState(initial.owner_words || "");
+  // A replacement of an approved fact starts with no owner's words: the old quote does not vouch for new wording.
+  const startWords = mode === "approved" ? "" : initial.owner_words || "";
+  const [ownerWords, setOwnerWords] = useState(startWords);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // A new draft sends everything. An edit sends only what the editor changed, plus the hash of the wording it opened,
+  // so an untouched field never overwrites someone else's edit and a concurrent change of the wording is refused (409).
+  const valuesToSend = (now) => {
+    if (mode === "new") return now;
+    const was = { topic: initial.topic || "", factText: (initial.fact_text || "").trim(), question: initial.question || "", ownerWords: startWords };
+    const changed = Object.fromEntries(Object.entries(now).filter(([key, value]) => value !== was[key]));
+    return Object.keys(changed).length ? { ...changed, baseTextSha256: initial.text_sha256 } : null;
+  };
 
   const save = async () => {
     if (busy) return;
@@ -25,10 +36,15 @@ export default function FactForm({ mode, initial = {}, onSubmit, onCancel }) {
       setError("Add a short topic and the fact.");
       return;
     }
+    const values = valuesToSend({ topic: topic.trim(), factText: factText.trim(), question: question.trim(), ownerWords: ownerWords.trim() });
+    if (!values) {
+      setError("Nothing has changed yet.");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
-      await onSubmit({ topic: topic.trim(), factText: factText.trim(), question: question.trim(), ownerWords: ownerWords.trim() });
+      await onSubmit(values);
     } catch (requestError) {
       setError(errorMessage(requestError, "The fact could not be saved."));
       setBusy(false);

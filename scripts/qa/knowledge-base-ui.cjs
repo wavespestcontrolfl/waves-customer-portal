@@ -42,6 +42,7 @@ async function main() {
           const state = url.searchParams.get('status');
           const facts = { draft: [{ id: '11111111-1111-4111-8111-111111111111', topic: 'Fixture company fact', fact_text: 'We service the fixture area.', status: 'draft', check_result: { blocks: [], warnings: [] }, created_at: '2026-11-25T15:00:00Z' }], approved: [], retired: [] }[state] || [];
           if (url.pathname.endsWith('/history')) body = { events: [] };
+          else if (url.pathname.endsWith('/preview')) body = { lines: '', count: 0, version: '', ids: [] };
           else if (method === 'GET') body = { facts, nextCursor: null, viewer: { ownerActions: fixtureRole === 'admin' } };
           else { report.unmatched.push(`${method} ${url.pathname}`); status = 404; body = {}; }
         } else if (/^\/api\/admin\/(kb|wiki)(\/|$)/.test(url.pathname)) {

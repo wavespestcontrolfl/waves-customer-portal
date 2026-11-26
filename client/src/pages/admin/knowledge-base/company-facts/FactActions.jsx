@@ -9,6 +9,9 @@ import { factTextSha256 } from "./factHash";
 const BASE = "/admin/company-facts";
 const send = (path, method, body) => adminFetch(`${BASE}${path}`, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
 
+// What a tick covers: this wording and this set of warnings.
+const reviewKey = (text, warnings) => `${text}\n${warnings.map((w) => `${w.code}:${(w.words || []).join(',')}`).join(';')}`;
+
 // One in-flight request at a time per card. run() reports success through onDone(message) and failure as one plain sentence.
 function useAction(onDone, onStale) {
   const [busy, setBusy] = useState(false);
@@ -35,20 +38,25 @@ function useAction(onDone, onStale) {
 
 export function DraftActions({ fact, ownerActions, onDone, onStale }) {
   const [mode, setMode] = useState("view");
-  const [ticked, setTicked] = useState(false);
-  const [freshWarnings, setFreshWarnings] = useState(null);
+  // The tick and the server's fresh warnings belong to one wording: each remembers the text it was given for, and
+  // counts only while the card still shows that text (an edit or a reload that changed the wording drops both).
+  const [tickedFor, setTickedFor] = useState(null);
+  const [fresh, setFresh] = useState(null);
   const { busy, error, run } = useAction(onDone, onStale);
   const blocks = fact.check_result?.blocks || [];
+  const freshWarnings = fresh && fresh.text === fact.fact_text ? fresh.warnings : null;
   const warnings = freshWarnings || fact.check_result?.warnings || [];
+  const ticked = tickedFor === reviewKey(fact.fact_text, warnings);
   const canApprove = ownerActions && !blocks.length && (!warnings.length || ticked);
 
   const approve = () => run(async () => {
     // The hash of the exact wording on screen: the server refuses the approval if the wording changed since.
-    const textSha256 = await factTextSha256(fact.fact_text);
+    const reviewed = fact.fact_text;
+    const textSha256 = await factTextSha256(reviewed);
     try {
       await send(`/${fact.id}/approve`, "POST", { textSha256, ...(warnings.length ? { acknowledgeWarnings: true } : {}) });
     } catch (requestError) {
-      if (requestError.code === "WARNINGS_NOT_ACKNOWLEDGED") setFreshWarnings(requestError.details?.warnings || null);
+      if (requestError.code === "WARNINGS_NOT_ACKNOWLEDGED") setFresh({ text: reviewed, warnings: requestError.details?.warnings || [] });
       throw requestError;
     }
   }, "Fact approved.", "approved");
@@ -65,7 +73,7 @@ export function DraftActions({ fact, ownerActions, onDone, onStale }) {
   }
   return (
     <div className="space-y-3">
-      <FactChecks check={fact.check_result} warnings={freshWarnings} canTick={ownerActions && !blocks.length} ticked={ticked} onTick={setTicked} />
+      <FactChecks factId={fact.id} check={fact.check_result} warnings={freshWarnings} canTick={ownerActions && !blocks.length} ticked={ticked} onTick={(on) => setTickedFor(on ? reviewKey(fact.fact_text, warnings) : null)} />
       {mode === "discard" && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-ui-body">Discard this draft for good?</span>

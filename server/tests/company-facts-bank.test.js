@@ -330,6 +330,15 @@ describe('the reviewed text hash the page sends', () => {
     expect(sha256(String(text).trim())).toBe(digest);
   });
 
+  test('an edit that carries the hash of the wording the editor opened is refused when the wording changed since, and passes when it did not', async () => {
+    const text = 'We service Parrish.';
+    const opened = sha256(text);
+    await expect(Bank.editFact(ID, { topic: 'Areas', baseTextSha256: VECTORS[3][1] }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_TEXT', status: 409 });
+    await expect(Bank.editFact(ID, { topic: 'Areas', baseTextSha256: opened.toUpperCase() }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+    // No base hash (an older caller): nothing to compare, the edit goes on.
+    await expect(Bank.editFact(ID, { topic: 'Areas' }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
+  });
+
   test.each(VECTORS.filter(([text]) => text.trim()))('approve accepts the page hash of %j and refuses another wording', async (text, digest) => {
     await expect(Bank.approveFact(ID, { textSha256: digest }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'CATALOG_UNAVAILABLE' });
     await expect(Bank.approveFact(ID, { textSha256: VECTORS[3][1] }, owner, { dbi: dbFor(text) })).rejects.toMatchObject({ code: 'STALE_TEXT' });

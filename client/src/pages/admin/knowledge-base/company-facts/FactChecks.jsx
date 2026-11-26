@@ -3,7 +3,7 @@ import { WARNING_REASONS, blockReason } from "./factCopy";
 
 // The recorded check of one fact: hard blocks (cannot be approved) and warnings (the owner must tick "I checked this").
 // `warnings` may come from the saved check or from a refused approve (the server's fresh read).
-export default function FactChecks({ check, warnings, canTick, ticked, onTick }) {
+export default function FactChecks({ factId, check, warnings, canTick, ticked, onTick }) {
   const blocks = check?.blocks || [];
   const found = warnings || check?.warnings || [];
   if (!check && !found.length) return <p className="text-ui-caption text-ink-secondary">Not checked yet.</p>;
@@ -29,7 +29,7 @@ export default function FactChecks({ check, warnings, canTick, ticked, onTick })
             ))}
           </ul>
           {canTick
-            ? <Checkbox id={`ack-${found.map((w) => w.code).join("-")}`} className="mt-2" label="I checked this" checked={ticked} onChange={(event) => onTick(event.target.checked)} />
+            ? <Checkbox id={`ack-${factId}`} className="mt-2" label="I checked this" checked={ticked} onChange={(event) => onTick(event.target.checked)} />
             : <p className="mt-1 text-ui-caption text-ink-secondary">The owner ticks "I checked this" before approving.</p>}
         </div>
       )}

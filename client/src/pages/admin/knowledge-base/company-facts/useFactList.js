@@ -13,9 +13,14 @@ export default function useFactList(status) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const token = useRef(0);
+  // The status the page shows now. A reload or page read started for another status (a save that finished after the admin
+  // switched tabs) is dropped, so it can never fill this status with another status's facts.
+  const shown = useRef(status);
+  shown.current = status;
 
   // quiet: a refresh after a change keeps the cards on screen instead of flashing "Loading".
   const reload = useCallback(async (quiet = false) => {
+    if (shown.current !== status) return;
     const mine = ++token.current;
     if (quiet !== true) setLoading(true);
     setError("");
@@ -35,7 +40,7 @@ export default function useFactList(status) {
   useEffect(() => { reload(); }, [reload]);
 
   const loadMore = async () => {
-    if (!page.nextCursor || loadingMore) return;
+    if (!page.nextCursor || loadingMore || shown.current !== status) return;
     const mine = token.current;
     setLoadingMore(true);
     setError("");
