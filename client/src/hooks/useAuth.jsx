@@ -339,52 +339,57 @@ export function AuthProvider({ children }) {
     if (freshMeRef.current) setCustomerSaved(false);
   }, []);
 
-  const loadCustomer = useCallback(async (attempt) => {
-    // `refreshCustomer` gets used as an event handler, so `attempt` may be
-    // anything — only our own retry chain passes a number.
-    const n = Number.isFinite(Number(attempt)) ? Number(attempt) : 0;
+  // A moved login (another tab's login adopted into api.token, or published to
+  // storage) discards an answer, ends everything still in flight and loads
+  // again under the current login. loadCustomerRef breaks the cycle with
+  // loadCustomer, which uses this too.
+  const loadCustomerRef = useRef(null);
+  const restartUnderCurrentLogin = useCallback(() => {
+    const stored = localStorage.getItem('waves_token');
+    if (stored && loginKey(stored) !== loginKey(api.token)) api.adoptTokens(stored, localStorage.getItem('waves_refresh_token'));
+    setSessionEpoch(++sessionEpochRef.current);
+    dropSavedHome();
+    customerRef.current = null;
+    setCustomer(null);
+    setProperties([]);
+    resetPropertyScope();
+    setPropertiesError(null);
+    setLoading(true);
+    loadCustomerRef.current();
+  }, [dropSavedHome]);
+
+  // Every auth read (loadCustomer, refreshProperties) starts one of these
+  // BEFORE its request leaves, and asks it before applying ANY outcome: an
+  // answer, a failure, or a session denial. It is true when the outcome must
+  // be dropped: the session epoch moved (a load for the new epoch is already
+  // running), the stored token was removed (a sign-out in another tab whose
+  // storage event has not run), or the login that asked is no longer the one
+  // in use or in storage (then the current login loads again). A denial for a
+  // replaced login therefore never clears the new login's credentials.
+  const startRequestGuard = useCallback(() => {
     const epoch = sessionEpochRef.current;
-    // Who this request is for, captured before it leaves: the saved screen is
-    // written only if the same login still holds the token afterwards.
-    const requestIdentity = homeIdentityKey(api.token);
     const requestLogin = loginKey(api.token);
-    // Another tab's login can be adopted into api.token by a token refresh
-    // (_adoptPublishedRotation) before its storage event reaches this tab, so
-    // the epoch alone cannot tell. A moved login discards the answer, ends
-    // everything still in flight and loads again under the current login.
-    const loginMoved = () => {
-      const stored = localStorage.getItem('waves_token');
-      return loginKey(api.token) !== requestLogin || (!!stored && loginKey(stored) !== requestLogin);
-    };
-    const restartUnderCurrentLogin = () => {
-      const stored = localStorage.getItem('waves_token');
-      if (stored && loginKey(stored) !== loginKey(api.token)) api.adoptTokens(stored, localStorage.getItem('waves_refresh_token'));
-      setSessionEpoch(++sessionEpochRef.current);
-      dropSavedHome();
-      customerRef.current = null;
-      setCustomer(null);
-      setProperties([]);
-      resetPropertyScope();
-      setPropertiesError(null);
-      setLoading(true);
-      loadCustomer();
-    };
-    // True when this answer must not be applied: the session epoch moved (a
-    // load for the new epoch is already running), or the login moved without an
-    // epoch bump, in which case it loads again under the current login.
-    const superseded = () => {
+    return () => {
       if (sessionEpochRef.current !== epoch) return true;
-      // A REMOVED stored token while memory still holds one is a sign-out in
-      // another tab whose storage event has not run yet: end the session, do
-      // not publish this answer.
       if (api.token && !localStorage.getItem('waves_token')) {
         endSessionLocally();
         return true;
       }
-      if (!loginMoved()) return false;
+      const stored = localStorage.getItem('waves_token');
+      if (loginKey(api.token) === requestLogin && !(stored && loginKey(stored) !== requestLogin)) return false;
       restartUnderCurrentLogin();
       return true;
     };
+  }, [endSessionLocally, restartUnderCurrentLogin]);
+
+  const loadCustomer = useCallback(async (attempt) => {
+    // `refreshCustomer` gets used as an event handler, so `attempt` may be
+    // anything — only our own retry chain passes a number.
+    const n = Number.isFinite(Number(attempt)) ? Number(attempt) : 0;
+    // Who this request is for, captured before it leaves: the saved screen is
+    // written only if the same login still holds the token afterwards.
+    const requestIdentity = homeIdentityKey(api.token);
+    const superseded = startRequestGuard();
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -480,7 +485,8 @@ export function AuthProvider({ children }) {
       return;
     }
     setLoading(false);
-  }, [dropSavedHome, denySession, endSessionLocally, releaseSavedHold]);
+  }, [dropSavedHome, denySession, releaseSavedHold, startRequestGuard]);
+  loadCustomerRef.current = loadCustomer;
 
   // Cross-tab session sync. Logout in tab A only clears tab B's localStorage —
   // tab B's in-memory api.token kept working until its next 401. React to the
@@ -668,11 +674,11 @@ export function AuthProvider({ children }) {
     // Same staleness rule as loadCustomer: a response (or failure) that
     // started under a superseded session must not overwrite the new
     // session's property list or surface its error.
-    const epoch = sessionEpochRef.current;
+    const superseded = startRequestGuard();
     const seq = ++propertyReadSeqRef.current;
     try {
       const data = await api.getAuthProperties({ scope: 'saved' });
-      if (sessionEpochRef.current !== epoch) return false;
+      if (superseded()) return false;
       // Superseded by a newer list read (uncapped codex r1s P1): a delayed
       // response must not restore a house a newer read already retired.
       if (propertyReadSeqRef.current !== seq) return false;
@@ -682,7 +688,7 @@ export function AuthProvider({ children }) {
       releaseSavedHold();
       return true;
     } catch (err) {
-      if (sessionEpochRef.current !== epoch) return false;
+      if (superseded()) return false;
       // The server DENIED the session (not an outage): same cleanup as a
       // /auth/me 401, for any read of the session (winning or not), and before
       // the transient fallback below can release the saved-account hold.
@@ -702,7 +708,7 @@ export function AuthProvider({ children }) {
       }
       return false;
     }
-  }, [releaseSavedHold, adoptScopeFromMe, denySession]);
+  }, [releaseSavedHold, adoptScopeFromMe, denySession, startRequestGuard]);
 
   // target: a profile id (string — every shipped caller) or a saved-property
   // pair { customerId, propertyId } (GATE_APP_PROPERTY_SCOPE). A same-profile

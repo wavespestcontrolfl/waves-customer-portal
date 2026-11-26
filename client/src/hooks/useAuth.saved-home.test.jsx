@@ -578,4 +578,58 @@ describe('saved home screen at launch', () => {
       expect(savedSnapshot()).toBeNull();
     });
   });
+
+  describe('a reconnect / pull-to-refresh property read for a replaced login', () => {
+    const start = async () => {
+      localStorage.setItem('waves_token', TOKEN);
+      api.getMe.mockResolvedValueOnce(FRESH_ME);
+      api.getAuthProperties.mockResolvedValueOnce(PROPS);
+      await mount();
+    };
+    // mode: 'both' (adopted into memory), 'storage' (published only), 'memory' (memory only).
+    const swapLogin = (mode) => {
+      // Another tab's login (same customer, new family) is published; no storage event has run yet.
+      const other = makeToken({ customerId: 'cust-1', sessionId: 'fam-9' });
+      if (mode !== 'memory') localStorage.setItem('waves_token', other);
+      if (mode !== 'storage') api.token = other;
+      return other;
+    };
+
+    it.each(['both', 'storage', 'memory'])('a denial for the old login does not clear the new login (%s)', async (mode) => {
+      await start();
+      let rejectOld;
+      api.getAuthProperties.mockImplementationOnce(() => new Promise((_, reject) => { rejectOld = reject; }));
+      await act(async () => { void authApi.refreshProperties(); });
+      swapLogin(mode);
+      const storedBefore = localStorage.getItem('waves_token');
+      api.getMe.mockImplementation(() => new Promise(() => {}));
+      await act(async () => { rejectOld(Object.assign(new Error('revoked'), { status: 401 })); });
+      expect(api.clearTokens).not.toHaveBeenCalled();
+      expect(localStorage.getItem('waves_token')).toBe(storedBefore);
+      // The current login loads (again) instead of being signed out.
+      expect(api.getMe).toHaveBeenCalledTimes(2);
+      expect(text('loading')).toBe('true');
+    });
+
+    it('a denial for the CURRENT login still signs out', async () => {
+      await start();
+      api.getAuthProperties.mockRejectedValueOnce(Object.assign(new Error('revoked'), { status: 403 }));
+      await act(async () => { await authApi.refreshProperties(); });
+      expect(api.clearTokens).toHaveBeenCalled();
+      expect(authApi.isAuthenticated).toBe(false);
+    });
+
+    it('a list for the old login is not adopted and a failure for it is not shown', async () => {
+      await start();
+      let releaseOld;
+      api.getAuthProperties.mockImplementationOnce(() => new Promise((resolve) => { releaseOld = resolve; }));
+      await act(async () => { void authApi.refreshProperties(); });
+      swapLogin('both');
+      api.getMe.mockImplementation(() => new Promise(() => {}));
+      await act(async () => { releaseOld(PROPS); });
+      expect(authApi.properties).toHaveLength(0);
+      expect(text('name')).toBe('');
+      expect(api.getMe).toHaveBeenCalledTimes(2);
+    });
+  });
 });
