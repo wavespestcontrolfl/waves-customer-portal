@@ -310,12 +310,14 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
 }
 
 function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services = {}, measurements = null } = {}) {
+  // customers.property_sqft is TREATED LAWN AREA by schema contract (initial_schema 20260401000001), never the home size, so it is
+  // not read here: a 2,000 sq ft house with 20,000 sq ft of lawn was priced as a 20,000 sq ft building. Pest keeps rising with the
+  // footprint above 5,500 sq ft (owner 2026-11-26), so that wrong size is no longer hidden by a flat top.
   const statedHomeSqFt = numberOrNull(
     body.homeSqFt,
     body.home_sqft,
     body.squareFootage,
     body.square_footage,
-    customer.property_sqft,
     customer.home_sqft
   );
   const statedLotSqFt = numberOrNull(
@@ -811,7 +813,8 @@ function evaluateLeadEstimateAutomationReadiness({
 
   if (!address.city && !address.zip) review.push('city_or_zip_missing');
   if (!firstNonEmpty(intake.email, customer.email)) review.push('email_missing_sms_only');
-  if (!numberOrNull(customer.property_sqft, intake.homeSqFt, intake.squareFootage)) {
+  // The home size only: the customer row's property_sqft is treated lawn area (see buildLeadEngineInput), not a home measurement.
+  if (!numberOrNull(customer.home_sqft, intake.homeSqFt, intake.squareFootage)) {
     review.push('property_measurements_defaulted');
   }
 

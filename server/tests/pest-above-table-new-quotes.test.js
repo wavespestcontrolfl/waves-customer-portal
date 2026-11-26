@@ -75,6 +75,20 @@ describe('a fresh quote keeps rising above 5,500 sq ft', () => {
     expect(mo.perApp).toBe(Math.round(q * PEST.frequencyDiscounts.v2.monthly * 100) / 100);
   });
 
+  test('the footprint is the living area over the stories at every size: the price never falls as the home grows past 5,500 sq ft', () => {
+    // The phone price tool sends a stated story count on both sides of 5,500 sq ft (voice-relay-context.test.js); these are the
+    // engine prices for those inputs. Using the count only above the line made a two-story home cheaper at 5,501 than at 5,500.
+    const at = (homeSqFt, stories) => plan(homeSqFt, 'quarterly', { stories }).perApp;
+    for (const stories of [1, 1.5, 2, 3]) {
+      expect(at(5501, stories)).toBeGreaterThanOrEqual(at(5500, stories));
+      expect(at(12000, stories)).toBeGreaterThanOrEqual(at(5501, stories));
+    }
+    // 12,000 sq ft of living area: one floor is a 12,000 sq ft footprint, 1.5 floors 8,000, two floors 6,000.
+    expect([at(12000, 1), at(12000, 1.5), at(12000, 2)]).toEqual([180, 148, 132]);
+    // Under the table a two-story home is priced on its smaller footprint too (as the estimator always has).
+    expect(at(5500, 2)).toBeLessThan(at(5500, 1));
+  });
+
   test('one-time pest follows the quarterly price (beside a plan and stand-alone); at or below 5,500 it is main\'s number', () => {
     for (const [sqft, , solo] of MAIN_ONE_TIME) {
       const beside = line(run(sqft, { pest: { frequency: 'quarterly' }, oneTimePest: {} }), 'one_time_pest').price;

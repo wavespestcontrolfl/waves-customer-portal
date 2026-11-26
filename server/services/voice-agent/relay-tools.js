@@ -358,7 +358,7 @@ const CONTEXT_TOOLS = [
           description: 'Which recurring plan to price',
         },
         home_sqft: { type: 'number', description: 'Approximate home square footage (ask the caller)' },
-        stories: { type: 'number', description: 'How many stories the home has (1, 2 or 3). Needed for pest control on a home above 5,500 square feet: the tool asks for it when it is missing' },
+        stories: { type: 'number', description: 'How many stories the home has (1, 2 or 3). Pest control is priced on the ground-floor footprint, so pass it whenever the caller says it. It is needed for a home above 5,500 square feet: the tool asks for it when it is missing' },
         lot_sqft: { type: 'number', description: 'Approximate lot size in square feet (needed for lawn/mosquito/tree & shrub)' },
         lawn_sqft: { type: 'number', description: 'Approximate lawn/turf square footage, if the caller knows it' },
         frequency: { type: 'string', enum: ['quarterly', 'bimonthly', 'monthly'], description: 'Pest control visit frequency (default quarterly)' },

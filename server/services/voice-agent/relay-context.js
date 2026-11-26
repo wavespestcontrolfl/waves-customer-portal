@@ -1586,8 +1586,9 @@ async function pricingText(input = {}, { practiceLine = false } = {}) {
 
   // Pest keeps rising with the FOOTPRINT above 5,500 sq ft (owner 2026-11-26), and a footprint is the living area over the stories:
   // 12,000 sq ft on one floor and on two floors are different prices. So a home above that size is not priced until the caller says
-  // how many stories it has. At or under it the tool prices as it always has (no story count asked or used). A home above the
-  // 20,000 sq ft residential bound is refused below as a custom quote, so no story count is asked for it.
+  // how many stories it has. At or under it the count is not asked for (one floor is assumed when the caller gave none, as
+  // always), but a count the caller did give is used. A home above the 20,000 sq ft residential bound is refused below as a
+  // custom quote, so no story count is asked for it.
   const pestAboveTable = service === 'pest_control' && !!homeSqFt && homeSqFt <= 20000
     && homeSqFt > Number(require('../pricing-engine/constants').PEST.aboveTableStartSqFt);
   // A real count only (a number or a numeric string, in the website's bounds of 1 to 3): true or a list is no count, so it is asked again.
@@ -1622,7 +1623,9 @@ async function pricingText(input = {}, { practiceLine = false } = {}) {
 
   const engineInput = {
     homeSqFt: sqft,
-    ...(pestAboveTable ? { stories } : {}),
+    // A stated story count is used for EVERY pest quote, not only above the table: the engine prices pest on the footprint at
+    // every size, so dropping the count at 5,500 sq ft and using it at 5,501 made the price fall across the line.
+    ...(service === 'pest_control' && stories ? { stories } : {}),
     lotSqFt: lot,
     ...(lawnSqFt ? { lawnSqFt: Math.max(500, Math.min(200000, lawnSqFt)) } : {}),
     // Property type MATTERS to the price (PROPERTY_TYPE_ADJ discounts a condo

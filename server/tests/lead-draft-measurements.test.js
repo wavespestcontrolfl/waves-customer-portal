@@ -153,6 +153,24 @@ describe('the draft builder\'s cache read', () => {
     expect(both.automation.engineInput).toMatchObject({ homeSqFt: 1500, lotSqFt: 7000 });
   });
 
+  test('a customer row\'s treated lawn area (property_sqft) is never the home size: pest is priced on the home, not the lawn', async () => {
+    // customers.property_sqft is treated lawn area by schema. A house with 20,000 sq ft of lawn is not a 20,000 sq ft building:
+    // pest keeps rising with the footprint above 5,500 sq ft (owner 2026-11-26), so that size would more than double the price.
+    const pestPerApp = (draft) => draft.estimateData.engineResult.lineItems.find((l) => l.service === 'pest_control').perApp;
+    const noSize = await buildAutomatedLeadDraftEstimate(readyLead());
+    const lawnOnly = readyLead({ customer: { property_sqft: 20000, lot_sqft: 30000 } });
+    const draft = await buildAutomatedLeadDraftEstimate(lawnOnly);
+    expect(draft.automation.engineInput).toMatchObject({ homeSqFt: 2000, lotSqFt: 30000 });
+    expect(pestPerApp(draft)).toBe(pestPerApp(noSize));
+    // The home size is still unknown, so the draft says so (the auto-send lane parks it for a person).
+    expect(lawnOnly.readiness.review).toContain('property_measurements_defaulted');
+    expect(draft.automation.review).toContain('property_measurements_defaulted');
+    // A home size the lead states is used as before, beside the same lawn area.
+    const stated = await buildAutomatedLeadDraftEstimate(readyLead({ customer: { property_sqft: 20000, lot_sqft: 30000 }, body: { homeSqFt: 8000 } }));
+    expect(stated.automation.engineInput.homeSqFt).toBe(8000);
+    expect(pestPerApp(stated)).toBe(148);
+  });
+
   test('measurements passed in (the background lookup) skip the cache read', async () => {
     process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP = 'true';
     const draft = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: { homeSqFt: 3100, lotSqFt: 14500, source: 'county_assessed' } });

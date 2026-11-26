@@ -1336,14 +1336,26 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(generateEstimate).not.toHaveBeenCalled();
   });
 
-  test('at or under 5,500 sq ft, and for every other plan, the story count is neither asked for nor used', async () => {
+  test('at or under 5,500 sq ft the story count is not asked for, but a stated one is used; other plans never use it', async () => {
     generateEstimate.mockReturnValue({ lineItems: [], summary: {} });
-    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 5500, stories: 2 }, { customerId: null });
+    // No count given: priced at once, with no story count on the engine input (one floor, as always).
+    const priced = await executeTool('get_pricing', { service: 'pest_control', home_sqft: 5500 }, { customerId: null });
+    expect(priced).not.toContain('how many stories');
     expect(generateEstimate).toHaveBeenCalledTimes(1);
     expect(generateEstimate.mock.calls[0][0]).not.toHaveProperty('stories');
+    // A count the caller gave is used on both sides of 5,500 sq ft, so the price never falls across the line.
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 5500, stories: 2 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 5500, stories: 2 }));
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 5501, stories: 2 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 5501, stories: 2 }));
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 2400, stories: 2 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 2400, stories: 2 }));
+    // A value that is not a count is dropped under the table (nothing is asked there).
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 2400, stories: true }, { customerId: null });
+    expect(generateEstimate.mock.calls.at(-1)[0]).not.toHaveProperty('stories');
+    // Another plan: never forwarded.
     await executeTool('get_pricing', { service: 'termite_bait', home_sqft: 12000, stories: 2 }, { customerId: null });
-    expect(generateEstimate).toHaveBeenCalledTimes(2);
-    expect(generateEstimate.mock.calls[1][0]).not.toHaveProperty('stories');
+    expect(generateEstimate.mock.calls.at(-1)[0]).not.toHaveProperty('stories');
   });
 
   test('a building beyond the residential bounds refuses instead of clamping down', async () => {
