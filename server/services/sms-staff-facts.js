@@ -1,9 +1,10 @@
 'use strict';
 // Facts staff know and the texting agent may state (owner 2026-11-25, texting AI fix step 2: "feed the facts staff know"; owner ruling
 // 2026-09-30: price and fee questions are explained from the estimate and invoice on file): the open estimate's per-application price and
-// applications a year, and a customer's prepaid visits left. This module only READS the numbers; the AI never sees them raw: each becomes one
-// finished sentence in payment-status-contract.js (the same copy-verbatim contract as the plan price and the balance, PR #5331), so a figure
-// the AI writes in its own words is held. Never a technician note or a visit note. A read that fails is null, never a guess.
+// applications a year, a customer's prepaid visits left, and the prep guide of the customer's booked visit. This module only READS the facts.
+// The numbers never reach the AI raw: each becomes one finished sentence in payment-status-contract.js (the same copy-verbatim contract as the
+// plan price and the balance, PR #5331), so a figure the AI writes in its own words is held. The guide's own published sentences reach it as the
+// PREP GUIDE section (sms-shadow-drafter.js prepGuideSection). Never a technician note or a visit note. A read that fails is null, never a guess.
 
 const logger = require('./logger');
 
@@ -99,4 +100,103 @@ async function loadPrepaidPlanFacts(customerId, { db } = {}) {
   }
 }
 
-module.exports = { loadEstimateFacts, loadPrepaidPlanFacts };
+// ---- Prep guide ----------------------------------------------------------------------------------------------------------------------
+
+// The sections of a published guide that read as prose: each paragraph, callout, list item and FAQ row WHOLE (a published item is never cut
+// into sentences: a cut can strand a step from the sentence that names its subject, or split "St. Augustine"), under the heading it sits
+// below. A guide's steps often hold only for one case ("Prep for a German roach cleanout", "Prep for palmetto bugs"), so every step stays tied
+// to its heading. What the guide tells the customer to DO comes first and its background (why, what we do, the FAQ) after it, each in guide
+// order: the drafter's budget is spent on the steps the customer asks about, not on the introduction.
+const BACKGROUND_HEADING = /^(?:why|what we do|how (?:we|it)|about|meet|faq|frequently|questions?)\b/i;
+const FAQ_HEADING = 'Frequently asked questions';
+function guideSections(blocks) {
+  const groups = [];
+  const add = (heading, parts) => {
+    if (!parts.length) return;
+    if (!groups.length || heading !== null) groups.push({ heading: heading ?? '', parts: [] });
+    groups[groups.length - 1].parts.push(...parts);
+  };
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    if (!block || typeof block !== 'object') continue;
+    if (block.type === 'heading') { groups.push({ heading: String(block.content || '').replace(/\s+/g, ' ').trim(), parts: [] }); continue; }
+    if (['paragraph', 'callout'].includes(block.type) && typeof block.content === 'string') add(null, [block.content]);
+    if (block.type === 'list' && Array.isArray(block.items)) add(null, block.items.filter((item) => typeof item === 'string'));
+    // the FAQ rows of a guide (its question and the answer, in the guide's own words); the service details rows are not prose
+    if (block.type === 'details' && block.variant === 'faq' && Array.isArray(block.rows)) {
+      add(FAQ_HEADING, block.rows.filter((row) => typeof row?.label === 'string' && typeof row?.value === 'string').map((row) => `${row.label} ${row.value}`));
+    }
+  }
+  const aside = (group) => BACKGROUND_HEADING.test(group.heading);
+  return [...groups.filter((group) => !aside(group)), ...groups.filter(aside)];
+}
+
+// A street address the bank's phone and email rules do not see ("Meet us at 123 Example Lane"): a house number, one to three words, a street word.
+const ADDRESS_RE = /\b\d{1,6}\s+(?:[A-Za-z.']+\s+){0,3}(?:street|st|avenue|ave|road|rd|lane|ln|drive|dr|boulevard|blvd|way|court|ct|circle|cir|terrace|ter|place|pl|parkway|pkwy|highway|hwy|trail|trl)\b/i;
+// A published item is cut at the drafter's own limits, never mid-item: one longer than this is left out whole.
+const MAX_ITEM_CHARS = 700;
+
+// Whether a line of a guide may be repeated: the company facts bank's own text rules (checkFactText: no link, phone number, email, price,
+// product or brand name, "safe" or other safety claim, banned copy or prompt-control shape), no street address, no merge tag, no em dash, and
+// no wording that points at the email or page itself. The bank's amount rules (no number, at most three sentences, 400 characters) are
+// waived: a guide says "12 to 18 inches" in as many sentences as it needs. The drafter screens the rest (prepGuideSection).
+const WAIVED = new Set(['number_in_fact', 'too_many_sentences', 'too_long']);
+function plainLine(text, bank, ctx) {
+  if (ADDRESS_RE.test(text) || /\{\{|\]\(|\u2014/.test(text) || /\b(?:e-?mail|inbox|button|below|above|this (?:guide|page))\b/i.test(text)) return false;
+  return bank.checkFactText(text, ctx).blocks.every((code) => WAIVED.has(code));
+}
+
+function guideGroups(blocks, productNames) {
+  const bank = require('./company-facts-bank');
+  const sections = guideSections(blocks);
+  // What the guide itself links is a product or brand it names (a pet medication, a collar): the catalog does not know those, so the link
+  // labels count as brand names too, in an item of the guide that names the product without the link.
+  const linked = sections.flatMap((group) => group.parts).flatMap((part) => [...String(part).matchAll(/\[([^\]]{2,60})\]\(/g)].map((m) => m[1].trim()))
+    .flatMap((label) => [label, /^[A-Z][A-Za-z]{5,}/.exec(label)?.[0]]).filter(Boolean);
+  const ctx = { productNames: [...productNames, ...linked] };
+  const out = [];
+  for (const group of sections) {
+    const items = group.parts.map((part) => String(part).replace(/\s+/g, ' ').trim())
+      .filter((item) => item.length >= 12 && item.length <= MAX_ITEM_CHARS && plainLine(item, bank, ctx));
+    // a group whose heading may not be repeated is dropped whole: its steps would sit under the wrong case
+    if (items.length && (!group.heading || (group.heading.length <= 120 && plainLine(group.heading, bank, ctx)))) out.push({ heading: group.heading || null, sentences: items });
+  }
+  return out;
+}
+
+/**
+ * The prep guide the customer may be asking about: { source, key, label, sections: [{ heading, sentences }] } with the published words of (`sentences` are whole published items: a paragraph, list item, callout or FAQ row)
+ * that guide. Which guide: the one prep-guide-sender gives the customer's BOOKED visit (bookedPrepGuide: the soonest upcoming visit, its
+ * stop and its stored guide, else its service types' family), else, with no booked visit, the guide the LAST completed service day's services carried (completedPrepGuide: a visit's assigned guide, else the
+ * family its service type belongs to by the sender's own match rule; services that finished the same day and disagree name none). Only that one service's guide, never another's. The words are the template's
+ * ACTIVE version, the same row the customer's prep page renders (EmailTemplateLibrary.loadTemplateByKey).
+ * { sections: [] } when no guide covers the visit or the guide is not published (a successful read of nothing); null when the read failed.
+ * Never throws: the drafter writes without a section, and a send-time check reads null as an outage (never as "nothing changed").
+ */
+async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
+  const none = { sections: [] };
+  if (!customerId || !db) return null;
+  const completedRecords = [].concat(lastRecords || []);
+  try {
+    const sender = require('./prep-guide-sender');
+    const booked = await sender.bookedPrepGuide([customerId]);
+    // No booked visit: the services that completed on the latest service day (the history is ordered by that date alone, so several can tie).
+    // Each resolves to the guide it carried; they must all agree, else no guide is named.
+    // (`lastRecords` null: the latest service day may run past the history page, so no completed service can be named)
+    const completed = booked || lastRecords === null ? [] : await Promise.all(completedRecords.map((record) => sender.completedPrepGuide({ scheduledServiceId: record?.scheduled_service_id, serviceRecordId: record?.id, serviceType: record?.service_type })));
+    const configs = new Set(completed.map((guide) => guide.config?.emailTemplateKey || null));
+    const config = booked ? booked.config : (configs.size === 1 ? completed[0].config : null);
+    if (!config) return none;
+    const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
+    // the template must be one the customer's own page and the email sender would use: published (an active version) and not switched off
+    if (!loaded?.activeVersion || String(loaded.template?.status || 'active').toLowerCase() !== 'active') return none;
+    const raw = loaded.activeVersion.blocks;
+    const blocks = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const sections = guideGroups(blocks, await require('./company-facts-bank').readProductNames(db));
+    return sections.length ? { source: booked ? 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sections } : none;
+  } catch (err) {
+    logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = { loadEstimateFacts, loadPrepaidPlanFacts, loadPrepGuideFacts };

@@ -21,6 +21,7 @@ jest.mock('../config', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => (gate in mockGates ? mockGates[gate] : true)),
+  wdoReportHoldLive: jest.fn(() => false),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {

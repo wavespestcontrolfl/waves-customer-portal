@@ -83,6 +83,8 @@ let ownershipLost = false; // the send-time re-read finds the page re-keyed
 let upcomingVisitRows = null; // several candidates (soonest first); null = [upcomingVisitRow]
 let viewRow = null; // prep_guide_views
 let visitLookupError = null;
+let projectRows = []; // projects linked to the visit (a staff-sent guide stores its key there)
+let projectLookups = [];
 // A live upcoming visit as the appointment page's pageState reads it —
 // status + a date ahead of the run (the pick requires state 'upcoming').
 const FUTURE = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
@@ -185,6 +187,11 @@ beforeEach(() => {
   };
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery();
+    if (table === 'projects') {
+      const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q), whereNotNull: jest.fn(() => q), select: jest.fn(async () => projectRows) };
+      projectLookups.push(q);
+      return q;
+    }
     if (table === 'scheduled_services') { const q = scheduledQuery(); scheduledQueries.push(q); return q; }
     if (table === 'customer_interactions') {
       // One object: traceQuery's where() returns ITS OWN q, so the claim's
@@ -239,6 +246,8 @@ beforeEach(() => {
   upcomingVisitRows = null;
   viewRow = null;
   visitLookupError = null;
+  projectRows = [];
+  projectLookups = [];
   serviceUpdateCount = 1;
   servicePrepRow = { prep_token: null, prep_template_key: null };
   serviceUpdates = [];
@@ -1011,6 +1020,159 @@ describe('sendPrepToCustomer', () => {
     const payload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
     expect(payload.prep_url).toContain('?tab=visits');
     expect(payload.service_date).toBe('To be confirmed');
+  });
+});
+
+// Which guide a visit gets, read in JS by the texting AI's PREP GUIDE facts (owner 2026-11-25, step 2C). The JS matcher and the pick are
+// held to what the sender itself runs: the SQL upcomingFamilyVisits emits for each config, and the guide the visit's page shows.
+describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide)', () => {
+  const sender = require('../services/prep-guide-sender');
+  const VISIT = liveVisit({ customer_id: 'cust-1', service_type: 'Pest Control', scheduled_date: FUTURE });
+  // the SQL predicate upcomingFamilyVisits builds, evaluated against a service type with real LIKE semantics ('%' any run, '_' one char)
+  const likeTest = (pattern, text) => new RegExp(`^${String(pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.')}$`).test(text);
+  const sqlMatches = (calls, serviceType) => calls.every(([sql, args]) => {
+    const name = serviceType.toLowerCase();
+    let at = 0;
+    return String(sql).replace(/^\(|\)$/g, '').split(' OR ').some((part) => {
+      const arg = args[at++];
+      return part.includes('NOT LIKE') ? !likeTest(arg, name) : likeTest(arg, name);
+    });
+  });
+  const SERVICE_TYPES = [
+    'Pest Control', 'Quarterly Pest Control', 'Lawn Pest Control', 'Lawn Care', 'Lawn Dethatching', 'Lawn Plugging', 'Lawn Top Dressing', 'Lawn Health Inspection',
+    'Lawn Inspection & Treatment', 'Lawn Assessment', 'Termite Inspection', 'Termite Liquid Treatment & Inspection', 'Termite Bond Renewal', 'Termite Monitoring',
+    'Termite Foam Treatment', 'WDO Inspection', 'Rodent Control', 'Pest Control & Rodent Exclusion', 'Pest Rodent Control', 'Rodent Sanitation Service',
+    'Rodent Trapping & Sanitation', 'Dead Rodent Removal & Odor Treatment', 'Dead Rodent Removal & Bait Station', 'Waves Pest Control Appointment', 'Mosquito Control',
+    'Flea Treatment', 'Flea & Tick Pest Control', 'Bed Bug Treatment', 'Bed Bug Heat Treatment', 'Roach Treatment', 'Roach Vehicle Treatment', 'Pest Inspection',
+    'Pest Inspection & Spot Treatment', 'Pest Assessment', 'Tree & Shrub Care', 'One-Time Pest Control', 'Sprinkler Timer Guide', '',
+  ];
+
+  test('the JS matcher agrees with the SQL the sender builds for every guide family, on every service type of a hostile table', async () => {
+    for (const [pestType, config] of Object.entries(sender.PREP_CONFIG)) {
+      if (config.guide) { expect(SERVICE_TYPES.some((type) => sender.prepConfigMatches(config, type))).toBe(false); continue; }
+      scheduledQueries = [];
+      upcomingVisitRow = VISIT;
+      await sender.nextUpcomingVisit(['cust-1'], config.serviceKeywords[0]);
+      const calls = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).filter(([sql]) => /service_type/.test(String(sql)));
+      expect(calls.length).toBeGreaterThan(0);
+      for (const type of SERVICE_TYPES) expect({ pestType, type, js: sender.prepConfigMatches(config, type) }).toEqual({ pestType, type, js: sqlMatches(calls, type) });
+    }
+  });
+
+  test('a service type belongs to the first family whose match covers it, in table order; a how-to guide and no name belong to none', () => {
+    const family = (type) => sender.prepFamilyForServiceType(type)?.[0] || null;
+    expect(family('Quarterly Pest Control')).toBe('interior_pest');
+    expect(family('Flea & Tick Pest Control')).toBe('flea');
+    expect(family('Bed Bug Heat Treatment')).toBe('bed_bug_heat');
+    expect(family('Lawn Pest Control')).toBe('lawn');
+    expect(family('Pest Rodent Control')).toBe('interior_pest');
+    expect(family('Rodent Control')).toBe('rodent');
+    expect(family('Termite Inspection')).toBeNull();
+    expect(family('Waves Pest Control Appointment')).toBeNull();
+    expect(family('Sprinkler Timer Guide')).toBeNull();
+    expect(family('')).toBeNull();
+    expect(family(null)).toBeNull();
+  });
+
+  test('bookedPrepGuide: the soonest visit as the page lists it, and the guide its page shows (a stored key wins, an unknown one names no guide)', async () => {
+    upcomingVisitRow = VISIT;
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ visit: { id: 'svc-9' }, pestType: 'interior_pest', config: { emailTemplateKey: 'prep.interior_pest' } });
+    upcomingVisitRow = { ...VISIT, service_type: 'Flea & Tick Pest Control' };
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ pestType: 'flea' }); // table order, as the composer's scan breaks a tie
+    upcomingVisitRow = { ...VISIT, service_type: 'Lawn Health Inspection', prep_template_key: 'prep.lawn' };
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ pestType: 'lawn', config: { emailTemplateKey: 'prep.lawn' } }); // the stored key is what its page renders
+    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.something_retired' };
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ visit: { id: 'svc-9' }, pestType: null, config: null });
+    upcomingVisitRow = null;
+    expect(await sender.bookedPrepGuide(['cust-1'])).toBeNull();
+  });
+
+  test('bookedPrepGuide: a booked visit no guide covers is still THE booked visit (no guide), never skipped for a later one or an earlier service', async () => {
+    upcomingVisitRows = [{ ...VISIT, id: 'svc-1', service_type: 'Lawn Health Inspection' }, { ...VISIT, id: 'svc-2', service_type: 'Pest Control' }];
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ visit: { id: 'svc-1' }, pestType: null, config: null });
+    // the query is not narrowed to one family: any service type, the same filters and order the guide emails use
+    const keywordGroup = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).find(([sql]) => /^\(LOWER\(service_type\) LIKE \?\)$/.test(String(sql)));
+    expect(keywordGroup[1]).toEqual(['%%']);
+    expect(scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).some(([sql]) => /NOT LIKE/.test(String(sql)))).toBe(false);
+  });
+
+  test('bookedPrepGuide reads the whole stop from the snapshot its page state was judged on: a guide ANY live member carries decides, two guides or an unknown one name none, and only a stop with none is matched by its service types', async () => {
+    const appointmentPublic = require('../routes/appointment-public');
+    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit');
+    const stop = async (visit, members) => {
+      spy.mockResolvedValue({ state: 'upcoming', phase: null, ...(members ? { members } : {}) });
+      upcomingVisitRow = { ...VISIT, visit_id: members ? 'stop-1' : undefined, ...visit };
+      return sender.bookedPrepGuide(['cust-1']);
+    };
+    try {
+      const keyed = { id: 'svc-2', service_type: 'Pest Control', prep_template_key: 'prep.interior_pest' };
+      const first = { id: 'svc-1', service_type: 'Lawn Care', prep_template_key: null };
+      // the soonest row carries no key (inferred: a lawn service), its stop-mate carries the guide the customer received
+      expect(await stop(first, [first, keyed])).toMatchObject({ pestType: 'interior_pest' });
+      // two assigned guides in one stop, or an assigned key that is not ours: no single guide
+      expect(await stop(first, [{ ...first, prep_template_key: 'prep.lawn' }, keyed])).toMatchObject({ pestType: null, config: null });
+      expect(await stop(first, [{ ...first, prep_template_key: 'prep.retired' }, keyed])).toMatchObject({ pestType: null, config: null });
+      // no key anywhere: the stop's service types (one family names it, two families name none, a service no guide covers is ignored)
+      const pest = { id: 'svc-1', service_type: 'Pest Control' };
+      expect(await stop(pest, [pest, { id: 'svc-2', service_type: 'Termite Inspection' }])).toMatchObject({ pestType: 'interior_pest' });
+      expect(await stop(pest, [pest, { id: 'svc-2', service_type: 'Lawn Care' }])).toMatchObject({ pestType: null, config: null });
+      // the snapshot is the whole stop: the visit row's own key is not read when the page state judged the stop on its members
+      expect(await stop({ ...pest, prep_template_key: 'prep.lawn' }, [pest, keyed])).toMatchObject({ pestType: 'interior_pest' });
+      // a sibling the booking query itself hides (a dispatch-owned booking nobody confirmed) is not part of the stop the customer sees
+      const unreviewed = { id: 'svc-3', service_type: 'Pest Control', status: 'pending', source_action: 'ai_call_pipeline_followup', customer_confirmed: false, prep_template_key: 'prep.interior_pest' };
+      expect(await stop(first, [first, unreviewed])).toMatchObject({ pestType: 'lawn' });
+      expect(await stop(first, [first, { ...unreviewed, customer_confirmed: true }])).toMatchObject({ pestType: 'interior_pest' });
+      // a guide a staff send stored on the project linked to the stop decides over the visit's name, and conflicts with the visit's own key
+      const bedBug = { id: 'svc-1', service_type: 'Bed Bug Treatment' };
+      projectRows = [{ prep_template_key: 'prep.bed_bug_heat' }];
+      expect(await stop(bedBug, [bedBug])).toMatchObject({ pestType: 'bed_bug_heat' });
+      expect(projectLookups.at(-1).whereIn).toHaveBeenCalledWith('scheduled_service_id', ['svc-1']);
+      expect(await stop(bedBug, [{ ...bedBug, prep_template_key: 'prep.bed_bug_heat' }])).toMatchObject({ pestType: 'bed_bug_heat' }); // the visit and its project agree
+      expect(await stop(bedBug, [{ ...bedBug, prep_template_key: 'prep.bed_bug' }])).toMatchObject({ pestType: null, config: null }); // they disagree
+      projectRows = [{ prep_template_key: 'prep.retired' }];
+      expect(await stop(bedBug, [bedBug])).toMatchObject({ pestType: null, config: null });
+      projectRows = [];
+      expect(await stop(bedBug, [bedBug])).toMatchObject({ pestType: 'bed_bug' });
+      // an ungrouped visit (no snapshot) is its own stop
+      expect(await stop({ ...pest, prep_template_key: 'prep.lawn' }, null)).toMatchObject({ pestType: 'lawn' });
+    } finally { spy.mockRestore(); }
+  });
+
+  test('completedPrepGuide: the guide assigned to the completed visit, else its service type\'s family; an unknown stored key names none', async () => {
+    servicePrepRow = { prep_template_key: 'prep.bed_bug_heat' };
+    // a generically named visit that was booked on the heat guide keeps it after it completes
+    expect(await sender.completedPrepGuide({ scheduledServiceId: 'ss-1', serviceType: 'Bed Bug Treatment' })).toMatchObject({ pestType: 'bed_bug_heat' });
+    servicePrepRow = { prep_template_key: 'prep.retired' };
+    expect(await sender.completedPrepGuide({ scheduledServiceId: 'ss-1', serviceType: 'Bed Bug Treatment' })).toEqual({ pestType: null, config: null });
+    servicePrepRow = { prep_template_key: null };
+    expect(await sender.completedPrepGuide({ scheduledServiceId: 'ss-1', serviceType: 'Bed Bug Treatment' })).toMatchObject({ pestType: 'bed_bug' });
+    expect(await sender.completedPrepGuide({ serviceType: 'Pest Control' })).toMatchObject({ pestType: 'interior_pest' }); // no visit row: by name
+    // a guide a staff send stored on a project linked to the visit or to its service record is the one it carried; the visit's own key and the project's must agree
+    projectRows = [{ prep_template_key: 'prep.bed_bug_heat' }];
+    expect(await sender.completedPrepGuide({ scheduledServiceId: 'ss-1', serviceRecordId: 'rec-1', serviceType: 'Bed Bug Treatment' })).toMatchObject({ pestType: 'bed_bug_heat' });
+    expect(await sender.completedPrepGuide({ serviceRecordId: 'rec-1', serviceType: 'Bed Bug Treatment' })).toMatchObject({ pestType: 'bed_bug_heat' });
+    servicePrepRow = { prep_template_key: 'prep.bed_bug' };
+    expect(await sender.completedPrepGuide({ scheduledServiceId: 'ss-1', serviceRecordId: 'rec-1', serviceType: 'Bed Bug Treatment' })).toEqual({ pestType: null, config: null });
+    expect(await sender.completedPrepGuide({ serviceType: 'Termite Inspection' })).toEqual({ pestType: null, config: null });
+    expect(await sender.completedPrepGuide({})).toEqual({ pestType: null, config: null });
+  });
+
+  test('bookedPrepGuide throws on a failed lookup, and on a grouped stop whose members could not be read: a failed read is never "nothing booked"', async () => {
+    visitLookupError = new Error('db down');
+    await expect(sender.bookedPrepGuide(['cust-1'])).rejects.toThrow('db down');
+    visitLookupError = null;
+    upcomingVisitRow = VISIT;
+    const appointmentPublic = require('../routes/appointment-public');
+    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit').mockResolvedValue({ state: 'not_available', phase: null, unknown: true });
+    try {
+      await expect(sender.bookedPrepGuide(['cust-1'])).rejects.toThrow('could not be read as a stop');
+      // a visit that is simply closed (not_available without the flag) is skipped, as before; the family queries never throw for it
+      spy.mockResolvedValue({ state: 'not_available', phase: null });
+      expect(await sender.bookedPrepGuide(['cust-1'])).toBeNull();
+      expect(await sender.nextUpcomingVisit(['cust-1'], 'flea')).toBeNull();
+      spy.mockResolvedValue({ state: 'not_available', phase: null, unknown: true });
+      expect(await sender.nextUpcomingVisit(['cust-1'], 'flea')).toBeNull(); // the composer's pick keeps skipping it (its own behavior is unchanged)
+    } finally { spy.mockRestore(); }
   });
 });
 
