@@ -65,10 +65,8 @@ const staffActionDef = require('./sms-staff-action-answers');
 const DAY_MS = 24 * 60 * 60 * 1000;
 // When the star-key hold sent a call in to voicemail (call_log.metadata.conference_path.hold.voicemail_at, an ISO
 // stamp); null for any other call. Same shape check as callEndedAtSql, so a bad value never breaks the cast.
-// `alias` is the call_log alias in the query (the text follow-up loader reads the bare table).
-const holdVoicemailAtSql = (alias = 'cl') => `CASE WHEN ${alias}.metadata #>> '{conference_path,hold,voicemail_at}' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
-    THEN CAST(${alias}.metadata #>> '{conference_path,hold,voicemail_at}' AS timestamptz) END`;
-const HOLD_VOICEMAIL_AT_SQL = holdVoicemailAtSql();
+const HOLD_VOICEMAIL_AT_SQL = `CASE WHEN cl.metadata #>> '{conference_path,hold,voicemail_at}' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
+    THEN CAST(cl.metadata #>> '{conference_path,hold,voicemail_at}' AS timestamptz) END`;
 const asDate = (v) => {
   const d = v ? new Date(v) : null;
   return d && !Number.isNaN(d.getTime()) ? d : null;
@@ -516,4 +514,4 @@ async function loadContactBundles(items, { conn, bookedVisits }) {
   return bundles;
 }
 
-module.exports = { loadContactBundles, visitsCompletedAfterBell, HOLD_VOICEMAIL_AT_SQL, holdVoicemailAtSql, sharedPhoneItems };
+module.exports = { loadContactBundles, visitsCompletedAfterBell, HOLD_VOICEMAIL_AT_SQL, sharedPhoneItems };

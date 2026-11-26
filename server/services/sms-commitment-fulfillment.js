@@ -377,11 +377,14 @@ async function loadCustomerEvidence(conn, commitment, message, now) {
       // exactly the fields it read before, so its evidence hash is unchanged.
       const callIn = textCallbackAsk(commitment);
       const { callEndedAtSql } = require('./sms-pending-conversations');
-      // When a person was last on the call: its end, or the moment the hold
-      // sent a call in to voicemail (admin-alert-contact-witnesses.js reads a
-      // call in the same way).
-      const { holdVoicemailAtSql } = require('./admin-alert-contact-witnesses');
-      const spokeUntil = (table) => `COALESCE(${holdVoicemailAtSql(table)}, ${callEndedAtSql(table)})`;
+      // When a person was last on the call: its end (callEndedAtSql), or,
+      // when it ended on hold or in voicemail (call-hold.js), the moment the
+      // latest hold began, since the staff left then. Each bound can only be
+      // early, never late, so a doubt keeps the ask open.
+      const spokeUntil = (table) => `CASE WHEN ${table}.metadata #>> '{conference_path,hold,phase}' IN ('held', 'voicemail')
+        THEN CASE WHEN ${table}.metadata #>> '{conference_path,hold,open_at}' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
+          THEN CAST(${table}.metadata #>> '{conference_path,hold,open_at}' AS timestamptz) END
+        ELSE ${callEndedAtSql(table)} END`;
       const rows = await conn('call_log').where({ customer_id: customerId })
         // A call in counts when a person was still on it after the text
         // (spokeUntil), so a text sent while the phone rang is answered by

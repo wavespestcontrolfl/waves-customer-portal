@@ -2986,22 +2986,34 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(dispatchWithFallback).not.toHaveBeenCalled();
     });
 
-    test('a call in the hold sent to voicemail counts only while a person was on it', async () => {
+    test('a call that ended on hold or in voicemail counts only until the latest hold began', async () => {
       const after = await callbackAsk();
       const at = (ms) => new Date(message.created_at.getTime() + ms).toISOString();
-      // The customer texted while leaving the voicemail: a person had left the call.
+      // The text came while the customer was on hold (later in voicemail, or
+      // still held at hangup): no person was on the call after it.
       await callIn(new Date(message.created_at.getTime() - 60000),
-        { metadata: { ended_at: at(60000), conference_path: { hold: { voicemail_at: at(-10000) } } } });
-      const now = new Date(after.getTime() + 300000);
+        { metadata: { ended_at: at(400000), conference_path: { hold: { phase: 'voicemail', open_at: at(-20000), voicemail_at: at(280000) } } } });
+      await callIn(new Date(message.created_at.getTime() - 60000),
+        { metadata: { ended_at: at(90000), conference_path: { hold: { phase: 'held', open_at: at(-10000) } } } });
+      const now = new Date(after.getTime() + 600000);
       const evidence = await loadSmsFulfillmentEvidence(mockPg, await mockPg('call_commitments').first(), message, now);
       expect(evidence.records.filter((r) => r.type === 'call')).toHaveLength(0);
-      // Held to voicemail after the text: the person spoke with them after it, until then.
+      // Held after the text: a person spoke with them after it, until the hold began.
       const spoke = await callIn(new Date(message.created_at.getTime() - 30000),
-        { metadata: { ended_at: at(90000), conference_path: { hold: { voicemail_at: at(20000) } } } });
+        { metadata: { ended_at: at(400000), conference_path: { hold: { phase: 'voicemail', open_at: at(20000), voicemail_at: at(320000) } } } });
       expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ fulfilled: 1 });
       const { fulfillment } = await mockPg('call_commitments').first();
       expect(fulfillment).toMatchObject({ record_type: 'call', record_id: spoke.id });
       expect(new Date(fulfillment.matched_at).getTime()).toBe(message.created_at.getTime() + 20000);
+    });
+
+    test('a call whose staff came back from hold counts until it ended', async () => {
+      const after = await callbackAsk();
+      const at = (ms) => new Date(message.created_at.getTime() + ms).toISOString();
+      const call = await callIn(new Date(message.created_at.getTime() - 60000),
+        { metadata: { ended_at: at(90000), conference_path: { hold: { phase: 'returned', open_at: at(-30000) } } } });
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 300000) })).toMatchObject({ fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ record_id: call.id });
     });
 
     test('a short staff call back that reached the customer closes the ask', async () => {
