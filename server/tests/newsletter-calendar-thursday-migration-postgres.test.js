@@ -6,6 +6,13 @@ const knex = require('knex');
 const { randomUUID } = require('crypto');
 
 const migration = require('../models/migrations/20261126130000_newsletter_calendar_thursday_anchor');
+const companion = require('../models/migrations/20261126140000_newsletter_calendar_thursday_rollback_reset');
+
+// A rollback runs the newest migration's down() first, as knex does.
+const rollBack = async (database) => {
+  await companion.down(database);
+  await migration.down(database);
+};
 
 jest.setTimeout(30000);
 
@@ -142,7 +149,7 @@ const PAST_THU = '2020-06-04';
       const planned = await week('2099-06-11', 'planned');
       const drafted = await week(FUTURE_THU, 'drafted', proofed.id);
       const scheduled = await week('2099-06-18', 'scheduled', queued.id);
-      await migration.down(database);
+      await rollBack(database);
 
       expect(dateOf((await byId(planned.id)).week_of)).toBe('2099-06-09');
       expect(dateOf((await byId(drafted.id)).week_of)).toBe(FUTURE_TUE);
@@ -163,7 +170,7 @@ const PAST_THU = '2020-06-04';
       const sending = await send('sending', { proof_token: 'ab12cd34', proof_sent_at: new Date() });
       const past = await week(PAST_THU, 'drafted');
       const live = await week(FUTURE_THU, 'scheduled', sending.id);
-      await migration.down(database);
+      await rollBack(database);
       expect((await byId(past.id)).target_send_at.toISOString()).toBe(`${PAST_THU}T10:00:00.000Z`);
       expect(await byId(live.id)).toMatchObject({ status: 'scheduled', send_id: sending.id });
       expect(await database('newsletter_sends').where({ id: sending.id }).first()).toMatchObject({ status: 'sending', proof_token: 'ab12cd34' });

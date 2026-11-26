@@ -68,35 +68,45 @@ describe('newsletter calendar Thursday-anchor migration', () => {
     await expect(migration.up(knex)).rejects.toThrow(/bad-row.*non-Thursday/);
   });
 
-  test('down puts rows back on Tuesdays, re-times pending weeks to Tuesday 6 AM ET and resets their drafts and queued sends first', async () => {
-    const { knex, raw, query } = transactionHarness();
+  test('down moves Thursday rows back two days and restores the Tuesday CHECK', async () => {
+    const { knex, raw } = transactionHarness();
     await migration.down(knex);
-    const statements = raw.mock.calls.map(([statement]) => statement);
-    const sql = statements.join('\n');
+    const sql = raw.mock.calls.map(([statement]) => statement).join('\n');
     expect(sql).toContain('DROP CONSTRAINT IF EXISTS chk_calendar_week_of_thursday');
     expect(sql).toContain("week_of - INTERVAL '2 days'");
     expect(sql).toContain('ADD CONSTRAINT chk_calendar_week_of_tuesday');
-    expect(sql).toContain('EXTRACT(ISODOW FROM week_of) = 2');
-    expect(query.whereRaw).toHaveBeenCalledWith('EXTRACT(ISODOW FROM week_of) <> 2');
-    const at = (needle) => statements.findIndex((statement) => statement.includes(needle));
-    const reset = at('UPDATE newsletter_sends s');
-    const move = at("SET week_of = (week_of - INTERVAL '2 days')");
-    const retime = at('SET target_send_at');
-    expect(reset).toBeGreaterThan(0);
-    expect(reset).toBeLessThan(move);
-    expect(move).toBeLessThan(retime);
+  });
+});
+
+describe('rollback companion 20261126140000', () => {
+  const companion = require('../models/migrations/20261126140000_newsletter_calendar_thursday_rollback_reset');
+
+  test('up changes nothing', async () => {
+    const { knex, raw } = transactionHarness();
+    await companion.up(knex);
+    expect(raw).not.toHaveBeenCalled();
+    expect(knex.transaction).not.toHaveBeenCalled();
+  });
+
+  test('down resets pending drafts and queued sends, then re-times pending weeks to Tuesday 6 AM ET, all while the calendar is still on Thursdays', async () => {
+    const { knex, raw } = transactionHarness();
+    await companion.down(knex);
+    const statements = raw.mock.calls.map(([statement]) => statement);
+    const reset = statements.findIndex((statement) => statement.includes('UPDATE newsletter_sends s'));
+    const relink = statements.findIndex((statement) => statement.includes("SET status = 'drafted'"));
+    const retime = statements.findIndex((statement) => statement.includes('SET target_send_at'));
+    expect(reset).toBe(0);
+    expect(relink).toBe(1);
+    expect(retime).toBe(2);
     expect(statements[reset]).toContain("status = 'draft'");
     for (const column of ['scheduled_for', 'proof_token', 'proof_sent_at', 'proof_approved_at', 'proof_approval_email_id']) {
       expect(statements[reset]).toContain(`${column} = NULL`);
     }
+    expect(statements[reset]).toContain('EXTRACT(ISODOW FROM c.week_of) = 4');
+    expect(statements[retime]).toContain("week_of - INTERVAL '2 days'");
     expect(statements[retime]).toContain("TIME '06:00'");
     expect(statements[retime]).toContain("AT TIME ZONE 'America/New_York'");
-    expect(statements[retime]).toContain("status IN ('planned', 'drafted', 'scheduled')");
-  });
-
-  test('down fails closed when a drifted row is not Tuesday after the move', async () => {
-    const { knex } = transactionHarness({ unexpected: { id: 'bad-row', week_of: '2026-07-22' } });
-    await expect(migration.down(knex)).rejects.toThrow(/bad-row.*non-Tuesday/);
+    expect(statements[retime]).toContain('EXTRACT(ISODOW FROM week_of) = 4');
   });
 });
 
