@@ -122,7 +122,7 @@ beforeEach(() => {
 describe('checkFlexOwnBounds (the tapped row, inside makeMoveGuard)', () => {
   const BEST = { date: dayOffset(9), technician_id: null };
 
-  test('no-op outside flex mode, for a non-recurring-child row, or an unplaced due-date visit', async () => {
+  test('no-op outside flex mode, for a booster-month row, or an unplaced due-date visit', async () => {
     const trx = jest.fn(() => { throw new Error('must not query'); });
     const refuse = refuseFactory();
     const recurringRow = {
@@ -130,7 +130,6 @@ describe('checkFlexOwnBounds (the tapped row, inside makeMoveGuard)', () => {
     };
     await expect(checkFlexOwnBounds(trx, recurringRow, BEST, 'tiers', refuse)).resolves.toBeUndefined();
     await expect(checkFlexOwnBounds(trx, recurringRow, BEST, 'legacy', refuse)).resolves.toBeUndefined();
-    await expect(checkFlexOwnBounds(trx, { ...recurringRow, recurring_parent_id: null }, BEST, 'flex', refuse)).resolves.toBeUndefined();
     await expect(checkFlexOwnBounds(trx, { ...recurringRow, is_recurring: false }, BEST, 'flex', refuse)).resolves.toBeUndefined();
     await expect(checkFlexOwnBounds(trx, {
       ...recurringRow, recurring_dispatch_due_date: dayOffset(9), window_start: null,
@@ -185,6 +184,39 @@ describe('checkFlexOwnBounds (the tapped row, inside makeMoveGuard)', () => {
     const refuse = refuseFactory();
     await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuse))
       .rejects.toMatchObject({ code: 'TEST_REFUSE', id: 's1' });
+  });
+});
+
+// Owner 2026-11-26: a plan's first visit and a one-time visit may move too, with the same freeze and band at commit.
+describe('checkFlexOwnBounds on a plan\'s first visit and on a one-time visit', () => {
+  const parent = { id: 'p1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: null, recurring_pattern: 'monthly' };
+  const oneTime = { id: 'o1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: false, recurring_parent_id: null };
+
+  test('both are frozen inside the freeze of their own schedule, before any read', async () => {
+    const trx = jest.fn(() => { throw new Error('must not query'); });
+    for (const row of [parent, oneTime]) {
+      await expect(checkFlexOwnBounds(trx, { ...row, scheduled_date: dayOffset(2) }, { date: dayOffset(9) }, 'flex', refuseFactory()))
+        .rejects.toMatchObject({ code: 'TEST_REFUSE', id: row.id });
+    }
+  });
+
+  test('a first visit fences its own series and is clamped by its next visit', async () => {
+    const trx = seriesTrx({ p1: [{ ...parent }, { id: 'c2', recurring_parent_id: 'p1', scheduled_date: dayOffset(12) }] });
+    await expect(checkFlexOwnBounds(trx, parent, { date: dayOffset(12) }, 'flex', refuseFactory())).rejects.toMatchObject({ id: 'p1' });
+    await expect(checkFlexOwnBounds(trx, parent, { date: dayOffset(11) }, 'flex', refuseFactory())).resolves.toBeUndefined();
+    expect(trx.raw).toHaveBeenCalledWith(expect.any(String), ['recurring-series-maintenance', 'p1']);
+  });
+
+  test('a first visit whose series is busy is refused', async () => {
+    const trx = seriesTrx({ p1: [{ ...parent }] }, ['p1']);
+    await expect(checkFlexOwnBounds(trx, parent, { date: dayOffset(11) }, 'flex', refuseFactory())).rejects.toMatchObject({ id: 'p1' });
+  });
+
+  test('a one-time visit takes no series fence and moves inside ±5 days of its own date, never 6', async () => {
+    const trx = seriesTrx({});
+    await expect(checkFlexOwnBounds(trx, oneTime, { date: dayOffset(14) }, 'flex', refuseFactory())).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trx, oneTime, { date: dayOffset(15) }, 'flex', refuseFactory())).rejects.toMatchObject({ id: 'o1' });
+    expect(trx.raw).not.toHaveBeenCalled();
   });
 });
 

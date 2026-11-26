@@ -98,7 +98,8 @@ describe('eligibility: gate on ⇒ tier ladder replaces the flat lock', () => {
   test('every non-lock exclusion is untouched by the gate (same in both regimes)', () => {
     for (const CTX of [LEGACY_CTX, TIER_CTX]) {
       expect(isEligibleForAutoDispatch(svc({ is_recurring: false }), CTX).reason_code).toBe('NON_RECURRING');
-      expect(isEligibleForAutoDispatch(svc({ recurring_parent_id: null }), CTX).reason_code).toBe('PARENT_TEMPLATE_ROW');
+      // Owner 2026-11-26: a plan's first visit may move too.
+      expect(isEligibleForAutoDispatch(svc({ recurring_parent_id: null }), CTX).eligible).toBe(true);
       expect(isEligibleForAutoDispatch(svc({ status: 'rescheduled' }), CTX).reason_code).toBe('RESCHEDULE_REQUEST_PENDING');
       expect(isEligibleForAutoDispatch(svc({ auto_dispatch_locked: true }), CTX).reason_code).toBe('MANUALLY_LOCKED');
       expect(isEligibleForAutoDispatch(svc({ auto_dispatch_excluded: true }), CTX).reason_code).toBe('AUTO_DISPATCH_EXCLUDED');

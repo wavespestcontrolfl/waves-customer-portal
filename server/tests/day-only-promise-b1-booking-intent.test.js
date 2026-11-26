@@ -145,10 +145,12 @@ describe('customerAskedTime on the office create', () => {
     expect(withFlag.json.appointments).toHaveLength(1);
   });
 
-  test('the series children and boosters take the same stamp as the parent (one helper, three insert sites)', () => {
+  // Owner 2026-11-26: "if this is clicked, it should only be for the first visit".
+  test('only the first visit takes the stamp: never the series children or boosters', () => {
     const source = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
-    for (const target of ['insertData', 'childData', 'boosterData']) {
-      expect(source).toContain(`Object.assign(${target}, askedTimeStamp(cols, customerAskedTime));`);
+    expect(source).toContain('Object.assign(insertData, askedTimeStamp(cols, customerAskedTime));');
+    for (const target of ['childData', 'boosterData']) {
+      expect(source).not.toContain(`Object.assign(${target}, askedTimeStamp(cols, customerAskedTime));`);
     }
     expect(source).toMatch(/function askedTimeStamp\(cols, customerAskedTime\) \{\n  return cols\.customer_asked_time && customerAskedTime === true \? \{ customer_asked_time: true \} : \{\};/);
   });

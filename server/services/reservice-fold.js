@@ -313,7 +313,7 @@ async function moveFoldTargetForCustomer({ conn = db, target, svc, elig, lane, d
       placeInRoute: bookingPlacesInRoute(),
       expect: { ...foldExpect(target), window_start: target.window_start, technician_id: target.technician_id },
       beforeMove: customerFoldGuard({ target, svc, elig, lane, date: newDate, startTime: slot.start_time }),
-      ...dayPromiseMoveIntent(),
+      ...(await dayPromiseMoveIntent(target)),
     });
   } catch (err) {
     const why = moveRefusal(err);

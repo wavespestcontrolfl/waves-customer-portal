@@ -73,6 +73,17 @@ async function assertAssignableSlotTechnician(technicianId, trx, date, { initiat
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 // Lazy: time-promise pulls the promise readers, which must not load while this module loads.
 const moveIntentColumns = (...args) => require('./time-promise').moveIntentColumns(...args);
+// Is `row` a Waves Assessment, for a customer-surface move's intent (time-promise moveIntentFor)? Read only for a customer
+// surface; false otherwise. A failed read is false: the move then records no intent, as for every other visit (the night
+// run's own assessment hold, eligibility.js isPersonPlacedVisit, reads the identity itself and fails closed).
+async function customerMoveAssessment(conn, options, row) {
+  if (!require('./time-promise').isCustomerMoveSurface(options)) return false;
+  try {
+    return await require('./assessment-booking').isAssessmentBooking(row, conn);
+  } catch (_) {
+    return false;
+  }
+}
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks, techScopedConfirmActive } = require('./scheduling/occupancy');
@@ -509,14 +520,20 @@ const SERIES_MOVE_SNAPSHOT_COLUMNS = [
 // same stamp): the row is a deliberate exception to its series, and its
 // cadence POSITION is the date it deviated from — kept across repeated
 // single moves so the sweep still orders it by where it belongs in the
-// series. Auto-dispatch nudges are placement, not intent: no stamp.
+// series. Auto-dispatch nudges are placement, not intent: no stamp (except on a
+// plan's first visit, below).
 // The two automatic night writers: auto-dispatch and the day re-plan (services/day-replan, owner 2026-11-03). Neither
 // is a person's choice of date or time, so neither stamps a date exception, ends a customer-pick hand-off, or resets the
 // recurring due date; both fail closed on an unreadable blackout list.
 const isNightWriter = (initiatedBy) => initiatedBy === 'auto_dispatch' || initiatedBy === 'day_replan';
 
+// One exception (owner 2026-11-26, the night run moves a plan's first visit): a night writer's day move of the PARENT row
+// stamps it too. The parent's cadence position (seriesCadencePosition) is the plan's round anchor when none is stored and the
+// base its children are read against, so an unstamped move would shift every later round and top-up. The stamp keeps the
+// position at the date the parent left.
+const isParentRow = (row) => row.recurring_parent_id == null;
 function dateExceptionStamp(row, source) {
-  if (!row || row.is_recurring !== true || isNightWriter(source)) return {};
+  if (!row || row.is_recurring !== true || (isNightWriter(source) && !isParentRow(row))) return {};
   return {
     date_exception: true,
     date_exception_source: source,
@@ -2663,7 +2680,9 @@ class SmartRebooker {
         .update({
           ...updates,
           // Day-only promise (B3): the intent of this move, written by this same UPDATE.
-          ...moveIntentColumns(trx, options, { slotChanged: slotChangedBy(service, updates, newDateStr) }),
+          ...moveIntentColumns(trx, options, {
+            slotChanged: slotChangedBy(service, updates, newDateStr), assessment: await customerMoveAssessment(trx, options, service),
+          }),
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
           // The move's own change time (same stamp the series path writes):
           // SMS follow-up proves a move by the row changing after the request.
@@ -4106,7 +4125,7 @@ class SmartRebooker {
           anyLivePartner = anyLivePartner || liveStatus;
           await fencePartner({ partner, pUpdate, dateStr, partnerDateChanges, techChanges, keptTech, shiftLive, tapped: isAnchor });
           pUpdate.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, pUpdate.window_end);
-          Object.assign(pUpdate, moveIntentColumns(trx, options, { series: true }));
+          Object.assign(pUpdate, moveIntentColumns(trx, options, { series: true, assessment: await customerMoveAssessment(trx, options, partner) }));
           if (pUpdate.window_start) await probePartnerSlot(partner, pUpdate, keptTech, dateStr);
           const awaitingPlacement = applyPartnerPlacementPatch(partner, pUpdate);
           // A carried partner that lands on another day and carries a limited area add-on is judged for that day, as the
@@ -4265,6 +4284,7 @@ class SmartRebooker {
           // and start stay (an end-only edit) keeps the intent of the slot it holds, as the single-visit writer does.
           ...moveIntentColumns(trx, options, {
             series: true, anchor: isAnchor, slotChanged: slotChangedBy(sib, { window_start: occurrenceWindow.start }, dateOnlyString(date)),
+            assessment: await customerMoveAssessment(trx, options, sib),
           }),
         };
         // Rewound rows need the post-commit cleanup (tech pointer release +

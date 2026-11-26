@@ -16,7 +16,7 @@ jest.mock('../services/rebooker', () => ({ reschedule: jest.fn() }));
 jest.mock('../routes/reschedule-public', () => ({
   _internals: {
     moveNoticeArgs: jest.fn(async () => [{ timePromise: 'set_time' }]),
-    dayPromiseMoveIntent: jest.fn(() => ({ customerAskedTime: true })),
+    dayPromiseMoveIntent: jest.fn(async () => ({ customerAskedTime: true })),
     bookingPlacesInRoute: jest.fn(() => true),
   },
 }));

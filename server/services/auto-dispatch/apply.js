@@ -186,15 +186,17 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
 // invert lock order against a writer holding the fence; a busy series is
 // simply refused (fail closed — the 04:10 pass retries tomorrow).
 // Parents sorted so multi-series grouped moves acquire in a stable order.
+// A plan's first visit (the parent row) fences its own series; a one-time
+// visit has none (flexTier.seriesKeyOf).
 async function fenceFlexSeries(trx, rows, refuse) {
-  const parents = [...new Set(rows.map((r) => r.recurring_parent_id).filter(Boolean).map(String))].sort();
+  const parents = [...new Set(rows.map((r) => flexTier.seriesKeyOf(r)).filter(Boolean).map(String))].sort();
   for (const parentId of parents) {
     const result = await trx.raw(
       'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
       ['recurring-series-maintenance', parentId],
     );
     if (result?.rows?.[0]?.locked !== true) {
-      const row = rows.find((r) => String(r.recurring_parent_id) === parentId);
+      const row = rows.find((r) => String(flexTier.seriesKeyOf(r)) === parentId);
       throw refuse(row.id, 'has a series update in progress (no move, fail closed)');
     }
   }
@@ -261,7 +263,11 @@ function isUnplacedDueDate(row) {
 // `lock24h` (the run always passes true; owner 2026-11-03): the freeze is 25 hours
 // instead of 73, so the refusal text names the hours actually enforced (flexFreezeHoursFor).
 async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination, lock24h = false) {
-  if (guardMode !== 'flex' || row.is_recurring !== true || !row.recurring_parent_id
+  // Every visit the run moves gets the freeze and the band: a plan visit, a
+  // plan's first visit and a one-time visit (owner 2026-11-26). Only a
+  // booster-month row (never loaded; eligibility.js) and the unplaced
+  // due-date shape skip it.
+  if (guardMode !== 'flex' || (row.is_recurring !== true && row.recurring_parent_id != null)
     || isUnplacedDueDate(row)) return;
   const now = new Date();
   const hours = flexTier.flexFreezeHoursFor(lock24h);

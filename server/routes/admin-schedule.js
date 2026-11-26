@@ -10241,7 +10241,8 @@ async function scheduleCreateHandler(req, res, next) {
         // operator turns a re-service into a repeating cadence, every future
         // visit must stay free and report as a callback (not bill monthly dues).
         if (cols.is_callback) childData.is_callback = resolvedIsCallback || false;
-        Object.assign(childData, askedTimeStamp(cols, customerAskedTime));
+        // The office's "customer asked for this time" box marks the FIRST visit only (owner 2026-11-26: "if this is
+        // clicked, it should only be for the first visit"): the later visits stay free for the night run.
         if (cols.estimated_price) {
           if (zeroCallbackPrice) childData.estimated_price = 0;
           else if (memberSeriesCovered) {
@@ -10338,7 +10339,7 @@ async function scheduleCreateHandler(req, res, next) {
           const boosterRestack = restackLiveVisitFinancials(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
-          Object.assign(boosterData, askedTimeStamp(cols, customerAskedTime));
+          // The asked box marks the first visit only (owner 2026-11-26), never a booster.
           // Booster rows are is_recurring:false — completion treats them as
           // one-off visits that BILL their own price, never as dues-covered
           // plan visits, so the member-series stripping must not touch them:
