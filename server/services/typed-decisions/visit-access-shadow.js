@@ -419,8 +419,12 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
   // The state is kept before anyone is asked or any row is requeued, so every
   // stored answer has the exact text it was judged on, whatever is edited
   // later; an unchanged visit whose state was pruned gets it back here.
+  // created_at is moved to now on every pass, so the newest row is always the
+  // state the sweep last built: a visit that goes A -> B -> A shows A's flags
+  // to the technician (visit-access-flags.js reads the newest), not B's.
+  // Retention then counts from the last pass that saw the state.
   const keepState = () => dbh(STATES_TABLE).insert({ scheduled_service_id: svc.id, subject_hash: built.subjectHash, state: JSON.stringify(built.state) })
-    .onConflict(['scheduled_service_id', 'subject_hash']).ignore();
+    .onConflict(['scheduled_service_id', 'subject_hash']).merge({ created_at: dbh.fn.now() });
   if (!due.length) {
     out.unchanged += 1;
     await keepState();

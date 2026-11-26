@@ -621,6 +621,16 @@ describe('visit access shadow: rules that need no database', () => {
     await text('We got a puppy', '2026-10-05T13:50:00Z');
     await sweep();
     expect(await database('visit_access_states').where({ scheduled_service_id: visitId })).toHaveLength(2);
+    // Back to the first state (the text is gone): still two rows, and the
+    // first state is the newest again, so the technician sees its flags.
+    const [first] = await database('visit_access_states').where({ scheduled_service_id: visitId }).orderBy('created_at', 'asc');
+    await database('visit_access_states').where({ id: first.id }).update({ created_at: new Date('2026-10-01T00:00:00Z') });
+    await database('visit_access_states').whereNot({ id: first.id }).update({ created_at: new Date('2026-10-02T00:00:00Z') });
+    await database('sms_log').where({ message_body: 'We got a puppy' }).del();
+    await sweep();
+    const rows = await database('visit_access_states').where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].subject_hash).toBe(first.subject_hash);
     // Retention is its own, ungated step.
     await database('visit_access_states').update({ created_at: new Date('2026-01-01T00:00:00Z') });
     gates(false);
