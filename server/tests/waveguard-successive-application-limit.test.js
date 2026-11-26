@@ -19,7 +19,7 @@ const lawnProtocol = require('../config/lawn-protocol-v13.json');
 const VELISTA = SUCCESSIVE_USE_LIMITS.find((limit) => limit.epa === '100-1534');
 const HOME = 'home';
 // One history row = one product of one completed service record. `record` defaults to the date: one visit a day.
-const row = (day, product, over = {}) => ({ service_record_id: over.record || `r-${day}`, service_date: day, recorded_at: `${day}T15:00:00Z`, treated_property_id: HOME, ...product, ...over, record: undefined });
+const row = (day, product, over = {}) => ({ service_record_id: over.record || `r-${day}`, service_date: day, recorded_at: `${day}T15:00:00Z`, treated_property_id: HOME, service_line: 'lawn', service_type: 'Lawn Care', ...product, ...over, record: undefined });
 const VEL = { product_name: 'Velista', catalog_epa: '100-1534', catalog_group: '7' };
 const ART = { product_name: 'Artavia 2 SC (Azoxy)', catalog_epa: '91234-74', catalog_group: '11', catalog_moa_group: 'Group 11' };
 const HEAD = { product_name: 'Headway Fungicide', catalog_epa: '100-1216', catalog_group: '3 + 11', catalog_moa_group: 'Group 11 + 3' };
@@ -55,9 +55,21 @@ describe('successiveRun: the product\'s unbroken run that ends at the lawn\'s la
     expect(run([artavia('2026-11-20', { treated_property_id: null }), velista('2026-11-03'), velista('2026-10-06')])).toEqual(['2026-11-03', '2026-10-06']);
     expect(run([artavia('2026-11-20', { treated_property_id: 'other-home' }), velista('2026-11-03'), velista('2026-10-06')])).toEqual(['2026-11-03', '2026-10-06']);
     expect(run([velista('2026-11-03', { treated_property_id: null }), velista('2026-10-06')])).toEqual(['2026-11-03', '2026-10-06']);
-    // A visit whose property could not be established: the customer's whole history is one lawn.
+    // A visit whose property could not be established: every Velista application in the customer's history counts, and no
+    // rotation ends the run (none can be tied to the lawn this visit treats).
     expect(run([velista('2026-11-03'), velista('2026-10-06', { treated_property_id: 'other-home' })], null)).toEqual(['2026-11-03', '2026-10-06']);
-    expect(run([artavia('2026-11-20', { treated_property_id: 'other-home' }), velista('2026-11-03'), velista('2026-10-06')], null)).toEqual([]);
+    expect(run([artavia('2026-11-20', { treated_property_id: 'other-home' }), velista('2026-11-03'), velista('2026-10-06')], null)).toEqual(['2026-11-03', '2026-10-06']);
+    expect(run([artavia('2026-11-20'), velista('2026-11-03'), velista('2026-10-06')], null)).toEqual(['2026-11-03', '2026-10-06']);
+  });
+
+  test('a rotation on the shrubs is not the lawn\'s: only a lawn record ends the run', () => {
+    const shrubs = { service_line: 'tree_shrub', service_type: 'Tree & Shrub Care' };
+    expect(run([artavia('2026-11-20', shrubs), velista('2026-11-03'), velista('2026-10-06')])).toEqual(['2026-11-03', '2026-10-06']);
+    // A record with no service line is read by its name.
+    expect(run([artavia('2026-11-20', { service_line: null, service_type: 'Tree & Shrub Care' }), velista('2026-11-03'), velista('2026-10-06')])).toEqual(['2026-11-03', '2026-10-06']);
+    expect(run([artavia('2026-11-20', { service_line: null, service_type: 'Monthly Lawn Care Service' }), velista('2026-11-03'), velista('2026-10-06')])).toEqual([]);
+    // Velista on the shrubs still counts toward the run.
+    expect(run([velista('2026-11-03', shrubs), velista('2026-10-06')])).toEqual(['2026-11-03', '2026-10-06']);
   });
 
   test('one service record is one application: two visits on one date are two, a tank mix is one', () => {
@@ -109,6 +121,8 @@ describe('successiveRun: the product\'s unbroken run that ends at the lawn\'s la
     // The latest names no property, or another one: it may not be this lawn's.
     expect(ends([velista('2026-11-03', { treated_property_id: null }), artavia('2026-09-08')])).toBe(false);
     expect(ends([velista('2026-11-03', { treated_property_id: 'other-home' })])).toBe(false);
+    // A record that is not a lawn treatment says nothing of the lawn's Group 11 run.
+    expect(ends([velista('2026-11-03', { service_line: 'tree_shrub' })])).toBe(false);
     // A product with no group on file may be Group 11.
     expect(ends([velista('2026-11-03'), row('2026-11-03', { product_name: 'Hand entry', catalog_epa: null, catalog_group: null })])).toBe(false);
     // No history, and a visit with no property.
@@ -293,6 +307,13 @@ describe('Fast Complete and the treatment guide pass the Velista row over at its
     // Two Velista records that name no property: Velista is held, and nothing at this property ended the Group 11 run.
     const unplaced = [velista('2026-11-03', { treated_property_id: null }), velista('2026-10-06', { treated_property_id: null }), headway('2026-09-20'), artavia('2026-09-08')];
     expect(await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: unplaced }) })).toEqual({ takeAllMapped: true, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
+    // October and November keep the Group 11 pass-over whatever the Velista run: the release is December's alone.
+    const early = [velista('2026-09-22'), velista('2026-08-11')];
+    for (const date of ['2026-10-06', '2026-11-03']) {
+       
+      expect(await fastComplete.fungicideHolds({ svc: { ...svc, scheduled_date: date }, knex: fakeKnex({ catalog: CATALOG, history: early }) }))
+        .toEqual({ takeAllMapped: true, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
+    }
     // Outside the Group 11 window nothing was passed over; the Velista limit still holds its row.
     expect(await fastComplete.fungicideHolds({ svc: { ...svc, scheduled_date: '2027-01-12' }, knex: fakeKnex({ catalog: CATALOG, history: fall }) }))
       .toEqual({ takeAllMapped: false, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
@@ -322,6 +343,12 @@ describe('Fast Complete and the treatment guide pass the Velista row over at its
        
       expect(await fastComplete.loadPlannedProducts(svc, knex, visitType, new Set(), null)).toMatchObject({ source: null, items: [], group11HeldProductIds: ['vel'] });
     }
+    // The recurring plan fails to load: the sheet still has the search, and it keeps the held ids.
+    jest.spyOn(require('../services/lawn-completion-defaults'), 'lawnCompletionDefaultsEnabled').mockReturnValue(true);
+    jest.spyOn(require('../services/waveguard-plan-engine'), 'buildPlanForService').mockRejectedValue(new Error('plan read failed'));
+    const failures = new Set();
+    expect(await fastComplete.loadPlannedProducts(svc, knex, 'recurring', failures, null)).toMatchObject({ source: null, unavailable: 'planned_products_lookup_failed', group11HeldProductIds: ['vel'] });
+    expect([...failures]).toEqual(['planned_products']);
     // Nothing reached: the payload is as before.
     expect(await fastComplete.loadPlannedProducts(svc, fakeKnex({ catalog: CATALOG, history: [] }), 'one_time', new Set(), null)).toEqual({ source: null, items: [], addOns: [], unavailable: null });
   });

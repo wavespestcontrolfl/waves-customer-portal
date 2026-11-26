@@ -414,7 +414,7 @@ async function categoryHistory(knex, { customerId, propertyId, category, service
     .where(function () { this.where('sp.product_category', category).orWhere('pc.category', category); })
     .orderBy([{ column: 'sr.service_date', order: 'desc' }, { column: 'sr.created_at', order: 'desc' }])
     .select(
-      'sr.id as service_record_id', 'sr.service_date', 'sr.created_at as recorded_at', 'sp.product_name', 'sp.moa_group',
+      'sr.id as service_record_id', 'sr.service_date', 'sr.created_at as recorded_at', 'sr.service_line', 'sr.service_type', 'sp.product_name', 'sp.moa_group',
       // The registration the close-out stored with the application: the catalog row of that name may since be renamed or replaced.
       'sp.epa_reg_number as recorded_epa', 'pc.epa_reg_number as catalog_epa', 'pc.frac_group as catalog_group', 'pc.moa_group as catalog_moa_group',
       k.raw('COALESCE(pah_scope.property_id, ss.property_id) as treated_property_id'),
@@ -437,15 +437,25 @@ function applicationsOf(rows) {
 
 // The dates, newest first, of the product's unbroken run of applications that ends at the lawn's latest fungicide
 // application. `propertyId`: the visit's property. Null = none could be established: the rows are the customer's
-// whole history (categoryHistory), judged as one lawn.
+// whole history (categoryHistory), every listed application in it counts, and no rotation ends the run, because none
+// can be tied to the lawn this visit treats.
+// A rotation ends the run only when it is a lawn treatment at this property: a fungicide of another group on the
+// shrubs, or at another home, is not this lawn's rotation.
 function successiveRun(limit, rows, { propertyId = null } = {}) {
-  const here = (row) => !propertyId || String(row.treated_property_id ?? '') === String(propertyId);
+  const here = (row) => Boolean(propertyId) && String(row.treated_property_id ?? '') === String(propertyId) && isLawnRecord(row);
   const run = [];
   for (const application of applicationsOf(rows)) {
     if (application.rows.some((row) => isLimitedProduct(limit, { epa: row.recorded_epa || row.catalog_epa, name: row.product_name }))) run.push(application.day);
     else if (application.rows.some((row) => here(row) && rowGroups(row).some((group) => group !== limit.group))) break;
   }
   return run;
+}
+
+// A history row of a lawn service record: by the record's own service line, else by its name.
+function isLawnRecord(row) {
+  const line = String(row?.service_line || '').trim().toLowerCase();
+  if (line) return line === 'lawn' || line === 'lawn_care';
+  return require('./service-report/service-line-configs').detectServiceLine(row?.service_type) === 'lawn';
 }
 
 // Did a record at this property end the group's run? (Fast Complete: whether the Group 11 run is closed after a
@@ -455,7 +465,7 @@ function successiveRun(limit, rows, { propertyId = null } = {}) {
 function latestApplicationEndsGroup(rows, group, { propertyId = null } = {}) {
   const [latest] = applicationsOf(rows);
   if (!latest || !propertyId) return false;
-  return latest.rows.every((row) => String(row.treated_property_id ?? '') === String(propertyId)
+  return latest.rows.every((row) => String(row.treated_property_id ?? '') === String(propertyId) && isLawnRecord(row)
     && rowGroups(row).length > 0 && !rowGroups(row).includes(String(group)));
 }
 

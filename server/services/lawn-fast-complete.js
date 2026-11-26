@@ -914,7 +914,8 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoSc
   } catch (err) {
     logger.warn(`[lawn-fast] planned products unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     readFailures.add('planned_products');
-    return empty('planned_products_lookup_failed');
+    // The sheet still has the search: it keeps the held ids, when they can be read.
+    return empty('planned_products_lookup_failed', await searchHeld().catch(() => []));
   }
 }
 
@@ -1205,6 +1206,7 @@ async function group11PassOver({ svc, knex }) {
 //     every other case both rows stay passed over.
 // A history read that fails holds every listed product (nobody read its run) and leaves the Group 11 pass-over as it
 // was, the way an unread take-all status counts as mapped.
+const GROUP11_RELEASE_MONTH = 12;
 async function fungicideHolds({ svc, knex, strict = false }) {
   const group11 = await group11PassOver({ svc, knex });
   const engine = require('./waveguard-approval-engine');
@@ -1215,7 +1217,8 @@ async function fungicideHolds({ svc, knex, strict = false }) {
       customerId: svc.customer_id, propertyId: svc.property_id || null, visit: svc, serviceDate: svc.scheduled_date, serviceId: svc.id || null, strict: true,
     });
     successiveHeld = reached.map((entry) => entry.limit);
-    if (successiveHeld.length && engine.latestApplicationEndsGroup(rowsByCategory.get('fungicide'), '11', { propertyId })) takeAllMapped = false;
+    // December only: the card's one Artavia case. October's large patch pass stays Velista alone, and November's row is Velista.
+    if (successiveHeld.length && visitMonthOf(svc) === GROUP11_RELEASE_MONTH && engine.latestApplicationEndsGroup(rowsByCategory.get('fungicide'), '11', { propertyId })) takeAllMapped = false;
   } catch (err) {
     logger.warn(`[lawn-fast] fungicide history unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     successiveHeld = [...engine.SUCCESSIVE_USE_LIMITS];
