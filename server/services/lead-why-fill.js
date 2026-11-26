@@ -46,8 +46,11 @@
  */
 
 const db = require('../models/db');
+const { dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 const { DEFAULT_EXCLUDE_STATUSES } = require('./scheduling/occupancy');
 const { eligibleCallsQuery } = require('./call-research-miner');
+const { leadRelatedVisitQuery } = require('./lead-related-visits');
 const logger = require('./logger');
 
 const LOOKBACK_DAYS = 120;
@@ -57,7 +60,6 @@ const MAX_LEADS_PER_RUN = 2000;
 // from 2 days before the lead was created to 14 days after.
 const CALL_WINDOW_BEFORE_DAYS = 2;
 const CALL_WINDOW_AFTER_DAYS = 14;
-const EXISTING_CUSTOMER_MARGIN_DAYS = 1;
 // A linked call this recent that the miner has not stamped yet may still add
 // evidence, so no_response waits for it.
 const MINING_GRACE_DAYS = 3;
@@ -276,7 +278,7 @@ async function loadChunksByLead(conn, leads, now) {
   // never mined, so it never holds no_response back.
   const recent = [...calls.values()].filter((c) => now - new Date(c.created_at) < MINING_GRACE_DAYS * DAY_MS).map((c) => c.id);
   const pending = new Set(recent.length
-    ? (await eligibleCallsQuery({ onlyUnmined: true }).whereIn('call_log.id', recent).select('call_log.id')).map((r) => r.id)
+    ? (await eligibleCallsQuery({ onlyUnmined: true, conn }).whereIn('call_log.id', recent).select('call_log.id')).map((r) => r.id)
     : []);
   const out = new Map();
   for (const [leadId, set] of byLead) {
@@ -289,28 +291,29 @@ async function loadChunksByLead(conn, leads, now) {
   return out;
 }
 
-// Leads whose customer has an active visit (any type, an assessment included)
-// created since the lead: booked, so never "not booked".
+// Leads with an active visit linked to THAT lead by exact record evidence
+// (lead-related-visits.js, the same rule as the admin lead card). A visit for
+// another inquiry of the same customer never counts.
 async function bookedLeadIds(conn, leads) {
-  const customerIds = asUuidList(leads, 'customer_id');
-  if (!customerIds.length) return new Set();
-  const rows = await conn('scheduled_services').whereIn('customer_id', customerIds)
-    .whereNotIn('status', DEFAULT_EXCLUDE_STATUSES)
-    .select('customer_id', 'created_at');
-  return new Set(leads.filter((l) => rows.some((r) => r.customer_id === l.customer_id
-    && new Date(r.created_at) >= new Date(l.created_at))).map((l) => l.id));
+  const out = new Set();
+  for (const l of leads) {
+    if (!LOST_STATUSES.has(l.status) || l.converted_at) continue; // only these can get a reason
+    const visits = await leadRelatedVisitQuery(conn, l);
+    if (visits.some((v) => !DEFAULT_EXCLUDE_STATUSES.includes(v.status))) out.add(l.id);
+  }
+  return out;
 }
 
-// Customers that existed before the lead are not prospects: skip their leads.
+// A lead from someone who was already a customer (a completed visit before the
+// lead) is not a prospect switching providers. A customer ROW alone is not
+// enough: prospects sit in the pipeline as customer rows before they call.
 async function existingCustomerLeadIds(conn, leads) {
   const customerIds = asUuidList(leads, 'customer_id');
   if (!customerIds.length) return new Set();
-  const rows = await conn('customers').whereIn('id', customerIds).select('id', 'created_at');
-  const createdAt = new Map(rows.map((r) => [r.id, new Date(r.created_at)]));
-  return new Set(leads
-    .filter((l) => createdAt.has(l.customer_id)
-      && createdAt.get(l.customer_id) < new Date(l.created_at) - EXISTING_CUSTOMER_MARGIN_DAYS * DAY_MS)
-    .map((l) => l.id));
+  const done = await conn('scheduled_services').whereIn('customer_id', customerIds).where('status', 'completed')
+    .select('customer_id', 'scheduled_date');
+  return new Set(leads.filter((l) => done.some((v) => v.customer_id === l.customer_id
+    && dateOnlyString(v.scheduled_date) < etDateString(new Date(l.created_at)))).map((l) => l.id));
 }
 
 // Write only the changed fields, and only while the lead is still live and its
@@ -337,7 +340,7 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
       .where((w) => w.whereNull('why_checked_at').orWhere('why_checked_at', '<', now))
       .orderByRaw('why_checked_at ASC NULLS FIRST, created_at DESC, id DESC')
       .limit(Math.min(PAGE_SIZE, maxLeads - stats.scanned))
-      .select('id', 'status', 'converted_at', 'created_at', 'customer_id', 'twilio_call_sid', 'previous_company', 'switch_reason', 'not_booked_reason');
+      .select('id', 'status', 'converted_at', 'created_at', 'customer_id', 'estimate_id', 'twilio_call_sid', 'previous_company', 'switch_reason', 'not_booked_reason');
     if (!leads.length) break;
     stats.scanned += leads.length;
 
