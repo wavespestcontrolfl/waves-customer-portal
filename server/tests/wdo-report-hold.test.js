@@ -2067,6 +2067,58 @@ describe('audit fixes', () => {
     });
   });
 
+  describe('advisor redesign phase 2: the link goes live only once the email is accepted', () => {
+    const { resolveProjectPortalAttachment } = require('../services/project-completion');
+
+    test('the publish step keeps the report hidden; the delivered write shows it; the visit link follows delivery', async () => {
+      resolveProjectPortalAttachment.mockResolvedValueOnce({ portalAttached: true, portalAttachReason: 'ok', completionProfile: null });
+      const order = [];
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', service_record_id: 'sr-1', report_token: 'c'.repeat(32) }), invoice: invoiceRow({ status: 'paid' }) });
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'service_records') c.update = jest.fn(async () => { order.push('visit_link'); return 1; });
+        if (table === 'projects') {
+          const up = c.update;
+          c.update = jest.fn(async (payload) => { if (payload.report_hold_status === 'released') order.push('released'); return up(payload); });
+        }
+        return c;
+      });
+      const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(result.released).toBe(true);
+      const projectUpdates = updates.projects || [];
+      const stamp = projectUpdates.find((u) => typeof u.report_token === 'string' && 'portal_visible' in u);
+      expect(stamp.portal_visible).toBe(false);
+      const released = projectUpdates.find((u) => u.report_hold_status === 'released');
+      expect(released.portal_visible).toBe(true);
+      expect(order).toEqual(['released', 'visit_link']);
+    });
+
+    test('a report email that definitely failed takes back the link this attempt minted', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'rejected', blocked: true });
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(revert).toEqual(expect.objectContaining({ report_token: null }));
+    });
+
+    test('a report email of unknown outcome keeps the link (the customer may hold it)', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'email send held by provider_retry_ambiguous' });
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(revert).not.toHaveProperty('report_token');
+    });
+
+    test('a failed email never touches a link that existed before this attempt', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'rejected', blocked: true });
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: 'b'.repeat(32) }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(revert).not.toHaveProperty('report_token');
+    });
+  });
+
   describe('round 19: report recipient at handoff, notes in the fingerprint, failed resend', () => {
     test('the release email re-reads its recipient under the customer lock: a corrected address refuses the old one', async () => {
       mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });

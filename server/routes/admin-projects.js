@@ -4201,13 +4201,20 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
 
     const sent = await sendHeldReport({ link, customer: ctx.customer, invoice, wdoPdf: pdf.wdoPdf, wdoFiling: pdf.wdoFiling, ownClaim });
     // The FDACS PDF rides on the email only, so the email IS the delivery.
-    if (!sent.channels.email.ok) return await revertToHeld(`Report email failed: ${sent.channels.email.error || 'unknown'}`);
+    // A definite non-send takes back the link this attempt minted; an email of unknown outcome may carry it.
+    if (!sent.channels.email.ok) {
+      return await revertToHeld(`Report email failed: ${sent.channels.email.error || 'unknown'}`, {
+        unmintToken: link.mintedToken && !sent.channels.email.uncertain,
+      });
+    }
 
-    const finalized = await finalizeHeldRelease({ project, projectCols, ownClaim, channels: sent.channels, customer: ctx.customer, wdoFiling: pdf.wdoFiling, source });
+    const finalized = await finalizeHeldRelease({ project, projectCols, ownClaim, channels: sent.channels, customer: ctx.customer, wdoFiling: pdf.wdoFiling, source, portalAttached: link.portalAttached });
     if (!finalized) {
       logger.error(`[projects] hold release finalize fenced off for ${projectId}: claim superseded, outcome not recorded`);
       return { released: false, reason: 'claim_superseded' };
     }
+    // Delivered and recorded: now the visit history carries the link too.
+    await restoreHeldVisitReportLink(link.refreshed, link.reportPath, link.portalAttached);
     await recordHeldRelease({ project, invoice, link, channels: sent.channels, source });
     return { released: true, channels: sent.channels, reportUrl: link.reportUrl };
   } catch (err) {
@@ -4261,7 +4268,7 @@ async function claimHeldReportForRelease(projectId) {
 // `countAttempt: false` is for "not due yet" (invoice not settled).
 function makeHeldReverter({ project, claim, ctx, source }) {
   const hold = require('../services/project-report-hold');
-  return async function revertToHeld(reason, { countAttempt = true } = {}) {
+  return async function revertToHeld(reason, { countAttempt = true, unmintToken = false } = {}) {
     const { attemptsSoFar, previousDeliveryStatus, ownClaim } = claim;
     const nextAttempts = countAttempt ? attemptsSoFar + 1 : attemptsSoFar;
     const delayMinutes = countAttempt ? hold.reportHoldBackoffMinutes(nextAttempts) : 2;
@@ -4275,6 +4282,7 @@ function makeHeldReverter({ project, claim, ctx, source }) {
       ...(countAttempt ? { report_hold_last_error: String(reason || 'release failed').slice(0, 500) } : {}),
       delivery_status: previousDeliveryStatus,
       delivery_claim_token: null,
+      ...(unmintToken ? { report_token: null } : {}),
       updated_at: db.fn.now(),
     }).catch((err) => logger.warn(`[projects] hold revert failed for ${project.id}: ${err.message}`));
     // ONE bell, rung until an alert is recorded: the attempt count is saved first, so a failed insert (or a stop
@@ -4341,7 +4349,8 @@ async function stampHeldReportLink({ project, projectCols, ownClaim, customer, i
   });
   const profile = portalAttachment.completionProfile;
   const tokenUpdate = { report_token: token, ...RELEASE_LEASE_RENEWAL() };
-  if (projectCols.portal_visible) tokenUpdate.portal_visible = portalAttachment.portalAttached;
+  // Hidden from the portal until the email is accepted: finalizeHeldRelease shows it (and the visit link) then.
+  if (projectCols.portal_visible) tokenUpdate.portal_visible = false;
   if (projectCols.portal_visibility) tokenUpdate.portal_visibility = profile?.portalVisibility || project.portal_visibility || 'token_only';
   if (projectCols.portal_attach_policy) tokenUpdate.portal_attach_policy = profile?.portalAttachPolicy || project.portal_attach_policy || 'active_portal_customer';
   if (projectCols.completion_profile_snapshot && profile) tokenUpdate.completion_profile_snapshot = JSON.stringify(profile);
@@ -4360,8 +4369,10 @@ async function stampHeldReportLink({ project, projectCols, ownClaim, customer, i
   if (published !== 'ok') return null;
   const refreshed = await db('projects').where({ id: project.id }).first();
   const reportPath = await projectReportPathForProject(db, refreshed, customer);
-  await restoreHeldVisitReportLink(refreshed, reportPath, portalAttachment.portalAttached);
-  return { token, refreshed, reportUrl: `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}` };
+  return {
+    token, refreshed, reportPath, portalAttached: portalAttachment.portalAttached, mintedToken: !project.report_token,
+    reportUrl: `https://portal.wavespestcontrol.com${reportPath || `/report/project/${token}`}`,
+  };
 }
 
 // A release that stopped after it archived (and maybe emailed) the filing leaves the reference on the
@@ -4594,7 +4605,7 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
     }
     channels.email = result.ok
       ? { ok: true, messageId: result.messageId || null }
-      : { ok: false, error: unknownOutcomeHeld ? heldUnknownOutcomeMessage(staffSend) : projectEmailFailureMessage(result) };
+      : { ok: false, uncertain: unknownOutcomeHeld, error: unknownOutcomeHeld ? heldUnknownOutcomeMessage(staffSend) : projectEmailFailureMessage(result) };
   } catch (err) {
     channels.email = { ok: false, error: err.message };
   }
@@ -4702,7 +4713,7 @@ async function sendHeldReportText({ project, customer, invoice, reportUrl, ownCl
 }
 
 // The released stamp, fenced on the claim. False when a stale takeover owns the row now.
-async function finalizeHeldRelease({ project, projectCols, ownClaim, channels, customer, wdoFiling, source }) {
+async function finalizeHeldRelease({ project, projectCols, ownClaim, channels, customer, wdoFiling, source, portalAttached = false }) {
   // A failed requestor copy (the realtor or title company named on the form) makes the release partial, so the
   // drawer shows it: the hold is released and nothing retries a copy.
   const successful = [channels.email, channels.sms, channels.report_copies].filter((c) => c?.ok).length;
@@ -4718,6 +4729,8 @@ async function finalizeHeldRelease({ project, projectCols, ownClaim, channels, c
     delivery_status: successful >= available ? 'sent' : 'partial',
     delivery_claim_token: null,
     report_hold_next_attempt_at: null,
+    // The portal shows the report from the write that records it delivered.
+    ...(projectCols.portal_visible ? { portal_visible: Boolean(portalAttached) } : {}),
     ...heldReportReleaseFields(source),
     updated_at: db.fn.now(),
     ...filingAppend,
