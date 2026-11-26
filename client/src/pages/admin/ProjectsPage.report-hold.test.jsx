@@ -127,8 +127,14 @@ describe("WDO report hold on the project page", () => {
   });
 
   it("a held project whose paid release failed shows the reason", async () => {
-    stubProject({ ...baseProject, report_hold_status: "held", report_hold_last_error: "Licensee signature required, re-sign to release the paid report" });
+    stubProject({ ...baseProject, report_hold_status: "held", report_hold_invoice_status: "paid", report_hold_last_error: "Licensee signature required, re-sign to release the paid report" });
     expect(await screen.findByText(/The invoice is paid, but the report did not send: Licensee signature required/)).toBeInTheDocument();
+  });
+
+  it.each(["processing", "partial", "sent", null])("says the invoice is paid only for a paid invoice (status %s is not)", async (invoiceStatus) => {
+    stubProject({ ...baseProject, report_hold_status: "held", report_hold_invoice_status: invoiceStatus, report_hold_last_error: "No email on file" });
+    expect(await screen.findByText(/The report did not send: No email on file/)).toBeInTheDocument();
+    expect(screen.queryByText(/The invoice is paid/)).not.toBeInTheDocument();
   });
 
   it("a released or never-held project shows no banner", async () => {

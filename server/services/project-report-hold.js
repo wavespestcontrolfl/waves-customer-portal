@@ -23,6 +23,7 @@
  */
 
 const db = require('../models/db');
+const { invoiceDepositCreditCents } = require('./invoice-helpers');
 const logger = require('./logger');
 
 const STALE_RELEASING_MINUTES = 10;
@@ -131,13 +132,13 @@ function reportLinkShared(project) {
 
 // Money on the invoice, of any kind, refuses a hold (409 hold_payment_started; the normal send is still available):
 // a payment intent, a payments row (the ledger names the invoice under invoice_id, waves_invoice_id or a dispute's
-// dispute_invoice_id), a charge attempt, a paid or recorded payment, credit already applied, or a status that says money moved. The invoice row
+// dispute_invoice_id), a charge attempt, a paid or recorded payment, credit or an estimate deposit already applied, or a status that says money moved. The invoice row
 // is read whole, so a column this database lacks reads as absent.
 const PAYMENT_STATUSES = ['processing', 'paid', 'prepaid', 'partial', 'partially_paid', 'refunded'];
 async function assertNoPaymentStarted(invoice, database = db) {
   const id = String(invoice.id);
   const started = invoice.stripe_payment_intent_id || invoice.paid_at || invoice.payment_recorded_at
-    || Number(invoice.amount_paid) > 0 || Number(invoice.credit_applied) > 0 || PAYMENT_STATUSES.includes(String(invoice.status || '').toLowerCase())
+    || Number(invoice.amount_paid) > 0 || Number(invoice.credit_applied) > 0 || invoiceDepositCreditCents(invoice) > 0 || PAYMENT_STATUSES.includes(String(invoice.status || '').toLowerCase())
     || await database('payments')
       .whereRaw("(metadata->>'invoice_id' = ? OR metadata->>'waves_invoice_id' = ? OR metadata->>'dispute_invoice_id' = ?)", [id, id, id])
       .first('id')
@@ -157,6 +158,36 @@ async function customerHasCredit(customerId, database = db) {
     return balance === null || balance > 0;
   } catch {
     return true;
+  }
+}
+
+// ONE bell for an invoice email whose outcome is unknown (an error after the provider may have taken it). The hold stays
+// armed; staff check whether the customer got the invoice. One open row per project (dedupe key).
+async function raiseInvoiceEmailUncertainBell({ project, customer, reason }) {
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    const { fitAction } = require('./admin-alert-names');
+    const name = [customer?.first_name, customer?.last_name].filter(Boolean).join(' ').trim() || 'this customer';
+    await raiseAdminAlert(BELL_CATEGORY, {
+      area: 'Customers',
+      action: fitAction('Customers', name, [
+        (n) => `check ${n} got the WDO invoice`,
+        (n) => `check ${n} got the invoice`,
+      ]),
+      why: 'The invoice email may not have arrived, and the report waits for payment.',
+      severity: 'needs-you',
+      link: `/admin/projects?projectId=${encodeURIComponent(project.id)}`,
+      subject: { type: 'customer', id: String(project.customer_id || project.id) },
+      doneWhen: 'report_sent',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `wdo-report-hold-invoice-email:${project.id}`,
+      detail: `The invoice email for this held WDO report ended with an error that may have come after the provider took it: ${String(reason || '').slice(0, 300)}. The report hold stays. Check that the customer got the invoice, and resend it if not.`,
+      metadata: { projectId: String(project.id) },
+    });
+  } catch (err) {
+    logger.error(`[report-hold] invoice-email bell not raised for ${project?.id}: ${err.message}`);
   }
 }
 
@@ -212,6 +243,7 @@ module.exports = {
   assertNoPaymentStarted,
   customerHasCredit,
   raiseReleaseFailedBell,
+  raiseInvoiceEmailUncertainBell,
   closeReleaseFailedBell,
   reportHoldBackoffMinutes,
   _internals: { recoverStaleReleasingClaims, findDueHeldProjectIds, STALE_RELEASING_MINUTES, bellKey },

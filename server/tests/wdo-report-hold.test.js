@@ -1277,17 +1277,28 @@ describe('audit fixes', () => {
       expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(false);
     });
 
-    test('an unreadable balance counts as credit (fail closed), and the arming transaction reads it again under the locks', async () => {
+    test('an unreadable balance counts as credit (fail closed) in the preflight', async () => {
       const { getBalance } = require('../services/customer-credit');
       mockTables();
-      getBalance.mockResolvedValueOnce(0).mockRejectedValueOnce(new Error('db blip'));
+      getBalance.mockRejectedValueOnce(new Error('db blip'));
       await withServer(async (baseUrl) => {
         const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
         expect(res.status).toBe(409);
         expect((await res.json()).code).toBe('hold_has_credit');
       });
-      getBalance.mockReset(); getBalance.mockResolvedValue(0);
       expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+    });
+
+    test('credit issued after the preflight read is caught under the customers row lock the credit writer takes', async () => {
+      // the preflight read saw 0 (getBalance), but the locked customers row read inside the arming transaction has credit
+      const { updates } = mockTables({ customer: { ...CUSTOMER, account_credits: 12.5 } });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('hold_has_credit');
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(false);
     });
 
     test('a held send never applies credit', async () => {
@@ -1433,6 +1444,100 @@ describe('audit fixes', () => {
     });
   });
 
+  describe('round 12: one amount, unknown email outcome, deposits, drawer', () => {
+    test.each([
+      ['the total', { total: 250 }],
+      ['a line item', { line_items: [{ description: 'WDO inspection', quantity: 1, unit_price: 250, amount: 250 }] }],
+      ['the tax', { tax_amount: 17.5 }],
+    ])('an invoice that changed (%s) between the send reading it and the arming lock refuses and sends nothing', async (_label, patch) => {
+      const { updates } = mockTables();
+      const base = db.getMockImplementation();
+      // the locked read inside the arming transaction is the changed row; every earlier read is the original
+      let invoiceReads = 0;
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'invoices') {
+          const original = c.first;
+          c.first = jest.fn(async (...a) => { invoiceReads += 1; return c.__locked ? invoiceRow(patch) : original(...a); });
+          c.forUpdate = jest.fn(() => { c.__locked = true; return c; });
+        }
+        return c;
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('hold_invoice_changed');
+      });
+      expect(invoiceReads).toBeGreaterThan(0);
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(false);
+    });
+
+    test('an invoice email that ends in an error (outcome unknown) keeps the hold, finalizes the invoice and rings the one bell', async () => {
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'provider timeout' });
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.report_held).toBe(true);
+      });
+      const projectUpdates = updates.projects || [];
+      const stampIdx = projectUpdates.findIndex((u) => u.report_hold_status === 'held');
+      expect(stampIdx).toBeGreaterThanOrEqual(0);
+      expect(projectUpdates.findIndex((u, i) => i > stampIdx && u.report_hold_status === null)).toBe(-1);
+      expect(InvoiceService.markDeliverySent).toHaveBeenCalled();
+      expect(require('../services/logger').error.mock.calls).toEqual([]);
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(NotificationService.notifyAdmin.mock.calls[0][3]).toEqual(expect.objectContaining({ dedupeKey: 'wdo-report-hold-invoice-email:project-1' }));
+    });
+
+    test('a definite failure (the library says blocked) takes the hold back and rings no bell', async () => {
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, blocked: true, reason: 'suppressed' });
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const projectUpdates = updates.projects || [];
+      const stampIdx = projectUpdates.findIndex((u) => u.report_hold_status === 'held');
+      expect(projectUpdates.findIndex((u, i) => i > stampIdx && u.report_hold_status === null)).toBeGreaterThan(stampIdx);
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('an estimate deposit applied to the invoice counts as a prior payment', async () => {
+      mockTables({ invoice: invoiceRow({ line_items: [
+        { description: 'WDO inspection', quantity: 1, unit_price: 250, amount: 250 },
+        { description: 'Estimate deposit', category: 'deposit_credit', amount: -50 },
+      ] }) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('hold_payment_started');
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+    });
+
+    test('a settlement deferral (the invoice is not paid yet) stores no error, so the drawer cannot read it as a paid failure', async () => {
+      const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'sent' }) });
+      const base = db.getMockImplementation();
+      // the sweep scan said paid; the lock-time read finds it open again
+      db.mockImplementation((table) => base(table));
+      const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(result.released).toBe(false);
+      const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(revert).toBeTruthy();
+      expect(revert).not.toHaveProperty('report_hold_last_error');
+    });
+
+    test('the project detail carries the held invoice status for the drawer', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'processing' }) });
+      const out = await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects/project-1`, { headers: { Authorization: 'Bearer admin' } });
+        return res.json();
+      });
+      expect(out.project.report_hold_invoice_status).toBe('processing');
+    });
+  });
+
   describe('P1: the payer lookup fails closed', () => {
     test('a lookup error refuses the hold before any invoice is created, and asks the lookup to throw', async () => {
       PayerService.resolveForInvoice.mockRejectedValueOnce(new Error('db down'));
@@ -1504,6 +1609,9 @@ describe('audit fixes, round 2', () => {
     const writes = [];
     db.mockImplementation((table) => {
       const c = base(table);
+      if (table === 'customers') {
+        c.forUpdate = jest.fn(() => { order.push('customers row'); return c; });
+      }
       if (table === 'projects' || table === 'invoices') {
         const raws = [];
         const originalFirst = c.first;
@@ -1550,7 +1658,8 @@ describe('audit fixes, round 2', () => {
         const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
         expect((await res.json()).report_held).toBe(true);
       });
-      expect(order.slice(0, 3)).toEqual(['projects', 'customer', 'invoices']);
+      // project, the customer's payment lock, the customers row (the credit writer's lock, before the invoice row), the invoice
+      expect(order.slice(0, 4)).toEqual(['projects', 'customer', 'customers row', 'invoices']);
       const stamp = writes.find((w) => w.payload.report_hold_status === 'held');
       expect(stamp.raws).toEqual(expect.arrayContaining([expect.objectContaining({
         sql: expect.stringContaining('invoice_id IS NOT DISTINCT FROM ?'),

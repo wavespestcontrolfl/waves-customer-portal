@@ -3862,10 +3862,12 @@ function ReadinessPanel({ readiness }) {
 function ReportHoldBanner({ project }) {
   if (!["held", "releasing"].includes(project.report_hold_status)) return null;
   const failure = project.report_hold_last_error;
+  // "Paid" only when the linked invoice's status says paid (not processing, partial or open).
+  const paid = project.report_hold_invoice_status === "paid";
   return (
     <Alert tone={failure ? "error" : "success"}>
       {failure
-        ? `The invoice is paid, but the report did not send: ${failure}. It tries again by itself. Fix the cause, or press Send report to send it now.`
+        ? `${paid ? "The invoice is paid, but the report" : "The report"} did not send: ${failure}. It tries again by itself. Fix the cause, or press Send report to send it now.`
         : "Report held until the invoice is paid. It is emailed to the customer by itself once payment arrives. Press Send report to send it now."}
     </Alert>
   );
