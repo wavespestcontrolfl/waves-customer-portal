@@ -123,6 +123,12 @@ const AUTOSHARE_SOURCES = new Set(['rss', 'blog_scheduled', 'autonomous_blog', '
 // died (the lock would still be held otherwise), so it finishes only the sites
 // that did not get the post.
 const SHARE_PROGRESS_STATUS = 'publishing';
+// Every source the locked lanes use: the cron lanes plus the admin Share
+// button ('blog') and the content agent. A function, because BLOG_HERO_SOURCES
+// is declared further down.
+function shareProgressSources() {
+  return [...new Set([...AUTOSHARE_SOURCES, ...BLOG_HERO_SOURCES])];
+}
 
 function parsePlatformsPosted(value) {
   if (Array.isArray(value)) return value;
@@ -146,14 +152,21 @@ function sitesAlreadyPosted(platformsPosted) {
 }
 
 // Never throws: a progress-row failure falls back to the old end-of-run write.
+async function findShareProgressRow(column, value) {
+  if (!value) return null;
+  return db('social_media_posts')
+    .where(column, value)
+    .whereIn('source_type', shareProgressSources())
+    .whereIn('status', [SHARE_PROGRESS_STATUS, 'failed'])
+    .orderBy('created_at', 'desc')
+    .first('id', 'status', 'platforms_posted');
+}
+
 async function openShareProgress({ title, description, normalizedLink, guid, source }) {
   try {
-    const earlier = await db('social_media_posts')
-      .where('source_url', normalizedLink)
-      .whereIn('source_type', [...AUTOSHARE_SOURCES])
-      .whereIn('status', [SHARE_PROGRESS_STATUS, 'failed'])
-      .orderBy('created_at', 'desc')
-      .first('id', 'status', 'platforms_posted');
+    // By URL, then by feed GUID (the RSS dedupe knows a post by either).
+    const earlier = (await findShareProgressRow('source_url', normalizedLink))
+      || (guid && guid !== normalizedLink ? await findShareProgressRow('source_guid', guid) : null);
     if (earlier) {
       const done = earlier.status === SHARE_PROGRESS_STATUS ? sitesAlreadyPosted(earlier.platforms_posted) : new Map();
       if (earlier.status !== SHARE_PROGRESS_STATUS) {
@@ -179,10 +192,16 @@ async function openShareProgress({ title, description, normalizedLink, guid, sou
   }
 }
 
-async function recordShareProgress(rowId, platformResults) {
-  if (!rowId) return;
+// Saves every result so far PLUS any earlier success this run has not reached
+// yet, so a second restart never loses a site the first attempt reached.
+async function recordShareProgress(progress, platformResults) {
+  if (!progress.rowId) return;
+  const sameSite = (a, b) => a.platform === b.platform && (a.location || null) === (b.location || null);
+  const notReachedYet = [...progress.done.values()].flat()
+    .filter((earlier) => !platformResults.some((r) => sameSite(r, earlier)));
   try {
-    await db('social_media_posts').where('id', rowId).update({ platforms_posted: JSON.stringify(platformResults) });
+    await db('social_media_posts').where('id', progress.rowId)
+      .update({ platforms_posted: JSON.stringify([...notReachedYet, ...platformResults]) });
   } catch (err) {
     logger.warn(`[social] share progress update failed: ${err.message}`);
   }
@@ -2367,7 +2386,7 @@ const SocialMediaService = {
     const platformResults = [];
     // Locked blog lanes only (see SHARE_PROGRESS_STATUS).
     const progressLink = normalizeUrl(link);
-    const progress = trackProgress && !SOCIAL_FLAGS.dryRun && !postId && progressLink && AUTOSHARE_SOURCES.has(source)
+    const progress = trackProgress && !SOCIAL_FLAGS.dryRun && !postId && progressLink && shareProgressSources().includes(source)
       ? await openShareProgress({ title, description, normalizedLink: progressLink, guid, source })
       : { rowId: null, done: new Map() };
     // Durable-marker hook: awaited the moment the FIRST platform reports
@@ -2768,7 +2787,7 @@ const SocialMediaService = {
         logger.error(`[social] ${p.key} post failed: ${err.message}`);
         platformResults.push({ platform: p.key, success: false, error: err.message });
       }
-      await recordShareProgress(progress.rowId, platformResults);
+      await recordShareProgress(progress, platformResults);
       await fireFirstPlatformSuccess();
     }
 
@@ -2783,13 +2802,17 @@ const SocialMediaService = {
     // Auto-shared blog posts go to ONE rotating city profile, not all four.
     // Only when the caller didn't pin locations — an explicit admin selection
     // (or the studio's per-city targeting) is always honored as-is.
-    if (
-      gbpLocations.length > 1
-      && !requestedGbpLocations
-      && throttledLane
-      && autoshareGbpSingleLocation()
-      && !bypassAutoshareThrottle
-    ) {
+    const gbpSingleProfile = !requestedGbpLocations && throttledLane
+      && autoshareGbpSingleLocation() && !bypassAutoshareThrottle;
+    // A resumed share skips the profiles the cut-off attempt reached; a
+    // one-profile share that reached any profile is done on Google.
+    const gbpDone = progress.done.get('gbp') || [];
+    if (gbpDone.length) {
+      platformResults.push(...gbpDone.map((r) => ({ ...r, resumed: true })));
+      const doneLocations = new Set(gbpDone.map((r) => r.location));
+      gbpLocations = gbpSingleProfile ? [] : gbpLocations.filter((loc) => !doneLocations.has(loc.id));
+    }
+    if (gbpLocations.length > 1 && gbpSingleProfile) {
       // Rotate only among profiles that can actually publish. Narrowing to one
       // profile removes the old fanout's accidental redundancy: if the day's
       // slot landed on a profile missing its OAuth credentials, postToGBP would
@@ -2808,10 +2831,6 @@ const SocialMediaService = {
       }
       gbpLocations = rotateGbpLocation(candidates);
       logger.info(`[social] auto-share GBP narrowed to ${gbpLocations[0].name} (rotation)`);
-    }
-    if (progress.done.has('gbp')) {
-      platformResults.push(...progress.done.get('gbp').map((r) => ({ ...r, resumed: true })));
-      gbpLocations = [];
     }
     for (const loc of gbpLocations) {
       try {
@@ -2861,7 +2880,7 @@ const SocialMediaService = {
       } catch (err) {
         platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: err.message });
       }
-      await recordShareProgress(progress.rowId, platformResults);
+      await recordShareProgress(progress, platformResults);
       await fireFirstPlatformSuccess();
     }
 
@@ -2936,7 +2955,9 @@ const SocialMediaService = {
           : null;
         const existing = existingByUrl || existingByGuid;
 
-        if (existing) {
+        if (existing && SOCIAL_FLAGS.dryRun && existing.status === SHARE_PROGRESS_STATUS) {
+          // A dry run never overwrites a cut-off live share's saved results.
+        } else if (existing) {
           await db('social_media_posts').where('id', existing.id).update(updateCols);
         } else {
           await db('social_media_posts').insert(postRow);

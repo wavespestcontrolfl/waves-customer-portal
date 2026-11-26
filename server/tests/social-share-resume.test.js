@@ -44,6 +44,8 @@ jest.mock('../models/db', () => {
 process.env.FACEBOOK_PAGE_ID = 'page-1';
 const social = require('../services/social-media');
 const twitter = require('../services/twitter');
+const gbpService = require('../services/google-business');
+const { WAVES_LOCATIONS } = require('../config/locations');
 
 const LINK = 'https://www.wavespestcontrol.com/pest-control/what-odor-do-mice-hate/';
 
@@ -123,4 +125,81 @@ describe('cut-off blog share resumes without posting twice', () => {
     await share({ trackProgress: false });
     expect(statusAtX).toBe('none');
   });
+  test('a second restart keeps a site the first attempt reached later in the order', async () => {
+    // Attempt 1: Facebook failed, X succeeded. Attempt 2 retries Facebook (first in order)
+    // and the progress write right after it must still carry the X success.
+    mockRows.push({ id: 'row-old', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'publishing',
+      platforms_posted: JSON.stringify([
+        { platform: 'facebook', success: false, error: 'Facebook API 500' },
+        { platform: 'twitter', postId: 'tw-early', success: true },
+      ]) });
+    const snapshots = [];
+    const db = require('../models/db');
+    const realImpl = db.getMockImplementation();
+    db.mockImplementation((t) => {
+      const b = realImpl(t);
+      const update = b.update;
+      b.update = async (cols) => { const n = await update(cols); if (cols.platforms_posted && !cols.status) snapshots.push(JSON.parse(cols.platforms_posted)); return n; };
+      return b;
+    });
+    try {
+      await share();
+    } finally {
+      db.mockImplementation(realImpl);
+    }
+    expect(xSpy).not.toHaveBeenCalled();
+    // The first progress write (after Facebook) holds both sites.
+    expect(snapshots[0]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ platform: 'facebook', postId: 'fb-new', success: true }),
+      expect.objectContaining({ platform: 'twitter', postId: 'tw-early' }),
+    ]));
+  });
+
+  test('the admin Share button source (blog) resumes too', async () => {
+    mockRows.push({ id: 'row-old', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'publishing',
+      platforms_posted: JSON.stringify([{ platform: 'facebook', postId: 'fb-early', success: true }]) });
+    await share({ source: 'blog' });
+    expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
+    expect(mockRows).toHaveLength(1);
+  });
+
+  test('a cut-off share is found by its feed GUID when the URL changed', async () => {
+    mockRows.push({ id: 'row-old', source_url: 'https://www.wavespestcontrol.com/old-path/', source_guid: 'guid-1', source_type: 'rss', status: 'publishing',
+      platforms_posted: JSON.stringify([{ platform: 'facebook', postId: 'fb-early', success: true }]) });
+    await share({ guid: 'guid-1' });
+    expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
+    expect(mockRows).toHaveLength(1);
+    expect(mockRows[0].status).toBe('published');
+  });
+
+  test('a dry run never overwrites a cut-off live share', async () => {
+    const saved = JSON.stringify([{ platform: 'facebook', postId: 'fb-early', success: true }]);
+    mockRows.push({ id: 'row-old', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'publishing', platforms_posted: saved });
+    process.env.SOCIAL_DRY_RUN = 'true';
+    try {
+      await share();
+    } finally {
+      delete process.env.SOCIAL_DRY_RUN;
+    }
+    expect(mockRows[0].status).toBe('publishing');
+    expect(mockRows[0].platforms_posted).toBe(saved);
+  });
+
+  test('Google: an all-profiles run resumes only the profiles the cut-off attempt missed', async () => {
+    process.env.SOCIAL_GBP_ENABLED = 'true';
+    const locs = WAVES_LOCATIONS.filter((l) => l.googleLocationResourceName);
+    expect(locs.length).toBeGreaterThan(1);
+    mockRows.push({ id: 'row-old', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'publishing',
+      platforms_posted: JSON.stringify([{ platform: 'gbp', location: locs[0].id, postId: 'g-early', success: true }]) });
+    const createSpy = jest.spyOn(gbpService, 'createPost').mockResolvedValue({ name: 'g-new' });
+    try {
+      await share({ channels: ['gbp'], customContent: { gbp: 'GBP copy' }, bypassAutoshareThrottle: true, gbpLocationIds: locs.map((l) => l.id) });
+    } finally {
+      delete process.env.SOCIAL_GBP_ENABLED;
+    }
+    const posted = createSpy.mock.calls.map(([name]) => name);
+    expect(posted).not.toContain(locs[0].googleLocationResourceName);
+    expect(posted).toHaveLength(locs.length - 1);
+  });
 });
+
