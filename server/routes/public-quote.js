@@ -1476,9 +1476,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const sqft = Math.max(500, Math.min(HOME_CAP, Number(homeSqFt) || 2000));
     // A residential home bigger than the public calculator's ceiling is never priced as the truncated size: pest keeps rising with
     // the footprint (owner 2026-11-26), so a 24,000 sq ft two-story clamped to 20,000 would quote a 10,000 sq ft footprint. A posted
-    // size above the ceiling on a quote that asks for pest goes to the team for a hand price instead.
-    const homeSizeAbovePublicLimit = !commercialDetected && Number(homeSqFt) > HOME_CAP
-      && !!(services && (services.pest || services.oneTimePest));
+    // size above the ceiling goes to the team for a hand price instead, WHATEVER the quote asks for: a lawn-only quote that stored
+    // the truncated size would hand it to pest the day pest is added to that estimate.
+    const homeSizeAbovePublicLimit = !commercialDetected && Number(homeSqFt) > HOME_CAP;
     // ONE resolved size for everything this quote stores or prices from: the engine input, the exclusion line and the lead's extracted data.
     // The size kept for the team is bounded at ten times the public ceiling (200,000 sq ft): a junk value such as 1e300 is finite, so
     // without the bound it would reach the price arithmetic (prices that overflow and store as null) and the integer size columns.

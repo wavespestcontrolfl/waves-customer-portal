@@ -346,6 +346,9 @@ describe('a save the server cannot price: no pest row above 5,500 sq ft (admin-e
     const building = { inputs: { homeSqFt: 20000, stories: '1' }, engineInputs: { buildingSqFt: 20000, footprintSqFt: 20000 } };
     const band = { footprintSource: 'bedroom_band', pricingBasis: 'caller_stated_bedroom_count', pricingVersion: 'unit_band' };
     refused({ result: { recurring: { services: [{ name: 'Commercial Pest Control', service: 'commercial_pest', mo: 180 }] } }, ...building });
+    // A commercial line known by its service key alone (no name, no label), priced or not.
+    refused({ engineResult: { lineItems: [{ service: 'commercial_pest', price: 2160 }] }, ...building });
+    refused({ result: { lineItems: [{ service: 'commercial_pest' }] }, ...building });
     refused({ result: { lineItems: [{ service: 'pest_control', price: 99, ...band }] }, ...building });
     refused({ result: { results: { pest: { ...row(99), ...band }, pestTiers: [{ ...row(99), ...band }] } }, ...building });
     // A marker on a container never hides the ordinary pest rows under it.

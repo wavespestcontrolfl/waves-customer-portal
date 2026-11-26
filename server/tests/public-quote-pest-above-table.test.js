@@ -184,12 +184,36 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
     expect(stored()).toBe(200000);
   });
 
-  test('a size at the ceiling still prices (20,000 sq ft two-story = 10,000 footprint = $164), and a non-pest quote above it is not parked by this rule', async () => {
+  test('a size at the ceiling still prices (20,000 sq ft two-story = 10,000 footprint = $164)', async () => {
     const atLimit = await calculate(20000, 2);
     expect(atLimit.json.quote_required).toBeFalsy();
     expect(atLimit.json.per_application).toBe(164);
-    // Above the ceiling a quote that does not ask for pest is not parked by this rule.
+    // A quote without pest at the ceiling is not parked by this rule either.
+    const baitAtLimit = await calculate(20000, 2, { rodentBait: {} });
+    expect(baitAtLimit.status).toBe(200);
+    expect(baitAtLimit.json.quote_required).toBeFalsy();
+  });
+
+  test('a quote WITHOUT pest above the ceiling goes to the team too and stores the real size, so pest added later is priced from it', async () => {
+    const baitOnly = await calculate(24000, 2, { rodentBait: {} });
+    expect(baitOnly.status).toBe(202);
+    expect(baitOnly.json.quote_required).toBe(true);
+    expect(baitOnly.json.reason).toBe('home_size_above_public_limit');
+    const row = db.__recorded.find((w) => w.table === 'estimates' && w.op === 'insert');
+    const data = typeof row.row.estimate_data === 'string' ? JSON.parse(row.row.estimate_data) : row.row.estimate_data;
+    // The stored engine input holds the real size, never the 20,000 it would have been cut to.
+    expect(data.engineInput.homeSqFt).toBe(24000);
+    // Pest added to that estimate later prices the real 12,000 sq ft footprint ($128 + $8 x 6.5 = $180), not the cut 10,000 ($164).
+    const { generateEstimate } = require('../services/pricing-engine');
+    const later = generateEstimate({ ...data.engineInput, services: { ...data.engineInput.services, pest: { frequency: 'quarterly' } } });
+    const pest = later.lineItems.find((line) => line.service === 'pest_control');
+    expect(pest.footprintUsed).toBe(12000);
+    expect(pest.basePrice).toBe(180);
+    // A lawn line parked for its own reason keeps that reason; the size is stored whole all the same.
     const lawnOnly = await calculate(24000, 2, { lawn: { track: 'st_augustine' } });
-    expect(lawnOnly.json.reason).not.toBe('home_size_above_public_limit');
+    expect(lawnOnly.json.quote_required).toBe(true);
+    const lawnRow = db.__recorded.find((w) => w.table === 'estimates' && w.op === 'insert');
+    const lawnData = typeof lawnRow.row.estimate_data === 'string' ? JSON.parse(lawnRow.row.estimate_data) : lawnRow.row.estimate_data;
+    expect(lawnData.engineInput.homeSqFt).toBe(24000);
   });
 });

@@ -2093,7 +2093,7 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
 // that hides one (an exemption was tried and dropped for that reason). The cost is a reload while the engine is broken. Production
 // holds no browser-priced estimate at all (pricing_authority CLIENT_FALLBACK: 0 rows, read 2026-11-26), and the first send of one is
 // already refused (GATE_SEND_REQUIRES_SERVER_PRICING).
-const PEST_ROW_SERVICES = new Set(['pest_control', 'one_time_pest']);
+const PEST_ROW_SERVICES = new Set(['pest_control', 'one_time_pest', 'commercial_pest']);
 const NOT_A_PEST_ROW_NAME = /termite|mosquito|rodent|lawn|shrub|palm|mist|wdo|exclusion|flea|roach|bed ?bug/i;
 const PEST_ROW_PRICE_KEYS = ['pa', 'perApp', 'perVisit', 'perTreatment', 'basePrice', 'mo', 'monthly', 'monthlyBase', 'ann', 'annual',
   'annualTotal', 'annualAfterDiscount', 'price', 'amount', 'priceAfterDiscount', 'estimatedPrice', 'total'];
