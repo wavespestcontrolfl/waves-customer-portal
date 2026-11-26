@@ -1768,10 +1768,17 @@ describe('service-worker slow page loads', () => {
     };
     return { release, serve };
   }
+  // A stored shell as the worker writes it: marked when it came from a
+  // customer app screen. `saved: 'other'` stores another page's HTML.
+  function customerShell(html, saved) {
+    const response = fakeResponse(html);
+    if (saved !== 'other') response.headers.set('x-waves-shell-source', 'customer');
+    return response;
+  }
   async function start({ saved = true } = {}) {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const cache = fakeCache();
-    if (saved) await cache.put('/', fakeResponse(savedHtml));
+    if (saved) await cache.put('/', customerShell(savedHtml, saved));
     const worker = loadWorker(cache);
     const network = gatedNetwork();
     worker.setFetch(network.serve);
@@ -1882,6 +1889,38 @@ describe('service-worker slow page loads', () => {
     await home.promise;
   });
 
+  it('never answers a slow home load with a shell another page stored', async () => {
+    const { network, load } = await start({ saved: 'other' });
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    network.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it('marks the shell from a customer screen, and unmarks one from any other page', async () => {
+    const { cache, network, load } = await start();
+    network.release();
+    await (await load(`/report/${'f'.repeat(32)}`).promise).settled();
+    expect((await cache.match('/')).headers.get('x-waves-shell-source')).toBeNull();
+    await (await load('/').promise).settled();
+    expect((await cache.match('/')).headers.get('x-waves-shell-source')).toBe('customer');
+  });
+
+  it('keeps the saved build live after the late refresh commits the new one', async () => {
+    const { cache, worker, network, load } = await start();
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await nav.promise;
+    network.release();
+    await result.settled();
+    // The refresh committed: the saved copy is now the new build.
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+    await worker.dispatchFetch('/assets/Lazy-XYZ.js');
+    const tags = (await cache.match('/assets/Lazy-XYZ.js')).headers.get('x-waves-build').split(',').map(t => t.replace(/^~/, ''));
+    expect(tags).toContain(worker.buildIdOf(OLD));
+  });
+
   it('leaves an offer link to the browser, with no timer', async () => {
     const { load } = await start();
     const result = await load(`/careers/offer/${'a'.repeat(64)}`).promise;
@@ -1890,7 +1929,7 @@ describe('service-worker slow page loads', () => {
   });
 
   describe('the network-next message', () => {
-    it('acks, then makes the next page load wait for the network, once', async () => {
+    it('acks, then makes every customer-screen load in the window wait for the network', async () => {
       const { worker, network, load } = await start();
       const port = worker.dispatchMessage({ type: 'waves:network-next-navigation' });
       expect(port.postMessage).toHaveBeenCalledWith({ type: 'waves:network-next-ack' });
@@ -1900,12 +1939,15 @@ describe('service-worker slow page loads', () => {
       expect(first.done).toBe(false);
       network.release();
       expect(bodyOf(await first.promise)).toBe(networkHtml);
-      // The flag was used up: a slow load is answered from the saved copy
-      // again (the first load's refresh stored the network page there).
+      // Not used up: another tab's load in the window must not take the
+      // recovering tab's turn, so a second load waits too.
       const next = gatedNetwork();
       worker.setFetch(next.serve);
       const second = load();
-      await vi.advanceTimersByTimeAsync(3000);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(second.done).toBe(false);
+      next.release();
       expect(bodyOf(await second.promise)).toBe(networkHtml);
     });
 

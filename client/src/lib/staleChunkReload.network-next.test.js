@@ -59,6 +59,16 @@ describe('reloadFromNetwork', () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['/admin/dispatch', '/tech', `/report/${'a'.repeat(32)}`])('reloads at once on %s, which the worker never answers from the saved copy', (pathname) => {
+    const reload = vi.fn();
+    const controller = controllerThat({ ack: true });
+    vi.stubGlobal('location', { ...window.location, pathname });
+    withController(controller);
+    reloadFromNetwork(reload);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(controller.postMessage).not.toHaveBeenCalled();
+  });
+
   it('reloads at once when the message cannot be posted', () => {
     const reload = vi.fn();
     withController({ postMessage: () => { throw new Error('closed'); } });

@@ -104,10 +104,20 @@ export const CHUNK_RELOAD_FLAG = 'chunk-reload-attempted';
 export const NETWORK_NEXT_MESSAGE = 'waves:network-next-navigation';
 const NETWORK_NEXT_WAIT_MS = 300;
 
+// Only the customer app's own screens (home and login, as isSavedCopyPath in
+// public/sw.js) are ever answered from the saved copy, so only they need the
+// message. Every other page, staff pages above all, reloads at once: a staff
+// reload ran its guards (route, open work, holds) the moment before, and a
+// wait would let the user move or start work in between.
+const SAVED_COPY_PATHS = new Set(['/', '/login', '/login/']);
+function onSavedCopyPath() {
+  try { return SAVED_COPY_PATHS.has(window.location.pathname); } catch { return false; }
+}
+
 export function reloadFromNetwork(reload = () => window.location.reload()) {
   let controller = null;
   try { controller = navigator.serviceWorker?.controller || null; } catch { /* no worker API */ }
-  if (!controller) {
+  if (!controller || !onSavedCopyPath()) {
     reload();
     return;
   }

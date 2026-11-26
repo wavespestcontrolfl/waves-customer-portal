@@ -348,11 +348,28 @@ const shellRefreshChain = { promise: Promise.resolve() };
 function withShellRefresh(fn) {
   return serializeOn(SHELL_REFRESH_LOCK, shellRefreshChain, fn);
 }
-async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true, startedAt = Date.now() } = {}) {
-  return withShellRefresh(() => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, startedAt));
+async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true, startedAt = Date.now(), customerShell = false, advanceLive = true } = {}) {
+  return withShellRefresh(() => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, startedAt, { customerShell, advanceLive }));
 }
 
-async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, startedAt = Date.now()) {
+// The stored shell records whether it came from a customer app screen
+// (isSavedCopyPath). Only such a shell may answer a slow customer page load:
+// any other page's HTML can carry that page's own link preview (a report's
+// token-bearing image URL) or a staff page's manifest and title.
+const SHELL_SOURCE_HEADER = 'x-waves-shell-source';
+const CUSTOMER_SHELL_SOURCE = 'customer';
+function withShellSource(response, customerShell) {
+  const headers = new Headers(response.headers);
+  if (customerShell) headers.set(SHELL_SOURCE_HEADER, CUSTOMER_SHELL_SOURCE);
+  else headers.delete(SHELL_SOURCE_HEADER);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+// advanceLive false: the page that asked for this refresh runs an older,
+// saved build (it was served the saved copy on a slow network), so this
+// commit must not make the new build the live one; the next navigation that
+// really runs the new build advances it.
+async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, startedAt = Date.now(), { customerShell = false, advanceLive = true } = {}) {
   const cache = await caches.open(CACHE_NAME);
   // Superseded by a newer navigation of this worker, or by an installing
   // worker whose precache began after this request did.
@@ -447,7 +464,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
       if (previousShell) await putShell(cache, previousShell.clone(), previousBuildId).catch(() => {});
     };
     try {
-      await putShell(cache, withoutUrl(shellResponse.clone()), buildId);
+      await putShell(cache, withShellSource(withoutUrl(shellResponse.clone()), customerShell), buildId);
       if (!supersedable) await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } }));
     } catch (err) {
       await restorePreviousShell();
@@ -512,7 +529,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
       headers: { 'Content-Type': 'application/json' },
     })).then(() => ownedAssetsMemo.set(buildId, new Set(ownedAssets))).catch(() => {});
   }
-  advanceLiveBuild(buildId, enqueuedSeq);
+  if (advanceLive) advanceLiveBuild(buildId, enqueuedSeq);
   // Keep the generation just replaced too: a tab still running the previous
   // build lazy-loads its chunks after the shell moved on, and an offline
   // navigation may read the old shell moments before its replacement. Two
@@ -563,7 +580,7 @@ async function precacheOnce() {
   await withShellRefresh(async () => {
     const shellRequest = new Request(OFFLINE_URL, { cache: 'reload' });
     const shellResponse = await fetch(shellRequest);
-    await replaceCompleteShell(shellResponse, navigationSeq, false, startedAt);
+    await replaceCompleteShell(shellResponse, navigationSeq, false, startedAt, { customerShell: true });
   });
 }
 
@@ -709,10 +726,12 @@ function isSavedCopyPath(pathname) {
   return pathname === '/' || pathname === '/login' || pathname === '/login/';
 }
 
-function takeNetworkNext() {
-  const active = Date.now() < networkNextUntil;
-  networkNextUntil = 0;
-  return active;
+// Not used up by the first load: the worker cannot tell which tab asked
+// (a reload's navigation names no client), so another tab's load must not
+// take the recovering tab's turn. Every customer-screen load in the window
+// waits for the network; the cost is only that, for at most NETWORK_NEXT_MS.
+function networkNextActive() {
+  return Date.now() < networkNextUntil;
 }
 
 self.addEventListener('message', event => {
@@ -735,7 +754,8 @@ function startNavigationFetch(request) {
 async function savedShell() {
   try {
     const cache = await caches.open(CACHE_NAME);
-    return (await cache.match(OFFLINE_URL)) || null;
+    const shell = await cache.match(OFFLINE_URL);
+    return shell && shell.headers.get(SHELL_SOURCE_HEADER) === CUSTOMER_SHELL_SOURCE ? shell : null;
   } catch {
     return null;
   }
@@ -756,7 +776,7 @@ async function offlineNavigationResponse(request) {
 
 // The page's response. `decide` tells the shell refresh which one the page
 // got: 'saved' (the saved copy, on a slow network) or 'network'.
-async function answerNavigation(request, attempt, mayServeSaved, decide) {
+async function answerNavigation(request, attempt, mayServeSaved, decide, navSeq) {
   let timer;
   try {
     if (mayServeSaved) {
@@ -765,6 +785,11 @@ async function answerNavigation(request, attempt, mayServeSaved, decide) {
         const shell = await savedShell();
         if (shell) {
           decide('saved');
+          // The page now runs the saved build: chunks it loads are that build's.
+          await shell.clone().text().then(html => {
+            const assets = shellAssetUrls(html);
+            if (assets.length) advanceLiveBuild(buildIdOf(assets), navSeq);
+          }).catch(() => {});
           return shell;
         }
       }
@@ -785,7 +810,7 @@ async function answerNavigation(request, attempt, mayServeSaved, decide) {
 // tagged with its own build. When the page got the SAVED copy it runs the
 // saved build, not this response's, so the live build stays where it was.
 // A shell without assets is not a build.
-function refreshShellAfterNavigation(attempt, choice, navSeq, startedAt) {
+function refreshShellAfterNavigation(attempt, choice, navSeq, startedAt, customerShell) {
   return Promise.all([attempt, choice]).then(([{ copy }, chosen]) => {
     if (!copy) return undefined;
     const advance = chosen === 'saved' ? Promise.resolve() : copy.clone().text().then(html => {
@@ -794,7 +819,7 @@ function refreshShellAfterNavigation(attempt, choice, navSeq, startedAt) {
     });
     return Promise.all([
       advance.catch(() => {}),
-      cacheCompleteShellResponse(copy, navSeq, { startedAt }).catch(() => {}),
+      cacheCompleteShellResponse(copy, navSeq, { startedAt, customerShell, advanceLive: chosen !== 'saved' }).catch(() => {}),
     ]);
   }).catch(() => {});
 }
@@ -830,15 +855,15 @@ self.addEventListener('fetch', event => {
     // follows a reload for a missing chunk (NETWORK_NEXT_MESSAGE) never is.
     // Any other page load (a form POST, a link page, a staff page) leaves the
     // flag unread.
-    const mayServeSaved = event.request.method === 'GET' && isSavedCopyPath(url.pathname) && !takeNetworkNext();
+    const mayServeSaved = event.request.method === 'GET' && isSavedCopyPath(url.pathname) && !networkNextActive();
     const attempt = startNavigationFetch(event.request);
     let decide;
     const choice = new Promise(resolve => { decide = resolve; });
     // Registered here, in the handler's own turn: the background work must
     // outlive a response sent before the network answers, and waitUntil can
     // throw once respondWith has settled.
-    event.waitUntil(refreshShellAfterNavigation(attempt, choice, navSeq, startedAt));
-    event.respondWith(answerNavigation(event.request, attempt, mayServeSaved, decide));
+    event.waitUntil(refreshShellAfterNavigation(attempt, choice, navSeq, startedAt, isSavedCopyPath(url.pathname)));
+    event.respondWith(answerNavigation(event.request, attempt, mayServeSaved, decide, navSeq));
     return;
   }
 
