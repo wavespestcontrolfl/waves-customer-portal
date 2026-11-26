@@ -83,6 +83,13 @@ describe('prior-provider evidence (Codex #8521)', () => {
     expect(patch.previous_company).toBeUndefined();
     expect(patch.switch_reason).toBeUndefined();
   });
+  test('a negated use or a full-name quote is not a previous company', () => {
+    for (const q of ['I have not used Orkin because of the price', 'I had Orkin Pest Control quote me a price', "We haven't used Turner"]) {
+      const patch = planLeadWhy(lead(), [chunk('competitor_mention', q)]);
+      expect(patch.previous_company).toBeUndefined();
+      expect(patch.switch_reason).toBeUndefined();
+    }
+  });
   test('a quote request does not erase a stated switch', () => {
     const c = chunk('competitor_mention', 'We left Orkin because they raised the price, and now we want a quote');
     expect(planLeadWhy(lead(), [c])).toMatchObject({ previous_company: 'Orkin', switch_reason: 'price_creep' });

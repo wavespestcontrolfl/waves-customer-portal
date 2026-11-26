@@ -76,12 +76,14 @@ const PRIOR_PROVIDER_RE = /(current|previous|prior|existing|former|old|last) (pe
 // "we had Turner", "switching from Orkin", "been with Hughes".
 // At most one word between the phrase and the name ("had the Turner guy" is
 // two, so "we had ants and Orkin quoted us" never links Orkin).
-const RIVAL_USE_LEAD = String.raw`\b(?:had|have had|used|been using|been with|was with|were with|leaving|left|cancel+(?:ed|ing)?|switch(?:ing|ed)? from|currently (?:have|use|with))\s+(?:the\s+)?(?:\w+\s+)?`;
+// A negated use ("have not used Orkin", "never had Turner") is not use.
+const RIVAL_USE_LEAD = String.raw`(?<!(?:\bnot|\bnever|n't|\bno)\s+)(?<!(?:\bnot|\bnever|n't)\s+(?:been|ever)\s+)\b(?:had|have had|used|been using|been with|was with|were with|leaving|left|cancel+(?:ed|ing)?|switch(?:ing|ed)? from|currently (?:have|use|with))\s+(?:the\s+)?(?:\w+\s+)?`;
 // The caller says they never had a provider: no switch evidence at all.
 const NO_PRIOR_PROVIDER_RE = /never (used|had|been with)|first time|no (current|previous|prior) (provider|company)|don'?t have (a|any) (provider|company|pest)/i;
 // A rival named for a quote ("had Orkin quote me") is shopping, not use. This
 // only blocks that rival link; "we left Orkin ... now we want a quote" stays.
-const RIVAL_SHOPPING_TAIL = String.raw`(?!\s+(?:to\s+)?(?:quot|give|gave|come|came|bid|estimat|send|sent|look))`;
+// The look-ahead skips the rest of the company name ("Orkin Pest Control quote me").
+const RIVAL_SHOPPING_TAIL = String.raw`(?!(?:\s+(?:pest|lawn|termite|control|services?|company|exterminat\w*|inc\.?))*\s+(?:to\s+)?(?:quot|give|gave|come|came|bid|estimat|send|sent|look))`;
 
 // First match wins. Specific complaint themes sit before the broad price theme.
 const SWITCH_RULES = [
@@ -297,11 +299,27 @@ async function loadChunksByLead(conn, leads, now) {
 // Leads with an active visit linked to THAT lead by exact record evidence
 // (lead-related-visits.js, the same rule as the admin lead card). A visit for
 // another inquiry of the same customer never counts.
+// A visit booked by phone on the call: call-recording-processor.js records it as
+// an appointment_booked activity with metadata.scheduledServiceId and leaves the
+// lead's status and converted_at as they were. Same customer ownership check as
+// the admin card's links (a populated lead customer vetoes a dissenting visit).
+function phoneBookedVisit(conn, lead) {
+  return conn('scheduled_services as ss')
+    .whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES)
+    .whereExists(conn('lead_activities as la').select(conn.raw('1'))
+      .where('la.lead_id', lead.id)
+      .where('la.activity_type', 'appointment_booked')
+      .whereRaw("la.metadata->>'scheduledServiceId' = ss.id::text"))
+    .modify((q) => { if (lead.customer_id) q.where((o) => o.whereNull('ss.customer_id').orWhere('ss.customer_id', lead.customer_id)); })
+    .first('ss.id');
+}
+
 async function bookedLeadIds(conn, leads) {
   const out = new Set();
   for (const l of leads) {
     if (!LOST_STATUSES.has(l.status) || l.converted_at) continue; // only these can get a reason
-    const active = await leadLinkedVisits(conn, l).whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES).first('ss.id');
+    const active = await leadLinkedVisits(conn, l).whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES).first('ss.id')
+      || await phoneBookedVisit(conn, l);
     if (active) out.add(l.id);
   }
   return out;
