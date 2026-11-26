@@ -107,12 +107,44 @@ describe('email autoUnsubscribe — the feeds the SiteOne deals digest reads (ow
   });
 
   test('a look-alike is not a digest sender: it gets the ordinary checks', async () => {
+    jest.spyOn(require('../services/email/vendor-sender'), 'isVendorWeUse').mockResolvedValue(false);
     for (const from of ['srep@siteone.com.evil.example', 'srep@notsiteone.com']) {
       const result = await unsub(from);
       expect(result.method).toBe('none');
       expect(result.note).not.toContain('deals digest sender');
       expect(result.note).toContain('unauthenticated sender');
     }
+  });
+});
+
+describe('email autoUnsubscribe — vendors we use keep their promos (owner 2026-11-25)', () => {
+  const vendorSender = require('../services/email/vendor-sender');
+  const unsub = (from) => autoUnsubscribe({ id: 'test', from_address: from, list_unsubscribe: '<https://example.com/unsub>' });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('anthropic.com is refused too (the operational belt answers first)', async () => {
+    const result = await unsub('news@mail.anthropic.com');
+    expect(result.method).toBe('none');
+  });
+
+  test.each([
+    'Claude <hello@email.claude.com>',
+    'noreply@tm.openai.com',
+  ])('refuses the fixed-list vendor %s before any request or log row', async (from) => {
+    const result = await unsub(from);
+    expect(result).toEqual({ method: 'none', note: 'vendor we use — keep promos' });
+  });
+
+  test('refuses a sender the vendor lookup knows, before the auth check', async () => {
+    jest.spyOn(vendorSender, 'isVendorWeUse').mockResolvedValue(true);
+    const result = await unsub('deals@promo.supplier.example');
+    expect(result).toEqual({ method: 'none', note: 'vendor we use — keep promos' });
+  });
+
+  test('a sender that is not a vendor reaches the ordinary auth check', async () => {
+    jest.spyOn(vendorSender, 'isVendorWeUse').mockResolvedValue(false);
+    const result = await unsub('deals@retailer.example.com');
+    expect(result.note).toContain('unauthenticated sender');
   });
 });
 
