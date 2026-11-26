@@ -31,7 +31,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
+const { scopeToProspects } = require('./lead-statuses');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const {
   etWeekStart, etDateString, addETDays, parseETDateTime, formatETDayDate,
@@ -41,7 +41,8 @@ const KEY_PREFIX = 'lead-why-weekly:';
 const CATEGORY = 'system';
 const AREA = 'Leads';
 const LINK = '/admin/leads';
-const MAX_LEADS = 500; // a week of leads is a few dozen; the cap only bounds a runaway read
+const OWED_PAGE = 20;
+const PAGE = 500; // leads are read in pages, so a big week is still counted in full
 const TOP_N = 3;
 const LIST_LIMIT = 10;
 const PROMISE_KINDS = ['send_estimate', 'callback'];
@@ -104,12 +105,12 @@ function topCounts(rows, field, n = TOP_N) {
 
 const known = (rows, field) => rows.filter((r) => clean(r[field])).length;
 
-// Totals for the week. Won is status won; not booked is lost / unresponsive, or any other lead that
-// carries a not-booked reason (never a won lead). The rest are still open or closed another way.
+// Not booked = status lost / unresponsive. The loss reasons are counted over these same leads, so a
+// lead won after the nightly fill never adds a stale reason. The rest are open or closed another way.
+const notBookedRows = (rows) => rows.filter((r) => NOT_BOOKED_STATUSES.includes(r.status));
 function weekTotals(rows) {
   const won = rows.filter((r) => r.status === 'won').length;
-  const notBooked = rows.filter((r) => r.status !== 'won'
-    && (NOT_BOOKED_STATUSES.includes(r.status) || clean(r.not_booked_reason))).length;
+  const notBooked = notBookedRows(rows).length;
   return { total: rows.length, won, notBooked, other: rows.length - won - notBooked };
 }
 
@@ -119,14 +120,15 @@ function weekTotals(rows) {
  * [{ id, created_at }] of the leads with a promised quote or callback still owed.
  */
 function summarizeWeek(rows, owed = null) {
+  const lostRows = notBookedRows(rows);
   return {
     ...weekTotals(rows),
     switchReasons: topCounts(rows, 'switch_reason'),
     switchKnown: known(rows, 'switch_reason'),
     rivals: topCounts(rows, 'previous_company'),
     rivalsKnown: known(rows, 'previous_company'),
-    notBookedReasons: topCounts(rows, 'not_booked_reason'),
-    notBookedKnown: known(rows, 'not_booked_reason'),
+    notBookedReasons: topCounts(lostRows, 'not_booked_reason'),
+    notBookedKnown: known(lostRows, 'not_booked_reason'),
     owed,
   };
 }
@@ -153,7 +155,7 @@ function buildDetail(week, s) {
     `Leads: ${s.total}. Won: ${s.won}. Not booked: ${s.notBooked}. Still open or closed another way: ${s.other}.`,
     listLine('Why they left their last company', s.switchReasons, s.switchKnown, s.total, SWITCH_LABELS),
     listLine('Companies they are leaving', s.rivals, s.rivalsKnown, s.total, null),
-    listLine('Why they did not book', s.notBookedReasons, s.notBookedKnown, s.total, NOT_BOOKED_LABELS),
+    listLine('Why they did not book', s.notBookedReasons, s.notBookedKnown, s.notBooked, NOT_BOOKED_LABELS),
     owedLine(s.owed),
     'The reasons come from the calls, filled in each night. A lead with no reason yet counts only in the totals.',
   ].filter(Boolean).join('\n');
@@ -185,30 +187,47 @@ function composeWeekly(week, summary) {
   return { spec, detail: buildDetail(week, summary) };
 }
 
+// The week's prospects: the Leads analytics scope (scopeToProspects), so a won quote-wizard repeat
+// and its won original count as one deal. Read in pages by (created_at, id) so none are cut off.
 async function loadWeekLeads(conn, week) {
-  return conn('leads')
-    .whereNull('deleted_at')
-    .where('created_at', '>=', week.from)
-    .where('created_at', '<', week.to)
-    .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
-    .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
-    .limit(MAX_LEADS)
-    .select('id', 'status', 'created_at', 'switch_reason', 'previous_company', 'not_booked_reason');
+  const all = [];
+  let after = null;
+  for (;;) {
+    const page = await conn('leads')
+      .whereNull('leads.deleted_at')
+      .where('leads.created_at', '>=', week.from)
+      .where('leads.created_at', '<', week.to)
+      .modify((q) => scopeToProspects(q, 'leads'))
+      .modify((q) => {
+        if (after) q.whereRaw('(leads.created_at, leads.id) > (?, ?)', [after.created_at, after.id]);
+      })
+      .orderBy([{ column: 'leads.created_at', order: 'asc' }, { column: 'leads.id', order: 'asc' }])
+      .limit(PAGE)
+      .select('leads.id', 'leads.status', 'leads.created_at', 'leads.switch_reason', 'leads.previous_company', 'leads.not_booked_reason');
+    all.push(...page);
+    if (page.length < PAGE) return all;
+    after = page[page.length - 1];
+  }
 }
 
 /**
  * The leads of the week with a Waves promise still owed: the Owed queue's read per lead, so the
- * call link, the overdue rule and the quiet-call filter are the queue's own. Won leads are
- * skipped (the work was done). Returns null when the read fails (fail open).
+ * call link, the overdue rule and the quiet-call filter are the queue's own. A won lead is read
+ * too: a booking does not keep a separate promised callback or quote. Returns null when the read
+ * fails (fail open).
  */
 async function loadOwedLeads(conn, leads) {
   const { listOpenCommitments } = require('./call-commitments');
   const owed = [];
   try {
     for (const lead of leads) {
-      if (lead.status === 'won') continue;
-      const rows = await listOpenCommitments(conn, { leadId: lead.id, party: 'waves', kinds: PROMISE_KINDS, limit: 20 });
-      if (rows.some((r) => r.overdue && !r.quiet_call)) owed.push({ id: lead.id, created_at: lead.created_at });
+      // Page on: the quiet-call filter runs after the read's limit, so one page of quiet rows
+      // must not hide an owed promise on the next.
+      for (let offset = 0; ; offset += OWED_PAGE) {
+        const rows = await listOpenCommitments(conn, { leadId: lead.id, party: 'waves', kinds: PROMISE_KINDS, limit: OWED_PAGE, offset });
+        if (rows.some((r) => r.overdue && !r.quiet_call)) { owed.push({ id: lead.id, created_at: lead.created_at }); break; }
+        if (rows.length < OWED_PAGE) break;
+      }
     }
   } catch (err) {
     logger.warn(`[lead-why-weekly] promised-follow-up line left out: ${err.message}`);
@@ -217,10 +236,11 @@ async function loadOwedLeads(conn, leads) {
   return owed;
 }
 
-// Close last week's open row once this week's is raised.
+// Close older weeks' open rows once this week's exists. Keys end in the ET Monday (YYYY-MM-DD), so
+// a string compare finds the older weeks; a newer week's row is never touched.
 async function closeOlderRows(conn, now, keepKey) {
   const episodes = require('./admin-alert-episodes');
-  const keys = (await episodes.openAdminAlertKeys(conn, KEY_PREFIX)).filter((k) => k !== keepKey);
+  const keys = (await episodes.openAdminAlertKeys(conn, KEY_PREFIX)).filter((k) => k < keepKey);
   if (!keys.length) return 0;
   return Number(await episodes.closeAdminAlertKeys(conn, keys, 'replaced', { now, resolution: REPLACED })) || 0;
 }
@@ -254,7 +274,8 @@ async function runLeadWhyWeekly({ now = new Date(), conn = db, loadOwed = loadOw
   let outcome = 'raised';
   if (result.suppressed) outcome = 'suppressed';
   else if (result.deduped) outcome = 'unchanged';
-  if (outcome === 'raised') await closeOlderRows(conn, now, dedupeKey);
+  // Also on a dedupe: a retry after a failed cleanup still closes last week's row.
+  if (outcome !== 'suppressed') await closeOlderRows(conn, now, dedupeKey);
   logger.info(`[lead-why-weekly] week of ${week.start}: ${summary.total} leads, ${summary.won} won, ${summary.notBooked} not booked (${outcome})`);
   return { leads: summary.total, outcome };
 }
@@ -264,6 +285,6 @@ module.exports = {
   KEY_PREFIX,
   _private: {
     reportWeek, topCounts, summarizeWeek, weekTotals, composeWeekly, buildDetail, whyLine, owedLine, shortDay, shortDate,
-    loadOwedLeads, SWITCH_LABELS, NOT_BOOKED_LABELS, REPLACED,
+    loadOwedLeads, loadWeekLeads, SWITCH_LABELS, NOT_BOOKED_LABELS, REPLACED,
   },
 };

@@ -65,15 +65,16 @@ describe('counts', () => {
     const rows = ['b', 'a', 'b', ' ', null, 'c', 'a', 'd'].map((v) => ({ f: v }));
     expect(topCounts(rows, 'f')).toEqual([{ value: 'a', count: 2 }, { value: 'b', count: 2 }, { value: 'c', count: 1 }]);
   });
-  test('summarizeWeek: wins, not booked (lost, unresponsive, or a reason on an open lead), the rest', () => {
+  test('summarizeWeek: wins, not booked (lost / unresponsive only), the rest; loss reasons from the same leads', () => {
     const s = summarizeWeek(WEEK, []);
-    expect(s).toMatchObject({ total: 6, won: 2, notBooked: 3, other: 1, switchKnown: 4, rivalsKnown: 3, notBookedKnown: 3 });
+    // L5 is open with a stale reason: neither not booked nor counted as a loss reason.
+    expect(s).toMatchObject({ total: 6, won: 2, notBooked: 2, other: 2, switchKnown: 4, rivalsKnown: 3, notBookedKnown: 2 });
     expect(s.switchReasons[0]).toEqual({ value: 'price_creep', count: 2 });
     expect(s.rivals[0]).toEqual({ value: 'Orkin', count: 2 });
   });
   test('a won lead with a stale not-booked reason is still a win, never both', () => {
     const s = summarizeWeek([lead('W', { status: 'won', not_booked_reason: 'price' })], []);
-    expect(s).toMatchObject({ won: 1, notBooked: 0 });
+    expect(s).toMatchObject({ won: 1, notBooked: 0, notBookedKnown: 0, notBookedReasons: [] });
   });
 });
 
@@ -85,15 +86,15 @@ describe('the card', () => {
     const alert = composeAdminAlert(spec);
     expect(alert.headline).toBe('Leads — read why we win and lose, week of Nov 16');
     expect(alert.headline.length).toBeLessThanOrEqual(60);
-    expect(alert.why).toBe('6 new leads, 2 won, 3 not booked; top switch reason: price kept going up; 1 promised follow-up still owed.');
+    expect(alert.why).toBe('6 new leads, 2 won, 2 not booked; top switch reason: price kept going up; 1 promised follow-up still owed.');
     expect(alert.metadata).toMatchObject({ area: 'Leads', severity: 'needs-you', who: 'person', doneWhen: 'reviewed' });
   });
 
   test('the detail uses plain words, counts, coverage and the owed list; no codes', () => {
-    expect(detail).toContain('Leads: 6. Won: 2. Not booked: 3.');
+    expect(detail).toContain('Leads: 6. Won: 2. Not booked: 2. Still open or closed another way: 2.');
     expect(detail).toContain('Why they left their last company (4 of 6 leads): price kept going up 2, moved house 1, old company missed visits 1.');
     expect(detail).toContain('Companies they are leaving (3 of 6 leads): Orkin 2, Terminix 1.');
-    expect(detail).toContain('Why they did not book (3 of 6 leads): never answered us 1, price too high 1, not the right time 1.');
+    expect(detail).toContain('Why they did not book (2 of 2 leads): never answered us 1, price too high 1.');
     expect(detail).toContain('still owed: 1 lead - L3 (Nov 18).');
     expect(detail).not.toMatch(/price_creep|no_response|pests_came_back/);
   });
@@ -117,17 +118,24 @@ describe('the card', () => {
 });
 
 describe('loadOwedLeads: the Owed queue read, per lead', () => {
-  test('counts a lead only with an overdue, non-quiet promise; skips won leads', async () => {
+  test('counts a lead only with an overdue, non-quiet promise; won leads are read too', async () => {
     listOpenCommitments.mockImplementation(async (_c, { leadId }) => ({
+      L1: [{ overdue: true, quiet_call: false }],
       L3: [{ overdue: true, quiet_call: false }],
       L4: [{ overdue: false, quiet_call: false }],
       L5: [{ overdue: true, quiet_call: true }],
       L6: [],
     })[leadId] || []);
     const owed = await loadOwedLeads({}, WEEK);
-    expect(owed.map((l) => l.id)).toEqual(['L3']);
-    expect(listOpenCommitments).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ leadId: 'L1' }));
+    expect(owed.map((l) => l.id)).toEqual(['L1', 'L3']);
     expect(listOpenCommitments).toHaveBeenCalledWith({}, expect.objectContaining({ party: 'waves', kinds: ['send_estimate', 'callback'] }));
+  });
+  test('a full page of quiet promises does not hide an owed one on the next page', async () => {
+    const quiet = Array.from({ length: 20 }, () => ({ overdue: true, quiet_call: true }));
+    listOpenCommitments.mockImplementation(async (_c, { offset }) => (offset === 0 ? quiet : [{ overdue: true, quiet_call: false }]));
+    const owed = await loadOwedLeads({}, [lead('Q')]);
+    expect(owed.map((l) => l.id)).toEqual(['Q']);
+    expect(listOpenCommitments).toHaveBeenCalledWith({}, expect.objectContaining({ offset: 20 }));
   });
   test('fails open: a broken read gives null and a warning', async () => {
     listOpenCommitments.mockRejectedValue(new Error('boom'));
@@ -136,11 +144,13 @@ describe('loadOwedLeads: the Owed queue read, per lead', () => {
   });
 });
 
-// A chainable knex stand-in that resolves to `rows` at .select().
-function connWith(rows) {
+// A chainable knex stand-in that resolves to the next page at each .select().
+function connWith(rows, pages = [rows]) {
   const q = {};
-  for (const m of ['whereNull', 'where', 'whereNotIn', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
-  q.select = jest.fn(async () => rows);
+  for (const m of ['whereNull', 'where', 'whereNotIn', 'whereRaw', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
+  q.modify = jest.fn((fn) => { fn(q); return q; });
+  let i = 0;
+  q.select = jest.fn(async () => pages[i++] || []);
   const conn = jest.fn(() => q);
   conn.q = q;
   return conn;
@@ -160,8 +170,10 @@ describe('runLeadWhyWeekly', () => {
     const conn = connWith(WEEK);
     const out = await weekly.runLeadWhyWeekly({ now: MONDAY, conn, loadOwed: owed });
     expect(out).toEqual({ leads: 6, outcome: 'raised' });
-    expect(conn.q.where).toHaveBeenCalledWith('created_at', '>=', expect.any(Date));
-    expect(conn.q.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['duplicate', 'spam']));
+    expect(conn.q.where).toHaveBeenCalledWith('leads.created_at', '>=', expect.any(Date));
+    // scopeToProspects: the non-engaged statuses plus the won-repeat checks.
+    expect(conn.q.whereNotIn).toHaveBeenCalledWith('leads.status', expect.arrayContaining(['duplicate', 'spam']));
+    expect(conn.q.whereRaw).toHaveBeenCalled();
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = notifyAdmin.mock.calls[0];
     expect(category).toBe('system');
@@ -174,11 +186,19 @@ describe('runLeadWhyWeekly', () => {
     expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, ['lead-why-weekly:2026-11-09'], 'replaced', expect.objectContaining({ resolution: REPLACED }));
   });
 
-  test('a rerun that dedupes writes nothing new and closes nothing', async () => {
+  test('a rerun that dedupes writes nothing new but still closes older weeks, never a newer one', async () => {
     notifyAdmin.mockResolvedValue({ id: 'n1', deduped: true });
-    const out = await weekly.runLeadWhyWeekly({ now: MONDAY, conn: connWith(WEEK), loadOwed: owed });
+    episodes.openAdminAlertKeys.mockResolvedValue(['lead-why-weekly:2026-11-09', 'lead-why-weekly:2026-11-16', 'lead-why-weekly:2026-11-23']);
+    const conn = connWith(WEEK);
+    const out = await weekly.runLeadWhyWeekly({ now: MONDAY, conn, loadOwed: owed });
     expect(out.outcome).toBe('unchanged');
-    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(conn, ['lead-why-weekly:2026-11-09'], 'replaced', expect.anything());
+  });
+
+  test('a week bigger than one page is counted in full', async () => {
+    const big = Array.from({ length: 500 }, (_, i) => lead(`B${i}`));
+    const out = await weekly.runLeadWhyWeekly({ now: MONDAY, conn: connWith(null, [big, [lead('LAST', { status: 'won' })]]), loadOwed: owed });
+    expect(out.leads).toBe(501);
   });
 
   test('a failed promise read still sends the card, without that line', async () => {
