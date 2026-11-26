@@ -63,6 +63,13 @@ function ownerAnswered(acceptance) {
   return !!owner && !!answered && owner === answered;
 }
 
+// A known staff number that is not the owner's answered. An unknown answerer, or no ADAM_PHONE, is not proof.
+function staffAnswered(acceptance) {
+  const owner = toE164(process.env.ADAM_PHONE);
+  const answered = toE164(acceptance?.answered_by_number);
+  return !!owner && !!answered && owner !== answered;
+}
+
 // Decides whether a check is due, then stamps it with a compare-and-swap on upset_checks: of two webhooks that read
 // the same count, one UPDATE matches and wins. Cheap checks first, so most utterances cost no query beyond the row.
 async function claimCheck(callSid, live, now) {
@@ -211,5 +218,5 @@ function afterCallerUtterance(callSid) {
   checkCall(callSid).catch(() => {});
 }
 
-// ownerAnswered and staffNameOf are also read by live-call-early-summary.js (the next-step alert after an office call).
-module.exports = { afterCallerUtterance, checkCall, ownerAnswered, staffNameOf, _test: { whyFrom, callEnded } };
+// staffAnswered and staffNameOf are also read by live-call-early-summary.js (the next-step alert after an office call).
+module.exports = { afterCallerUtterance, checkCall, ownerAnswered, staffAnswered, staffNameOf, _test: { whyFrom, callEnded } };

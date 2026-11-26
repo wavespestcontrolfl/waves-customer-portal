@@ -34,7 +34,7 @@ const { anthropicText } = require('./llm/call');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { scrubPans } = require('../utils/pan-scrub');
 const { raiseAdminAlert, firstSentence, cutAtWord, breaksAlertRules, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
-const { ownerAnswered, staffNameOf } = require('./live-call-upset-alert');
+const { staffAnswered, staffNameOf } = require('./live-call-upset-alert');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -207,25 +207,34 @@ function actionFor(name, reply) {
   return title && !breaksAlertRules(title) ? title : `read ${name || 'the office'}'s call summary`;
 }
 
-// ONE admin alert per call answered by a staff member who is not the owner: no forward_acceptance (not a press-1
-// staff answer) and an owner answer raise nothing. A needs-you row when the call left a next step, else an FYI row.
-// Never throws: the saved summary stands whatever happens here.
-// A phone banner cannot be taken back, so a call with any card talk (a card-pause stamp, a masked card number, or card
-// words in its live text) raises nothing: those are the calls a later card-number quarantine can clear. A quarantined
-// call raises nothing, and a quarantine that lands after the row is written deletes the row (purgeLiveUtterances).
-// A warm transfer (a second staff member on the same Agent track) raises nothing either: the name would be wrong.
-async function alertOfficeCall(callSid, reply, transcript) {
+// Why a call raises no office-call alert, or null when it may. A phone banner cannot be taken back, so:
+// - only a known staff number that is not the owner's (an unknown answerer is not proof);
+// - no warm transfer, ever tried on the call (a second staff member on the same Agent track: the name would be wrong;
+//   the transfers count stays after a later hold replaces the transfer state);
+// - no card talk anywhere in the live text (every utterance, not the head and tail the model read): a card-pause
+//   stamp, a masked card number or card words. Those are the calls a later card-number quarantine can clear.
+async function officeAlertBlock(callSid, meta) {
+  if (!staffAnswered(meta?.forward_acceptance)) return 'not_staff';
+  const hold = meta?.conference_path?.hold;
+  if (hold?.transfer || Number(hold?.transfers) > 0) return 'transfer';
+  if (meta?.live_transcription?.card_pause) return 'card';
+  const { isCardIntent } = require('./live-call-card-pause');
+  const rows = await db('call_live_utterances').where('call_sid', callSid).select('text', 'pan_masked');
+  return (rows || []).some((r) => isCardIntent(r.text, r.pan_masked)) ? 'card' : null;
+}
+
+// ONE admin alert per call answered by a staff member who is not the owner (see officeAlertBlock). A needs-you row
+// when the call left a next step, else an FYI row. A quarantined call raises nothing. A quarantine racing the insert is
+// covered both ways: purgeLiveUtterances deletes a row already written, and a re-check after the insert deletes a row
+// written after the purge. Never throws: the saved summary stands whatever happens here.
+async function alertOfficeCall(callSid, reply) {
   try {
     const call = await db('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id', 'metadata');
     let meta = call?.metadata;
     if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-    const acceptance = meta?.forward_acceptance;
-    if (!call || !acceptance || ownerAnswered(acceptance)) return;
-    if (meta?.conference_path?.hold?.transfer?.status === 'accepted') return;
-    if (meta?.live_transcription?.card_pause || require('./live-call-card-pause').isCardIntent(transcript)) return;
-    const masked = await db('call_live_utterances').where({ call_sid: callSid, pan_masked: true }).first('id');
-    if (masked) return;
-    const name = staffNameOf(acceptance);
+    if (!call || (await officeAlertBlock(callSid, meta))) return;
+    const name = staffNameOf(meta.forward_acceptance);
+    const dedupeKey = `live-call-next-step:${callSid}`;
     await raiseAdminAlert('live_call_next_step', {
       area: 'Comms',
       action: actionFor(name, reply),
@@ -235,7 +244,8 @@ async function alertOfficeCall(callSid, reply, transcript) {
       subject: { type: 'call', id: String(call.id) },
       doneWhen: 'office_followed_up',
       who: 'person',
-    }, { bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${callSid}`, bannerKind: 'live_call_next_step' });
+    }, { bell: true, fyiRow: true, dedupeKey, bannerKind: 'live_call_next_step' });
+    if (await quarantinedNow(callSid)) await db('notifications').whereRaw("metadata ->> 'dedupeKey' = ?", [dedupeKey]).del();
   } catch (err) {
     logger.warn(`[live-call-early-summary] next-step alert failed: ${err?.code || err?.name || 'error'}`);
   }
@@ -255,7 +265,7 @@ async function writeEarlySummary(callSid, { now = () => new Date() } = {}) {
     const reply = await summarize(text);
     if (!reply) return { written: false, reason: 'no_summary' };
     const written = await saveSummary(callSid, reply, now());
-    if (written) await alertOfficeCall(callSid, reply, text);
+    if (written) await alertOfficeCall(callSid, reply);
     return { written, reason: null };
   } catch (err) {
     logger.warn(`[live-call-early-summary] failed: ${err?.code || err?.name || 'error'}`);

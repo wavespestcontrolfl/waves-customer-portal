@@ -424,10 +424,39 @@ describe('the alert after an office call', () => {
 
   test('a warm-transferred call raises nothing (the answerer named may not be the one who promised)', async () => {
     setCall({ acceptance: staffAnswer });
-    db.__state.call.metadata.conference_path = { hold: { transfer: { status: 'accepted' } } };
+    db.__state.call.metadata.conference_path = { hold: { transfers: 1, transfer: null } }; // a later hold replaced the transfer state
     reply(JSON.stringify(JSON_REPLY));
     await early.writeEarlySummary(SID, { now: NOW });
     expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('an unknown answerer (no number) is not proof of a staff answer: no alert', async () => {
+    setCall({ acceptance: { ...staffAnswer, answered_by_number: null } });
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('card words in the middle of a long call (outside the text the model read) still block the alert', async () => {
+    setCall({ acceptance: staffAnswer });
+    const filler = Array.from({ length: 100 }, (_, i) => ['staff', `Filler line ${i} ${'x'.repeat(80)}`]);
+    say([...CALL, ...filler, ['caller', 'Here is my card number.'], ...filler, ...CALL]);
+    expect((await early._test.transcriptFor(SID)).text).not.toContain('card number');
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('a quarantine that lands while the alert is written: the row is deleted after the insert', async () => {
+    setCall({ acceptance: staffAnswer });
+    mockRaise.mockImplementationOnce(async () => {
+      db.__state.call.metadata.live_transcription.quarantined_at = new Date(T0 + 70000).toISOString();
+      return { id: 'n1' };
+    });
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise).toHaveBeenCalledTimes(1);
+    expect(db.__state.deletedAlertKeys).toContain(`live-call-next-step:${SID}`);
   });
 
   test('a phone number in the model title is redacted before the bell row', async () => {
