@@ -1,15 +1,42 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useBiometricLock } from '../components/BiometricGate';
 import { isNativeApp } from '../native/platform';
+import { clearHomeReads, readHomeReads, writeHomeRead } from '../lib/homeSnapshot';
 
 const PortalReadContext = createContext(null);
 export const READ_TIMEOUT_MS = 15000;
 const RESUME_REFRESH_MS = 1000;
 
-// Scoped to the mounted, authenticated property. Nothing is written to browser
-// storage: logout, a different session, or a property change drops these reads.
-export function PortalReadProvider({ enabled, children }) {
-  const cache = useRef(new Map()).current;
+// The cache a provider starts with: the saved home reads for this login and
+// property as unverified entries, or empty.
+function hydrateSavedReads(identity, property) {
+  const cache = new Map();
+  if (!identity || !property) return cache;
+  for (const [key, saved] of Object.entries(readHomeReads(identity, property))) {
+    cache.set(key, { data: saved.data, updatedAt: saved.updatedAt, loading: false, pending: false, verified: false, error: '' });
+  }
+  return cache;
+}
+
+// Scoped to the mounted, authenticated property: logout, a different session, or
+// a property change drops these reads. Browser storage rule (owner 2026-11-25,
+// "the app opens to a real screen in about 1 second on weak signal"): ONLY the
+// 'next-visit' and 'latest-service' reads are saved to localStorage, cut down to
+// what the saved visit card prints (lib/homeSnapshot SAVED_READ_KEYS), under the
+// login identity + property they were read for, and hydrated at mount as
+// unverified (the `saved` card shows until a refresh succeeds). A 401/403, a
+// sign-out, or a login or property change deletes them. Every other read stays
+// in memory only.
+export function PortalReadProvider({ enabled, persistIdentity = null, persistProperty = null, children }) {
+  const cache = useRef(null);
+  if (cache.current === null) cache.current = hydrateSavedReads(enabled ? persistIdentity : null, persistProperty);
+  const persistRef = useRef({ identity: persistIdentity, property: persistProperty });
+  persistRef.current = { identity: enabled ? persistIdentity : null, property: persistProperty };
+  const persistRead = useCallback((key, entry) => {
+    const { identity, property } = persistRef.current;
+    writeHomeRead(identity, property, key, entry.data, entry.updatedAt);
+  }, []);
+  const forgetSaved = useCallback(() => clearHomeReads(), []);
   const readers = useRef(new Set()).current;
   const [online, setOnline] = useState(() => navigator.onLine !== false);
   const [refreshing, setRefreshing] = useState(false);
@@ -94,8 +121,8 @@ export function PortalReadProvider({ enabled, children }) {
     wasLocked.current = locked;
   }, [locked, refresh]);
 
-  const value = useMemo(() => ({ enabled, cache, register, online, refreshing, refresh }),
-    [enabled, cache, register, online, refreshing, refresh]);
+  const value = useMemo(() => ({ enabled, cache: cache.current, register, online, refreshing, refresh, persistRead, forgetSaved }),
+    [enabled, register, online, refreshing, refresh, persistRead, forgetSaved]);
   return <PortalReadContext.Provider value={value}>{children}</PortalReadContext.Provider>;
 }
 
@@ -110,6 +137,8 @@ export default function usePortalRead(key, load) {
   const cache = portal?.enabled ? portal.cache : null;
   const register = portal?.enabled ? portal.register : null;
   const offline = portal?.enabled && !portal.online;
+  const persistRead = portal?.enabled ? portal.persistRead : undefined;
+  const forgetSaved = portal?.enabled ? portal.forgetSaved : undefined;
   const loadRef = useRef(load);
   loadRef.current = load;
   const sequence = useRef(0);
@@ -147,12 +176,13 @@ export default function usePortalRead(key, load) {
       if (sequence.current !== attempt) return;
       const next = { data, updatedAt: Date.now(), loading: false, pending: false, verified: navigator.onLine !== false, error: '' };
       cache?.set(key, next);
+      persistRead?.(key, next);
       setState(next);
     } catch (error) {
       if (sequence.current !== attempt) return;
       // An explicit access denial must not leave cached customer details behind.
       const denied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
-      if (denied) cache?.clear();
+      if (denied) { cache?.clear(); forgetSaved?.(); }
       setState(previous => ({
         ...previous,
         ...(denied ? { data: undefined, updatedAt: null } : {}),
@@ -164,7 +194,7 @@ export default function usePortalRead(key, load) {
     } finally {
       clearTimeout(timer);
     }
-  }, [cache, key]);
+  }, [cache, key, persistRead, forgetSaved]);
 
   useEffect(() => {
     void refresh();
@@ -178,9 +208,10 @@ export default function usePortalRead(key, load) {
       if (previous.data === undefined) return previous;
       const next = { ...previous, data: change(previous.data), error: '', loading: false, pending: false, verified: navigator.onLine !== false, updatedAt: Date.now() };
       cache?.set(key, next);
+      persistRead?.(key, next);
       return next;
     });
-  }, [cache, key]);
+  }, [cache, key, persistRead]);
 
   return { ...state, refresh, update, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
 }

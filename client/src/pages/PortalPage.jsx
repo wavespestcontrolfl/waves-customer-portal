@@ -8,6 +8,7 @@ import usePortalActivity from '../hooks/usePortalActivity';
 import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
+import { homeIdentityKey } from '../lib/homeSnapshot';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
 import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
@@ -2845,6 +2846,18 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   );
 }
 
+// A tab that shows money, plan or account settings waits for fresh data: while
+// the app is still showing its saved home screen (customerSaved) it renders
+// this note instead of anything built from the saved account.
+function AccountUpdatingNotice() {
+  return (
+    <section data-glass="card" role="status" style={{ padding: 20, marginBottom: 16, borderRadius: 14, color: B.glassNavy }}>
+      <h2 style={{ fontSize: 20, margin: '0 0 8px' }}>Updating…</h2>
+      <p style={{ fontSize: 16, lineHeight: 1.5, margin: 0 }}>We are loading your latest account details. This page will open as soon as they arrive.</p>
+    </section>
+  );
+}
+
 function SavedVisitDetails({ visits }) {
   if (!visits.length) return <p style={{ fontSize: 16 }}>No saved visits are available.</p>;
   return <ul style={{ paddingLeft: 20, fontSize: 16, lineHeight: 1.6 }}>
@@ -2890,7 +2903,7 @@ function rememberPetNameAskDone(customerId) {
   } catch { /* storage unavailable: the card hides for this visit to Home only */ }
 }
 
-function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
+function DashboardTab({ customer, accountSaved = false, onSwitchTab, onOpenPlanService, onOpenPets, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
   const dashboardSavedScope = properties.some((p) => p.key);
@@ -3173,9 +3186,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
     </>;
   }
 
-  const balanceReady = balanceStatus === 'ready' && !!balance;
-  const balancePending = balanceStatus === 'loading';
-  const balanceError = balanceStatus === 'error';
+  // Saved home screen (accountSaved): no balance and no pay action until the
+  // fresh account lands, even when the live balance read came back first.
+  const balanceReady = !accountSaved && balanceStatus === 'ready' && !!balance;
+  const balancePending = accountSaved || balanceStatus === 'loading';
+  const balanceError = !accountSaved && balanceStatus === 'error';
   const currentBalance = balanceReady ? Number(balance.currentBalance || 0) : 0;
   const hasBalance = balanceReady && currentBalance > 0;
   const nextDate = nextService ? parseDate(nextService.date) : null;
@@ -3212,7 +3227,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Text us', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
-    { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
+    { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing'), disabled: accountSaved },
     { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${Number.isInteger(referralReward) ? referralReward : referralReward.toFixed(2)} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
   return (
@@ -3270,7 +3285,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
           {/* Same glass chip as the quick actions — the opaque #FFF7ED panel
               read as a peach block over the hero. The amber label carries
               the "due" signal. */}
-          <button type="button" data-glass="chip" onClick={() => onSwitchTab?.('billing')} style={{
+          <button type="button" data-glass="chip" disabled={accountSaved} onClick={() => onSwitchTab?.('billing')} style={{
             minWidth: compact ? '100%' : 180,
             padding: '14px 16px',
             borderRadius: 8,
@@ -3431,7 +3446,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Billing, visits, and membership in one place.</div>
           <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
             {[
-              annualPrepay
+              accountSaved
+                ? { label: 'Billing', value: '...', sub: tierDiscountSub }
+                : annualPrepay
                 ? {
                     label: 'Billing',
                     value: annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid',
@@ -3475,7 +3492,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
           columns squeezed the chips to ~66px on 320-390px viewports. */}
       <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10 }}>
         {quickActions.map((item) => (
-          <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
+          <button key={item.label} type="button" onClick={item.action} disabled={item.disabled} data-glass="chip" style={dashboardActionCard}>
             <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
             <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.15 }}>{item.label}</div>
             {!compact && <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{item.sub}</div>}
@@ -18148,7 +18165,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
 const APP_RATING_ASK_DELAY_MS = 8000;
 
 export default function PortalPage() {
-  const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
+  const { customer, customerSaved = false, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
   const isMobileShell = useIsMobile(900);
   // C4: /auth/me reports `cancelled` for a churned account admitted under
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
@@ -18596,10 +18613,15 @@ export default function PortalPage() {
   };
   const shellMaxWidth = 760; // the document column (owner 2026-09-05, Customer Glass Contract D5)
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
+  // Saved home screen: Home, Visits, Documents and Learn read their own live
+  // data; every other tab (plan, billing, refer, property, messages) waits for
+  // the fresh account.
+  const accountHeld = customerSaved === true && !['dashboard', 'visits', 'documents', 'learn'].includes(activeTab);
 
   return (
     <PortalGlassContext.Provider value={true}>
-    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}>
+    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}
+      persistIdentity={cancelledAccount || contactSession ? null : homeIdentityKey(api.token)} persistProperty={activePropertyId}>
       {/* Always registered (codex #4207 r2): a gate rollback drops the client
           to profile mode, but the refresh token still forwards its property
           claim — when the gate returns, the next refresh must re-read the
@@ -18634,6 +18656,7 @@ export default function PortalPage() {
           <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2, overflowWrap: 'anywhere' }}>Customer Portal</div>
+            {customerSaved && <div role="status" data-testid="portal-updating" style={{ fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.3 }}>Updating…</div>}
           </div>
         </div>
         {/* Desktop tab nav moved out of this bar (owner 2026-07-09) — it now
@@ -19117,8 +19140,9 @@ export default function PortalPage() {
         )}
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && !contactSession && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
-        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} onOpenPets={() => navigate('/?tab=property#pets')} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} messagesEnabled={messagesGate.enabled} />}
+        {accountHeld && <AccountUpdatingNotice />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} accountSaved={customerSaved} onSwitchTab={switchTab} onOpenPlanService={openPlanService} onOpenPets={() => navigate('/?tab=property#pets')} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
+        {activeTab === 'plan' && !accountHeld && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} messagesEnabled={messagesGate.enabled} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the
@@ -19126,17 +19150,17 @@ export default function PortalPage() {
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={cancelledAccount || contactSession ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} onSwitchTab={switchTab} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} openAddCard={new URLSearchParams(location.search).get('add_card') === '1'} />}
-        {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
+        {activeTab === 'billing' && !accountHeld && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} onSwitchTab={switchTab} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} openAddCard={new URLSearchParams(location.search).get('add_card') === '1'} />}
+        {activeTab === 'refer' && !accountHeld && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
-        {activeTab === 'property' && (savedSecondarySelection
+        {activeTab === 'property' && !accountHeld && (savedSecondarySelection
           ? <PropertyProfileScopedNotice key={`property-notice-${propertyRenderKey}`} primaryEntry={profilePrimaryEntry} onSwitch={profilePrimaryEntry ? () => selectProperty(profilePrimaryEntry.id, { tab: 'property' }) : undefined} />
           : <PropertyTab key={`property-${propertyRenderKey}`} customer={customer}
             wateringPlanCustomerId={wateringPlanCustomerId}
             onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
           />)}
         {/* A deep link (a push tap) can land before the first probe answers: show the page unless the server said it is off. */}
-        {activeTab === 'messages' && !messagesGate.off && <PortalMessages onUnread={messagesGate.setUnread} />}
+        {activeTab === 'messages' && !accountHeld && !messagesGate.off && <PortalMessages onUnread={messagesGate.setUnread} />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} onOpenPhotoId={photoIdAvailable ? () => setShowPhotoId(true) : null} scope={{ currentEntry: activeProperty, savedScope: portalProperties.some((p) => p.key), selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable: refreshProperties }} />}
         </PortalRefreshArea>
       </main>

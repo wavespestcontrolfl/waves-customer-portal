@@ -3,6 +3,7 @@ import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 import { clearNativeBadge } from '../native/nativeBadge';
 import { endVisitCards } from '../native/visitCard';
+import { clearHomeSnapshot, clearSavedHome, readHomeSnapshot, snapshotEligible, writeHomeSnapshot } from '../lib/homeSnapshot';
 
 const AuthContext = createContext(null);
 
@@ -175,6 +176,16 @@ export function AuthProvider({ children }) {
     setSelectedProperty(null);
   };
   const [loading, setLoading] = useState(true);
+  // The customer on screen is the saved home screen (lib/homeSnapshot), not yet
+  // confirmed by /auth/me: no money, no payment actions, an "Updating…" note.
+  // Flips false when a fresh load lands or the session ends.
+  const [customerSaved, setCustomerSaved] = useState(false);
+  // Delete the saved home screen and stop showing it. Every identity or
+  // session boundary below calls this; refs and setters only, so stable.
+  const dropSavedHome = useCallback(() => {
+    clearSavedHome();
+    setCustomerSaved(false);
+  }, []);
   const [error, setError] = useState(null);
   const retryTimer = useRef(null);
   // Property-list reads race: loadCustomer's read, refreshProperties (the
@@ -204,8 +215,21 @@ export function AuthProvider({ children }) {
     const token = localStorage.getItem('waves_token');
     if (token) {
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
+      // Weak signal: paint the last saved home screen at once when it belongs
+      // to THIS login (same customer, session family, property, actor; under
+      // 30 days old). It is part of this mount's epoch: loadCustomer below
+      // replaces it, or a 401/403 deletes it and signs out.
+      const saved = readHomeSnapshot(token);
+      if (saved) {
+        customerRef.current = saved.customer;
+        setCustomer(saved.customer);
+        adoptPropertyPayload(saved.properties);
+        setCustomerSaved(true);
+        setLoading(false);
+      }
       loadCustomer();
     } else {
+      clearSavedHome();
       void clearNativeBadge();
       setLoading(false);
     }
@@ -281,6 +305,9 @@ export function AuthProvider({ children }) {
       if (!sessionMountsBell(data)) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
+      setCustomerSaved(false);
+      // A cancelled or contact session has a narrower screen that is never saved.
+      if (!snapshotEligible(data)) clearHomeSnapshot();
       const propertyReadSeq = ++propertyReadSeqRef.current;
       try {
         const propertyData = await api.getAuthProperties({ scope: 'saved' });
@@ -289,6 +316,8 @@ export function AuthProvider({ children }) {
         if (propertyReadSeqRef.current === propertyReadSeq) {
           adoptPropertyPayload(propertyData);
           setPropertiesError(null);
+          // Save this account for the next weak-signal start (money stripped).
+          writeHomeSnapshot({ token: api.token, me: data, propertyPayload: propertyData });
         }
       } catch (propertyErr) {
         // Same staleness rule as the success path: if the session changed
@@ -330,6 +359,7 @@ export function AuthProvider({ children }) {
         // customer and undo this sign-out.
         setSessionEpoch(++sessionEpochRef.current);
         api.clearTokens();
+        dropSavedHome();
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
@@ -355,7 +385,7 @@ export function AuthProvider({ children }) {
       return;
     }
     setLoading(false);
-  }, []);
+  }, [dropSavedHome]);
 
   // Cross-tab session sync. Logout in tab A only clears tab B's localStorage —
   // tab B's in-memory api.token kept working until its next 401. React to the
@@ -376,6 +406,7 @@ export function AuthProvider({ children }) {
       if (!token) {
         setSessionEpoch(++sessionEpochRef.current);
         api.clearTokens();
+        dropSavedHome();
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
@@ -405,7 +436,11 @@ export function AuthProvider({ children }) {
       // BEFORE the switch must not land afterwards and paint the previous
       // selection — so it counts as an identity transition for the epoch.
       const propertyChanged = tokenPropertyId(api.token) !== tokenPropertyId(token);
-      if (familyChanged || propertyChanged) setSessionEpoch(++sessionEpochRef.current);
+      if (familyChanged || propertyChanged) {
+        setSessionEpoch(++sessionEpochRef.current);
+        // The saved home screen is bound to the old session family.
+        clearSavedHome();
+      }
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (propertyChanged && !identityChanged) {
         // The previous selection is gone the moment the token changes, and
@@ -417,6 +452,7 @@ export function AuthProvider({ children }) {
         // honored (/auth/me propertyScope, then the list), and its retry
         // branch keeps the shell pending on failure.
         setSelectedProperty(null);
+        dropSavedHome();
         customerRef.current = null;
         setCustomer(null);
         setLoading(true);
@@ -426,6 +462,7 @@ export function AuthProvider({ children }) {
         // keep rendering (and firing actions) against it while loadCustomer
         // is in flight or retrying. Same go-pending pattern as switchProperty;
         // a same-customer refresh skips this so working tabs don't flash.
+        dropSavedHome();
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
@@ -438,7 +475,7 @@ export function AuthProvider({ children }) {
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
-  }, [loadCustomer]);
+  }, [loadCustomer, dropSavedHome]);
 
   const sendCode = async (phone) => {
     setError(null);
@@ -463,6 +500,7 @@ export function AuthProvider({ children }) {
       if (sessionEpochRef.current !== epoch) return false;
       setSessionEpoch(++sessionEpochRef.current);
       api.setTokens(data.token, data.refreshToken);
+      dropSavedHome();
       resetPropertyScope();
       setProperties(data.properties || []);
       setPropertiesError(null);
@@ -482,6 +520,9 @@ export function AuthProvider({ children }) {
     // — without this, a delayed switch response re-writes tokens after
     // sign-out and walks the user back into the portal.
     setSessionEpoch(++sessionEpochRef.current);
+    // The saved home screen goes now, not when the bounded native cleanup
+    // below finally clears the tokens.
+    dropSavedHome();
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -575,6 +616,8 @@ export function AuthProvider({ children }) {
       if (sessionEpochRef.current !== epoch) return false;
       setSessionEpoch(++sessionEpochRef.current);
       api.setTokens(data.token, data.refreshToken);
+      // A different property is a different saved screen.
+      dropSavedHome();
       // Re-point this device's push subscription at the newly selected
       // customer — otherwise pushes keep flowing to the previous property.
       // (The subscription follows the customer ROW; a same-profile saved-
@@ -616,6 +659,7 @@ export function AuthProvider({ children }) {
       propertyScope,
       selectedProperty,
       loading,
+      customerSaved,
       error,
       isAuthenticated: !!customer,
       // Contact session (GATE_CONTACT_LOGIN): an on-location contact signed
