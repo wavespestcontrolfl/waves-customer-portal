@@ -125,17 +125,17 @@ const MATCH_RULES = [
   // entries, never a trap reset. Not named *_followup: followupVisitMatch takes the program's one *_followup rule.
   {
     programKey: 'rodent',
-    visit: 1,
+    visit: 7,
     reason: 'rodent_exclusion_recheck',
     // A follow-up booked from an exclusion visit carries its name: the re-inspection, never the sealing card again.
     followupOf: ['rodent_exclusion'],
     terms: ['rodent exclusion follow up', 'rodent exclusion followup', 'exclusion follow up', 'exclusion followup'],
   },
-  // The combined service ("Rodent Exclusion & Trapping Service", key rodent_exclusion) seals and places traps: its card is the
-  // exclusion card, and a follow-up of it is a trap check (above), never the exclusion re-inspection.
+  // The combined service ("Rodent Exclusion & Trapping Service", key rodent_exclusion) seals, then traps the rats left inside: its
+  // own card, and a follow-up of it is a trap check (above), never the exclusion re-inspection.
   {
     programKey: 'rodent',
-    visit: 3,
+    visit: 6,
     reason: 'rodent_exclusion_trapping',
     serviceKeys: ['rodent_exclusion', 'rodent_trapping_exclusion', 'rodent_trapping_exclusion_sanitation'],
     terms: ['exclusion & trapping', 'exclusion and trapping', 'trapping & exclusion', 'trapping and exclusion', 'trapping + exclusion'],

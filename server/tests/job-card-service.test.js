@@ -2887,6 +2887,11 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     const setup = await card({ serviceType: 'Rodent Trapping Service', serviceKey: 'rodent_trapping' });
     expect([setup.visit.visit, setup.lines]).toEqual([2, []]);
     expect(setup.procedure.steps.join(' ')).toMatch(/up to 8 Victor M326/);
+    // A trapping visit places no bait: the outdoor bait is the bait-station service's own card.
+    expect([...setup.procedure.steps, ...setup.procedure.conditional].join(' ')).not.toMatch(/Tomcat|bromethalin|Contrac/i);
+    // The combined service seals, then traps: steps only, no Victor product line.
+    const combined = await card({ serviceType: 'Rodent Exclusion & Trapping Service', serviceKey: 'rodent_exclusion' });
+    expect([combined.visit.visit, combined.lines, combined.procedure.steps[0]]).toEqual([6, [], 'Rodent Exclusion & Trapping']);
     // Sanitation keeps no card.
     expect((await card({ serviceType: 'Rodent Sanitation — Light', serviceKey: 'rodent_sanitation_light' })).visit).toBeNull();
   });
@@ -2902,7 +2907,7 @@ describe('rodent trap work: steps only, with the safety rules', () => {
     expect(baitFollow.procedure.conditional).toContain('Outdoors when activity is unclear: non-toxic monitoring blocks in a locked station first, no rodenticide');
     // A follow-up booked from an exclusion visit (it keeps that name) re-inspects: the traps came out at exclusion.
     const exclusionFollow = await card({ serviceType: 'Rodent Exclusion Service', serviceKey: 'rodent_exclusion_only', isFollowup: true });
-    expect(exclusionFollow.visit.visit).toBe(1);
+    expect([exclusionFollow.visit.visit, exclusionFollow.procedure.steps[0]]).toEqual([7, 'Rodent Exclusion Re-inspection']);
     expect((await card({ serviceType: 'Rodent Exclusion Service', serviceKey: 'rodent_exclusion_only' })).visit.visit).toBe(3);
     // The combined service places traps: its follow-up is a trap check.
     const combinedFollow = await card({ serviceType: 'Rodent Exclusion & Trapping Service', serviceKey: 'rodent_exclusion', isFollowup: true });
