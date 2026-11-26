@@ -1949,15 +1949,16 @@
       {
         "visit": 5,
         "month": "Any",
-        "primary": "Rodent monitoring / bait\nInspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries\nRodenticide blocks in tamper-resistant stations where label allows\nSnap traps in attic/garage when activity is active",
+        "primary": "Rodent monitoring / bait\nInspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries\nOutdoors at a home: bromethalin bait in a locked, anchored station (a second-generation bait at commercial sites only)\nSnap traps in the attic only, spread apart, screwed or tied down, when activity is active",
         "secondary": "Document exclusion findings with photos\nEscalate seal-up proposal when entry points are active\nRemove carcasses and reset traps on follow-up",
         "lineMeta": {
-          "Rodenticide blocks in tamper-resistant stations where label allows": {
+          "Outdoors at a home: bromethalin bait in a locked, anchored station (a second-generation bait at commercial sites only)": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Contrac Blox"
-            ]
+              "Tomcat Bait Chunx with Bromethalin"
+            ],
+            "completionApplicationMethod": "bait_placement"
           }
         },
         "material_cost": "inventory",
@@ -1984,22 +1985,25 @@
   "rodent": {
     "name": "Rodent Control Protocol",
     "notes": [
-      "Rodent service is inspection-led. Confirm activity, entry points, sanitation pressure, and access before promising remediation.",
-      "Baiting without exclusion is monitoring, not a rodent-free structural warranty.",
-      "Use tamper-resistant stations for exterior rodenticide placements and document station count, location, and follow-up cadence."
+      "Rodent service is inspection-led: find and photograph the entry points first. Traps and bait show where rats come from; exclusion is what ends it. Only a fully excluded home gets a guarantee.",
+      "Trapping is attic only, 8 traps at most, spread apart, never bunched: the traps that catch show which side the rats come in, and that leads to the entry points (owner 2026-11-23).",
+      "Trap checks happen only when the customer reports a sound or a dead-rat smell (owner 2026-11-23). The exclusion visit is the last trap check: every trap comes out then.",
+      "Bait at homes is Tomcat Bromethalin in a locked EVO station. Contrac Blox (a second-generation bait that kills owls and pets that eat the rats) is for commercial sites only. No glue boards.",
+      "Wildlife (raccoons, opossums, squirrels, bats) is referred out. Waves keeps the seal-up work after the animal is gone."
     ],
     "safety_rules": [
-      "Use tamper-resistant stations for exterior bait.",
-      "Do not place rodenticide where children, pets, wildlife, or non-target animals can access it.",
-      "Photo-document entry points before quoting exclusion.",
-      "Separate trapping, baiting, exclusion, and sanitation recommendations in notes."
+      "Nitrile gloves for every trap and every rat: leptospirosis, rat-bite fever, and hantavirus in Florida cotton rats.",
+      "Spray a dead rat and its droppings with 1 part bleach to 9 parts water, wait 5 minutes, then double-bag. Never sweep or vacuum dry droppings.",
+      "Heavy sanitation needs a P100 half-mask, not an N95, and the wearer needs a fit test first.",
+      "Outdoors: never an open snap trap, and never a glue board. Bait only in a locked, anchored station, out of reach of children and pets.",
+      "Check for bats before sealing any entry point."
     ],
     "visits": [
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Rodent Inspection / Activity Assessment\nInspect attic, garage, roof returns, soffits, AC chase, utility penetrations, doors, weep gaps, and exterior perimeter\nDocument droppings, rub marks, gnawing, nesting, odor, sounds, food sources, and water sources\nPhotograph active or potential entry points",
-        "secondary": "Classify as monitoring, trapping, baiting, exclusion, or sanitation follow-up\nSet temporary monitors only when activity is unclear\nQuote exclusion separately when entry points are active",
+        "primary": "Rodent Inspection / Activity Assessment\nInspect top down: roof-wall gaps, soffit returns, tile eave gaps, vents, AC line chases, garage door corners and pipe holes\nA gap over 1/2 in lets a rat in; over 1/4 in, a mouse\nPhotograph and number every entry point: this is the exclusion quote\nLook for droppings, rub marks, gnawing, nesting, sounds and smells; note food and water sources",
+        "secondary": "Check for bats before quoting any sealing\nAsk about peanut allergies in the home before trapping\nQuote exclusion separately; refer wildlife out",
         "material_cost": "inspection",
         "labor_cost": "inspection",
         "tiers": {
@@ -2008,24 +2012,28 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Do not start with bait alone when active interior activity suggests a structural entry issue."
+        "notes": "Do not start with bait alone when active interior activity points to an open entry. About 25 to 35 minutes."
       },
       {
         "visit": 2,
         "month": "Any",
-        "primary": "Trap / Bait Station Setup\nInstall tamper-resistant exterior bait stations where label and site conditions allow\nSet snap traps or mechanical traps in attic, garage, or utility zones when active interior movement is present\nMap station and trap locations",
-        "secondary": "Use non-toxic monitors when risk, access, or customer preference blocks rodenticide\nRecord bait type, station count, trap count, and placement areas\nSchedule follow-up based on activity and customer access",
+        "primary": "Rodent Trapping Setup\nAttic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched\nSet each on a top plate, joist, rafter, pipe or beam with rub marks or droppings; screw or zip-tie every trap\nOn a floor or ledge: the trap at a right angle to the wall, trigger end against it\nBait each trap with a pea-size amount: rotate peanut butter, nut meat, raisin or prune; hazelnut spread or dried fruit if anyone has a peanut allergy\nMap each trap (A1 to A8) and photograph it in place",
+        "secondary": "Outdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station. Use non-toxic blocks first when activity is unclear\nNo glue boards, and no open snap trap outdoors\nTell the customer: nobody goes into the attic, no children or pets near the traps, and call us on a snap or a dead-rat smell",
         "lineMeta": {
-          "Install tamper-resistant exterior bait stations where label and site conditions allow": {
+          "Attic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched": {
+            "scope": "interior",
+            "treatmentApplied": false,
+            "catalogProductHints": [
+              "Victor Expanded Trigger Rat Snap Trap"
+            ]
+          },
+          "Outdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station. Use non-toxic blocks first when activity is unclear": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Contrac Blox"
-            ]
-          },
-          "Set snap traps or mechanical traps in attic, garage, or utility zones when active interior movement is present": {
-            "scope": "interior",
-            "treatmentApplied": false
+              "Tomcat Bait Chunx with Bromethalin"
+            ],
+            "completionApplicationMethod": "bait_placement"
           }
         },
         "material_cost": "inventory",
@@ -2036,13 +2044,16 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Exterior bait stations manage pressure. Interior activity still requires trapping and entry-point work."
+        "notes": "Trap count, placement and sealing the entries matter more than the bait. Checks come only on the customer's report.",
+        "completionDefaultProducts": [
+          "Victor Expanded Trigger Rat Snap Trap"
+        ]
       },
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Exclusion / Entry-Point Repair\nSeal approved entry points with rodent-resistant materials\nPrioritize roof returns, AC line sets, utility penetrations, gaps at doors, soffits, vents, and garage transitions\nConfirm no active trapping conflict before sealing major pathways",
-        "secondary": "Do not seal animals into occupied voids\nFlag inaccessible or declined repairs in the customer note\nRecommend sanitation or landscape trimming when pressure is recurring",
+        "primary": "Exclusion / Entry-Point Repair\nSeal every numbered entry with 1/4 in galvanized hardware cloth, sheet metal, copper mesh with sealant, or mortar at tile eaves\nFoam alone, chicken wire and steel wool (it rusts) are not exclusion\nFinal trap check: remove every trap, log the catches by trap (A1 to A8), and take out the trap map",
+        "secondary": "Check for bats and live animals before sealing: never seal an animal into an occupied void\nFlag inaccessible or declined repairs in the customer note\nRecommend sanitation or trimming when pressure is recurring",
         "material_cost": "materials",
         "labor_cost": "scope",
         "tiers": {
@@ -2051,13 +2062,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Exclusion is a separate scope unless the estimate explicitly includes it."
+        "notes": "The exclusion visit is the last trap check (owner 2026-11-25, D15a). Exclusion is a separate scope unless the estimate includes it."
       },
       {
         "visit": 4,
         "month": "Any",
-        "primary": "Follow-Up / Monitoring\nCheck and refresh stations or traps\nRemove captured rodents or carcasses when accessible\nReinspect sealed areas and active pathways\nUpdate activity level and customer-facing status",
-        "secondary": "If activity persists, identify missed access, food/water pressure, or sanitation source\nReset cadence until activity drops to monitoring level\nEscalate structural or wildlife issue if evidence does not match standard rodent pressure",
+        "primary": "Rodent Trap Check (on the customer's report)\nRemove each catch with nitrile gloves: spray 1 part bleach to 9 parts water, wait 5 minutes, double-bag\nRe-bait and reset each sprung trap\nLog which traps caught (A1 to A8)",
+        "secondary": "Repeat catches on one side mean an entry is still open: quote exclusion\nIf activity does not match rats or mice, refer wildlife out\nTrap-only retainer: the same numbered 8-trap check, with the catch map",
         "material_cost": "inventory",
         "labor_cost": "follow_up",
         "tiers": {
@@ -2066,7 +2077,43 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "A clean follow-up should say what changed: station activity, trap captures, new evidence, sealed gaps, and next cadence."
+        "notes": "A check visit comes only on the customer's report of a sound or a smell (owner 2026-11-23). Say what changed: catches by trap, new evidence, entries found."
+      },
+      {
+        "visit": 5,
+        "month": "Any",
+        "primary": "Rodent Bait Station Service\nOutdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station. Use non-toxic blocks first when activity is unclear\nCheck each station: lock, anchor, bait eaten, droppings; replace the bait and log the station count",
+        "secondary": "Commercial sites only: Contrac Blox in locked, anchored stations\nInspect the exterior for new entry points; quote exclusion when they are active",
+        "lineMeta": {
+          "Outdoors at a home: Tomcat Bromethalin bait chunks in a locked, anchored EVO station. Use non-toxic blocks first when activity is unclear": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Tomcat Bait Chunx with Bromethalin"
+            ],
+            "completionApplicationMethod": "bait_placement"
+          },
+          "Commercial sites only: Contrac Blox in locked, anchored stations": {
+            "scope": "exterior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Contrac Blox"
+            ],
+            "completionApplicationMethod": "bait_placement"
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "standard",
+        "tiers": {
+          "bronze": false,
+          "silver": false,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "Bait stations manage outdoor pressure; interior activity still needs trapping and exclusion. Homes get Tomcat Bromethalin, never Contrac (owner 2026-11-25, D15b).",
+        "completionDefaultProducts": [
+          "Tomcat Bait Chunx with Bromethalin"
+        ]
       }
     ]
   },

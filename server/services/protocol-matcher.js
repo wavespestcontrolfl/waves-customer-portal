@@ -100,11 +100,18 @@ const MATCH_RULES = [
     reason: 'cockroach_control',
     terms: ['cockroach', 'roach'],
   },
+  // A trap check (owner 2026-11-23: only on the customer's report of a sound or a smell): every follow-up, an added check, and each
+  // trap-only retainer visit (the numbered 8-trap check with the catch map). The catalog key routes a retainer whose name says no rodent.
   {
     programKey: 'rodent',
     visit: 4,
     reason: 'rodent_followup',
+    serviceKeys: [
+      'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',
+      'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
+    ],
     terms: [
+      'trap check',
       'rodent exclusion follow up',
       'rodent exclusion followup',
       'rodent trapping follow up',
@@ -121,11 +128,20 @@ const MATCH_RULES = [
     reason: 'rodent_exclusion',
     terms: ['exclusion', 'seal up', 'seal-up', 'entry point', 'entry points'],
   },
+  // Outdoor bait stations: their own card (Tomcat Bromethalin at homes, Contrac at commercial sites; owner 2026-11-25, D15b), never the
+  // attic trapping card and its Victor trap default.
+  {
+    programKey: 'rodent',
+    visit: 5,
+    reason: 'rodent_bait_station',
+    serviceKeys: ['rodent_bait_quarterly', 'rodent_bait_setup'],
+    terms: ['rodent bait', 'rat bait', 'mouse bait', 'bait station', 'rodent station', 'rodent monitoring'],
+  },
   {
     programKey: 'rodent',
     visit: 2,
     reason: 'rodent_trapping_baiting',
-    terms: ['rodent bait', 'rat bait', 'mouse bait', 'bait station', 'rodent station', 'rodent trap', 'rat trap', 'mouse trap', 'rodent monitoring'],
+    terms: ['rodent trap', 'rat trap', 'mouse trap'],
   },
   {
     programKey: 'rodent',

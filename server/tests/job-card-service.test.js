@@ -2312,12 +2312,12 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect([misting.lines, misting.note]).toEqual([[], 'No treatment protocol for this service (mosquito)']);
     const mistingAddon = await run({ addons: [{ name: 'Mosquito Misting System Service', category: 'mosquito', serviceKey: 'mosquito_misting_system' }] });
     expect(mistingAddon.addons).toMatchObject([{ name: 'Mosquito Misting System Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (mosquito)' }]);
-    // The bait-station services keep the program: the trap-only add-on gets no Contrac Blox line, the quarterly bait service does (r9 P1).
-    const rodentProtocols = { ...protocols, rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }, { visit: 2, month: 'Any', primary: 'Install exterior bait stations — Contrac Blox\nSet snap traps in attic zones' }] } };
+    // The bait-station services keep the program: the trap-only add-on gets no Contrac Blox line, the quarterly bait service does (r9 P1), from its own bait-station card (visit 5).
+    const rodentProtocols = { ...protocols, rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }, { visit: 2, month: 'Any', primary: 'Set snap traps in attic zones' }, { visit: 5, month: 'Any', primary: 'Install exterior bait stations — Contrac Blox' }] } };
     const rodent = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: 'Rodent Trapping Service', category: 'rodent', serviceKey: 'rodent_trapping' }, { name: 'Quarterly Rodent Bait Station Service', category: 'rodent', serviceKey: 'rodent_bait_quarterly' }] }, protocols: rodentProtocols, catalog: [...catalog, { id: 'blox', name: 'Contrac Blox' }], dbh: () => ({}) });
     expect(rodent.addons).toMatchObject([
       { name: 'Rodent Trapping Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (rodent)' },
-      { name: 'Quarterly Rodent Bait Station Service', products: 1, visit: { number: 2, month: 'Any' }, note: null },
+      { name: 'Quarterly Rodent Bait Station Service', products: 1, visit: { number: 5, month: 'Any' }, note: null },
     ]);
     const mechanicalAddon = await run({ addons: [{ name: 'Lawn Dethatching', category: 'lawn_care', serviceKey: 'dethatching' }, { name: 'Lawn Care', category: 'lawn_care', serviceKey: 'lawn_care_recurring' }, { name: 'Rodent Sanitation — Light', category: 'rodent', serviceKey: 'rodent_sanitation_light' }] });
     expect(mechanicalAddon.addons).toEqual([
