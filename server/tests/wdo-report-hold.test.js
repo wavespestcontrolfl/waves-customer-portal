@@ -68,6 +68,7 @@ jest.mock('../services/sms-template-renderer', () => ({
 }));
 jest.mock('../services/project-email', () => ({
   dispatchBoundaryCheck: jest.fn(async () => true),
+  reportEmailSuppressed: jest.fn(async () => false),
   PREP_TEMPLATE_BY_PROJECT_TYPE: {},
   resolveProjectEmailRecipient: jest.fn((customer = {}) => ({
     email: customer.email || '',
@@ -141,6 +142,7 @@ jest.mock('../services/pdf/addendum-photo', () => ({
 jest.mock('../services/project-completion', () => ({
   buildProjectCloseoutPreview: jest.fn(async () => null),
   completeProjectBackedService: jest.fn(async () => ({})),
+  completionTechnicianNotes: jest.requireActual('../services/project-completion').completionTechnicianNotes,
   resolveProjectPortalAttachment: jest.fn(async () => ({
     portalAttached: false,
     portalAttachReason: 'policy_not_met',
@@ -2014,6 +2016,8 @@ describe('audit fixes', () => {
       expect(srWrites).toHaveLength(1);
       // the release-time portal decision, not the closeout's "not attached" (the report was unsent then)
       expect(srWrites[0].structured_notes.sql).toMatch(/'portalAttached', \?::boolean, 'projectReport', jsonb_build_object/);
+      // ...and the paid report's recommendations join the note the held completion wrote without them
+      expect(srWrites[0].technician_notes.sql).toBe('CASE WHEN technician_notes IS NOT DISTINCT FROM ? THEN ? ELSE technician_notes END');
       const [attached, token, url, tokenOnly] = srWrites[0].structured_notes.bindings;
       expect(token).toBe('tok-1');
       expect(tokenOnly).toBe(!attached);
@@ -2424,7 +2428,7 @@ describe('audit fixes', () => {
       const claim = (updates.invoices || []).find((u) => u.status === 'sending');
       expect(String(claim.due_date?.sql || '')).toContain('AND due_date < ?::date THEN ?::date ELSE due_date END');
       const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
-      expect(source).toContain('.where((q) => { if (invoiceClaimToken) q.where({ status: previousInvoiceStatus }); })');
+      expect(source).toContain('.where((q) => { if (hold.active) q.where({ status: previousInvoiceStatus }); })');
       // the fingerprint confirms the due date the first delivery carries
       expect(source).toContain("require('../services/invoice-helpers').firstDeliveryDueDateOf(inv, etDateString()),");
     });
@@ -2514,6 +2518,61 @@ describe('audit fixes', () => {
         const res = await post(baseUrl, SEND_WITH_INVOICE(), heldResendBodyFor());
         expect(res.status).toBe(409);
         expect((await res.json()).code).toBe('hold_invoice_changed');
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+    });
+
+    test('the release publishes only while the project keeps the customer and invoice its email verified', async () => {
+      const { updates } = mockTables({
+        project: wdoProject({ report_hold_status: 'held' }),
+        invoice: invoiceRow({ status: 'paid' }),
+        // an account merge moved the project after the email: the fenced finalize writes nothing
+        projectUpdateResult: (u) => (u.report_hold_status === 'released' ? 0 : 1),
+      });
+      const base = db.getMockImplementation();
+      const finalizeWheres = [];
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'projects') {
+          const where = c.where;
+          c.where = jest.fn((arg) => { finalizeWheres.push(arg); return where.call(c, arg); });
+        }
+        return c;
+      });
+      const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(result.released).not.toBe(true);
+      expect(finalizeWheres).toContainEqual({ customer_id: 'customer-1', invoice_id: 'inv-1' });
+      // still held, and the emailed link is taken back
+      const reverted = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(reverted).toBeTruthy();
+      expect(reverted.report_token).toBeNull();
+    });
+
+    test('a plain combined send claims the invoice with its own token, and gives back only that claim', async () => {
+      const { updates } = mockTables({ project: wdoProject({ invoice_id: 'inv-1' }) });
+      ProjectEmail.sendProjectReportWithInvoice.mockResolvedValueOnce({ ok: false, deliveryOutcome: 'not_sent', error: 'down' });
+      sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, error: 'down' });
+      await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), {}); });
+      expect(ProjectEmail.sendProjectReportWithInvoice).toHaveBeenCalled();
+      const invoiceUpdates = updates.invoices || [];
+      expect(invoiceUpdates[0]).toEqual(expect.objectContaining({ status: 'sending', send_claim_token: INVOICE_CLAIM }));
+      expect(invoiceUpdates.some((u) => u.status !== 'sending' && u.send_claim_token === null)).toBe(true);
+    });
+
+    test('a held completion keeps the recommendations out of the visit note until the paid release', () => {
+      const { completionTechnicianNotes } = jest.requireActual('../services/project-completion');
+      const project = wdoProject({ title: 'WDO inspection', recommendations: 'Treat the garage door frame.' });
+      expect(completionTechnicianNotes(project, { reportHeld: true })).not.toMatch(/garage door frame/);
+      expect(completionTechnicianNotes(project)).toMatch(/Treat the garage door frame/);
+    });
+
+    test('a hold is refused when the report address is on the email suppression list', async () => {
+      ProjectEmail.reportEmailSuppressed.mockResolvedValueOnce(true);
+      mockTables();
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        expect(res.status).toBeGreaterThanOrEqual(400);
+        expect(JSON.stringify(await res.json())).toMatch(/accepts email/);
       });
       expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
     });

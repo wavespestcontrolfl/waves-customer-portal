@@ -62,6 +62,7 @@ const { resolveProjectReportPreviewFields } = require('../services/service-repor
 const {
   buildProjectCloseoutPreview,
   completeProjectBackedService,
+  completionTechnicianNotes,
   resolveProjectPortalAttachment,
 } = require('../services/project-completion');
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
@@ -4278,7 +4279,12 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep', a
       return { ...reverted, channels: sent.channels };
     }
 
-    const finalized = await finalizeHeldRelease({ project, projectCols, ownClaim, channels: sent.channels, customer: ctx.customer, wdoFiling: pdf.wdoFiling, source, portalAttached: link.portalAttached, link });
+    const finalized = await finalizeHeldRelease({ project, projectCols, ownClaim, channels: sent.channels, customer: ctx.customer, invoice, wdoFiling: pdf.wdoFiling, source, portalAttached: link.portalAttached, link });
+    // Still our claim, but the project moved to another customer or invoice after the email: the report stays hidden,
+    // its link is taken back, and a person looks (a counted attempt rings the bell).
+    if (!finalized && await db('projects').where(ownClaim).first('id')) {
+      return revertToHeld('The customer or invoice changed while the report was being sent, so it was not published. Check the account, then press Send report.', { unmintToken: true });
+    }
     if (!finalized) {
       logger.error(`[projects] hold release finalize fenced off for ${projectId}: claim superseded, outcome not recorded`);
       return { released: false, reason: 'claim_superseded' };
@@ -4429,7 +4435,9 @@ async function heldReleaseBlocker(project, customer, { readinessChecked = false,
   // ...and the address-wide rule the email's handoff applies (every contact slot sharing that address): a recipient it
   // would stop never passes here, so a paid release is not blocked on every attempt. Unreadable refuses.
   const accepted = emailRecipient?.email
-    && await ProjectEmail.dispatchBoundaryCheck({ recipient: emailRecipient, customerId: customer?.id, database }).catch(() => false);
+    && await ProjectEmail.dispatchBoundaryCheck({ recipient: emailRecipient, customerId: customer?.id, database }).catch(() => false)
+    // ...and the report email's suppression list (a bounced or unsubscribed address would never get the paid report).
+    && !(await ProjectEmail.reportEmailSuppressed(emailRecipient.email, database).catch(() => true));
   return accepted ? null : 'No email on file that accepts email, the FDACS-13645 PDF is delivered by email';
 }
 
@@ -4546,6 +4554,11 @@ async function restoreHeldVisitReportLink(project, reportPath, portalAttached, d
         "coalesce(structured_notes, '{}'::jsonb) || jsonb_build_object('portalAttached', ?::boolean, 'projectReport', jsonb_build_object('token', ?::text, 'url', ?::text, 'tokenOnly', ?::boolean))",
         [Boolean(portalAttached), project.report_token, portalAttached ? (reportPath || null) : null, !portalAttached],
       ),
+      // The paid report's recommendations join the visit note the held completion wrote without them (a note
+      // someone has since edited is left as it is).
+      technician_notes: db.raw('CASE WHEN technician_notes IS NOT DISTINCT FROM ? THEN ? ELSE technician_notes END', [
+        completionTechnicianNotes(project, { reportHeld: true }), completionTechnicianNotes(project),
+      ]),
     });
 }
 
@@ -4873,19 +4886,21 @@ function finalizedDeliveryStatus(channels, customer) {
 
 // The release and the visit history link commit together: a stop or an error between them rolls both back, so the
 // release runs again (the email, copies and text are once-only by key and mark) and writes both.
-async function finalizeHeldRelease({ project, projectCols, ownClaim, channels, customer, wdoFiling, source, portalAttached = false, link = null }) {
+async function finalizeHeldRelease({ project, projectCols, ownClaim, channels, customer, invoice, wdoFiling, source, portalAttached = false, link = null }) {
   const filingAppend = wdoFiling && projectCols.wdo_sent_filings
     ? { wdo_sent_filings: db.raw("coalesce(wdo_sent_filings, '[]'::jsonb) || ?::jsonb", [JSON.stringify([wdoFiling])]) }
     : {};
   return db.transaction(async (trx) => {
-    const written = await finalizeHeldReleaseRow(trx, { project, projectCols, ownClaim, channels, customer, source, portalAttached, filingAppend });
+    const written = await finalizeHeldReleaseRow(trx, { project, projectCols, ownClaim, channels, customer, invoice, source, portalAttached, filingAppend });
     if (written && link) await restoreHeldVisitReportLink(link.refreshed, link.reportPath, portalAttached, trx);
     return written;
   });
 }
 
-function finalizeHeldReleaseRow(trx, { project, projectCols, ownClaim, channels, customer, source, portalAttached, filingAppend }) {
-  return trx('projects').where(ownClaim).update({
+function finalizeHeldReleaseRow(trx, { project, projectCols, ownClaim, channels, customer, invoice, source, portalAttached, filingAppend }) {
+  // ...and only while the project still belongs to the customer and the invoice the email's handoff verified: an
+  // account merge after the handoff must never publish the old recipient's link under the new owner.
+  return trx('projects').where(ownClaim).where({ customer_id: customer.id, invoice_id: invoice.id }).update({
     status: SENT_UNLESS_CLOSED(),
     sent_at: project.sent_at || db.fn.now(),
     last_delivery_at: db.fn.now(),
@@ -5718,21 +5733,16 @@ async function heldInvoiceEmailRecipient(customer, invoice) {
 // closeout); the office bell asks staff to check with the customer. A first delivery parks the invoice for review the
 // way a stale send is (still payable from the link the customer may hold, so payment still releases the report). An
 // invoice already sent (sent, viewed, overdue) keeps its status: its earlier delivery still stands.
-// A held send's invoice claim: its own token, and the first-delivery due date (a draft past its due day goes out due
-// on the send day, as every first send does). It claims only the status this request read, so the rollback and the
-// unknown-outcome park restore the status it really had. A plain send claims as before.
-function heldInvoiceClaimFields(claimToken) {
-  return claimToken
-    ? { send_claim_token: claimToken, due_date: require('../services/invoice-helpers').firstDeliveryDueDate(db, etDateString()) }
-    : {};
+// A held send's invoice claim also takes the first-delivery due date (a draft past its due day goes out due on the send
+// day, as every first send does), and claims only the status this request read, so the rollback and the
+// unknown-outcome park restore the status it really had.
+function heldInvoiceClaimFields(hold) {
+  return hold.active ? { due_date: require('../services/invoice-helpers').firstDeliveryDueDate(db, etDateString()) } : {};
 }
 
-// The combined send's invoice claim: a held send's claim carries its own token (see the claim), a plain send's none.
+// The combined send's invoice claim, owned by its token.
 function invoiceClaimWhere(id, claimToken) {
-  return { id, status: 'sending', ...(claimToken ? { send_claim_token: claimToken } : {}) };
-}
-function invoiceClaimRelease(claimToken) {
-  return claimToken ? { send_claim_token: null } : {};
+  return { id, status: 'sending', send_claim_token: claimToken };
 }
 
 async function settleUnverifiedHeldInvoice(invoice, previousInvoiceStatus, claimToken) {
@@ -5925,6 +5935,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
             await trx('invoices').where({ id: claimedInvoice.id }).update({
               credit_applied: Math.max(0, round2(round2(locked.credit_applied || 0) - reverseAmt)),
               status: claimedInvoice.previousStatus,
+              // this send's own claim token goes with the claim it gives back (another sender's is left alone)
+              send_claim_token: db.raw('CASE WHEN send_claim_token = ? THEN NULL ELSE send_claim_token END', [claimedInvoice.claimToken]),
               prepaid_at: null,
               prepaid_by: null,
               prepaid_prev_status: null,
@@ -6127,10 +6139,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // deliver duplicate report/pay-link messages (mirrors the InvoiceService
     // send-claim). Released below if nothing is delivered.
     const previousInvoiceStatus = invoice.status;
-    // A held send owns its claim by token: an unknown-outcome park, a restore or the finalize touch only this
+    // Every combined send owns its claim by token: a rollback, an unknown-outcome park or the finalize touch only this
     // episode, never a newer sender's claim taken after a stale recovery.
-    // (invoices.send_claim_token is a uuid column.) The handoffs read it from the hold.
-    const invoiceClaimToken = hold.active ? crypto.randomUUID() : null;
+    // (invoices.send_claim_token is a uuid column.) The held handoffs read it from the hold.
+    const invoiceClaimToken = crypto.randomUUID();
     hold.invoiceClaimToken = invoiceClaimToken;
     const claimedRows = await db('invoices')
       .where({ id: invoice.id })
@@ -6138,14 +6150,14 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       // an opened/overdue invoice works (getByToken flips sent → viewed once
       // the customer opens the pay link).
       .whereIn('status', ['draft', 'scheduled', 'sent', 'viewed', 'overdue'])
-      .where((q) => { if (invoiceClaimToken) q.where({ status: previousInvoiceStatus }); })
-      .update({ status: 'sending', ...heldInvoiceClaimFields(invoiceClaimToken), updated_at: db.fn.now() });
+      .where((q) => { if (hold.active) q.where({ status: previousInvoiceStatus }); })
+      .update({ status: 'sending', send_claim_token: invoiceClaimToken, ...heldInvoiceClaimFields(hold), updated_at: db.fn.now() });
     if (!claimedRows) {
       return res.status(409).json({ error: 'Invoice send already in progress', invoice_id: invoice.id });
     }
     claimedInvoice = { id: invoice.id, previousStatus: previousInvoiceStatus, claimToken: invoiceClaimToken };
     // The email and PDF print the due date the claim wrote (the fingerprint already confirmed it).
-    if (invoiceClaimToken) {
+    if (hold.active) {
       invoice.due_date = require('../services/invoice-helpers').firstDeliveryDueDateOf({ ...invoice, status: 'sending' }, etDateString());
     }
 
@@ -6173,7 +6185,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       .update({ delivery_status: 'sending', delivery_claim_token: deliveryClaimToken, updated_at: db.fn.now() });
     if (!deliveryClaimRows) {
       await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
-        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() })
+        .update({ status: previousInvoiceStatus, send_claim_token: null, updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] invoice claim release after lost delivery claim failed for ${invoice.id}: ${err.message}`));
       claimedInvoice = null;
       return res.status(409).json({
@@ -6212,7 +6224,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (stamped && hold.active) armedHold = { hold, project, deliveryClaimToken };
     if (!stamped) {
       await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
-        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() })
+        .update({ status: previousInvoiceStatus, send_claim_token: null, updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] invoice claim release after superseded stamp failed for ${invoice.id}: ${err.message}`));
       claimedInvoice = null;
       await reverseProjectCreditOnAbort();
@@ -6293,7 +6305,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       }
     } catch (e) {
       await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
-        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() }).catch(() => {});
+        .update({ status: previousInvoiceStatus, send_claim_token: null, updated_at: db.fn.now() }).catch(() => {});
       await reverseProjectCreditOnAbort();
       // The hold stamp is fenced on the claim token, so it is taken back before the claim is given back.
       await takeBackHoldStamp({ hold, project, deliveryClaimToken });
@@ -6322,7 +6334,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       .update({ updated_at: db.fn.now() });
     if (!stillOwned) {
       await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
-        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() })
+        .update({ status: previousInvoiceStatus, send_claim_token: null, updated_at: db.fn.now() })
         .catch((err) => logger.warn(`[projects] invoice claim release after superseded delivery failed for ${invoice.id}: ${err.message}`));
       claimedInvoice = null;
       await reverseProjectCreditOnAbort();
@@ -6515,7 +6527,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         source: 'project_report_with_invoice',
         payUrl,
         actorTechnicianId: req.technicianId || null,
-        ...(invoiceClaimToken ? { claimToken: invoiceClaimToken } : {}),
+        claimToken: invoiceClaimToken,
       }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));
       // Invoice is delivered + finalized — now run the full-coverage side effects we
       // deferred at apply time (stop dunning followups + activate the annual-prepay
@@ -6539,7 +6551,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       // Nothing went out — release the 'sending' claim back to its prior status
       // so the invoice isn't stranded and can be retried.
       await db('invoices').where(invoiceClaimWhere(invoice.id, invoiceClaimToken))
-        .update({ status: previousInvoiceStatus, ...invoiceClaimRelease(invoiceClaimToken), updated_at: db.fn.now() }).catch(() => {});
+        .update({ status: previousInvoiceStatus, send_claim_token: null, updated_at: db.fn.now() }).catch(() => {});
       await reverseProjectCreditOnAbort();
     }
 
@@ -6583,7 +6595,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // (and retries don't 409). No-op if it was already finalized to 'sent'.
     if (claimedInvoice) {
       await db('invoices').where(invoiceClaimWhere(claimedInvoice.id, claimedInvoice.claimToken))
-        .update({ status: claimedInvoice.previousStatus, ...invoiceClaimRelease(claimedInvoice.claimToken), updated_at: db.fn.now() })
+        .update({ status: claimedInvoice.previousStatus, send_claim_token: null, updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[projects] claim release on error failed for ${claimedInvoice.id}: ${e.message}`));
     }
     // An exception before any customer message leaves no promise to keep: take the armed hold back, while this

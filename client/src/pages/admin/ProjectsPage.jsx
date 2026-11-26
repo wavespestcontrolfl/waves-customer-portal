@@ -3996,7 +3996,8 @@ function Alert({ tone = "success", children }) {
 }
 
 function DeliveryPanel({ channels, status }) {
-  const entries = Object.entries(channels || {});
+  // Delivery results only: the report hold keeps a send count beside them (a number, not a channel).
+  const entries = Object.entries(channels || {}).filter(([, result]) => result && typeof result === "object");
   if (!entries.length) return null;
   return (
     <div

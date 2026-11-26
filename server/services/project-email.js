@@ -297,6 +297,14 @@ async function sendProjectTemplate({
 // authorized recipients, so a contact's switch never vetoes the payer's invoice because the two share an address.
 // `database`: a caller that must judge a send ahead of time (the WDO report hold's readiness) asks the same rule on its
 // transaction, so a recipient the boundary would stop is never accepted.
+// Whether the report email's suppression list would stop this address (a bounce, a complaint, an unsubscribe from
+// service email): the WDO report hold asks it before promising an automatic release. Unreadable throws (fail closed).
+async function reportEmailSuppressed(email, database = undefined) {
+  const loaded = await EmailTemplateLibrary.loadTemplateByKey('project.report_ready', database);
+  if (!loaded?.template) throw new Error('project.report_ready template missing');
+  return Boolean(await EmailTemplateLibrary.activeSuppressionFor(loaded.template, email, SERVICE_GROUP, database));
+}
+
 async function dispatchBoundaryCheck({ recipient, customerId, database = undefined }) {
   return !isServiceContactRole(recipient.role)
     || !(await require('./contact-notification-prefs').contactEmailDeclines(customerId, recipient.email, { requireSlot: true, ...(database ? { dbh: database } : {}) }));
@@ -624,6 +632,7 @@ module.exports = {
   resolveProjectEmailRecipient,
   // The handoff's address-wide email rule, for a caller judging a send ahead of time.
   dispatchBoundaryCheck,
+  reportEmailSuppressed,
   resolveProjectEmailRecipientForSend,
   resolvePortalInviteRecipient,
   sendProjectReportReady,

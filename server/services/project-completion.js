@@ -417,18 +417,9 @@ function projectFollowupSuggestion({
   };
 }
 
-function buildServiceRecordInsert({
-  scheduledService,
-  project,
-  profile,
-  serviceRecordCols = {},
-  lifecycleUpdates = {},
-  portalAttached = false,
-  reportPath = null,
-}) {
-  const serviceDate = normalizeDateOnly(project.project_date)
-    || normalizeDateOnly(scheduledService.scheduled_date)
-    || etDateString();
+// The visit-history note a project completion writes (service_records.technician_notes, which the customer's service
+// history returns). A report held for payment keeps its recommendations out until the paid release writes them.
+function completionTechnicianNotes(project, { reportHeld = false } = {}) {
   // The recommendation copied here lands in service_records.technician_notes,
   // which the authenticated portal service-history API returns verbatim — so
   // a legacy narrative that predates the create/PUT write guard gets its
@@ -446,10 +437,26 @@ function buildServiceRecordInsert({
     }
     return safe;
   };
-  const notes = [
+  return [
     project.title ? `Project completed: ${scrubCompletionText(project.title)}` : 'Project completed.',
-    project.recommendations ? scrubCompletionText(project.recommendations) : '',
+    project.recommendations && !reportHeld ? scrubCompletionText(project.recommendations) : '',
   ].filter(Boolean).join('\n\n');
+}
+
+function buildServiceRecordInsert({
+  scheduledService,
+  project,
+  profile,
+  serviceRecordCols = {},
+  lifecycleUpdates = {},
+  portalAttached = false,
+  reportPath = null,
+  reportHeld = false,
+}) {
+  const serviceDate = normalizeDateOnly(project.project_date)
+    || normalizeDateOnly(scheduledService.scheduled_date)
+    || etDateString();
+  const notes = completionTechnicianNotes(project, { reportHeld });
   const structuredNotes = projectCompletionNotes({
     project,
     profile,
@@ -849,6 +856,7 @@ async function completeProjectBackedService({
         lifecycleUpdates,
         portalAttached,
         reportPath,
+        reportHeld,
       });
       // Tier/provenance/callback snapshot — the SAME shared builder the
       // /complete and pest-recap paths use (completion-tier-snapshot.js):
@@ -1350,6 +1358,7 @@ async function resolveProjectPortalAttachment(project = {}, knex = db) {
 module.exports = {
   buildProjectCloseoutPreview,
   buildServiceRecordInsert,
+  completionTechnicianNotes,
   buildServiceRecordProjectCompletionUpdate,
   closeoutReportLink,
   completeProjectBackedService,
