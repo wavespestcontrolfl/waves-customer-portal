@@ -9,7 +9,7 @@ jest.mock('../models/db', () => { const db = () => ({}); db.raw = () => ({}); re
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { summarize, caseOf, actionLabel, restrictedOf, ACTION_TYPES, ESCALATION_KINDS, FIRST_JUDGE } = require('../services/eval/waves-ai-replay');
+const { summarize, caseOf, actionLabel, restrictedOf, ACTION_TYPES, CURRENT_ESCALATION_KINDS, FIRST_JUDGE } = require('../services/eval/waves-ai-replay');
 const ops = require('../../ops/agents/waves-ai-replay');
 
 const draft = (overrides = {}) => ({
@@ -229,7 +229,7 @@ describe('actionLabel', () => {
   test('the escalation kinds match the drafter', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'sms-shadow-drafter.js'), 'utf8');
     const kinds = new Set([...source.matchAll(/"type":"escalate","note":"([a-z_]+)[":]/g)].map((m) => m[1]));
-    expect([...kinds].sort()).toEqual([...ESCALATION_KINDS].sort());
+    expect([...kinds].sort()).toEqual([...CURRENT_ESCALATION_KINDS].sort());
   });
 });
 

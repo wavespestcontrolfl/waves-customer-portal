@@ -201,6 +201,31 @@ describe('verifier — revise addendum', () => {
     expect(a).toMatch(/do NOT invent/i);
     expect(a).toMatch(/confirm and get right back/i);
   });
+
+  // owner 2026-11-25: with real answers on, a rewrite never goes toward a promise; it goes toward ABSTAIN
+  test('real answers: the rewrite instruction promises nothing and points at ABSTAIN', () => {
+    const a = buildReviseAddendum(['invents a 2 PM arrival'], { realAnswers: true });
+    expect(a).toContain('- invents a 2 PM arrival');
+    expect(a).toMatch(/do NOT invent/i);
+    expect(a).toMatch(/promise no check, confirmation or reply/);
+    expect(a).toContain('return "kind": "ABSTAIN" with an empty reply');
+    expect(a).not.toMatch(/confirm and get right back/i);
+    // the default stays the old instruction
+    expect(buildReviseAddendum(['x'], { realAnswers: false })).toBe(buildReviseAddendum(['x']));
+  });
+});
+
+describe('verifier — follow-up promises (owner 2026-11-25)', () => {
+  test('real answers: a promise that a person will check, confirm or reply is a VIOLATION, not "fine"', () => {
+    const on = buildVerifierSystemPrompt({ realAnswers: true });
+    expect(on).toMatch(/a promise that a person, the office, a teammate or the team will check, confirm, reply, call, text or get back to the customer .* is a VIOLATION/);
+    expect(on).not.toContain('offers to confirm/follow up are fine');
+    // the link hand-off the drafter rules allow is not a violation (Codex #8543 r1)
+    expect(on).toContain("The one allowed hand-off is a teammate texting the pay link or the free re-service booking link");
+  });
+  test('gate off keeps the old allowance', () => {
+    expect(buildVerifierSystemPrompt({ realAnswers: false })).toContain('offers to confirm/follow up are fine');
+  });
 });
 
 describe('verifier — DECLARED OFFERS mapping (PR #5119: the drafter\'s offered_times rides into the verifier user prompt)', () => {

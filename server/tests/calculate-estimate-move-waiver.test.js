@@ -8,10 +8,13 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 let mockStored = null;
-jest.mock('../models/db', () => jest.fn(() => {
+// Rows by table for the lead lookup (leads, customers); every other read gets mockStored.
+let mockByTable = {};
+jest.mock('../models/db', () => jest.fn((table) => {
   const b = {};
   b.where = jest.fn(() => b);
-  b.first = jest.fn(async () => mockStored);
+  b.whereNull = jest.fn(() => b);
+  b.first = jest.fn(async () => (table in mockByTable ? mockByTable[table] : mockStored));
   return b;
 }));
 jest.mock('../services/pricing-engine', () => ({
@@ -35,6 +38,11 @@ jest.mock('../services/estimate-membership-context', () => ({
   ...jest.requireActual('../services/estimate-membership-context'),
   currentServiceTierOffer: jest.fn(),
 }));
+// The returning-customer rule's history read (GATE_RETURNING_SETUP_FEE_GAP): null = gate off or no history.
+jest.mock('../services/returning-setup-fee-waiver', () => ({
+  ...jest.requireActual('../services/returning-setup-fee-waiver'),
+  loadReturningVisitHistory: jest.fn(async () => null),
+}));
 jest.mock('../services/customer-moves', () => {
   class MoveError extends Error {
     constructor(code, message, status = 400) { super(message); this.code = code; this.status = status; }
@@ -44,6 +52,7 @@ jest.mock('../services/customer-moves', () => {
 
 const db = require('../models/db');
 const Moves = require('../services/customer-moves');
+const Returning = require('../services/returning-setup-fee-waiver');
 const router = require('../routes/property-lookup-v2');
 
 function invoke(body, techRole = 'admin') {
@@ -69,7 +78,9 @@ const quote = (options = {}) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   mockStored = null;
+  mockByTable = {};
 });
+afterEach(() => { delete process.env.GATE_RETURNING_SETUP_FEE_GAP; });
 
 test('a new-home estimate previews without the $99 and says so', async () => {
   const plain = await invoke(quote());
@@ -88,6 +99,78 @@ test('a new-home estimate previews without the $99 and says so', async () => {
   expect(moving.payload.totals.year1).toBe(plain.payload.totals.year1 - 99);
   // Recurring prices are untouched.
   expect(moving.payload.totals.year2).toBe(plain.payload.totals.year2);
+});
+
+// Returning-customer rule: the preview prices through the decision the save makes, so the two agree. Regressions
+// this would show: staff see a $99 the save drops (or the reverse), a technician is shown a visit date, a failed
+// history read prices as "no history".
+test('a returning customer inside the window previews without the $99, and the tool gets the reason', async () => {
+  const backAfter95Days = { todayKey: '2026-11-24', lastByFamily: { pest_control: { lastVisitKey: '2026-08-21', cycleDays: 91 } } };
+  const plain = await invoke(quote());
+  Returning.loadReturningVisitHistory.mockResolvedValueOnce(backAfter95Days);
+  const back = await invoke(quote());
+  expect(Returning.loadReturningVisitHistory).toHaveBeenLastCalledWith(db, { customerId: 'cust-1' });
+  expect(back.payload.returningSetupFeeWaiver).toEqual(expect.objectContaining({ lastCompletedVisitDate: '2026-08-21', gapDays: 95, windowDays: 121 }));
+  expect(back.payload.oneTime.membershipFee).toBe(0);
+  expect(back.payload.oneTime.total).toBe(plain.payload.oneTime.total - 99);
+  expect(back.payload.totals.year1).toBe(plain.payload.totals.year1 - 99);
+  expect(back.payload.totals.year2).toBe(plain.payload.totals.year2);
+
+  // A technician gets the price and the rule's name, never the visit date.
+  Returning.loadReturningVisitHistory.mockResolvedValueOnce(backAfter95Days);
+  const tech = await invoke(quote(), 'technician');
+  expect(tech.payload.oneTime.membershipFee).toBe(0);
+  expect(tech.payload.returningSetupFeeWaiver).toEqual({ rule: 'returning_customer_gap' });
+
+  // A move's own waiver already covers the fee: the rule adds nothing to it.
+  Returning.loadReturningVisitHistory.mockResolvedValueOnce(backAfter95Days);
+  const moving = await invoke(quote({ moveId: 'move-1' }));
+  expect(moving.payload.moveSetupFeeWaived).toBe(true);
+  expect(moving.payload.returningSetupFeeWaiver).toBeUndefined();
+});
+
+test('a failed visit-history read refuses the preview for a retry', async () => {
+  Returning.loadReturningVisitHistory.mockRejectedValueOnce(new Error('db down'));
+  expect(await invoke(quote())).toEqual({
+    status: 503,
+    payload: expect.objectContaining({ code: 'PRIOR_SERVICES_UNAVAILABLE', retryable: true }),
+  });
+});
+
+// A builder that holds only a lead (picking one clears its customer) is saved for the lead's customer
+// (leadCustomerIdForEstimate). Regression (pre-push audit 2026-11-25): the preview read no visit history for it,
+// so staff saw a $99 the save then waived, with no banner.
+test('a lead-only builder previews for the lead\'s customer, by the save\'s own rule', async () => {
+  const LEAD_ID = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  const typed = { leadId: LEAD_ID, customerPhone: '(941) 555-0100', customerEmail: '' };
+  const leadOnly = (lead) => ({ ...quote({ existingCustomerId: null }), lead });
+  const readFor = () => Returning.loadReturningVisitHistory.mock.calls.at(-1)[1].customerId;
+  mockByTable = {
+    leads: { id: LEAD_ID, customer_id: 'cust-9', status: 'new', phone: '+19415550100', email: null },
+    customers: { id: 'cust-9' },
+  };
+
+  // Gate off: the lead is never read.
+  await invoke(leadOnly(typed));
+  expect(db).not.toHaveBeenCalledWith('leads');
+  expect(readFor()).toBeNull();
+
+  process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+  await invoke(leadOnly(typed));
+  expect(readFor()).toBe('cust-9');
+  // As at the save: no customer when the typed contact is not the lead's, the lead is closed, or the id is no lead id.
+  await invoke(leadOnly({ ...typed, customerPhone: '(941) 555-0199' }));
+  expect(readFor()).toBeNull();
+  mockByTable.leads = { ...mockByTable.leads, status: 'lost' };
+  await invoke(leadOnly(typed));
+  expect(readFor()).toBeNull();
+  db.mockClear();
+  await invoke(leadOnly({ ...typed, leadId: 'not-a-lead-id' }));
+  expect(db).not.toHaveBeenCalledWith('leads');
+  expect(readFor()).toBeNull();
+  // The builder's own customer wins over a lead.
+  await invoke({ ...quote(), lead: typed });
+  expect(readFor()).toBe('cust-1');
 });
 
 test('a refused move answers its status and prices nothing; a technician is refused', async () => {

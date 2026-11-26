@@ -1673,6 +1673,9 @@ module.exports = {
   seriesCreateLockKeys,
   inferRecurringPattern,
   intervalDaysForPattern,
+  // The next date the scheduler places after a visit (the returning-customer setup fee reads an old series' cycle).
+  nextRecurringDate,
+  MONTH_RECURRENCE_INTERVALS,
   schedulerPlacesPattern,
   FALLBACK_RECURRENCE_GAP_DAYS,
   SEASONAL_FEB_OCT,

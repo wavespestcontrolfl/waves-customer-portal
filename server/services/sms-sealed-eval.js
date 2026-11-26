@@ -688,6 +688,17 @@ function computeSignificance({ candidateResults = [], baselineResults = [], alph
  * Returns true when a result row landed; false leaves the item pending for
  * a resume pass (transient provider/judge misses must not poison the run).
  */
+// When the source draft of a frozen item was built (its message_drafts.created_at; else the item's inbound time; else null = now): the instant
+// the owner-approved bank lines in its frozen block are checked at (sms-company-facts isOwnerBankLine), so a replay accepts what the draft did.
+async function itemBankAt(item, dbi) {
+  const valid = (value) => { const d = value ? new Date(value) : null; return d && !Number.isNaN(d.getTime()) ? d : null; };
+  try {
+    const row = await dbi('message_drafts').where({ id: item.source_draft_id }).first('created_at');
+    if (valid(row?.created_at)) return valid(row.created_at);
+  } catch { /* fall back to the item's own inbound time */ }
+  return valid(item.inbound_at);
+}
+
 async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = null, promptPatch }) {
   const startedAt = Date.now();
   const drafter = require('./sms-shadow-drafter');
@@ -723,6 +734,7 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
     intent,
     schedulingIntent: Boolean(item.scheduling_intent),
     factsBlock: item.facts_block, // frozen day-of snapshot — never a live context
+    bankAt: await itemBankAt(item, dbi), // the original draft's time, for its owner-approved bank lines
     routeOverride: route, // pinned leg, cross-provider fallback disabled
     voiceProfile, // pinned at run creation — null means drafted profile-free
     promptPatch, // exam-only candidate rules (run.prompt_patch_id); undefined = the live drafter's own

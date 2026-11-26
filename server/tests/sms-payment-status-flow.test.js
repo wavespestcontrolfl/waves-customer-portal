@@ -6,7 +6,7 @@
 const GATE = 'GATE_SMS_REAL_ANSWERS';
 const COPY = 'We received your $120.00 card payment on Sep 12, 2026.';
 const PARAPHRASE = 'Yes, we got your $120.00 payment from Sep 12 - thank you!';
-const HANDOFF = 'A teammate will confirm that and follow up within the hour.';
+const HANDOFF = 'Happy to help with that.';
 const INBOUND = 'Did you get my $120 payment from Sep 12?';
 
 const contextWith = () => ({

@@ -175,6 +175,33 @@ describe("Settings new UI foundation", () => {
     expect(JSON.parse(call[1].body)).toEqual({ ovhOfficePayroll: 1750.5 });
   });
 
+  it("saves the owner's own office time with the same PUT, blank clears it", async () => {
+    mount("operating-costs");
+    fireEvent.change(await screen.findByLabelText("Your office hours"), { target: { value: "12.5" } });
+    fireEvent.change(screen.getByLabelText("Your office hourly rate"), { target: { value: "40" } });
+    expect(screen.getByText("$500")).toBeInTheDocument(); // the allowance counted, 12.5 x 40
+    fireEvent.click(screen.getByRole("button", { name: "Save costs" }));
+    await screen.findByText(/Saved\. The dashboard's EBITDA bridge/);
+    const call = fetch.mock.calls.find(([url, options]) => url === "/api/admin/revenue/settings" && options?.method === "PUT");
+    expect(JSON.parse(call[1].body)).toEqual({ ownerOfficeHoursPerMonth: 12.5, ownerOfficeHourlyRate: 40 });
+  });
+
+  it("refuses owner office time the server would refuse: extra decimals and values past the columns, no PUT sent", async () => {
+    mount("operating-costs");
+    const hours = await screen.findByLabelText("Your office hours");
+    expect(hours).toHaveAttribute("max", "9999.99");
+    expect(hours).toHaveAttribute("step", "0.01");
+    expect(screen.getByLabelText("Your office hourly rate")).toHaveAttribute("max", "999999.99");
+    const puts = () => fetch.mock.calls.filter(([url, options]) => url === "/api/admin/revenue/settings" && options?.method === "PUT");
+    for (const [label, value] of [["Your office hours", "12.345"], ["Your office hours", "10000"], ["Your office hourly rate", "1000000"]]) {
+      fireEvent.change(screen.getByLabelText(label), { target: { value } });
+      fireEvent.click(screen.getByRole("button", { name: "Save costs" }));
+      expect(await screen.findByText(new RegExp(`"${label}" must be from 0 to`))).toBeInTheDocument();
+      expect(puts()).toHaveLength(0);
+      fireEvent.change(screen.getByLabelText(label), { target: { value: "" } }); // blank clears the figure, not an error
+    }
+  });
+
   it("preserves schedule mutation payloads and refreshes blackout data", async () => {
     mount("blackout-days");
     await screen.findByText("Holiday");

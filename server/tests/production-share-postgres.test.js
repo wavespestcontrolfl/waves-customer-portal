@@ -182,7 +182,9 @@ postgres('production share credit', () => {
       await trx('payments').insert({ customer_id: c1, payment_date: '2026-09-02', amount: '400.00', status: 'paid', stripe_payment_intent_id: 'pi_sample_1', refund_amount: '100.00' });
       const visit = await stop(a, c1, day(2), { estimated_price: '120.00', annual_prepay_term_id: termId, prepaid_amount: '90.00', prepaid_method: 'annual_prepay_invoice' });
       const row = byVisit(await credits(a), visit);
-      expect(row).toMatchObject({ kind: 'prepaid_plan', creditCents: 9000, needsReview: false });
+      // PR 3a: the refund on the term invoice flags the stamped visit ($0, the owner sets its credit); the refund total is still shown.
+      expect(row).toMatchObject({ kind: 'refund_flagged', creditCents: 0, needsReview: true });
+      expect(row.refundSignals).toEqual([expect.stringMatching(/^pay:[0-9a-f-]{36}:10000$/)]);
       // The one stamped visit of the term takes the whole $100 refunded on the term invoice.
       expect(row.refundCents).toBe(10000);
     });
@@ -300,7 +302,7 @@ postgres('production share credit', () => {
       expect(byVisit(rows, zero)).toMatchObject({ kind: 'free_visit', creditCents: 0, needsReview: false });
     });
 
-    it('exposes the refund on the stop\'s own invoice without changing the credit', async () => {
+    it('flags a stop with a refund on its own invoice: $0, needs review, the refund still shown (the owner sets the credit)', async () => {
       const a = await tech('Sample Alpha');
       const c1 = await customer();
       const visit = await stop(a, c1, day(0), { estimated_price: '100.00' });
@@ -309,7 +311,7 @@ postgres('production share credit', () => {
         status: 'paid', stripe_payment_intent_id: 'pi_sample_2',
       });
       await trx('payments').insert({ customer_id: c1, payment_date: '2026-09-15', amount: '100.00', status: 'paid', stripe_payment_intent_id: 'pi_sample_2', refund_amount: '30.00' });
-      expect(byVisit(await credits(a), visit)).toMatchObject({ creditCents: 10000, refundCents: 3000 });
+      expect(byVisit(await credits(a), visit)).toMatchObject({ kind: 'refund_flagged', creditCents: 0, needsReview: true, refundCents: 3000 });
     });
   });
 
@@ -459,10 +461,10 @@ postgres('production share credit', () => {
       const mine = [byVisit(rows, v1), byVisit(rows, v3)];
       const other = (await credits(b))[0];
       // 120.01 across 60 : 40 : 20 is 60.00 + 40.00 + 20.01 (the odd cent to the largest remainder, ties by id).
-      expect(mine[0].creditCents + other.creditCents + mine[1].creditCents).toBe(12001);
-      expect(mine.map((row) => row.kind)).toEqual(['priced', 'priced']);
+      // PR 3a: a refund on the shared invoice flags every visit on it ($0, the owner sets each credit); the refund is still counted once.
+      expect(mine.map((row) => row.kind)).toEqual(['refund_flagged', 'refund_flagged']);
+      expect(other.kind).toBe('refund_flagged');
       expect(mine[0].refundCents + other.refundCents + mine[1].refundCents).toBe(1001);
-      expect(mine[0].creditCents).toBeGreaterThanOrEqual(6000);
     });
 
     it('flags the stops of a shared invoice that cannot be split, and keeps its refund visible instead of pricing them from the visit', async () => {
@@ -526,7 +528,8 @@ postgres('production share credit', () => {
       const refunds = [v1, v2, v3].map((id) => byVisit(rows, id).refundCents);
       expect(refunds.reduce((x, y) => x + y, 0)).toBe(1000);
       expect(refunds).toEqual([333, 333, 334]);
-      expect([v1, v2, v3].map((id) => byVisit(rows, id).creditCents)).toEqual([3333, 3333, 3334]);
+      // PR 3a: the term refund flags each stamped visit ($0 until the owner sets its credit).
+      expect([v1, v2, v3].map((id) => byVisit(rows, id).kind)).toEqual(['refund_flagged', 'refund_flagged', 'refund_flagged']);
     });
 
     it('spreads the refund over visits of the term in other weeks too', async () => {
@@ -602,8 +605,8 @@ postgres('production share credit', () => {
       const rows = await credits(a);
       expect(byVisit(rows, detached)).toMatchObject({ kind: 'prepaid_plan', creditCents: 0, needsReview: true });
       expect(byVisit(rows, cash)).toMatchObject({ kind: 'priced', creditCents: 9000, refundCents: 0 });
-      // The term's refund goes to the one annual-stamped visit of the term, not to the cash-prepaid one.
-      expect(byVisit(rows, annual)).toMatchObject({ kind: 'prepaid_plan', creditCents: 5000, refundCents: 1000 });
+      // The term's refund goes to the one annual-stamped visit of the term, not to the cash-prepaid one (PR 3a: it is flagged, the cash one is not).
+      expect(byVisit(rows, annual)).toMatchObject({ kind: 'refund_flagged', creditCents: 0, refundCents: 1000 });
     });
   });
 

@@ -17,8 +17,8 @@
 // is exactly today's behavior.
 //
 // Deliberately NOT routed here (they keep emailing regardless of the gate):
-// the two reply-to-approve flows (newsletter proof, content email approvals)
-// and the stripe-webhook-health FIX alert (payments pipeline down).
+// the two reply-to-approve flows (newsletter proof, content email approvals).
+// (stripe-webhook-health left email for its own bell row, owner 2026-11-26.)
 // llm-dispatch-metrics routes normal exceptions here with email fallback;
 // recorder/database outages send SMTP directly. Customer-facing mail never
 // touches this module.

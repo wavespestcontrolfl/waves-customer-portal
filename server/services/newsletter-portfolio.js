@@ -24,11 +24,18 @@
  *   ≥4 Fri–Sun events, ≥2 distinct weekend days, ≥3 zones,
  *   ≥2 family picks, ≥2 parents'-night picks, ≥1 free-ish pick,
  *   ≥1 hero (≥ hero floor), ≥1 inaugural/opening/limited/one-time.
- * Caps: ≤3 per zone, ≤2 per venue, ≤2 per source, ≤1 generic class.
+ * Caps: ≤3 per zone, ≤2 per venue, ≤2 per source, ≤1 generic class,
+ *   ≤2 "worth the drive" picks from the away zones (Tampa + Pinellas together).
+ *
+ * Local first (owner 2026-11-26, "ok go" + "yes" on the Suncoast Weekender
+ * plan): most readers are customers in Manatee and Sarasota counties, so the
+ * away zones share AWAY_CAP. The owner chose 2 for now because good local
+ * events are thin in most weeks; tighten to 1 once the local feeds fill them.
  */
 
 const { etParts } = require('../utils/datetime-et');
 const { featureScoreFloor, heroScoreFloor } = require('./event-scoring');
+const { cityToZone } = require('./event-freshness');
 
 const TARGET_COUNT = 8;
 const MIN_COUNT = 5;
@@ -39,6 +46,25 @@ const ZONE_CAP = 3;
 const VENUE_CAP = 2;
 const SOURCE_CAP = 2;
 const CLASS_CAP = 1;
+// Tampa Bay zones are 45-75 minutes from most readers: together they fill at
+// most AWAY_CAP slots ('away' = an untagged event from a town not known to
+// be local; see awayZoneOf).
+const AWAY_ZONES = new Set(['tampa', 'pinellas', 'away']);
+const AWAY_CAP = 2;
+// An event with no region_zone counts as LOCAL only when its city is a known
+// home-zone town in the normalizer's cityToZone map (after stripping
+// punctuation). Any other untagged city counts as
+// away: a list of away towns can never be complete, and local first means an
+// unknown town must not slip past the cap.
+function awayZoneOf(event) {
+  const zone = norm(event?.region_zone);
+  if (zone) return zone;
+  const city = norm(event?.city);
+  // No location at all is not proof of a local event: count it as away.
+  if (!city) return 'away';
+  return cityToZone(city) || 'away';
+}
+const isAway = (event) => AWAY_ZONES.has(awayZoneOf(event));
 
 const MIN_WEEKEND = 4;
 const MIN_WEEKEND_DAYS = 2;
@@ -120,6 +146,10 @@ function effectiveScore(event) {
 
 const isHero = (event) => effectiveScore(event) >= heroScoreFloor();
 
+function awayAllows(picked, candidate) {
+  return !isAway(candidate) || picked.filter(isAway).length < AWAY_CAP;
+}
+
 function capsAllow(picked, candidate) {
   const zone = norm(candidate.region_zone || candidate.city);
   const venue = norm(candidate.venue_name);
@@ -135,7 +165,7 @@ function capsAllow(picked, candidate) {
   if (venue && venueCount >= VENUE_CAP) return false;
   if (source && sourceCount >= SOURCE_CAP) return false;
   if (isGenericClass(candidate) && classCount >= CLASS_CAP) return false;
-  return true;
+  return awayAllows(picked, candidate);
 }
 
 const zoneOf = (event) => norm(event?.region_zone || event?.city);
@@ -384,4 +414,6 @@ module.exports = {
   TARGET_COUNT,
   MIN_COUNT,
   MAX_COUNT,
+  AWAY_CAP,
+  capsAllow,
 };

@@ -573,6 +573,12 @@ function afterCommit(trx, fn) {
  * replays and the admin-refund/webhook pair; a shortfall throws (same contract
  * as the void path) so the caller's trx rolls back and Stripe retries the event.
  */
+// The note of the credit row a FULL REFUND writes (returnAppliedCreditOnRefund below). The production share finds that row by this exact note
+// (production-share-refunds.js), so a payer transfer or a void, which write their own notes, never match.
+const REFUND_CREDIT_NOTE_PREFIX = 'Account credit returned — invoice ';
+const REFUND_CREDIT_NOTE_SUFFIX = ' fully refunded';
+const refundCreditNote = (invoice) => `${REFUND_CREDIT_NOTE_PREFIX}${invoice.invoice_number || invoice.id}${REFUND_CREDIT_NOTE_SUFFIX}`;
+
 async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, trx) {
   const inv = await trx('invoices').where({ id: invoiceId }).forUpdate()
     .first('id', 'customer_id', 'invoice_number', 'status', 'credit_applied', 'line_items', 'scheduled_service_id');
@@ -648,7 +654,7 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
       delta: restore,
       source: 'adjustment',
       invoiceId,
-      note: `Account credit returned — invoice ${inv.invoice_number || invoiceId} fully refunded`,
+      note: refundCreditNote({ invoice_number: inv.invoice_number, id: invoiceId }),
       createdBy,
     }, trx);
   }
@@ -846,4 +852,6 @@ module.exports = {
   reverseCreditAndStampPayer,
   restoreAccountCreditForVoidedInvoice,
   returnAppliedCreditOnRefund,
+  REFUND_CREDIT_NOTE_PREFIX,
+  REFUND_CREDIT_NOTE_SUFFIX,
 };

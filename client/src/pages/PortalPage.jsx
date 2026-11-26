@@ -7,7 +7,8 @@ import useModalFocus from '../hooks/useModalFocus';
 import usePortalActivity from '../hooks/usePortalActivity';
 import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
-import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
+import usePortalRead, { PortalReadProvider, READ_TIMEOUT_MS, usePortalRefresh } from '../hooks/usePortalRead';
+import { homeIdentityKey, readHomeReads } from '../lib/homeSnapshot';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
 import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
@@ -81,6 +82,15 @@ const PortalGlassContext = createContext(false);
 const usePortalGlass = () => useContext(PortalGlassContext);
 const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+function homeReportKey(visitId, report, propertyId) {
+  if (!visitId || !report || report.reportWithheld || report.reportAvailable === false) return null;
+  return JSON.stringify([propertyId, visitId, report.reportUrl, report.reportPdfUrl]);
+}
+const portalHomeReportUrl = (url) => {
+  if (!url || !String(url).startsWith('/report/')) return url;
+  const join = String(url).includes('?') ? '&' : '?';
+  return `${url}${join}source=portal_home`;
+};
 
 // Authenticated fetch → blob download for Bearer-only report endpoints. A
 // bare <a href> to these endpoints opens a raw 401 JSON page (no cookie
@@ -201,36 +211,73 @@ async function fetchAuthedPdfBlob(url) {
 // PDF previews fetch Bearer-only endpoints into a blob URL first. The doc
 // passed in needs { id, title, fileName?, pdfUrl? } — pdfUrl drives the
 // overlay's Save-to-share-sheet button.
-function useReportPreview(onError) {
+function useReportPreview(onError, reportKey) {
   const [preview, setPreview] = useState(null); // { doc, src, blob?, blobUrl?, loading? }
+  // The blob URL this hook owns lives in a ref too, so an unmount (a tab or
+  // property switch that never calls closePreview) still releases it, and a
+  // fetch that settles after unmount or after the preview closed creates none.
+  const previewRef = useRef(null);
+  previewRef.current = preview;
+  const ownedBlobUrl = useRef(null);
+  const unmountedRef = useRef(false);
+  const releaseBlob = useCallback(() => {
+    if (ownedBlobUrl.current) URL.revokeObjectURL(ownedBlobUrl.current);
+    ownedBlobUrl.current = null;
+  }, []);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      releaseBlob();
+    };
+  }, [releaseBlob]);
 
-  const closePreview = () => {
+  const closePreview = useCallback(() => {
+    releaseBlob();
+    previewRef.current = null;
     setPreview(p => {
       if (p?.blobUrl) URL.revokeObjectURL(p.blobUrl);
       return null;
     });
-  };
+  }, [releaseBlob]);
 
-  const openPagePreview = (doc, src) => setPreview({ doc, src });
+  // reportKey is a key, or a function of the previewed doc (a list of visits
+  // binds each preview to its own row). A null key means the report was
+  // withdrawn: the preview closes and its blob is revoked.
+  const keyOf = (doc) => (typeof reportKey === 'function' ? reportKey(doc) : reportKey);
+  const currentKey = preview ? keyOf(preview.doc) : undefined;
+  const withdrawn = Boolean(preview && (currentKey === null || preview.reportKey !== currentKey));
+  useEffect(() => {
+    if (withdrawn) closePreview();
+  }, [withdrawn, closePreview]);
+
+  const openPagePreview = (doc, src) => setPreview({ doc, src, reportKey: keyOf(doc) });
 
   const openPdfPreview = (doc, url) => {
-    setPreview({ doc, src: null, loading: true });
+    const openedKey = keyOf(doc);
+    // Set the ref now: the fetch can settle before React commits the render.
+    previewRef.current = { doc, src: null, loading: true, reportKey: openedKey };
+    setPreview(previewRef.current);
     fetchAuthedPdfBlob(url)
       .then(blob => {
+        // Discard a late result: unmounted, closed, or replaced by another doc.
+        if (unmountedRef.current || previewRef.current?.doc !== doc) return;
+        releaseBlob();
         const blobUrl = URL.createObjectURL(blob);
+        ownedBlobUrl.current = blobUrl;
         setPreview(p => {
-          if (!p || p.doc.id !== doc.id) { URL.revokeObjectURL(blobUrl); return p; }
-          return { doc, src: blobUrl, blob, blobUrl };
+          if (!p || p.doc !== doc) { URL.revokeObjectURL(blobUrl); return p; }
+          return { doc, src: blobUrl, blob, blobUrl, reportKey: openedKey };
         });
       })
       .catch(err => {
         console.error(err);
-        setPreview(p => (p && p.doc.id === doc.id ? null : p));
+        setPreview(p => (p?.doc === doc ? null : p));
         onError?.(err);
       });
   };
 
-  return { preview, openPagePreview, openPdfPreview, closePreview };
+  return { preview: withdrawn ? null : preview, openPagePreview, openPdfPreview, closePreview };
 }
 
 // The arrival window quoted to customers is ALWAYS window_start + 2 hours
@@ -2845,11 +2892,70 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   );
 }
 
+// Every tab behind the saved home screen shows this until the account is fresh.
+function AccountUpdatingNotice() {
+  return (
+    <section data-glass="card" role="status" style={{ padding: 20, marginBottom: 16, borderRadius: 14, color: B.glassNavy }}>
+      <h2 style={{ fontSize: 20, margin: '0 0 8px' }}>Updating…</h2>
+      <p style={{ fontSize: 16, lineHeight: 1.5, margin: 0 }}>We are loading your latest account details. Your plan, billing and settings will open as soon as they arrive.</p>
+    </section>
+  );
+}
+
+// The saved home screen (customerSaved): what the app paints at once on a weak
+// signal while the account loads. It is NOT the portal: no tab, no overlay, no
+// read, no write and nothing derived from the account's money. It shows the
+// saved profile line and the two saved visit cards from storage, and it makes
+// no network request. When the account turns fresh the normal portal mounts
+// once and starts every live read exactly once.
+function SavedHomeView({ customer, entry, identity, property }) {
+  const [reads] = useState(() => readHomeReads(identity, property));
+  const next = reads['next-visit'];
+  const last = reads['latest-service'];
+  const nextVisit = next?.data?.next || null;
+  const lastVisit = last?.data?.services?.[0] || null;
+  const savedRead = (read) => ({ updatedAt: read?.updatedAt || null, error: '', offline: false, pending: true, refresh: () => {} });
+  const address = formatPropertyAddress(entry?.address ? entry : customer);
+  const label = entry?.profileLabel || '';
+  return (
+    <PortalGlassContext.Provider value={true}>
+      <div className="portal-root" style={{ minHeight: '100vh', background: 'transparent', fontFamily: FONTS.body, color: PORTAL_SHELL.body }}>
+        <div style={{
+          background: PORTAL_SHELL.surface, borderBottom: `1px solid ${PORTAL_SHELL.border}`,
+          padding: '12px 16px', paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Customer Portal</div>
+            <div role="status" data-testid="portal-updating" style={{ fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.3 }}>Updating…</div>
+          </div>
+        </div>
+        <main id="portal-main" style={{ maxWidth: 760, margin: '0 auto', padding: '24px 16px 32px', boxSizing: 'border-box' }}>
+          <section data-glass="card" style={{ padding: 20, marginBottom: 16, borderRadius: 14, color: B.glassNavy }}>
+            <h1 style={{ fontSize: 24, margin: 0 }}>Hello {customer.firstName || 'there'}!</h1>
+            {label && <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 4 }}>{label}</div>}
+            {address && <div style={{ fontSize: 16, marginTop: 2 }}>{address}</div>}
+          </section>
+          <AccountUpdatingNotice />
+          <SavedPortalRead title="Saved next visit" read={savedRead(next)}>
+            <SavedVisitDetails visits={nextVisit ? [nextVisit] : []} />
+          </SavedPortalRead>
+          <SavedPortalRead title="Saved completed visit" read={savedRead(last)}>
+            <SavedVisitDetails visits={lastVisit ? [lastVisit] : []} />
+          </SavedPortalRead>
+        </main>
+      </div>
+    </PortalGlassContext.Provider>
+  );
+}
+
 function SavedVisitDetails({ visits }) {
   if (!visits.length) return <p style={{ fontSize: 16 }}>No saved visits are available.</p>;
   return <ul style={{ paddingLeft: 20, fontSize: 16, lineHeight: 1.6 }}>
     {visits.map(visit => <li key={visit.id} style={{ marginBottom: 12 }}>
       <strong>{visit.serviceType || visit.type || 'Service visit'}</strong>
+      {visit.propertyAddress && <div>{visit.propertyAddress}</div>}
       <div>{parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
       {visit.windowStart && <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>}
       {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
@@ -2969,6 +3075,10 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
   const lastScopeStale = scopeEchoMismatch(lastRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (lastScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [lastScopeStale, onSavedScopeUnavailable]);
   const lastService = lastScopeStale ? null : (lastRead.data?.services?.[0] || null);
+  const { preview: reportPreview, openPagePreview: openReportPage, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
+    () => showCustomerAlert('Could not open this report. Please try again.'),
+    homeReportKey(lastService?.id, lastRead.saved ? null : lastService, activePropertyId),
+  );
   // Misting system card (dark behind GATE_MOSQUITO_MISTING: gate off = { system: null }).
   // A loading or failed read renders nothing.
   const mistingRead = usePortalRead('misting-system', () => api.getMistingSystem());
@@ -3217,6 +3327,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {reportPreview && <DocumentPreviewOverlay preview={reportPreview} onClose={closeReportPreview} onError={() => showCustomerAlert('Could not save this report. Please try again.')} />}
       {/* Service-day tracker leads the dashboard (owner ruling 2026-08-14):
           on the day of service, where the tech is matters more than the
           greeting. ServiceTracker renders null on every other day, so
@@ -3585,20 +3696,64 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
               </div>
             </div>
           </div>
-          {(lastService.notes || lastService.technician_notes) ? (
+          {lastService.homeSummary ? (
             <p style={{ margin: '12px 0 0', color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
-              {((lastService.notes || lastService.technician_notes) || '').slice(0, 220)}
-              {((lastService.notes || lastService.technician_notes) || '').length > 220 ? '...' : ''}
+              {lastService.homeSummary}
             </p>
-          ) : (
+          ) : lastService.reportAvailable !== false ? (
             <div style={{ marginTop: 12 }}>
               <PortalInlineState
                 icon="document"
                 title="Report available"
-                message="Open Visits for the full service summary and documents."
+                message="Your full service report is ready below."
               />
             </div>
-          )}
+          ) : null}
+          {lastService.reportUrl ? (
+            isNativeApp() ? (
+              <button
+                type="button"
+                data-glass-accent=""
+                style={{ ...dashboardPrimaryButton, display: 'inline-flex', marginTop: 14 }}
+                onClick={() => {
+                  const reportUrl = portalHomeReportUrl(lastService.reportUrl);
+                  const pdfCandidate = lastService.reportPdfUrl;
+                  const pdfUrl = pdfCandidate && !String(pdfCandidate).startsWith('/report/')
+                    ? resolveApiAssetUrl(pdfCandidate)
+                    : null;
+                  openReportPage({
+                    id: lastService.id,
+                    title: `Visit Report — ${lastService.type || lastService.serviceType || 'Service'}`,
+                    fileName: `Service_Report_${lastService.date}.pdf`,
+                    ...(pdfUrl ? { pdfUrl } : {}),
+                  }, reportUrl);
+                }}
+              >
+                View service report
+              </button>
+            ) : (
+              <a href={portalHomeReportUrl(lastService.reportUrl)} data-glass-accent="" style={{ ...dashboardPrimaryButton, display: 'inline-flex', marginTop: 14, textDecoration: 'none' }}>
+                View service report
+              </a>
+            )
+          ) : lastService.reportAvailable !== false ? (
+            <button
+              type="button"
+              data-glass-accent=""
+              style={{ ...dashboardPrimaryButton, marginTop: 14 }}
+              onClick={() => {
+                const url = resolveApiAssetUrl(lastService.reportPdfUrl || api.getServiceReportUrl(lastService.id));
+                const doc = { id: lastService.id, title: 'Service report', fileName: `Service_Report_${lastService.date}.pdf`, pdfUrl: url };
+                // Match Visits: iOS can preview a fetched PDF in-app;
+                // Android WebView cannot, so fetch it and hand the bytes to
+                // the OS share/save sheet through downloadAuthedPdf.
+                if (isNativeApp() && nativePlatform() !== 'android') { openReportPdf(doc, url); return; }
+                downloadAuthedPdf(url, doc.fileName).catch(() => showCustomerAlert('Could not open this report. Please try again.'));
+              }}
+            >
+              View service report
+            </button>
+          ) : null}
         </section>
       ) : (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -3741,25 +3896,126 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
 // =========================================================================
 // SERVICES TAB
 // =========================================================================
-function ServicesTab() {
+function historyAuthorizationDenied(error) {
+  return error?.status === 401 || error?.status === 403 || error?.sessionExpired;
+}
+
+function historyPropertyUnavailable(error, historyProperty) {
+  return Boolean(historyProperty) && error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE';
+}
+
+function historyScopeMismatch(result, historyProperty, customerId) {
+  return Boolean(historyProperty)
+    && (result?.historyProperty !== historyProperty || result?.historyCustomerId !== customerId);
+}
+
+function settleHistoryScopeConflict({
+  current, originalCacheEntryIsCurrent, evictOriginalCache,
+  invalidateCurrentScope, requestedScopeKey, message,
+}) {
+  if (!current) {
+    if (originalCacheEntryIsCurrent()) evictOriginalCache();
+    return;
+  }
+  invalidateCurrentScope(requestedScopeKey, message);
+}
+
+function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUnavailable = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const reportPanelIdPrefix = useId();
-  const [services, setServices] = useState([]);
-  // The Completed list stays CUSTOMER-wide by ruling (PR 2 r1f; kept in PR 4
-  // after review): a retired house has no picker entry left to reach its
-  // visits and reports, and pre-linkage visits must stay reachable when the
-  // primary itself is retired. The disclosure below says so.
-  const historyRead = usePortalRead('service-history', () => api.getServices({ limit: 100 }));
+  const historyScopeKey = `${customerId || 'customer'}:${historyProperty || 'profile'}`;
+  const mountedRef = useRef(false);
+  const activeHistoryScopeRef = useRef(historyScopeKey);
+  const scopeRefreshRequestedRef = useRef(null);
+  const invalidateHistoryScopeRef = useRef(() => {});
+  const evictHistoryCacheRef = useRef(() => {});
+  const historyCacheEntryGuardRef = useRef(() => () => false);
+  if (activeHistoryScopeRef.current !== historyScopeKey) {
+    activeHistoryScopeRef.current = historyScopeKey;
+    scopeRefreshRequestedRef.current = null;
+  }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const requestPropertyRefresh = (requestedScopeKey) => {
+    if (!mountedRef.current
+      || activeHistoryScopeRef.current !== requestedScopeKey
+      || scopeRefreshRequestedRef.current === requestedScopeKey
+      || typeof onSavedScopeUnavailable !== 'function') return;
+    scopeRefreshRequestedRef.current = requestedScopeKey;
+    // Start on a microtask so an unmount/property switch caused by the same
+    // response can invalidate this request first. A failed picker refresh
+    // leaves the history error visible and is not retried in a loop.
+    Promise.resolve()
+      .then(() => {
+        if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) return undefined;
+        return onSavedScopeUnavailable();
+      })
+      .catch(() => {});
+  };
+  const readPage = async (pagination, { isCurrent = () => true } = {}) => {
+    const requestedScopeKey = historyScopeKey;
+    const evictOriginalCache = evictHistoryCacheRef.current;
+    const originalCacheEntryIsCurrent = historyCacheEntryGuardRef.current();
+    const requestIsCurrent = () => mountedRef.current
+      && activeHistoryScopeRef.current === requestedScopeKey
+      && isCurrent();
+    let result;
+    try {
+      result = await api.getServices(historyProperty ? { ...pagination, historyProperty } : pagination);
+      if (historyScopeMismatch(result, historyProperty, customerId)) {
+        const mismatch = new Error('Your selected property changed. Reopen Visits to see its history.');
+        mismatch.status = 409;
+        throw mismatch;
+      }
+    } catch (error) {
+      const authorizationDenied = historyAuthorizationDenied(error);
+      const propertyConflict = Boolean(historyProperty) && error?.status === 409;
+      // Pagination bypasses usePortalRead.refresh. A denial that arrives after
+      // Completed unmounts must still evict the provider cache, or an offline
+      // remount can resurrect the previously authorized rows and actions.
+      const current = requestIsCurrent();
+      if (authorizationDenied) evictOriginalCache({ clearAll: true });
+      // A scope conflict invalidates the cache entry this request started
+      // from even after unmount. Preserve a replacement written by a newer
+      // verified request for the same key.
+      if (propertyConflict) {
+        settleHistoryScopeConflict({
+          current, originalCacheEntryIsCurrent, evictOriginalCache,
+          invalidateCurrentScope: invalidateHistoryScopeRef.current,
+          requestedScopeKey, message: error?.message,
+        });
+      } else if (current && authorizationDenied) {
+        invalidateHistoryScopeRef.current(requestedScopeKey, error?.message, {
+          clearAll: true,
+          refreshPicker: historyPropertyUnavailable(error, historyProperty),
+        });
+      }
+      throw error;
+    }
+    if (!requestIsCurrent()) {
+      throw new Error('This service-history request is no longer current.');
+    }
+    // A verified response ends the previous conflict episode. A later scope
+    // conflict must be allowed to refresh the picker again automatically.
+    scopeRefreshRequestedRef.current = null;
+    return result;
+  };
+  const historyRead = usePortalRead(`service-history:${historyProperty || 'profile'}`, ({ isCurrent }) => readPage({ limit: 100 }, { isCurrent }));
+  evictHistoryCacheRef.current = historyRead.evict;
+  historyCacheEntryGuardRef.current = historyRead.cacheEntryGuard;
   const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
-  const [totalServices, setTotalServices] = useState(null);
+  const services = historyRead.data?.services || [];
+  const totalServices = Number.isFinite(historyRead.data?.total) ? historyRead.data.total : null;
   // Raw pagination cursor — counts rows RECEIVED, not rows kept after the
   // boundary-row dedupe, so the next page never re-requests a seen row.
-  const [servicesOffset, setServicesOffset] = useState(0);
+  const servicesOffset = historyRead.data?.nextOffset ?? services.length;
   const [loadingMore, setLoadingMore] = useState(false);
   const moreSequence = useRef(0);
   const [lightbox, setLightbox] = useState(null);
@@ -3769,21 +4025,46 @@ function ServicesTab() {
   useLockBodyScroll(!!lightbox);
   const lightboxRef = useModalFocus(!!lightbox, () => setLightbox(null));
   useLockBodyScroll(!!lightbox); // freeze the page behind the photo viewer
+  // Each preview is bound to the row it opened from. A refresh that drops the
+  // row, or returns it with reportAvailable false (a contact's report access
+  // withdrawn), closes the preview and revokes its blob.
   const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
-    (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
+    (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.'),
+    (doc) => {
+      const row = services.find(item => item.id === doc?.id);
+      return homeReportKey(row?.id, row, historyProperty || 'profile');
+    },
   );
+
+  invalidateHistoryScopeRef.current = (requestedScopeKey, message, { clearAll = false, refreshPicker = true } = {}) => {
+    if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) return;
+    moreSequence.current += 1;
+    setLoadingMore(false);
+    setExpanded(null);
+    setLightbox(null);
+    closePreview();
+    historyRead.invalidate(message || 'Your property selection changed. Refresh it before reopening completed visits.', { clearAll });
+    if (refreshPicker) requestPropertyRefresh(requestedScopeKey);
+  };
+
+  const retryHistory = () => {
+    // A deliberate retry means the property-list refresh may have recovered.
+    // Lifecycle/provider refreshes keep the guard armed so they cannot loop.
+    scopeRefreshRequestedRef.current = null;
+    void historyRead.refresh();
+  };
 
   const SERVICES_PAGE_SIZE = 100;
   useEffect(() => {
-    if (!historyRead.data) return;
-    const d = historyRead.data;
     moreSequence.current += 1;
     setLoadingMore(false);
-    setServices(d.services || []);
-    setServicesOffset(d.nextOffset ?? (d.services || []).length);
-    setTotalServices(Number.isFinite(d.total) ? d.total : null);
+    if (!historyRead.data) {
+      setExpanded(null);
+      setLightbox(null);
+      closePreview();
+    }
     return () => { moreSequence.current += 1; };
-  }, [historyRead.data, historyRead.pending]);
+  }, [historyRead.data, historyRead.pending, closePreview]);
 
   // The server caps each page at 100 rows — older visits stay reachable
   // through an explicit Load More instead of silently vanishing from history.
@@ -3791,7 +4072,10 @@ function ServicesTab() {
     if (loadingMore) return;
     setLoadingMore(true);
     const attempt = ++moreSequence.current;
-    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
+    const historyIsCurrent = historyRead.freshnessGuard();
+    readPage({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset }, {
+      isCurrent: () => moreSequence.current === attempt && historyIsCurrent(),
+    })
       .then(d => {
         if (moreSequence.current !== attempt) return;
         // The offset runs against a live newest-first query — a visit
@@ -3840,7 +4124,7 @@ function ServicesTab() {
   const sectionTitle = CUSTOMER_SECTION_LABEL;
 
   // The stable key keeps an open iframe alive when the list enters saved mode.
-  const previewOverlay = preview && <DocumentPreviewOverlay key="report-preview"
+  const previewOverlay = historyRead.data && preview && <DocumentPreviewOverlay key="report-preview"
     preview={preview} onClose={closePreview}
     onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />;
 
@@ -3873,7 +4157,7 @@ function ServicesTab() {
         title="Could not load service history"
         message={loadError}
         actionLabel="Try Again"
-        onAction={historyRead.refresh}
+        onAction={retryHistory}
       />
     );
   }
@@ -3919,7 +4203,7 @@ function ServicesTab() {
     }
     if (searchTerm.trim()) {
       const q = searchTerm.toLowerCase();
-      const haystack = [s.notes, s.type, s.technician].filter(Boolean).join(' ').toLowerCase();
+      const haystack = [s.notes, s.type, s.technician, s.propertyAddress].filter(Boolean).join(' ').toLowerCase();
       if (!haystack.includes(q)) return false;
     }
     return true;
@@ -4055,7 +4339,7 @@ function ServicesTab() {
           eyebrow="Completed Visits"
           title={services.length === 0 ? 'No completed visits yet' : 'No visits match those filters'}
           message={services.length === 0
-            ? "Your completed service reports will appear here after your first appointment."
+            ? (historyProperty && historyProperty !== 'all' ? 'No completed visits are linked to this property. Choose “All properties on this profile” to see older visits.' : 'Your completed service reports will appear here after your first appointment.')
             : 'Try clearing the year, type, or search filters to see more visit history.'}
           actionLabel={services.length === 0 ? undefined : 'Clear Filters'}
           onAction={services.length === 0 ? undefined : () => { setTypeFilter('All'); setYearFilter('All'); setSearchTerm(''); }}
@@ -4114,6 +4398,7 @@ function ServicesTab() {
                           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
                             {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
                           </div>
+                          {historyProperty && <div style={{ fontSize: 14, color: muted }}>{s.propertyAddress || 'Address unavailable'}</div>}
                         </div>
                       </div>
                       {/* Every row in this list is a finished visit — a
@@ -13692,7 +13977,17 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
 
 function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
   const [tracker, setTracker] = useState(null);
+  const trackerRef = useRef(null);
+  trackerRef.current = tracker;
   const [loading, setLoading] = useState(true);
+  const [reportRefreshing, setReportRefreshing] = useState(false);
+  const reportRefreshAttemptRef = useRef(0);
+  const portalRead = usePortalRefresh();
+  const registerPortalRead = portalRead?.register;
+  const { preview: reportPreview, openPagePreview: openReportPage, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
+    () => showCustomerAlert('Could not open this report. Please try again.'),
+    homeReportKey(tracker?.id, tracker?.serviceSummary, selectedProperty || currentEntry?.id),
+  );
   const [propertyPrefs, setPropertyPrefs] = useState(null);
   const [weather, setWeather] = useState(null);
   // Monotonic sequence for tracker fetches: the 15s poll overlaps the initial
@@ -13723,19 +14018,20 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const profileFactsApply = !(selectedProperty || savedScope) || entryConfirmedPrimary;
   const profileFactsRef = useRef(profileFactsApply);
   profileFactsRef.current = profileFactsApply;
-  const adoptTracker = useCallback((d) => {
+  const adoptTracker = useCallback((d, expectedStopId = null) => {
     const { entry, saved, named, refresh } = scopeRef.current;
     if (scopeEchoMismatch(d?.propertyScope, entry, saved, named)) {
       setTracker(null);
       if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
       return;
     }
-    setTracker(d.tracker);
+    if (expectedStopId != null && String(d?.tracker?.id) !== String(expectedStopId)) return;
+    setTracker(d?.tracker ?? null);
   }, []);
 
   const fetchTracker = useCallback(() => {
     const seq = ++trackerSeqRef.current;
-    api.getActiveTracker()
+    return api.getActiveTracker()
       .then(d => { if (seq !== trackerSeqRef.current) return; adoptTracker(d); setLoading(false); })
       .catch(() => { if (seq === trackerSeqRef.current) setLoading(false); });
   }, [adoptTracker]);
@@ -13774,6 +14070,83 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
     return () => clearInterval(interval);
   }, [trackerPhase, fetchTracker]);
 
+  const withdrawCompletionReport = useCallback((displayedTrackerId) => {
+    setTracker(current => {
+      if (!current?.serviceSummary || String(current.id) !== String(displayedTrackerId)) return current;
+      // Keep the completed-stop status, but discard every report-derived
+      // field immediately. homeReportKey then closes an open native preview.
+      return {
+        ...current,
+        serviceSummary: {
+          customerSummary: null,
+          reportUrl: null,
+          reportPdfUrl: null,
+          reportPending: false,
+          reportWithheld: true,
+          reportAvailable: false,
+        },
+      };
+    });
+  }, []);
+
+  const revalidateCompletedTracker = useCallback(({ preserveOnMissing = false, showBusy = false } = {}) => {
+    const displayedTracker = trackerRef.current;
+    if (!displayedTracker || displayedTracker.currentStep !== 7 || displayedTracker.state !== 'complete') {
+      return Promise.resolve();
+    }
+    const displayedTrackerId = displayedTracker.id;
+    const reportWasVisible = Boolean(displayedTracker.serviceSummary
+      && !displayedTracker.serviceSummary.reportPending
+      && !displayedTracker.serviceSummary.reportWithheld
+      && displayedTracker.serviceSummary.reportAvailable !== false);
+    const seq = ++trackerSeqRef.current;
+    const busyAttempt = showBusy ? ++reportRefreshAttemptRef.current : null;
+    if (showBusy) setReportRefreshing(true);
+    let timer;
+    return Promise.race([
+      api.getTodayTracker(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Report refresh timed out')), READ_TIMEOUT_MS);
+      }),
+    ])
+      .then(d => {
+        if (seq !== trackerSeqRef.current) return;
+        adoptTracker(d, preserveOnMissing ? displayedTrackerId : null);
+      })
+      .catch(error => {
+        if (seq !== trackerSeqRef.current) return;
+        const denied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
+        if (denied || reportWasVisible) withdrawCompletionReport(displayedTrackerId);
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        if (showBusy && busyAttempt === reportRefreshAttemptRef.current) setReportRefreshing(false);
+      });
+  }, [adoptTracker, withdrawCompletionReport]);
+
+  // Terminal trackers stop the 15-second poll, but report permission can
+  // still change while Home remains mounted. Join the portal refresh cycle so
+  // reconnect/focus/pull refreshes withdraw stale excerpts, links and previews.
+  useEffect(() => {
+    if (typeof registerPortalRead !== 'function') return undefined;
+    return registerPortalRead(() => revalidateCompletedTracker());
+  }, [registerPortalRead, revalidateCompletedTracker]);
+
+  // A provider-wide authorization eviction (a 401 or 403 on any read) clears
+  // every reader. The completed tracker withdraws its excerpt, links and open
+  // preview at once and cancels any pending completion read.
+  const registerPortalInvalidation = portalRead?.enabled ? portalRead.registerInvalidation : null;
+  const getPortalEpoch = portalRead?.enabled ? portalRead.getInvalidationEpoch : null;
+  useEffect(() => {
+    if (typeof registerPortalInvalidation !== 'function') return undefined;
+    const key = 'home-completed-tracker';
+    return registerPortalInvalidation(key, getPortalEpoch?.(key), () => {
+      trackerSeqRef.current += 1;
+      const displayed = trackerRef.current;
+      if (displayed?.currentStep === 7 && displayed?.state === 'complete') withdrawCompletionReport(displayed.id);
+    });
+  }, [registerPortalInvalidation, getPortalEpoch, withdrawCompletionReport]);
+
   const lastReportedAt = tracker?.techPosition?.lastReportedAt || tracker?.techPosition?.updatedAt;
   const lastUpdated = useLastUpdated(lastReportedAt);
 
@@ -13787,6 +14160,12 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const eta = tracker.etaMinutes;
   const notes = tracker.liveNotes || [];
   const summary = tracker.serviceSummary;
+  const refreshPendingReport = () => {
+    // Completion lives on /today after /active stops returning terminal
+    // visits. Only refresh the report for the stop already on screen: a
+    // different or missing visit must not swap or clear the completed card.
+    void revalidateCompletedTracker({ preserveOnMissing: true, showBusy: true });
+  };
   const serviceDescription = tracker.service?.summary;
   const office = tracker.office || { name: 'Waves Pest Control', phone: '(941) 297-5749', area: 'Southwest Florida' };
   const isLawn = svcType.toLowerCase().includes('lawn') || svcType.toLowerCase().includes('turf');
@@ -13859,6 +14238,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
     <div style={{
       display: 'flex', flexDirection: 'column', gap: 12,
     }}>
+      {reportPreview && <DocumentPreviewOverlay preview={reportPreview} onClose={closeReportPreview} onError={() => showCustomerAlert('Could not save this report. Please try again.')} />}
       {/* Status pill + weather strip. The pill is the authoritative
           state read; the weather chip is informational context.
           Replaces the gradient header + 6-step chevron bar. */}
@@ -14221,9 +14601,14 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
 
       {/* Completion summary at step 7 — never for a cancelled visit, where
           any summary data would describe work that didn't happen */}
-      {step === 7 && tracker.state !== 'cancelled' && summary && (
+      {step === 7 && tracker.state === 'complete' && summary && !summary.reportWithheld && (
         <div data-glass="soft" style={{ ...subCardBase, background: GLASS_SUBTLE, borderColor: '#E7E2D7' }}>
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10, marginBottom: 8 }}><Icon name="clipboard" size={14} strokeWidth={2} />Service summary</div>
+          {summary.customerSummary && (
+            <div style={{ fontSize: 15, color: B.textBody, lineHeight: 1.55, marginBottom: 12 }}>
+              {summary.customerSummary}
+            </div>
+          )}
           {summary.productsApplied?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 14, color: B.textBody, fontWeight: 600, marginBottom: 6 }}>Products</div>
@@ -14247,6 +14632,66 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
               Next visit: {parseDate(summary.nextVisitDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
             </div>
           )}
+          {summary.reportUrl ? (
+            isNativeApp() ? (
+              <button
+                type="button"
+                data-glass-accent=""
+                style={{ ...PORTAL_PRIMARY_ACTION, width: '100%', minHeight: 46, marginTop: 12 }}
+                onClick={() => {
+                  const reportUrl = portalHomeReportUrl(summary.reportUrl);
+                  const pdfCandidate = summary.reportPdfUrl;
+                  const pdfUrl = pdfCandidate && !String(pdfCandidate).startsWith('/report/')
+                    ? resolveApiAssetUrl(pdfCandidate)
+                    : null;
+                  openReportPage({
+                    id: tracker.id,
+                    title: `Visit Report — ${svcType}`,
+                    fileName: `Service_Report_${tracker.service?.date || 'Today'}.pdf`,
+                    ...(pdfUrl ? { pdfUrl } : {}),
+                  }, reportUrl);
+                }}
+              >
+                View today&apos;s report
+              </button>
+            ) : (
+              <a
+                href={portalHomeReportUrl(summary.reportUrl)}
+                data-glass-accent=""
+                style={{ ...PORTAL_PRIMARY_ACTION, display: 'flex', width: '100%', minHeight: 46, marginTop: 12, boxSizing: 'border-box', textDecoration: 'none' }}
+              >
+                View today&apos;s report
+              </a>
+            )
+          ) : summary.reportPdfUrl ? (
+            <button
+              type="button"
+              data-glass-accent=""
+              style={{ ...PORTAL_PRIMARY_ACTION, width: '100%', minHeight: 46, marginTop: 12 }}
+              onClick={() => {
+                const url = resolveApiAssetUrl(summary.reportPdfUrl);
+                const doc = { id: tracker.id, title: 'Service report', fileName: 'Waves_Service_Report.pdf', pdfUrl: url };
+                if (isNativeApp() && nativePlatform() !== 'android') { openReportPdf(doc, url); return; }
+                downloadAuthedPdf(url, doc.fileName).catch(() => {
+                  showCustomerAlert('Could not open this report. Please try again.');
+                });
+              }}
+            >
+              View today&apos;s report
+            </button>
+          ) : summary.reportPending ? (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 14, color: B.textCaption, lineHeight: 1.45 }}>Your report is still being prepared.</div>
+              <button
+                type="button"
+                disabled={reportRefreshing}
+                style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, marginTop: 8 }}
+                onClick={refreshPendingReport}
+              >
+                {reportRefreshing ? 'Checking...' : 'Check for report'}
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
     </div>
@@ -17631,6 +18076,21 @@ function WavesChatSheet({ onClose, onUnread, firstName }) {
 function VisitsTab({ customer, properties = [], activePropertyId, selectedProperty = null, subTab, onSubTabChange, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   const compact = useIsMobile(760);
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
+  const [showAllProperties, setShowAllProperties] = useState(false);
+  const entry = properties.find(p => p.id === activePropertyId);
+  const historyPropertyId = selectedProperty?.propertyId || entry?.propertyId;
+  const holderCanReadPropertyHistory = customer?.actor?.kind !== 'contact' && !customer?.cancelled;
+  // Positive server-resolved signal only: every saved address on THIS holder
+  // profile retired. A missing selection by itself may be gate-off, contact,
+  // or legacy profile shape and must keep the unfiltered read.
+  const closedHolderHistory = holderCanReadPropertyHistory
+    && selectedProperty?.closed === true
+    && selectedProperty.key == null
+    && selectedProperty.propertyId == null
+    && String(selectedProperty.customerId || '') === String(customer?.id || '')
+    && String(activePropertyId || '') === String(customer?.id || '');
+  const canFilterHistory = Boolean(historyPropertyId && holderCanReadPropertyHistory);
+  const historyProperty = closedHolderHistory ? 'all' : (canFilterHistory ? (showAllProperties ? 'all' : historyPropertyId) : null);
   const card = {
     background: B.white,
     border: '1px solid #E7E2D7',
@@ -17697,18 +18157,16 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
       </section>
       {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : (
         <>
-          {/* Completed visits and reports read /services, which is
-              customer-wide (per-property history is PR 4 of the lane): under
-              the saved-property MODEL say so — whenever the list is
-              saved-shaped, not only with 2+ active entries (GitHub codex r8
-              P2): a profile whose other houses were retired still lists their
-              visits and reports here, under the remaining house's address. */}
-          {properties.some((p) => p.key) && (
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }} data-testid="completed-profile-wide-notice">
-              Completed visits and reports are listed for this whole profile, including any property that is no longer active.
-            </div>
+          {(canFilterHistory || closedHolderHistory) && (
+            <label style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 4, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
+              Show completed visits for
+              <CustomerSelect fullWidth disabled={closedHolderHistory} style={{ textOverflow: 'ellipsis' }} value={closedHolderHistory || showAllProperties ? 'all' : 'selected'} onChange={e => setShowAllProperties(e.target.value === 'all')}>
+                {!closedHolderHistory && <option value="selected">This property{entry?.propertyId === historyPropertyId && entry.address?.line1 ? ` · ${formatAddress(entry.address)}` : ''}</option>}
+                <option value="all">All properties on this profile</option>
+              </CustomerSelect>
+            </label>
           )}
-          <ServicesTab />
+          <ServicesTab key={historyProperty || 'profile'} historyProperty={historyProperty} customerId={customer?.id} onSavedScopeUnavailable={onSavedScopeUnavailable} />
         </>
       )}
     </div>
@@ -18148,7 +18606,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
 const APP_RATING_ASK_DELAY_MS = 8000;
 
 export default function PortalPage() {
-  const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
+  const { customer, customerSaved = false, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
   const isMobileShell = useIsMobile(900);
   // C4: /auth/me reports `cancelled` for a churned account admitted under
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
@@ -18168,7 +18626,8 @@ export default function PortalPage() {
   // probe and falls back home only once the server said it is off.
   // One key per signed-in customer and session: the activity beacon and the Messages probe restart on it.
   const sessionKey = `${customer?.id ?? ''}:${sessionEpoch}`;
-  const messagesGate = usePortalMessagesGate(!!customer?.id && !allowedTabs, sessionKey);
+  // Nothing probes or loads behind the saved home screen: these start when the account is fresh.
+  const messagesGate = usePortalMessagesGate(!!customer?.id && !allowedTabs && !customerSaved, sessionKey);
   const tabBlocked = (tab) => (!!allowedTabs && !allowedTabs.includes(tab)) || (tab === 'messages' && messagesGate.off);
   // Rollback applies to this mounted session, including tab/property navigation.
   const [refreshEnabled] = useState(() => new URLSearchParams(window.location.search).get('appRefresh') !== '0');
@@ -18201,7 +18660,7 @@ export default function PortalPage() {
     tabBlocked(initialTab) ? homeTab : initialTab,
   );
   // Tab view beacon (server-gated by GATE_PORTAL_ACTIVITY; a dark gate stops it).
-  usePortalActivity(activeTab, sessionKey);
+  usePortalActivity(customerSaved ? null : activeTab, sessionKey);
   // Re-probe the Messages count when the customer changes tab (and for the first probe).
   // The open Waves Chat sheet reports the count itself, as the Messages page does.
   const [showWavesChat, setShowWavesChat] = useState(false);
@@ -18366,7 +18825,7 @@ export default function PortalPage() {
   // the feature is live (404 hides both). reportIssuePrefill carries the
   // category/location/note/photos a "Request service" next-step hands to
   // the New Request form.
-  const photoIdGate = usePhotoIdGate(sessionEpoch, !cancelledAccount && !contactSession);
+  const photoIdGate = usePhotoIdGate(sessionEpoch, !cancelledAccount && !contactSession && !customerSaved);
   const [showPhotoId, setShowPhotoId] = useState(false);
   const [reportIssuePrefill, setReportIssuePrefill] = useState(null);
   // Store rating pop-up (GATE_APP_RATING_PROMPT, owner 2026-11-02 "do the rating
@@ -18377,7 +18836,7 @@ export default function PortalPage() {
   // phone check; the server decides (finished visit, 120-day spacing) and the
   // store decides last.
   const biometricLocked = useBiometricLock();
-  const appRatingQuiet = activeTab === 'dashboard' && !cancelledAccount && !contactSession && !biometricLocked;
+  const appRatingQuiet = activeTab === 'dashboard' && !cancelledAccount && !contactSession && !biometricLocked && !customerSaved;
   useEffect(() => {
     if (!appRatingQuiet || !isNativeApp()) return undefined;
     // Cleanup runs the moment the screen stops being quiet, so a claim still
@@ -18459,6 +18918,10 @@ export default function PortalPage() {
   // entry ids against this, never against customer.id directly.
   const activePropertyId = selectedProperty?.key || customer.id;
   const activeProperty = portalProperties.find((property) => property.id === activePropertyId) || null;
+  // The saved home screen stands in for the whole portal until the account is
+  // fresh (see SavedHomeView): none of the tabs below mounts, so none of their
+  // reads, purchase flows or SetupIntent return handling can start from it.
+  if (customerSaved) return <SavedHomeView customer={customer} entry={activeProperty} identity={homeIdentityKey(api.token)} property={activePropertyId} />;
   // Every saved property of this profile retired (closed): the list names no
   // selectable entry (`selected.key` null). No house to show, edit or file
   // under (GitHub codex r5 P1) — the header shows no address, My Property
@@ -18599,7 +19062,8 @@ export default function PortalPage() {
 
   return (
     <PortalGlassContext.Provider value={true}>
-    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}>
+    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}
+      persistIdentity={cancelledAccount || contactSession ? null : homeIdentityKey(api.token)} persistProperty={activePropertyId}>
       {/* Always registered (codex #4207 r2): a gate rollback drops the client
           to profile mode, but the refresh token still forwards its property
           claim — when the gate returns, the next refresh must re-read the

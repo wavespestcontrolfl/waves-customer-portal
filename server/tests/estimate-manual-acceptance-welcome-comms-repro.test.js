@@ -85,6 +85,9 @@ function makeDb(estimate) {
       whereNull(column) { this.nullColumns = [...(this.nullColumns || []), column]; return this; },
       orWhereNot() { return this; },
       whereRaw() { return this; },
+      leftJoin() { return this; },
+      orderBy() { return this; },
+      select() { return this; },
       forUpdate() { return this; },
       first: async () => (table === 'estimates' ? estimate : null),
       update(patch) {

@@ -3025,6 +3025,34 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       : { lane: LANES.RED, reasons: ['pricing engine failed for the selected services'] };
     result.lane = lane;
     result.reasons = reasons;
+
+    // Returning-customer setup fee rule (owner 2026-11-24 and 2026-11-25, GATE_RETURNING_SETUP_FEE_GAP). A lane
+    // that drafts decides as a staff save does: on the plan the engine priced, from the visits of the customer
+    // the draft links (trustedCustomer: an ambiguous phone match links nobody). A waiver marks the engine result
+    // the draft stores (mapWithReturningWaiver) and rides the draft as the operator waiver, so the page, the
+    // accept and a later staff save read one answer.
+    //  - Decided once, here, before the dry-run return: a replay prices what the live draft stores, and a
+    //    second pass over a marked result would find no fee to waive.
+    //  - Decided on a copy, which replaces the priced result only when the decision finished: a result is never
+    //    left marked with no waiver to explain it.
+    //  - Gate off, no linked customer or an active member = no history, no copy, no change. A failed read or
+    //    map keeps the result as priced, fee included: this step never costs a draft.
+    let returningSetupFeeWaiver = null;
+    if (lane !== LANES.RED) {
+      try {
+        const Returning = require('../returning-setup-fee-waiver');
+        const history = await Returning.loadReturningVisitHistory(db, { customerId: trustedCustomer?.id });
+        if (history) {
+          const decided = structuredClone(engineResult);
+          ({ waiver: returningSetupFeeWaiver } = Returning.mapWithReturningWaiver(
+            decided, require('../pricing-engine/v1-legacy-mapper').mapV1ToLegacyShape, { history },
+          ));
+          engineResult = decided;
+        }
+      } catch (err) {
+        logger.warn(`[estimator-engine] returning setup fee rule skipped: ${err.message}`);
+      }
+    }
     result.engineResult = dryRun ? engineResult : undefined;
 
     if (dryRun) return result;
@@ -3228,7 +3256,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     let draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
       propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
-      membershipSnapshot, priorQualifyingServices, origin,
+      membershipSnapshot, priorQualifyingServices, origin, returningSetupFeeWaiver,
     });
 
     if (draft.blocked && UNIT_FENCE_QUIET_REASONS.includes(draft.duplicateBlock?.reason)) {
@@ -3280,7 +3308,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           draft = await createDraftEstimate({
             intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
             propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
-            membershipSnapshot, priorQualifyingServices, origin,
+            membershipSnapshot, priorQualifyingServices, origin, returningSetupFeeWaiver,
           });
         }
       }

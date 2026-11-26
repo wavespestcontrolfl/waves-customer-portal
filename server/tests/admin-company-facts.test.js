@@ -22,6 +22,9 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const mockBank = {
   listFacts: jest.fn(async () => ({ facts: [], nextCursor: null })),
+  readVerifiedFacts: jest.fn(async () => ({ facts: [{ id: 'f1', text: 'We service Parrish.' }, { id: 'f2', text: 'We offer a plan.' }], consideredIds: ['f1', 'f2', 'f3'] })),
+  renderBankFactsLines: jest.fn((facts) => facts.map((f) => `- ${f.text}`).join('\n')),
+  bankVersionHash: jest.fn(() => 'v1'),
   createDraft: jest.fn(async () => ({ id: 'f1', status: 'draft', check_result: { blocks: ['banned_copy'], warnings: [] } })),
   getFact: jest.fn(async () => ({ id: 'f1', status: 'draft', check_result: null })),
   factHistory: jest.fn(async () => [{ action: 'drafted' }]),
@@ -64,7 +67,7 @@ async function call(target, method = 'GET', body) {
 }
 
 const EVERY_ROUTE = [
-  ['GET', ''], ['POST', ''], ['GET', `/${ID}`], ['GET', `/${ID}/history`], ['PATCH', `/${ID}`], ['DELETE', `/${ID}`],
+  ['GET', ''], ['GET', '/preview'], ['POST', ''], ['GET', `/${ID}`], ['GET', `/${ID}/history`], ['PATCH', `/${ID}`], ['DELETE', `/${ID}`],
   ['POST', `/${ID}/approve`], ['POST', `/${ID}/retire`], ['POST', `/${ID}/restore`],
 ];
 
@@ -92,6 +95,12 @@ describe('approve is the owner account only', () => {
     expect(mockBank.approveFact).toHaveBeenCalledWith(ID, { ownerWords: 'ok 11-25', acknowledgeWarnings: true }, { id: 'bbbbbbbb-0000-4000-8000-000000000001', isOwner: true });
   });
 
+  test('the list tells the page whether to show Approve: true for the owner account only', async () => {
+    expect((await call(url())).body.viewer).toEqual({ ownerActions: true });
+    mockEmail = 'someone.else@example.test';
+    expect((await call(url())).body.viewer).toEqual({ ownerActions: false });
+  });
+
   test('a blocked approve answers 422 with the codes', async () => {
     mockBank.approveFact.mockRejectedValueOnce(new FactError('BLOCKED', 422, { blocks: ['banned_copy'], warnings: [] }));
     const res = await call(url(`/${ID}/approve`), 'POST', {});
@@ -113,14 +122,35 @@ describe('any admin may draft, edit, discard, retire and restore', () => {
     expect((await call(url('?status=draft'))).status).toBe(200);
     expect(mockBank.listFacts).toHaveBeenCalledWith({ status: 'draft' });
     const paged = await call(url('?status=all&limit=50&cursor=abc'));
-    expect(paged.body).toEqual({ facts: [], nextCursor: null });
+    expect(paged.body).toEqual({ facts: [], nextCursor: null, viewer: { ownerActions: false } });
     expect(mockBank.listFacts).toHaveBeenLastCalledWith({ status: 'all', limit: '50', cursor: 'abc' });
     expect((await call(url(`/${ID}`), 'PATCH', { factText: 'x' })).body.fact.id).toBe('f2');
     expect((await call(url(`/${ID}`), 'DELETE')).body).toEqual({ id: 'f1', discarded: true });
+    expect((await call(url(`/${ID}`), 'DELETE', { baseTextSha256: 'h', baseUpdatedAt: '2026-11-25T15:00:00.000Z' })).status).toBe(200);
+    expect(mockBank.discardDraft).toHaveBeenLastCalledWith(ID, expect.objectContaining({ isOwner: false }), { baseTextSha256: 'h', baseUpdatedAt: '2026-11-25T15:00:00.000Z' });
     expect((await call(url(`/${ID}/retire`), 'POST', { reason: 'wrong' })).status).toBe(200);
     expect(mockBank.retireFact).toHaveBeenCalledWith(ID, { reason: 'wrong' }, expect.objectContaining({ isOwner: false }));
     expect((await call(url(`/${ID}/restore`), 'POST')).status).toBe(201);
     expect((await call(url(`/${ID}/history`))).body.events).toEqual([{ action: 'drafted' }]);
+  });
+});
+
+describe('preview', () => {
+  test('any admin gets the lines the agents snapshot serves, from a fresh read, and the route is not taken for an id', async () => {
+    mockEmail = 'someone.else@example.test';
+    const res = await call(url('/preview'));
+    expect(res).toEqual({ status: 200, body: { lines: '- We service Parrish.\n- We offer a plan.', count: 2, version: 'v1', ids: ['f1', 'f2'], consideredIds: ['f1', 'f2', 'f3'], leftOut: ['f3'] } });
+    expect(mockBank.readVerifiedFacts).toHaveBeenCalledTimes(1);
+    expect(mockBank.getFact).not.toHaveBeenCalled();
+  });
+});
+
+describe('a failed preview read is an error, not an empty list', () => {
+  test('503 PREVIEW_UNAVAILABLE with a code-only log', async () => {
+    mockBank.readVerifiedFacts.mockRejectedValueOnce(Object.assign(new Error('db down with secret text'), { code: 'ECONNRESET' }));
+    expect(await call(url('/preview'))).toEqual({ status: 503, body: { error: 'PREVIEW_UNAVAILABLE', code: 'PREVIEW_UNAVAILABLE' } });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('secret text');
+    expect(JSON.stringify(logger.error.mock.calls)).toContain('ECONNRESET');
   });
 });
 

@@ -137,7 +137,7 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
 
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers45_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers53_n');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
   });
 
@@ -161,11 +161,13 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     expect(prompt).toContain('{"type":"send_payment_link"}');
     expect(prompt).toContain('{"type":"send_portal_link"}');
     expect(prompt).toContain('{"type":"send_estimate_link"}');
-    // the SLA points at the FACTS, never a live-computed value (see the
-    // time-invariance test below) — the rule text still names what that
-    // fact IS, for a human reading the prompt
-    expect(prompt).toContain('the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below');
-    expect(prompt).toContain('the 1-business-hour follow-up SLA, 8am–8pm ET');
+    // owner 2026-11-25: the prompt no longer orders a follow-up promise; a hand-off is an ABSTAIN
+    expect(prompt).toContain('answer any part the facts DO answer, or return ABSTAIN when nothing is left (see DRAFT KINDS); never promise a follow-up, a reply or any timing');
+    expect(prompt).not.toContain('the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
+    expect(prompt).not.toContain('the 1-business-hour follow-up SLA, 8am–8pm ET');
+    expect(prompt).toContain('DRAFT KINDS (every reply is exactly one kind');
+    for (const kind of ['- ANSWER:', '- ACK:', '- ABSTAIN:']) expect(prompt).toContain(kind);
+    expect(prompt).toContain('"kind": "ANSWER, ACK or ABSTAIN (see DRAFT KINDS)"');
     // FACT DISCIPLINE still fully in force — never invent a time
     expect(prompt).toMatch(/never invent one/);
   });
@@ -205,13 +207,15 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     expect(prompt.match(/HELD FOR A PERSON:[^.]*\./)[0]).not.toMatch(/cancellation/i);
   });
 
-  test('CANCELLATIONS are accepted plainly: no "why", no owner-call promise, options only on request, escalate/cancel_request kept (owner 2026-10-09)', () => {
+  test('CANCELLATIONS are never an ACK and never promise anything: options only on request, escalate/cancel_request kept (owner 2026-10-09, 2026-11-25)', () => {
     const prompt = buildSystemPrompt();
     const bullet = prompt.split('\n').find((l) => l.startsWith('- CANCELLATIONS'));
     expect(bullet).toBeTruthy();
-    expect(bullet).toContain('Accept it in ONE plain sentence: no question about why, no attempt to change their mind, and NEVER a promise that the owner or anyone will call them.');
-    expect(bullet).toContain('Say the team will confirm the cancellation, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
-    expect(bullet).toContain('Offer skipping or rescheduling the next visit (2–3 SPECIFIC times from OPEN TIMES) ONLY when the customer asks what their options are.');
+    // owner 2026-11-25: never an ACK, no accepting sentence, no promise; the draft answers only what the facts answer or abstains
+    expect(bullet).toContain('never an ACK. Write no accepting sentence and no question about why, make no attempt to change their mind, and NEVER promise that the owner, the office, the team or anyone will call, confirm, cancel or process it.');
+    expect(bullet).not.toContain('FOLLOW-UP SLA RIGHT NOW');
+    expect(bullet).toContain('When none of that applies, return ABSTAIN.');
+    expect(bullet).toContain('offer skipping or rescheduling the next visit (2–3 SPECIFIC times from OPEN TIMES) ONLY when the customer asks what their options are;');
     expect(bullet).toContain('NEVER invent a discount, credit, or refund.');
     expect(bullet).toContain('Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
     // the 2026-09-27 wording is gone
@@ -232,7 +236,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     expect(prompt).toContain("say CONCRETELY that you're sending their free re-service booking link now, ALSO ask in the same reply where they are seeing the activity and about how many (so the technician treats the right place — ask AND send the link, never ask instead of sending it), and add {\"type\":\"escalate\",\"note\":\"send_reservice_link\"}");
     expect(prompt).toContain('- A text with MORE THAN ONE question or request gets an answer to EACH one.');
     expect(prompt).toContain('- When part of the text needs a person, still answer the parts the facts DO answer in the same reply.');
-    expect(prompt).toContain('- When two facts give DIFFERENT dates or times for what looks like the same visit, do not pick one and do not tell the customer our records disagree: say you will confirm the exact time, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW, and add {"type":"escalate","note":"followup_promised"}.');
+    expect(prompt).toContain('- When two facts give DIFFERENT dates or times for what looks like the same visit, do not pick one and do not tell the customer our records disagree: state neither time and promise no check or reply (answer what the facts do cover, or return ABSTAIN), and add {"type":"escalate","note":"needs_person"}.');
     const prior = process.env.GATE_SMS_REAL_ANSWERS;
     delete process.env.GATE_SMS_REAL_ANSWERS;
     try {
@@ -966,7 +970,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
 
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
-    expect(result.promptVersion).toBe('house_voice_v12_real_answers45_n');
+    expect(result.promptVersion).toBe('house_voice_v12_real_answers53_n');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
@@ -1085,7 +1089,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(result.factsBlock).toContain('- MISSED VISIT: the Mosquito Control visit');
-    expect(result.factsBlock).toContain('quote FOLLOW-UP SLA RIGHT NOW and escalate followup_promised so the office rebooks it; never offer OPEN TIMES for it');
+    expect(result.factsBlock).toContain('escalate needs_person so the office rebooks it (promise no reply, follow-up or timing; return ABSTAIN when the apology is all you can say); never offer OPEN TIMES for it');
     expect(result.factsBlock).not.toContain('OPEN TIMES (real');
   });
 
@@ -1264,7 +1268,8 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       for (const m of ['The ants are back, cancel my plan', 'The ants are back. Can I move my lawn visit to Friday?', 'ants are back and the lawn has weeds', 'ants are back, please book me a time']) expect(reserviceMixedRequest({ inboundMessage: m })).toBe(true);
       for (const m of ['the ants are back', 'the ants came back', 'The ants are back. Can you book a re-service?', 'The ants are back. Can someone come back out?', 'The ants are back after my appointment', 'the ants are back this morning']) expect(reserviceMixedRequest({ inboundMessage: m })).toBe(false);
       expect(RESERVICE_MIXED_REQUEST_HINT).toContain('"type":"escalate"');
-      expect(RESERVICE_MIXED_REQUEST_HINT).toContain('FOLLOW-UP SLA RIGHT NOW');
+      expect(RESERVICE_MIXED_REQUEST_HINT).not.toContain('FOLLOW-UP SLA RIGHT NOW');
+      expect(RESERVICE_MIXED_REQUEST_HINT).toContain('promise no reply, follow-up or timing for it');
       expect(RESERVICE_MIXED_REQUEST_HINT).toMatch(/Do NOT quote, offer or book any times/);
       const withHint = buildUserPromptFromFacts('FACTS', 'ants are back, cancel my plan', { intent: 'x' }, false, '', RESERVICE_MIXED_REQUEST_HINT);
       expect(withHint).toContain('MIXED REQUEST');
@@ -1460,7 +1465,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, city: 'Venice' });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1' });
     expect(insertedRows).toHaveLength(1);
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers45_n');
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers53_n');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
     expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
@@ -1469,7 +1474,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     const { insertedRows, getAvailableSlots } = await runDraft({ gateOn: true, schedulingIntent: false });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(insertedRows[0].facts_block).not.toContain('OPEN TIMES');
-    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers45_n'); // the prompt rewrite still applies; only the section is withheld
+    expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers53_n'); // the prompt rewrite still applies; only the section is withheld
   });
 });
 
@@ -1808,7 +1813,8 @@ describe('system prompt, gate ON (Codex r3): no-appointment → OPEN TIMES; foll
     const prompt = buildSystemPrompt();
     expect(prompt).toContain("no confirmed appointment is shown, do NOT invent a time — offer 2–3 SPECIFIC times from OPEN TIMES (declared in offered_times)");
     expect(prompt).not.toContain("no confirmed appointment is shown, do NOT name a time — say you'll confirm it");
-    expect(prompt).toContain('ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions');
+    expect(prompt).toContain('ALWAYS add {"type":"escalate","note":"<short reason>"} to intended_actions so a person owns it');
+    expect(prompt).not.toContain('followup_promised');
     expect(prompt).toContain('copy the matching "Payment status sentences" line from BILLING (it carries the exact amount) and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here');
     expect(prompt).not.toContain('exact amount from BILLING or PENDING ESTIMATE');
   });
@@ -3246,8 +3252,8 @@ describe('free re-service is an entitlement resolved through the existing mechan
       });
 
       // Codex round-41 P2: state-specific validation for the two non-offer states.
-      test('booked lane: the reply must refer to the existing appointment; link-unavailable lane: it must hand off with the current SLA wording', () => {
-        const { validateReserviceOffer, reserviceFactLine, followupSlaPhrase } = require('../services/sms-shadow-drafter');
+      test('booked lane: the reply must refer to the existing appointment; link-unavailable lane: it must hand off with an escalation and no follow-up wording', () => {
+        const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
         const inboundMessage = 'The ants are back';
         const bookedFacts = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
         const run = (reply, factsBlock, intendedActions = []) => validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage });
@@ -3263,14 +3269,13 @@ describe('free re-service is an entitlement resolved through the existing mechan
         expect(validateReserviceOffer({ reply: 'Understood.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: "Ants are back, please don't send anyone" }).ok).toBe(true);
         // link unavailable
         const downFacts = `X\n${reserviceFactLine([], {}, 'unknown', ['pest'])}\nBILLING:`;
-        const sla = followupSlaPhrase();
-        const escalate = [{ type: 'escalate', note: 'followup_promised' }];
+        const escalate = [{ type: 'escalate', note: 'needs_person' }];
         const noHandoff = run('So sorry to hear that.', downFacts);
         expect(noHandoff.ok).toBe(false);
         expect(noHandoff.violations[0]).toMatch(/link is unavailable/);
-        expect(run(`So sorry. Someone from the office will reach out ${sla}.`, downFacts).ok).toBe(false); // SLA wording but no escalate action
-        expect(run('So sorry. The office will reach out soon.', downFacts, escalate).ok).toBe(false); // escalate but no SLA wording
-        expect(run(`So sorry. Someone from the office will reach out ${sla}.`, downFacts, escalate).ok).toBe(true);
+        expect(run('So sorry to hear that.', downFacts, escalate).ok).toBe(true); // an escalation is the hand-off; no follow-up wording is asked for
+        expect(run('', downFacts, escalate).ok).toBe(true); // an ABSTAIN that escalates
+        expect(run('', downFacts).ok).toBe(false); // an ABSTAIN without the escalation is not a hand-off
         // not a pest report / no covered state: untouched
         expect(validateReserviceOffer({ reply: 'Thanks!', factsBlock: downFacts, intendedActions: [], inboundMessage: 'thank you' }).ok).toBe(true);
         expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: `X\n${reserviceFactLine([])}\nBILLING:`, intendedActions: [], inboundMessage }).ok).toBe(true);

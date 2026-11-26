@@ -1065,7 +1065,13 @@ async function submitRecap({
       // typed and pointer-required keys stay live-resolvable without
       // their pointer, same as the /complete path (codex P2 r28/r29).
       const { primaryIdentityFreezable } = require('./service-report/trace-eligibility');
+      // The visit's place in its plan series, and the cycle of each line that has a cadence of its own
+      // (returning-setup-fee-waiver.js reads both), like the /complete path. Only when this recap performs the
+      // completion: a later re-recap would freeze today's schedule as the completion's.
+      const recapPlan = recapPriorCompleted ? null
+        : await require('./returning-setup-fee-waiver').frozenPlanSeriesForCompletion(serviceId, trx, recapAddonLines).catch(() => null);
       frozenTraceIdentity = {
+        ...(recapPlan ? { completedSeries: recapPlan.series } : {}),
         ...(!primaryIdentityFreezable(recapProfile || {})
           ? {}
           : {
@@ -1073,7 +1079,7 @@ async function submitRecap({
             completedServiceName: (locked ? locked.service_type : svc.service_type) || null,
           }),
         ...(Array.isArray(recapAddonLines)
-          ? { completedAddonLines: recapAddonLines }
+          ? { completedAddonLines: (recapPlan && recapPlan.addonLines) || recapAddonLines }
           : {}),
       };
     } catch { /* legacy live-row behavior */ }
@@ -1097,6 +1103,10 @@ async function submitRecap({
         if (!Object.prototype.hasOwnProperty.call(existingData, 'completedAddonLines')
           && Object.prototype.hasOwnProperty.call(frozenTraceIdentity, 'completedAddonLines')) {
           missing.completedAddonLines = frozenTraceIdentity.completedAddonLines;
+        }
+        if (!Object.prototype.hasOwnProperty.call(existingData, 'completedSeries')
+          && Object.prototype.hasOwnProperty.call(frozenTraceIdentity, 'completedSeries')) {
+          missing.completedSeries = frozenTraceIdentity.completedSeries;
         }
         // Only when THIS recap is the completion (the existing row is not
         // yet 'completed'): a resend/retry against a record completed

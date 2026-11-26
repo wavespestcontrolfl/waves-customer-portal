@@ -885,6 +885,17 @@ const OVH_FIELDS_UI = [
   { key: "ovhOtherGa", col: "ovh_other_ga", label: "Other G&A", hint: "banking, professional fees, misc overhead" },
 ];
 
+// The owner's own office time (company_financials owner_office_*): hours a month x an
+// hourly rate = the allowance the dashboard's "Office cost per stop" card adds to the
+// ledger's office costs. Blank or 0 = not counted. Saved with the same PUT as the costs above.
+const OWNER_OFFICE_FIELDS_UI = [
+  { key: "ownerOfficeHoursPerMonth", col: "owner_office_hours_per_month", label: "Your office hours", hint: "hours a month you spend on office work instead of in the field", unit: "hours / month", max: 9999.99 },
+  { key: "ownerOfficeHourlyRate", col: "owner_office_hourly_rate", label: "Your office hourly rate", hint: "what an hour of your office time is worth", unit: "$ / hour", max: 999999.99 },
+];
+// The server (admin-revenue.js OWNER_OFFICE_FIELDS) refuses anything else: plain digits, at most two decimals, up to max.
+const OWNER_OFFICE_NUMBER = /^\d+(\.\d{1,2})?$/;
+const ALL_COST_FIELDS_UI = [...OVH_FIELDS_UI, ...OWNER_OFFICE_FIELDS_UI];
+
 function OperatingCostsSettingsTab() {
   const [row, setRow] = useState(null); // latest company_financials row
   const [dirty, setDirty] = useState({}); // { ovhKey: string input value }
@@ -917,13 +928,17 @@ function OperatingCostsSettingsTab() {
     // Inputs stay editable while the PUT runs; only these values go out.
     const submitted = dirty;
     const body = {};
-    for (const f of OVH_FIELDS_UI) {
+    for (const f of ALL_COST_FIELDS_UI) {
       if (dirty[f.key] === undefined) continue;
       const raw = String(dirty[f.key]).trim();
       if (raw === "") { body[f.key] = null; continue; } // blank clears the figure
       const v = Number(raw);
       if (!Number.isFinite(v) || v < 0) {
         setMessage({ text: `"${f.label}" must be a number ≥ 0 (or blank to clear).`, error: true });
+        return;
+      }
+      if (f.max !== undefined && (!OWNER_OFFICE_NUMBER.test(raw) || v > f.max)) {
+        setMessage({ text: `"${f.label}" must be from 0 to ${f.max} with at most two decimals (or blank to clear).`, error: true });
         return;
       }
       body[f.key] = v;
@@ -962,6 +977,7 @@ function OperatingCostsSettingsTab() {
       : <ActionFeedback className="min-h-20">Loading operating costs...</ActionFeedback>;
   }
 
+  const ownerAllowance = (Number(valueOf(OWNER_OFFICE_FIELDS_UI[0])) || 0) * (Number(valueOf(OWNER_OFFICE_FIELDS_UI[1])) || 0);
   const monthlyTotal = OVH_FIELDS_UI.reduce((t, f) => {
     const v = Number(valueOf(f));
     return t + (Number.isFinite(v) ? v : 0);
@@ -1019,6 +1035,43 @@ function OperatingCostsSettingsTab() {
             <span className="text-ink-secondary">Monthly overhead total</span>
             <span className="font-medium text-zinc-900 u-nums">
               ${monthlyTotal.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+            </span>
+          </div>
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Your own office time</CardTitle>
+          <p className="mt-1 text-ui-body text-ink-secondary">
+            Added to the office costs on the dashboard's "Office cost per stop" card. Leave blank
+            (or 0) and your time is not counted.
+          </p>
+        </CardHeader>
+        <CardBody className="divide-y divide-zinc-200">
+          {OWNER_OFFICE_FIELDS_UI.map((f) => (
+            <div key={f.key} className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0 sm:flex-row sm:items-end sm:justify-between">
+              <Field label={f.label} help={f.hint} className="min-w-0 flex-1 sm:max-w-md">
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max={f.max}
+                  value={valueOf(f)}
+                  placeholder="0"
+                  onChange={(ev) => setDirty((d) => ({ ...d, [f.key]: ev.target.value }))}
+                  className="u-nums"
+                />
+              </Field>
+              <div className="flex items-center gap-2 sm:pb-3">
+                {dirty[f.key] !== undefined && <Badge tone="neutral">Unsaved</Badge>}
+                <span className="text-ui-caption text-ink-secondary">{f.unit}</span>
+              </div>
+            </div>
+          ))}
+          <div className="flex justify-between gap-3 pt-4">
+            <span className="text-ink-secondary">Monthly allowance counted</span>
+            <span className="font-medium text-zinc-900 u-nums">
+              ${ownerAllowance.toLocaleString("en-US", { maximumFractionDigits: 2 })}
             </span>
           </div>
         </CardBody>
