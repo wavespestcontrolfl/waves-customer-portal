@@ -208,6 +208,11 @@ describe('protocol matcher specialty routing', () => {
     expect(followup('Cockroach Control Service')).toEqual(['cockroach', 3, 'cockroach_followup']);
     // A program with no follow-up card keeps its match, and so does any visit that is not a follow-up.
     expect(followup('Quarterly Pest Control')).toEqual(['pest', 1, 'general_pest']);
+    // A linked visit whose own name says its stage keeps that card: a clearance check, a third treatment, a scope review.
+    expect(followup('Bed Bug Clearance Check')).toEqual(['bed_bug', 4, 'bed_bug_clearance']);
+    expect(followup('Bed Bug Treatment 3')).toEqual(['bed_bug', 5, 'bed_bug_third_treatment']);
+    expect(followup('Bed Bug Heat Treatment')).toEqual(['bed_bug', 1, 'bed_bug_heat_scope_review']);
+    expect(followup('Bed Bug Inspection')).toEqual(['bed_bug', 1, 'bed_bug_inspection']);
     const first = matchServiceProtocol(protocols, 'Flea Control Service');
     expect(followupVisitMatch(first, false)).toBe(first);
     expect(followupVisitMatch(null, true)).toBeNull();

@@ -26,6 +26,7 @@ const MATCH_RULES = [
     programKey: 'bed_bug',
     visit: 3,
     reason: 'bed_bug_followup',
+    followupOf: ['bed_bug_treatment'],
     terms: ['bed bug follow', 'bed bug treatment 2', 'bed bug second treatment', 'second bed bug'],
   },
   // Waves does not sell heat. A booking named heat or hybrid gets the inspection / scope card (no product
@@ -54,6 +55,7 @@ const MATCH_RULES = [
     programKey: 'flea',
     visit: 2,
     reason: 'flea_followup',
+    followupOf: ['flea_service'],
     terms: ['flea follow', 'flea recheck', 'flea treatment 2', 'flea second treatment', 'second flea'],
   },
   {
@@ -483,12 +485,15 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
 // A follow-up booked from a finished visit copies that visit's name and service key, and is marked only by
 // scheduled_services.followup_source_service_id. Its name therefore matches the SOURCE visit's card. When the
 // program has a follow-up card (its one rule whose reason ends `_followup`), a follow-up booking gets that card.
-// Every surface that shows a visit's card or products applies this to its match: the job card, the completion
-// actions and the completion product defaults. A program with no follow-up rule keeps its match.
+// Every surface that shows a visit's card or products applies this to its match: the job card, the schedule
+// panel, the completion actions and the completion product defaults. A program with no follow-up rule keeps
+// its match. A follow-up rule with `followupOf` replaces only the cards it lists (the first treatment): a visit
+// whose own name already says its stage (a clearance check, a third treatment, a scope review) keeps that card.
 function followupVisitMatch(match, isFollowup) {
   if (!isFollowup || !match?.program) return match;
   const rule = MATCH_RULES.find((entry) => entry.programKey === match.programKey && /_followup$/.test(entry.reason || ''));
-  const visit = rule ? findVisit(match.program, rule.visit) : null;
+  if (!rule || (rule.followupOf && !rule.followupOf.includes(match.reason))) return match;
+  const visit = findVisit(match.program, rule.visit);
   return visit ? { ...match, matchedVisit: visit, matched: true, reason: rule.reason } : match;
 }
 

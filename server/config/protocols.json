@@ -2234,7 +2234,7 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "German Roach Cleanout\nInspect kitchen, bathrooms, hinges, appliance motors, plumbing voids, cabinet seams, and food storage areas\nApply cockroach gel bait in targeted placements\nUse non-repellent crack-and-crevice treatment where label allows\nApply growth regulator: Tekko Pro 2 fl oz per gallon, 1 gallon per 1,000 sq ft, as a crack-and-crevice spray",
+        "primary": "German Roach Cleanout\nInspect kitchen, bathrooms, hinges, appliance motors, plumbing voids, cabinet seams, and food storage areas\nApply cockroach gel bait in targeted placements\nUse non-repellent crack-and-crevice treatment where label allows\nApply IGR point-source or aerosol where label allows",
         "secondary": "Vacuum visible aggregation before application when practical\nPlace monitors and record count/location\nExplain sanitation and follow-up requirements",
         "lineMeta": {
           "Apply cockroach gel bait in targeted placements": {
@@ -2253,11 +2253,11 @@
             ],
             "completionApplicationMethod": "spot_treatment"
           },
-          "Apply growth regulator: Tekko Pro 2 fl oz per gallon, 1 gallon per 1,000 sq ft, as a crack-and-crevice spray": {
+          "Apply IGR point-source or aerosol where label allows": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Tekko Pro IGR"
+              "Gentrol Complete EC3"
             ],
             "completionApplicationMethod": "spot_treatment"
           }
@@ -2270,10 +2270,10 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Bait-first, non-repellent approach. The growth regulator goes down once: it lasts 6 months, so the follow-up visit has none. Schedule a 10-14 day follow-up for confirmed live German roach activity.",
+        "notes": "Bait-first, non-repellent approach. Schedule 10-14 day follow-up for confirmed live German roach activity.",
         "completionDefaultProducts": [
           "Atticus Antapex WSG",
-          "Tekko Pro IGR",
+          "Gentrol Complete EC3",
           "Advion Evolution Cockroach Gel Bait"
         ]
       },
@@ -2295,7 +2295,7 @@
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Advion Insect Granule"
+              "Advion WDG Granular"
             ]
           }
         },
@@ -2313,7 +2313,7 @@
         "visit": 3,
         "month": "Any",
         "primary": "Cockroach Follow-Up\nInspect monitors, bait consumption, live activity, egg cases, droppings, and customer prep progress\nRefresh bait only where consumed or contaminated\nSpot treat cracks, crevices, or harborages as needed",
-        "secondary": "Adjust plan if monitor counts are not dropping\nReinforce sanitation, moisture, and food-source corrections\nEscalate severe or multi-unit activity for office review\nDo not apply the growth regulator again at the follow-up",
+        "secondary": "Adjust plan if monitor counts are not dropping\nReinforce sanitation, moisture, and food-source corrections\nEscalate severe or multi-unit activity for office review",
         "material_cost": "inventory",
         "labor_cost": "follow_up",
         "tiers": {
@@ -2354,7 +2354,11 @@
             "catalogProductHints": [
               "Atticus Antapex WSG"
             ],
-            "completionApplicationMethod": "spot_treatment"
+            "completionApplicationMethod": "spot_treatment",
+            "tankRatePerGallon": {
+              "amount": 10,
+              "unit": "g"
+            }
           },
           "Growth regulator in the same tank: Tekko Pro 0.67 fl oz per gallon at 1 gallon per 1,000 sq ft (the label amount, 1 fl oz per 1,500 sq ft)": {
             "scope": "interior",
@@ -2362,7 +2366,11 @@
             "catalogProductHints": [
               "Tekko Pro IGR"
             ],
-            "completionApplicationMethod": "spot_treatment"
+            "completionApplicationMethod": "spot_treatment",
+            "tankRatePerGallon": {
+              "amount": 0.67,
+              "unit": "fl_oz"
+            }
           },
           "Exterior, shaded pet zones only when pets rest outside: Antapex 10 g per gallon with Tekko Pro 1 fl oz per 1,500 sq ft": {
             "scope": "exterior",
@@ -2475,7 +2483,11 @@
             "catalogProductHints": [
               "Atticus Antapex WSG"
             ],
-            "completionApplicationMethod": "spot_treatment"
+            "completionApplicationMethod": "spot_treatment",
+            "tankRatePerGallon": {
+              "amount": 20,
+              "unit": "g"
+            }
           }
         },
         "completionDefaultProducts": [
@@ -2543,7 +2555,11 @@
             "catalogProductHints": [
               "Atticus Antapex WSG"
             ],
-            "completionApplicationMethod": "spot_treatment"
+            "completionApplicationMethod": "spot_treatment",
+            "tankRatePerGallon": {
+              "amount": 20,
+              "unit": "g"
+            }
           }
         },
         "material_cost": "inventory",

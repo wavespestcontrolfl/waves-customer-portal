@@ -2206,6 +2206,58 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const withAddon = await run({ serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', addons: [{ name: 'Flea Control Service', category: 'specialty', serviceKey: 'flea_tick' }] });
     expect(withAddon.addons).toMatchObject([{ name: 'Flea Control Service', visit: { number: 1 }, note: null }]);
     expect(withAddon.addons[0].products).toBeGreaterThanOrEqual(2);
+    // Indoor spray jobs show their safety rules on the card (people and pets out until dry, fish tanks covered, no fogging).
+    expect(first.procedure.safety).toEqual(protocols.flea.safety_rules);
+    const bedBug = await run({ serviceType: 'Bed Bug Treatment Service', serviceCategory: 'specialty', serviceKey: 'bed_bug_treatment' });
+    expect(bedBug.procedure.safety).toEqual(protocols.bed_bug.safety_rules);
+    // A program outside that list keeps its procedure as it was.
+    expect((await run({ serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control' })).procedure.safety).toBeUndefined();
+  });
+
+  test('the tank search gives the flea card\'s own amounts, never a stronger mix', async () => {
+    const protocols = require('../config/protocols.json');
+    // The live catalog rows: Antapex 10-30 g per gallon; the growth regulator 1 fl oz per gallon (its label mix, sprayed at 1 gallon per 1,500 sq ft).
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const tekko = { id: 'tekko', name: 'Tekko Pro IGR', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Flea Control Service', service_category: 'specialty', service_key: 'flea_tick' };
+    const mix = (first, second, tank = 2) => {
+      const rows = { scheduled_services: [visit], products_catalog: [first, second], equipment_calibrations: [], scheduled_service_addons: [], product_aliases: [] };
+      const dbh = (t) => {
+        const table = String(t).split(' as ')[0];
+        const chain = {};
+        for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+        chain.first = async () => (rows[table] || [])[0] ?? null;
+        chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+        chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+        return chain;
+      };
+      dbh.raw = (sql) => sql;
+      return jobCard.mixForProduct(first.id, tank, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    };
+    // The card shares one tank at the Antapex volume, so the growth regulator is 0.67 fl oz per gallon: the label amount per square foot.
+    expect(await mix(tekko, antapex)).toMatchObject({ amount: 1.34, amountMax: null, unit: 'fl_oz', ratePerGallon: { lo: 0.67, hi: 0.67 }, rateSource: 'protocol' });
+    // Antapex is the card's 10 g per gallon, not the catalog's 10 to 30.
+    expect(await mix(antapex, tekko)).toMatchObject({ amount: 20, amountMax: null, unit: 'g', ratePerGallon: { lo: 10, hi: 10 }, rateSource: 'protocol' });
+    // A declared rate above the label's top never governs: the label band stands.
+    const strong = JSON.parse(JSON.stringify(protocols));
+    const line = Object.values(strong.flea.visits[0].lineMeta).find((meta) => meta.catalogProductHints[0] === 'Tekko Pro IGR');
+    line.tankRatePerGallon.amount = 1.5;
+    const rows = await jobCard.mixForProduct('tekko', 2, {
+      serviceId: 'svc1',
+      dbh: Object.assign((t) => {
+        const table = String(t).split(' as ')[0];
+        const data = { scheduled_services: [visit], products_catalog: [tekko, antapex] }[table] || [];
+        const chain = {};
+        for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+        chain.first = async () => data[0] ?? null;
+        chain.catch = (fn) => Promise.resolve(data).catch(fn);
+        chain.then = (res, rej) => Promise.resolve(data).then(res, rej);
+        return chain;
+      }, { raw: (sql) => sql }),
+      deps: { buildPlan: jest.fn(), protocols: strong },
+      now: new Date('2026-12-08T14:00:00Z'),
+    });
+    expect(rows).toMatchObject({ amount: 2, ratePerGallon: { lo: 1, hi: 1 } });
   });
 
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {

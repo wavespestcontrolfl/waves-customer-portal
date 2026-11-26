@@ -539,8 +539,7 @@ describe('pest regular protocol products: the protocol hints', () => {
   test('the roach settings name the live gel (the old gel row is inactive) and the house bifenthrin', () => {
     const roach1 = protocols.cockroach.visits.find((v) => v.visit === 1);
     const roach2 = protocols.cockroach.visits.find((v) => v.visit === 2);
-    // Tekko Pro replaced Gentrol Complete EC3 on the cockroach card (owner 2026-11-25).
-    expect(roach1.completionDefaultProducts).toEqual(['Atticus Antapex WSG', 'Tekko Pro IGR', 'Advion Evolution Cockroach Gel Bait']);
+    expect(roach1.completionDefaultProducts).toEqual(['Atticus Antapex WSG', 'Gentrol Complete EC3', 'Advion Evolution Cockroach Gel Bait']);
     expect(roach1.lineMeta['Apply cockroach gel bait in targeted placements']).toMatchObject({ catalogProductHints: ['Advion Evolution Cockroach Gel Bait'], completionApplicationMethod: 'bait_placement' });
     expect(roach2.lineMeta['Treat exterior perimeter, cracks, crevices, and harborage zones where label allows'].catalogProductHints).toEqual(['LESCO Crosscheck Plus', 'Atticus Antapex WSG']);
     expect(JSON.stringify(protocols)).not.toMatch(/Advion Cockroach Gel Bait|Talstar P/);

@@ -1407,9 +1407,11 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
  * the booking's catalog service key — a matcher rule that claims it fixes
  * the visit regardless of the display name.
  */
-// The misting program's safety rules as a procedure field ({ safety: [...] }), or {} for any other program (they keep their procedure).
+// The safety rules of the misting, flea and bed bug programs as a procedure field ({ safety: [...] }), or {} for any other program (they
+// keep their procedure). Flea and bed bug are indoor sprays: people and pets out until dry, fish tanks covered, nothing fogged.
+const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'flea', 'bed_bug'];
 function mistingSafetyField(program, effectiveProgramKey) {
-  if (effectiveProgramKey !== 'mosquito_misting' || !program?.safety_rules?.length) return {};
+  if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};
   return { safety: program.safety_rules.map((rule) => String(rule)) };
 }
 
@@ -1549,6 +1551,14 @@ function seasonalVisit(program, scheduledDate) {
  * comes from where the line sits — a secondary line is the visit's
  * "if needed", never selected base work.
  */
+// A card line may declare its tank rate (lineMeta.tankRatePerGallon: { amount, unit }) when its text cannot be read as one rate: grams, or
+// two products on one line. Only a line that names one product carries it. { declaredRate } or {}.
+function declaredTankRate(meta, hints) {
+  const amount = Number(meta?.tankRatePerGallon?.amount);
+  if (!(amount > 0) || hints.length !== 1) return {};
+  return { declaredRate: { lo: amount, hi: amount, unit: String(meta.tankRatePerGallon.unit) } };
+}
+
 function linesFromLineMeta(visit, catalog) {
   const secondary = String(visit?.secondary || '');
   const lines = [];
@@ -1564,7 +1574,7 @@ function linesFromLineMeta(visit, catalog) {
       // Conditional when the line sits in the visit's secondary text OR is
       // phrased as a condition (isConditionalLine).
       const conditional = Boolean(raw && (secondary.includes(raw) || isConditionalLine(raw)));
-      lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
+      lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional, ...declaredTankRate(meta, meta.catalogProductHints) });
     }
   }
   return lines;
@@ -2197,7 +2207,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // Distance IGR: 6-8 fl oz/100 gal on the protocol, 0.06-0.12 fl oz/gal on
   // the label → 0.06-0.08). A band outside the label, or on another unit,
   // leaves the label band standing.
-  const protocolPerGallon = labelPerGallon && protocolLine?.rate ? narrowBand(labelPerGallon, protocolLine.rate) : null;
+  const protocolPerGallon = protocolBand(labelPerGallon, protocolLine);
   const perGallon = protocolPerGallon || labelPerGallon;
   // Plan-wide blocks first; then THIS product through the same guards the
   // closeout applies (manager approvals: off-protocol, unselected
@@ -2349,9 +2359,19 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     .filter(({ hit }) => hit);
   const owners = hits.map(({ c }) => ({ name: c.name, serviceKey: c.serviceKey || null }));
   const selected = hits.find(({ hit }) => hit.selected !== false);
-  if (selected) return found({ addon: selected.c.addon, selected: true, rate: lineRate(selected.hit.raw), governed: Boolean(selected.hit.governed) }, owners);
+  if (selected) return found({ addon: selected.c.addon, selected: true, rate: selected.hit.declaredRate || lineRate(selected.hit.raw), declared: Boolean(selected.hit.declaredRate), governed: Boolean(selected.hit.governed) }, owners);
   const [conditional] = hits;
   return found(conditional ? { addon: conditional.c.addon, selected: false, rate: null, ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}) } : null, owners);
+}
+
+// The per-gallon band the matched card line gives the mix, or null (the label band stands). A rate read from the line's text is clipped
+// to the label band. A rate the card DECLARES governs when it is on the label's unit and not above the label band's top: a card may mix
+// weaker than the label (the flea growth regulator shares a tank sprayed at a higher volume), never stronger.
+function protocolBand(label, protocolLine) {
+  if (!label || !protocolLine?.rate) return null;
+  if (!protocolLine.declared) return narrowBand(label, protocolLine.rate);
+  const sameUnit = String(label.unit).toLowerCase() === String(protocolLine.rate.unit).toLowerCase();
+  return sameUnit && protocolLine.rate.hi <= label.hi ? protocolLine.rate : null;
 }
 
 // The protocol band clipped to the verified label band, on one unit.
