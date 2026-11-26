@@ -37,6 +37,12 @@ function fakeCallLog(metadata = {}, { exists = true, status = 'in-progress' } = 
     if (m) return (at(row.metadata, m[1].split(',')) != null) === Boolean(m[2]);
     m = sql.match(/^\(status IS NULL OR status NOT IN \((.*)\)\)$/);
     if (m) return row.status == null || !m[1].split(', ').map((s) => s.replace(/'/g, '')).includes(row.status);
+    // The ring sweep's deadline: started_at + ring_timeout_sec + the bound extra seconds, before now.
+    if (sql.startsWith("((metadata #>> '{conference_path,started_at}')::timestamptz")) {
+      const cp0 = row.metadata?.conference_path || {};
+      const at = Date.parse(cp0.started_at || '');
+      return Number.isFinite(at) && Number.isInteger(cp0.ring_timeout_sec) && at + (cp0.ring_timeout_sec + 60) * 1000 < Date.now();
+    }
     throw new Error(`unknown condition: ${sql}`);
   };
   const apply = ({ sql, bindings }) => {
@@ -489,6 +495,79 @@ describe('the minute staff-end sweep (recoverStaffEnds)', () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     expect(await cp.recoverStaffEnds()).toEqual({ action: 'error' });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('staff-end sweep read failed (Error)'));
+  });
+});
+
+describe('the minute ring sweep (recoverUnansweredRings): a backstop a restart lost', () => {
+  const rangAt = (secAgo, extra = {}) => ({
+    conference_path: { ...ringing().conference_path, ring_timeout_sec: 30, started_at: new Date(Date.now() - secAgo * 1000).toISOString(), ...extra },
+  });
+  const room = [{ sid: 'CF1', status: 'init' }];
+
+  test('the deadline is in the query, bound to ring + backstop + grace, and the oldest overdue call goes first', async () => {
+    fakeCallLog(rangAt(300));
+    fakeTwilio({ callStatus: 'in-progress', rooms: [] });
+    await cp.recoverUnansweredRings();
+    const chain = db.mock.results[0].value;
+    expect(chain.whereRaw).toHaveBeenCalledWith(expect.stringContaining('make_interval(secs =>'), [60]);
+    expect(chain.orderBy).toHaveBeenCalledWith('created_at', 'asc');
+  });
+
+  test('past the deadline with the caller waiting in the room: the caller goes to voicemail and the legs end', async () => {
+    const row = fakeCallLog(rangAt(91));
+    const log = fakeTwilio({ callStatus: (sid) => (sid === SID ? 'in-progress' : 'completed'), rooms: room });
+    expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 1, voicemail: 1, closed: 0 });
+    expect(log.updates.map((u) => u.sid)).toEqual([LEG0, LEG1, SID]);
+    expect(log.updates[2].url).toContain('/call-complete?conf=1&conf_status=no-answer');
+    expect(row.metadata.conference_path.voicemail_at).toEqual(expect.any(String));
+  });
+
+  test('still inside the deadline: not read, so the in-memory backstop goes first', async () => {
+    fakeCallLog(rangAt(89));
+    fakeTwilio({ rooms: room });
+    expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 0, voicemail: 0, closed: 0 });
+    expect(mockTw.api.calls).not.toHaveBeenCalled();
+  });
+
+  test('no open room (the classic ring took the caller): nothing, so a talking caller is never redirected', async () => {
+    const row = fakeCallLog(rangAt(300));
+    const log = fakeTwilio({ callStatus: 'in-progress', rooms: [] });
+    expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 1, voicemail: 0, closed: 0 });
+    expect(log.updates).toEqual([]);
+    expect(row.metadata.conference_path.voicemail_at).toBeUndefined();
+  });
+
+  test('Twilio says the caller is gone: the call is closed, and no voicemail redirect is sent', async () => {
+    const row = fakeCallLog(rangAt(300));
+    const log = fakeTwilio({ callStatus: 'completed', rooms: room });
+    expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 1, voicemail: 0, closed: 1 });
+    expect(row.metadata.conference_path.closed_at).toEqual(expect.any(String));
+    expect(log.updates.some((u) => u.url)).toBe(false);
+  });
+
+  test('a press 1, a voicemail, a close, a classic-ring fallback or an ended caller is not read', async () => {
+    for (const [metadata, opts] of [
+      [rangAt(300, { accepted_leg_sid: LEG0 }), {}],
+      [rangAt(300, { voicemail_at: 'x' }), {}],
+      [rangAt(300, { closed_at: 'x' }), {}],
+      [rangAt(300, { fallback: 'classic_ring' }), {}],
+      [rangAt(300), { status: 'completed' }],
+    ]) {
+      fakeCallLog(metadata, opts);
+      fakeTwilio({ rooms: room });
+      expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 0, voicemail: 0, closed: 0 });
+      expect(mockTw.api.calls).not.toHaveBeenCalled();
+    }
+  });
+
+  test('a Twilio error is only logged; a read error answers error', async () => {
+    fakeCallLog(rangAt(300));
+    fakeTwilio();
+    mockTw.api.calls = jest.fn(() => ({ fetch: jest.fn(async () => { throw Object.assign(new Error('x'), { status: 503 }); }) }));
+    expect(await cp.recoverUnansweredRings()).toEqual({ action: 'swept', open: 1, voicemail: 0, closed: 0 });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('ring sweep failed for'));
+    db.mockImplementation(() => { throw new Error('db down'); });
+    expect(await cp.recoverUnansweredRings()).toEqual({ action: 'error' });
   });
 });
 

@@ -16,7 +16,9 @@
  *      (dual channel, the same /recording-status callback), writes forward_acceptance exactly as
  *      today, ends the other legs and joins the room.
  *   4. No press 1 (every leg ended, or the ring timeout + 20 s backstop): the caller is redirected to
- *      /call-complete?conf=1&conf_status=<status>, which runs today's voicemail / AI backstop path.
+ *      /call-complete?conf=1&conf_status=<status>, which runs today's voicemail / AI backstop path. The
+ *      backstop is an in-memory timer; a minute sweep (recoverUnansweredRings) redirects a caller whose
+ *      backstop a restart lost, 40 s after it was due.
  *   5. The winning staff call ends (its status callback: Twilio requests no <Dial> action when the call
  *      that runs the <Dial> hangs up): the room is ended, so the caller's <Dial> action runs
  *      /call-complete as it does when a bridged staff leg hangs up today. Staff join with
@@ -55,6 +57,13 @@ const STAFF_END_RETRY_MS = [2000, 5000, 15000, 30000, 60000];
 // The minute staff-end sweep reads answered calls started in this long, at most this many at a time.
 const STAFF_END_SWEEP_LOOKBACK_MS = 6 * 60 * 60 * 1000;
 const STAFF_END_SWEEP_LIMIT = 25;
+// The minute ring sweep sends a caller nobody answered to voicemail once the ring timeout, the in-memory backstop's
+// 20 s and this much more have passed: the backstop lives in memory, so a restart during the ring loses it.
+const RING_SWEEP_GRACE_SEC = 40;
+// The ring's deadline in SQL, so the batch limit applies to overdue calls only (fresh rings never crowd them out).
+// claimStart writes started_at (ISO) and ring_timeout_sec (an integer); a row without them is never overdue.
+const RING_OVERDUE_SQL = "((metadata #>> '{conference_path,started_at}')::timestamptz"
+  + " + make_interval(secs => (metadata #>> '{conference_path,ring_timeout_sec}')::int + ?)) < now()";
 const OPEN_SQL = [
   "(metadata -> 'conference_path') IS NOT NULL",
   "(metadata #>> '{conference_path,voicemail_at}') IS NULL",
@@ -434,6 +443,63 @@ async function recoverStaffEnds() {
   }
 }
 
+let sweepingRings = false;
+
+// Every minute (scheduler.js, next to recoverStaffEnds, whatever the gates say): a conference call nobody answered whose
+// ring is long over, with no voicemail, no close and no classic-ring fallback. Its no-answer backstop was an in-memory
+// timer that a restart lost, so without this the caller hears ringback until they hang up. A caller Twilio reports gone
+// is closed (its legs ended). A caller still on the line who waits in the open room goes to voicemail, as the backstop
+// would have sent them; a caller with no open room is left alone (the classic ring has no room, and a talking caller
+// must never be redirected). Oldest overdue first; one REST read of the caller, one of the room.
+async function recoverUnansweredRings() {
+  if (sweepingRings) return { action: 'busy' };
+  sweepingRings = true;
+  try {
+    const rows = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
+      .where('created_at', '>', new Date(Date.now() - STAFF_END_SWEEP_LOOKBACK_MS))
+      .whereRaw("(metadata -> 'conference_path') IS NOT NULL")
+      .whereRaw("(metadata #>> '{conference_path,accepted_leg_sid}') IS NULL")
+      .whereRaw("(metadata #>> '{conference_path,voicemail_at}') IS NULL")
+      .whereRaw("(metadata #>> '{conference_path,closed_at}') IS NULL")
+      .whereRaw("(metadata #>> '{conference_path,fallback}') IS NULL")
+      .whereRaw("(metadata #>> '{ended_at}') IS NULL")
+      .whereRaw(CALLER_LIVE_SQL)
+      .whereRaw(RING_OVERDUE_SQL, [NO_ANSWER_BACKSTOP_EXTRA_SEC + RING_SWEEP_GRACE_SEC])
+      .orderBy('created_at', 'asc')
+      .limit(STAFF_END_SWEEP_LIMIT)
+      .select('twilio_call_sid', 'metadata');
+    let voicemail = 0;
+    let closed = 0;
+    for (const row of rows) {
+      const callSid = row.twilio_call_sid;
+      const state = readState(row);
+      if (!CALL_SID_RE.test(String(callSid || '')) || !state) continue;
+      try {
+        const api = client();
+        const caller = await api.calls(callSid).fetch();
+        if (TERMINAL_LEG_STATUSES.has(String(caller?.status || ''))) {
+          await closeForCallerEnd(callSid);
+          closed += 1;
+          continue;
+        }
+        const rooms = await api.conferences.list({ friendlyName: roomFor(callSid), limit: 5 });
+        if (!(rooms || []).some((room) => room.status !== 'completed')) continue;
+        logger.warn(`[conference] ${masked(callSid)} rang out with no voicemail (a lost backstop): the sweep sends it to voicemail`);
+        if ((await sendCallerToVoicemail(callSid, noAnswerStatus(state))) === 'redirected') voicemail += 1;
+      } catch (err) {
+        logger.warn(`[conference] ring sweep failed for ${masked(callSid)} (${errorCode(err)})`);
+      }
+    }
+    return { action: 'swept', open: rows.length, voicemail, closed };
+  } catch (err) {
+    logger.warn(`[conference] ring sweep read failed (${errorCode(err)})`);
+    return { action: 'error' };
+  } finally {
+    sweepingRings = false;
+  }
+}
+
 // The caller's call ended (/call-status): close the claim and end every leg still ringing.
 async function closeForCallerEnd(callSid) {
   const closed = await updateState(callSid, [[['closed_at'], new Date().toISOString()]],
@@ -496,6 +562,7 @@ module.exports = {
   onStaffLegStatus,
   onTransferLegStatus,
   recoverStaffEnds,
+  recoverUnansweredRings,
   closeForCallerEnd,
   conferenceDialOutcome,
   _test: { callTokens, STAFF_END_RETRY_MS },
