@@ -344,7 +344,7 @@ function buildRows() {
       .concat(sweepValues(TYPICAL_HOMES,
         (homeSqFt) => sp.priceExclusion({ homeSqFt, stories: 1 }),
         (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : r.price))),
-    notes: `Scope set by inspection findings; components price per unit (standard point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.standard)}, advanced/roof point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.advancedRoofHigh)}, soft mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.softRatePerLF)}/LF, concrete mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.hardRatePerLF)}/LF), so larger scopes price higher at those rates; the rodent inspection fee is included. ${rodentBundleTerms}`,
+    notes: `Scope set by inspection findings; components price per unit (standard point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.standard)}, advanced/roof point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.advancedRoofHigh)}, plus ${Math.round((constants.RODENT.exclusionV2.modifiers.twoStory - 1) * 100)}% on a two-story home, soft mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.softRatePerLF)}/LF, concrete mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.hardRatePerLF)}/LF), so larger scopes price higher at those rates; the rodent inspection fee is included. ${rodentBundleTerms}`,
   }));
 
   // Bare and complex-perimeter/structural profiles — a typical home's

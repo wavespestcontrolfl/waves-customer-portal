@@ -114,6 +114,18 @@ describe("Roof style choice", () => {
     }
   });
 
+  it("the Roof/High label names the two-story rise on a home of two or more stories", async () => {
+    const { container } = await openExclusion({ data: {}, exclusionRoofStyle: true });
+    await waitFor(() => expect(container.querySelector("#estimate-exclRoofStyle")).toBeTruthy());
+    const label = () => container.querySelector('label[for="estimate-exclAdvancedWireMesh"]').textContent;
+    fireEvent.change(container.querySelector("#estimate-stories"), { target: { value: "2" } });
+    expect(label()).toBe("Roof/High — $150/pt, +30% two-story");
+    fireEvent.change(container.querySelector("#estimate-exclRoofStyle"), { target: { value: "flat_tile" } });
+    expect(label()).toBe("Roof/High — tile rate applies, +30% two-story");
+    fireEvent.change(container.querySelector("#estimate-stories"), { target: { value: "1" } });
+    expect(label()).toBe("Roof/High — tile rate applies");
+  });
+
   it("changing the service address clears the roof style", async () => {
     const { container, getByLabelText } = await openExclusion({ data: {}, exclusionRoofStyle: true });
     await waitFor(() => expect(container.querySelector("#estimate-exclRoofStyle")).toBeTruthy());

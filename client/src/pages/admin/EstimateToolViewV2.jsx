@@ -1368,6 +1368,15 @@ export function roofStyleReset() {
   return { exclRoofStyle: "", exclBarrelEaveFt: "" };
 }
 
+// The Roof/High points label. A home of two or more stories adds 30% to these points (rodent exclusion, owner 2026-11-26);
+// the label names the base rate and the rise so it never shows a rate the engine will not charge.
+export function exclusionRoofHighLabel(form) {
+  const tile = ["flat_tile", "barrel_tile"].includes(form?.exclRoofStyle);
+  const twoStory = Number(form?.stories) >= 2;
+  if (tile) return twoStory ? "Roof/High — tile rate applies, +30% two-story" : "Roof/High — tile rate applies";
+  return twoStory ? "Roof/High — $150/pt, +30% two-story" : "Roof/High — $150/pt";
+}
+
 // A saved roof style pick cannot be regenerated while the server has not confirmed the gate is on: the request would
 // drop the pick and price as if nothing was tapped. Returns the reason shown to staff, or "" when generating is fine.
 export function roofStyleRegenerateBlock(form, available) {
@@ -8702,7 +8711,7 @@ export default function EstimateToolViewV2({
                     <Field label="Standard — $75/pt" id="estimate-exclStandardWireMesh" className="mb-4">
                       <InputV2 k="exclStandardWireMesh" type="number" min="0" />
                     </Field>
-                    <Field label={["flat_tile", "barrel_tile"].includes(form.exclRoofStyle) ? "Roof/High — tile rate applies" : "Roof/High — $150/pt"} id="estimate-exclAdvancedWireMesh" className="mb-4">
+                    <Field label={exclusionRoofHighLabel(form)} id="estimate-exclAdvancedWireMesh" className="mb-4">
                       <InputV2 k="exclAdvancedWireMesh" type="number" min="0" />
                     </Field>
                   </div>

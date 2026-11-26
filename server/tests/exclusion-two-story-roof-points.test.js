@@ -91,10 +91,12 @@ describe('priceRodentExclusionV2 two-story roof points', () => {
       .toBe(tileOne.lineItems.find((li) => li.component === 'barrel_eave_closure').price);
   });
 
-  test('a frozen factor from a stored row wins over the live constant, and only on two stories', () => {
+  test('a frozen factor from a stored row wins over the live constant and over the story count', () => {
     expect(priceRodentExclusionV2({ ...MIX, stories: 2, frozenTwoStoryFactor: 1 }).price).toBe(priceRodentExclusionV2({ ...MIX, stories: 1 }).price);
     expect(priceRodentExclusionV2({ ...MIX, stories: 2, frozenTwoStoryFactor: 1.5 }).price).toBe(8 * 75 + 4 * 150 * 1.5);
-    expect(priceRodentExclusionV2({ ...MIX, stories: 1, frozenTwoStoryFactor: 1.5 }).price).toBe(8 * 75 + 4 * 150);
+    expect(priceRodentExclusionV2({ ...MIX, stories: 1, frozenTwoStoryFactor: 1.5 }).price).toBe(8 * 75 + 4 * 150 * 1.5);
+    expect(priceRodentExclusionV2({ ...MIX, frozenTwoStoryFactor: 1.5 }).price).toBe(8 * 75 + 4 * 150 * 1.5);
+    expect(priceRodentExclusionV2({ ...MIX, stories: 1, frozenTwoStoryFactor: 1 }).price).toBe(8 * 75 + 4 * 150);
   });
 });
 
@@ -124,6 +126,14 @@ describe('estimate engine: stories reach the exclusion pricer', () => {
       if (gate === undefined) delete process.env.GATE_EXCLUSION_WHOLE_HOME;
       else process.env.GATE_EXCLUSION_WHOLE_HOME = gate;
     }
+  });
+});
+
+describe('public price range note', () => {
+  test('the exclusion range names the two-story rise on the roof points', () => {
+    const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
+    const row = computePublicPricingRanges({ refresh: true }).services.find((r) => r.key === 'rodent_exclusion');
+    expect(row.notes).toContain('advanced/roof point $150, plus 30% on a two-story home');
   });
 });
 
@@ -186,6 +196,23 @@ describe('replay: each stored exclusion row decides the factor', () => {
     const priced = estimate(ADV_ONLY, { stories: 1 });
     const saved = { engineInputs: baseInput({ stories: 2, services: { exclusion: { pricingVersion: 'v2', ...ADV_ONLY } } }), engineResult: priced, result: mapV1ToLegacyShape(priced) };
     expect(publicReplayTotal(saved)).toBe(600);
+  });
+
+  test('a quote sold at 1.3 replays at $780 when its stories are later missing or edited to one', async () => {
+    const saved = freshQuote();
+    expect(total(saved.engineResult)).toBe(780);
+    for (const stories of [1, undefined, null, 0]) {
+      const edited = { ...saved, engineInputs: { ...saved.engineInputs, stories } };
+      expect(publicReplayTotal(edited)).toBe(780);
+    }
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    for (const stories of [1, undefined]) {
+      const edited = { ...saved, engineInputs: { ...saved.engineInputs, stories } };
+      const out = await serverRecomputeFromEstimateData(edited, { needsSync: () => false, replaySavedPricingKnobs: true });
+      expect(total({ lineItems: out.rawEngineResult.lineItems })).toBe(780);
+    }
+    // Live pricing of the same one-story home stays $600.
+    expect(total(estimate(ADV_ONLY, { stories: 1 }))).toBe(600);
   });
 
   test('no exclusion row stored: nothing is pinned and the current rule prices it', () => {

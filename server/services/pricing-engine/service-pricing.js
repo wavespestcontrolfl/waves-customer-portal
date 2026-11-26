@@ -10214,7 +10214,9 @@ function priceRodentExclusionV2(options = {}) {
   // stamp was priced before the rule, so it replays with factor 1.
   const twoStoryLive = Number(cfg.modifiers && cfg.modifiers.twoStory) > 0 ? Number(cfg.modifiers.twoStory) : 1;
   const twoStoryFrozen = Number(options.frozenTwoStoryFactor) > 0 ? Number(options.frozenTwoStoryFactor) : null;
-  const twoStoryFactor = Number(options.stories) >= 2 ? (twoStoryFrozen ?? twoStoryLive) : 1;
+  // A frozen factor (replay only) is the factor the quote was sold with: it wins whatever the stories say now. Stories decide
+  // only on live pricing.
+  const twoStoryFactor = twoStoryFrozen ?? (Number(options.stories) >= 2 ? twoStoryLive : 1);
   const advancedPointRate = cfg.wireMeshPoints.advancedRoofHigh * (roof ? roof.multiplier : 1) * twoStoryFactor;
 
   const wireMeshPointSubtotal =
