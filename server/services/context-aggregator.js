@@ -16,6 +16,10 @@ const {
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { visitReportCustomerCopy, carriesReportNote } = require('./service-report/technician-report-copy');
 const { etDateString, formatETTime } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
+
+// The completed services read for SERVICE HISTORY (most recent first).
+const SERVICE_HISTORY_LIMIT = 5;
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 // LIVE ETA (GATE_SMS_REAL_ANSWERS): reuses the exact functions + bounds
@@ -252,21 +256,29 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
   } catch { return null; }
 }
 
-// Texting AI facts (owner 2026-11-25): the open estimate's per-application price and the customer's prepaid visits left (sms-staff-facts). Numbers
-// only (never technician or visit notes); a read that fails is null. OPT IN (`includeSmsStaffFacts`: true = both, or an object naming the ones a
-// caller needs): only the texting AI's draft, the unanswered-text fingerprint and the send-time payment recheck ask for them, every other caller
-// skips the reads and the keys. The drafting callers pass the GATE_SMS_REAL_ANSWERS gate as the opt-in (a new draft needs it); the send-time recheck
-// asks regardless, so a reviewed card keeps its live recheck after a gate rollback. Never in a frozen replay (asOf): these read today's rows,
-// never an earlier day's.
-async function loadSmsStaffFacts({ customer, pendingEstimate, asOfDate, optedIn }) {
-  if (!optedIn || asOfDate) return { estimateFacts: null, prepaidPlans: null };
-  const want = optedIn === true ? { estimate: true, prepaid: true } : optedIn;
+// Texting AI facts (owner 2026-11-25): the open estimate's per-application price, the customer's prepaid visits left and the prep guide of the
+// booked (else last) visit (sms-staff-facts). Numbers and the guide's own published sentences only (never technician or visit notes); a read that
+// fails is null. OPT IN (`includeSmsStaffFacts`: true = all three, or an object naming the ones a caller needs): only the texting AI's draft and
+// the unanswered-text fingerprint (which hashes the block the draft was written from, guide included) ask for the guide; the send-time payment
+// recheck names the number facts it re-renders and never reads the guide. Every other caller skips the reads and the keys. The drafting callers
+// pass the GATE_SMS_REAL_ANSWERS gate as the opt-in (a new draft needs it); the send-time recheck asks regardless, so a reviewed card keeps its
+// live recheck after a gate rollback. Never in a frozen replay (asOf): these read today's rows, never an earlier day's.
+async function loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn }) {
+  if (!optedIn || asOfDate) return { estimateFacts: null, prepaidPlans: null, prepGuide: null };
+  const want = optedIn === true ? { estimate: true, prepaid: true, guide: true } : optedIn;
   const staffFacts = require('./sms-staff-facts');
-  const [estimateFacts, prepaidPlans] = await Promise.all([
+  // The guide fallback reads the completed services of the latest service day: the history is ordered by that date alone, so several can tie.
+  // The history is a short page (SERVICE_HISTORY_LIMIT rows): a latest day that fills it may continue past it, so no guide is named then.
+  const latestDay = dateOnlyString(serviceHistory?.[0]?.service_date);
+  const lastServices = serviceHistory?.length >= SERVICE_HISTORY_LIMIT && serviceHistory.every((record) => dateOnlyString(record.service_date) === latestDay)
+    ? null
+    : (serviceHistory || []).filter((record) => dateOnlyString(record.service_date) === latestDay);
+  const [estimateFacts, prepaidPlans, prepGuide] = await Promise.all([
     want.estimate ? staffFacts.loadEstimateFacts(pendingEstimate, { db }) : null,
     want.prepaid ? staffFacts.loadPrepaidPlanFacts(customer.id, { db }) : null,
+    want.guide ? staffFacts.loadPrepGuideFacts(customer.id, lastServices, { db }) : null,
   ]);
-  return { estimateFacts, prepaidPlans };
+  return { estimateFacts, prepaidPlans, prepGuide };
 }
 
 // GATE_SMS_PROMPT_B1 (change A, owner 2026-10-24): the LATEST finished visit's service_findings (title, detail, recommendation, severity,
@@ -1337,8 +1349,8 @@ class ContextAggregator {
   // inbound SMS webhook resolve a single active customer with deleted_at and
   // shared-number protection — re-looking up by phone here could silently
   // pick a different (or deleted) account that shares the number.
-  // `includeSmsStaffFacts` (owner 2026-11-25): the open estimate's per-application price and the prepaid visits left, for the texting AI's
-  // draft, its send-time recheck and the unanswered-text fingerprint only (loadSmsStaffFacts).
+  // `includeSmsStaffFacts` (owner 2026-11-25): the open estimate's per-application price, the prepaid visits left and the booked visit's prep guide,
+  // for the texting AI's draft, its send-time recheck and the unanswered-text fingerprint only (loadSmsStaffFacts).
   // `includeLiveEta` (Codex round-2 P2, PR #5334 — inverted from the
   // earlier opt-OUT `skipLiveEta`): LIVE ETA resolution is an external GPS +
   // Distance Matrix call, so it defaults OFF and every caller that discards
@@ -1390,7 +1402,7 @@ class ContextAggregator {
         .orderBy('created_at', 'desc').limit(20),
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.
-      db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
+      db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(SERVICE_HISTORY_LIMIT),
       loadUpcomingServices(customer, includeLiveEta),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
@@ -1480,7 +1492,7 @@ class ContextAggregator {
 
     const lastService = serviceHistory[0] || null;
     const latestVisitFindings = await loadLatestVisitFindings(serviceHistory[0]);
-    const { estimateFacts, prepaidPlans } = await loadSmsStaffFacts({ customer, pendingEstimate, asOfDate, optedIn: includeSmsStaffFacts });
+        const { estimateFacts, prepaidPlans, prepGuide } = await loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn: includeSmsStaffFacts });
     // Third-party Bill-To (Codex r2, mirrors billing-v2 /balance): a payment
     // against a payer-billed invoice is the PAYER's even though the row sits
     // under the homeowner's customer_id — exclude those from both the
@@ -1769,6 +1781,7 @@ class ContextAggregator {
       } : null,
       estimateFacts,
       prepaidPlans,
+      prepGuide,
       propertyPrefs: propertyPrefs || {},
       // v10: property facts the drafter may draw on. Access CODES are
       // presence-booleans ONLY — the values never enter a prompt (they would

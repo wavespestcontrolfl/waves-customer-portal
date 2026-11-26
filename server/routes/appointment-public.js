@@ -281,7 +281,7 @@ async function visitServicesFor(svc) {
       .where({ visit_id: svc.visit_id })
       .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
       .orderBy('window_start', 'asc')
-      .select('id', 'service_type', 'status', 'source_action', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+      .select('id', 'service_type', 'status', 'source_action', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'prep_template_key');
     if (members.length < 2) return {};
     // The members must still form ONE stop (local codex audit): the unit
     // mover commits members in separate transactions and a failed detach
@@ -1677,7 +1677,12 @@ module.exports.slotMatchesShown = slotMatchesShown;
 // or the row's own. The composer's send seam re-runs it (GH Codex #3844 r13).
 module.exports.pageStateForVisit = async function pageStateForVisit(svc, now = new Date()) {
   const info = svc?.visit_id ? await visitServicesFor(svc) : {};
-  return info.visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, info, now);
+  // `unknown`: the stop's membership could not be read or no longer holds together (not a visit that is simply closed): a reader that must
+  // tell "nothing to show" from "could not look" (the texting AI's prep guide pick) reads it. `members`: for a grouped stop, the live
+  // members the verdict was judged on (the same validated snapshot), so a reader never re-reads a stop that may have moved since.
+  if (info.visitUnknown) return { state: 'not_available', phase: null, unknown: true };
+  const verdict = pageStateForGroup(svc, info, now);
+  return info.members ? { ...verdict, members: info.members } : verdict;
 };
 // Visit-prep photos (customer-visit-photos-scope-20260928.md PR 4, "app
 // entry"): schedule.js's customer-authenticated POST /:id/prep-photos
