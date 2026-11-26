@@ -50,7 +50,7 @@ const { dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { DEFAULT_EXCLUDE_STATUSES } = require('./scheduling/occupancy');
 const { eligibleCallsQuery } = require('./call-research-miner');
-const { leadRelatedVisitQuery } = require('./lead-related-visits');
+const { leadLinkedVisits } = require('./lead-related-visits');
 const logger = require('./logger');
 
 const LOOKBACK_DAYS = 120;
@@ -77,8 +77,11 @@ const PRIOR_PROVIDER_RE = /(current|previous|prior|existing|former|old|last) (pe
 // At most one word between the phrase and the name ("had the Turner guy" is
 // two, so "we had ants and Orkin quoted us" never links Orkin).
 const RIVAL_USE_LEAD = String.raw`\b(?:had|have had|used|been using|been with|was with|were with|leaving|left|cancel+(?:ed|ing)?|switch(?:ing|ed)? from|currently (?:have|use|with))\s+(?:the\s+)?(?:\w+\s+)?`;
-// A chunk about a quote or estimate is shopping, not a prior relationship.
-const NO_PRIOR_PROVIDER_RE = /never (used|had|been with)|first time|no (current|previous|prior) (provider|company)|don'?t have (a|any) (provider|company|pest)|\bquot(e|es|ed|ing)\b|estimate|\bbids?\b/i;
+// The caller says they never had a provider: no switch evidence at all.
+const NO_PRIOR_PROVIDER_RE = /never (used|had|been with)|first time|no (current|previous|prior) (provider|company)|don'?t have (a|any) (provider|company|pest)/i;
+// A rival named for a quote ("had Orkin quote me") is shopping, not use. This
+// only blocks that rival link; "we left Orkin ... now we want a quote" stays.
+const RIVAL_SHOPPING_TAIL = String.raw`(?!\s+(?:to\s+)?(?:quot|give|gave|come|came|bid|estimat|send|sent|look))`;
 
 // First match wins. Specific complaint themes sit before the broad price theme.
 const SWITCH_RULES = [
@@ -131,7 +134,7 @@ const RIVALS = [
   ['Rentokil', /rentokil/i],
 ];
 
-const RIVAL_USE = RIVALS.map(([name, re]) => [name, new RegExp(RIVAL_USE_LEAD + '(?:' + re.source + ')', 'i')]);
+const RIVAL_USE = RIVALS.map(([name, re]) => [name, new RegExp(RIVAL_USE_LEAD + '(?:' + re.source + ')\\w*' + RIVAL_SHOPPING_TAIL, 'i')]);
 
 const SWITCH_REASONS = SWITCH_RULES.map(([reason]) => reason);
 const NOT_BOOKED_REASONS = [...NOT_BOOKED_RULES.map(([reason]) => reason), 'no_response'];
@@ -298,8 +301,8 @@ async function bookedLeadIds(conn, leads) {
   const out = new Set();
   for (const l of leads) {
     if (!LOST_STATUSES.has(l.status) || l.converted_at) continue; // only these can get a reason
-    const visits = await leadRelatedVisitQuery(conn, l);
-    if (visits.some((v) => !DEFAULT_EXCLUDE_STATUSES.includes(v.status))) out.add(l.id);
+    const active = await leadLinkedVisits(conn, l).whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES).first('ss.id');
+    if (active) out.add(l.id);
   }
   return out;
 }
@@ -311,9 +314,13 @@ async function existingCustomerLeadIds(conn, leads) {
   const customerIds = asUuidList(leads, 'customer_id');
   if (!customerIds.length) return new Set();
   const done = await conn('scheduled_services').whereIn('customer_id', customerIds).where('status', 'completed')
-    .select('customer_id', 'scheduled_date');
-  return new Set(leads.filter((l) => done.some((v) => v.customer_id === l.customer_id
-    && dateOnlyString(v.scheduled_date) < etDateString(new Date(l.created_at)))).map((l) => l.id));
+    .select('customer_id', 'scheduled_date', 'completed_at');
+  // completed_at when stamped (catches a visit done that morning); legacy
+  // visits without it fall back to an earlier ET calendar day.
+  const before = (v, l) => (v.completed_at
+    ? new Date(v.completed_at) < new Date(l.created_at)
+    : dateOnlyString(v.scheduled_date) < etDateString(new Date(l.created_at)));
+  return new Set(leads.filter((l) => done.some((v) => v.customer_id === l.customer_id && before(v, l))).map((l) => l.id));
 }
 
 // Write only the changed fields, and only while the lead is still live and its
@@ -336,7 +343,10 @@ async function fillLeadWhy({ conn = db, now = new Date(), maxLeads = MAX_LEADS_P
   while (stats.scanned < maxLeads) {
     const leads = await conn('leads')
       .whereNull('deleted_at')
-      .where('created_at', '>=', cutoff)
+      // In the window, or outside it but still carrying a value the job owns
+      // (its outcome can change later, e.g. a day-121 conversion).
+      .where((w) => w.where('created_at', '>=', cutoff)
+        .orWhereNotNull('previous_company').orWhereNotNull('switch_reason').orWhereNotNull('not_booked_reason'))
       .where((w) => w.whereNull('why_checked_at').orWhere('why_checked_at', '<', now))
       .orderByRaw('why_checked_at ASC NULLS FIRST, created_at DESC, id DESC')
       .limit(Math.min(PAGE_SIZE, maxLeads - stats.scanned))

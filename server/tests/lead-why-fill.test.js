@@ -83,6 +83,10 @@ describe('prior-provider evidence (Codex #8521)', () => {
     expect(patch.previous_company).toBeUndefined();
     expect(patch.switch_reason).toBeUndefined();
   });
+  test('a quote request does not erase a stated switch', () => {
+    const c = chunk('competitor_mention', 'We left Orkin because they raised the price, and now we want a quote');
+    expect(planLeadWhy(lead(), [c])).toMatchObject({ previous_company: 'Orkin', switch_reason: 'price_creep' });
+  });
   test('a callback that happened is not no_callback', () => {
     const c = chunk('competitor_mention', 'We had Orkin. They called back and raised the price');
     expect(planLeadWhy(lead(), [c], NOW).switch_reason).toBe('price_creep');

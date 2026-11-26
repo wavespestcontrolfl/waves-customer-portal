@@ -10,7 +10,8 @@ const RELATED_VISITS_LIMIT = 25;
 
 // Outcome evidence must name the record, not merely the person. A customer or
 // phone match can span multiple inquiries and is therefore never a visit link.
-function leadRelatedVisitQuery(conn, lead) {
+// All visits linked to the lead, unordered and unlimited (callers add filters).
+function leadLinkedVisits(conn, lead) {
   const leadId = String(lead.id);
   return conn('scheduled_services as ss')
     .where(function confirmedLeadIdentity() {
@@ -56,9 +57,14 @@ function leadRelatedVisitQuery(conn, lead) {
         visits.where((owner) => owner.whereNull('ss.customer_id').orWhere('ss.customer_id', lead.customer_id));
       }
     })
+    ;
+}
+
+function leadRelatedVisitQuery(conn, lead) {
+  return leadLinkedVisits(conn, lead)
     .orderByRaw('ss.scheduled_date DESC NULLS LAST, ss.id DESC')
     .limit(RELATED_VISITS_LIMIT + 1)
     .select('ss.id', 'ss.status', 'ss.scheduled_date');
 }
 
-module.exports = { leadRelatedVisitQuery, RELATED_VISITS_LIMIT };
+module.exports = { leadLinkedVisits, leadRelatedVisitQuery, RELATED_VISITS_LIMIT };
