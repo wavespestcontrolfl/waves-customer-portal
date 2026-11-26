@@ -222,7 +222,7 @@ const MATCH_RULES = [
     programKey: 'palm_injection',
     visit: 1,
     reason: 'palm_diagnosis',
-    terms: ['palm injection assessment', 'palm injection diagnosis', 'manganese injection', 'magnesium injection', 'assessment', 'diagnosis', 'sample', 'testing'],
+    terms: ['palm injection assessment', 'palm injection diagnosis', 'manganese injection', 'magnesium injection', 'assessment', 'diagnosis', 'sample', 'sampling', 'test', 'testing', 'inspection', 'inspect', 'evaluation'],
   },
   // Lethal bronzing prevention, the main palm service (owner 2026-11-25, D8): its own Arbor-OTC card when the booking names it. After the
   // assessment and follow-up rules: a booking that names both a stage and the disease keeps its stage card.

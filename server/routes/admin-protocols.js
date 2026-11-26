@@ -639,7 +639,7 @@ function buildCompletionActions({ lines, products, programKey, visit, addonHints
   // existing string consumer — protocol UI tabs, /match — still works) and
   // carry per-line metadata here, keyed by the exact de-branded line text.
   const lineMeta = (visit && typeof visit.lineMeta === 'object' && visit.lineMeta) || {};
-  return lines.map((line, index) => {
+  return lines.flatMap((line, index) => {
     const meta = lineMeta[line.raw] || null;
     // Feed the catalog matcher the brand hints (the display text is de-branded),
     // so the right product still attaches.
@@ -650,12 +650,14 @@ function buildCompletionActions({ lines, products, programKey, visit, addonHints
     const product = meta?.exactCatalogName
       ? resolveCatalogProductForName(meta.catalogProductHints?.[0], products, { exactOnly: true })
       : matchCatalogProduct(lineForMatch, products);
+    // Its bottle is not in the catalog: no action to pick. Picked, it would record an injection with no product on the materials record.
+    if (meta?.exactCatalogName && meta.treatmentApplied !== false && !product) return [];
     const kind = actionKindForLine(line, product);
     // De-branded lines (have lineMeta) display their own text — do NOT run
     // actionLabel, which appends the matched product's brand name and re-leaks
     // it. Product stays attached below for selection/material tracking.
     const label = meta ? line.raw : actionLabel(kind, line, product);
-    return {
+    return [{
       id: `${programKey || 'protocol'}_${visit?.visit || 'visit'}_${index}`,
       kind,
       label,
@@ -675,7 +677,7 @@ function buildCompletionActions({ lines, products, programKey, visit, addonHints
         // A blank rate when a booked add-on's card lists the product too (completion-product-defaults.js labelRateFor).
         ...completionRateFields(labelRateFor(meta, addonHints), product),
       } : null,
-    };
+    }];
   });
 }
 

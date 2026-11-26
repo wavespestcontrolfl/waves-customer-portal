@@ -55,6 +55,8 @@ describe('palm injection card', () => {
     expect(partial.lines.map((l) => l.product.id)).not.toContain('ima5');
     const actions = buildCompletionActions({ lines: [...parseProtocolLines(visitOf(2).secondary, 'conditional')], products: PRODUCTS.filter((p) => p.id !== 'g4'), programKey: 'palm_injection', visit: visitOf(2) });
     expect(actions.map((a) => a.product?.id)).not.toContain('r10');
+    // The missing bottle's injection is not offered at all: every treatment action left carries its product.
+    expect(actions.filter((a) => a.treatmentApplied).map((a) => a.product?.id).sort()).toEqual(['ima10', 'mn', 'otc5', 'phos', 'pj']);
     // Its safety rules ride the card.
     expect(full.procedure.safety.join(' ')).toMatch(/Never inject a palm whose fruit or nuts anyone eats/);
   });
@@ -68,6 +70,7 @@ describe('palm injection card', () => {
     expect([program('Palm Bronzing Prevention'), visit('Palm Bronzing Prevention')]).toEqual(['palm_injection', 4]);
     expect(visit('Lethal Bronzing Assessment')).toBe(1);
     expect(visit('Lethal Bronzing Follow Up')).toBe(3);
+    for (const name of ['Lethal Bronzing Test', 'Lethal Bronzing Sampling', 'Lethal Bronzing Inspection']) expect(visit(name)).toBe(1);
     // A booked follow-up (it carries the source visit's name, on a date the tech picks) is the re-inspection, never a dose: the
     // 3-month Arbor-OTC dose is its own scheduled visit.
     const { followupVisitMatch } = require('../services/protocol-matcher');

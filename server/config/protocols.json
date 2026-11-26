@@ -2856,7 +2856,7 @@
         "visit": 4,
         "month": "Any",
         "primary": "Lethal Bronzing Prevention\nConfirm the palm tested negative (first visit) or is on the 3-month plan\nScreen out: symptoms, a dead spear leaf, or a palm whose fruit or nuts anyone eats, sells or gives away\nLethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp. An unusually thin or thick trunk moves the dose one size down or up (label)\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
-        "secondary": "A palm with symptoms: no dose; test that palm on its own, and recommend removal only on its own positive result\nTell the customer: keep the base of the palm clear; no dry time; the plugs stay in the trunk; we come back every 3 months",
+        "secondary": "A palm with symptoms: no dose; test that palm on its own, and recommend removal only on its own positive result\nTell the customer: keep the base of the palm clear; the plugs stay in the trunk; we come back every 3 months. Keep people and pets off a leak until you have cleaned it up",
         "lineMeta": {
           "Lethal Bronzing Prevention": {
             "scope": "plant",
@@ -2878,10 +2878,6 @@
             "scope": "plant",
             "treatmentApplied": false
           },
-          "Tell the customer: keep the base of the palm clear; no dry time; the plugs stay in the trunk; we come back every 3 months": {
-            "scope": "plant",
-            "treatmentApplied": false
-          },
           "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector": {
             "scope": "plant",
             "treatmentApplied": false
@@ -2900,6 +2896,10 @@
             "exactCatalogName": true
           },
           "Screen out: symptoms, a dead spear leaf, or a palm whose fruit or nuts anyone eats, sells or gives away": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Tell the customer: keep the base of the palm clear; the plugs stay in the trunk; we come back every 3 months. Keep people and pets off a leak until you have cleaned it up": {
             "scope": "plant",
             "treatmentApplied": false
           }
