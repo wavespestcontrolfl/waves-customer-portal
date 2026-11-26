@@ -41,6 +41,7 @@ const REFRESH_MS = 60 * 1000;
 const STALE_MS = 5 * 60 * 1000;
 const STATUSES = Object.freeze(['draft', 'approved', 'retired']);
 const SOURCES = Object.freeze(['admin_page', 'owner_paste', 'mac_sms_job', 'mac_call_job', 'import']);
+const BANK_LOCK_KEY = 'company_facts_bank_approve';
 const AUDIT_APPROVED = 'company_fact.approved';
 const AUDIT_RETIRED = 'company_fact.retired';
 
@@ -122,10 +123,14 @@ function mentionsProduct(text, tokens) {
   return false;
 }
 
-/** hasBannedCustomerCopy from the SMS drafter, loaded on first use. Fails closed: a guard that cannot load bans the text. */
+/**
+ * hasBannedCustomerCopy from the SMS drafter, loaded on first use, WITH the label-timing guard (rainTimeGuard) and no
+ * label evidence: rainfast, re-entry and drying times reach a customer only as visit-specific LABEL FACTS (AGENTS.md), never
+ * as a standing company line. Fails closed: a guard that cannot load bans the text.
+ */
 function hasBannedCopy(text) {
   try {
-    return require('./sms-shadow-drafter').hasBannedCustomerCopy(text) !== false;
+    return require('./sms-shadow-drafter').hasBannedCustomerCopy(text, { rainTimeGuard: true, labelFactsText: '' }) !== false;
   } catch {
     return true;
   }
@@ -280,9 +285,9 @@ async function createDraft(input, actor, { dbi = db } = {}) {
   }, actor, { action: 'drafted', detail: { source: f.source || 'admin_page' } }));
 }
 
-async function editDraftRow(trx, row, f, actor, dbi) {
+async function editDraftRow(trx, row, f, actor) {
   const text = 'factText' in f ? f.factText : row.fact_text;
-  const check = checkFactText(text, await loadCheckContext(dbi, { excludeIds: [row.id] }));
+  const check = checkFactText(text, await loadCheckContext(trx, { excludeIds: [row.id] }));
   const patch = { fact_text: text, text_sha256: sha256(text), check_result: checkResult(check), warnings_acknowledged: false, updated_at: trx.fn.now() };
   if ('topic' in f) patch.topic = f.topic;
   if ('question' in f) patch.question = f.question;
@@ -298,11 +303,11 @@ async function editDraftRow(trx, row, f, actor, dbi) {
   return updated;
 }
 
-async function editApprovedRow(trx, row, f, actor, dbi) {
+async function editApprovedRow(trx, row, f, actor) {
   if (!('factText' in f) || f.factText === row.fact_text) throw new FactError('TEXT_UNCHANGED', 409);
   const pending = await trx('company_facts').where({ supersedes_id: row.id, status: 'draft' }).first('id');
   if (pending) throw new FactError('EDIT_IN_PROGRESS', 409, { draftId: pending.id });
-  const check = checkFactText(f.factText, await loadCheckContext(dbi, { excludeIds: [row.id] }));
+  const check = checkFactText(f.factText, await loadCheckContext(trx, { excludeIds: [row.id] }));
   return insertDraft(trx, {
     topic: 'topic' in f ? f.topic : row.topic,
     question: 'question' in f ? f.question : row.question,
@@ -323,7 +328,7 @@ async function editFact(id, patch, actor, { dbi = db } = {}) {
   return dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status === 'retired') throw new FactError('RETIRED_USE_RESTORE', 409);
-    return row.status === 'draft' ? editDraftRow(trx, row, f, actor, dbi) : editApprovedRow(trx, row, f, actor, dbi);
+    return row.status === 'draft' ? editDraftRow(trx, row, f, actor) : editApprovedRow(trx, row, f, actor);
   });
 }
 
@@ -332,7 +337,7 @@ async function restoreAsDraft(id, actor, { dbi = db } = {}) {
   return dbi.transaction(async (trx) => {
     const row = await lockFact(trx, id);
     if (row.status !== 'retired') throw new FactError('NOT_RETIRED', 409);
-    const check = checkFactText(row.fact_text, await loadCheckContext(dbi));
+    const check = checkFactText(row.fact_text, await loadCheckContext(trx));
     return insertDraft(trx, {
       topic: row.topic,
       question: row.question,
@@ -365,8 +370,8 @@ async function approvedTextsExcept(trx, excludeId) {
 }
 
 /** Every approve-time check, on the server. Throws BLOCKED (with codes) or WARNINGS_NOT_ACKNOWLEDGED. */
-async function approveChecks(trx, row, { acknowledgeWarnings }, dbi) {
-  const ctx = await loadCheckContext(dbi, { statuses: ['approved'], excludeIds: [row.id, row.supersedes_id] });
+async function approveChecks(trx, row, { acknowledgeWarnings }) {
+  const ctx = await loadCheckContext(trx, { statuses: ['approved'], excludeIds: [row.id, row.supersedes_id] });
   const check = checkFactText(row.fact_text, ctx);
   const others = await approvedTextsExcept(trx, row.supersedes_id);
   if (others.length >= MAX_ACTIVE_FACTS) check.blocks.push('bank_full');
@@ -397,11 +402,18 @@ async function retireSuperseded(trx, row, actor) {
 async function approveFact(id, input, actor, { dbi = db } = {}) {
   if (!actor || !actor.isOwner) throw new FactError('OWNER_ONLY', 403);
   const ownerWords = cleanLine(input && input.ownerWords, 500) || null;
-  const acknowledgeWarnings = Boolean(input && input.acknowledgeWarnings);
+  const acknowledgeWarnings = Boolean(input) && input.acknowledgeWarnings === true;
+  const reviewedSha = input && typeof input.textSha256 === 'string' ? input.textSha256.trim().toLowerCase() : '';
+  if (!reviewedSha) throw new FactError('REVIEWED_TEXT_REQUIRED', 400);
   const approved = await dbi.transaction(async (trx) => {
+    // One approval at a time bank-wide: the cap and the duplicate compare read the whole approved set, which two
+    // concurrent approvals would each see without the other's row. Held to the end of this transaction.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [BANK_LOCK_KEY]);
     const row = await lockFact(trx, id);
     if (row.status !== 'draft') throw new FactError('NOT_A_DRAFT', 409);
-    const check = await approveChecks(trx, row, { acknowledgeWarnings }, dbi);
+    // The owner approves the wording the page showed: an edit since then is refused, never approved under his name.
+    if (row.text_sha256 !== reviewedSha) throw new FactError('STALE_TEXT', 409);
+    const check = await approveChecks(trx, row, { acknowledgeWarnings });
     const supersededId = await retireSuperseded(trx, row, actor);
     const [updated] = await trx('company_facts').where({ id }).update({
       status: 'approved',
@@ -468,6 +480,8 @@ async function factHistory(id, { dbi = db } = {}) {
 
 let state = { facts: Object.freeze([]), loadedAt: 0 };
 let generation = 0;
+let startedReads = 0; // refreshes started, in order
+let appliedRead = 0; // the newest-started read whose result is in `state`
 let refreshTimer = null;
 let lastDropKey = '';
 
@@ -494,12 +508,22 @@ async function loadVerifiedFacts(dbi) {
   return Object.freeze(kept);
 }
 
-/** Reload the snapshot. A failed read keeps the last copy (it ages out after STALE_MS); a read overtaken by invalidate() is discarded. */
+/**
+ * Reload the snapshot. A failed read keeps the last copy (it ages out after STALE_MS). A read is applied only when no
+ * invalidate() ran since it started AND no read that started after it has already been applied, so a slow read can never
+ * put back a line a newer read (or a retire) removed. The copy's age counts from when its read STARTED.
+ */
 async function refreshBankFacts({ dbi = db, now = Date.now } = {}) {
   const startedIn = generation;
+  startedReads += 1;
+  const myRead = startedReads;
+  const startedAt = now();
   try {
     const facts = await loadVerifiedFacts(dbi);
-    if (startedIn === generation) state = { facts, loadedAt: now() };
+    if (startedIn === generation && myRead > appliedRead) {
+      appliedRead = myRead;
+      state = { facts, loadedAt: startedAt };
+    }
   } catch (err) {
     logger.warn(`[company-facts-bank] snapshot refresh failed (code ${err?.code || 'unknown'}); keeping the last copy until it goes stale`);
   }
@@ -558,5 +582,5 @@ module.exports = {
   invalidate,
   startBankRefresh,
   stopBankRefresh,
-  _test: { sha256, normalise, countSentences, loadVerifiedFacts, resetSnapshot: () => { state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; lastDropKey = ''; } },
+  _test: { sha256, normalise, countSentences, loadVerifiedFacts, resetSnapshot: () => { state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
 };

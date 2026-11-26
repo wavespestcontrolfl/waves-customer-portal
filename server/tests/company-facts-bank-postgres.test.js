@@ -30,7 +30,11 @@ jest.setTimeout(120000);
   let n = 0;
   const line = (extra = '') => `We service zone number ${(n += 1)} on request${extra}.`;
   const draft = (text = line(), more = {}) => Bank.createDraft({ topic: 'Areas', factText: text, ...more }, admin, opts());
-  const approve = (id, input = {}, actor = owner) => Bank.approveFact(id, input, actor, opts());
+  // Presses Approve as the page does: with the hash of the wording it showed (the row as it stands, unless a test says otherwise).
+  const approve = async (id, input = {}, actor = owner) => {
+    const shown = (await row(id))?.text_sha256;
+    return Bank.approveFact(id, { textSha256: shown, ...input }, actor, opts());
+  };
   const live = async (text = line()) => approve((await draft(text)).id);
   const row = (id) => root('company_facts').where({ id }).first();
   const events = async (id) => (await Bank.factHistory(id, opts())).map((e) => e.action);
@@ -46,7 +50,7 @@ jest.setTimeout(120000);
   }
 
   beforeAll(async () => {
-    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 3 } });
     root = await database.transaction();
     Bank = require('../services/company-facts-bank');
     await root('products_catalog').insert({ name: 'Zorbex Pro 4L', category: 'insecticide' });
@@ -61,6 +65,32 @@ jest.setTimeout(120000);
     Bank._test.resetSnapshot();
     await root('company_facts').update({ status: 'retired', retired_at: root.fn.now(), retire_reason: 'test reset' }).where({ status: 'approved' });
     await root('company_facts').where({ status: 'draft' }).del();
+  });
+
+  // FIRST in the file on purpose: the suite's root transaction takes the bank-wide lock at its first approve and keeps it until it
+  // rolls back at the end, so this test (own connections) must run before any approve of the root.
+  describe('bank-wide approve lock', () => {
+    test('approve takes the bank-wide lock: while another transaction holds it, an approve waits (and times out here)', async () => {
+      const a = await database.transaction();
+      const b = await database.transaction();
+      try {
+        const d = await Bank.createDraft({ topic: 'Areas', factText: line(' lock') }, admin, { dbi: a });
+        await b.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['company_facts_bank_approve']);
+        let caught;
+        try {
+          await a.transaction(async (sp) => {
+            await sp.raw("SET LOCAL lock_timeout = '300ms'");
+            await Bank.approveFact(d.id, { textSha256: d.text_sha256 }, owner, { dbi: sp });
+          });
+        } catch (err) { caught = err; }
+        expect(caught && caught.code).toBe('55P03');
+        await b.rollback();
+        await expect(Bank.approveFact(d.id, { textSha256: d.text_sha256 }, owner, { dbi: a })).resolves.toMatchObject({ status: 'approved' });
+      } finally {
+        await a.rollback();
+        if (!b.isCompleted()) await b.rollback();
+      }
+    });
   });
 
   describe('state machine', () => {
@@ -91,6 +121,16 @@ jest.setTimeout(120000);
       await expect(Bank.getFact(randomUUID(), opts())).rejects.toMatchObject({ code: 'NOT_FOUND' });
     });
 
+    test('approve binds to the wording the owner reviewed: a changed or missing hash is refused and the draft stays', async () => {
+      const d = await draft();
+      const shown = d.text_sha256;
+      await Bank.editFact(d.id, { factText: line(' reworded') }, admin, opts());
+      await expect(approve(d.id, { textSha256: shown })).rejects.toMatchObject({ code: 'STALE_TEXT', status: 409 });
+      await expect(Bank.approveFact(d.id, {}, owner, opts())).rejects.toMatchObject({ code: 'REVIEWED_TEXT_REQUIRED' });
+      expect((await row(d.id)).status).toBe('draft');
+      await expect(approve(d.id)).resolves.toMatchObject({ status: 'approved' });
+    });
+
     test('a non-owner cannot approve: the draft stays a draft', async () => {
       const d = await draft();
       await expect(approve(d.id, {}, admin)).rejects.toMatchObject({ code: 'OWNER_ONLY' });
@@ -114,6 +154,20 @@ jest.setTimeout(120000);
       const clash = await live(again.fact_text);
       await expect(Bank.restoreAsDraft(second.id, admin, opts())).rejects.toMatchObject({ code: 'DUPLICATE' });
       expect(clash.status).toBe('approved');
+    });
+
+    test('edit, restore and approve read through their own transaction, never a second pooled connection', async () => {
+      // A handle that opens transactions but refuses any direct query: a validation read that borrowed another connection throws.
+      const strict = Object.assign(() => { throw new Error('read outside the transaction'); }, { transaction: (work) => root.transaction(work) });
+      const sopts = { dbi: strict };
+      const d = await draft();
+      const edited = await Bank.editFact(d.id, { factText: line(' via trx') }, admin, sopts);
+      const a = await Bank.approveFact(d.id, { textSha256: edited.text_sha256 }, owner, sopts);
+      const next = await Bank.editFact(a.id, { factText: line(' again') }, admin, sopts);
+      expect(next.supersedes_id).toBe(a.id);
+      await Bank.retireFact(a.id, { reason: 'not needed' }, admin, sopts);
+      const back = await Bank.restoreAsDraft(a.id, admin, sopts);
+      expect(back.status).toBe('draft');
     });
 
     test('discarding a draft deletes the row and keeps its history', async () => {
@@ -150,6 +204,18 @@ jest.setTimeout(120000);
       const a = await approve(d.id, { acknowledgeWarnings: true });
       expect(a).toMatchObject({ status: 'approved', warnings_acknowledged: true });
       expect(a.check_result.warnings[0].code).toBe('promise_words');
+    });
+
+    test('only a literal true acknowledges warnings: the string "false" does not', async () => {
+      const d = await draft('We can reschedule a visit from the customer portal.');
+      await expect(approve(d.id, { acknowledgeWarnings: 'false' })).rejects.toMatchObject({ code: 'WARNINGS_NOT_ACKNOWLEDGED' });
+      await expect(approve(d.id, { acknowledgeWarnings: 1 })).rejects.toMatchObject({ code: 'WARNINGS_NOT_ACKNOWLEDGED' });
+      expect((await row(d.id)).status).toBe('draft');
+    });
+
+    test('a standing rainfast or re-entry time is blocked, as it is for the code lines', async () => {
+      const d = await draft('Our treatment is rainfast after two hours.');
+      await expect(approve(d.id)).rejects.toMatchObject({ detail: { blocks: expect.arrayContaining(['banned_copy']) } });
     });
 
     test('the bank holds at most 20 approved lines', async () => {

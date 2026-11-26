@@ -7,7 +7,8 @@
  *   GET    /:id/history     its events, oldest first
  *   PATCH  /:id             edit a draft in place; an edit of an approved fact makes a NEW draft that supersedes it
  *   DELETE /:id             discard a draft
- *   POST   /:id/approve     OWNER ACCOUNT ONLY (requireFullAccess); { ownerWords?, acknowledgeWarnings? }
+ *   POST   /:id/approve     OWNER ACCOUNT ONLY (requireFullAccess); { textSha256 (the hash the page showed; 409 STALE_TEXT
+ *                           when the wording changed since), ownerWords?, acknowledgeWarnings (literal true) }
  *   POST   /:id/retire      any admin; { reason } is required
  *   POST   /:id/restore     a retired fact comes back as a NEW draft
  *
