@@ -1719,9 +1719,9 @@ async function postToLinkedIn(text, link, title, description, imageUrl) {
   return linkedin.createPost({ text, link, title, description, imageUrl });
 }
 
-async function postToTwitter(text, link) {
+async function postToTwitter(text, link, imageUrl) {
   const twitter = require('./twitter');
-  return twitter.createPost({ text, link });
+  return twitter.createPost({ text, link, imageUrl });
 }
 
 // ── GBP watermark ──
@@ -2662,15 +2662,18 @@ const SocialMediaService = {
           const r = await postToLinkedIn(content, link, title, description, generatedImageUrl);
           platformResults.push({ ...r, content });
         } else if (p.key === 'twitter') {
-          // Text + article URL; X renders the link card from the page's
-          // og:image, so blog shares need no media upload (mirrors the FB
-          // /feed link-post approach).
+          // Text + article URL, plus the same picture Instagram and LinkedIn
+          // get (the blog hero copy) when this run has one. X's own link card
+          // missed on 6 of 30 blog shares (2026-10-27..11-26) and cannot be
+          // re-read, so the picture rides on the tweet itself. No video here:
+          // the tweet stays text + link + picture.
           // NOT wrapped in withRetry: tweet creation is non-idempotent — if X
           // accepts the create but the response is lost/times out, a retry
           // publishes a DUPLICATE tweet (same rule as the FB video and IG
           // container flows). A transient failure surfaces as an X partial
           // failure and stays retryable through the normal channels.
-          const r = await postToTwitter(content, link);
+          const xImageUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
+          const r = await postToTwitter(content, link, xImageUrl);
           platformResults.push({ ...r, content });
         }
       } catch (err) {
@@ -2925,7 +2928,7 @@ const SocialMediaService = {
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
     if (platform === 'gbp') return postToGBP(locationId || 'bradenton', text, link, imageUrl);
     if (platform === 'linkedin') return postToLinkedIn(text, link, title, description, imageUrl);
-    if (platform === 'twitter') return postToTwitter(text, link);
+    if (platform === 'twitter') return postToTwitter(text, link, imageUrl);
     throw new Error(`Unknown platform: ${platform}`);
   },
 
