@@ -739,3 +739,91 @@ describe('schedule blocks', () => {
       .toEqual([{ startMin: 600, endMin: 600 }, { startMin: 720, endMin: 780 }]);
   });
 });
+
+// GATE_TECH_SHIFT_HOURS (D4): the re-plan's day bounds are each technician's shift.
+describe('technician shift hours', () => {
+  const eligibility = require('../services/technician-eligibility');
+  const OTHER_TECH = '00000000-0000-4000-8000-000000000002';
+  let load;
+  const shifts = (byTech) => {
+    load = jest.spyOn(eligibility, 'loadTechShifts').mockImplementation(async () => (techId, date) => (date === TOMORROW ? byTech[techId] || null : null));
+  };
+  const run = async (rows = zigzagRows()) => {
+    process.env.GATE_DAY_REPLAN = 'shadow';
+    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
+    const out = await runDayReplanIfEnabled({ now: NOW, conn });
+    return { out, inserts, conn, options: planDay.mock.calls[0]?.[0].options };
+  };
+  afterEach(() => { if (load) load.mockRestore(); load = null; });
+
+  test('a shift sets the day: it opens at the first whole hour inside the shift and closes at the shift end', async () => {
+    shifts({ [TECH]: { startMin: 9 * 60 + 30, endMin: 15 * 60, source: 'roster' } });
+    const { options, conn } = await run();
+    expect(options).toMatchObject({ firstHour: 10, closeMin: 15 * 60 });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledWith(conn, { now: NOW });
+  });
+
+  test('a shift on the hour opens at that hour; a shift wider than the night pass\'s day does not widen it', async () => {
+    shifts({ [TECH]: { startMin: 9 * 60, endMin: 16 * 60 + 30, source: 'roster' } });
+    expect((await run()).options).toMatchObject({ firstHour: 9, closeMin: 16 * 60 + 30 });
+    load.mockRestore();
+    jest.clearAllMocks();
+    shifts({ [TECH]: { startMin: 6 * 60, endMin: 20 * 60, source: 'roster' } });
+    expect((await run()).options).toMatchObject({ firstHour: 8, closeMin: 17 * 60 });
+  });
+
+  test('no set hours, or another technician\'s, leave the night pass\'s day', async () => {
+    shifts({ [OTHER_TECH]: { startMin: 10 * 60, endMin: 12 * 60, source: 'roster' } });
+    expect((await run()).options).toMatchObject({ firstHour: 8, closeMin: 17 * 60 });
+  });
+
+  test('a stop the shift does not hold is never moved, and nothing is moved out of the shift', async () => {
+    // The shift ends at 10:00: the 10:00 and 11:00 stops are outside it and have no hour to take.
+    shifts({ [TECH]: { startMin: 8 * 60, endMin: 10 * 60, source: 'roster' } });
+    const { out, inserts } = await run();
+    expect(out.status).toBe('completed');
+    const changes = JSON.parse(inserts[0].row.changes);
+    for (const change of changes) {
+      expect(['a', 'b']).toContain(change.id);
+      expect(change.to < '10:00').toBe(true);
+    }
+    expect(changes.some((change) => ['c', 'd'].includes(change.id))).toBe(false);
+  });
+
+  test('a failed read of the hours plans nothing', async () => {
+    load = jest.spyOn(eligibility, 'loadTechShifts').mockRejectedValue(new Error('synthetic read failure'));
+    const { out, inserts } = await run();
+    expect(out.status).toBe('failed');
+    expect(inserts).toEqual([]);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('shift hours (synthetic read failure); nothing planned'));
+  });
+
+  test('techDayEnv: the same object with no shift; boundsOf reads the plan\'s own bounds', () => {
+    const env = { openMin: 480, closeMin: 1020, departureMin: 450, techBlind: true, shiftOf: (techId) => (techId === TECH ? { startMin: 541, endMin: 900 } : null) };
+    expect(_internals.techDayEnv(env, OTHER_TECH, TOMORROW)).toBe(env);
+    expect(_internals.techDayEnv({ ...env, shiftOf: undefined }, TECH, TOMORROW)).toMatchObject({ openMin: 480, closeMin: 1020 });
+    expect(_internals.techDayEnv(env, TECH, TOMORROW)).toMatchObject({ openMin: 600, closeMin: 900, departureMin: 450 });
+    const plan = { blocks: [], dayContext: { allRows: [] } };
+    expect(_internals.boundsOf(env, { ...plan, openMin: 600, closeMin: 900 }, TECH)).toMatchObject({ openMin: 600, closeMin: 900 });
+    expect(_internals.boundsOf(env, plan, TECH)).toMatchObject({ openMin: 480, closeMin: 1020 });
+  });
+
+  test('the plan carries the day\'s bounds when a shift set them, and none when it did not', async () => {
+    const rows = zigzagRows();
+    const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
+    const dayContext = await _internals.loadDayContext(conn, TOMORROW, NOW);
+    const env = { openMin: 480, closeMin: 1020, departureMin: 450, techBlind: true, techHomes: new Map(), shiftOf: () => ({ startMin: 541, endMin: 900 }) };
+    const held = await _internals.computeTechDay(conn, env, { dateStr: TOMORROW, techId: TECH, rows, dayContext });
+    expect(held).toMatchObject({ openMin: 600, closeMin: 900 });
+    const free = await _internals.computeTechDay(conn, { ...env, shiftOf: () => null }, { dateStr: TOMORROW, techId: TECH, rows, dayContext });
+    expect('openMin' in free || 'closeMin' in free).toBe(false);
+  });
+
+  test('gate off: the real reader reads nothing and the day is the night pass\'s', async () => {
+    delete process.env.GATE_TECH_SHIFT_HOURS;
+    const { options, out } = await run();
+    expect(out).toMatchObject({ status: 'completed', days: 1 });
+    expect(options).toMatchObject({ firstHour: 8, closeMin: 17 * 60 });
+  });
+});

@@ -554,9 +554,22 @@ function planRow({ runId, techId, dateStr, entries, result, check, verdict, mode
  * Plans one tech-day. Returns { skip: {reason} } for a day that is not planned, else the plan with everything the
  * insert, the summary and (apply mode) the writer need.
  */
-async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) {
+/**
+ * GATE_TECH_SHIFT_HOURS (D4): one technician-day's bounds. With set hours that day (env.shiftOf, read once a run in
+ * buildEnv; today's follow a clock-in) the day opens at the first whole hour inside the shift and closes at the shift
+ * end, never wider than the night pass's own day. No set hours, or the gate off: the run's bounds, the same object.
+ * A stop already outside the shift is not pulled in: a movable one has no hour to take, so the day keeps its plan.
+ */
+function techDayEnv(env, techId, dateStr) {
+  const shift = typeof env.shiftOf === 'function' ? env.shiftOf(techId, dateStr) : null;
+  if (!shift) return env;
+  return { ...env, openMin: Math.max(env.openMin, Math.ceil(shift.startMin / 60) * 60), closeMin: Math.min(env.closeMin, shift.endMin) };
+}
+
+async function computeTechDay(conn, runEnv, { dateStr, techId, rows, dayContext }) {
   const reason = skipReason(rows);
   if (reason) return { skip: { reason } };
+  const env = techDayEnv(runEnv, techId, dateStr);
   const blocks = await loadBlocks(conn, dateStr, techId);
   if (blocksWholeDay(blocks, env.openMin, env.closeMin)) return { skip: { reason: 'DAY_BLOCKED' } };
   const origin = homeFromMap(env.techHomes, techId);
@@ -565,6 +578,8 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
   limitToldShift(entries, dayContext.toldStart, dayContext.toldCap);
   const planned = planEntries(env, { rows, entries, blocks, origin, techId, dayContext });
   const plan = { entries, blocks, origin, dayContext, ...planned, hash: versionHash(dayContext.allRows) };
+  // The day's own bounds ride with the plan when a shift set them (boundsOf, for the open-time figures after this).
+  if (env !== runEnv) Object.assign(plan, { openMin: env.openMin, closeMin: env.closeMin });
   return planned.verdict.accepted ? plan : withPackPlan(env, plan, { rows, techId });
 }
 
@@ -612,7 +627,7 @@ function planEntries(env, { rows, entries, blocks, origin, techId, dayContext })
 function boundsOf(env, plan, techId) {
   const held = blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind).map((h) => ({ startMin: h * 60, endMin: h * 60 + 60 }));
   return {
-    departureMin: env.departureMin, openMin: env.openMin, closeMin: env.closeMin, unavailable: [...plan.blocks, ...held],
+    departureMin: env.departureMin, openMin: plan.openMin ?? env.openMin, closeMin: plan.closeMin ?? env.closeMin, unavailable: [...plan.blocks, ...held],
     driveBlocks: serviceBlocks(plan.blocks),
   };
 }
@@ -901,7 +916,7 @@ async function planDate(conn, env, dateStr, now, summary) {
  *   changedVisits?: number, skipped?: object[], failed?: object[]}>}
  */
 /** The run's environment: start points, the departure minute, the occupancy rule, the night pass's day bounds. */
-async function buildEnv(conn, { apply, runId, deps }) {
+async function buildEnv(conn, { apply, runId, deps, now }) {
   // Same reader occupancy.js uses: tech-blind (another technician's row blocks an hour too) unless the gate is on.
   const { techScopedConfirmActive } = require('../scheduling/occupancy');
   // The night pass's own day bounds (candidate-slots.js DAY_OPEN / DAY_CLOSE, the after_hours rule), not a copy.
@@ -914,6 +929,9 @@ async function buildEnv(conn, { apply, runId, deps }) {
     techBlind: !techScopedConfirmActive(),
     openMin: DAY_OPEN,
     closeMin: DAY_CLOSE,
+    // GATE_TECH_SHIFT_HOURS: each technician's hours (techDayEnv). Gate off: nothing is read and no day has a shift.
+    // A failed read throws, and the run plans nothing.
+    shiftOf: await require('../technician-eligibility').loadTechShifts(conn, { now }),
     deps: apply ? (deps || applyDeps()) : null,
   };
 }
@@ -928,9 +946,9 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
   if (apply) Object.assign(summary, { apply: [], appliedVisits: 0 });
   let env;
   try {
-    env = await buildEnv(conn, { apply, runId, deps });
+    env = await buildEnv(conn, { apply, runId, deps, now });
   } catch (err) {
-    logger.error(`[day-replan] could not read start points or departure time (${err.message}); nothing planned`);
+    logger.error(`[day-replan] could not read start points, departure time or shift hours (${err.message}); nothing planned`);
     return { ...summary, status: 'failed' };
   }
   // A day committed on an earlier run whose after-commit syncs did not finish is made to match again (apply and shadow alike).
@@ -998,7 +1016,7 @@ function applyDeps() {
   };
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, loadSetTime, skipReason, horizonDates, LOCK_HOURS,
+module.exports = { runDayReplanIfEnabled, _internals: { techDayEnv, boundsOf, applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, loadSetTime, skipReason, horizonDates, LOCK_HOURS,
   limitToldShift, toldStartsOnDate, toldFactsOf, TOLD_SHIFT_MIN,
   // The booking-time make-room check (scheduling/booking-make-room.js) reads a day, a preference and a leg the same way.
   loadDayStops, loadPref, legMin,
