@@ -434,6 +434,7 @@ async function sweepStaleClaims() {
 // mark. Idempotent: the notice row is unique per email, so a second pass finds no mark left; a mark
 // whose notice row already exists is simply cleared. Oldest first, small batch (indexed read).
 const RETIRE_BATCH = 25;
+const RETIRED_WARNING = 'The sender was never verified as Capital One. Confirm the credit in the bank account before recording it.';
 async function retireMarkedEmails() {
   const rows = await db('emails')
     .where({ auto_action: 'zelle_notice_retry' })
@@ -443,17 +444,20 @@ async function retireMarkedEmails() {
   let retired = 0;
   for (const email of rows) {
     try {
+      // Inserted directly as parked (never `processing`), so the bank-check warning survives a crash between steps.
       const [notice] = await db('inbound_payment_notices')
         .insert({
           email_id: email.id, source: 'capitalone_zelle', received_at: email.received_at || new Date(),
-          status: 'processing', claim_token: randomUUID(), candidates: null,
+          status: 'parked', park_reason: 'parse_failed', apply_error: RETIRED_WARNING,
+          claim_token: randomUUID(), candidates: null,
         })
         .onConflict('email_id').ignore().returning('*');
       if (notice) {
-        await finishParked(notice, email, 'parse_failed', {
-          applyError: 'The sender was never verified as Capital One. Confirm the credit in the bank account before recording it.',
+        await stampEmail(email.id, 'zelle_notice_parked:parse_failed'); // overwrites the retry mark
+        await raise(parkedAlert(notice, 'parse_failed', {
+          applyError: RETIRED_WARNING,
           why: 'This Zelle email was left unprocessed, so check the bank first.',
-        });
+        }), notice.id);
       } else {
         await db('emails').where({ id: email.id, auto_action: 'zelle_notice_retry' }).update({ auto_action: null, updated_at: new Date() });
       }
