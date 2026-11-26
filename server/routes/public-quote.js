@@ -162,7 +162,7 @@ const {
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
-const { PLUGGING_AREA_REQUIRED_REASON } = require('../services/pricing-engine/service-pricing');
+const { PLUGGING_AREA_REQUIRED_REASON, MOSQUITO_LOT_AT_RECORD_CAP_TEXT } = require('../services/pricing-engine/service-pricing');
 // customQuoteReason the engine stamps on every top dressing line (estimate-engine.js).
 const TOP_DRESSING_QUOTE_ONLY_REASON = 'top_dressing_quote_only';
 // Reasons the office prices by hand: a keyed quote-on-request product and top
@@ -3365,6 +3365,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               ...(typeof estimate.pricingMetadata.legacyOneTimePestBuffer === 'boolean'
                 ? { legacyOneTimePestBuffer: estimate.pricingMetadata.legacyOneTimePestBuffer }
                 : {}),
+              // Specialty prices (bed bug rooms, mosquito above 2 acres, wasp level; 2026-11-26): ONE stamp.
+              ...(typeof estimate.pricingMetadata.legacySpecialty1126 === 'boolean'
+                ? { legacySpecialty1126: estimate.pricingMetadata.legacySpecialty1126 }
+                : {}),
             } }
             : {}),
           lineItems: (estimate?.lineItems || []).map(item => ({
@@ -3373,6 +3377,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
             ...(typeof item.legacyTwoStoryRoof === 'boolean' ? { legacyTwoStoryRoof: item.legacyTwoStoryRoof } : {}),
             ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
+            ...(typeof item.legacySpecialty1126 === 'boolean' ? { legacySpecialty1126: item.legacySpecialty1126 } : {}),
             annual: item.annualAfterDiscount ?? item.annual ?? null,
             monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
             price: item.priceAfterDiscount ?? item.price ?? null,
@@ -3841,7 +3846,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
               ? `${serviceInterest} · needs the area to plug (sq ft) · ${quoteFullAddress}`
             : quoteRequiredReason === 'mosquito_lot_above_2_acres'
-              ? `${serviceInterest} · Lot above 2 acres: set the mosquito price by hand · ${quoteFullAddress}`
+              ? `${serviceInterest} · ${manualQuoteLine?.mosquitoLotAtRecordCap === true ? MOSQUITO_LOT_AT_RECORD_CAP_TEXT : 'Lot above 2 acres: set the mosquito price by hand'} · ${quoteFullAddress}`
             : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)

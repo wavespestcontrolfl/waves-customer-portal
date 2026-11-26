@@ -1490,7 +1490,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord, storedEstimateData = null }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1579,6 +1579,14 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   // fallbackReason rides OUTSIDE audit (audit spreads into the row): the
   // route rings the admin bell for ENGINE_ERROR only after the save's
   // transaction committed, never from a dryRun preflight (pre-push codex P1).
+  // The server could not price this save, so the browser's price stands: it may not carry a bed bug, mosquito or wasp row (the browser
+  // mirrors none of those rules), and its rule stamp is the server's. A staff revision that the server CAN price re-prices on the
+  // CURRENT rules by design (owner 2026-09-26 ruling, the same decision as #8626, #8631 and the pest price PR): the stored stamps are
+  // not wired into that path, so a delivered wasp quote revised by staff goes $250 -> $275. A customer replay of the sent quote
+  // (replaySavedPricingKnobs) keeps the sent price. Both sit AFTER the log lines above: a refused save commits nothing, so the
+  // route's engine-error bell never rings, and the error-level line is then the only trace of a broken engine.
+  assertSpecialtyClientFallbackSave(estimateData);
+  stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData });
   // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
   // totals already say (returningWaiverForUnpricedSave). A result priced without the fee by the rule (a fresh
   // preview, or a reopened estimate's stored result), for a customer the rule no longer waives, would store
@@ -2072,6 +2080,68 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
   }
 }
 
+// Specialty prices (2026-11-26 evening: bed bug added rooms, mosquito above 2 acres, wasp level; new quotes only). A save the server
+// could not price (the CLIENT_FALLBACK authority: no replayable engine input, or an engine error) keeps the BROWSER's price, and the
+// browser mirrors none of these rules (the $349 rooms, the $85 acres, the wasp levels). So such a save is refused (409, reload and
+// let the server price it) when it NAMES bed bug, mosquito, wasp, hornet, yellow jacket or a stinging insect anywhere outside its
+// inputs: priced or $0, in any result container or shape, whatever stamp it posts, and whether or not it changed (no
+// unchanged-resave exception, so nothing to compare). The check sits where the pricing authority is decided, not behind any
+// browser-shape test.
+const SPECIALTY_ROW_WORDS = /bed[ _-]?bug|mosquito|wasp|hornet|yellow[ _-]?jacket|stinging/i;
+const SPECIALTY_SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$/;
+const isSpecialtyRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+// True when the saved blob names one of the three anywhere outside its input carriers, in `result`, `engineResult`, the bare data or
+// the send snapshot. A row is known by whatever names it: its service key or its name under ANY field (service, serviceKey,
+// service_key, key, name, label, displayName, title, n, a detail line), or the key it sits under (a results.mosquito block, a bedBug
+// item, the browser's `mq` tier rows). So every string is read, and every key that holds a block or a list: there is no list of
+// identity fields or row shapes to keep complete. No product is left out by its label either (the misting system and the one-time
+// mosquito visit are refused too): on this branch the server verified nothing, so a row cannot prove what it is.
+// A NUMBER or a word under such a key is not a row: every priced estimate carries the home's own mosquito measurements
+// (property.mosquitoTreatableSqFt, property.mosquitoLotCategory, modifiers.mosquitoWaterMult). A real browser estimate and the
+// server's own result with none of the three services hold none of the words in a string, and no block under such a key
+// (specialty-prices-20261126.test.js prices both and checks).
+const specialtyKeyHoldsRows = (value) => !!value && typeof value === 'object' && Object.keys(value).length > 0;
+function saveHoldsSpecialtyRow(estimateData) {
+  const seen = new Set();
+  const walk = (node) => {
+    if (typeof node === 'string') return SPECIALTY_ROW_WORDS.test(node);
+    if (!node || typeof node !== 'object' || seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some(walk);
+    return Object.entries(node).some(([key, value]) => {
+      if (SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key)) return false;
+      if ((key === 'mq' || SPECIALTY_ROW_WORDS.test(key)) && specialtyKeyHoldsRows(value)) return true;
+      return walk(value);
+    });
+  };
+  return walk(estimateData);
+}
+
+function assertSpecialtyClientFallbackSave(estimateData) {
+  if (!isSpecialtyRecord(estimateData) || !saveHoldsSpecialtyRow(estimateData)) return;
+  throw errorWithStatus('This estimate has a bed bug, mosquito or wasp price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
+}
+// The rule evidence of a browser-priced save is the server's, never the browser's: a revision keeps the stored estimate's stamp and
+// its per-service list (a quote sold before the rule stays on it), a first save is new. A save that passed the check above holds
+// none of the three rows, so either is true to its prices. Written on every result container, so the reader finds it whichever
+// one it picks.
+function stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (!isSpecialtyRecord(estimateData)) return;
+  const replay = require('./estimate-floor-signal-replay');
+  const legacy = !!storedEstimateData && replay.savedLegacySpecialty1126Signal(storedEstimateData).legacySpecialty1126 === true;
+  const current = storedEstimateData ? replay.savedSpecialty1126CurrentServices(storedEstimateData) : [];
+  const containers = [estimateData.result, estimateData.engineResult].filter(isSpecialtyRecord);
+  for (const container of containers.length ? containers : [estimateData]) {
+    const metadata = { ...(isSpecialtyRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacySpecialty1126: legacy };
+    if (legacy && current.length) metadata.specialty1126CurrentServices = current; else delete metadata.specialty1126CurrentServices;
+    container.pricingMetadata = metadata;
+    if (isSpecialtyRecord(container.routingMetadata)) {
+      const { legacySpecialty1126: _flag, specialty1126CurrentServices: _list, ...rest } = container.routingMetadata;
+      container.routingMetadata = rest;
+    }
+  }
+}
+
 // Client-priced saves can't server-recompute (the legacy builder ships no
 // replayable engineRequest), so a stale client bundle could persist
 // yesterday's bond rates after an admin edits pricing_config.termite_bond
@@ -2319,6 +2389,8 @@ async function resolveEstimateWritePayload({
     areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId }),
     returningVisitHistory,
     returningAnswerHeld,
+    // Revise only: the stored estimate, whose specialty rule stamp a save the server cannot price keeps.
+    storedEstimateData,
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   // The rule's answer, stored as the operator waiver every setup-fee reader honors, with its evidence.
@@ -4156,6 +4228,8 @@ module.exports = {
   estimateEditVersion,
   detectUnlinkedMemberAddress,
   assertLivePestBaseForClientPayload,
+  assertSpecialtyClientFallbackSave,
+  stampSpecialtyOnClientFallbackSave,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   assertNoDarkTermiteRentalPayload,

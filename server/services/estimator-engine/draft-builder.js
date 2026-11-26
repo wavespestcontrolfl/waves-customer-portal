@@ -910,9 +910,13 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // owner's hand price. The line's own review mark already parks the draft
   // (partial draft above); this names the cause in the operator's words, and
   // the call-quote auto-send verdict holds on it (lane_review_reason).
-  if (lines.some((l) => l?.service === 'mosquito'
-    && (l.manualReviewReasons || []).includes('mosquito_lot_above_2_acres'))) {
-    reasons.push('Lot above 2 acres: set the mosquito price by hand');
+  const handPricedMosquito = lines.find((l) => l?.service === 'mosquito'
+    && (l.manualReviewReasons || []).includes('mosquito_lot_above_2_acres'));
+  if (handPricedMosquito) {
+    // A lot at the 200,000 sq ft record cap is "4.59 acres or more": the operator is told to enter the real size (specialty prices, 2026-11-26).
+    reasons.push(handPricedMosquito.mosquitoLotAtRecordCap === true
+      ? require('../pricing-engine/service-pricing').MOSQUITO_LOT_AT_RECORD_CAP_TEXT
+      : 'Lot above 2 acres: set the mosquito price by hand');
   }
   const lookupPalmLine = lines.find((l) => l?.service === 'tree_shrub' && l.palmCountFromLookup === true
     && Number(l.palmCount) > 0 && (l.manualReviewReasons || []).includes(LOOKUP_PALM_REVIEW_REASON));
