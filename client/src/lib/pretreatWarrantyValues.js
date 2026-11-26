@@ -234,6 +234,13 @@ export function consumerNoticeOnFile(notices, initialDate, basisDate) {
   }) || null;
 }
 
+// True when the cutoff day is before today (ET): a notice signed now is too late.
+export function noticeCutoffPassed(cutoff, today = etDateString()) {
+  const day = parseUsDate(cutoff);
+  const now = parseDateOnly(today);
+  return Boolean(day && now && dateKey(day) < dateKey(now));
+}
+
 // A signed notice on file that is dated after the cutoff (it cannot qualify).
 export function lateConsumerNotice(notices) {
   return (notices || []).find((notice) => notice.usable && parseUsDate(notice.signedOn)) || null;

@@ -126,6 +126,9 @@ describe('IssueWarrantyDialog', () => {
     await screen.findByText(/The warranty cannot be issued without one/);
     expect(document.getElementById('warranty-notice-date')).toBeNull();
     fillOfficeFields();
+    // Treatment is past: a new signature is too late, so the dialog names the cutoff and asks for the paper form.
+    expect(screen.getByText(/signed on or before 09\/01\/2026, so a new signature cannot qualify/)).toBeInTheDocument();
+    expect(screen.queryByText(/send it from Document Requests/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
     const file = new File(['%PDF-1.4 test'], 'notice.pdf', { type: 'application/pdf' });
     fireEvent.change(document.getElementById('warranty-notice-file'), { target: { files: [file] } });

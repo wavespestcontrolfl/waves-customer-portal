@@ -7,6 +7,7 @@ import {
   consumerNoticeCutoff,
   consumerNoticeOnFile,
   lateConsumerNotice,
+  noticeCutoffPassed,
   daysSinceTreatment,
   warrantyEligible,
   warrantyPlanYears,
@@ -149,5 +150,8 @@ describe('consumer notice cutoff', () => {
     expect(consumerNoticeOnFile([late], '10/01/2026', '')).toBe(late);
     expect(lateConsumerNotice([{ usable: false, signedOn: '08/01/2026' }, late])).toBe(late);
     expect(lateConsumerNotice([])).toBeNull();
+    expect(noticeCutoffPassed('09/01/2026', '2026-11-25')).toBe(true);
+    expect(noticeCutoffPassed('11/25/2026', '2026-11-25')).toBe(false);
+    expect(noticeCutoffPassed('', '2026-11-25')).toBe(false);
   });
 });

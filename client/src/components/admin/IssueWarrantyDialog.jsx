@@ -13,6 +13,7 @@ import {
   consumerNoticeOnFile,
   consumerNoticeCutoff,
   lateConsumerNotice,
+  noticeCutoffPassed,
   daysSinceTreatment,
   warrantyEligible,
   warrantyIssueReadiness,
@@ -132,6 +133,11 @@ function ConsumerNoticePanel({ customerId, onFile, late, cutoff, onUploaded }) {
         <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
           The FDACS-13692 on file was signed {late.signedOn}. It must be signed on or before {cutoff || "the treatment date"}, so
           it cannot be used. A new signature cannot qualify either: find the form signed on or before that date and upload it.
+        </div>
+      ) : noticeCutoffPassed(cutoff) ? (
+        <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+          No signed FDACS-13692 is on file for this customer. The warranty cannot be issued without one signed on or
+          before {cutoff}, so a new signature cannot qualify: upload the paper form signed by then.
         </div>
       ) : (
         <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
