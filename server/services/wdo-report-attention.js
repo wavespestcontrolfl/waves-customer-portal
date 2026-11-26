@@ -47,6 +47,8 @@ const SUPERSEDED_RESOLUTION = 'Replaced by a newer WDO alert.';
 // failed sweep in the scheduler's error log, never as clean:true (this sweep
 // exists to catch silence; it can't be allowed to produce it).
 async function findAttentionItems(now = new Date()) {
+  // A database migrated before the hold columns existed keeps both older checks: no hold exclusion, no hold bucket.
+  const holdColumns = await db.schema.hasColumn('projects', 'report_hold_status');
   // Signed but never sent: the licensee did their part and the filing is
   // sitting in drafts. 48h grace covers the normal same-week office send.
   // Aged from the signature's own signed_at — updated_at moves on every
@@ -65,10 +67,9 @@ async function findAttentionItems(now = new Date()) {
     .whereNull('sent_at')
     .whereNull('sent_outside_portal_at')
     .whereNotNull('wdo_signature')
-    // A report held until paid (GATE_WDO_REPORT_HOLD) parks its signed draft ON PURPOSE: it sends by
-    // itself once the invoice is paid. It is not stalled. A hold whose release keeps failing rings
-    // through the stuck-hold bucket below instead.
-    .whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')")
+    // A report held until paid (GATE_WDO_REPORT_HOLD) parks its signed draft ON PURPOSE: it sends by itself once the
+    // invoice is paid. It is not stalled. A hold whose release keeps failing rings through the stuck-hold bucket below.
+    .where((q) => { if (holdColumns) q.whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')"); })
     .whereRaw("coalesce((wdo_signature->>'signed_at')::timestamptz, updated_at) < ?", [
       new Date(now.getTime() - SIGNED_UNSENT_HOURS * 3600e3),
     ])
@@ -101,7 +102,7 @@ async function findAttentionItems(now = new Date()) {
   // Also: a hold whose invoice never left draft for a day (the customer has no bill to pay), an unpaid invoice that bills
   // nothing (it can never settle), and a release stuck 'releasing' well past the 10-minute stale-claim recovery.
   const dayAgo = new Date(now.getTime() - 24 * 3600e3);
-  const stuckHolds = await db('projects as p')
+  const stuckHolds = !holdColumns ? [] : await db('projects as p')
     .leftJoin('invoices as i', 'i.id', 'p.invoice_id')
     .whereIn('p.project_type', ['wdo_inspection'])
     .where((q) => q

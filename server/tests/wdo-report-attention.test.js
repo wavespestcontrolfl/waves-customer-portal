@@ -7,6 +7,7 @@ jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  mock.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -239,10 +240,24 @@ describe('runWdoReportAttentionSweep', () => {
       if (table === 'projects') projectsChains.push(c);
       return c;
     });
-    await runWdoReportAttentionSweep();
+    const exclusionSql = async () => {
+      projectsChains.length = 0;
+      await _private.findAttentionItems(new Date('2026-11-02T12:00:00Z'));
+      const sql = [];
+      for (const [arg] of projectsChains[0].where.mock.calls) {
+        if (typeof arg === 'function') arg({ whereRaw: (text) => sql.push(text) });
+      }
+      return sql;
+    };
     // First projects query = signedUnsent: held/releasing rows are parked by
     // design (pay-before-report), not stalled — they must not ring here.
-    expect(projectsChains[0].whereRaw).toHaveBeenCalledWith(expect.stringContaining("NOT IN ('held', 'releasing')"));
+    expect(await exclusionSql()).toEqual([expect.stringContaining("NOT IN ('held', 'releasing')")]);
+    // A database without the hold columns keeps the older check working: no exclusion, and no stuck-hold query.
+    db.schema.hasColumn.mockResolvedValueOnce(false);
+    const tables = [];
+    db.mockImplementation((table) => { tables.push(table); const c = chain(); if (table === 'projects') projectsChains.push(c); return c; });
+    expect(await exclusionSql()).toEqual([]);
+    expect(tables).not.toContain('projects as p');
   });
 
   test('a failed bell insert fails the sweep instead of recording a ring', async () => {

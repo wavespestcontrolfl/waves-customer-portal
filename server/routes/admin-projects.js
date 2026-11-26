@@ -17,6 +17,7 @@ const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = re
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const db = require('../models/db');
+const { invoicePayerOwnership } = require('../services/invoice-payer-ownership');
 const config = require('../config');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
@@ -3370,7 +3371,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // A project whose linked invoice cannot be reused (voided, replaced, paid elsewhere) or whose hold is
     // live never gets a replacement draft for a hold: the hold binds the invoice the customer received, and
     // a refused replacement would leave a stray bill behind. Every hold refusal runs here, before the create.
-    await assertHoldMintable(project, holdRequested, { linkedInvoiceId, locked });
+    await assertHoldMintable(project, holdRequested, { database: trx, linkedInvoiceId, locked });
 
     if (project.project_type === 'wdo_inspection') {
 
@@ -4257,6 +4258,9 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep', a
         ? await revertToHeld('invoice_not_settled', { countAttempt: false, unmintToken: link.mintedToken })
         : await revertToHeld(`Report email failed: ${sent.channels.email.error || 'unknown'}`, {
           unmintToken: link.mintedToken && !sent.channels.email.uncertain,
+          // A kept link may be in the customer's inbox: it shows the filing this email carried (never live findings
+          // edited later), without the report being recorded as delivered.
+          possiblySentFiling: sent.channels.email.uncertain ? pdf.wdoFiling : null,
         });
       return { ...reverted, channels: sent.channels };
     }
@@ -4322,7 +4326,7 @@ async function claimHeldReportForRelease(projectId) {
 // `countAttempt: false` is for "not due yet" (invoice not settled).
 function makeHeldReverter({ project, claim, ctx, source }) {
   const hold = require('../services/project-report-hold');
-  return async function revertToHeld(reason, { countAttempt = true, unmintToken = false } = {}) {
+  return async function revertToHeld(reason, { countAttempt = true, unmintToken = false, possiblySentFiling = null } = {}) {
     const { attemptsSoFar, previousDeliveryStatus, ownClaim } = claim;
     const nextAttempts = countAttempt ? attemptsSoFar + 1 : attemptsSoFar;
     const delayMinutes = countAttempt ? hold.reportHoldBackoffMinutes(nextAttempts) : 2;
@@ -4337,6 +4341,7 @@ function makeHeldReverter({ project, claim, ctx, source }) {
       delivery_status: previousDeliveryStatus,
       delivery_claim_token: null,
       ...(unmintToken ? { report_token: null } : {}),
+      ...(possiblySentFiling ? { delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ possibly_sent_filing: possiblySentFiling })]) } : {}),
       updated_at: db.fn.now(),
     }).catch((err) => logger.warn(`[projects] hold revert failed for ${project.id}: ${err.message}`));
     if (countAttempt && reverted) await ringReleaseFailedOnce({ hold, project, customer: ctx.customer, reason, attemptsSoFar, source });
@@ -5357,6 +5362,11 @@ async function armReportHold({ hold, project, invoice, expectedFingerprint, deli
       throw holdRefusal(409, 'hold_has_credit', 'This customer has account credit, which would settle the invoice before the report is held. Use Send report + invoice.');
     }
     await assertHoldMintable(locked, true, { database: trx });
+    // ...and the invoice's OWN visit: an explicit or earlier invoice can ride a different visit than the project's,
+    // and a payer assigned to that visit since leaves no stamp on the invoice. Unknown ownership refuses too.
+    if (await invoicePayerOwnership(lockedInvoice, trx)) {
+      throw holdRefusal(422, 'hold_payer_billed', 'This invoice is billed to a third party, or its payer could not be checked, so the report cannot wait for payment. Send the report and invoice normally.');
+    }
     await require('../services/project-report-hold').assertNoPaymentStarted(lockedInvoice, trx);
     const written = await trx('projects')
       .where({ id: project.id, delivery_claim_token: deliveryClaimToken })
@@ -5524,7 +5534,9 @@ async function heldPayLinkFence(database, { customerId, projectId, invoiceId, de
   }
   const ownership = await require('../services/invoice-helpers').selfPayAtDispatch(invoiceId, database)();
   if (ownership.ok !== true) return { code: ownership.code || 'INVOICE_PAYER_BILLED', reason: ownership.reason || 'Not the homeowner\'s bill' };
-  if (await liveBillToRefusal(liveProject, database)) return { code: 'INVOICE_PAYER_BILLED', reason: 'This service is now billed to a third party' };
+  if (await liveBillToRefusal(liveProject, database) || await invoicePayerOwnership(live, database)) {
+    return { code: 'INVOICE_PAYER_BILLED', reason: 'This service is now billed to a third party, or its payer could not be checked' };
+  }
   const collectionHold = require('../services/collections/collection-hold');
   const held = await collectionHold.messagingHeldByCollectionHold(customerId, database, { ignoreDisputeHold: collectionHold.holdExemptionApplies('operator') });
   if (held.held) return { code: 'COLLECTION_HOLD', reason: 'A collections hold applies to this customer' };

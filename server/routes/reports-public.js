@@ -813,6 +813,18 @@ async function buildServiceReportV1ResponseData(service, token, {
   };
 }
 
+// The FDACS filing a WDO report link shows: the last one emailed, else the one a held release emailed with an unknown
+// outcome (its link may be in the customer's inbox, so it shows that signed filing, never findings edited later).
+function servedWdoFiling(project) {
+  const parse = (v) => {
+    if (typeof v !== 'string') return v;
+    try { return JSON.parse(v); } catch { return null; }
+  };
+  const filings = parse(project.wdo_sent_filings);
+  if (Array.isArray(filings) && filings.length) return filings[filings.length - 1];
+  return parse(project.delivery_channels)?.possibly_sent_filing || null;
+}
+
 async function findProjectByReportSegment(segment) {
   const lookup = extractProjectReportTokenLookup(segment);
   if (!lookup) return null;
@@ -946,9 +958,7 @@ router.get('/project/:token/data', async (req, res, next) => {
     // so it never opens a 404 for a pre-archive/legacy report.
     let fdacsPdfAvailable = false;
     if (project.project_type === 'wdo_inspection') {
-      let filings = project.wdo_sent_filings;
-      if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
-      const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
+      const lastFiling = servedWdoFiling(project);
       if (lastFiling?.findings) {
         viewerFindings = lastFiling.findings;
         if (lastFiling.project_date) viewerProjectDate = lastFiling.project_date;
@@ -1146,9 +1156,7 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
     if (!project || project.project_type !== 'wdo_inspection') {
       return res.status(404).json({ error: 'Report not found' });
     }
-    let filings = project.wdo_sent_filings;
-    if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
-    const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
+    const lastFiling = servedWdoFiling(project);
     if (!lastFiling?.s3_key || !config.s3?.bucket) {
       return res.status(404).json({ error: 'Report not found' });
     }
@@ -2619,6 +2627,7 @@ async function ensureReportToken(serviceRecordId) {
 
 module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
+module.exports.servedWdoFiling = servedWdoFiling;
 module.exports.reportLimiter = reportLimiter;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;

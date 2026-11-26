@@ -2292,6 +2292,72 @@ describe('audit fixes', () => {
       expect(dispatch).not.toHaveBeenCalled();
     });
 
+    test('P0: an invoice riding another visit, billed to a payer since, is refused at arming and at both handoffs', async () => {
+      const payerOnOtherVisit = async ({ scheduledServiceId }) => (scheduledServiceId === 'ss-other' ? { payerId: 'payer-1', paymentTerms: 'due_on_receipt' } : null);
+      // arming: the confirmed invoice names another visit, whose payer came after the invoice was made
+      mockTables({ invoice: invoiceRow({ scheduled_service_id: 'ss-other' }) });
+      PayerService.resolveForInvoice.mockImplementation(payerOnOtherVisit);
+      try {
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+          expect(res.status).toBe(422);
+          expect((await res.json()).code).toBe('hold_payer_billed');
+        });
+        expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      } finally {
+        PayerService.resolveForInvoice.mockImplementation(async () => null);
+      }
+      // the handoffs: armed on a self-pay invoice, then the invoice's own visit gains a payer before the email and text
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const token = (updates.projects || []).find((u) => u.delivery_status === 'sending').delivery_claim_token;
+      await ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0].withProviderHandoff(jest.fn());
+      const opts = require('../services/billing-channel-email-authority').dispatchUnderBillingEmailAuthority.mock.calls.at(-1)[0];
+      const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'admin_project_report_with_invoice')[0];
+      mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token, report_token: null }), invoice: invoiceRow({ status: 'sending', scheduled_service_id: 'ss-other' }) });
+      PayerService.resolveForInvoice.mockImplementation(payerOnOtherVisit);
+      try {
+        expect(await opts.preSendCheck({ database: db })).toMatchObject({ ok: false, code: 'INVOICE_PAYER_BILLED' });
+        const dispatch = jest.fn();
+        expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false, code: 'RECIPIENT_CHANGED' }));
+        expect(dispatch).not.toHaveBeenCalled();
+      } finally {
+        PayerService.resolveForInvoice.mockImplementation(async () => null);
+      }
+    });
+
+    test('a report email of unknown outcome binds the kept link to the filing that email carried', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'email send held by provider_retry_ambiguous' });
+      let { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const kept = (updates.projects || []).find((u) => u.report_hold_status === 'held');
+      expect(String(kept.delivery_channels?.sql || '')).toContain('jsonb');
+      expect(JSON.parse(kept.delivery_channels.bindings[0]).possibly_sent_filing).toEqual(expect.objectContaining({ s3_key: expect.any(String) }));
+      // a definite failure records no such filing
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'rejected', blocked: true });
+      ({ updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) }));
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect((updates.projects || []).find((u) => u.report_hold_status === 'held')).not.toHaveProperty('delivery_channels');
+    });
+
+    test('the report viewer and its PDF serve the possibly-sent filing when nothing is recorded as sent', () => {
+      const { servedWdoFiling } = require('../routes/reports-public');
+      const possible = { s3_key: 'wdo/possible.pdf', findings: { a: 1 } };
+      expect(servedWdoFiling({ wdo_sent_filings: [], delivery_channels: { possibly_sent_filing: possible } })).toEqual(possible);
+      expect(servedWdoFiling({ wdo_sent_filings: null, delivery_channels: JSON.stringify({ possibly_sent_filing: possible }) })).toEqual(possible);
+      // a filing recorded as sent always wins
+      const sent = { s3_key: 'wdo/sent.pdf' };
+      expect(servedWdoFiling({ wdo_sent_filings: JSON.stringify([sent]), delivery_channels: { possibly_sent_filing: possible } })).toEqual(sent);
+      expect(servedWdoFiling({ wdo_sent_filings: null, delivery_channels: null })).toBeNull();
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+      expect(source.match(/const lastFiling = servedWdoFiling\(project\);/g)).toHaveLength(2);
+    });
+
+    test('the draft payer lookup runs on the open transaction', () => {
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
+      expect(source).toContain('await assertHoldMintable(project, holdRequested, { database: trx, linkedInvoiceId, locked });');
+    });
+
     test('the key moves only when the email ledger shows this key ended in a bounce or drop', async () => {
       const counted = (u) => String(u.delivery_channels?.sql || '').includes('release_email_blocks');
       // the ledger answers the key with its terminal failed row: a fresh copy may go next time
