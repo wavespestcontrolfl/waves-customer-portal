@@ -112,8 +112,8 @@ const COMPANY_FACTS = Object.freeze([
   // (a pest report before a visit moves that visit; the FREE RE-SERVICE fact owns return visits, so no line uses its words).
   'The perimeter treatment is applied as a band around the home.',
   'Lawn insect control is part of the lawn care plan, not the pest plan. The pest plan still treats the shrubs, ornamentals and bed areas around the home.',
-  'When a customer on a recurring plan reports pests before the next scheduled visit, we move that visit earlier, and the later visits in the plan move up with it.',
-  'When rain forces us to move a visit, we text the customer the new day with our standard moved-visit text.',
+  'When a customer on a recurring plan reports pests before their next scheduled visit, we can move that visit earlier, and the later visits in the plan move up with it.',
+  'When rain forces a move and the customer is notified, we send our standard moved-visit text with the new day or a link to choose a day.',
   'New sod and plugs get the same watering instructions as any other lawn: follow the water district\'s watering days and times.',
   'For a wasp nest, we can explain how the nest is removed, and we suggest turning the outdoor lights off.',
   'We never tell a customer that ants may stay. The ant products we use are non-repellents: ants carry them back to the colony, so results build over time.',
