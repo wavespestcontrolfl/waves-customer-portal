@@ -59,7 +59,7 @@ const sentencesOfPart = (part) => {
 /**
  * The prep guide of the customer's booked visit: the soonest upcoming visit a guide covers, chosen by the prep senders' own eligibility
  * (prep-guide-sender.nextGuideVisit: one helper for the senders and for this lookup, so a visit the senders would not prep is never
- * read here). Only that visit's guide: its published email template as { key, label, sections: [{ heading, sentences }] }, in the guide's
+ * read here). Only that visit's guide: its published email template as { key, label, sections: [{ heading, sentences }], omitted }, in the guide's
  * own order. Merge tags and bare links are dropped here (a part with one is dropped whole); the drafter screens what is left (banned claims, prompt-control text) and caps the
  * section. null when no booked visit has a guide or the template cannot be read. Never reads notes.
  */
@@ -76,10 +76,15 @@ async function loadPrepGuideFacts(customerId, { db } = {}) {
     const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
     if (!loaded?.activeVersion) return null;
     const blocks = typeof loaded.activeVersion.blocks === 'string' ? JSON.parse(loaded.activeVersion.blocks) : loaded.activeVersion.blocks;
+    let omitted = false; // a paragraph or list item dropped whole (merge tag, bare link, address, email wording): the drafter calls the guide PARTIAL
     const sections = sectionsOfBlocks(blocks)
-      .map(({ heading, parts }) => ({ heading, sentences: parts.flatMap(sentencesOfPart) }))
+      .map(({ heading, parts }) => {
+        const kept = parts.map(sentencesOfPart);
+        omitted = omitted || kept.some((sentences, n) => !sentences.length && String(parts[n]).trim());
+        return { heading, sentences: kept.flat() };
+      })
       .filter((section) => section.sentences.length);
-    return sections.length ? { key, label: config.label, sections } : null;
+    return sections.length ? { key, label: config.label, sections, omitted } : null;
   } catch (err) {
     logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}${key ? ` (guide ${key})` : ''}: ${err.message}`);
     return null;

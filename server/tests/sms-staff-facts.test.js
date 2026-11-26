@@ -77,6 +77,9 @@ describe('prepaid visits left (payment-status contract)', () => {
     // availability questions are not plan-count questions (unless the plan is named)
     expect(ask('We can move it to Friday.', 'Do you have any appointments left on Friday?')).toBe(true);
     expect(ask('Three.', 'Do I have any visits left?')).toBe(false);
+    expect(ask('Three.', 'How many are left on my plan?')).toBe(false);
+    // a treatment-frequency question is not a plan-count question
+    expect(ask('Bed bugs usually take two treatments.', 'How many treatments do I need for bed bugs?')).toBe(true);
     expect(ask('Three.', 'How many appointments do I have left on my prepaid plan?')).toBe(false);
     // a complaint about the last visit is not a count question
     expect(ask('I am sorry about the gate, we will make sure it is closed.', 'At the last visit you left the gate open')).toBe(true);
@@ -157,6 +160,8 @@ describe('PREP GUIDE section', () => {
     expect(text).toContain('(PARTIAL:');
     const whole = { key: 'flea', label: 'Flea Treatment', sections: [{ heading: 'How to prepare', sentences: ['Vacuum every carpet before we arrive.'] }] };
     expect(section(buildFactsBlock({ summary: 'X', billing, prepGuide: whole }))).not.toContain('PARTIAL');
+    // the loader dropped a paragraph whole: partial even though every shown line fit
+    expect(section(buildFactsBlock({ summary: 'X', billing, prepGuide: { ...whole, omitted: true } }))).toContain('(PARTIAL:');
     expect(text).toContain('Step 2: Vacuum:\n- Vacuum every carpet, rug and hard floor before we arrive.');
     expect(text).toContain('- Move small items off the floor so we can treat the baseboards.');
     expect(text.indexOf('Step 1: Treat the pets:')).toBeLessThan(text.indexOf('Step 2: Vacuum:'));
@@ -227,6 +232,8 @@ describe('sms-staff-facts loaders', () => {
     expect(loadTemplateByKey).toHaveBeenCalledWith('prep.flea', 'db');
     expect(guide).toMatchObject({ key: 'flea', label: 'Flea Treatment' });
     // (the opening paragraph carries a merge tag and is dropped; "Reply to this email", the link and the address sentences are dropped)
+    // the part with an address and the part with email wording were dropped whole, so the guide is flagged as having omissions
+    expect(guide.omitted).toBe(true);
     expect(guide.sections).toEqual([
       { heading: 'Why fleas are different in Florida', sentences: ['Fleas thrive in warm, humid homes all year long.'] },
       // a link keeps its label; a part with a bare link, an address or email wording is dropped WHOLE ("Reply to this email ... Vacuum twice")
@@ -245,6 +252,7 @@ describe('sms-staff-facts loaders', () => {
     const { guide } = await loadWith({ key: 'flea', visit: {} }, { activeVersion: { blocks: roach } });
     expect(guide.sections.map((section) => section.heading)).toEqual(['Prep for a German roach cleanout (kitchen and bath)', 'Prep for palmetto bugs (exterior and occasional indoor)']);
     expect(guide.sections[1].sentences).toEqual(['Trim shrubs back from the walls and clear leaf litter from the foundation.']);
+    expect(guide.omitted).toBe(false);
     const empty = [{ type: 'heading', content: 'Heading only' }, { type: 'cta', label: 'Open portal' }];
     expect((await loadWith({ key: 'flea', visit: {} }, { activeVersion: { blocks: empty } })).guide).toBeNull();
   });
