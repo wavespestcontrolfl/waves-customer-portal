@@ -35,17 +35,20 @@ function live() {
  * True when this technician has a COMPLETED record on ANY issued version (effective now or
  * earlier) of the staff form `templateKey`. A wording re-issue must not silently undo a
  * signed agreement. One plain snapshot query; the caller decides what an error means.
+ * `completedBy` (optional): the record must also have been completed at or before that instant.
  */
-async function hasCompletedIssuedRecord(conn, technicianId, templateKey, now = new Date()) {
-  const row = await conn('staff_document_records as r')
+async function hasCompletedIssuedRecord(conn, technicianId, templateKey, now = new Date(), { completedBy = null } = {}) {
+  let query = conn('staff_document_records as r')
     .join('document_template_versions as v', 'v.id', 'r.version_id')
     .join('document_templates as t', 't.id', 'v.template_id')
     .where({ 't.template_key': templateKey, 't.audience': 'staff', 'r.owner_id': technicianId })
     .whereNotNull('r.completed_at')
     .whereNotNull('v.published_at')
-    .where('v.effective_at', '<=', now)
-    .first('r.id');
-  return !!row;
+    .where('v.effective_at', '<=', now);
+  // completedBy: the record must have been completed at or before that instant (a backdated
+  // pay start must not rest on a signature that came after it).
+  if (completedBy) query = query.where('r.completed_at', '<=', completedBy);
+  return !!(await query.first('r.id'));
 }
 
 // The current ISSUED version of every required staff document (the same rule as

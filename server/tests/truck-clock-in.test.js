@@ -116,7 +116,8 @@ describe('truckClockInMode', () => {
   test.each([
     [undefined, 'off'], ['', 'off'], ['false', 'off'], ['1', 'off'], ['on', 'off'], ['yes', 'off'],
     ['shadow', 'shadow'], [' Shadow ', 'shadow'], ['SHADOW', 'shadow'],
-    ['true', 'off'], ['TRUE', 'off'], ['live', 'off'], ['shadow,true', 'off'],
+    ['start', 'start'], [' Start ', 'start'], ['START', 'start'],
+    ['true', 'off'], ['TRUE', 'off'], ['live', 'off'], ['shadow,true', 'off'], ['start,shadow', 'off'],
   ])('GATE_TRUCK_CLOCK_IN=%p reads %p', (value, expected) => {
     if (value === undefined) delete process.env.GATE_TRUCK_CLOCK_IN; else process.env.GATE_TRUCK_CLOCK_IN = value;
     expect(truckClockInMode()).toBe(expected);
@@ -253,6 +254,50 @@ describe('maybeClockInFromTruck', () => {
       lat: STOP.lat, lng: STOP.lng,
     });
     expect(timeTracking.clockIn).not.toHaveBeenCalled();
+  });
+
+  test('start: records the same row as shadow, with the GPS time as event_at, and never clocks in itself', async () => {
+    process.env.GATE_TRUCK_CLOCK_IN = 'start';
+    const at = new Date(NOW.getTime() - 3000);
+    const result = await run({ point: point({ reported_at: at.toISOString() }), verified: true });
+    expect(result).toMatchObject({ action: 'recorded', mode: 'start', wouldClockIn: true });
+    expect(shadowRows[0]).toMatchObject({ event_at: at, event_time_known: true, event_verified: true });
+    expect(timeTracking.clockIn).not.toHaveBeenCalled();
+  });
+
+  test('start: an unverified webhook (log or disabled verification mode) claims nothing, so a verified one can still claim the day', async () => {
+    process.env.GATE_TRUCK_CLOCK_IN = 'start';
+    await expect(run({ verified: false })).resolves.toEqual({ action: 'no_trigger', reason: 'unverified' });
+    await expect(run()).resolves.toEqual({ action: 'no_trigger', reason: 'unverified' });
+    expect(shadowRows).toHaveLength(0);
+    await expect(run({ verified: true })).resolves.toMatchObject({ action: 'recorded' });
+    expect(shadowRows).toHaveLength(1);
+  });
+
+  test.each([[true, true], [false, false], [undefined, false]])('shadow records the row with event_verified for verified=%p', async (verified, expected) => {
+    process.env.GATE_TRUCK_CLOCK_IN = 'shadow';
+    await run(verified === undefined ? {} : { verified });
+    expect(shadowRows[0]).toMatchObject({ event_verified: expected });
+  });
+
+  test.each(['shadow', 'start'])('%s: a row is written with the real GPS time when already clocked in or the agreement is unsigned', async (mode) => {
+    process.env.GATE_TRUCK_CLOCK_IN = mode;
+    const at = new Date(NOW.getTime() - 3000);
+    installDb({ shiftActive: true });
+    await run({ point: point({ reported_at: at.toISOString() }), verified: true });
+    expect(shadowRows[0]).toMatchObject({ skip_reason: 'already_clocked_in', event_at: at, event_time_known: true });
+    shadowRows.length = 0;
+    truck._test.resetMemo();
+    installDb();
+    hasCompletedIssuedRecord.mockResolvedValue(false);
+    await run({ point: point({ reported_at: at.toISOString() }), verified: true });
+    expect(shadowRows[0]).toMatchObject({ skip_reason: 'agreement_not_signed', event_at: at, event_time_known: true });
+  });
+
+  test('a GPS sample with no usable time is recorded with event_time_known false (the job will not pay from it)', async () => {
+    process.env.GATE_TRUCK_CLOCK_IN = 'start';
+    await run({ point: point({ reported_at: null }), verified: true });
+    expect(shadowRows[0]).toMatchObject({ event_at: NOW, event_time_known: false });
   });
 
   test('GATE_TRUCK_CLOCK_IN=true behaves as off: no row, no clock-in, no database call', async () => {
