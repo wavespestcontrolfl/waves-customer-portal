@@ -8616,10 +8616,50 @@ function wdoConstructionClass(raw) {
 // A crawl space or raised (pier / piling) foundation prices in its own column, whatever the walls are made of.
 const wdoFoundationIsCrawl = (raw) => /^(CRAWLSPACE|CRAWL_SPACE|CRAWL|RAISED|PIER|PILING|STILT)/.test(String(raw || '').trim().toUpperCase().replace(/[\s-]+/g, '_'));
 
+// Size = the home's living area, from the engine's own living-area inputs (homeSqFt, then livingAreaSqFt, the order the flea
+// pricer reads them); a quote with none prices on the footprint the legacy path reads.
+function wdoSizeTier(property, footprint) {
+  const tiers = SPECIALTY.wdo.sizeTable.tiers;
+  const size = wdoLivingArea(property) || footprint;
+  return { size, tier: tiers.find((t) => size <= t.maxSqFt) || tiers[tiers.length - 1] };
+}
+
+// Trust applies per field. A weak (false) construction reads as unknown (null): block + a staff note.
+function wdoWallClass(property, options) {
+  if ((options.constructionTrusted ?? property.constructionTrusted) === false) return null;
+  return wdoConstructionClass(options.constructionType ?? property.constructionMaterial);
+}
+
+// A weak foundation is not used: the home prices as on a slab. `dropped` = that discarded read claimed a crawl space or raised foundation.
+function wdoFoundation(property, options) {
+  const claimsCrawl = wdoFoundationIsCrawl(options.foundationType ?? property.foundationType);
+  const distrusted = (options.foundationTrusted ?? property.foundationTrusted) === false;
+  return { crawl: claimsCrawl && !distrusted, dropped: claimsCrawl && distrusted };
+}
+
+// A trusted crawl space is a stated fact on its own and wins; the walls decide the rest.
+const wdoTableColumn = (crawl, wallClass) => (crawl ? 'crawl' : (wallClass === 'frame' ? 'frame' : 'block'));
+
+// An internal staff note that names the price chosen and what a confirmed alternative would cost. Three cases: the walls are
+// unknown or untrusted (and no trusted crawl space prices the home), a crawl-space / raised-foundation read was dropped as untrusted,
+// or both. A trusted crawl space with unknown walls is a stated fact: no note (null).
+function wdoStaffNote({ tier, column, wallsKnown, crawl, dropped }) {
+  if (!((!wallsKnown && !crawl) || dropped)) return null;
+  let because = 'the home construction is not verified';
+  if (wallsKnown) because = 'the crawl space or raised foundation read is not verified';
+  else if (dropped) because = 'the home construction and the crawl space or raised foundation read are not verified';
+  const alternatives = [
+    column === 'block' ? `wood frame on a slab would be $${tier.frame}` : null,
+    `a confirmed crawl space or raised foundation would be $${tier.crawl}`,
+  ].filter(Boolean).join('; ');
+  const asPriced = `priced as ${column === 'frame' ? 'wood frame' : 'concrete block'} on a slab ($${tier[column]})`;
+  return `${SPECIALTY.wdo.sizeTable.staffNoteMarker} ${asPriced}: ${because}. If confirmed, ${alternatives}. Confirm before sending.`;
+}
+
 // options.legacyWdoFlat (from the quote's own rule stamp, see estimate-engine legacyWdoFlat) runs the flat price the quote was
 // sold at, unchanged. Otherwise the size + construction table. The construction and size read are the ones on the property passed
 // in: a replay passes the quote's stored inputs, never a live lookup. constructionTrusted / foundationTrusted === false marks a
-// lookup value the record's own evidence flags as weak, judged per field (see below): never a guess up.
+// lookup value the record's own evidence flags as weak, judged per field: never a guess up.
 function priceWDO(input, options = {}) {
   const property = typeof input === 'number' || typeof input === 'string'
     ? { footprint: input }
@@ -8640,41 +8680,22 @@ function priceWDO(input, options = {}) {
     const bracket = brackets.find((b) => footprint <= b.maxSqFt) || brackets[brackets.length - 1];
     return { ...base, price: bracket.price, bracketLabel: bracket.maxSqFt === Infinity ? '>3500' : `<=${bracket.maxSqFt}` };
   }
-  const table = SPECIALTY.wdo.sizeTable;
-  // Size = the home's living area, from the engine's own living-area inputs (homeSqFt, then livingAreaSqFt, the order the flea
-  // pricer reads them); a quote with none prices on the footprint the legacy path reads.
-  const size = wdoLivingArea(property) || footprint;
-  const tier = table.tiers.find((t) => size <= t.maxSqFt) || table.tiers[table.tiers.length - 1];
-  // Trust applies per field. A weak (false) construction reads as unknown: block + a staff note. A weak foundation is not used:
-  // the home prices as on a slab, and when that discarded read claimed a crawl space or raised foundation the staff note says so.
-  const constructionClass = (options.constructionTrusted ?? property.constructionTrusted) === false
-    ? null : wdoConstructionClass(options.constructionType ?? property.constructionMaterial);
-  const foundationClaimsCrawl = wdoFoundationIsCrawl(options.foundationType ?? property.foundationType);
-  const foundationDistrusted = (options.foundationTrusted ?? property.foundationTrusted) === false;
-  const crawl = foundationClaimsCrawl && !foundationDistrusted;
-  // A trusted crawl space is a stated fact on its own and wins; the walls decide the rest.
-  const sizeClass = crawl ? 'crawl' : (constructionClass === 'frame' ? 'frame' : 'block');
-  const constructionKnown = constructionClass !== null;
-  const priced = { ...base, price: tier[sizeClass], sizeUsed: size, bracketLabel: tier.maxSqFt === Infinity ? `>${table.tiers[table.tiers.length - 2].maxSqFt}` : `<=${tier.maxSqFt}`,
-    wdoConstructionClass: sizeClass, wdoConstructionKnown: constructionKnown || crawl };
-  // An internal staff note that names the price chosen and what a confirmed alternative would cost. Three cases: the walls are
-  // unknown or untrusted (and no trusted crawl space prices the home), a crawl-space / raised-foundation read was dropped as untrusted,
-  // or both. A trusted crawl space with unknown walls is a stated fact: no note.
-  const dropsCrawl = foundationClaimsCrawl && foundationDistrusted;
-  if ((!constructionKnown && !crawl) || dropsCrawl) {
-    const marker = table.staffNoteMarker;
-    const usd = (n) => `$${n}`;
-    const asPriced = `priced as ${sizeClass === 'frame' ? 'wood frame' : 'concrete block'} on a slab (${usd(tier[sizeClass])})`;
-    const alternatives = [
-      sizeClass === 'block' ? `wood frame on a slab would be ${usd(tier.frame)}` : null,
-      `a confirmed crawl space or raised foundation would be ${usd(tier.crawl)}`,
-    ].filter(Boolean).join('; ');
-    let because = 'the home construction is not verified';
-    if (constructionKnown) because = 'the crawl space or raised foundation read is not verified';
-    else if (dropsCrawl) because = 'the home construction and the crawl space or raised foundation read are not verified';
-    priced.warnings = [...(base.warnings || []), `${marker} ${asPriced}: ${because}. If confirmed, ${alternatives}. Confirm before sending.`];
-  }
-  return priced;
+  const { size, tier } = wdoSizeTier(property, footprint);
+  const wallClass = wdoWallClass(property, options);
+  const { crawl, dropped } = wdoFoundation(property, options);
+  const column = wdoTableColumn(crawl, wallClass);
+  const wallsKnown = wallClass !== null;
+  const tiers = SPECIALTY.wdo.sizeTable.tiers;
+  const note = wdoStaffNote({ tier, column, wallsKnown, crawl, dropped });
+  return {
+    ...base,
+    ...(note ? { warnings: [...(base.warnings || []), note] } : {}),
+    price: tier[column],
+    sizeUsed: size,
+    bracketLabel: tier.maxSqFt === Infinity ? `>${tiers[tiers.length - 2].maxSqFt}` : `<=${tier.maxSqFt}`,
+    wdoConstructionClass: column,
+    wdoConstructionKnown: wallsKnown || crawl,
+  };
 }
 
 function normalizeFleaAreaSource(value) {
