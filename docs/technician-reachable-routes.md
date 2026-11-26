@@ -382,6 +382,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/tech/timetracking/weekly` | tech-timetracking |
 | GET | `/api/tech/truck-check` | tech-truck-check |
 | POST | `/api/tech/truck-check` | tech-truck-check |
+| GET | `/api/tech/visual-moments/clip-week` | visual-service-moments |
 | DELETE | `/api/visual-moments/:momentId` | visual-service-moments |
 | PATCH | `/api/visual-moments/:momentId` | visual-service-moments |
 

@@ -18,6 +18,11 @@ const {
   tagForCode,
   truncateText,
   invalidateVisualMomentReportPdfCache,
+  youtubeOkColumns,
+  youtubeOkFields,
+  countOkClipsThisWeek,
+  CLIP_GOAL_MIN,
+  CLIP_GOAL_MAX,
 } = require('../services/visual-service-notes');
 
 const router = express.Router();
@@ -89,9 +94,25 @@ function canMutateMoment(req, moment) {
 async function formatRows(rows, includeInternal) {
   return Promise.all((rows || []).map(async (row) => {
     const mediaUrl = await signedVisualMomentMediaUrl(row).catch(() => null);
-    return formatVisualMoment(row, { mediaUrl, includeInternal });
+    // Staff routes only: the YouTube mark is added here, never in the shared
+    // formatter that the public report uses.
+    return { ...formatVisualMoment(row, { mediaUrl, includeInternal }), ...youtubeOkFields(row) };
   }));
 }
+
+// GET /api/tech/visual-moments/clip-week
+// The requesting tech's "OK to post" clip count for the current ET week.
+router.get('/tech/visual-moments/clip-week', authStack, async (req, res, next) => {
+  try {
+    const enabled = await isVisualServiceNotesEnabled(req.technicianId);
+    if (!enabled && req.techRole !== 'admin') {
+      return res.json({ enabled: false, okClips: 0, goalMin: CLIP_GOAL_MIN, goalMax: CLIP_GOAL_MAX });
+    }
+    return res.json({ enabled: true, ...(await countOkClipsThisWeek(req.technicianId)) });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/jobs/:jobId/visual-moments
 router.get('/jobs/:jobId/visual-moments', authStack, async (req, res, next) => {
@@ -215,6 +236,75 @@ router.post('/jobs/:jobId/visual-moments', authStack, upload.single('media'), as
   }
 });
 
+// Field edits a PATCH asks for (the OK-to-post mark is handled separately).
+function patchFieldUpdates(req) {
+  const updates = {};
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'note')) updates.note = truncateText(req.body.note, 1500);
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'locationArea')) {
+    const locationArea = req.body.locationArea || null;
+    if (locationArea && !LOCATION_AREAS.includes(locationArea)) {
+      return { error: 'locationArea is invalid' };
+    }
+    updates.location_area = locationArea;
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'tagCode')) {
+    const tag = tagForCode(req.body.tagCode);
+    if (!tag) return { error: 'tagCode is invalid' };
+    updates.tag_code = tag.tagCode;
+    updates.tag_label = tag.label;
+    updates.tag_group = tag.group;
+  }
+  if (req.techRole === 'admin' && Object.prototype.hasOwnProperty.call(req.body || {}, 'customerCaption')) {
+    updates.customer_caption = truncateText(req.body.customerCaption, 1500);
+  }
+  return { updates };
+}
+
+// The OK-to-post mark on PATCH. A tech whose Visual Notes switch is off cannot
+// set it (create and the weekly count check the same switch).
+async function youtubeUpdatesForPatch(req, moment) {
+  const updates = youtubeOkColumns({
+    mediaType: moment.media_type,
+    youtubeOk: req.body?.youtubeOk,
+    technicianId: req.technicianId,
+  });
+  if (Object.keys(updates).length && req.techRole !== 'admin'
+    && !(await isVisualServiceNotesEnabled(req.technicianId))) {
+    return { updates: {}, refusal: { status: 403, error: 'Visual Notes are not enabled' } };
+  }
+  return { updates, refusal: null };
+}
+
+// Locked revalidation at the write (same pattern as create): a reassignment
+// or an admin review landing after the route's unlocked checks must not let
+// the old technician's edit (or OK-to-post mark) land. Visit first, then the
+// note: the same order as create, so the two never wait on each other.
+async function lockedMomentUpdate(req, moment, updates) {
+  let row;
+  let refusal = null;
+  await db.transaction(async (trx) => {
+    if (req.techRole !== 'admin') {
+      const lockedJob = await trx('scheduled_services').where({ id: moment.job_id }).forUpdate().first();
+      if (!lockedJob || !require('../services/technician-visit-scope').technicianVisitRowInScope(req, lockedJob)) {
+        refusal = { status: 403, error: 'Not assigned to this service' };
+        return;
+      }
+    }
+    const lockedMoment = await trx('visual_service_moments')
+      .where({ id: moment.id })
+      .whereNull('deleted_at')
+      .forUpdate()
+      .first();
+    const lockedAccess = canMutateMoment(req, lockedMoment);
+    if (!lockedAccess.ok) { refusal = lockedAccess; return; }
+    [row] = await trx('visual_service_moments')
+      .where({ id: moment.id })
+      .update(updates)
+      .returning('*');
+  });
+  return { row, refusal };
+}
+
 // PATCH /api/visual-moments/:momentId
 router.patch('/visual-moments/:momentId', authStack, async (req, res, next) => {
   try {
@@ -223,34 +313,19 @@ router.patch('/visual-moments/:momentId', authStack, async (req, res, next) => {
     if (!access.ok) return res.status(access.status).json({ error: access.error });
     if (!(await momentVisitInScope(req, moment))) return res.status(403).json({ error: 'Not assigned to this service' });
 
-    const updates = {};
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'note')) updates.note = truncateText(req.body.note, 1500);
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'locationArea')) {
-      const locationArea = req.body.locationArea || null;
-      if (locationArea && !LOCATION_AREAS.includes(locationArea)) {
-        return res.status(400).json({ error: 'locationArea is invalid' });
-      }
-      updates.location_area = locationArea;
-    }
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'tagCode')) {
-      const tag = tagForCode(req.body.tagCode);
-      if (!tag) return res.status(400).json({ error: 'tagCode is invalid' });
-      updates.tag_code = tag.tagCode;
-      updates.tag_label = tag.label;
-      updates.tag_group = tag.group;
-    }
-    if (req.techRole === 'admin' && Object.prototype.hasOwnProperty.call(req.body || {}, 'customerCaption')) {
-      updates.customer_caption = truncateText(req.body.customerCaption, 1500);
-    }
+    const parsed = patchFieldUpdates(req);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    const updates = parsed.updates;
+    const youtube = await youtubeUpdatesForPatch(req, moment);
+    if (youtube.refusal) return res.status(youtube.refusal.status).json({ error: youtube.refusal.error });
+    Object.assign(updates, youtube.updates);
     if (Object.keys(updates).length === 0) {
       const [formatted] = await formatRows([moment], req.techRole === 'admin');
       return res.json({ moment: formatted });
     }
     updates.updated_at = db.fn.now();
-    const [row] = await db('visual_service_moments')
-      .where({ id: moment.id })
-      .update(updates)
-      .returning('*');
+    const { row, refusal } = await lockedMomentUpdate(req, moment, updates);
+    if (refusal) return res.status(refusal.status).json({ error: refusal.error });
     if (moment.visibility_status === 'approved_customer') {
       await invalidateVisualMomentReportPdfCache(moment.job_id);
     }

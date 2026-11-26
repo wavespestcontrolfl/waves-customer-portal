@@ -5,6 +5,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const db = require('../models/db');
 const config = require('../config');
 const { isUserFeatureEnabled } = require('./feature-flags');
+const { etWeekStart } = require('../utils/datetime-et');
 
 const VISUAL_SERVICE_NOTES_FLAG = 'visual_service_notes_enabled';
 const VISUAL_SERVICE_NOTES_REQUIRED_FLAG = 'visual_service_notes_required';
@@ -28,6 +29,9 @@ const MEDIA_TYPES = new Set(['none', 'photo', 'video']);
 const ACTIVE_VISUAL_NOTE_STATUSES = new Set(['on_site']);
 const MAX_VISUAL_MOMENT_MEDIA_BYTES = 50 * 1024 * 1024;
 const VISUAL_MOMENT_MEDIA_PREFIX = 'visual-service-notes/';
+// Weekly goal for clips a tech marks "OK to post" on the Waves YouTube channel.
+const CLIP_GOAL_MIN = 1;
+const CLIP_GOAL_MAX = 3;
 
 const TAG_CATALOG = [
   { tagCode: 'bugs_seen', label: 'Bugs Seen', group: 'observation', serviceTypes: ['pest', 'rodent', 'termite', 'mosquito', 'other'], sortOrder: 10, defaultCustomerVisible: false, requiresMedia: false },
@@ -182,6 +186,52 @@ function numberOrNull(value) {
 function dateOrNow(value) {
   const date = value ? new Date(value) : new Date();
   return Number.isNaN(date.getTime()) ? new Date() : date;
+}
+
+// Reads the multipart/JSON youtubeOk field: true, false, or undefined when the
+// field is absent or not a recognizable boolean.
+function parseYoutubeOk(value) {
+  if (value === true || value === false) return value;
+  // Only a boolean, string or number counts: an array like [true] or an object
+  // never stamps the mark.
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
+// Column values for the "OK to post" mark. Only a video clip takes the mark; a
+// photo or a note with no media ignores it. It never touches visibility_status.
+function youtubeOkColumns({ mediaType, youtubeOk, technicianId }) {
+  const flag = parseYoutubeOk(youtubeOk);
+  if (flag === undefined || mediaType !== 'video') return {};
+  return flag
+    ? { youtube_ok_at: new Date(), youtube_ok_by: technicianId || null }
+    : { youtube_ok_at: null, youtube_ok_by: null };
+}
+
+// Count of this tech's live video clips marked "OK to post" and captured in the
+// current Monday-to-Monday week in America/New_York. The boundaries are ET
+// calendar days converted to instants in SQL, so DST weeks stay correct.
+// Staff-only fields for the "OK to post" mark. Kept out of formatVisualMoment so
+// they never reach the public report payload (/api/reports/:token/data).
+function youtubeOkFields(row = {}) {
+  return { youtubeOk: !!row.youtube_ok_at, youtubeOkAt: row.youtube_ok_at || null };
+}
+
+async function countOkClipsThisWeek(technicianId, { knex = db, now = new Date() } = {}) {
+  const weekStart = etWeekStart(now);
+  if (!technicianId) return { weekStart, okClips: 0, goalMin: CLIP_GOAL_MIN, goalMax: CLIP_GOAL_MAX };
+  const row = await knex('visual_service_moments')
+    .where({ technician_id: technicianId, media_type: 'video' })
+    .whereNull('deleted_at')
+    .whereNotNull('youtube_ok_at')
+    .whereRaw("captured_at >= (?::date)::timestamp AT TIME ZONE 'America/New_York'", [weekStart])
+    .whereRaw("captured_at < ((?::date + 7)::timestamp AT TIME ZONE 'America/New_York')", [weekStart])
+    .count({ n: '*' })
+    .first();
+  return { weekStart, okClips: Number(row?.n) || 0, goalMin: CLIP_GOAL_MIN, goalMax: CLIP_GOAL_MAX };
 }
 
 function safeFilename(value, fallback = 'visual-note-media') {
@@ -390,6 +440,7 @@ function normalizeMomentInsert({ body = {}, job, technicianId, media = {} }) {
     gps_longitude: numberOrNull(body.gpsLongitude || body.gps_longitude),
     captured_at: dateOrNow(body.capturedAt || body.captured_at),
     metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
+    ...youtubeOkColumns({ mediaType, youtubeOk: body.youtubeOk, technicianId }),
   };
 }
 
@@ -443,6 +494,11 @@ module.exports = {
   LOCATION_AREAS,
   ACTIVE_VISUAL_NOTE_STATUSES,
   MAX_VISUAL_MOMENT_MEDIA_BYTES,
+  CLIP_GOAL_MIN,
+  CLIP_GOAL_MAX,
+  youtubeOkColumns,
+  youtubeOkFields,
+  countOkClipsThisWeek,
   getVisualServiceNotesSettings,
   setVisualServiceNotesSettings,
   isVisualServiceNotesEnabled,

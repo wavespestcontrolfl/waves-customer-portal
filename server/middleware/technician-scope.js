@@ -120,6 +120,8 @@ const TECHNICIAN_ALLOW_LIST = [
   // Visual service notes on a job (visibility and customer caption stay admin).
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/jobs\/[^/]+\/visual-moments$/ },
   { bucket: 'own-visits', methods: ['PATCH', 'DELETE'], pattern: /^\/api\/visual-moments\/[^/]+$/ },
+  // The tech's own weekly count of clips marked OK to post (no customer data).
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/tech\/visual-moments\/clip-week$/ },
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/service\/records\/[^/]+\/validate-photo-chain$/ },
 
   // Own timesheet. The timesheet dispute and own mileage are not on the list
