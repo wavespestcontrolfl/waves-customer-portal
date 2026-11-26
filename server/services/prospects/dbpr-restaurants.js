@@ -540,6 +540,8 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   if (violationsEnd === null || !PAGE_FOOTER_RE.test(htmlText(page.slice(violationsEnd)))) return null;
   // A page that lists two visits, whose date does not read, of another visit, or of a callback cannot answer.
   if (visits.length !== 1 || !isFirstVisitRow(visits[0], visitDate)) return null;
+  // A 35 code outside the 35A and 35B families cannot be classed as pest or not.
+  if (entries.some((entry) => /^35(?![AB]-)/.test(entry.code))) return null;
   const rows35 = entries.filter((entry) => /^35[AB]-/.test(entry.code)).map((entry) => {
     const text = entry.parts.join(' ');
     return { code: entry.code, text, notes: visitNotes(text) };

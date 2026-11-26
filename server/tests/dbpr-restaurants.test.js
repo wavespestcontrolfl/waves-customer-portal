@@ -305,6 +305,8 @@ describe('parseInspectionReport', () => {
     // A word that only ends in a later-visit word ("before inspection") is not one.
     expect(parse(reportPage(`${flies}<tr><td>22-01-4</td><td>Door repaired before inspection.</td></tr>`), { violation35: 1 })).not.toBeNull();
     expect(parse(reportPage(`${flies}<tr><td>22-01-4</td><td>Seen at Call-Back.</td></tr>`), { violation35: 1 })).toBeNull();
+    // A 35 code outside 35A and 35B cannot be classed.
+    expect(parse(reportPage(`<tr><td>35B-03-4</td><td>Door gap.</td></tr><tr><td>35-06-4</td><td>Other.</td></tr>`), { violation35: 1 })).toBeNull();
     // A break inside the word cannot hide it.
     expect(parse(reportPage('<tr><td>35A-02-8</td><td>From fol<br>low-up: Live flies.</td></tr>'), { violation35: 1 })).toBeNull();
     expect(parse(reportPage('<tr><td>35A-02-8</td><td>From fol&zwj;low-up: Live flies.</td></tr>'), { violation35: 1 })).toBeNull();
