@@ -165,7 +165,10 @@ describe('migration 20261126120000', () => {
       'monthly_financial_snapshots.prepaid_owed 12,2',
       'monthly_financial_snapshots.autopay_renewing_share 6,4',
     ]);
-    expect(updates).toEqual([{ table: 'company_financials', v: { owner_field_hourly_rate: 25 } }]);
+    expect(updates).toEqual([
+      { table: 'company_financials', v: { owner_field_hourly_rate: 25 } },
+      { table: 'company_financials', v: { owner_office_hourly_rate: 25 } },
+    ]);
   });
 
   test('a second run changes nothing and never overwrites a wage the owner has since changed', async () => {

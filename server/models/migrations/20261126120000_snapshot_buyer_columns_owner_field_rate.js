@@ -22,7 +22,8 @@
  *
  * Seed (owner ruling 2026-11-26): the owner wants $25 an hour counted for his field hours now, so the migration that adds
  * owner_field_hourly_rate sets it to 25 on every existing company_financials row, once (only in the run that adds the
- * column, so a re-run never overwrites a figure he has since changed). It is a plain Settings figure: he edits or clears
+ * column, so a re-run never overwrites a figure he has since changed). The same run fills an empty
+ * owner_office_hourly_rate with $25 too (his office-time rate, same ruling); the office hours stay empty until he enters them. It is a plain Settings figure: he edits or clears
  * it under Settings -> Your own office time, and a later row carries his new value forward.
  *
  * Additive and idempotent. down() drops only what this migration added.
@@ -68,6 +69,8 @@ exports.up = async function up(knex) {
   await addDecimals(knex, 'company_financials', SETTINGS_COLUMNS);
   if (!rateColumnExisted) {
     await knex('company_financials').whereNull('owner_field_hourly_rate').update({ owner_field_hourly_rate: OWNER_FIELD_RATE_DOLLARS });
+    // Same ruling, office side: $25 an hour for his office time. Only an empty rate is filled; the hours stay his to enter.
+    await knex('company_financials').whereNull('owner_office_hourly_rate').update({ owner_office_hourly_rate: OWNER_FIELD_RATE_DOLLARS });
   }
   await addDecimals(knex, 'monthly_financial_snapshots', SNAPSHOT_COLUMNS);
 };
