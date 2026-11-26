@@ -52,6 +52,8 @@ function makeReviseDatabase({
   sendingGroupMember = null,
   // The call row the unit-hold check reads (call_log.metadata.unit_answer).
   callRow = null,
+  // The customer's completed visits, for the returning-customer setup fee read (GATE_RETURNING_SETUP_FEE_GAP).
+  completedVisits = [],
 }) {
   const updates = [];
   const rawGuards = [];
@@ -101,6 +103,10 @@ function makeReviseDatabase({
       };
       return leadChain;
     }
+    if (String(table).startsWith('scheduled_service_addons')) {
+      const addonChain = { join: () => addonChain, leftJoin: () => addonChain, where: () => addonChain, select: async () => [] };
+      return addonChain;
+    }
     if (String(table).startsWith('scheduled_services')) {
       // The setup-waiver evidence read is UNGATED since codex #3591 r73 P1
       // (planGate: false): it reaches the live rows even for a non-member
@@ -108,13 +114,14 @@ function makeReviseDatabase({
       // throwing (a real lookup failure here 503s the save by design).
       // leftJoin + the aliased table name serve the canonical catalog join
       // the waiver read runs regardless of the auto-tier gate (r79 P1).
+      let historyRead = false;
       const rowsChain = {
-        where: () => rowsChain,
+        where: (clause) => { if (clause && clause['s.status'] === 'completed') historyRead = true; return rowsChain; },
         whereNotIn: () => rowsChain,
         whereNull: () => rowsChain,
         leftJoin: () => rowsChain,
         columnInfo: async () => ({ is_recurring: {} }),
-        select: async () => [],
+        select: async () => (historyRead ? completedVisits : []),
         first: async () => null,
       };
       return rowsChain;
@@ -360,6 +367,89 @@ describe('reviseAdminEstimate', () => {
     expect(estimate.id).toBe('est-1');
     expect(estimate.token).toBe('tok-abc123');
     expect(estimate.status).toBe('sent');
+  });
+
+  // Returning-customer $99 rule (owner 2026-11-24, GATE_RETURNING_SETUP_FEE_GAP): a revision carries no promise.
+  // It drops the stored answer and decides again from the visit history, so the stored waiver, the stored totals
+  // and the day of the save always agree. Regressions: a stale waiver rides a revision past its window, or onto
+  // a quote whose customer has no such history.
+  describe('returning customer setup fee on a revision', () => {
+    afterEach(() => { delete process.env.GATE_RETURNING_SETUP_FEE_GAP; });
+    const Returning = require('../services/returning-setup-fee-waiver');
+    const stored = Returning.withReturningSetupWaiver(null, {
+      rule: 'returning_customer_gap', family: 'pest_control', lastCompletedVisitDate: '2026-04-06', decidedOn: '2026-07-09', gapDays: 94, windowDays: 121,
+    });
+    const waivedRow = { ...sentEstimate, estimate_data: JSON.stringify({ ...JSON.parse(sentEstimate.estimate_data), operatorPriceAdjustment: stored }) };
+    const soloPest = {
+      ...reviseBody,
+      customerId: 'cust-9',
+      estimateData: { engineInputs: { homeSqFt: 2200, stories: 1, lotSqFt: 12000, services: { pest: { frequency: 'quarterly' } } }, result: { total: 1 } },
+    };
+    const revise = async (completedVisits) => {
+      const { database, updates } = makeReviseDatabase({ estimate: waivedRow, completedVisits });
+      await reviseAdminEstimate({ database, estimateId: 'est-1', body: soloPest, technicianId: 'tech-2', now: fixedNow });
+      return JSON.parse(updates[0].estimate_data);
+    };
+    const visitOn = (scheduled_date) => ({ scheduled_date, service_type: 'Pest Control Service', is_recurring: true, recurring_pattern: 'quarterly' });
+
+    test('still inside the window: the revision stores the answer of its own day', async () => {
+      process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+      const saved = await revise([visitOn('2026-04-06')]);
+      expect(saved.operatorPriceAdjustment.returningCustomerGap).toEqual(expect.objectContaining({ decidedOn: '2026-07-10', gapDays: 95, windowDays: 121 }));
+      expect(Number(saved.result.oneTime.membershipFee || 0)).toBe(0);
+    });
+
+    test('past the window, no history, or the gate off: the stored waiver is not carried and the fee is priced', async () => {
+      for (const [gate, visits] of [['true', [visitOn('2026-02-01')]], ['true', []], [undefined, [visitOn('2026-04-06')]]]) {
+        if (gate) process.env.GATE_RETURNING_SETUP_FEE_GAP = gate; else delete process.env.GATE_RETURNING_SETUP_FEE_GAP;
+        const saved = await revise(visits);
+        expect(saved.operatorPriceAdjustment).toBeUndefined();
+        expect(Number(saved.result.oneTime.membershipFee)).toBe(99);
+      }
+    });
+
+    // A save strips the preview's mark from the stored result, and the editor posts that result back on reopen.
+    // Regression (pre-push audit 2026-11-25): a revision the server cannot price reads "no mark" as "the totals
+    // carry the fee", stores the fee-free totals with no waiver, and the accept bills $99 above the saved total.
+    describe('a reopened waived estimate whose revision the server cannot price', () => {
+      const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+      const history = { todayKey: '2026-07-10', lastByFamily: { pest_control: { lastVisitKey: '2026-04-06', cycleDays: 91 } } };
+      const pricedResult = async (waived) => (await serverRecomputeFromEstimateData(
+        { engineInputs: soloPest.estimateData.engineInputs }, { now: fixedNow(), returningVisitHistory: waived ? history : null },
+      )).serverResult;
+      const reviseUnpriced = async (result, completedVisits) => {
+        const { database, updates } = makeReviseDatabase({ estimate: waivedRow, completedVisits });
+        await reviseAdminEstimate({
+          database, estimateId: 'est-1', technicianId: 'tech-2', recompute: noRecompute, now: fixedNow,
+          body: { ...soloPest, estimateData: { inputs: { address: '456 Gulf Dr' }, result } },
+        });
+        return JSON.parse(updates[0].estimate_data);
+      };
+
+      test('the rule still waives: the stored fee-free totals keep their waiver', async () => {
+        process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+        const stored = await pricedResult(true);
+        expect(stored).not.toHaveProperty('returningSetupFeeWaiver');
+        const saved = await reviseUnpriced(stored, [visitOn('2026-04-06')]);
+        expect(saved.operatorPriceAdjustment.returningCustomerGap).toEqual(expect.objectContaining({ family: 'pest_control', gapDays: 95 }));
+        expect(Number(saved.result.oneTime.membershipFee || 0)).toBe(0);
+      });
+
+      test('the rule no longer waives (past the window, or the gate off): the revision is refused, never saved $99 short', async () => {
+        const stored = await pricedResult(true);
+        process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+        await expect(reviseUnpriced(stored, [visitOn('2026-02-01')])).rejects.toMatchObject({ statusCode: 409 });
+        delete process.env.GATE_RETURNING_SETUP_FEE_GAP;
+        await expect(reviseUnpriced(stored, [visitOn('2026-04-06')])).rejects.toMatchObject({ statusCode: 409 });
+      });
+
+      test('a fresh preview that carries the fee saves as posted, with no waiver and no refusal', async () => {
+        process.env.GATE_RETURNING_SETUP_FEE_GAP = 'true';
+        const saved = await reviseUnpriced(await pricedResult(false), [visitOn('2026-02-01')]);
+        expect(saved.operatorPriceAdjustment).toBeUndefined();
+        expect(Number(saved.result.oneTime.membershipFee)).toBe(99);
+      });
+    });
   });
 
   test('retains the locked row\'s annual delivery witness across an ordinary revision', async () => {

@@ -156,6 +156,9 @@ function makeKnex(store) {
 
     q.first = jest.fn(async () => {
       if (table === 'scheduled_services') return { id: SERVICE_ID, status: store.serviceStatus };
+      // The plan-series read a completing recap freezes (frozenSeriesForCompletion) — a test opts in by
+      // seeding store.seriesRow.
+      if (table === 'scheduled_services as s') return store.seriesRow;
       // The ledger-sync catalog resolution (name ilike) — a test opts in
       // by seeding store.catalogRow.
       if (table === 'products_catalog') return store.catalogRow;
@@ -447,6 +450,23 @@ describe('pest recap idempotency (Codex P1)', () => {
     });
     // No technician_id on this visit → the leg is omitted, not blanked.
     expect(inserted.reportIdentitySnapshot.technicianName).toBeUndefined();
+  });
+
+  // The recap that completes a visit freezes the visit's place in its plan series, as the /complete path does
+  // (the returning-customer setup fee rule reads it). A recap on a visit already completed freezes none: the
+  // schedule row of today is not the completion's.
+  test('a completing recap freezes the plan series; a recap on a visit already completed does not', async () => {
+    const seriesRow = { scheduled_date: '2026-08-21', is_recurring: true, recurring_pattern: 'quarterly' };
+    const submit = (store) => submitRecap({ serviceId: SERVICE_ID, actorType: 'tech', actorId: 'tech-1', technicianNotes: 'x', products: [], customerRecap: 'Done.', sendSms: false, knex: makeKnex(store) });
+    const frozenBy = (store) => JSON.parse(store.records[0].service_data).completedSeries;
+
+    const completing = { serviceStatus: 'scheduled', records: [], seriesRow };
+    expect((await submit(completing)).ok).toBe(true);
+    expect(frozenBy(completing)).toEqual({ planVisit: true, pattern: 'quarterly', cycleDays: 91 });
+
+    const alreadyCompleted = { serviceStatus: 'completed', records: [], seriesRow };
+    expect((await submit(alreadyCompleted)).ok).toBe(true);
+    expect(frozenBy(alreadyCompleted)).toBeUndefined();
   });
 
   test('a recap that completes an existing record freezes facts for RETAINED products too; an already-completed record is left alone (codex #3742 r4)', async () => {

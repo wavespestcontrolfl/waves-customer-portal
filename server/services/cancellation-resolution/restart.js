@@ -775,12 +775,21 @@ function engineResultNeedsReview(raw) {
 // mapper prices the fee by and the mixes the website quote freezes,
 // setupFeeQuoteBasisForEstimate), at the stored result's amount. A zero
 // freeze is the "no fee" the page and the accept both read.
+// A zero the returning-customer rule made (its answer is stored on this estimate, GATE_RETURNING_SETUP_FEE_GAP)
+// carries the rule's name, as the website quote's does: the answer holds for one plan family, so a later
+// re-price (a service change, a staff save) drops this freeze and decides again (dropReturningSetupWaiver).
+// Every other freeze holds for the life of the quote.
 function disclosedSetupFeeQuote(estimateData) {
   const fee = estimateData.result?.oneTime?.membershipFee;
   if (fee == null || !(Number(fee) >= 0)) return null;
   const converter = require('../estimate-converter');
   if (!converter.recurringMixHasMembershipFeeService(converter.recurringServicesFromEstimateData(estimateData))) return null;
-  return { amount: toCents(fee) / 100, kind: 'waveguard_membership' };
+  const Returning = require('../returning-setup-fee-waiver');
+  return {
+    amount: toCents(fee) / 100,
+    ...(Returning.returningSetupFeeWaiverOf(estimateData) ? { waived: Returning.FROZEN_WAIVED_REASON } : {}),
+    kind: 'waveguard_membership',
+  };
 }
 
 const HAND_CHECK_MESSAGE = 'This one needs a quick hand-check before we can price it online.';
@@ -1074,13 +1083,25 @@ async function recomputeOffer(mint, estimateData, propertySeed) {
     toPrice, ownedFamilies, logTag, mintDeps: { persistence },
   } = mint;
   const priorQualifyingServices = [...ownedFamilies];
+  // Returning customer $99 rule (owner 2026-11-24, GATE_RETURNING_SETUP_FEE_GAP): the history read the staff save
+  // makes, handed to the same recompute, which decides on the server-priced plan. Restart only: the plan-start
+  // card prices without it, and its cent-exact offer check must see the same fee. A failed read keeps the fee
+  // (loadReturningVisitHistoryInSavepoint).
+  const Returning = require('../returning-setup-fee-waiver');
+  const returningVisitHistory = mint.source === SOURCE
+    ? await Returning.loadReturningVisitHistoryInSavepoint(mint.trx, { customerId: mint.fresh.id, now: mint.nowDate }, logTag)
+    : null;
   const recomputed = await persistence.serverRecomputeFromEstimateData(estimateData, {
     priorQualifyingServices,
     recurringCustomer: priorQualifyingServices.length > 0,
+    returningVisitHistory,
   });
   if (!recomputed?.recomputed) {
     throw new Error(`${logTag} recompute failed (${recomputed?.reason || 'unknown'})`);
   }
+  // The rule's answer, stored where the page and the accept read a waiver; the zero setupFeeQuote frozen below
+  // discloses the same "no fee".
+  Returning.storeReturningSetupWaiver(estimateData, recomputed.returningSetupFeeWaiver);
 
   // FAIL CLOSED on review markers, the same demotion the offer path's
   // optionIsPriceable applies: an engine result flagged for on-site

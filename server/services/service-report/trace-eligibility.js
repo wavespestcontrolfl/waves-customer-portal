@@ -881,7 +881,8 @@ async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
     // id tiebreaker: same-transaction lines share created_at (codex P2 r24)
     .orderBy('created_at', 'asc')
     .orderBy('id', 'asc')
-    .select('service_id', 'service_name', 'service_key_snapshot'));
+    .select('service_id', 'service_name', 'service_key_snapshot',
+      'recurring_pattern', 'recurring_interval_days', 'recurring_nth', 'recurring_weekday'));
   const missingIds = [...new Set(rows
     .filter((r) => !r.service_key_snapshot && r.service_id)
     .map((r) => r.service_id))];
@@ -921,6 +922,15 @@ async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
     return {
       serviceId: row.service_id || null,
       serviceName: row.service_name || null,
+      // The line's cadence as the schedule held it at completion (no pattern: the line rides the visit's
+      // cadence; one_time: one application). The schedule line can be edited or removed afterwards, and a plan
+      // read (returning-setup-fee-waiver.js) must never take one application for a plan.
+      recurrence: {
+        pattern: row.recurring_pattern,
+        intervalDays: row.recurring_interval_days,
+        nth: row.recurring_nth,
+        weekday: row.recurring_weekday,
+      },
       ...(freezable
         ? { serviceKey: key, findingsType: pointerByKey.get(key) || null }
         : {}),

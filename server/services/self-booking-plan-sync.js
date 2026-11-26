@@ -1671,6 +1671,7 @@ module.exports = {
   isOneTimeBookingSource,
   isRodentLedServiceRow,
   isNonBaitRodentServiceRow,
+  catalogBillingTypeIsOneTime,
   resolveRodentBaitRecurringPlan,
   normalizeTierName,
   reconcileRecurringTiers,

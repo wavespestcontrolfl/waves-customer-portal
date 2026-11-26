@@ -439,12 +439,32 @@ function setupFeeQuoteBasisForEstimate(estimate, { commercialDetected = false, q
 // per-series and never self-waives (codex #3591 r64 P1: a second rodent
 // program for another property must not ride the first series' in-flight
 // stamp), so a queued claim waives it only when it belongs to THIS draft.
-function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQueued = false, queuedForThisDraft = false } = {}) {
+// returningWaives (GATE_RETURNING_SETUP_FEE_GAP, owner 2026-11-24): the returning-customer rule waives, a lapsed
+// customer back inside one plan cycle + 30 days. Membership fee only. The frozen quote names the reason and
+// never the visit dates: this quote belongs to whoever typed the matching phone or email.
+function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQueued = false, queuedForThisDraft = false, returningWaives = false } = {}) {
   const memberWaives = activeMember && basis.kind === 'waveguard_membership';
   const queuedWaives = feeAlreadyQueued && (basis.kind === 'waveguard_membership' || queuedForThisDraft);
-  return memberWaives || queuedWaives
-    ? { amount: 0, waived: memberWaives ? 'existing_member' : 'fee_already_queued', kind: basis.kind }
+  if (memberWaives || queuedWaives) {
+    return { amount: 0, waived: memberWaives ? 'existing_member' : 'fee_already_queued', kind: basis.kind };
+  }
+  return returningWaives && basis.kind === 'waveguard_membership'
+    ? { amount: 0, waived: require('../services/returning-setup-fee-waiver').FROZEN_WAIVED_REASON, kind: basis.kind }
     : { amount: basis.amount, kind: basis.kind };
+}
+
+// The returning-customer rule is the last reason, asked only about a membership fee the account still owes.
+// A member's or a queued fee's waiver is settled first from facts already read, so the visit history is never
+// read for it and a failed history read cannot undo it. A failed read of the history keeps the fee
+// (loadReturningVisitHistoryInSavepoint: a savepoint of the draft write's transaction, null on failure).
+async function resolveSetupFeeQuoteWithReturningRule(basis, facts, { q, customerId, recurringLines }) {
+  const settled = resolveSetupFeeQuoteDecision(basis, facts);
+  if (settled.waived || basis.kind !== 'waveguard_membership') return settled;
+  const Returning = require('../services/returning-setup-fee-waiver');
+  const history = await Returning.loadReturningVisitHistoryInSavepoint(q, { customerId }, '[public-quote]');
+  return Returning.decideReturningSetupFeeWaiverForPlan(recurringLines, history)
+    ? resolveSetupFeeQuoteDecision(basis, { ...facts, returningWaives: true })
+    : settled;
 }
 
 // Remove the engine's rodent_bait_setup line (and its share of the one-time
@@ -3243,7 +3263,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // booking.js stamps pending_setup_fee from `amount` when the
         // self-booked series activates, so the obligation travels with the
         // handoff instead of vanishing with the archived draft.
-        return resolveSetupFeeQuoteDecision(setupFeeBasis, { activeMember, feeAlreadyQueued, queuedForThisDraft });
+        // Returning customer $99 rule (GATE_RETURNING_SETUP_FEE_GAP): the same history read and decision the staff
+        // save makes, on this quote's own recurring lines, after the two waivers above are settled.
+        return await resolveSetupFeeQuoteWithReturningRule(
+          setupFeeBasis,
+          { activeMember, feeAlreadyQueued, queuedForThisDraft },
+          { q, customerId, recurringLines: recurringQuoteLines(estimate) },
+        );
       } catch (memberErr) {
         // FAIL CLOSED toward the engine-priced line (codex #3591 r43 local
         // P0): a transient membership/claim lookup failure must never become
@@ -4664,6 +4690,7 @@ module.exports._internals = {
   findExistingCustomerByContact,
   setupFeeQuoteBasisForEstimate,
   resolveSetupFeeQuoteDecision,
+  resolveSetupFeeQuoteWithReturningRule,
   stripWaivedRodentSetupFromDraft,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
