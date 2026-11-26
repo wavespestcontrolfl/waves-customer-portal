@@ -76,29 +76,58 @@ function familySql(alias = 'ss', typeColumn = 'service_type') {
   return `CASE WHEN ${alias}.service_key_snapshot IS NOT NULL THEN CASE ${byKey} END ELSE CASE ${byType} END END`;
 }
 
-// The counted visits, each with its family; and the (customer, family) pairs held on day `as of` (?, ?, ?).
+// A retired combined service (before the August 2026 split) is two programs on one visit: both families count.
+// Stored keys as in estimate-converter.js comboRouteFamiliesFromCatalogKey; an unkeyed row is read from its label.
+const COMBINED_KEYS = [
+  ['pest_termite_bait_quarterly', ['pest', 'termite']],
+  ['lawn_tree_shrub_combo', ['lawn', 'tree_shrub']],
+];
+function familiesSql(alias, typeColumn = 'service_type') {
+  const key = `${alias}.service_key_snapshot`;
+  const type = `${alias}.${typeColumn}`;
+  const pair = (families) => `ARRAY[${families.map(sqlLiteral).join(', ')}]`;
+  const byKey = COMBINED_KEYS.map(([k, families]) => `WHEN ${key} = ${sqlLiteral(k)} THEN ${pair(families)}`).join(' ');
+  return `CASE ${byKey}
+    WHEN ${key} IS NULL AND ${type} ILIKE '%pest%' AND (${type} ILIKE '%termite%' OR ${type} ILIKE '%bait%') THEN ${pair(['pest', 'termite'])}
+    WHEN ${key} IS NULL AND ${type} ILIKE '%lawn%' AND (${type} ILIKE '%tree%' OR ${type} ILIKE '%shrub%') THEN ${pair(['lawn', 'tree_shrub'])}
+    ELSE ARRAY[${familySql(alias, typeColumn)}] END`;
+}
+
+// Add-on keys the scheduler puts only on the visit they were sold on (admin-schedule.js isOneTimeOnlyAddonKey).
+const ONE_TIME_ADDON_KEY_SQL = `(a.service_key_snapshot = 'waveguard_membership' OR a.service_key_snapshot = 'mosquito_misting_refill'
+      OR starts_with(a.service_key_snapshot, 'area_addon_'))`;
+
+// The counted visits, each with its family; and the (customer, family) pairs held on day `as of` (?, ?, ?, ?, ?).
+// plan_visits keeps a visit cancelled by the day (held_on_day false) so a service's first booking, and the channel
+// it came through, survive a later cancellation of that one visit; only held visits make a family held.
 const COUNTED_VISITS_SQL = `
   plan_visits AS (
     SELECT ss.id, ss.customer_id, ss.scheduled_date, ss.created_at, ss.service_key_snapshot, ss.service_type,
-           ss.source_estimate_id, ss.source, ss.source_call_log_id, ss.booking_source
+           ss.source_estimate_id, ss.source, ss.source_call_log_id, ss.booking_source,
+           -- A visit cancelled after the day was still held on it (a cancellation with no time stamp counts as cancelled).
+           (ss.status IS DISTINCT FROM 'cancelled'
+            OR ss.cancelled_at >= (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York') AS held_on_day
     FROM scheduled_services ss
     -- A legacy series child carries recurring_parent_id with no is_recurring flag; a NULL status is open.
     WHERE (ss.is_recurring = true OR ss.recurring_parent_id IS NOT NULL)
       AND COALESCE(ss.is_callback, false) = false
-      -- A visit cancelled after the day was still held on it (a cancellation with no time stamp counts as cancelled).
-      AND (ss.status IS DISTINCT FROM 'cancelled' OR ss.cancelled_at >= (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York')
   ),
   v AS (
-    SELECT pv.*, ${familySql('pv')} AS fam FROM plan_visits pv
+    SELECT pv.id, pv.customer_id, pv.scheduled_date, pv.created_at, pv.service_key_snapshot, pv.service_type,
+           pv.source_estimate_id, pv.source, pv.source_call_log_id, pv.booking_source, pv.held_on_day, f.fam
+    FROM plan_visits pv
+    CROSS JOIN LATERAL unnest(${familiesSql('pv')}) AS f(fam)
     UNION ALL
-    -- A RECURRING service riding on a plan visit as an add-on (termite bait, mosquito, rodent bait) is a service the
-    -- customer holds; a one-time add-on is not. An add-on records no channel of its own, so its source is the office.
+    -- A service riding on a plan visit as an add-on (termite bait, mosquito, rodent bait) is a service the customer
+    -- holds when it repeats: a NULL pattern rides the parent's cadence (as the scheduler reads it); 'one_time' and the
+    -- sold-once keys do not. An add-on records no channel of its own, so its source is the office.
     SELECT a.id, pv.customer_id, pv.scheduled_date, a.created_at, a.service_key_snapshot, a.service_name AS service_type,
            NULL::uuid AS source_estimate_id, NULL AS source, NULL::uuid AS source_call_log_id, NULL AS booking_source,
-           ${familySql('a', 'service_name')} AS fam
+           pv.held_on_day, f.fam
     FROM scheduled_service_addons a
     JOIN plan_visits pv ON pv.id = a.scheduled_service_id
-    WHERE a.recurring_pattern IS NOT NULL AND a.recurring_pattern <> 'one_time'
+    CROSS JOIN LATERAL unnest(${familiesSql('a', 'service_name')}) AS f(fam)
+    WHERE a.recurring_pattern IS DISTINCT FROM 'one_time' AND NOT COALESCE(${ONE_TIME_ADDON_KEY_SQL}, false)
   ),
   held AS (
     SELECT v.customer_id, v.fam
@@ -107,7 +136,7 @@ const COUNTED_VISITS_SQL = `
       -- A churn stamp on or before the day drops the customer, unless this visit was booked after it (a reactivation).
       AND (c.churned_at IS NULL OR CAST(c.churned_at AS date) > CAST(? AS date)
            OR CAST(v.created_at AT TIME ZONE 'America/New_York' AS date) > CAST(c.churned_at AS date))
-    WHERE v.fam IS NOT NULL
+    WHERE v.fam IS NOT NULL AND v.held_on_day
       -- Only visits already booked by the end of the day (ET): a later purchase never rewrites a closed month.
       AND v.created_at < (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York'
       AND v.scheduled_date BETWEEN CAST(? AS date) - ${WINDOW_DAYS} AND CAST(? AS date) + ${WINDOW_DAYS}
@@ -185,12 +214,14 @@ async function crossSellForMonthEnd(db, monthEndDate) {
              v.customer_id, v.fam, v.created_at, v.source_estimate_id, v.source, v.source_call_log_id, v.booking_source
       FROM v
       JOIN held h ON h.customer_id = v.customer_id AND h.fam = v.fam
+      -- Any visit of the family booked by the day, cancelled or not: the first booking names the channel.
+      WHERE v.created_at < (CAST(? AS date) + 1)::timestamp AT TIME ZONE 'America/New_York'
       ORDER BY v.customer_id, v.fam, v.created_at NULLS LAST, v.id
     )
     SELECT f.*, e.source AS estimate_source
     FROM first_visit f
     LEFT JOIN estimates e ON e.id = f.source_estimate_id
-  `, asOfBindings(asOf));
+  `, [...asOfBindings(asOf), asOf]);
   return summarizeHeldFamilies(rows);
 }
 
@@ -214,7 +245,7 @@ async function pestOnlySummary(db, asOfDate) {
       SELECT DISTINCT ON (v.customer_id) v.customer_id, COALESCE(v.service_key_snapshot, v.service_type) AS pest_service_key
       FROM v
       JOIN pest_only p ON p.customer_id = v.customer_id
-      WHERE v.fam = 'pest'
+      WHERE v.fam = 'pest' AND v.held_on_day
       ORDER BY v.customer_id, v.scheduled_date DESC, v.id
     )
     SELECT c.id, c.first_name, c.last_name, c.city, l.pest_service_key, COUNT(*) OVER () AS total_count

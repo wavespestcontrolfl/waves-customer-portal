@@ -212,7 +212,7 @@ postgres('cross-sell rate (live Postgres)', () => {
       await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v, service_name: 'Termite Bait Monitoring', service_key_snapshot: 'termite_bait', recurring_pattern: 'quarterly', created_at: '2026-02-01T12:00:00Z' });
       const once = await customer('AddOnOnce');
       const v3 = await visit(once, { ...PEST });
-      // A one-time add-on (no recurring pattern of its own) is not a service the customer holds.
+      // No pattern of its own: it rides the parent visit's cadence, as the scheduler reads it, so it is held.
       await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v3, service_name: 'Mosquito Event', service_key_snapshot: 'mosquito_seasonal', created_at: '2026-02-01T12:00:00Z' });
       const plain = await customer('AddOnNoFamily');
       const v2 = await visit(plain, { ...PEST });
@@ -220,7 +220,23 @@ postgres('cross-sell rate (live Postgres)', () => {
       const marked = await customer('AddOnMarkedOnce');
       const v4 = await visit(marked, { ...PEST });
       await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v4, service_name: 'Mosquito Event', service_key_snapshot: 'mosquito_seasonal', recurring_pattern: 'one_time', created_at: '2026-02-01T12:00:00Z' });
-      expect(await counts()).toEqual({ recurringCustomers: 4, multiServiceCustomers: 1 });
+      const refill = await customer('AddOnSoldOnceKey');
+      const v5 = await visit(refill, { ...PEST });
+      // A key the scheduler puts only on the visit it was sold on is not held, whatever its pattern says.
+      await trx('scheduled_service_addons').insert({ id: randomUUID(), scheduled_service_id: v5, service_name: 'Mosquito Misting Refill', service_key_snapshot: 'mosquito_misting_refill', created_at: '2026-02-01T12:00:00Z' });
+      expect(await counts()).toEqual({ recurringCustomers: 5, multiServiceCustomers: 2 });
+    });
+
+    test('a retired combined visit counts both of its programs, keyed or read from its label', async () => {
+      const keyed = await customer('ComboKeyed');
+      await visit(keyed, { service_key_snapshot: 'pest_termite_bait_quarterly', service_type: 'Quarterly Pest + Termite Bait Station Service' });
+      const lawn = await customer('ComboLawn');
+      await visit(lawn, { service_key_snapshot: 'lawn_tree_shrub_combo', service_type: 'Lawn + Tree & Shrub Service' });
+      const label = await customer('ComboLabel');
+      await visit(label, { service_key_snapshot: null, service_type: 'Quarterly Pest + Termite Bait Station Service' });
+      const solo = await customer('PlainTermite');
+      await visit(solo, { service_key_snapshot: null, service_type: 'Termite Bait Monitoring' });
+      expect(await counts()).toEqual({ recurringCustomers: 4, multiServiceCustomers: 3 });
     });
 
     test('a visit cancelled after the day still counts for that day; one cancelled before it, or with no time, does not', async () => {
@@ -279,6 +295,24 @@ postgres('cross-sell rate (live Postgres)', () => {
       });
     });
 
+    test('a cancelled first booking still names the channel while later visits of the series are held', async () => {
+      const c = await customer('CancelledFirst');
+      await visit(c, { ...PEST, created_at: '2025-01-01T12:00:00Z', source: 'admin' });
+      await visit(c, { ...LAWN, created_at: '2026-06-01T12:00:00Z', booking_source: 'phone_call', status: 'cancelled', cancelled_at: '2026-06-02T12:00:00Z' });
+      // The seeded child copies source, not the phone fields.
+      await visit(c, { ...LAWN, created_at: '2026-06-01T12:05:00Z', source: 'admin', scheduled_date: await dayFrom(M, 20) });
+      const result = await svc.crossSellForMonthEnd(trx, M);
+      expect(result.multiServiceCustomers).toBe(1);
+      expect(result.sources).toMatchObject({ phone_call: 1, office: 0 });
+    });
+
+    test('a family whose only visits are cancelled is not held', async () => {
+      const c = await customer('AllCancelled');
+      await visit(c, { ...PEST });
+      await visit(c, { ...LAWN, status: 'cancelled', cancelled_at: '2026-06-02T12:00:00Z' });
+      expect(await counts()).toEqual({ recurringCustomers: 1, multiServiceCustomers: 0 });
+    });
+
     test('a call log link counts as a phone call', async () => {
       const callId = randomUUID();
       await trx('call_log').insert({ id: callId });
@@ -286,7 +320,7 @@ postgres('cross-sell rate (live Postgres)', () => {
       expect((await svc.crossSellForMonthEnd(trx, M)).sources.phone_call).toBe(1);
     });
 
-    test('the added service is the family whose earliest visit is newest, judged on its earliest visit not its latest', async () => {
+    test('the added service is judged on its earliest visit, not its latest', async () => {
       const c = await customer('Earliest');
       // Lawn was bought through the app first; its later visits were created by the office. Pest is the older family.
       await visit(c, { ...PEST, created_at: '2024-01-01T12:00:00Z', source: 'admin' });
