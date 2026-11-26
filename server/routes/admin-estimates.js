@@ -552,6 +552,13 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     // group claim would refuse it at delivery, so a schedule hears it now.
     if (['draft', 'scheduled', 'send_failed'].includes(sibling.status)) {
       try { assertSatellitePalmCountTyped(sibling, palmCountGateFor(sibling)); } catch (err) { return { sibling, statusCode: 409, code: err.code }; }
+      // …and a never-issued sibling with a barrel tile roof and no eave footage: delivery's assertEstimateSendable
+      // refuses it, so the schedule hears it now (pre-push P1).
+      const siblingData = parseEstimateData(sibling.estimate_data);
+      if (siblingData?.proposal?.enabled !== true && estimateNeverIssued(sibling)
+        && require('../services/estimate-roof-style-replay').estimateHasUnmeasuredBarrelExclusion(siblingData)) {
+        return { sibling, statusCode: 409, code: 'BARREL_EAVE_FOOTAGE_REQUIRED' };
+      }
     }
     // A sibling under a clarify re-price hold blocks the group at REQUEST
     // time — schedule and immediate alike — so the operator hears it now,
@@ -777,6 +784,16 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false, ..
     const err = new Error('Bahia lawn plans need manual review before they can be sent to the customer (the lawn program has no bahia track).');
     err.statusCode = 400;
     err.code = 'LAWN_V13_BAHIA_REVIEW_REQUIRED';
+    throw err;
+  }
+  // A barrel tile roof with no eave footage has no closure price yet. The engine stamps the quote-required flags on a
+  // new or re-saved quote; a draft saved before that hold has none, so a draft never issued is read from its stored
+  // roof pick here. An estimate already sent keeps the terms it was sent with.
+  if (!isAuthoredProposal && estimateNeverIssued(estimate)
+    && require('../services/estimate-roof-style-replay').estimateHasUnmeasuredBarrelExclusion(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
+    const err = new Error('A barrel tile roof needs its eave footage entered before this quote can be sent.');
+    err.statusCode = 400;
+    err.code = 'BARREL_EAVE_FOOTAGE_REQUIRED';
     throw err;
   }
   if (!isAuthoredProposal && estimateDataHasBlockingLeadAutomation(estimate.estimate_data || estimate.estimateData)) {

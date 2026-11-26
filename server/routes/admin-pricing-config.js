@@ -920,12 +920,19 @@ async function ensureTable() {
   }
 }
 
+// Settings rows no pricer reads (owner 2026-11-26, "fix all seven"). The row stays in the table (no data is
+// dropped), it is just not offered for editing: db-bridge has no mapping for onetime_german_roach, and the
+// German roach price comes from the SPECIALTY.germanRoach tiers and the pest roach modifiers instead.
+// The rodent trapping size, lot and pressure bands and ceiling are already gone from the seed list and from
+// the row (migration 20260826000001), and the loader for them was removed with this change.
+const DEAD_SETTINGS_KEYS = Object.freeze(['onetime_german_roach']);
+
 // GET / — all pricing configs
 router.get('/', async (req, res, next) => {
   try {
     await ensureTable();
     const { category } = req.query;
-    let query = db('pricing_config').orderBy('category').orderBy('sort_order');
+    let query = db('pricing_config').orderBy('category').orderBy('sort_order').whereNotIn('config_key', DEAD_SETTINGS_KEYS);
     if (category) query = query.where({ category });
     const configs = await query;
     res.json({ configs: configs.map(normalizePricingConfigRow) });

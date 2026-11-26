@@ -364,6 +364,13 @@ describe('findGroupSiblingBlockingSend — grouped schedules preflight every sib
   beforeEach(() => { mockGateState.sendRequiresServerPricing = true; });
   afterAll(() => { mockGateState.sendRequiresServerPricing = false; });
 
+  test('a never-issued draft sibling with a barrel roof and no eave footage blocks the schedule now (pre-push P1)', async () => {
+    const unmeasured = { engineRequest: { profile: {}, selectedServices: ['EXCLUSION'], options: { exclRoofStyle: 'barrel_tile' } } };
+    const sibling = { id: 'est-sib', status: 'draft', price_locked_at: null, pricing_authority: 'SERVER', sent_at: null, estimate_data: JSON.stringify(unmeasured) };
+    const { database } = fakeDatabase([sibling]);
+    expect(await findGroupSiblingBlockingSend(anchor, { database })).toMatchObject({ statusCode: 409, code: 'BARREL_EAVE_FOOTAGE_REQUIRED' });
+  });
+
   test('an ungrouped estimate never touches the database', async () => {
     const { database } = fakeDatabase([]);
     expect(await findGroupSiblingBlockingSend({ ...anchor, estimate_group_id: null }, { database })).toBeNull();
