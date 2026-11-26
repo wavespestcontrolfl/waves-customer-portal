@@ -1,6 +1,7 @@
 // Real migrated PostgreSQL, synthetic records, rolled back after every test.
 // The annual-prepay overlap check must start from the first paid visit of the estimate, never from a free Waves
 // Assessment, a callback, a re-service, a cancelled visit or another customer's row linked to the same estimate.
+jest.setTimeout(60000);
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 const { randomUUID } = require('node:crypto');
