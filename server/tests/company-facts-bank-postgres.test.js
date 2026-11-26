@@ -28,7 +28,9 @@ jest.setTimeout(120000);
   const admin = { id: randomUUID(), isOwner: false };
   const opts = () => ({ dbi: root });
   let n = 0;
-  const line = (extra = '') => `We service zone number ${(n += 1)} on request${extra}.`;
+  // Bank facts hold no digit and no number word, so the unique part of a test line is a word, not a number.
+  const letters = (k) => k.toString(26).replace(/[0-9a-p]/g, (c) => 'abcdefghijklmnopqrstuvwxyz'[parseInt(c, 26)]);
+  const line = (extra = '') => `We service zone ${letters((n += 1))} on request${extra}.`;
   const draft = (text = line(), more = {}) => Bank.createDraft({ topic: 'Areas', factText: text, ...more }, admin, opts());
   // Presses Approve as the page does: with the hash of the wording it showed (the row as it stands, unless a test says otherwise).
   const approve = async (id, input = {}, actor = owner) => {
@@ -105,7 +107,7 @@ jest.setTimeout(120000);
       expect(await events(d.id)).toEqual(['drafted', 'approved', 'retired']);
       const audits = await root('audit_log').where({ resource_type: 'company_fact', resource_id: d.id }).orderBy('created_at').select('action', 'actor_id', 'metadata');
       expect(audits.map((x) => x.action)).toEqual(['company_fact.approved', 'company_fact.retired']);
-      expect(JSON.stringify(audits)).not.toContain('zone number');
+      expect(JSON.stringify(audits)).not.toContain('We service zone');
     });
 
     test('illegal moves are refused', async () => {
@@ -239,9 +241,9 @@ jest.setTimeout(120000);
       expect(Bank.getApprovedBankFacts()).toEqual([]);
     });
 
-    test('a price with no currency sign is blocked even when warnings are acknowledged', async () => {
+    test('a number with no currency sign is blocked even when warnings are acknowledged', async () => {
       const d = await draft('The initial application costs 99.');
-      await expect(approve(d.id, { acknowledgeWarnings: true })).rejects.toMatchObject({ detail: { blocks: expect.arrayContaining(['price_amount']) } });
+      await expect(approve(d.id, { acknowledgeWarnings: true })).rejects.toMatchObject({ detail: { blocks: expect.arrayContaining(['number_in_fact']) } });
     });
 
     test('warning words need warnings_acknowledged', async () => {
@@ -267,7 +269,7 @@ jest.setTimeout(120000);
 
     test('a bank over 2,000 characters in all still approves: the SMS reply limit is not the bank limit', async () => {
       // Six lines of about 350 characters, each well inside its own 400.
-      const long = (i) => `We service zone ${i} ${'and the neighbors beside it '.repeat(12)}on request.`.slice(0, 350).replace(/\s+\S*$/, '.');
+      const long = (i) => `We service zone ${letters(i)} ${'and the neighbors beside it '.repeat(12)}on request.`.slice(0, 350).replace(/\s+\S*$/, '.');
       for (let i = 0; i < 6; i += 1) {
         const text = long(i + 100);
         expect(text.length).toBeGreaterThan(300);

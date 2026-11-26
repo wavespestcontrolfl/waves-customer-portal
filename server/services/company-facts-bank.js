@@ -82,43 +82,33 @@ const ABBREVIATION_END_RE = /(?:\b[a-z]\.){2,}$|\b(?:mr|mrs|ms|dr|vs|approx|inc)
 // ("safe" is a hard block).
 const SAFETY_CLAIM_RE = /\bsafe(?:r|st|ly)?\b|\bnon[\s-]?toxic\b|\bharmless\b|\ball[\s-]?natural\b|\b(?:no|zero|without)\s+(?:harsh\s+|harmful\s+)?(?:chemicals?|toxins?|pesticides?)\b|\b(?:chemical|toxin|poison|pesticide)[\s-]?free\b|\b(?:eco|environmentally|child|kid|pet|family)[\s-]?friendly\b|\b(?:organic|green)\s+(?:pest|treatment|product|spray)/i;
 
-// Prices written without a currency sign. A structural rule, not word adjacency (owner: facts state no amounts; over-blocking is fine,
-// the owner rewords). price_amount blocks:
-//   (1) a SENTENCE that holds a price cue (cost, price, fee, charge, rate, quote, pay, bill, starts at, as low as, dollars, discount,
-//       deposit...) AND any amount in that same sentence: a digit, or a number word (one to nineteen, tens, hundred, thousand, dozen, half),
-//       except a time of day ("nine a.m.", "8:30 pm", "nine in the morning"). So "the price covers three visits" blocks.
-//   (2) a RATE anywhere: an amount, digit or number word taken whole, followed by per / a / each / a slash and a billing unit
-//       ("99 per visit", "49/mo", "forty-nine a month", "five a month").
-// A sentence with no cue and no rate passes: "five acres", "three visits a year", "every 90 days", "one hundred twenty square feet".
-const AMOUNT_SRC = '\\d{1,3}(?:,\\d{3})+(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?';
-const BILLING_UNIT_SRC = '(?:mo(?:nth)?|months?|visits?|applications?|treatments?|services?|years?|yr|quarters?|weeks?|wk|times?)\\b';
-const RATE_RE = new RegExp(`(?<![\\d.,])(?:${AMOUNT_SRC})(?!\\d|[.,]\\d)\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
+// number_in_fact: a bank fact states NO amount at all (owner: facts state no prices, counts or measures; the agents read them as policy,
+// and every attempt to tell a price from a count by wording kept leaking). So the text may hold no digit and no number word (zero to
+// nineteen, the tens, hundred, thousand, million, billion, dozen, half, couple), with ONE exception: a valid clock time ("8:30 am",
+// "nine a.m.", "ten o'clock", "8 in the morning"). "Quarterly", "monthly" and "weekly" are not numbers. "Prices" and "rates" are not
+// numbers either: the screens for those words are the soft warnings.
 const UNIT_WORD = 'one|two|three|four|five|six|seven|eight|nine';
-const TENS_WORD = `(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\\s](?:${UNIT_WORD}))?`;
 const TEEN_WORD = 'ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
-const ANY_NUMBER_WORD = `(?:${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)`;
-// A number word is taken whole: "twenty" of "twenty-five" is not a number of its own.
-const WHOLE_NUMBER = `(?![-\\s]+(?:and\\s+)?${ANY_NUMBER_WORD}\\b)`;
-const WORD_AMOUNT_SRC = `(?:(?:a|an|${UNIT_WORD})\\s+(?:hundred|thousand)(?:\\s+(?:and\\s+)?(?:${TENS_WORD}|${TEEN_WORD}|${UNIT_WORD}))?|${TENS_WORD}|${TEEN_WORD})${WHOLE_NUMBER}`;
-const WORD_RATE_RE = new RegExp(`\\b(?:${WORD_AMOUNT_SRC}|(?:${UNIT_WORD}|half|dozen)\\b${WHOLE_NUMBER})\\s*(?:/|\\bper\\b|\\ba\\b|\\beach\\b)\\s*${BILLING_UNIT_SRC}`, 'i');
-const PRICE_CUE_RE = /\b(?:costs?|costing|prices?|priced|pricing|fees?|charges?|charged|charging|rates?|quotes?|quoted|pays?|paying|paid|billed|bills?|starts?\s+at|starting\s+(?:at|from)|as\s+low\s+as|dollars?|bucks|cents?|discounts?|deposits?)\b/i;
-const AMOUNT_WORD_SRC = `(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen|half)`;
-const ANY_AMOUNT_RE = new RegExp(`\\d|\\b${AMOUNT_WORD_SRC}\\b`, 'i');
+const NUMBER_WORD_RE = new RegExp(`\\b(?:zero|${UNIT_WORD}|${TEEN_WORD}|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen|half|couple)\\b`, 'gi');
 // A valid clock time only: hour 1-12 (digit or word), optional minutes :00-:59, then a.m. / p.m. / o'clock, or the hour then "in the
-// morning/afternoon/evening". "99 pm", "ninety a.m.", "12:75 pm" and "49 in the morning" are not times, so they do not hide a price.
+// morning/afternoon/evening". "99 pm", "ninety a.m.", "12:75 pm" and "49 in the morning" are not times, so they do not hide an amount.
 const CLOCK_HOUR_SRC = `(?:(?<![\\d.,:])(?:1[0-2]|0?[1-9])(?!\\d)(?:[:.][0-5]\\d(?!\\d))?|\\b(?:${UNIT_WORD}|ten|eleven|twelve)\\b(?:\\s+(?:fifteen|thirty|forty[-\\s]?five))?)`;
 const TIME_OF_DAY_RE = new RegExp(`${CLOCK_HOUR_SRC}\\s*(?:a\\.?m\\b\\.?|p\\.?m\\b\\.?|o'clock\\b)|${CLOCK_HOUR_SRC}\\s+in\\s+the\\s+(?:morning|afternoon|evening)\\b`, 'gi');
-// A promotional price with no cue word: "only 49", "just 99", "only 129.99", "only forty-nine", or a bare two-decimal figure. A count or a
-// measure after the amount ("only 3 visits", "just 2 hours", "1.25 acres") is not a price; neither is "just one tech".
-const COUNT_UNIT_SRC = '(?:square|sq|visits?|days?|hours?|hrs?|minutes?|mins?|weeks?|months?|years?|acres?|feet|foot|ft|inch(?:es)?|miles?|times|treatments?|applications?|services?|stops?|trucks?|techs?|technicians?|people|customers?|properties|homes?|houses?|units?|zones?|rooms?|pests?|ants?|%|percent|more|other|extra)\\b';
-const PROMO_RE = new RegExp(`\\b(?:only|just)\\s+(?:(?<![\\d.,])(?:${AMOUNT_SRC})(?!\\d|[.,]\\d)|${WORD_AMOUNT_SRC}|(?:${UNIT_WORD})\\b(?=\\s*(?:[.!?,;]|$|/|\\bper\\b|\\ba\\b)))(?!\\s*${COUNT_UNIT_SRC})`, 'i');
-const DECIMAL_FIGURE_RE = new RegExp(`(?<![\\d.])\\d{1,4}\\.\\d{2}(?!\\d)(?!\\s*${COUNT_UNIT_SRC})`, 'i');
+// "one" as a pronoun or in a compound is not a number: "one of our techs", "one another", "no one", "this one", "which one", "one-time".
+// ("anyone", "someone" and "everyone" never match \b one \b.) A counting "one" ("one visit", "one acre") still blocks.
+const ONE_PRONOUN_AFTER_RE = /^(?:\s+(?:of|another)\b|-(?:time|off)\b)/i;
+const ONE_PRONOUN_BEFORE_RE = /\b(?:no|this|that|which|each|every)\s+$/i;
 
-function hasUnmarkedPrice(text) {
-  if (RATE_RE.test(text) || WORD_RATE_RE.test(text)) return true;
-  const plain = text.replace(TIME_OF_DAY_RE, ' ');
-  if (PROMO_RE.test(plain) || DECIMAL_FIGURE_RE.test(plain)) return true;
-  return splitSentences(plain).some((sentence) => PRICE_CUE_RE.test(sentence) && ANY_AMOUNT_RE.test(sentence));
+/** True when the text states an amount: any digit or number word, other than inside a valid clock time. */
+function hasNumberInFact(text) {
+  const plain = String(text).replace(TIME_OF_DAY_RE, ' TIME ');
+  if (/\d/.test(plain)) return true;
+  for (const m of plain.matchAll(NUMBER_WORD_RE)) {
+    const pronoun = m[0].toLowerCase() === 'one'
+      && (ONE_PRONOUN_AFTER_RE.test(plain.slice(m.index + 3)) || ONE_PRONOUN_BEFORE_RE.test(plain.slice(0, m.index)));
+    if (!pronoun) return true;
+  }
+  return false;
 }
 
 // [code, regex]: each is a hard block on its own.
@@ -254,7 +244,7 @@ function checkFactText(rawText, ctx = {}) {
   const blocks = [];
   if (text.length > MAX_FACT_CHARS) blocks.push('too_long');
   if (countSentences(text) > MAX_SENTENCES) blocks.push('too_many_sentences');
-  if (hasUnmarkedPrice(text)) blocks.push('price_amount');
+  if (hasNumberInFact(text)) blocks.push('number_in_fact');
   for (const [code, re] of SHAPE_BLOCKS) if (re.test(text)) blocks.push(code);
   if (loadScreens().injection.test(withoutShapes(text))) blocks.push('injection_shape');
   if (mentionsProduct(text, productTokens(ctx.productNames))) blocks.push('product_brand');
@@ -761,5 +751,5 @@ module.exports = {
   invalidate,
   startBankRefresh,
   stopBankRefresh,
-  _test: { sha256, normalise, countSentences, sectionHasBannedCopy, loadVerifiedFacts, resetSnapshot: () => { state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
+  _test: { sha256, normalise, countSentences, sectionHasBannedCopy, hasNumberInFact, loadVerifiedFacts, resetSnapshot: () => { state = { facts: Object.freeze([]), loadedAt: 0 }; generation += 1; appliedRead = 0; lastDropKey = ''; } },
 };
