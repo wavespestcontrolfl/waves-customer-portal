@@ -19,7 +19,7 @@ function mockTables({ vendorDomain = null, priorEmail = null } = {}) {
     for (const m of ['whereRaw', 'where', 'whereIn', 'orWhere', 'whereNot']) {
       chain[m] = jest.fn((...args) => {
         calls[table].push([m, ...args]);
-        if (m === 'where' && typeof args[0] === 'function') args[0](chain);
+        if ((m === 'where' || m === 'orWhere') && typeof args[0] === 'function') args[0](chain);
         return chain;
       });
     }
@@ -63,7 +63,9 @@ describe('isVendorWeUse', () => {
     const calls = mockTables({ vendorDomain: { id: 'v1' } });
     expect(await isVendorWeUse({ id: 1, from_address: 'Promo <promo@news.supplier.example>' })).toBe(true);
     expect(calls.vendor_email_domains).toContainEqual(['whereIn', 'domain', ['promo@news.supplier.example', 'news.supplier.example', 'supplier.example']]);
-    expect(calls.vendor_email_domains).toContainEqual(['orWhere', 'domain', 'like', '%.supplier.example']);
+    expect(calls.vendor_email_domains).toContainEqual(['where', 'domain', 'like', '%.supplier.example']);
+    // Only domain-only rows match by suffix: merchant@billing.example never vouches for a sibling.
+    expect(calls.vendor_email_domains).toContainEqual(['whereNot', 'domain', 'like', '%@%']);
     expect(calls.emails).toHaveLength(0);
   });
 
@@ -109,6 +111,13 @@ describe('isVendorWeUse', () => {
     const calls = mockTables({ vendorDomain: null, priorEmail: null });
     await isVendorWeUse({ id: 1, from_address: '"seller@gmail.com" <spam@junk.example>' });
     expect(calls.vendor_email_domains[1][2]).toEqual(['spam@junk.example', 'junk.example']);
+  });
+
+  test('a billing platform is mailbox-scoped: one merchant never vouches for a sibling', async () => {
+    const calls = mockTables({ priorEmail: null });
+    expect(await isVendorWeUse({ id: 2, from_address: 'other-merchant@billtrust.com' })).toBe(false);
+    expect(calls.vendor_email_domains).toContainEqual(['whereIn', 'domain', ['other-merchant@billtrust.com']]);
+    expect(calls.emails[0][2]).toEqual(['other-merchant@billtrust.com', '%<other-merchant@billtrust.com>']);
   });
 
   test('strict mode rethrows a failed lookup so the deferred block retries', async () => {

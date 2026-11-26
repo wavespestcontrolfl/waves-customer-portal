@@ -11,6 +11,12 @@ const logger = require('../logger');
 // guarded separately by isDealSenderDomain (siteone-deals-digest.js, #7956).
 const KEEP_PROMO_DOMAINS = ['anthropic.com', 'claude.com', 'openai.com', 'siteone.com'];
 
+// Billing platforms send for many merchants from one domain (invoice
+// processor: siteoneus@billtrust.com, Stripe invoice+statements+acct_…
+// addresses). Like a shared mail provider, only the exact mailbox identifies
+// a vendor there.
+const BILLING_PLATFORM_DOMAINS = ['billtrust.com', 'stripe.com'];
+
 const VENDOR_CLASSIFICATIONS = ['vendor_invoice', 'vendor_communication'];
 
 // The bare lowercase mailbox, or ''. A display form ("Name <a@x.com>") uses
@@ -49,7 +55,9 @@ async function registryHasSender(mailbox, reg, shared) {
   const row = await db('vendor_email_domains')
     .where((qb) => {
       qb.whereIn('domain', keys);
-      if (!shared) qb.orWhere('domain', 'like', `%.${reg}`);
+      // Domain-only rows: a mailbox row (merchant@billing.example) never
+      // vouches for its siblings.
+      if (!shared) qb.orWhere((sub) => sub.where('domain', 'like', `%.${reg}`).whereNot('domain', 'like', '%@%'));
     })
     .first('id');
   return !!row;
@@ -102,7 +110,8 @@ async function isVendorWeUse(email, { strict = false } = {}) {
   const reg = registrableSenderDomain(mailbox);
   if (!reg) return false;
   if (KEEP_PROMO_DOMAINS.includes(reg)) return true;
-  const shared = require('./spam-blocker').isProtectedDomain(mailbox.slice(mailbox.lastIndexOf('@') + 1));
+  const shared = BILLING_PLATFORM_DOMAINS.includes(reg)
+    || require('./spam-blocker').isProtectedDomain(mailbox.slice(mailbox.lastIndexOf('@') + 1));
   try {
     if (await registryHasSender(mailbox, reg, shared)) return true;
     return await historyHasSender(email, mailbox, reg, shared, strict);

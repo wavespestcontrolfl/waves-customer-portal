@@ -668,7 +668,10 @@ async function reconcileStaleAutoBlocks() {
           .whereRaw('LOWER(email) = ?', [normalized])
           .whereNull('deleted_at')
           .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
-          .first());
+          .first())
+        // A vendor we use (owner 2026-11-25): an automatic block set before
+        // the sender qualified is unwound, row and Gmail filter.
+        || await require('./vendor-sender').isVendorWeUse({ id: null, from_address: normalized }, { strict: true });
       if (!identity) continue;
       const result = await removeStaleAutoBlock(normalized);
       counts[result?.success ? 'reconciled' : 'failed'] += 1;
@@ -732,6 +735,15 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
         return true;
       }
     }
+    return false;
+  }
+
+  // A vendor we use (owner 2026-11-25, strict: a booked expense from this
+  // mailbox) voids a stale AUTOMATIC block, row and Gmail filter; a manual
+  // block stands. A failed lookup keeps the block.
+  if (exactBlocked && exactBlocked.reason === 'spam_auto'
+    && await require('./vendor-sender').isVendorWeUse({ id: null, from_address: normalized }, { strict: true }).catch(() => false)) {
+    await removeStaleAutoBlock(normalized, { untrashGmailId: gmailId });
     return false;
   }
 
