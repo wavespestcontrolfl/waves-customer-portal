@@ -189,21 +189,19 @@ function scoreDailyFrom(row, measured, now) {
 const ageDaysOf = (row, now) => (Date.parse(`${etDateString(now)}T00:00:00Z`) - Date.parse(`${row.day}T00:00:00Z`)) / 86400000;
 
 /**
- * The score from the measured rain in the work hours (work-hour-rain.js), or null while gaps could still change it
- * (hours the gauges did not report; an unanswered request). After SCORE_GIVE_UP_DAYS the areas settled decide, marked
- * partial; none settled = a final score with no grade, so the day stops taking a retry slot.
+ * The score from the measured rain in the work hours (work-hour-rain.js), or null while it could still change: an hour the
+ * gauges did not report, or a read that failed (never a give-up). After SCORE_GIVE_UP_DAYS, on a successful read, the areas
+ * settled decide (wetDayFrom final), marked partial; none settled = a final score with no grade, so the day stops taking a
+ * retry slot.
  */
 async function scoreDay(row, { fetchObs = workHours.fetchHourlyObs, now = new Date() } = {}) {
   const obs = await Promise.resolve().then(() => fetchObs(row.day)).catch(() => null);
+  // A read that failed (IEM refused, timed out) is "not read this run": never a score, never a give-up.
+  if (!obs) return null;
   const measured = workHours.measureAreas(obs, Object.keys(ZONE_COORDS), RAIN_HOURS);
-  const { wet_areas: wetAreas, wet_day: day } = workHours.wetDayFrom(measured);
-  let wetDay = day;
-  const partial = wetDay === null;
-  if (partial) {
-    if (ageDaysOf(row, now) < SCORE_GIVE_UP_DAYS) return null;
-    const settled = Object.values(measured).filter((a) => a.wet !== null);
-    wetDay = settled.length ? wetAreas.length * 2 >= settled.length : null;
-  }
+  const aged = ageDaysOf(row, now) >= SCORE_GIVE_UP_DAYS;
+  const { wet_areas: wetAreas, wet_day: wetDay, partial } = workHours.wetDayFrom(measured, { final: aged });
+  if (partial && !aged) return null;
   return {
     basis: 'work_hours',
     partial,
@@ -268,7 +266,8 @@ function nextDayRow(prior, { day, forecast, call, cutoffRun, at }) {
   // The readings behind the call in force, unmerged: the run that settled it (this one, or an earlier one carried forward).
   if (forecast.call !== 'unknown' && forecast.chances) next.call_chances = forecast.chances;
   if (forecast.chances && Object.keys(forecast.chances).length) next.latest_chances = mergeChances(next.latest_chances, forecast.chances);
-  if (!next.cutoff_at && cutoffRun && call !== 'unknown') {
+  // A settled cutoff is never replaced; one written as 'unknown' by the earlier code may be, by a settled call before the day.
+  if ((!next.cutoff_at || next.cutoff_call === 'unknown') && cutoffRun && call !== 'unknown') {
     Object.assign(next, { cutoff_call: call, cutoff_at: at, cutoff_chances: next.call_chances || null });
   }
   return next.call || next.cutoff_at || next.latest_chances ? next : null;

@@ -430,19 +430,22 @@ function gradeVisits(row, measured) {
 }
 
 /**
- * The day's score, or null while it could still change: a visit with an unread hour, or the day by area not yet settled
- * (an IEM outage with no outdoor visit at all must not freeze a final score). After SCORE_GIVE_UP_DAYS what was read decides,
- * marked partial.
+ * The day's score, or null while it could still change: a visit with an unread hour, or the day by area not yet settled, or
+ * a read that failed (an IEM outage never freezes a score, and never counts as a give-up). After SCORE_GIVE_UP_DAYS, on a
+ * successful read, what was read decides (wetDayFrom final), marked partial.
  */
 async function scoreDay(row, now, { fetchObs = workHours.fetchHourlyObs, ...opts }) {
   const obs = await Promise.resolve().then(() => fetchObs(row.day)).catch(() => null);
+  // A read that failed (IEM refused, timed out) is "not read this run": never a score, never a give-up.
+  if (!obs) return null;
   const { measured, gaps } = await measureVisits(row, obs, opts);
-  // The day by forecast area (the ads record's wet-day rule), to read beside the visits.
+  // The day by forecast area, by the one rule the ads record uses (wetDayFrom), to read beside the visits.
   const zones = Object.keys(ZONE_COORDS);
   const areas = workHours.measureAreas(obs, zones, rainMode.RAIN_HOURS);
-  const dayVerdict = workHours.wetDayFrom(areas);
-  const partial = gaps.length > 0 || dayVerdict.wet_day === null;
-  if (partial && etDateString(now) < plusDays(row.day, rainMode.SCORE_GIVE_UP_DAYS)) return null;
+  const aged = etDateString(now) >= plusDays(row.day, rainMode.SCORE_GIVE_UP_DAYS);
+  const dayVerdict = workHours.wetDayFrom(areas, { final: aged });
+  const partial = gaps.length > 0 || dayVerdict.partial;
+  if (partial && !aged) return null;
   const visits = gradeVisits(row, measured);
   return {
     basis: 'work_hours',

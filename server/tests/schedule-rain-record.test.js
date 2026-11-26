@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const weather = require('../services/weather-forecast');
 const record = require('../services/scheduling/rain-schedule-record');
+const rainMode = require('../services/ads/rain-mode');
 const rainPass = require('../services/auto-dispatch/rain-pass');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -542,14 +543,32 @@ describe('scoring against the measured rain in each visit\'s hours', () => {
   describe('a day with no outdoor visit', () => {
     const emptyDay = () => fakeConn({ [record.DAYS_KEY]: JSON.stringify({ [WED]: { day: WED, recheck: { at: 'x', checked: 0, dry: 0, proposals: [] } } }) });
 
-    test('an IEM outage does not freeze a final score with no day grade: it waits, then is marked partial', async () => {
+    test('an IEM outage never freezes a score, not even past the give-up days; a successful read with no reports does', async () => {
       const conn = emptyDay();
-      const down = jest.fn(async () => null);
+      const down = jest.fn(async () => null); // a 429, a timeout, a bad reply: not read this run
+      const late = parseETDateTime('2026-12-02T06:06');
       expect((await run({ now: FRI, conn, fetchObs: down, deps: deps([]) })).scored).toEqual([]);
+      expect((await run({ now: late, conn, fetchObs: down, deps: deps([]) })).scored).toEqual([]);
       expect(daysOf(conn)[WED].score).toBeUndefined();
-      const late = await run({ now: parseETDateTime('2026-12-02T06:06'), conn, fetchObs: down, deps: deps([]) });
-      expect(late.scored).toEqual([WED]);
+      const empty = jest.fn(async () => ({ SRQ: {}, VNC: {}, PGD: {}, SPG: {} })); // IEM answered, no gauge reported
+      expect((await run({ now: FRI, conn, fetchObs: empty, deps: deps([]) })).scored).toEqual([]);
+      const done = await run({ now: late, conn, fetchObs: empty, deps: deps([]) });
+      expect(done.scored).toEqual([WED]);
       expect(daysOf(conn)[WED].score).toMatchObject({ partial: true, day: { wet_day: null } });
+    });
+
+    test('at the give-up deadline both graders reach the same partial day verdict from the same readings', async () => {
+      // Gaps at SRQ leave Parrish, Palmetto and Bradenton N open (no second gauge reports); Lakewood, Sarasota (they read the
+      // Venice gauge for those hours) and Venice settle dry: the three settled areas decide, marked partial.
+      const o = obsWith({ VNC: [], SRQ: [8, 9] }, { SRQ: [10, 11, 12, 13, 14, 15, 16], VNC: [] });
+      const obs = jest.fn(async () => o);
+      const conn = emptyDay();
+      await run({ now: parseETDateTime('2026-12-02T06:06'), conn, fetchObs: obs, deps: deps([]) });
+      const mine = daysOf(conn)[WED].score.day;
+      const theirs = rainMode.scoreDay;
+      const ads = await theirs({ day: WED, call: 'rain' }, { fetchObs: obs, now: parseETDateTime('2026-12-02T06:06') });
+      expect(ads).toMatchObject({ partial: true, wet_areas: mine.wet_areas, wet_day: mine.wet_day });
+      expect(mine).toMatchObject({ partial: true, wet_day: false, unknown: 3 });
     });
 
     test('a day read in full is scored final with its wet day', async () => {
@@ -767,7 +786,7 @@ describe('audit fixes', () => {
     const conn = fakeConn({ [record.DAYS_KEY]: JSON.stringify({ [WED]: old }) });
     const d = deps([stop({ scheduled_date: SAT })], { loadPoints: jest.fn(async () => { throw new Error('points down'); }) });
     const hours = Array.from({ length: 24 }, (_, h) => ({ startTime: `${SAT}T${String(h).padStart(2, '0')}:00:00-05:00`, rainChance: h >= 8 && h <= 11 ? 80 : 10 }));
-    const out = await run({ now: parseETDateTime('2026-11-27T14:06'), conn, deps: d, read: jest.fn(async () => hours) });
+    const out = await run({ now: parseETDateTime('2026-11-27T14:06'), conn, deps: d, read: jest.fn(async () => hours), fetchObs: jest.fn(async () => allHours(0)) });
     expect(out.problems).toEqual(['scoring failed: points down']);
     expect(daysOf(conn)[SAT].cutoff.proposals[0]).toMatchObject({ decision: 'reorder' });
     expect(daysOf(conn)[WED].score).toBeUndefined();

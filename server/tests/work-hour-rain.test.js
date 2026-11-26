@@ -91,11 +91,12 @@ describe('spanWet', () => {
 
 describe('fetchHourlyObs', () => {
   const ok = (body) => jest.fn(async () => ({ ok: true, text: async () => body }));
+  const noSleep = { sleep: jest.fn(async () => {}), paceMs: 0 };
 
   test('one request names every station, is asked for the ET day, is kept for 10 minutes', async () => {
     const fetchFn = ok(CSV);
-    const first = await w.fetchHourlyObs('2026-11-25', { fetchFn });
-    await w.fetchHourlyObs('2026-11-25', { fetchFn });
+    const first = await w.fetchHourlyObs('2026-11-25', { fetchFn, ...noSleep });
+    await w.fetchHourlyObs('2026-11-25', { fetchFn, ...noSleep });
     expect(fetchFn).toHaveBeenCalledTimes(1);
     const url = fetchFn.mock.calls[0][0];
     expect(url).toMatch(/station=SRQ&station=VNC&station=PGD&station=SPG&data=p01i/);
@@ -105,11 +106,43 @@ describe('fetchHourlyObs', () => {
 
   test('a failure or a rate-limit reply is null and is asked again next time', async () => {
     const down = jest.fn(async () => { throw new Error('timeout'); });
-    expect(await w.fetchHourlyObs('2026-11-25', { fetchFn: down })).toBeNull();
-    expect(await w.fetchHourlyObs('2026-11-25', { fetchFn: ok('Too many requests') })).toBeNull();
+    expect(await w.fetchHourlyObs('2026-11-25', { fetchFn: down, ...noSleep })).toBeNull();
+    expect(await w.fetchHourlyObs('2026-11-25', { fetchFn: ok('Too many requests'), ...noSleep })).toBeNull();
+    const throttled = jest.fn(async () => ({ ok: false, status: 429, text: async () => 'Too many requests' }));
+    expect(await w.fetchHourlyObs('2026-11-25', { fetchFn: throttled, ...noSleep })).toBeNull();
     const fetchFn = ok(CSV);
-    expect(await w.fetchHourlyObs('2026-11-25', { fetchFn })).not.toBeNull();
+    expect(await w.fetchHourlyObs('2026-11-25', { fetchFn, ...noSleep })).not.toBeNull();
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  test('distinct days start at least 1.1 s apart, process-wide; a cached day never waits', async () => {
+    const t = { now: Date.now() + 10_000 };
+    const sleeps = [];
+    const opts = { now: () => t.now, sleep: jest.fn(async (ms) => { sleeps.push(ms); t.now += ms; }) };
+    const fetchFn = ok(CSV);
+    await Promise.all(['2026-11-20', '2026-11-21', '2026-11-22'].map((d) => w.fetchHourlyObs(d, { fetchFn, ...opts })));
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    // The first starts at once; each later one waits out the 1.1 s gap.
+    expect(sleeps).toEqual([1100, 1100]);
+    await w.fetchHourlyObs('2026-11-21', { fetchFn, ...opts });
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    expect(sleeps).toHaveLength(2);
+  });
+});
+
+describe('wetDayFrom: one rule for both graders', () => {
+  const areas = (wets) => Object.fromEntries(wets.map((wet, i) => [`z${i}`, { wet }]));
+
+  test('a settled day is not partial; an open day is null and partial', () => {
+    expect(w.wetDayFrom(areas([true, true, true, false, false, false]))).toMatchObject({ wet_day: true, partial: false });
+    expect(w.wetDayFrom(areas([false, false, false, false, null, false]))).toMatchObject({ wet_day: false, partial: false });
+    expect(w.wetDayFrom(areas([true, true, false, false, null, null]))).toMatchObject({ wet_day: null, partial: true });
+  });
+
+  test('final: the settled areas decide, marked partial; null only when no area settled', () => {
+    expect(w.wetDayFrom(areas([true, true, false, false, null, null]), { final: true })).toMatchObject({ wet_day: true, partial: true, unknown: 2 });
+    expect(w.wetDayFrom(areas([true, false, false, false, null, null]), { final: true })).toMatchObject({ wet_day: false, partial: true });
+    expect(w.wetDayFrom(areas([null, null, null, null, null, null]), { final: true })).toMatchObject({ wet_day: null, partial: true });
   });
 });
 

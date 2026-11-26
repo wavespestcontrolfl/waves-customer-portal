@@ -75,8 +75,28 @@ function parseObs(csv, day) {
 
 const cache = new Map(); // day -> { at, promise }
 
-/** The day's hourly readings at every station, or null when IEM did not answer. Kept 10 minutes; a failure is never kept. */
-function fetchHourlyObs(day, { fetchFn = fetch, timeoutMs = FETCH_MS, now = Date.now } = {}) {
+// IEM throttles about 1 request a second per IP (2026-11-26: a 429 with the 'Too many requests' text). Distinct-day requests
+// of this process start at least PACE_MS apart; a day already read is served from the cache and never waits.
+const PACE_MS = 1100;
+let paceChain = Promise.resolve();
+let lastStartAt = 0;
+function paced(task, { now = Date.now, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), paceMs = PACE_MS } = {}) {
+  const run = paceChain.then(async () => {
+    const wait = lastStartAt + paceMs - now();
+    if (wait > 0) await sleep(wait);
+    lastStartAt = now();
+    return task();
+  });
+  paceChain = run.catch(() => {});
+  return run;
+}
+
+/**
+ * The day's hourly readings at every station, or null when the read FAILED (a 429, a timeout, a bad reply): null means "not
+ * read this run", never "no rain" and never a reason to give up on a score. An object (even one with missing hours) is a
+ * successful read. Kept 10 minutes; a failure is never kept.
+ */
+function fetchHourlyObs(day, { fetchFn = fetch, timeoutMs = FETCH_MS, now = Date.now, sleep, paceMs } = {}) {
   const hit = cache.get(day);
   if (hit && now() - hit.at < CACHE_MS) return hit.promise;
   const [y1, m1, d1] = day.split('-');
@@ -84,12 +104,15 @@ function fetchHourlyObs(day, { fetchFn = fetch, timeoutMs = FETCH_MS, now = Date
   const stations = Object.keys(STATIONS).map((s) => `station=${s}`).join('&');
   const url = `${ASOS_URL}?${stations}&data=p01i&year1=${y1}&month1=${Number(m1)}&day1=${Number(d1)}`
     + `&year2=${y2}&month2=${Number(m2)}&day2=${Number(d2)}&tz=America%2FNew_York&format=onlycomma&latlon=no&missing=M&trace=T&report_type=3`;
-  const promise = (async () => {
+  const promise = paced(async () => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetchFn(url, { signal: controller.signal });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        logger.warn(`[work-hour-rain] ${day} read refused: HTTP ${res.status}`);
+        return null;
+      }
       return parseObs(await res.text(), day);
     } catch (err) {
       logger.warn(`[work-hour-rain] ${day} read failed: ${err.message}`);
@@ -97,7 +120,7 @@ function fetchHourlyObs(day, { fetchFn = fetch, timeoutMs = FETCH_MS, now = Date
     } finally {
       clearTimeout(timer);
     }
-  })();
+  }, { now, sleep, paceMs }).catch(() => null);
   cache.set(day, { at: now(), promise });
   promise.then((obs) => { if (!obs && cache.get(day)?.promise === promise) cache.delete(day); });
   return promise;
@@ -140,16 +163,25 @@ function measureAreas(obs, zones, rainHours) {
   }));
 }
 
-/** The day from its areas: half or more wet = wet day. { wet_areas, unknown, wet_day }: wet_day null while unknown areas
- *  could still flip it. */
-function wetDayFrom(areas) {
+/**
+ * The day from its areas, the one rule both graders use. Half or more of all areas wet = wet day. { wet_areas, unknown,
+ * wet_day, partial }. While unknown areas could still flip it, wet_day is null and `partial` is true. With `final` (the
+ * give-up deadline, after a SUCCESSFUL read) the settled areas decide, still marked partial: wet day = half or more of the
+ * settled areas wet; null only when no area settled.
+ */
+function wetDayFrom(areas, { final = false } = {}) {
   const all = Object.values(areas);
   const wetAreas = Object.keys(areas).filter((z) => areas[z].wet === true);
   const unknown = all.filter((a) => a.wet === null).length;
   let wetDay = null;
   if (wetAreas.length * 2 >= all.length) wetDay = true;
   else if ((wetAreas.length + unknown) * 2 < all.length) wetDay = false;
-  return { wet_areas: wetAreas, unknown, wet_day: wetDay };
+  const partial = wetDay === null;
+  if (partial && final) {
+    const settled = all.length - unknown;
+    wetDay = settled ? wetAreas.length * 2 >= settled : null;
+  }
+  return { wet_areas: wetAreas, unknown, wet_day: wetDay, partial };
 }
 
 const km = (a, b) => Math.hypot((a.lat - b.lat) * 111, (a.lng - b.lng) * 99);

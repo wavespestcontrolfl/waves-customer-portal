@@ -372,12 +372,29 @@ describe('recordRun', () => {
       .toEqual([[10, 'google_lsa', 'indoor', 'base'], [11, 'facebook', null, null], [12, 'facebook', 'outdoor', 'stop']]);
     expect(rainMode.RAIN_PLATFORMS).toEqual(['google_ads', 'google_lsa', 'facebook']);
   });
-  test('a day with no gauge reading by the give-up day gets a final ungraded score', async () => {
-    const none = jest.fn(async () => null);
+  test('a read that failed is never a give-up: only a successful read with no reports gets the final ungraded score', async () => {
+    const failed = jest.fn(async () => null); // a 429, a timeout, a bad reply
+    const empty = jest.fn(async () => ({ SRQ: {}, VNC: {}, PGD: {}, SPG: {} })); // IEM answered; no gauge reported
     const row = { day: '2026-11-15', call: 'rain', cutoff_call: 'rain' };
-    expect(await rainMode.scoreDay(row, { fetchObs: none, now: new Date('2026-11-18T20:00:00Z') })).toBeNull();
-    expect(await rainMode.scoreDay(row, { fetchObs: none, now: new Date('2026-11-24T20:00:00Z') }))
+    const late = new Date('2026-11-24T20:00:00Z');
+    expect(await rainMode.scoreDay(row, { fetchObs: failed, now: late })).toBeNull();
+    expect(await rainMode.scoreDay(row, { fetchObs: empty, now: new Date('2026-11-18T20:00:00Z') })).toBeNull();
+    expect(await rainMode.scoreDay(row, { fetchObs: empty, now: late }))
       .toMatchObject({ partial: true, wet_day: null, hit: null, cutoff_hit: null });
+  });
+
+  test('a cutoff the earlier code wrote as unknown is replaced by a settled call before the day; a settled cutoff never is', () => {
+    const forecast = (call) => ({ call, areas: [], chances: { [ZONES[0]]: [80, 80, 80, 80, 10, 10, 10, 10, 10] } });
+    const old = { day: '2026-11-25', cutoff_call: 'unknown', cutoff_at: '2026-11-24T19:00:00.000Z' };
+    const at = '2026-11-24T21:00:00.000Z';
+    // An unsettled run leaves the old unknown alone; a run that is not a cutoff run does too.
+    expect(rainMode.nextDayRow(old, { day: '2026-11-25', forecast: forecast('unknown'), call: 'unknown', cutoffRun: true, at })).toMatchObject({ cutoff_call: 'unknown' });
+    expect(rainMode.nextDayRow(old, { day: '2026-11-25', forecast: forecast('rain'), call: 'rain', cutoffRun: false, at })).toMatchObject({ cutoff_call: 'unknown', cutoff_at: old.cutoff_at });
+    const fixed = rainMode.nextDayRow(old, { day: '2026-11-25', forecast: forecast('rain'), call: 'rain', cutoffRun: true, at });
+    expect(fixed).toMatchObject({ cutoff_call: 'rain', cutoff_at: at });
+    expect(fixed.cutoff_chances[ZONES[0]]).toEqual([80, 80, 80, 80, 10, 10, 10, 10, 10]);
+    const later = rainMode.nextDayRow(fixed, { day: '2026-11-25', forecast: forecast('dry'), call: 'dry', cutoffRun: true, at: '2026-11-24T22:00:00.000Z' });
+    expect(later).toMatchObject({ cutoff_call: 'rain', cutoff_at: at, call: 'dry' });
   });
 });
 
