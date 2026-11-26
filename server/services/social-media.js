@@ -1667,24 +1667,27 @@ async function requestFacebookPublish(postId, token) {
 // Make the hidden post public. Publishing the same post twice is harmless, so
 // a failed publish is asked once more on the SAME post before anything else.
 // Then:
-//   public                      -> true: done (an answer was lost).
-//   Facebook refused (4xx), or the post reads hidden
-//                               -> delete it. Confirmed: throw, so a retry of
-//                                  the whole post is safe. Not confirmed: false.
-//   anything else (no answer)   -> false: the post may be public.
+//   public                    -> true: done (an answer was lost).
+//   Facebook said no (4xx) BOTH times -> never public: delete it (best
+//                                effort) and throw.
+//   reads hidden              -> delete it. Confirmed: throw, so a retry of
+//                                the whole post is safe. Not confirmed: false.
+//   anything else             -> false: the post may be public.
 // false = the caller records the post as sent with its id and never makes a
 // new one, so a post that did go public is never doubled; the cost is a share
 // that may stay hidden.
 async function publishFacebookPost(postId, token) {
-  let failure = await requestFacebookPublish(postId, token);
-  if (!failure) return true;
-  failure = await requestFacebookPublish(postId, token);
-  if (!failure) return true;
+  const first = await requestFacebookPublish(postId, token);
+  if (!first) return true;
+  const second = await requestFacebookPublish(postId, token);
+  if (!second) return true;
   const state = await readFacebookPostState(postId, token);
   if (state === 'public') return true;
-  if (state === 'hidden' || failure.refused) {
-    if (await deleteFacebookPost(postId, token)) throw failure;
+  if (first.refused && second.refused) {
+    await deleteFacebookPost(postId, token);
+    throw second;
   }
+  if (state === 'hidden' && await deleteFacebookPost(postId, token)) throw second;
   return false;
 }
 

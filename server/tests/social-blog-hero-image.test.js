@@ -613,6 +613,29 @@ describe('blogHeroSocialImageUrl', () => {
       expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(1);
     });
 
+    test('refused twice with a dead token (state read and delete fail too): reported as failed', async () => {
+      mockPictureGraph({
+        sizes: [{ width: 720, height: 720 }],
+        publish: () => ({ ok: false, status: 400, text: async () => 'token expired' }),
+        published: 'unreadable',
+        del: () => ({ ok: false, status: 400, json: async () => ({ error: { code: 190 } }) }),
+      });
+      const res = await share();
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: false })]);
+    });
+
+    test('a lost first answer then a 4xx, state unreadable: never deleted, recorded as sent', async () => {
+      let n = 0;
+      const calls = mockPictureGraph({
+        sizes: [{ width: 720, height: 720 }],
+        publish: () => { n += 1; if (n === 1) throw new Error('socket hang up'); return { ok: false, status: 400, text: async () => 'odd' }; },
+        published: 'unreadable',
+      });
+      const res = await share();
+      expect(res.platforms).toEqual([expect.objectContaining({ postId: 'fb-1', success: true, publishUnconfirmed: true })]);
+      expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+    });
+
     test('a refused publish deletes the hidden post and reports the failure', async () => {
       const calls = mockPictureGraph({
         sizes: [{ width: 720, height: 720 }],
