@@ -7,32 +7,58 @@ const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = requ
 // ("Termite Installation Setup", "… Cartridge Replacement") are station work,
 // not the inspection their names fall to.
 const MATCH_RULES = [
+  // Bed bug cards (2026-11-25): 1 inspection, 2 treatment 1, 3 the follow-up card for every later visit (treatment 2
+  // at day 14, each clearance check, the third treatment on a heavy job). The stage of a later visit is never read
+  // from its name: one card covers them all. Waves does not sell heat, so a booking that says heat or hybrid anywhere
+  // gets the inspection / scope card (no product prefilled) and the office reviews the scope first.
+  // `explicitStage`: the name states the stage, so the rule outranks the booking's catalog service key.
   {
     programKey: 'bed_bug',
-    visit: 2,
-    reason: 'bed_bug_treatment',
-    terms: [
-      'chemical bed bug',
-      'heat bed bug',
-      'hybrid bed bug',
-      'bed bug chemical',
-      'bed bug heat',
-      'bed bug heat treatment',
-      'bed bug hybrid',
-      'bed bug treatment',
-    ],
+    visit: 1,
+    reason: 'bed_bug_heat_scope_review',
+    explicitStage: true,
+    terms: ['heat', 'hybrid'],
   },
   {
     programKey: 'bed_bug',
     visit: 3,
     reason: 'bed_bug_followup',
-    terms: ['bed bug follow', 'bed bug recheck', 'post treatment inspection'],
+    explicitStage: true,
+    followupOf: ['bed_bug_treatment'],
+    terms: [
+      'bed bug follow', 'bed bug recheck', 'bed bug clearance', 'post treatment inspection',
+      'bed bug treatment 2', 'bed bug second treatment', 'second bed bug',
+      'bed bug treatment 3', 'bed bug third treatment', 'third bed bug',
+    ],
+  },
+  {
+    programKey: 'bed_bug',
+    visit: 2,
+    reason: 'bed_bug_treatment',
+    terms: ['chemical bed bug', 'bed bug chemical', 'bed bug treatment'],
   },
   {
     programKey: 'bed_bug',
     visit: 1,
     reason: 'bed_bug_inspection',
     terms: ['bed bug', 'bedbug', 'bed bugs', 'mattress', 'box spring', 'fecal spotting'],
+  },
+  // Flea: treatment 1, then treatment 2 at day 14 (no third, owner 2026-11-23). A booked follow-up of a flea
+  // visit resolves to treatment 2 through the `_followup` rule, so the growth regulator is never prefilled twice.
+  {
+    programKey: 'flea',
+    visit: 2,
+    reason: 'flea_followup',
+    explicitStage: true,
+    followupOf: ['flea_service'],
+    terms: ['flea follow', 'flea recheck', 'flea treatment 2', 'flea second treatment', 'second flea'],
+  },
+  {
+    programKey: 'flea',
+    visit: 1,
+    reason: 'flea_service',
+    serviceKeys: ['flea_tick'],
+    terms: ['flea', 'fleas'],
   },
   {
     programKey: 'cockroach',
@@ -209,26 +235,13 @@ const MATCH_RULES = [
   },
   {
     programKey: 'pest',
-    visit: 2,
-    reason: 'german_roach',
-    terms: ['german roach', 'german cockroach', 'roach cleanout', 'cockroach', 'cleanout'],
-  },
-  {
-    programKey: 'pest',
     visit: 3,
     reason: 'ant_service',
     terms: ['ant', 'ants', 'ghost ant', 'ghost ants', 'fire ant', 'fire ants', 'carpenter ant', 'carpenter ants'],
   },
-  // Flea and tick share the pest visit-4 broadcast protocol but are separate
-  // catalog services (flea_tick is flea-only "Flea Control Service" since the
-  // 2026-07 rebrand; ticks are tick_control) — keep their match reasons split
-  // so downstream labeling never calls a tick request a flea service.
-  {
-    programKey: 'pest',
-    visit: 4,
-    reason: 'flea_service',
-    terms: ['flea', 'fleas'],
-  },
+  // Ticks keep the pest visit-4 card. Flea has its own program (below, 2026-11-25); flea_tick is the
+  // flea-only "Flea Control Service" since the 2026-07 rebrand and ticks are tick_control, so their match
+  // reasons stay split and downstream labeling never calls a tick request a flea service.
   {
     programKey: 'pest',
     visit: 4,
@@ -312,6 +325,14 @@ function isPestPrimaryCompanion(normalized) {
   return /\bpest\b.*\brodent\b/.test(normalized) && !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(normalized);
 }
 
+// Names decided before the rodent, mosquito, palm and termite words are read: a pest visit that names a companion service stays pest, and
+// a flea job has its own card. "Flea & Tick" names a tick request too, and ticks stay on the pest tick card. Null: no decision here.
+function pestOrFleaProgram(normalized) {
+  if (isPestPrimaryCompanion(normalized)) return 'pest';
+  const names = (token) => hasToken(normalized, token);
+  return (names('flea') || names('fleas')) && !names('tick') && !names('ticks') ? 'flea' : null;
+}
+
 function programKeyForService(serviceType) {
   const normalized = normalize(serviceType);
   // The misting SYSTEM's plan phrase is its own program (a keyless row); bare "misting" below stays the barrier program.
@@ -322,7 +343,8 @@ function programKeyForService(serviceType) {
   if (normalized.includes('lawn') || normalized.includes('turf')) return 'lawn';
   if (normalized.includes('bed bug') || normalized.includes('bedbug')) return 'bed_bug';
   if (normalized.includes('cockroach') || normalized.includes('roach') || normalized.includes('palmetto bug')) return 'cockroach';
-  if (isPestPrimaryCompanion(normalized)) return 'pest';
+  const named = pestOrFleaProgram(normalized);
+  if (named) return named;
   if (
     hasToken(normalized, 'rodent') ||
     hasToken(normalized, 'rat') ||
@@ -424,6 +446,13 @@ function mistingSystemMatchOverride(serviceType, serviceKey) {
   return null;
 }
 
+// The rule for a booking: the first rule of its program whose terms the name carries, or the rule that claims its catalog
+// service key. The key wins, except over a rule marked `explicitStage` (the name itself says "treatment 2" or "heat").
+function ruleFor(keyRule, rules, normalized) {
+  const named = rules.find((rule) => rule.terms.some((term) => matchesTerm(normalized, term)));
+  return named?.explicitStage ? named : keyRule || named;
+}
+
 function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month = null } = {}) {
   const override = mistingSystemMatchOverride(serviceType, serviceKey);
   if (override) return override;
@@ -436,7 +465,7 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
     if (fallbackProgramKey === 'lawn') return false;
     return rule.programKey === fallbackProgramKey;
   });
-  const matchedRule = keyRule || rules.find((rule) => rule.terms.some((term) => matchesTerm(normalized, term)));
+  const matchedRule = ruleFor(keyRule, rules, normalized);
   const programKey = matchedRule?.programKey || fallbackProgramKey;
   const program = protocols?.[programKey] || null;
   if (!program) return { programKey, program: null, matchedVisit: null, matched: false, reason: 'program_missing' };
@@ -455,8 +484,24 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
   };
 }
 
+// A follow-up booked from a finished visit copies that visit's name and service key, and is marked only by
+// scheduled_services.followup_source_service_id. Its name therefore matches the SOURCE visit's card. When the
+// program has a follow-up card (its one rule whose reason ends `_followup`), a follow-up booking gets that card.
+// Every surface that shows a visit's card or products applies this to its match: the job card, the schedule
+// panel, the completion actions and the completion product defaults. A program with no follow-up rule keeps
+// its match. A follow-up rule with `followupOf` replaces only the cards it lists (the first treatment): a visit
+// whose own name already says its stage (a clearance check, a third treatment, a scope review) keeps that card.
+function followupVisitMatch(match, isFollowup) {
+  if (!isFollowup || !match?.program) return match;
+  const rule = MATCH_RULES.find((entry) => entry.programKey === match.programKey && /_followup$/.test(entry.reason || ''));
+  if (!rule || (rule.followupOf && !rule.followupOf.includes(match.reason))) return match;
+  const visit = findVisit(match.program, rule.visit);
+  return visit ? { ...match, matchedVisit: visit, matched: true, reason: rule.reason } : match;
+}
+
 module.exports = {
   MATCH_RULES,
+  followupVisitMatch,
   matchServiceProtocol,
   monthVisit,
   programKeyForService,

@@ -545,10 +545,11 @@ describe('pest regular protocol products: the protocol hints', () => {
     expect(JSON.stringify(protocols)).not.toMatch(/Advion Cockroach Gel Bait|Talstar P/);
   });
 
-  test('visits 2 to 6 keep their hints', () => {
+  // The pest program's visit 2 (a copy of the cockroach cleanout) is retired; the remaining visits are 3 to 6.
+  test('visits 3 to 6 keep their hints', () => {
+    expect(protocols.pest.visits.map((visit) => visit.visit)).toEqual([1, 3, 4, 5, 6]);
     const hintsByVisit = protocols.pest.visits.slice(1).map((visit) => Object.values(visit.lineMeta || {}).map((m) => m.catalogProductHints || null));
     expect(hintsByVisit).toEqual([
-      [['Advion Evolution Cockroach Gel Bait'], ['Atticus Antapex WSG'], ['Gentrol Complete EC3']],
       [['Advion Ant Gel'], ['Atticus Antapex WSG'], null],
       [],
       [['Contrac Blox']],

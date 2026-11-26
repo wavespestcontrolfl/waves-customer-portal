@@ -311,7 +311,9 @@ describe('protocols and the job card route by catalog key', () => {
     const job = require('fs').readFileSync(path.join(__dirname, '..', 'services/job-card.js'), 'utf8');
     expect(job).toContain("...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),");
     expect(job).toContain("...(fieldGuide ? {} : mistingSafetyField(program, programKey || match?.programKey)),");
-    expect(job).toContain("if (effectiveProgramKey !== 'mosquito_misting' || !program?.safety_rules?.length) return {};");
+    // The safety field is for the programs on this list only (misting, and the indoor flea and bed bug sprays): Tree & Shrub is not on it.
+    expect(job).toContain("const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'flea', 'bed_bug'];");
+    expect(job).toContain("if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};");
   });
 
   test('the job card resolves the misting program for the plan visit and the install visit (not the barrier steps)', async () => {
