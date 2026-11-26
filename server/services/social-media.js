@@ -113,6 +113,81 @@ async function isPausedByAdmin() {
 // 'blog' share stays unthrottled and uncounted.
 const AUTOSHARE_SOURCES = new Set(['rss', 'blog_scheduled', 'autonomous_blog', 'blog_auto']);
 
+// A blog share that a restart cuts off mid-run (a deploy during the midnight
+// share) used to leave NO row, because the row was written only after every
+// site posted. The next RSS tick then posted the article again everywhere:
+// Facebook got it twice on 2026-10-24 (3 copies), 11-19 and 11-24. The two
+// locked lanes (checkAndPublish, shareUrlOnce: both hold RSS_LOCK_ID) now write
+// a 'publishing' row before the first site and add each site's result as it
+// lands. A later locked run that finds a 'publishing' row knows that attempt
+// died (the lock would still be held otherwise), so it finishes only the sites
+// that did not get the post.
+const SHARE_PROGRESS_STATUS = 'publishing';
+
+function parsePlatformsPosted(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const list = JSON.parse(value || '[]');
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+// Sites an earlier cut-off attempt already reached: platform -> its results.
+function sitesAlreadyPosted(platformsPosted) {
+  const done = new Map();
+  for (const r of parsePlatformsPosted(platformsPosted)) {
+    if (!r || r.success !== true || r.dryRun || !r.platform) continue;
+    if (!done.has(r.platform)) done.set(r.platform, []);
+    done.get(r.platform).push(r);
+  }
+  return done;
+}
+
+// Never throws: a progress-row failure falls back to the old end-of-run write.
+async function openShareProgress({ title, description, normalizedLink, guid, source }) {
+  try {
+    const earlier = await db('social_media_posts')
+      .where('source_url', normalizedLink)
+      .whereIn('source_type', [...AUTOSHARE_SOURCES])
+      .whereIn('status', [SHARE_PROGRESS_STATUS, 'failed'])
+      .orderBy('created_at', 'desc')
+      .first('id', 'status', 'platforms_posted');
+    if (earlier) {
+      const done = earlier.status === SHARE_PROGRESS_STATUS ? sitesAlreadyPosted(earlier.platforms_posted) : new Map();
+      if (earlier.status !== SHARE_PROGRESS_STATUS) {
+        await db('social_media_posts').where('id', earlier.id).update({ status: SHARE_PROGRESS_STATUS });
+      }
+      if (done.size) logger.warn(`[social] resuming a cut-off share of ${normalizedLink}: already on ${[...done.keys()].join(', ')}`);
+      return { rowId: earlier.id, done };
+    }
+    const [row] = await db('social_media_posts').insert({
+      title,
+      description: (description || '').substring(0, 1000),
+      source_url: normalizedLink,
+      source_guid: guid,
+      source_type: source,
+      platforms_posted: JSON.stringify([]),
+      status: SHARE_PROGRESS_STATUS,
+      ai_model: MODELS.VOICE,
+    }).returning('id');
+    return { rowId: row && (row.id || row), done: new Map() };
+  } catch (err) {
+    logger.warn(`[social] share progress row failed (${err.message}); writing at the end only`);
+    return { rowId: null, done: new Map() };
+  }
+}
+
+async function recordShareProgress(rowId, platformResults) {
+  if (!rowId) return;
+  try {
+    await db('social_media_posts').where('id', rowId).update({ platforms_posted: JSON.stringify(platformResults) });
+  } catch (err) {
+    logger.warn(`[social] share progress update failed: ${err.message}`);
+  }
+}
+
 // Kill switch: SOCIAL_AUTOSHARE_DAILY_CAP=0 disables the cap entirely.
 // Deliberately defaults ON (1/day) rather than the usual dark-ship default-OFF:
 // a default-OFF throttle would leave the spam live on deploy, which is the bug.
@@ -2041,7 +2116,9 @@ const SocialMediaService = {
             if (feedUrls.length) this.whereIn('source_url', feedUrls);
             if (feedGuids.length) this.orWhereIn('source_guid', feedGuids);
           })
-          .whereNotIn('status', ['dry_run', 'failed', 'rejected'])
+          // 'publishing' = an attempt a restart cut off (we hold the lock, so
+          // it is not running): resume it below, finishing only missing sites.
+          .whereNotIn('status', ['dry_run', 'failed', 'rejected', SHARE_PROGRESS_STATUS])
           .select('source_url', 'source_guid');
         takenUrls = new Set(takenRows.map((r) => r.source_url).filter(Boolean));
         takenGuids = new Set(takenRows.map((r) => r.source_guid).filter(Boolean));
@@ -2129,6 +2206,7 @@ const SocialMediaService = {
             // An admin-triggered run already bypasses the automatic RSS gates;
             // it must bypass the auto-share cap and GBP narrowing too.
             bypassAutoshareThrottle: manual,
+            trackProgress: true,
           });
           if (result?.success) autosharesLeft -= 1;
           results.push({ item: item.title, ...result });
@@ -2175,7 +2253,7 @@ const SocialMediaService = {
         // Same exclusions as the RSS path above: a REJECTED studio draft is
         // an admin killing that copy, not vetoing the URL — nothing posted,
         // so it must not block (or worse, park) an auto-share.
-        .whereNotIn('status', ['dry_run', 'failed', 'rejected'])
+        .whereNotIn('status', ['dry_run', 'failed', 'rejected', SHARE_PROGRESS_STATUS])
         .first();
       // blocking_status lets callers distinguish "definitively sent/queued"
       // (published/scheduled — safe to stamp the source row as shared) from
@@ -2188,6 +2266,7 @@ const SocialMediaService = {
         // Autonomous blog-share lane: opt into every platform incl. Twitter
         // (the omitted-channels default excludes it).
         channels: PUBLISH_PLATFORMS,
+        trackProgress: true,
       });
       return { shared: true, ...result };
     });
@@ -2245,7 +2324,7 @@ const SocialMediaService = {
   // videoUrl: a hosted MP4 (creative-engine Reel). FB posts it as a page video
   // and IG as a Reel; GBP has no video ingestion, so it keeps the image params
   // (imageUrl/gbpImageUrl are the still fallback alongside a video).
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, gbpImageBranded = false, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false, onFirstPlatformSuccess = null }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, gbpImageBranded = false, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false, onFirstPlatformSuccess = null, trackProgress = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -2286,6 +2365,11 @@ const SocialMediaService = {
     }
 
     const platformResults = [];
+    // Locked blog lanes only (see SHARE_PROGRESS_STATUS).
+    const progressLink = normalizeUrl(link);
+    const progress = trackProgress && !SOCIAL_FLAGS.dryRun && !postId && progressLink && AUTOSHARE_SOURCES.has(source)
+      ? await openShareProgress({ title, description, normalizedLink: progressLink, guid, source })
+      : { rowId: null, done: new Map() };
     // Durable-marker hook: awaited the moment the FIRST platform reports
     // success, BEFORE any later provider call runs. The testimonial path
     // passes its first-win published stamp here — posting continues
@@ -2519,6 +2603,10 @@ const SocialMediaService = {
     ].filter((platform) => requestedPlatforms.has(platform.key));
 
     for (const p of platforms) {
+      if (progress.done.has(p.key)) {
+        platformResults.push(...progress.done.get(p.key).map((r) => ({ ...r, resumed: true })));
+        continue;
+      }
       if (!p.enabled) {
         platformResults.push({ platform: p.key, skipped: p.reason });
         continue;
@@ -2680,6 +2768,7 @@ const SocialMediaService = {
         logger.error(`[social] ${p.key} post failed: ${err.message}`);
         platformResults.push({ platform: p.key, success: false, error: err.message });
       }
+      await recordShareProgress(progress.rowId, platformResults);
       await fireFirstPlatformSuccess();
     }
 
@@ -2719,6 +2808,10 @@ const SocialMediaService = {
       }
       gbpLocations = rotateGbpLocation(candidates);
       logger.info(`[social] auto-share GBP narrowed to ${gbpLocations[0].name} (rotation)`);
+    }
+    if (progress.done.has('gbp')) {
+      platformResults.push(...progress.done.get('gbp').map((r) => ({ ...r, resumed: true })));
+      gbpLocations = [];
     }
     for (const loc of gbpLocations) {
       try {
@@ -2768,6 +2861,7 @@ const SocialMediaService = {
       } catch (err) {
         platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: err.message });
       }
+      await recordShareProgress(progress.rowId, platformResults);
       await fireFirstPlatformSuccess();
     }
 
@@ -2827,6 +2921,11 @@ const SocialMediaService = {
             ...updateCols,
             image_url: postRow.image_url,
           });
+        if (!updated) await db('social_media_posts').insert(postRow);
+      } else if (progress.rowId) {
+        const updated = await db('social_media_posts')
+          .where('id', progress.rowId)
+          .update({ ...updateCols, image_url: postRow.image_url, source_type: postRow.source_type });
         if (!updated) await db('social_media_posts').insert(postRow);
       } else if (isAutoSource) {
         const existingByUrl = normalizedLink
