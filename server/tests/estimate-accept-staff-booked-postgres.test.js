@@ -171,7 +171,7 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
       service_type: 'Monthly Lawn Care Service', scheduled_date: BOOKED_DATE,
       window_start: '09:00', window_end: '11:00', status: 'confirmed', estimated_price: STAFF_PRICE,
       reservation_expires_at: stamp === 'cleared' ? null
-        : trx.raw(stamp === 'live' ? "NOW() + INTERVAL '10 minutes'" : "NOW() - INTERVAL '1 hour'"),
+        : trx.raw({ live: "NOW() + INTERVAL '10 minutes'", justlapsed: "NOW() - INTERVAL '30 seconds'" }[stamp] || "NOW() - INTERVAL '1 hour'"),
     });
     return id;
   }
@@ -237,6 +237,9 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
   test.each([
     ['lapsed', 'RESERVATION_EXPIRED'],
     ['cleared', 'RESERVATION_EXPIRED'],
+    // Inside the commit grace an unclaimed hold still graduates, but a booked
+    // visit's timestamp is judged on the database clock with no grace.
+    ['justlapsed', 'RESERVATION_EXPIRED'],
     ['live', 'SLOT_UNAVAILABLE'],
   ])('accept by slot of a staff-booked visit (%s timestamp) is refused and the visit untouched', async (stamp, code) => {
     const { customerId, estimateId, token } = await fixture(mockTransaction);
@@ -266,6 +269,27 @@ postgres('estimate accept — a visit staff booked from the hold', () => {
     const res = await putAccept(token, { existingAppointmentId: id, existingAppointmentWasHold: false });
     expect(res.status).toBe(200);
     expect((await visitRow(id)).reservation_expires_at).toBeNull();
+  });
+
+  // Termite annual sign-before-pay books nothing; the persisted park stamp routes
+  // the accept into that lane. It records the pick only from an unclaimed live hold.
+  describe('sign-before-pay lane', () => {
+    const parked = (estimateId) => mockTransaction('estimates').where({ id: estimateId }).update({ annual_plan_activation_status: 'awaiting_signature' });
+    const acceptPrepay = (token, body) => putAccept(token, { paymentMethodPreference: 'prepay_annual', ...body });
+
+    test.each([['slot', (id) => ({ slotId: SLOT_ID })], ['appointment id', (id) => ({ existingAppointmentId: id, existingAppointmentWasHold: true })]])(
+      'a visit staff booked after the preflight is refused by %s and never recorded as the requested first visit', async (_label, body) => {
+        const { customerId, estimateId, token } = await fixture(mockTransaction);
+        const id = await staffBookedHold(mockTransaction, { customerId, estimateId, stamp: 'live' });
+        await parked(estimateId);
+        const before = await visitRow(id);
+        const res = await acceptPrepay(token, body(id));
+        expect(res.status).toBe(409);
+        expect(await visitRow(id)).toEqual(before);
+        const stored = await mockTransaction('estimates').where({ id: estimateId }).first();
+        expect(JSON.stringify(stored.estimate_data || {})).not.toContain(id);
+      },
+    );
   });
 
   test('control: an unclaimed hold still graduates for its own estimate', async () => {

@@ -175,6 +175,24 @@ describe('accept-path wiring (source pins)', () => {
     const guard = src.slice(at, src.indexOf('// Parse estimate data + detect one-time-only', at));
     expect(guard).toContain('if (reservationRow.customer_id != null) {');
     expect(guard).toContain("code: 'SLOT_UNAVAILABLE'");
+    // No commit grace for a booked visit: its timestamp is compared with the DB clock.
+    expect(guard).toContain("whereRaw('reservation_expires_at <= NOW()')");
+  });
+
+  test('sign-before-pay re-reads its pick FOR UPDATE under the date lock and accepts only an unclaimed live hold of this estimate', () => {
+    const at = src.indexOf('const termitePickRow = isTermiteAnnualSignBeforePay');
+    expect(at).toBeGreaterThan(0);
+    const lock = src.slice(at, src.indexOf('const acceptHoldRow = reservationRow', at));
+    expect(lock).toContain('await acquireOccupancyLock(trx, termitePickDate)');
+    const at2 = src.indexOf('let termitePickLocked = null;');
+    const recheck = src.slice(at2, src.indexOf('if (reservationRow && customerId && !isTermiteAnnualSignBeforePay)', at2));
+    expect(recheck).toContain('source_estimate_id: estimate.id');
+    expect(recheck).toContain(".whereNull('customer_id')");
+    expect(recheck).toContain("whereRaw('reservation_expires_at > NOW()')");
+    expect(recheck).toContain('.forUpdate()');
+    expect(recheck).toContain("code: 'RESERVATION_EXPIRED'");
+    // The preference is built from the locked row only.
+    expect(src).toContain('requestedFirstVisitFromRow(termitePickLocked || reservationRow || existingAppointmentRow)');
   });
 
   test('the accept preflight reads the commit grace from the reservation service and threads it into the adoption lookup', () => {

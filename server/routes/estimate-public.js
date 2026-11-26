@@ -10816,6 +10816,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // Refuse it here, before any lane (the sign-before-pay preference included)
       // reads it as the customer's pick; a reload then offers the booked visit.
       if (reservationRow.customer_id != null) {
+        // The commit grace belongs to unclaimed holds only. A booked visit's old
+        // timestamp is compared with the database clock: lapsed reads as the
+        // expiry, a live one as a taken slot.
+        const bookedStampLapsed = await db('scheduled_services')
+          .where({ id: reservationRow.id })
+          .whereRaw('reservation_expires_at <= NOW()')
+          .first('id');
+        if (bookedStampLapsed) return res.status(409).json(HOLD_EXPIRED_409);
         return res.status(409).json({ code: 'SLOT_UNAVAILABLE', error: 'slot no longer available — re-pick a slot' });
       }
     }
@@ -12232,6 +12240,16 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // its own (hold ids are never reused), so no inversion opens.
       let acceptPreLockedDate = null;
       let acceptPreLockedTechId = null;
+      // Sign-before-pay books nothing, but it records the picked visit as the
+      // requested first visit: take that visit's date key before any row lock so
+      // the locked recheck below runs under it.
+      const termitePickRow = isTermiteAnnualSignBeforePay ? (reservationRow || existingAppointmentRow) : null;
+      let termitePickDate = null;
+      if (termitePickRow) {
+        const pickDateRow = await trx('scheduled_services').where({ id: termitePickRow.id }).first('scheduled_date');
+        termitePickDate = pickDateRow ? dateOnly(pickDateRow.scheduled_date) : null;
+        if (termitePickDate) await acquireOccupancyLock(trx, termitePickDate);
+      }
       {
         const acceptHoldRow = reservationRow
           || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow)
@@ -13274,6 +13292,20 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // requestedFirstVisit below) and the hold is released post-commit;
       // an adopted existing appointment is left untouched for the same
       // reason.
+      // Strict and narrow: this lane records an unclaimed live hold of THIS estimate
+      // and nothing else. A booked visit is never adopted here.
+      let termitePickLocked = null;
+      if (termitePickRow) {
+        termitePickLocked = await trx('scheduled_services')
+          .where({ id: termitePickRow.id, source_estimate_id: estimate.id })
+          .whereNull('customer_id')
+          .whereRaw('reservation_expires_at > NOW()')
+          .forUpdate()
+          .first();
+        if (!termitePickLocked || dateOnly(termitePickLocked.scheduled_date) !== termitePickDate) {
+          throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
+        }
+      }
       if (reservationRow && customerId && !isTermiteAnnualSignBeforePay) {
         try {
           const committedAppointment = await slotReservation.commitReservation({
@@ -13924,7 +13956,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           // The customer's pick, kept only as a scheduling preference for
           // staff once the plan is signed (nothing was booked).
           ...(isTermiteAnnualSignBeforePay && (reservationRow || existingAppointmentRow)
-            ? { requestedFirstVisit: requestedFirstVisitFromRow(reservationRow || existingAppointmentRow) }
+            ? { requestedFirstVisit: requestedFirstVisitFromRow(termitePickLocked || reservationRow || existingAppointmentRow) }
             : {}),
         });
         if (annualPrepayConversionResult?.annualPlanActivationStatus) {
