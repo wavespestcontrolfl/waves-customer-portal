@@ -517,6 +517,32 @@ describe('service-interest mapper hardening', () => {
     expect(mapServiceInterestToEstimateServices('Pest control, no shrubs').services).not.toHaveProperty('treeShrub');
   });
 
+  test('shrubs as a location, shrub fertilization, one-time and removed forms do not mis-map', () => {
+    // Location word: the service is mosquito, not plant care.
+    const mosquito = mapServiceInterestToEstimateServices('Mosquito control around shrubs');
+    expect(mosquito.services).toEqual({ mosquito: { tier: 'monthly12' } });
+    expect(mapServiceInterestToEstimateServices('Wasp nest in the shrubs').services).not.toHaveProperty('treeShrub');
+    expect(mapServiceInterestToEstimateServices('My shrubs are dying').services).toHaveProperty('treeShrub');
+    // Fertilization qualifies the plant, so it must not add a lawn program...
+    const shrubFert = mapServiceInterestToEstimateServices('Shrub fertilization');
+    expect(shrubFert.services).toEqual({ treeShrub: { tier: 'standard', palmCountUnverified: true } });
+    // ...but an explicit lawn request keeps both lines.
+    expect(mapServiceInterestToEstimateServices('Lawn fertilization and shrub care').services)
+      .toMatchObject({ lawn: expect.any(Object), treeShrub: { tier: 'standard' } });
+    // One-time is not the recurring Standard program.
+    expect(mapServiceInterestToEstimateServices('One-time shrub care')).toMatchObject({
+      supported: false,
+      unsupportedReason: 'tree_shrub_one_time_requires_manual_scope',
+    });
+    // Every form of "remove" parks.
+    for (const text of ['Shrubs need to be removed', 'Removing dead shrubs', 'Shrub removal']) {
+      expect(mapServiceInterestToEstimateServices(text)).toMatchObject({
+        supported: false,
+        unsupportedReason: 'tree_shrub_trimming_or_removal_requires_manual_scope',
+      });
+    }
+  });
+
   test('mixed pest and tree & shrub maps both services', () => {
     const mapped = mapServiceInterestToEstimateServices('Recurring pest control and tree & shrub care');
     expect(mapped).toMatchObject({

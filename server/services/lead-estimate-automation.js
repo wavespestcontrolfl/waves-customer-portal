@@ -124,19 +124,23 @@ function pestFrequencyFromText(text) {
   return 'quarterly';
 }
 
-const TREE_SHRUB_INTEREST = /\btree and shrub\b|\bshrubs?\b|\bornamentals?\b/;
+// "shrubs" after a location word ("mosquito control around shrubs") says where
+// another service happens, not that the lead wants plant care.
+const TREE_SHRUB_INTEREST = /\btree and shrub\b|(?<!\b(?:around|near|in|inside|under|by|from|on|behind|beside|along)\s(?:the\s|my\s|our\s)?)\bshrubs?\b|\bornamentals?\b/;
 
 // Interest text that names work automation never prices, so the lead parks
 // for manual scoping instead of drafting a partial or wrong quote.
-function interestManualScopeReason(wants) {
+function interestManualScopeReason(wants, oneTime) {
   if (wants(/\baeration\b|\bplugging\b|\blawn plug\b|\bcore plug\b/)) {
     return 'lawn_aeration_plugging_requires_manual_scope';
   }
   if (!wants(TREE_SHRUB_INTEREST)) return null;
   // Trimming, pruning and removal are arborist work the T&S program does not price.
-  if (wants(/\b(trim\w*|prun\w*|removal|remove|cut|cutting)\b/)) {
+  if (wants(/\b(trim\w*|prun\w*|remov\w*|cut|cutting)\b/)) {
     return 'tree_shrub_trimming_or_removal_requires_manual_scope';
   }
+  // The only T&S draft is the recurring Standard program.
+  if (oneTime) return 'tree_shrub_one_time_requires_manual_scope';
   // Palm injection / nutrition is a separate catalog program; drafting T&S
   // alone would quietly drop it.
   if (wants(/\bpalm (tree )?(injections?|nutrition)\b|\binject\w*/)) {
@@ -172,7 +176,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
   // plain matches — they qualify a selected service, they don't select one.
   const wants = (pattern) => hasUnnegatedMention(text, pattern);
 
-  const manualScopeReason = interestManualScopeReason(wants);
+  const manualScopeReason = interestManualScopeReason(wants, isOneTimeServiceText(text));
   if (manualScopeReason) {
     return { services, supported: false, unsupportedReason: manualScopeReason, review };
   }
@@ -186,7 +190,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     }
   }
 
-  if (wants(/\blawn\b|\bfertilization\b|\bweed\b/)) {
+  if (wants(/\blawn\b|(?<!\b(?:shrub|shrubs|tree|trees|palm|palms|ornamental|ornamentals)\s)\bfertilization\b|\bweed\b/)) {
     const lawnPest = wants(/\blawn pest\b/);
     if (pestWanted && !lawnPest) {
       services.lawn = { track: 'st_augustine', tier: 'enhanced' };
