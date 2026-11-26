@@ -367,7 +367,10 @@ describe('the alert after an office call', () => {
     expect(saved().next_step).toBe(JSON_REPLY.next_step);
   });
 
-  test('no forward_acceptance, or an unknown answerer (no number): no alert', async () => {
+  test('no forward_acceptance, or an unknown or malformed answerer: no alert', async () => {
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    setCall({ acceptance: { ...staffAnswer, answered_by_number: 'anonymous' } });
     reply(JSON.stringify(JSON_REPLY));
     await early.writeEarlySummary(SID, { now: NOW });
     setCall({ acceptance: { ...staffAnswer, answered_by_number: null } });
@@ -438,6 +441,20 @@ describe('the promises saved', () => {
     reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll call you back tomorrow"] }));
     await early.writeEarlySummary(SID, { now: NOW });
     expect(saved().promises).toEqual([]);
+  });
+
+  test('a short whole staff reply is kept; the same words inside a longer line are not', async () => {
+    say([...CALL, ['staff', 'I will.'], ['staff', 'I will not send it.']]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ['I will.'] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual(['I will.']);
+  });
+
+  test('a Spanish promise matches its own line; a line with an account number is left out', async () => {
+    say([...CALL, ['staff', 'Le mando la cotización hoy.'], ['staff', "I'll email the receipt for account 12345678."]]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ['Le mando la cotización hoy.', "I'll email the receipt"] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual(['Le mando la cotización hoy.']);
   });
 
   test('a staff line too long to show whole is left out, never cut', async () => {

@@ -53,7 +53,7 @@ const MAX_PROMISES = 4;
 const MAX_PROMISE_CHARS = 120;
 
 const SYSTEM_PROMPT = `You read a finished phone call to Waves, a pest control company, for the office staff. "Caller:" is the customer or prospect. "Agent:" is the Waves staff member. The text is a live machine transcript, so some words may be wrong.
-Write in English, even when the call was in Spanish. Use only what the text says; do not guess. Never include card numbers, account numbers or security codes.
+Write the summary and the next step in English, even when the call was in Spanish; copy promises in the call's own language, word for word. Use only what the text says; do not guess. Never include card numbers, account numbers or security codes.
 Reply with ONLY this JSON object, no code fence:
 {"summary": "<2 or 3 plain sentences: what the caller wanted, what was agreed or done, and the next step if one was named>",
 "next_step": "<one plain sentence, ${MAX_NEXT_STEP_CHARS} characters or fewer, starting with a verb: what the office should do next; null if nothing is left to do>",
@@ -233,11 +233,14 @@ function groundedPromises(promises, staffLines) {
   const kept = [];
   for (const p of promises) {
     const quote = normalized(p);
-    const line = quote.length >= 8 && agentLines.find((l) => ` ${normalized(l)} `.includes(` ${quote} `));
+    // A short quote ("I will.") counts only as a whole staff reply; a longer one may sit inside a line.
+    const line = quote && agentLines.find((l) => (quote.length >= 8 ? ` ${normalized(l)} `.includes(` ${quote} `) : normalized(l) === quote));
     // A staff line too long to show whole is left out (a cut could hide the promise or its condition), and so is one
-    // that also holds an access code (gate, door, alarm): the model may have quoted around it.
+    // that also holds an access code (gate, door, alarm) or a run of 5+ digits (an account number): the model may have
+    // quoted around it.
     const shown = line ? cleanText(line, 10000) : null;
-    if (shown && (shown.length > MAX_PROMISE_CHARS || require('./context-aggregator').redactAccessCodes(shown) !== shown)) continue;
+    if (shown && (shown.length > MAX_PROMISE_CHARS || /\d(?:[\s.-]?\d){4,}/.test(shown)
+      || require('./context-aggregator').redactAccessCodes(shown) !== shown)) continue;
     if (shown && !kept.includes(shown)) kept.push(shown);
   }
   return kept;

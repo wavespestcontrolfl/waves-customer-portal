@@ -63,11 +63,13 @@ function ownerAnswered(acceptance) {
   return !!owner && !!answered && owner === answered;
 }
 
-// A known staff number that is not the owner's answered. An unknown answerer, or no ADAM_PHONE, is not proof.
+// A known staff number that is not the owner's answered. An unknown or malformed answerer, or a missing or malformed
+// ADAM_PHONE, is not proof (toE164 hands a value it cannot read back unchanged).
+const US_E164_RE = /^\+1\d{10}$/;
 function staffAnswered(acceptance) {
   const owner = toE164(process.env.ADAM_PHONE);
   const answered = toE164(acceptance?.answered_by_number);
-  return !!owner && !!answered && owner !== answered;
+  return US_E164_RE.test(owner || '') && US_E164_RE.test(answered || '') && owner !== answered;
 }
 
 // Decides whether a check is due, then stamps it with a compare-and-swap on upset_checks: of two webhooks that read
