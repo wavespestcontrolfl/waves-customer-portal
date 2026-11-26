@@ -53,7 +53,7 @@ jest.mock('../models/db', () => {
       Object.assign(live(), JSON.parse(bindings[0]));
       return 1;
     });
-    q.first = jest.fn(async () => (state.call && !blockedByQuarantine(q) ? { id: state.call.id, metadata: state.call.metadata } : undefined));
+    q.first = jest.fn(async () => (state.call && !blockedByQuarantine(q) ? { id: state.call.id, metadata: state.call.metadata, customer_id: state.call.customer_id } : undefined));
     return q;
   }
   // The shared predicate (live-call-transcription QUARANTINE_WHERE_SQL): quarantined_at, or the recording scrub's
@@ -75,6 +75,7 @@ jest.mock('../models/db', () => {
   // notifications: the purge deletes the office-call alert row by its dedupe key.
   function notifications() {
     const q = {};
+    q.where = jest.fn(() => q);
     q.whereRaw = jest.fn((sql, bindings) => { q.key = bindings[0]; return q; });
     q.del = jest.fn(async () => { state.deletedAlertKeys.push(q.key); return 1; });
     return q;
@@ -435,6 +436,22 @@ describe('the alert after an office call', () => {
     reply(JSON.stringify({ ...JSON_REPLY, promises: ['You are set for Thursday at 9.', 'Thursday morning works.', 'We will waive the fee forever.'] }));
     await early.writeEarlySummary(SID, { now: NOW });
     expect(saved().promises).toEqual(['You are set for Thursday at 9.']);
+  });
+
+  test('a refusal is never turned into a promise ("cannot" read as "can")', async () => {
+    setCall({ acceptance: staffAnswer });
+    say([...CALL, ['staff', 'I cannot waive the fee, sorry.']]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ['I can waive the fee', 'I cannot waive the fee'] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual(['I cannot waive the fee']);
+  });
+
+  test("the call's customer id rides in the alert metadata (an internal test customer rings nobody)", async () => {
+    setCall({ acceptance: staffAnswer });
+    db.__state.call.customer_id = 'cust-9';
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise.mock.calls[0][2].metadata).toEqual({ customerId: 'cust-9' });
   });
 
   test('a gate code in the model words never reaches the banner: fixed copy instead', async () => {

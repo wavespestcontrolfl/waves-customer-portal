@@ -119,6 +119,7 @@ jest.mock('../models/db', () => {
   // notifications: the purge deletes the call's office-call alert row (live-call-early-summary.js) by dedupe key.
   function notifications() {
     const q = {};
+    q.where = jest.fn(() => q);
     q.whereRaw = jest.fn((sql, bindings) => { q.key = bindings[0]; return q; });
     q.del = jest.fn(async () => { (state.deletedAlertKeys ||= []).push(q.key); return 0; });
     return q;

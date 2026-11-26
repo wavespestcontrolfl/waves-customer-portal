@@ -58,7 +58,7 @@ Write in English, even when the call was in Spanish. Use only what the text says
 Reply with ONLY this JSON object, no code fence:
 {"summary": "<2 or 3 plain sentences: what the caller wanted, what was agreed or done, and the next step if one was named>",
 "next_step": "<one plain sentence, ${MAX_NEXT_STEP_CHARS} characters or fewer, starting with a verb: what the office should do next; null if nothing is left to do>",
-"promises": [<at most ${MAX_PROMISES} short quotes of something the Agent promised the caller, such as "I'll text you the quote in a few minutes."; [] if none>],
+"promises": [<at most ${MAX_PROMISES} exact word-for-word quotes, copied from one Agent line, of something the Agent promised the caller, such as "I'll text you the quote in a few minutes."; [] if none>],
 "alert_title": "<${MAX_ALERT_TITLE_CHARS} characters or fewer, starts lower case, verb first, such as "text Dana E. a roach quote"; the caller's first name and last initial only if said; null when next_step is null>",
 "alert_line": "<ONE sentence, ${MAX_ALERT_LINE_CHARS} characters or fewer: who called, what they want, what was promised; no exclamation mark, no dates, no codes>"}`;
 
@@ -221,13 +221,13 @@ function actionFor(name, reply) {
 //   the transfers count stays after a later hold replaces the transfer state);
 // - no card talk anywhere in the live text (every utterance, not the head and tail the model read): a card-pause
 //   stamp, a masked card number or card words. Those are the calls a later card-number quarantine can clear.
-async function officeAlertBlock(callSid, meta) {
+async function officeAlertBlock(conn, callSid, meta) {
   if (!staffAnswered(meta?.forward_acceptance)) return 'not_staff';
   const hold = meta?.conference_path?.hold;
   if (hold?.transfer || Number(hold?.transfers) > 0) return 'transfer';
   if (meta?.live_transcription?.card_pause) return 'card';
   const { isCardIntent } = require('./live-call-card-pause');
-  const rows = await db('call_live_utterances').where('call_sid', callSid).select('text', 'pan_masked');
+  const rows = await conn('call_live_utterances').where('call_sid', callSid).select('text', 'pan_masked');
   return (rows || []).some((r) => isCardIntent(r.text, r.pan_masked)) ? 'card' : null;
 }
 
@@ -236,44 +236,46 @@ async function officeAlertBlock(callSid, meta) {
 // lock after a re-check, and a purge after it deletes the row. Never throws: the saved summary stands.
 async function alertOfficeCall(callSid, reply) {
   try {
-    const call = await db('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id', 'metadata');
-    let meta = call?.metadata;
-    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-    if (!call || (await officeAlertBlock(callSid, meta))) return;
-    const name = staffNameOf(meta.forward_acceptance);
     await db.transaction(async (trx) => {
-      // The purge's own lock (live-call-transcription.js purgeLiveUtterances): a purge waits for this insert to
-      // commit, then deletes the row; a purge that committed first is seen here and nothing is written.
+      // The lock the live-text writer and the purge share (live-call-transcription.js): every check below reads the
+      // call as it stands under it, so a late card utterance or a quarantine either lands first (and blocks) or waits
+      // for this commit (and the purge then deletes the row). The banner sends only after the commit.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_live_utterances:${callSid}`]);
-      const clear = await trx('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id');
-      if (clear) await raiseOfficeAlert(trx, callSid, call.id, name, reply);
+      const call = await trx('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id', 'metadata', 'customer_id');
+      let meta = call?.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      if (!call || (await officeAlertBlock(trx, callSid, meta))) return;
+      await raiseOfficeAlert(trx, callSid, call, staffNameOf(meta.forward_acceptance), reply);
     });
   } catch (err) {
     logger.warn(`[live-call-early-summary] next-step alert failed: ${err?.code || err?.name || 'error'}`);
   }
 }
 
-function raiseOfficeAlert(trx, callSid, callId, name, reply) {
+// customerId rides in the metadata so an internal test customer's call rings nobody (notification-service.js).
+function raiseOfficeAlert(trx, callSid, call, name, reply) {
   return raiseAdminAlert('live_call_next_step', {
       area: 'Comms',
       action: actionFor(name, reply),
       why: whyFor(name, reply),
       severity: reply.next_step ? 'needs-you' : 'fyi',
-      link: `/admin/communications#tab=calls&call=${encodeURIComponent(callId)}`,
-      subject: { type: 'call', id: String(callId) },
+      link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
+      subject: { type: 'call', id: String(call.id) },
       doneWhen: 'office_followed_up',
       who: 'person',
-    }, { bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${callSid}`, bannerKind: 'live_call_next_step', trx });
+    }, { bell: true, fyiRow: true, dedupeKey: `live-call-next-step:${callSid}`, bannerKind: 'live_call_next_step', trx,
+    ...(call.customer_id ? { metadata: { customerId: call.customer_id } } : {}) });
 }
 
-// The promises the staff side really said: a promise is kept only when most of its words (3+ letters) appear in one
-// "Agent:" line, so a caller's words or a model's guess never show under a staff member's name.
-const words = (t) => (String(t || '').toLowerCase().match(/[a-z0-9']{3,}/g) || []);
+// The promises the staff side really said: a promise is kept only when it is a contiguous quote of one "Agent:" line
+// (case, curly quotes, punctuation and spacing aside), so a caller's words, a model's guess or a flipped refusal
+// ("I cannot waive the fee" read as "I can waive the fee") never shows under a staff member's name.
+const normalized = (t) => String(t || '').toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
 function groundedPromises(promises, transcript) {
-  const agentLines = String(transcript || '').split('\n').filter((l) => l.startsWith('Agent: ')).map((l) => new Set(words(l)));
+  const agentLines = String(transcript || '').split('\n').filter((l) => l.startsWith('Agent: ')).map((l) => ` ${normalized(l.slice(7))} `);
   return promises.filter((p) => {
-    const ws = words(p);
-    return ws.length > 0 && agentLines.some((line) => ws.filter((w) => line.has(w)).length / ws.length >= 0.6);
+    const quote = normalized(p);
+    return quote.length >= 8 && agentLines.some((line) => line.includes(` ${quote} `));
   });
 }
 
