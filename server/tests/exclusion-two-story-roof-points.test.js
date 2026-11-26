@@ -207,6 +207,35 @@ describe('replay: the estimate-level rule stamp decides the factor', () => {
     expect(await recomputeTotal(invalidated(after))).toBe(780);
   });
 
+  test('an issued inputs-only estimate (no rows, no stamp, no bundle) replays at $600; an unsent draft and a fresh quote stay on $780', async () => {
+    const inputsOnly = () => ({ engineInputs: REQUEST() });
+    // Issued (no never-issued mark): sold before the rule, so the replay never raises it.
+    expect(savedLegacyTwoStoryRoofSignal(inputsOnly())).toEqual({ legacyTwoStoryRoof: undefined });
+    expect(savedFloorReplaySignals(inputsOnly()).legacyTwoStoryRoof).toBe(true);
+    expect(extractEngineInputs(inputsOnly()).legacyTwoStoryRoof).toBe(true);
+    expect(publicReplayTotal(inputsOnly())).toBe(600);
+    expect(await recomputeTotal(inputsOnly())).toBe(600);
+    // Every request carrier counts, and a request with no exclusion pins nothing.
+    const exclusionInputs = { services: { exclusion: { pricingVersion: 'v2', ...ADV_ONLY } } };
+    for (const saved of [
+      { inputs: exclusionInputs }, { engineInput: exclusionInputs }, { result: { inputs: exclusionInputs } },
+      { engineRequest: { profile: {}, selectedServices: ['PEST', 'EXCLUSION'] } },
+      { engineInputs: { services: { rodentExclusion: { pricingVersion: 'v2' } } } },
+      JSON.stringify({ engineInputs: exclusionInputs }),
+    ]) expect(savedFloorReplaySignals(saved).legacyTwoStoryRoof).toBe(true);
+    expect(savedFloorReplaySignals({ engineInputs: baseInput({ services: { flea: {} } }) }).legacyTwoStoryRoof).toBeUndefined();
+    expect(savedFloorReplaySignals({ engineRequest: { profile: {}, selectedServices: ['PEST'] } }).legacyTwoStoryRoof).toBeUndefined();
+    // A draft the caller marked never-issued is not sold: current rule, $780.
+    const draft = inputsOnly();
+    draft[Symbol.for('waves.estimate.neverIssued')] = true;
+    expect(savedFloorReplaySignals(draft).legacyTwoStoryRoof).toBeUndefined();
+    expect(publicReplayTotal(draft)).toBe(780);
+    // A fresh unsent quote (stamped false by the engine) is untouched by the fallback.
+    expect(publicReplayTotal(freshQuote())).toBe(780);
+    // The first send of an inputs-only draft reads the plain stamp (no fallback), so its snapshot prices on the current rule.
+    expect(savedLegacyTwoStoryRoofSignal(inputsOnly())).toEqual({ legacyTwoStoryRoof: undefined });
+  });
+
   test('the send-snapshot builder freezes the stamp beside the bundle', () => {
     const fs = require('fs');
     const route = fs.readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');

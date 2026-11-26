@@ -256,8 +256,32 @@ function savedLegacyPricingRulesSignal(estData) {
 // Its own stamp, because an estimate priced after the seven fixes above and before this rule carries legacyPricingRules false
 // yet was sold without the factor: true = no two-story factor. An estimate with priced lines and no stamp predates the rule
 // and keeps its price; one with no priced lines pins nothing.
-function savedLegacyTwoStoryRoofSignal(estData) {
+//
+// Replay readers pass { inputsOnlyIsLegacy: true }: an ISSUED estimate that kept only its inputs (no priced rows, no stamp, no
+// snapshot bundle) but still asks for an exclusion was sold before the rule, and a replay never raises a sold price, so it reads
+// legacy. A draft the caller marked never-issued (estimate-bahia-review UNISSUED_ESTIMATE) is not sold and stays on the
+// current rule. The send-snapshot builder and the bundle freeze keep the plain stamp read (no fallback): a first send of an
+// inputs-only draft must price on the current rule.
+function storedRequestsExclusion(estData) {
+  let data = estData;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return false; }
+  }
+  if (!data || typeof data !== 'object') return false;
+  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
+  if (request && Array.isArray(request.selectedServices)
+    && request.selectedServices.some((key) => String(key || '').toUpperCase() === 'EXCLUSION')) return true;
+  const container = require('./estimate-result-container').storedEstimateContainer(data) || null;
+  return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
+    .some((carrier) => carrier && typeof carrier === 'object' && carrier.services && typeof carrier.services === 'object'
+      && !!(carrier.services.exclusion || carrier.services.rodentExclusion));
+}
+
+function savedLegacyTwoStoryRoofSignal(estData, { inputsOnlyIsLegacy = false } = {}) {
   const { flag } = readRuleStamp(estData, 'legacyTwoStoryRoof');
+  if (flag === undefined && inputsOnlyIsLegacy
+    && !(estData && typeof estData === 'object' && estData[require('./estimate-bahia-review').UNISSUED_ESTIMATE] === true)
+    && storedRequestsExclusion(estData)) return { legacyTwoStoryRoof: true };
   return { legacyTwoStoryRoof: flag };
 }
 
@@ -307,7 +331,7 @@ function savedFloorReplaySignals(estData) {
   if (minSignal != null) signals.lawnProgramMinimumMonthly = minSignal;
   Object.assign(signals, savedLawnMinimumAfterDiscountSignal(estData));
   Object.assign(signals, savedLegacyPricingRulesSignal(estData));
-  Object.assign(signals, savedLegacyTwoStoryRoofSignal(estData));
+  Object.assign(signals, savedLegacyTwoStoryRoofSignal(estData, { inputsOnlyIsLegacy: true }));
   const pest = estimatePestFloorSignal(estData);
   if (typeof pest.armed === 'boolean') signals.pestProgramFloorArmed = pest.armed;
   if (pest.perVisit != null) signals.pestProgramFloorPerVisit = pest.perVisit;
