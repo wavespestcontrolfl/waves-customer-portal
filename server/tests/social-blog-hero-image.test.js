@@ -578,14 +578,15 @@ describe('blogHeroSocialImageUrl', () => {
       expect(n).toBe(2);
     });
 
-    test('publish state unknown: fails without a retry and without deleting (the post may be public)', async () => {
+    test('publish state unknown: recorded as sent with its id, never retried or deleted (the post may be public)', async () => {
       const calls = mockPictureGraph({
         sizes: [{ width: 720, height: 720 }],
         publish: () => { throw new Error('socket hang up'); },
         published: 'unreadable',
       });
       const res = await share();
-      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: false, error: expect.stringMatching(/fb-1 may be public; not retried/) })]);
+      // A failed record would let the next blog run post the link again.
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', postId: 'fb-1', success: true, publishUnconfirmed: true })]);
       expect(calls.filter((c) => c.url.includes('/page-1/feed'))).toHaveLength(1);
       expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
     });

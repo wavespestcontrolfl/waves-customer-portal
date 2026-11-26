@@ -828,8 +828,7 @@ async function withRetry(fn, { maxAttempts = 3, label = '' } = {}) {
       const isTransient = !status || status >= 500 || /ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|network/i.test(err.message);
       const isAuth = status === '401' || status === '403' || /expired|invalid.*token|not.*configured/i.test(err.message);
 
-      // noRetry: the call may have taken effect and a second try could repeat it.
-      if (err.noRetry || isAuth || !isTransient || attempt === maxAttempts) throw err;
+      if (isAuth || !isTransient || attempt === maxAttempts) throw err;
 
       const delay = Math.pow(4, attempt - 1) * 1000;  // 1s, 4s, 16s
       logger.warn(`[social] ${label} attempt ${attempt}/${maxAttempts} failed: ${err.message} — retrying in ${delay}ms`);
@@ -1563,7 +1562,14 @@ async function postToFacebook(message, link, imageUrl) {
       logger.warn(`[social] Facebook link picture still ${size.width}x${size.height}; publishing anyway`);
     }
   }
-  await publishFacebookPost(id, token);
+  if (!(await publishFacebookPost(id, token))) {
+    // Facebook never confirmed either way, so the post may be public. It is
+    // recorded as sent: a failed record lets the next blog run (checkAndPublish,
+    // shareUrlOnce skip only non-failed rows) make a second public post. If it
+    // stayed hidden, the share is missing on Facebook, never doubled.
+    logger.warn(`[social] Facebook post ${id}: publish not confirmed; recorded as sent so no second post is made`);
+    return { platform: 'facebook', postId: id, success: true, publishUnconfirmed: true };
+  }
   logger.info(`[social] Facebook post created: ${id}${size ? ` (picture ${size.width}x${size.height})` : ''}`);
   return { platform: 'facebook', postId: id, success: true };
 }
@@ -1658,24 +1664,22 @@ async function requestFacebookPublish(postId, token) {
 // Make the hidden post public. Publishing the same post twice is harmless, so
 // a failed publish is asked once more on the SAME post before anything else.
 // Then the post's state decides:
-//   public  -> done (the first answer was lost), so no second public post.
-//   hidden  -> delete it and fail; a retry of the whole post is then safe.
-//   unknown -> fail with noRetry: the post may be public, so a retry that
-//              makes a new post could double it. The error names the post.
+//   public  -> true: done (the first answer was lost), no second public post.
+//   hidden  -> delete it and throw; a retry of the whole post is then safe.
+//   unknown -> false: the post may be public. The caller records it as sent
+//              and never makes a new post that could double it.
 async function publishFacebookPost(postId, token) {
   let failure = await requestFacebookPublish(postId, token);
-  if (!failure) return;
-  failure = (await requestFacebookPublish(postId, token)) || null;
-  if (!failure) return;
+  if (!failure) return true;
+  failure = await requestFacebookPublish(postId, token);
+  if (!failure) return true;
   const state = await readFacebookPostState(postId, token);
-  if (state === 'public') return;
+  if (state === 'public') return true;
   if (state === 'hidden') {
     await deleteFacebookPost(postId, token);
     throw failure;
   }
-  const unsure = new Error(`${failure.message} (post ${postId} may be public; not retried)`);
-  unsure.noRetry = true;
-  throw unsure;
+  return false;
 }
 
 function sleep(ms) {
