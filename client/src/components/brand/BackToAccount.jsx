@@ -88,3 +88,25 @@ export default function BackToAccountButton() {
   const show = useShowBackToAccount();
   return show ? <Link variant="button" /> : null;
 }
+
+function RouterHomeAnchor(props) {
+  const navigate = useNavigate();
+  return <HomeAnchor {...props} navigate={navigate} />;
+}
+
+function HomeAnchor({ navigate, children, ...rest }) {
+  return <a {...rest} href="/" onClick={(e) => goHome(navigate, e)}>{children}</a>;
+}
+
+/**
+ * A link to the account home that stays inside the app (router navigation, so
+ * no reload and no second Face ID unlock); a full load only outside a router.
+ */
+export function AccountHomeLink(props) {
+  return useInRouterContext() ? <RouterHomeAnchor {...props} /> : <HomeAnchor {...props} navigate={null} />;
+}
+
+/** Signed-in check that never throws (blocked browser storage = signed out). */
+export function signedInSafe() {
+  try { return hasSessionToken(); } catch { return false; }
+}

@@ -3,7 +3,7 @@ import { useLocation, useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
-import { hasSessionToken } from '../native/platform';
+import { AccountHomeLink, signedInSafe } from '../components/brand/BackToAccount';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
@@ -3505,8 +3505,8 @@ function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Rep
         {/* window.print() is a no-op in the Capacitor webview — hide the
             button there; the Download PDF share sheet carries Print on iOS. */}
         {isNativeApp() ? null : <button data-glass-accent="" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>}
-        {hasSessionToken()
-          ? <a data-glass-accent="" href="/" style={actionButtonStyle('primary')}><Home size={16} /> <ToolLabel full="My account" short="Account" /></a>
+        {signedInSafe()
+          ? <AccountHomeLink data-glass-accent="" style={actionButtonStyle('primary')}><Home size={16} /> <ToolLabel full="My account" short="Account" /></AccountHomeLink>
           : <a data-glass-accent="" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> <ToolLabel full="Portal Login" short="Login" /></a>}
       </div>
     </section>

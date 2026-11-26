@@ -6,7 +6,7 @@
 import { useState } from 'react';
 import { Download, Share2, Printer, Lock, Home } from 'lucide-react';
 import { canSaveNative, canShareNative, isNativeApp, saveUrlNative, shareUrlNative } from '../native/nativeFile';
-import { hasSessionToken } from '../native/platform';
+import { AccountHomeLink, signedInSafe } from './brand/BackToAccount';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { docButton } from '../theme-doc';
 import { showCustomerAlert } from './brand/CustomerDialogHost';
@@ -170,10 +170,10 @@ export default function DocumentActionBar({
         )}
         {/* A signed-in customer already has an account: "Portal Login" would
             only bounce them through /login, so send them straight home. */}
-        {hasSessionToken() ? (
-          <a data-glass-accent="" data-glass-size="primary" href="/" style={buttonStyle()}>
+        {signedInSafe() ? (
+          <AccountHomeLink data-glass-accent="" data-glass-size="primary" style={buttonStyle()}>
             <Home size={16} /> My account
-          </a>
+          </AccountHomeLink>
         ) : (
           <a data-glass-accent="" data-glass-size="primary" href="/login" style={buttonStyle()}>
             <Lock size={16} /> Portal Login

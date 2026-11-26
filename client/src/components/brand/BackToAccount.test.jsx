@@ -7,10 +7,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import WavesShell from './WavesShell';
 import BackToAccountButton from './BackToAccount';
 
-const env = vi.hoisted(() => ({ native: false, session: false }));
+const env = vi.hoisted(() => ({ native: false, session: false, storageBlocked: false }));
 vi.mock('../../native/platform', () => ({
   isNativeApp: () => env.native,
-  hasSessionToken: () => env.session,
+  hasSessionToken: () => { if (env.storageBlocked) throw new Error('SecurityError'); return env.session; },
   isWavesAdminApp: () => false,
   nativePlatform: () => (env.native ? 'ios' : 'web'),
 }));
@@ -79,5 +79,27 @@ describe('Back to my account (button)', () => {
     env.session = true;
     render(<WavesShell><BackToAccountButton /></WavesShell>);
     expect(screen.queryByText('Back to my account')).toBeNull();
+  });
+});
+
+describe('signedInSafe and AccountHomeLink', () => {
+  afterEach(() => { env.storageBlocked = false; env.session = false; });
+  it('reads blocked storage as signed out instead of throwing', async () => {
+    const { signedInSafe } = await import('./BackToAccount');
+    env.storageBlocked = true;
+    expect(signedInSafe()).toBe(false);
+  });
+  it('opens the account inside the router, with no page load', async () => {
+    const { AccountHomeLink } = await import('./BackToAccount');
+    render(
+      <MemoryRouter initialEntries={['/receipt/t1']}>
+        <Routes>
+          <Route path="/receipt/:t" element={<AccountHomeLink>My account</AccountHomeLink>} />
+          <Route path="/" element={<div>Account home</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText('My account'));
+    expect(screen.getByText('Account home')).toBeInTheDocument();
   });
 });
