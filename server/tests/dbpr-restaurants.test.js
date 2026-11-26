@@ -293,6 +293,21 @@ describe('namesFirstVisit', () => {
 });
 
 describe('parseInspectionReport', () => {
+  test('a merged cell in the inspection table, the violations table or a head row gives no answer; one outside them does not', () => {
+    const rows = '<tr><td>35A-02-8</td><td>&nbsp;</td><td>Live roaches.</td></tr>';
+    const answer = { pestEvidence: true, findings: [{ code: '35A-02-8', text: 'Live roaches.' }] };
+    expect(parse(reportPage(rows), { violation35: 1 })).toEqual(answer);
+    // A Result head cell over two columns puts "Issued" under Inspection Type on a callback's page.
+    const spannedHead = reportPage(rows).replace('<td>Result</td>', '<td colspan="2">Result</td>');
+    expect(parse(spannedHead, { violation35: 1 })).toBeNull();
+    const spannedVisit = reportPage(rows).replace('<td>Warning Issued</td>', '<td rowspan="2">Warning Issued</td>');
+    expect(parse(spannedVisit, { violation35: 1 })).toBeNull();
+    const spannedViolation = reportPage(rows.replace('<td>&nbsp;</td>', '<td colspan="2">&nbsp;</td>'));
+    expect(parse(spannedViolation, { violation35: 1 })).toBeNull();
+    // The state's pages merge cells in their layout, outside both tables: that still answers.
+    const layout = `<table><tr><td colspan="3">License information</td></tr></table>${reportPage(rows)}`;
+    expect(parse(layout, { violation35: 1 })).toEqual(answer);
+  });
   test('the answer names the page\'s own inspection type, for saveReport to check', () => {
     expect(svc.parseInspectionReport(fixture('report-35b.html'), { visitNumber: 1, violation35: 1 }))
       .toEqual({ inspectionType: 'Routine - Food', pestEvidence: false, findings: [] });

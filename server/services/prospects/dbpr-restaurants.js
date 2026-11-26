@@ -413,7 +413,13 @@ function readReportTables(page) {
   let violationsEnd = null; // where the last violations table's reading ended (a table tag), null while in it
   let violationsHeads = 0; // the violations head rows read so far: a second one makes the page unreadable
   let row = []; // the cell texts of the row being read, blank cells kept so each keeps its position
+  let spanned = false; // whether a cell of that row covers more than one column or row ("<td span>")
   const endRow = () => {
+    // A merged cell in either table, or in a head row naming its columns, puts the cells after it at the wrong
+    // positions: the page cannot answer.
+    if (spanned && (codeColumn >= 0 || dateColumn >= 0 || row.includes('Inspection Date') || violationsColumn(row) >= 0)) {
+      unreadable = true;
+    }
     if (codeColumn >= 0 && row.some(Boolean)) {
       const code = row[codeColumn] || '';
       if (VIOLATION_CODE_RE.test(code) && !row.slice(0, codeColumn).some(Boolean)) {
@@ -433,6 +439,7 @@ function readReportTables(page) {
   };
   for (const match of page.matchAll(CELL_OR_ROW_END_RE)) {
     if (match[1] !== undefined) {
+      if (/^<t[dh] span>/i.test(match[0])) spanned = true;
       row.push(htmlText(match[1]));
       continue;
     }
@@ -451,6 +458,7 @@ function readReportTables(page) {
       dateColumn = -1;
     }
     row = [];
+    spanned = false;
   }
   endRow();
   return { entries, unreadable, visits, violationsEnd };

@@ -273,6 +273,16 @@ function textElementEnd(html, i, name) {
   return read && { contentEnd: match.index, end: read.end };
 }
 
+// Whether a td or th start tag can cover more than one cell: a colspan or rowspan that does not read as 1 (a browser
+// reads the leading digits; a value with none, or 0 for rowspan, is read here as a span too, so a doubtful value
+// never passes). Such a cell keeps one mark, "<td span>", so a reader that counts cell positions can refuse it:
+// with the attribute dropped, the cells after it would sit one column off.
+function spansCells(name, attributes) {
+  if (name !== 'td' && name !== 'th') return false;
+  return attributes.some(({ name: attr, value }) => (attr === 'colspan' || attr === 'rowspan')
+    && Number.parseInt(decodeAttribute(value).trim(), 10) !== 1);
+}
+
 // The tag at `i` ("<" or "</", then a letter): its rebuilt form and the index just past it (for a script, a style or
 // the title, past its end tag), or null. It adds a style sheet's text (isStyleSheet) to page.sheets, and a start
 // tag's class and id names to page.names.
@@ -295,6 +305,7 @@ function readTag(html, i, page) {
   }
   // A browser ignores an end tag's attributes.
   if (!PLAIN_ELEMENTS.has(known) || !page.tags.has(known) || (!endTag && hides(known, read.attributes))) return null;
+  if (!endTag && spansCells(known, read.attributes)) return { text: `<${known} span>`, end: read.end };
   return { text: endTag ? `</${known}>` : `<${known}>`, end: read.end };
 }
 
