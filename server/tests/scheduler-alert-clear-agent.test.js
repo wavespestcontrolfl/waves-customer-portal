@@ -44,7 +44,7 @@ function tick() {
   initScheduledJobs();
   const regs = cron.schedule.mock.calls.filter(([, cb]) => cb.toString().includes("runExclusive('alert-clear-agent'"));
   expect(regs).toHaveLength(1);
-  expect(regs[0][0]).toBe('1,11,21,31,41,51 * * * *');
+  expect(regs[0][0]).toBe('5,15,25,35,45,55 * * * *');
   return regs[0][1];
 }
 

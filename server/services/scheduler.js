@@ -5616,7 +5616,7 @@ function initScheduledJobs() {
   // decides for each open admin alert about a customer text, email, voicemail or missed call whether the work is done and writes
   // the verdict to alert_clear_verdicts. Closes, edits and rings no notification; texts no one. Paid model reads are capped per
   // day. Gate off = no lock, no query. runExclusive: overlapping deploy instances would pay for the same read twice.
-  cron.schedule('1,11,21,31,41,51 * * * *', async () => {
+  cron.schedule('5,15,25,35,45,55 * * * *', async () => {
     // Read at tick time (a flip needs no restart); off = no lock and no job-health row.
     if (require('../config/feature-gates').alertClearAgentMode() !== 'shadow') return;
     try {
