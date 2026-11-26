@@ -136,6 +136,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
       'services/invoice-followups.js', // GATED: Day 3-90 ladder (invoice_followup_sequence); send-now passes holdExempt 'operator'
       'services/invoice.js', // EXEMPT: the invoice sender itself (invoice_send_via_sms): its own default-on hold check
       'services/messaging/billing-text-verdict.js', // NOT A SENDER: the #5440 visit-summary fold's yes/no verdict (policy lookup keys). The text that carries the pay link is visit-completion-summary.js, gated below
+      'services/messaging/send-customer-message.js', // NOT A SENDER: the WDO report hold's locked-handoff allowlist row (REPORT_HOLD_SMS_HANDOFFS); the sender is admin-projects.js above
       'services/previsit-balance-reminder.js', // GATED: previsit_balance_reminder
       'services/price-change-notices.js', // EXEMPT: an operator-confirmed price-change notice, no pay link
     ]);
@@ -236,6 +237,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
 
   test('every sender that goes through the billing email authority is classified', () => {
     expect(filesMatching(/dispatchUnderBillingEmailAuthority\(/)).toEqual([
+      'routes/admin-projects.js', // EXEMPT (operator click, holdExempt 'operator'): the held WDO invoice email; its preSendCheck still refuses a fallback or unreadable collections hold
       'services/account-membership-email.js', // GATED by template (billing.previsit_balance)
       'services/automation-runner.js', // payment-failed automation: its own up-front + locked hold check (COLLECTION_HOLD_DEFER)
       'services/billing-channel-email-authority.js', // the authority itself (the definition, not a sender)

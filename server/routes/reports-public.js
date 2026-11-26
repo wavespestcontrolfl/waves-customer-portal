@@ -813,6 +813,18 @@ async function buildServiceReportV1ResponseData(service, token, {
   };
 }
 
+// The FDACS filing a WDO report link shows: the last one emailed. A report held until paid (GATE_WDO_REPORT_HOLD) whose
+// release has not finished shows nothing: its link may exist only because a release email's outcome is unknown, and
+// the report is not recorded as delivered until the release finishes.
+function servedWdoFiling(project) {
+  let filings = project.wdo_sent_filings;
+  if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
+  return Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
+}
+function heldReportUnreleased(project) {
+  return ['held', 'releasing'].includes(project?.report_hold_status);
+}
+
 async function findProjectByReportSegment(segment) {
   const lookup = extractProjectReportTokenLookup(segment);
   if (!lookup) return null;
@@ -853,7 +865,7 @@ router.get('/project/:token/data', async (req, res, next) => {
   }
   try {
     const project = await findProjectByReportSegment(req.params.token);
-    if (!project) return res.status(404).json({ error: 'Report not found' });
+    if (!project || heldReportUnreleased(project)) return res.status(404).json({ error: 'Report not found' });
 
     if (!project.report_viewed_at) {
       await db('projects').where({ id: project.id }).update({ report_viewed_at: db.fn.now() });
@@ -946,9 +958,7 @@ router.get('/project/:token/data', async (req, res, next) => {
     // so it never opens a 404 for a pre-archive/legacy report.
     let fdacsPdfAvailable = false;
     if (project.project_type === 'wdo_inspection') {
-      let filings = project.wdo_sent_filings;
-      if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
-      const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
+      const lastFiling = servedWdoFiling(project);
       if (lastFiling?.findings) {
         viewerFindings = lastFiling.findings;
         if (lastFiling.project_date) viewerProjectDate = lastFiling.project_date;
@@ -1143,12 +1153,10 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
   }
   try {
     const project = await findProjectByReportSegment(req.params.token);
-    if (!project || project.project_type !== 'wdo_inspection') {
+    if (!project || project.project_type !== 'wdo_inspection' || heldReportUnreleased(project)) {
       return res.status(404).json({ error: 'Report not found' });
     }
-    let filings = project.wdo_sent_filings;
-    if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }
-    const lastFiling = Array.isArray(filings) && filings.length ? filings[filings.length - 1] : null;
+    const lastFiling = servedWdoFiling(project);
     if (!lastFiling?.s3_key || !config.s3?.bucket) {
       return res.status(404).json({ error: 'Report not found' });
     }
@@ -2619,6 +2627,8 @@ async function ensureReportToken(serviceRecordId) {
 
 module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
+module.exports.servedWdoFiling = servedWdoFiling;
+module.exports.heldReportUnreleased = heldReportUnreleased;
 module.exports.reportLimiter = reportLimiter;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;

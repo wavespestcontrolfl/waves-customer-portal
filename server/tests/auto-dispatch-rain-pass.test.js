@@ -7,6 +7,14 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+// The default forecast read is NWS only: the paid Open-Meteo backup must never be reached.
+jest.mock('../services/weather-forecast', () => ({
+  getNwsHourlyRain: jest.fn(),
+  getHourlyRainOutlook: jest.fn(),
+  getNwsHourlyRainPatient: (...args) => jest.requireActual('../services/weather-forecast').getNwsHourlyRainPatient(...args),
+}));
+const weather = require('../services/weather-forecast');
+
 const { runRainPass, planRainPass, _test } = require('../services/auto-dispatch/rain-pass');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
@@ -29,7 +37,7 @@ function deps(rows, extra = {}) {
   return {
     loadStops: jest.fn(async () => _test.groupStops(rows, extra.addOns || [])),
     withCatalogKeys: jest.fn(async (items) => items.map((item) => ({ name: item.name, serviceKey: item.serviceKey, findingsType: null }))),
-    hourlyRain: jest.fn(async () => hourlyFor()),
+    ...(extra.nwsOnly ? {} : { hourlyRain: jest.fn(async () => hourlyFor()) }),
     rainOut: { loadOccupancy: jest.fn(async () => ({ rows: [] })), conflictsForTarget: jest.fn(() => []) },
     dayHours: { DAY_START_HOUR: 8, DAY_END_HOUR: 17 },
     customerName: jest.fn(async () => 'Test Person'),
@@ -318,5 +326,81 @@ describe('auto-dispatch rain pass', () => {
     const d = deps([stop(), stop({ id: 'visit-2' })], { raiseAdminAlert });
     expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 2, wet: 2, noticed: 0, deferred: 0, closed: 0 });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
+  });
+
+  describe('the default forecast read (no hourlyRain dep): free NWS only', () => {
+    const wetStop = (extra) => stop({ point: { lat: 27.4, lng: -82.4 }, ...extra });
+    beforeEach(() => { weather.getNwsHourlyRain.mockReset(); weather.getHourlyRainOutlook.mockReset(); });
+
+    test('reads NWS with the long wait, never the paid backup', async () => {
+      process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+      weather.getNwsHourlyRain.mockResolvedValue(hourlyFor());
+      const [row] = await planRainPass({ now: NOW, db: {}, deps: deps([wetStop()], { nwsOnly: true }) });
+      expect(row).toMatchObject({ wet: true, peak: 80 });
+      expect(weather.getNwsHourlyRain).toHaveBeenCalledTimes(1);
+      expect(weather.getNwsHourlyRain).toHaveBeenCalledWith(27.4, -82.4, { fetchTimeoutMs: 10000 });
+      expect(weather.getHourlyRainOutlook).not.toHaveBeenCalled();
+    });
+
+    test('an unanswered area is asked once more, then the stop reads no_forecast (never dry)', async () => {
+      process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+      weather.getNwsHourlyRain.mockRejectedValueOnce(new Error('timeout')).mockResolvedValueOnce(hourlyFor());
+      const [retried] = await planRainPass({ now: NOW, db: {}, deps: deps([wetStop()], { nwsOnly: true }) });
+      expect(retried).toMatchObject({ wet: true });
+      expect(weather.getNwsHourlyRain).toHaveBeenCalledTimes(2);
+
+      weather.getNwsHourlyRain.mockReset();
+      weather.getNwsHourlyRain.mockResolvedValue(null);
+      const d = deps([wetStop()], { nwsOnly: true });
+      const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
+      expect(row).toMatchObject({ wet: false, reason: 'no_forecast' });
+      expect(weather.getNwsHourlyRain).toHaveBeenCalledTimes(2);
+      expect(weather.getHourlyRainOutlook).not.toHaveBeenCalled();
+      expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 0, noticed: 0 });
+      expect(d.raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test('each forecast area is read once per run, a failed one included', async () => {
+      weather.getNwsHourlyRain.mockImplementation(async (lat) => (lat > 27.45 ? null : hourlyFor()));
+      const rows = await planRainPass({
+        now: NOW, db: {},
+        deps: deps([wetStop(), wetStop({ id: 'v2', point: { lat: 27.401, lng: -82.401 } }), wetStop({ id: 'v3', point: { lat: 27.5, lng: -82.4 } }), wetStop({ id: 'v4', point: { lat: 27.5, lng: -82.4 } })], { nwsOnly: true }),
+      });
+      expect(rows.filter((r) => r.wet)).toHaveLength(2);
+      expect(rows.filter((r) => r.reason === 'no_forecast')).toHaveLength(2);
+      // area A once; area B twice (its one retry) and no more.
+      expect(weather.getNwsHourlyRain).toHaveBeenCalledTimes(3);
+    });
+
+    test('NWS down: after two unread areas the run asks no more and the rest read no_forecast', async () => {
+      weather.getNwsHourlyRain.mockResolvedValue(null);
+      const rows = await planRainPass({
+        now: NOW, db: {},
+        deps: deps([
+          wetStop(), wetStop({ id: 'v2', point: { lat: 27.5, lng: -82.4 } }),
+          wetStop({ id: 'v3', point: { lat: 27.6, lng: -82.4 } }), wetStop({ id: 'v4', point: { lat: 27.7, lng: -82.4 } }),
+        ], { nwsOnly: true }),
+      });
+      expect(rows.every((r) => r.reason === 'no_forecast')).toBe(true);
+      // two areas, two tries each; the third and fourth areas are asked the cache only.
+      expect(weather.getNwsHourlyRain).toHaveBeenCalledTimes(6);
+      expect(weather.getNwsHourlyRain.mock.calls.slice(4).map((c) => c[2])).toEqual([{ cacheOnly: true }, { cacheOnly: true }]);
+      expect(weather.getHourlyRainOutlook).not.toHaveBeenCalled();
+    });
+
+    test('after the cutoff a fresh cached NWS answer still counts', async () => {
+      weather.getNwsHourlyRain.mockImplementation(async (lat, lng, opts) => (opts && opts.cacheOnly && lat < 27.45 ? hourlyFor() : null));
+      const rows = await planRainPass({
+        now: NOW, db: {},
+        deps: deps([
+          wetStop(), wetStop({ id: 'v2', point: { lat: 27.5, lng: -82.4 } }),
+          wetStop({ id: 'v4', point: { lat: 27.7, lng: -82.4 } }),
+        ], { nwsOnly: true }),
+      });
+      // Stops are judged v2, v4, then visit-1: two areas fail, then visit-1's area is read from the cache only.
+      expect(weather.getNwsHourlyRain.mock.calls.at(-1)).toEqual([27.4, -82.4, { cacheOnly: true }]);
+      expect(rows.find((r) => r.visit.id === 'visit-1')).toMatchObject({ wet: true });
+      expect(rows.filter((r) => r.reason === 'no_forecast')).toHaveLength(2);
+    });
   });
 });

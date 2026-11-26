@@ -2052,6 +2052,7 @@ export function ProjectDetail({
         (project.status === "sent"
           ? "Resend report to customer?"
           : "Send report to customer? This generates a public link and marks the project as Sent.") +
+        heldSendNote(pv) +
         (routingLines ? `\n\n${routingLines}` : "");
       if (!(await confirmAsk(actionLabel, { confirmLabel: "Send" }))) {
         setSaving(false);
@@ -2059,7 +2060,13 @@ export function ProjectDetail({
       }
       const r = await adminFetch(`/admin/projects/${projectId}/send`, {
         method: "POST",
-        body: overrideReason ? { override_reason: overrideReason } : {},
+        body: {
+          ...(overrideReason ? { override_reason: overrideReason } : {}),
+          // A held report's early release: if payment released it meanwhile, the server sends no second copy.
+          expected_hold: pv.releases_payment_hold ? "held" : "none",
+          // The dialog said "Send", not "Resend": a report sent meanwhile is not sent a second time.
+          expected_sent: project.status === "sent",
+        },
       });
       const d = await readJsonResponse(r, "Could not send report");
       if (d.report_url) setSentLink(`${window.location.origin}${d.report_url}`);
@@ -2121,7 +2128,8 @@ export function ProjectDetail({
     }
   }
 
-  async function handleSendWithInvoice() {
+  // holdReport: send the invoice and pay link now, and send the report by itself once the invoice is paid.
+  async function handleSendWithInvoice({ holdReport = false } = {}) {
     if (!canAdminActions) {
       setError("Admin access required to send project reports.");
       return;
@@ -2162,14 +2170,7 @@ export function ProjectDetail({
     try {
       const savedRevision = await saveDirtyProjectEdits("Could not save project before sending");
       // dry_run first so the operator can confirm the invoice amount.
-      const preview = await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
-        method: "POST",
-        body: {
-          dry_run: true,
-          ...(overrideReason ? { override_reason: overrideReason } : {}),
-        },
-      });
-      const pv = await readJsonResponse(preview, "Could not prepare invoice");
+      const pv = await fetchSendWithInvoicePreview({ projectId, holdReport, overrideReason });
       const inv = pv.invoice || {};
       const amount = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : "the amount shown";
       const verb = inv.created ? "Create and send" : "Send";
@@ -2185,8 +2186,14 @@ export function ProjectDetail({
       // a distinct billing contact gets a copy, and which third parties from
       // the FDACS "Report sent to" line get a report-only copy (no invoice).
       const routing = pv.email_routing || {};
+      if (holdReport && routing.recipient_refused) {
+        setError("This invoice cannot be emailed: there is no billing email address that accepts email. Add one, or send the report with the invoice.");
+        setSaving(false);
+        return;
+      }
       const routingLines = [
         routing.recipient ? `Email to: ${routing.recipient}` : null,
+        routing.recipient_refused ? "No invoice email: there is no billing email address that accepts email." : null,
         routing.billing_copy ? `Billing copy (same email): ${routing.billing_copy}` : null,
         routing.report_copies?.length
           ? `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
@@ -2194,10 +2201,9 @@ export function ProjectDetail({
       ]
         .filter(Boolean)
         .join("\n");
-      const confirmMessage =
-        `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
-        `The customer gets one email (${emailContents}) and one text (report + pay links).` +
-        (routingLines ? `\n\n${routingLines}` : "");
+      const confirmMessage = sendWithInvoiceConfirmMessage({
+        holdReport, verb, invoiceLabel, amount, reportNoun, emailContents, routing, routingLines, release: pv.report_hold_release,
+      });
       if (!(await confirmAsk(confirmMessage, { confirmLabel: verb }))) {
         setSaving(false);
         return;
@@ -2208,6 +2214,7 @@ export function ProjectDetail({
           // Only an existing invoice carries an id from the preview; a new WDO
           // (id null) routes to the server's locked create path on send.
           ...(inv.id ? { invoice_id: inv.id } : {}),
+          ...holdBody(holdReport, inv.billing_fingerprint),
           ...(overrideReason ? { override_reason: overrideReason } : {}),
         },
       });
@@ -2217,9 +2224,7 @@ export function ProjectDetail({
       if (d.sent === false) {
         setError(`Delivery failed; project remains in review. ${deliverySummary(d.channels)}`.trim());
       } else {
-        setNotice(
-          `Report + invoice ${d.invoice?.invoice_number || ""} delivered. ${deliverySummary(d.channels)}`.trim(),
-        );
+        setNotice(sendWithInvoiceNotice(d));
       }
       await load({ background: true, hydrateRevision: savedRevision });
       onChanged?.();
@@ -2705,6 +2710,7 @@ export function ProjectDetail({
       >
         {error && <Alert tone="error">{error}</Alert>}
         {notice && <Alert tone="success">{notice}</Alert>}
+        <ReportHoldBanner project={project} />
         {delivery && (
           <DeliveryPanel channels={delivery} status={project.delivery_status} />
         )}
@@ -3379,14 +3385,17 @@ export function ProjectDetail({
               Send report
             </button>
           )}
+        <HeldReleaseButton canAdminActions={canAdminActions} project={project} actionsBlocked={actionsBlocked} wdoSendBlocked={wdoSendBlocked} blockedTitle={wdoSendBlockedTitle} onClick={handleSend} />
         {canAdminActions &&
           (project.project_type === WDO_TYPE ||
             project.project_type === CERTIFICATE_TYPE ||
             project.service_record_id) &&
-          project.status !== "closed" && (
+          project.status !== "closed" &&
+          // A held report goes out through Send report only (the server refuses a plain report + invoice send).
+          !["held", "releasing"].includes(project.report_hold_status) && (
             <button
               type="button"
-              onClick={handleSendWithInvoice}
+              onClick={() => handleSendWithInvoice()}
               disabled={actionsBlocked || wdoSendBlocked}
               style={{ ...btnPrimary, opacity: actionsBlocked || wdoSendBlocked ? 0.5 : 1 }}
               title={
@@ -3398,6 +3407,14 @@ export function ProjectDetail({
               Send report + invoice
             </button>
           )}
+        <HoldInvoiceButton
+          canAdminActions={canAdminActions}
+          project={project}
+          actionsBlocked={actionsBlocked}
+          wdoSendBlocked={wdoSendBlocked}
+          blockedTitle={wdoSendBlockedTitle}
+          onClick={() => handleSendWithInvoice({ holdReport: true })}
+        />
         {canAdminActions && project.project_type === WDO_TYPE && (
           <SentAnotherWayAction
             key={project.id}
@@ -3425,6 +3442,11 @@ const PROJECT_ACTIVITY_LABELS = {
   project_report_resent: "Resent",
   project_report_with_invoice_sent: "Report + invoice sent",
   project_report_with_invoice_failed: "Report + invoice failed",
+  project_invoice_sent_report_held: "Invoice sent, report held",
+  project_invoice_report_hold_failed: "Invoice failed, report not held",
+  project_invoice_report_hold_resend_failed: "Invoice resend failed, report still held",
+  project_report_released_after_payment: "Report sent after payment",
+  project_report_release_blocked: "Paid report not sent",
   project_prep_guide_sent: "Prep guide sent",
   project_prep_guide_failed: "Prep guide failed",
   project_portal_invite_sent: "Portal invite sent",
@@ -3841,6 +3863,117 @@ function ReadinessPanel({ readiness }) {
   );
 }
 
+// Send with invoice, "Invoice now, report after payment" (GATE_WDO_REPORT_HOLD): the body flag,
+// the confirm text and the result line, kept out of the click handler.
+// The held banner: the report waits for its invoice, or the paid release failed and says why.
+function ReportHoldBanner({ project }) {
+  if (!["held", "releasing"].includes(project.report_hold_status)) return null;
+  const failure = project.report_hold_last_error;
+  // "Paid" only when the linked invoice's status says paid (not processing, partial or open).
+  const paid = ["paid", "prepaid"].includes(project.report_hold_invoice_status);
+  return (
+    <Alert tone={failure ? "error" : "success"}>
+      {failure
+        ? `${paid ? "The invoice is paid, but the report" : "The report"} did not send: ${failure}. It tries again by itself. Fix the cause, or press Send report to send it now.`
+        : "Report held until the invoice is paid. It is emailed to the customer by itself once payment arrives. Press Send report to send it now."}
+    </Alert>
+  );
+}
+
+// A held report keeps its manual release after the project closes (the closed status stays). Only this button
+// shows on a closed project.
+function HeldReleaseButton({ canAdminActions, project, actionsBlocked, wdoSendBlocked, blockedTitle, onClick }) {
+  const blocked = actionsBlocked || wdoSendBlocked;
+  if (!canAdminActions || project.status !== "closed" || project.report_hold_status !== "held") return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={blocked}
+      style={{ ...btnPrimary, opacity: blocked ? 0.5 : 1 }}
+      title={blocked ? blockedTitle : "Send the held report now, without waiting for payment"}
+    >
+      Send report now
+    </button>
+  );
+}
+
+// "Invoice now, report after payment": shown only while the server offers the hold.
+function HoldInvoiceButton({ canAdminActions, project, actionsBlocked, wdoSendBlocked, blockedTitle, onClick }) {
+  const blocked = actionsBlocked || wdoSendBlocked;
+  if (!canAdminActions || project.status === "closed" || !project.report_payment_hold_available) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={blocked}
+      style={{ ...btnSecondary, opacity: blocked ? 0.5 : 1 }}
+      title={blocked ? blockedTitle : "Send the invoice and pay link now; the report is sent by itself once the invoice is paid"}
+    >
+      Invoice now, report after payment
+    </button>
+  );
+}
+
+function holdBody(holdReport, billingFingerprint) {
+  // The send hands back the fingerprint of the invoice amount the operator confirmed in the preview.
+  return holdReport ? { hold_report_until_paid: true, ...(billingFingerprint ? { expected_billing_fingerprint: billingFingerprint } : {}) } : {};
+}
+
+function heldSendNote(preview) {
+  return preview.releases_payment_hold
+    ? "\n\nThis report is held until its invoice is paid. Sending now sends it without waiting for payment."
+    : "";
+}
+
+function sendWithInvoiceConfirmMessage({ holdReport, verb, invoiceLabel, amount, reportNoun, emailContents, routing, routingLines, release }) {
+  if (holdReport) {
+    return (
+      `${verb} invoice${invoiceLabel} for ${amount} now and hold the ${reportNoun} until it is paid?\n\n` +
+      "The customer gets one email (invoice PDF + pay link) and one text (pay link). " +
+      "A bank payment takes a few days to clear, and the report waits until it does. " +
+      "The report is emailed by itself once the invoice is paid. Send report sends it early." +
+      (routing.recipient ? `\n\nInvoice email to: ${routing.recipient}` : "") +
+      (routing.billing_copy ? `\nBilling copy (same email): ${routing.billing_copy}` : "") +
+      `\n\nAfter payment the report goes to: ${[release?.recipient, ...(release?.copies || [])].filter(Boolean).join(", ") || "no one yet (no email on file)"}`
+    );
+  }
+  return (
+    `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
+    `The customer gets one email (${emailContents}) and one text (report + pay links).` +
+    (routingLines ? `\n\n${routingLines}` : "")
+  );
+}
+
+// The preview the operator confirms. A held send bills an invoice that already exists, so a brand-new WDO gets its draft
+// prepared first (no hold, nothing sent) and the preview is read again: the confirm shows, and the send is bound to, that
+// invoice's own amount.
+async function fetchSendWithInvoicePreview({ projectId, holdReport, overrideReason }) {
+  const call = async (body) => readJsonResponse(await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
+    method: "POST",
+    body: { ...body, ...(overrideReason ? { override_reason: overrideReason } : {}) },
+  }), "Could not prepare invoice");
+  const dryRun = { dry_run: true, ...holdBody(holdReport) };
+  const pv = await call(dryRun);
+  // No draft is prepared for a held send that cannot email its invoice: the caller stops on the refusal.
+  if (!(holdReport && pv.invoice && !pv.invoice.id) || pv.email_routing?.recipient_refused) return pv;
+  // The hold intent rides along: the server checks the hold before it makes the draft.
+  await call({ prepare_invoice: true, ...holdBody(holdReport) });
+  return call(dryRun);
+}
+
+function sendWithInvoiceNotice(d) {
+  const number = d.invoice?.invoice_number || "";
+  const summary = deliverySummary(d.channels);
+  // Only a hold the server confirmed: a plain send whose email outcome is unknown already sent its link by text.
+  if (d.channels?.email?.uncertain && d.report_held) {
+    return `Invoice ${number}: the invoice email outcome is unknown. Check that the customer got it before resending. The report stays held until the invoice is paid. ${summary}`.trim();
+  }
+  return d.report_held
+    ? `Invoice ${number} sent. The report is held and goes out by itself once the invoice is paid. ${summary}`.trim()
+    : `Report + invoice ${number} delivered. ${summary}`.trim();
+}
+
 function Alert({ tone = "success", children }) {
   const isError = tone === "error";
   return (
@@ -3863,7 +3996,8 @@ function Alert({ tone = "success", children }) {
 }
 
 function DeliveryPanel({ channels, status }) {
-  const entries = Object.entries(channels || {});
+  // Delivery results only: the report hold keeps a send count beside them (a number, not a channel).
+  const entries = Object.entries(channels || {}).filter(([, result]) => result && typeof result === "object");
   if (!entries.length) return null;
   return (
     <div

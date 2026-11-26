@@ -33,7 +33,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { getNwsHourlyRain } = require('../weather-forecast');
+const { getNwsHourlyRain, getNwsHourlyRainPatient } = require('../weather-forecast');
 const { fetchMrmsDailyRain } = require('../mrms-qpe');
 const { ZONE_COORDS } = require('../scheduling/forecast-zones');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
@@ -95,19 +95,14 @@ function countWetHours(hours, day) {
  * morning a wet early span can be gone) is open (`rain: null`) and is not counted either way. The call needs
  * MIN_AREAS settled areas.
  */
-const NWS_WAIT_MS = 10000;
-
 async function forecastDay(day, { read = getNwsHourlyRain } = {}) {
   const zones = Object.keys(ZONE_COORDS);
   const areas = [];
   const unread = [];
-  // No one waits on this cron: each NWS fetch may take NWS_WAIT_MS, and an area NWS does not answer is asked once more.
-  // The first prod ticks (2026-11-24) lost 4 of 6 areas to the 2.5 s default at the busy top of the hour.
-  const readOnce = (zone) => Promise.resolve()
-    .then(() => read(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng, { fetchTimeoutMs: NWS_WAIT_MS }))
-    .catch(() => null);
+  // No one waits on this cron: the patient NWS read (long wait, one retry). The first prod ticks (2026-11-24) lost 4 of
+  // 6 areas to the 2.5 s default at the busy top of the hour.
   await Promise.all(zones.map(async (zone) => {
-    const hours = (await readOnce(zone)) || (await readOnce(zone));
+    const hours = await getNwsHourlyRainPatient(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng, { read });
     const counted = Array.isArray(hours) ? countWetHours(hours, day) : null;
     const total = (DAY_CLOSE - DAY_OPEN) / HOUR;
     if (!counted || counted.missing >= total) { unread.push(zone); return; }
@@ -317,7 +312,6 @@ module.exports = {
   RAIN_PCT,
   RAIN_HOURS,
   WET_INCHES,
-  NWS_WAIT_MS,
   SCORE_MAX,
   SCORE_GIVE_UP_DAYS,
   rainClassOf,

@@ -154,7 +154,7 @@ maybeDescribe('portal messages: office-hours Waves AI step-in (live Postgres)', 
     // Not an answer by the office: the thread is still an open Portal-tab item.
     const row = await thread(pat.id);
     expect(new Date(row.last_message_at).getTime()).toBe(WRITTEN.getTime());
-    expect((await PortalInbox.list()).items.filter((item) => item.customer.id === pat.id)).toHaveLength(1);
+    expect((await PortalInbox.list(DUE)).items.filter((item) => item.customer.id === pat.id)).toHaveLength(1);
     expect(PushService.sendToCustomer).toHaveBeenCalledTimes(1);
     expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
 
@@ -260,7 +260,7 @@ maybeDescribe('portal messages: office-hours Waves AI step-in (live Postgres)', 
     const after = await thread(pat.id);
     expect(new Date(after.last_message_at).getTime()).toBe(new Date(before.last_message_at).getTime());
     expect(after.message_count).toBe(before.message_count);
-    expect((await PortalInbox.list()).items.filter((item) => item.customer.id === pat.id)).toHaveLength(1);
+    expect((await PortalInbox.list(DUE)).items.filter((item) => item.customer.id === pat.id)).toHaveLength(1);
   }, 60000);
 
   test('thanks is silent with no model call, and the customer\'s cap sends nothing', async () => {

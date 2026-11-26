@@ -281,9 +281,10 @@ function isSupportedChannel(channel) {
 // another guide while a later visit's is free (GH Codex #3856 r16 P2) — the
 // manual sender walks the WHOLE family (max Infinity) so a free visit behind
 // any number of taken ones is still found (GH Codex #3856 r27 P2). Empty
-// when nothing matches; THROWS on a lookup error.
+// when nothing matches; THROWS on a lookup error (and, with `strict`, on a stop whose members could not be read).
 const VISIT_PAGE = 10;
-async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywords = [] }, max) {
+const CLOSED_VISIT_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
+async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywords = [] }, max, { strict = false } = {}) {
   const ids = [].concat(customerIds).filter(Boolean);
   const { pageStateForVisit } = require('../routes/appointment-public');
   const found = [];
@@ -303,7 +304,7 @@ async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywo
       q.whereRaw(`(LOWER(service_type) NOT LIKE ? OR ${unless.map(() => 'LOWER(service_type) LIKE ?').join(' OR ')})`, [`%${ex.keyword}%`, ...unless.map((u) => `%${u}%`)]);
     }
     const rows = await q
-      .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
+      .whereNotIn('status', CLOSED_VISIT_STATUSES)
       // The same null-safe dispatch-owned predicate /api/schedule uses.
       .where((qb) => qb
         .whereNull('source_action')
@@ -327,7 +328,11 @@ async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywo
         'prep_template_key', 'prep_sent_at', 'prep_token', 'created_at', 'prep_first_viewed_at', 'prep_view_count',
       );
     for (const r of rows) {
-      if ((await pageStateForVisit(r)).state === 'upcoming') found.push(r);
+      const page = await pageStateForVisit(r);
+      // `strict` (the texting AI's prep guide pick): a grouped stop whose members could not be read is a failed lookup, never a visit to skip
+      if (strict && page.unknown) throw new Error(`visit ${r.id} could not be read as a stop`);
+      // `strict` also carries the stop snapshot the verdict was judged on (a grouped visit's live members), never a second read of it
+      if (page.state === 'upcoming') found.push(strict ? { ...r, stop_members: page.members || null } : r);
       if (found.length >= max) return found;
     }
     if (rows.length < VISIT_PAGE) return found;
@@ -351,6 +356,74 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
 
 async function nextUpcomingVisits(customerId, config) {
   return upcomingFamilyVisits([customerId], config, Infinity);
+}
+
+// ---- Which guide a visit gets (read by the texting AI's PREP GUIDE facts too) ------------------------------------------------------
+// ONE JS reading of a config's visit match, the same rule upcomingFamilyVisits runs in SQL (a keyword matches, no exclusion keyword
+// matches unless one of its `unless` patterns keeps the row; '%' is the only LIKE wildcard the table uses). A test evaluates the SQL
+// the builder emits for every config against this function, so the two readings cannot drift. First config in table order wins, the
+// order the composer's soonest-visit scan breaks ties in. A how-to guide (no keywords) never matches.
+const likeContains = (pattern, text) => new RegExp(String(pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*')).test(text);
+function prepConfigMatches(config, serviceType) {
+  const name = String(serviceType || '').toLowerCase();
+  if (!name || config.guide || !config.serviceKeywords?.some((keyword) => name.includes(keyword))) return false;
+  return !(config.excludeKeywords || []).some((ex) => (typeof ex === 'string'
+    ? name.includes(ex)
+    : name.includes(ex.keyword) && ![].concat(ex.unless).some((cue) => likeContains(cue, name))));
+}
+// [pestType, config] of the guide family a service type belongs to, or null.
+function prepFamilyForServiceType(serviceType) {
+  return Object.entries(PREP_CONFIG).find(([, config]) => prepConfigMatches(config, serviceType)) || null;
+}
+
+// [pestType, config] of the guide family a stored prep_template_key names, or null when it is not one of ours.
+function prepFamilyForStoredKey(templateKey) {
+  return Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === templateKey) || null;
+}
+
+// The guide a set of visits carries, as { pestType, config }: the guides ASSIGNED to them decide (a visit's own prep_template_key, or the one
+// a staff send stored on the project linked to it: admin-projects), and only with none assigned are their service types matched. An assigned
+// key that is not one of ours, or two different guides, name none (never a guess between them).
+function singleGuide(assignedKeys, serviceTypes) {
+  const families = new Set(assignedKeys.length
+    ? assignedKeys.map((key) => prepFamilyForStoredKey(key)?.[0] || null)
+    : serviceTypes.map((type) => prepFamilyForServiceType(type)?.[0]).filter(Boolean));
+  const [pestType] = families.size === 1 ? [...families] : [null];
+  return { pestType: pestType || null, config: pestType ? PREP_CONFIG[pestType] : null };
+}
+
+/**
+ * The guide a COMPLETED service carried: the guide assigned to its visit row or to the project linked to the visit or the service record,
+ * else the family its service type belongs to. { pestType, config }. THROWS on a lookup error.
+ */
+async function completedPrepGuide({ scheduledServiceId = null, serviceRecordId = null, serviceType = null } = {}) {
+  const visit = scheduledServiceId ? await db('scheduled_services').where({ id: scheduledServiceId }).first('prep_template_key') : null;
+  const projects = scheduledServiceId || serviceRecordId
+    ? await db('projects').where((qb) => {
+      if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
+      if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
+    }).whereNotNull('prep_template_key').select('prep_template_key')
+    : [];
+  return singleGuide([visit, ...projects].map((row) => row?.prep_template_key).filter(Boolean), [serviceType]);
+}
+
+/**
+ * The prep guide the customer's BOOKED visit gets: the soonest upcoming visit as the customer's own page lists it (upcomingFamilyVisits'
+ * filters and order, across every service: a visit no guide covers is still THE booked visit, so an earlier completed service's guide is
+ * never put in its place), and the guide its page shows. The page is one STOP: every live member of a grouped visit counts, read from the
+ * snapshot the page state was judged on. A guide assigned to a member or to a project linked to one decides (singleGuide); only a stop with
+ * none is matched by its service types.
+ * { visit, pestType, config } or null with no booked visit; pestType and config are null when no single guide can be named. THROWS on a
+ * lookup error, including a grouped stop whose members could not be read: a failed read is not "nothing booked".
+ */
+async function bookedPrepGuide(customerIds) {
+  const [visit] = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, 1, { strict: true });
+  if (!visit) return null;
+  // (a sibling the booking query itself would hide, a dispatch-owned booking nobody confirmed, is not part of what the customer sees)
+  const { dispatchOwnedUnreviewed } = require('../routes/appointment-public');
+  const stop = (visit.stop_members || [visit]).filter((row) => !dispatchOwnedUnreviewed(row));
+  const projects = await db('projects').whereIn('scheduled_service_id', stop.map((row) => row.id)).whereNotNull('prep_template_key').select('prep_template_key');
+  return { visit, ...singleGuide([...stop, ...projects].map((row) => row.prep_template_key).filter(Boolean), stop.map((row) => row.service_type)) };
 }
 
 // A visit's prep key is never MOVED between guides. The automated lanes
@@ -1185,4 +1258,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 
 module.exports = {
   sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, buildWateringBlock, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
+  prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide, completedPrepGuide,
 };

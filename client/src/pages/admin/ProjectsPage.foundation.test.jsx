@@ -141,7 +141,8 @@ describe("Reports Tier 2 token pass", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send", exact: true }));
     await screen.findByText(/Report delivered/);
     const sendCalls = fetch.mock.calls.filter(([url, options]) => url === "/api/admin/projects/project-1/send" && options?.method === "POST");
-    expect(sendCalls.map(([, options]) => JSON.parse(options.body))).toEqual([{ dry_run: true }, {}]);
+    // The send carries what the operator confirmed: no early release of a held report, and a first send (not a resend).
+    expect(sendCalls.map(([, options]) => JSON.parse(options.body))).toEqual([{ dry_run: true }, { expected_hold: "none", expected_sent: false }]);
   });
 
   it("keeps admin-only delivery and close actions hidden from technicians", async () => {

@@ -15,6 +15,19 @@ describe('weather-forecast (NWS)', () => {
     delete global.fetch;
   });
 
+  test('getNwsHourlyRain cacheOnly: a fresh cached NWS answer or null, never a fetch', async () => {
+    const { getNwsHourlyRain, getNwsHourlyRainPatient } = require('../services/weather-forecast');
+    expect(await getNwsHourlyRain(27.4, -82.4, { cacheOnly: true })).toBeNull();
+    const hours = [{ startTime: '2026-11-27T08:00:00-05:00', pop: 80, source: 'nws' }];
+    _test._hourlyCache.set('27.40,-82.40', { at: Date.now(), value: hours });
+    expect(await getNwsHourlyRain(27.4, -82.4, { cacheOnly: true })).toBe(hours);
+    const read = jest.fn(async (lat, lng, opts) => (opts.fetchTimeoutMs === 10000 ? null : hours));
+    // The patient read asks twice with the long wait, then gives up with null.
+    expect(await getNwsHourlyRainPatient(27.4, -82.4, { read })).toBeNull();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   test('forecastLinkForZip builds the NWS zipcity link and rejects junk', () => {
     expect(forecastLinkForZip('34202')).toBe('https://forecast.weather.gov/zipcity.php?inputstring=34202');
     expect(forecastLinkForZip('34202-1234')).toBe('https://forecast.weather.gov/zipcity.php?inputstring=34202');
