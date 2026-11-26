@@ -2,12 +2,13 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import NotificationBell, { _test } from './NotificationBell';
 import api from '../utils/api';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 
-const native = vi.hoisted(() => ({ enabled: false, locked: false, request: vi.fn(), connection: vi.fn() }));
+const native = vi.hoisted(() => ({ enabled: false, locked: false, request: vi.fn(), connection: vi.fn(), permission: vi.fn() }));
 const badge = vi.hoisted(() => ({ write: vi.fn() }));
 vi.mock('../native/nativeBadge', () => ({
   captureNativeBadgeUpdate: () => badge.write,
@@ -17,6 +18,7 @@ vi.mock('../native/nativePush.js', () => ({
   isNativeApp: () => native.enabled,
   requestNativePushPermission: native.request,
   nativePushConnectionState: native.connection,
+  nativePushPermissionState: native.permission,
 }));
 vi.mock('./BiometricGate', () => ({ useBiometricLock: () => native.locked }));
 
@@ -56,6 +58,7 @@ beforeEach(() => {
   native.locked = false;
   native.request.mockReset().mockResolvedValue('granted');
   native.connection.mockReset().mockResolvedValue('granted');
+  native.permission.mockReset().mockResolvedValue('granted');
   badge.write.mockReset().mockResolvedValue(true);
   global.fetch = vi.fn(async (url) => {
     if (String(url).includes('/push/status')) return jsonResponse({ available: true });
@@ -376,7 +379,7 @@ describe('NotificationBell panel', () => {
     expect(badge.write).not.toHaveBeenCalled();
   });
 
-  it('requests the native permission popup automatically after biometric unlock, once per mount', async () => {
+  it('silently reconnects a device that already allowed notifications after biometric unlock, once per mount', async () => {
     native.enabled = true;
     native.locked = true;
     const { rerender } = render(<NotificationBell type="customer" />);
@@ -392,7 +395,34 @@ describe('NotificationBell panel', () => {
     rerender(<NotificationBell type="customer" />);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
     expect(native.request).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('button', { name: 'Enable push' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Turn on alerts' })).toBeNull();
+  });
+
+  it.each(['prompt', 'prompt-with-rationale'])('never raises the system popup by itself when permission is %s; it asks only after the customer taps', async (permission) => {
+    native.enabled = true;
+    native.permission.mockResolvedValue(permission);
+    native.connection.mockResolvedValue(permission);
+    render(<NotificationBell type="customer" />);
+    await waitFor(() => expect(native.permission).toHaveBeenCalled());
+    await act(async () => {});
+    expect(native.request).not.toHaveBeenCalled();
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
+    const turnOn = await screen.findByRole('button', { name: 'Turn on alerts' });
+    expect(native.request).not.toHaveBeenCalled();
+
+    await act(async () => { fireEvent.click(turnOn); });
+    expect(native.request).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Turn on alerts' })).toBeNull();
+  });
+
+  it('does not raise the popup by itself after a saved denial', async () => {
+    native.enabled = true;
+    native.permission.mockResolvedValue('denied');
+    render(<NotificationBell type="customer" />);
+    await waitFor(() => expect(native.permission).toHaveBeenCalled());
+    await act(async () => {});
+    expect(native.request).not.toHaveBeenCalled();
   });
 
   it.each([false, undefined])('does not auto-prompt when server availability is %s', async (available) => {
@@ -428,11 +458,13 @@ describe('NotificationBell panel', () => {
     native.enabled = true;
     native.request.mockResolvedValue('denied');
     native.connection.mockResolvedValue('denied');
+    native.permission.mockResolvedValue('denied');
     render(<NotificationBell type="customer" />);
-    await waitFor(() => expect(native.request).toHaveBeenCalledTimes(1));
+    await act(async () => {});
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Turn on alerts' })); });
     expect(screen.getByText('Notifications are off. Enable them for Waves in your device Settings, then try again.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Enable push' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Turn on alerts' })).toBeEnabled();
     expect(native.request).toHaveBeenCalledTimes(1);
   });
 
@@ -515,16 +547,13 @@ describe('NotificationBell customer safe-area offsets', () => {
       const title = await screen.findByText('Notifications');
       const markAll = await screen.findByRole('button', { name: 'Mark all read' });
       const close = screen.getByRole('button', { name: 'Close' });
-      const account = screen.getByRole('button', { name: 'Account' });
-      const whatsNew = screen.getByRole('button', { name: "What's new" });
       expect(title).toHaveStyle({ color: CUSTOMER_SURFACE.text });
       expect(markAll).toHaveStyle({ minHeight: '44px', color: CUSTOMER_SURFACE.text });
       expect(close).toHaveStyle({ width: '44px', height: '44px', color: CUSTOMER_SURFACE.text });
-      expect(account).toHaveStyle({ minHeight: '44px', color: CUSTOMER_SURFACE.text });
-      expect(whatsNew).toHaveStyle({ minHeight: '44px', color: CUSTOMER_SURFACE.muted });
-
-      fireEvent.click(whatsNew);
-      expect(screen.getByText('Nothing new right now')).toHaveStyle({ color: CUSTOMER_SURFACE.muted });
+      // A customer has one list, so no Account / What's new tab bar.
+      expect(screen.queryByRole('button', { name: 'Account' })).toBeNull();
+      expect(screen.queryByRole('button', { name: "What's new" })).toBeNull();
+      expect(screen.queryByText('Nothing new right now')).toBeNull();
     } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
     }
@@ -2239,5 +2268,93 @@ describe('NotificationBell admin — ranked list with an Area chip', () => {
     await screen.findByText('Today');
     expect(screen.getByText('Older')).toBeInTheDocument();
     expect(screen.queryAllByTestId('area-chip')).toHaveLength(0);
+  });
+});
+
+describe('NotificationBell customer alerts strip, tabs and link taps', () => {
+  const STAFF_WORDS = /failed payments|overdue invoices|unmapped calls|push notifications|Enable push/i;
+
+  it('shows customer words, with no staff words, on the customer strip', async () => {
+    native.enabled = true;
+    native.permission.mockResolvedValue('prompt');
+    native.connection.mockResolvedValue('prompt');
+    render(<NotificationBell type="customer" />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
+    const button = await screen.findByRole('button', { name: 'Turn on alerts' });
+    const strip = button.parentElement;
+    expect(strip).toHaveTextContent('Get an alert when your tech is on the way, your report is ready, or your schedule changes.');
+    expect(strip.textContent).not.toMatch(STAFF_WORDS);
+    expect(strip).toHaveStyle({ color: CUSTOMER_SURFACE.text });
+  });
+
+  it('keeps the staff strip and both tabs on the admin bell', async () => {
+    const { isPushEnabled } = await import('../lib/push-subscribe.js');
+    isPushEnabled.mockResolvedValue(false);
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    try {
+      render(<NotificationBell type="admin" />);
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
+      const button = await screen.findByRole('button', { name: 'Enable push' });
+      expect(button.parentElement).toHaveTextContent('Banner alerts for failed payments, overdue invoices, unmapped calls, and more.');
+      expect(screen.getByRole('button', { name: 'Account' })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: "What's new" }));
+      expect(screen.getByText('Nothing new right now')).toBeInTheDocument();
+    } finally {
+      isPushEnabled.mockResolvedValue(true);
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+    }
+  });
+
+  describe('taps on a customer row with a portal link', () => {
+    const linkRow = (link) => ({
+      id: 'l1', category: 'appointment', title: 'Report ready', body: 'Open it.',
+      created_at: new Date().toISOString(), read_at: null, link,
+    });
+    function mockList(link) {
+      global.fetch = vi.fn(async (url) => {
+        if (String(url).includes('/unread-count')) return jsonResponse({ count: 1 });
+        if (String(url).includes('/read')) return jsonResponse({ ok: true, count: 0 });
+        return jsonResponse({ notifications: [linkRow(link)] });
+      });
+    }
+    function renderInRouter(type = 'customer') {
+      const seen = { path: null };
+      function Where() { const l = useLocation(); seen.path = `${l.pathname}${l.search}${l.hash}`; return null; }
+      render(
+        <MemoryRouter initialEntries={['/']}><Where /><NotificationBell type={type} customerId="c1" /></MemoryRouter>,
+      );
+      return seen;
+    }
+
+    it('uses SPA navigation for a same-origin link and does not reload the page', async () => {
+      mockList('/?tab=billing');
+      const seen = renderInRouter();
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const row = await screen.findByRole('link', { name: /Report ready/ });
+      await act(async () => { fireEvent.click(row); });
+      await waitFor(() => expect(seen.path).toBe('/?tab=billing'));
+    });
+
+    it('keeps a full load for another origin and for a file or API path', async () => {
+      const original = window.location;
+      const assign = vi.fn();
+      for (const link of ['https://example.org/x', '/api/files/report.pdf']) {
+        mockList(link);
+        const hrefSetter = vi.fn();
+        Object.defineProperty(window, 'location', {
+          configurable: true,
+          value: { origin: original.origin, get href() { return original.href; }, set href(v) { hrefSetter(v); assign(v); } },
+        });
+        const seen = renderInRouter();
+        fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+        const row = await screen.findByRole('link', { name: /Report ready/ });
+        await act(async () => { fireEvent.click(row); });
+        expect(hrefSetter).toHaveBeenCalledWith(link);
+        expect(seen.path).toBe('/');
+        cleanup();
+      }
+      Object.defineProperty(window, 'location', { configurable: true, value: original });
+    });
   });
 });

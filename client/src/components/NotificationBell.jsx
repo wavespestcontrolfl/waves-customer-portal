@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useId } from 'react';
+import { useState, useEffect, useRef, useId, useContext } from 'react';
+import { UNSAFE_NavigationContext as NavigationContext } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import { useBiometricLock } from './BiometricGate';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
-import { isNativeApp, nativePushConnectionState, requestNativePushPermission } from '../native/nativePush.js';
+import { isNativeApp, nativePushConnectionState, nativePushPermissionState, requestNativePushPermission } from '../native/nativePush.js';
 import { isWavesAdminApp } from '../native/platform';
 import { setInAppBadge } from '../native/wavesAdminPush';
 import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
@@ -40,6 +41,22 @@ function notificationSettingsHref(type) {
   const role = type === 'admin' ? staffRoleFromToken() : null;
   if (role === 'admin') return '/admin/communications#tab=notifications';
   return role === 'technician' ? '/admin/today/more#notifications' : null;
+}
+
+// A customer notification link that points inside this app opens by SPA
+// navigation (no full page reload). Returns the in-app path, or null when the
+// target is another origin, an API/file path or an admin path, which keep the
+// full load.
+function sameOriginAppPath(href) {
+  try {
+    if (typeof href !== 'string' || typeof window === 'undefined') return null;
+    const url = new URL(href, window.location.origin);
+    if (url.origin !== window.location.origin) return null;
+    if (/^\/(api|admin)(\/|$)/.test(url.pathname) || /\.[a-z0-9]{2,5}$/i.test(url.pathname)) return null;
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return null;
+  }
 }
 
 // Mirror a server-confirmed unread count onto the home-screen app icon
@@ -596,6 +613,8 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   const [pushError, setPushError] = useState(null);
   const biometricLocked = useBiometricLock();
   const pushPromptRequested = useRef(false);
+  // Present inside the app's router; null in a bare render, which then falls back to a full load.
+  const routerNavigator = useContext(NavigationContext)?.navigator || null;
   const bellRef = useRef(null);
   const panelRef = useRef(null);
   // The customer shell keeps its bottom navigation through 899px, including
@@ -751,6 +770,15 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     }
   }, [open, type]);
 
+  // Open a notification's link. A customer's same-origin portal link uses the
+  // router (no reload); everything else, and every admin link, loads the page.
+  const openLink = (href) => {
+    setOpen(false);
+    const appPath = type === 'customer' && routerNavigator ? sameOriginAppPath(href) : null;
+    if (appPath) routerNavigator.push(appPath);
+    else window.location.href = href;
+  };
+
   const handleEnablePush = async () => {
     setPushEnabling(true);
     setPushError(null);
@@ -784,15 +812,19 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
     }
   };
 
-  // This bell mounts inside the authenticated customer portal. Show Apple's
-  // normal permission popup after Face ID unlock, without a preliminary tap.
-  // The OS remembers the choice; this ref avoids overlapping attempts when
-  // the system sheet causes lock/foreground changes during the same mount.
+  // This bell mounts inside the authenticated customer portal. After Face ID
+  // unlock it only reconnects a device that already allowed notifications (a
+  // silent re-register, no popup). A device that has not been asked yet gets
+  // Apple's permission popup only after the customer taps "Turn on alerts" in
+  // the drawer, so the popup never arrives cold. This ref avoids overlapping
+  // attempts when lock/foreground changes happen during the same mount.
   useEffect(() => {
     if (type !== 'customer' || !isNativeApp() || biometricLocked || pushPromptRequested.current) return;
     let current = true;
-    void api.getCustomerPushStatus().then((status) => {
+    void api.getCustomerPushStatus().then(async (status) => {
       if (!current || status?.available !== true) return;
+      const permission = await nativePushPermissionState();
+      if (!current || permission !== 'granted') return;
       pushPromptRequested.current = true;
       void handleEnablePush();
     }).catch(() => { /* Availability fails closed; the drawer keeps its retry action. */ });
@@ -1397,7 +1429,9 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
               </div>
             </div>
 
-            {/* Pill tabs: Account / What's new */}
+            {/* Pill tabs: Account / What's new. A customer has only the Account
+                list ("What's new" was always empty), so no tab bar there. */}
+            {type === 'admin' && (
             <div style={{ padding: '8px 20px 16px', flexShrink: 0 }}>
               <div style={{
                 display: 'flex', gap: 4,
@@ -1427,6 +1461,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                 })}
               </div>
             </div>
+            )}
 
             {/* Enable Push strip — admin only, shown when not yet
                 subscribed on this device. iOS reminder is folded into
@@ -1434,6 +1469,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
             {showPushStrip && (
               <PushEnableStrip
                 admin={type === 'admin'}
+                customer={type === 'customer'}
                 enabling={pushEnabling}
                 error={pushError}
                 onClick={handleEnablePush}
@@ -1460,7 +1496,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                   <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>No notifications yet</div>
                 </div>
               )}
-              {!loading && tab === 'whats_new' && (
+              {!loading && type === 'admin' && tab === 'whats_new' && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
                   <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>Nothing new right now</div>
                 </div>
@@ -1478,14 +1514,13 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                   className={href ? 'waves-focus-ring' : undefined}
                   onClick={async () => {
                     if (!n.read_at) await markRead(n.id);
-                    if (href) { setOpen(false); window.location.href = href; }
+                    if (href) openLink(href);
                   }}
                   onKeyDown={href ? async (e) => {
                     if (e.key !== 'Enter' && e.key !== ' ') return;
                     e.preventDefault();
                     if (!n.read_at) await markRead(n.id);
-                    setOpen(false);
-                    window.location.href = href;
+                    openLink(href);
                   } : undefined}
                   style={{
                     padding: '14px 20px', cursor: href ? 'pointer' : 'default',
@@ -1606,6 +1641,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
             {showPushStrip && (
               <PushEnableStrip
                 admin={type === 'admin'}
+                customer={type === 'customer'}
                 enabling={pushEnabling}
                 error={pushError}
                 onClick={handleEnablePush}
@@ -1658,14 +1694,13 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
                       className={href ? 'waves-focus-ring' : undefined}
                       onClick={async () => {
                         if (!n.read_at) await markRead(n.id);
-                        if (href) { setOpen(false); window.location.href = href; }
+                        if (href) openLink(href);
                       }}
                       onKeyDown={href ? async (e) => {
                         if (e.key !== 'Enter' && e.key !== ' ') return;
                         e.preventDefault();
                         if (!n.read_at) await markRead(n.id);
-                        setOpen(false);
-                        window.location.href = href;
+                        openLink(href);
                       } : undefined}
                       style={{
                         padding: '12px 20px', cursor: href ? 'pointer' : 'default',
@@ -1753,36 +1788,62 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
 // requirement is surfaced via the error-message path inside
 // ensurePushSubscription, not pre-emptively here, so Android/desktop
 // users don't see an irrelevant warning.
-function PushEnableStrip({ admin, enabling, error, onClick }) {
+function PushEnableStrip({ admin, customer, enabling, error, onClick }) {
+  // The customer app gets plain customer words and the customer palette. The
+  // staff words below stay on the admin bell only.
+  const copy = customer
+    ? {
+        title: 'Turn on app alerts',
+        body: 'Get an alert when your tech is on the way, your report is ready, or your schedule changes.',
+        button: 'Turn on alerts',
+        busy: 'Turning on…',
+      }
+    : {
+        title: 'Get push notifications on this device',
+        body: 'Banner alerts for failed payments, overdue invoices, unmapped calls, and more.',
+        button: 'Enable push',
+        busy: 'Enabling…',
+      };
+  const look = customer
+    ? {
+        bg: CUSTOMER_SURFACE.soft, border: CUSTOMER_SURFACE.softBorder, text: CUSTOMER_SURFACE.text,
+        muted: CUSTOMER_SURFACE.muted, button: CUSTOMER_SURFACE.text, titleSize: 15, bodySize: 14,
+        buttonSize: 14, buttonRadius: 10, minHeight: 44,
+      }
+    : {
+        bg: '#F4F4F5', border: '#E4E4E7', text: '#18181B', muted: '#52525B', button: '#18181B',
+        titleSize: 13, bodySize: 12, buttonSize: 13, buttonRadius: 6, minHeight: undefined,
+      };
   return (
     <div style={{
-      padding: '12px 16px',
-      background: '#F4F4F5',
-      borderBottom: '1px solid #E4E4E7',
-      fontSize: 13,
-      color: '#18181B',
+      padding: customer ? '14px 20px' : '12px 16px',
+      background: look.bg,
+      borderBottom: `1px solid ${look.border}`,
+      fontSize: look.titleSize,
+      color: look.text,
     }}>
       <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ fontWeight: admin ? 500 : 600 }}>Get push notifications on this device</span>
+        <span style={{ fontWeight: admin ? 500 : 600 }}>{copy.title}</span>
       </div>
-      <div style={{ marginBottom: 8, color: '#52525B', fontSize: 12 }}>
-        Banner alerts for failed payments, overdue invoices, unmapped calls, and more.
+      <div style={{ marginBottom: 8, color: look.muted, fontSize: look.bodySize, lineHeight: customer ? 1.4 : undefined }}>
+        {copy.body}
       </div>
       <button
         onClick={onClick}
         disabled={enabling}
         style={{
           padding: '8px 14px',
-          background: '#18181B',
+          minHeight: look.minHeight,
+          background: look.button,
           color: '#FFFFFF',
           border: 'none',
-          borderRadius: 6,
-          fontSize: 13,
-          fontWeight: 500,
+          borderRadius: look.buttonRadius,
+          fontSize: look.buttonSize,
+          fontWeight: customer ? 600 : 500,
           cursor: enabling ? 'wait' : 'pointer',
         }}
       >
-        {enabling ? 'Enabling…' : 'Enable push'}
+        {enabling ? copy.busy : copy.button}
       </button>
       {error && (
         <div style={{ marginTop: 8, color: '#C8312F', fontSize: 14, lineHeight: 1.4 }}>
