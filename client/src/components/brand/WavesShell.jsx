@@ -2,6 +2,7 @@ import React from 'react';
 import BrandFooter from '../BrandFooter';
 import HelpPhoneLink from './HelpPhoneLink';
 import HeaderStoreLinks from './HeaderStoreLinks';
+import { HeaderBackToAccount } from './BackToAccount';
 import TrustFooter from './TrustFooter';
 import { WavesShellContext } from './WavesShellContext';
 
@@ -18,6 +19,7 @@ import { WavesShellContext } from './WavesShellContext';
 // topBar="solid"     → surface-on-page top bar (default).
 // topBar="transparent" → transparent top bar for /login video hero; phone
 //                        reverses to white.
+// native + signed in → a "My account" control in the left slot (BackToAccount).
 // locked             → hand-off mode (Book at the Table): the owner has handed
 //                      his phone to a customer, so nothing in the chrome may
 //                      leave the page. The header keeps only the logo, and the
@@ -49,7 +51,7 @@ export default function WavesShell({
   };
 
   return (
-    <WavesShellContext.Provider value={{ variant, inShell: true, setFooterNoGuarantee }}>
+    <WavesShellContext.Provider value={{ variant, inShell: true, locked, setFooterNoGuarantee }}>
       <div
         style={{
           minHeight: '100vh',
@@ -91,6 +93,10 @@ export default function WavesShell({
               }}
             />
             {locked ? null : <HeaderStoreLinks tone={phoneTone} />}
+            {/* Native app + signed in: a labeled way back to the account (the
+                shell has no address bar). Renders nothing otherwise, and
+                never when locked (it checks the context's `locked`). */}
+            {locked ? null : <HeaderBackToAccount tone={phoneTone} />}
             {/* marginLeft:auto keeps the phone CTA on the right even when
                 HeaderStoreLinks renders null inside the native app (the
                 logo is absolutely positioned, so space-between alone would

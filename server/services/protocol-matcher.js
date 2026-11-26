@@ -100,20 +100,46 @@ const MATCH_RULES = [
     reason: 'cockroach_control',
     terms: ['cockroach', 'roach'],
   },
+  // A trap check (owner 2026-11-23: only on the customer's report of a sound or a smell): every follow-up, an added check, and each
+  // trap-only retainer visit (the numbered 8-trap check with the catch map). The catalog key routes a retainer whose name says no rodent.
   {
     programKey: 'rodent',
     visit: 4,
     reason: 'rodent_followup',
+    // A visit booked as a follow-up (it carries the source visit's name) gets this card only after a trapping visit: a follow-up of a
+    // bait-station service or an exclusion keeps its own card (no attic traps to reset).
+    followupOf: ['rodent_trapping_baiting', 'rodent_exclusion_trapping', 'rodent_followup'],
+    serviceKeys: [
+      'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',
+      'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
+    ],
     terms: [
-      'rodent exclusion follow up',
-      'rodent exclusion followup',
+      'trap check',
+      'trap only retainer',
       'rodent trapping follow up',
       'rodent trapping followup',
       'rodent follow up',
       'rodent followup',
-      'exclusion follow up',
-      'exclusion followup',
     ],
+  },
+  // An exclusion follow-up: the traps came out at the exclusion visit (owner 2026-11-25, D15a), so it is a re-inspection of the sealed
+  // entries, never a trap reset. Not named *_followup: followupVisitMatch takes the program's one *_followup rule.
+  {
+    programKey: 'rodent',
+    visit: 7,
+    reason: 'rodent_exclusion_recheck',
+    // A follow-up booked from an exclusion visit carries its name: the re-inspection, never the sealing card again.
+    followupOf: ['rodent_exclusion'],
+    terms: ['rodent exclusion follow up', 'rodent exclusion followup', 'exclusion follow up', 'exclusion followup'],
+  },
+  // The combined service ("Rodent Exclusion & Trapping Service", key rodent_exclusion) seals, then traps the rats left inside: its
+  // own card, and a follow-up of it is a trap check (above), never the exclusion re-inspection.
+  {
+    programKey: 'rodent',
+    visit: 6,
+    reason: 'rodent_exclusion_trapping',
+    serviceKeys: ['rodent_exclusion', 'rodent_trapping_exclusion', 'rodent_trapping_exclusion_sanitation'],
+    terms: ['exclusion & trapping', 'exclusion and trapping', 'trapping & exclusion', 'trapping and exclusion', 'trapping + exclusion'],
   },
   {
     programKey: 'rodent',
@@ -121,11 +147,20 @@ const MATCH_RULES = [
     reason: 'rodent_exclusion',
     terms: ['exclusion', 'seal up', 'seal-up', 'entry point', 'entry points'],
   },
+  // Outdoor bait stations: their own card (Tomcat Bromethalin at homes, Contrac at commercial sites; owner 2026-11-25, D15b), never the
+  // attic trapping card and its Victor trap default.
+  {
+    programKey: 'rodent',
+    visit: 5,
+    reason: 'rodent_bait_station',
+    serviceKeys: ['rodent_bait_quarterly', 'rodent_bait_setup'],
+    terms: ['rodent bait', 'rat bait', 'mouse bait', 'bait station', 'rodent station', 'rodent monitoring'],
+  },
   {
     programKey: 'rodent',
     visit: 2,
     reason: 'rodent_trapping_baiting',
-    terms: ['rodent bait', 'rat bait', 'mouse bait', 'bait station', 'rodent station', 'rodent trap', 'rat trap', 'mouse trap', 'rodent monitoring'],
+    terms: ['rodent trap', 'rat trap', 'mouse trap'],
   },
   {
     programKey: 'rodent',
@@ -367,7 +402,9 @@ function programKeyForService(serviceType) {
     hasToken(normalized, 'mice') ||
     hasToken(normalized, 'exclusion') ||
     normalized.includes('seal up') ||
-    normalized.includes('entry point')
+    normalized.includes('entry point') ||
+    // A keyless trap-only retainer ("Standard Trap-Only Retainer Service") names no rodent.
+    normalized.includes('trap only retainer')
   ) return 'rodent';
   if (normalized.includes('mosquito') || normalized.includes('misting') || normalized.includes('no see um')) return 'mosquito';
   if (
@@ -507,8 +544,10 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
 // whose own name already says its stage (a clearance check, a third treatment, a scope review) keeps that card.
 function followupVisitMatch(match, isFollowup) {
   if (!isFollowup || !match?.program) return match;
-  const rule = MATCH_RULES.find((entry) => entry.programKey === match.programKey && /_followup$/.test(entry.reason || ''));
-  if (!rule || (rule.followupOf && !rule.followupOf.includes(match.reason))) return match;
+  // The rule that lists this card in followupOf, else the program's catch-all *_followup rule (one with no followupOf).
+  const rules = MATCH_RULES.filter((entry) => entry.programKey === match.programKey && (entry.followupOf || /_followup$/.test(entry.reason || '')));
+  const rule = rules.find((entry) => entry.followupOf?.includes(match.reason)) || rules.find((entry) => !entry.followupOf);
+  if (!rule) return match;
   const visit = findVisit(match.program, rule.visit);
   return visit ? { ...match, matchedVisit: visit, matched: true, reason: rule.reason } : match;
 }

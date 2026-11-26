@@ -16,9 +16,9 @@ module.exports = {
     const captures = fs.readFileSync(captureFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
     const code = captures.filter((item) => item.kind === 'verification').at(-1)?.code;
     assert.ok(code, 'Expected captured OTP from the real send-code route');
-    await page.getByLabel('Verification code', { exact: true }).fill(code);
+    // A full 6-digit code signs in by itself (no Sign in tap).
     const login = page.waitForResponse((response) => response.url().endsWith('/api/auth/verify-code'));
-    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await page.getByLabel('Verification code', { exact: true }).fill(code);
     const session = await json(await login);
     ctx.customerToken = session.token;
     ctx.customerRefreshToken = session.refreshToken;
