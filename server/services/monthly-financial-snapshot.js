@@ -7,7 +7,8 @@
  *   office_cost_per_stop = office_cost / paid_stops (null when there are no paid stops)
  *
  * The buyer-view columns (owner field time, book gross margin, SDE, owner-paid profit, recurring and prepaid money) come
- * from monthly-snapshot-buyer-columns.js.
+ * from monthly-snapshot-buyer-columns.js. The cross-sell columns (recurring customers, customers with two or more kinds of
+ * recurring service, and how the added service came in) come from cross-sell-rate.js.
  *
  * Reads reuse pnl-report.js (the P&L report for the cash-basis revenue and net income, the
  * pay-run category exclusion) and the dashboard gross-margin tile's formula
@@ -21,6 +22,7 @@ const { pnlPayRunWagesLive } = require('../config/feature-gates');
 const { buildPnlReport } = require('./pnl-report');
 const { leaveOutPayRunCategory } = require('./pay-run-books');
 const { timeAllowance, buyerColumns } = require('./monthly-snapshot-buyer-columns');
+const { crossSellColumns } = require('./cross-sell-rate');
 const logger = require('./logger');
 
 // Office categories, by expense_categories.name. Insurance, vehicle, ads, card fees,
@@ -178,6 +180,7 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
   const officeCost = round2(ledger + allowance);
   const cashRevenue = round2(pnl.revenue.total);
   const buyer = await buyerColumns(db, { startDate, endDate, financials, pnl, officeAllowance: allowance, cashRevenue });
+  const crossSell = await crossSellColumns(db, endDate);
   return {
     month: monthStart,
     completed_job_revenue: jobs.revenue,
@@ -194,6 +197,7 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
     // card fees inside cash revenue and net income are final.
     pnl_complete: !!(pnl.coverage && pnl.coverage.complete),
     ...buyer,
+    ...crossSell,
   };
 }
 
