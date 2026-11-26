@@ -711,9 +711,34 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
   return profile;
 }
 
+function assertConvertibleReservation(row, {
+  expectedEstimateId = null,
+  expectedCustomerId = null,
+} = {}) {
+  const claimed = row?.customer_id != null;
+  if (!row
+    || (expectedEstimateId != null
+      && String(row.source_estimate_id || '') !== String(expectedEstimateId))
+    || (claimed && (expectedCustomerId == null
+      || String(row.customer_id) !== String(expectedCustomerId)))) {
+    const err = new Error('reservation not found');
+    err.code = 'RESERVATION_NOT_FOUND';
+    throw err;
+  }
+  if (claimed || !row.reservation_expires_at) {
+    throw capacityError('reservation_already_booked');
+  }
+}
+
+function reservationOwnershipRequested({ expectedEstimateId = null, expectedCustomerId = null } = {}) {
+  return expectedEstimateId != null || expectedCustomerId != null;
+}
+
 async function prepareReservationCommit(scheduledServiceId, options = {}) {
   const row = await db('scheduled_services').where({ id: scheduledServiceId }).first();
-  if (!row) return null;
+  if (reservationOwnershipRequested(options)) {
+    assertConvertibleReservation(row, options);
+  } else if (!row) return null;
   const held = require('./combined-visit-capacity').capacityFromReservation(row);
   if (held?.version === 1 || (!capacityEnabled() && row.reservation_policy_version !== 2)) return null;
   const profile = await resolveReservationServiceProfile(db, row, { ...options, preserveCombinedCapacity: !!held });
@@ -2038,7 +2063,8 @@ async function reserveSlot({
  * the acquisition below is a reentrant no-op (pg advisory xact locks are
  * re-acquirable by the owning transaction).
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?,
+ *   expectedEstimateId?, expectedCustomerId?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
  * returns: updated scheduled_services row
  */
 async function commitReservation({
@@ -2054,6 +2080,8 @@ async function commitReservation({
   preLockedDate = null,
   preLockedTechId = null,
   preparedCapacity = null,
+  expectedEstimateId = null,
+  expectedCustomerId = null,
   trx,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
@@ -2066,7 +2094,13 @@ async function commitReservation({
   await refreshCustomerBookingWindowConfig(trx || db);
   requireKnownBookingWindowConfig();
   if (!trx && !preparedCapacity) preparedCapacity = await prepareReservationCommit(scheduledServiceId, {
-    estimate, serviceMode, selectedFrequency, serviceCadences, durationMinutes,
+    estimate,
+    expectedEstimateId,
+    expectedCustomerId,
+    serviceMode,
+    selectedFrequency,
+    serviceCadences,
+    durationMinutes,
   });
   // Set by the standalone path's run() when a make-room accept moved stops: the after-commit steps follow its transaction.
   let standaloneMakeRoom = null;
@@ -2112,6 +2146,9 @@ async function commitReservation({
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
       throw err;
+    }
+    if (reservationOwnershipRequested({ expectedEstimateId, expectedCustomerId })) {
+      assertConvertibleReservation(preRow, { expectedEstimateId, expectedCustomerId });
     }
     const lockedDate = dateOnly(preRow.scheduled_date);
     // Caller pre-locked rung 1 (the accept txn, at its start, before its
@@ -2201,6 +2238,12 @@ async function commitReservation({
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
       throw err;
+    }
+    // The pre-read is advisory. Repeat the one-tap ownership authority on
+    // the FOR UPDATE row so a staff claim or reassignment after preparation
+    // cannot be replayed through the reservation writer.
+    if (reservationOwnershipRequested({ expectedEstimateId, expectedCustomerId })) {
+      assertConvertibleReservation(row, { expectedEstimateId, expectedCustomerId });
     }
     if (dateOnly(row.scheduled_date) !== lockedDate
       || (preparedCapacity && (row.technician_id || null) !== (preRow.technician_id || null))) {
@@ -2625,9 +2668,9 @@ function uncommittedHoldQuery(client, { scheduledServiceId, estimateId }) {
   return estimateId && scheduledServiceId ? q.where({ source_estimate_id: estimateId }) : q;
 }
 
-async function releaseReservation({ scheduledServiceId, estimateId }) {
+async function releaseReservation({ scheduledServiceId, estimateId, database = null }) {
   if (!scheduledServiceId) return { released: false };
-  const count = await uncommittedHoldQuery(db, { scheduledServiceId, estimateId }).del();
+  const count = await uncommittedHoldQuery(database || db, { scheduledServiceId, estimateId }).del();
   return { released: count > 0 };
 }
 
@@ -3189,6 +3232,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
 
 module.exports = {
   reserveSlot,
+  parseSlotId,
   prepareReservationCommit,
   commitReservation,
   releaseReservation,
@@ -3217,6 +3261,7 @@ module.exports = {
   // the visit-count table.
   cadenceCatalogKeyForProfile,
   _internals: {
+    assertConvertibleReservation,
     parseSlotId,
     addMinutesToTime,
     cappedServiceType,

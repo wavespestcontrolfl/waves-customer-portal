@@ -1428,6 +1428,12 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
   const [confirming, setConfirming] = useState(false);
   confirmingRef.current = confirming;
   const [stepError, setStepError] = useState('');
+  const [officeReviewMessage, setOfficeReviewMessage] = useState('');
+  // An office-review refusal parks the purchase for staff: closing or
+  // unmounting the overlay must not release its held visit or draft.
+  // Keep this in a ref so the unmount cleanup observes it even if close is
+  // triggered immediately after the refusal response settles.
+  const preserveOfficeReviewRef = useRef(false);
   const [needsCard, setNeedsCard] = useState(false);
   const [cardSaved, setCardSaved] = useState(false);
   const [cardBusy, setCardBusy] = useState(false);
@@ -1442,6 +1448,11 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
   const releaseRef = useRef({});
   releaseRef.current = { purchaseId: init?.purchaseId || null, done: step === 'done' };
 
+  const keepForOfficeReview = (message) => {
+    preserveOfficeReviewRef.current = true;
+    setOfficeReviewMessage(message || 'Call Waves so we can confirm the right appointment before you continue.');
+  };
+
   useEffect(() => {
     if (!open || (!card && !resume)) return undefined;
     let stale = false;
@@ -1451,6 +1462,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     setSlots(null);
     setSelectedSlot(null);
     setStepError('');
+    setOfficeReviewMessage('');
+    preserveOfficeReviewRef.current = false;
     setNeedsCard(false);
     setCardSaved(false);
     setResult(null);
@@ -1472,7 +1485,10 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
         holdMinutes: resume.holdMinutes,
       });
       setCardSaved(!!resume.cardJustSaved);
-      if (resume.holdLive && resume.slot) {
+      if (resume.officeReviewRequired) {
+        setSelectedSlot(resume.slot || null);
+        keepForOfficeReview(resume.officeReviewMessage);
+      } else if (resume.holdLive && resume.slot) {
         setSelectedSlot({ slotId: null, ...resume.slot });
         setStep('confirm');
       } else {
@@ -1492,11 +1508,22 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
         // saw no purchase id, so this late success is the only holder of the
         // new id — release it or its draft sits in the admin pipeline until
         // the 24h expiry sweep.
-        if (d?.purchaseId) api.oneTapRelease(d.purchaseId).catch(() => {});
+        if (d?.purchaseId && !d.officeReviewRequired) api.oneTapRelease(d.purchaseId).catch(() => {});
         return;
       }
       setInit(d);
-      setSlots(d.slots || null);
+      if (d.success === true) {
+        // Another confirmation completed while this offer was reopening.
+        setResult(d);
+        setStep('done');
+        // The plan changed on the server in the other tab: a host that shows the plan reloads, as after a confirm.
+        if (onPurchased) onPurchased();
+      } else if (d.officeReviewRequired) {
+        setSelectedSlot(d.slot || null);
+        keepForOfficeReview(d.officeReviewMessage);
+      } else {
+        setSlots(d.slots || null);
+      }
     }).catch((err) => {
       if (stale) return;
       setInitError(err?.status === 409 ? 'stale' : (err?.message || 'Something went wrong — please try again.'));
@@ -1526,7 +1553,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     return () => {
       closedRef.current = true;
       const { purchaseId, done } = releaseRef.current;
-      if (purchaseId && !done) api.oneTapRelease(purchaseId).catch(() => {});
+      if (purchaseId && !done && !preserveOfficeReviewRef.current) api.oneTapRelease(purchaseId).catch(() => {});
       paymentElementRef.current = null;
       elementsRef.current = null;
       stripeRef.current = null;
@@ -1546,6 +1573,12 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
     }
   };
 
+  const showOfficeReview = (err) => {
+    if (err?.status !== 422 || err.code !== 'APPOINTMENT_OFFICE_REVIEW_REQUIRED') return false;
+    keepForOfficeReview(err.message);
+    return true;
+  };
+
   const pickSlot = async (slot) => {
     if (!init || reserving) return;
     setReserving(true);
@@ -1563,6 +1596,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
       setSelectedSlot(slot);
       setStep('confirm');
     } catch (err) {
+      if (showOfficeReview(err)) return;
       if (err?.code === 'SLOT_UNAVAILABLE') {
         setStepError('That time was just taken — pick another slot.');
         refreshSlots();
@@ -1668,6 +1702,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
       // The plan changed on the server: a host that shows the plan reloads.
       if (onPurchased) onPurchased();
     } catch (err) {
+      if (showOfficeReview(err)) return;
       if (err?.status === 402) {
         setNeedsCard(true);
         setCardSaved(false);
@@ -1729,7 +1764,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
   // The services the customer already has, at the price the new tier gives
   // them. Before confirm these are the frozen plan; on the done screen only
   // the ones the purchase actually repriced.
-  const existingServicesBox = (pricing, { done = false } = {}) => {
+  const existingServicesBox = (pricing, { done = false, officeReview = false } = {}) => {
     const rows = pricing?.existingServices || [];
     if (!rows.length && !(done && pricing?.existingPending)) return null;
     return (
@@ -1765,7 +1800,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
             We are moving {rows.length ? 'the rest of your' : 'your'} current services to the {tierName(pricing)} price.
           </div>
         ) : null}
-        {!done ? (
+        {!done && !officeReview ? (
           <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
             Applied automatically when you confirm. Your visit schedule does not change.
           </div>
@@ -1864,6 +1899,35 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
             </div>
           ) : !init ? (
             <div style={{ fontSize: 15, color: muted }}>Loading your offer…</div>
+          ) : officeReviewMessage ? (
+            <>
+              <div style={softBox}>
+                {summaryRow('Service', init.label)}
+                <div style={{ height: 6 }} />
+                {priceRows(init.pricing, init.perVisit)}
+                {selectedSlot && <>
+                  <div style={{ height: 6 }} />
+                  {summaryRow('Time you selected', `${oneTapDayLabel(selectedSlot.date)}, ${oneTapTime12(selectedSlot.windowStart)}–${oneTapTime12(selectedSlot.windowEnd)}`)}
+                </>}
+              </div>
+              {existingServicesBox(init.pricing, { officeReview: true })}
+              <div style={softBox}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Call Waves to review your appointment</div>
+                <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+                  {officeReviewMessage}
+                </div>
+                <a
+                  data-glass-accent=""
+                  href="tel:+19412975749"
+                  style={{ ...PORTAL_SECONDARY_ACTION, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginTop: 10, textDecoration: 'none' }}
+                >
+                  Call Waves — (941) 297-5749
+                </a>
+                <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+                  You can close this screen. The office has your quote.
+                </div>
+              </div>
+            </>
           ) : step === 'terms' ? (
             <>
               <div style={softBox}>
