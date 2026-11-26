@@ -7,7 +7,7 @@
  *   SQL-expressible (applied directly in buildSubscriberQuery):
  *     { sources?: string[], tags?: string[], customersOnly?: boolean,
  *       leadsOnly?: boolean, region_zone?: string[], subscriber_ids?: number[],
- *       holdout?: 'pest-insider', address_keys?: { [id]: string } }
+ *       holdout?: 'pest-insider' | 'weekly-warm', address_keys?: { [id]: string } }
  *   (holdout and address_keys: re-checked per batch at dispatch)
  *   Service-line / membership (NOT a column — resolved to a customer_id set
  *   via newsletter-audience-profiles, then injected as a whereIn):
@@ -38,6 +38,7 @@ const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasHomeToken, loadHomeFacts } = require('./pest-insider/home');
 const { referralLineForBatch } = require('./pest-insider/referral-line');
+const { PHASE_WARM, WEEKLY_WARM_PLAN } = require('./newsletter-weekly-audience');
 const { toolBlockForBatch } = require('./pest-insider/tool-block');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
@@ -47,7 +48,7 @@ const { pestInsiderProofLive, newsletterAutoSendLive, pestInsiderAutoSendLive } 
 const { issueContextForSend, inSendWindow, issueSendAt, moveIssueForSend, SEND_WINDOW_MS } = require('./pest-insider/schedule');
 const { dateOnlyString } = require('../utils/date-only');
 const NewsletterSubscribers = require('./newsletter-subscribers');
-const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
+const { PEST_INSIDER_TYPE, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -602,11 +603,19 @@ function buildSubscriberQuery(segmentFilter, customerIds = null) {
 //   recipient about to be mailed at any other address is skipped, because the
 //   plan chose that mailbox, not whatever address the row carries now.
 // - isAddressKey(value): whether a stored key has addressKey's form.
+// 'weekly-warm' is the weekly events email's first-readers step (owner 2026-11-26,
+// newsletter-weekly-audience.js): the same list-and-address-key plan, with no
+// holdout group (heldOut is always false), so the name only marks a planned audience.
 const SEND_HOLDOUTS = Object.freeze({
   'pest-insider': Object.freeze({
     heldOut: (customerId) => require('./pest-insider/audience').isHeldOut(customerId),
     addressKey: (email) => require('./pest-insider/audience').addressKey(email),
     isAddressKey: (value) => require('./pest-insider/audience').isAddressKey(value),
+  }),
+  [WEEKLY_WARM_PLAN]: Object.freeze({
+    heldOut: () => false,
+    addressKey: (email) => require('./newsletter-warm-audience').addressKey(email),
+    isAddressKey: (value) => require('./newsletter-warm-audience').isAddressKey(value),
   }),
 });
 
@@ -630,6 +639,25 @@ function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerIds, ad
   return addresses.every((address) => keys[id] === plan.addressKey(address));
 }
 
+// The weekly events email records its first-readers phase when its draft is built. An issue with
+// no phase (a draft older than the step) would mail the whole list, and a warm issue must carry
+// its own list, so both stop here until the next draft is built.
+function weeklyAudienceRefusal(send, refused) {
+  if (send.newsletter_type !== FLAGSHIP_TYPE_KEY) return null;
+  const phase = send.audience_phase;
+  const holdout = send.segment_filter?.holdout;
+  if (phase !== PHASE_WARM && phase !== 'all') {
+    return refused('UNPLANNED_AUDIENCE', 'a weekly issue goes out only with its audience phase recorded (first readers or everyone), and this one has none');
+  }
+  if (phase === PHASE_WARM && holdout !== WEEKLY_WARM_PLAN) {
+    return refused('UNPLANNED_AUDIENCE', 'a weekly first-readers issue goes only to its planned warm readers, and this one has no list');
+  }
+  if (phase === 'all' && holdout != null) {
+    return refused('UNPLANNED_AUDIENCE', 'a weekly issue for everyone carries no planned reader list');
+  }
+  return null;
+}
+
 // Why this send must not go out to its audience (an Error marked
 // audienceRefusal), or null. Read before any claim work, on a first send and
 // on a resume (a resume reads its retryable rows from the ledger and never
@@ -638,6 +666,8 @@ function keepsPlannedAudience(plan, segmentFilter, subscriberId, customerIds, ad
 // - a Waves Pest Insider issue with no planned audience (its planner sets
 //   one): without it the issue would go to every subscriber, the holdout and
 //   readers who never open Waves mail included;
+// - a weekly events issue with no audience phase, or a first-readers issue with no
+//   list (weeklyAudienceRefusal);
 // - a planned audience without a usable reader list or without a
 //   well-formed address key for every reader on it: the batches would skip
 //   everyone, and the issue would end 'sent' to nobody.
@@ -650,6 +680,8 @@ function audienceRefusal(send) {
   if (send.newsletter_type === PEST_INSIDER_TYPE && filter?.holdout !== 'pest-insider') {
     return refused('UNPLANNED_AUDIENCE', 'a Waves Pest Insider issue goes only to its planned readers, and this one has no plan');
   }
+  const weeklyRefusal = weeklyAudienceRefusal(send, refused);
+  if (weeklyRefusal) return weeklyRefusal;
   const plan = sendHoldout(filter);
   if (plan) {
     const { subscriber_ids: ids, address_keys: keys } = filter;
@@ -931,7 +963,7 @@ async function sendCampaign(sendId, opts = {}) {
   // the 6:00–6:14 delivery window would block stalled-send recovery at
   // 6:30. A ZERO-LEDGER resume (failed before any delivery rows were
   // seeded) reseeds the whole audience — that IS a first send, so it faces
-  // the full gates: no resuming an entire issue outside the Tuesday window
+  // the full gates: no resuming an entire issue outside the Thursday window
   // or on a stale lineup.
   if (opts.preclaimed && opts.existingDeliveriesOnly) {
     // Partial resume: the freshness/cadence gates above are DELIBERATELY
@@ -979,12 +1011,12 @@ async function sendCampaign(sendId, opts = {}) {
       }
       const now = new Date();
       if (send.status === 'scheduled' && !isCurrentFlagshipTarget(send.scheduled_for, now)) {
-        const err = new Error('scheduled flagship target is not the current issue Tuesday at 6:00 AM ET');
+        const err = new Error('scheduled flagship target is not the current issue Thursday at 6:00 AM ET');
         err.code = 'FLAGSHIP_SCHEDULE_TARGET';
         throw err;
       }
       if (!isFlagshipDeliveryWindow(now)) {
-        const err = new Error('flagship newsletters can only be delivered Tuesday at 6:00 AM ET');
+        const err = new Error('flagship newsletters can only be delivered Thursday at 6:00 AM ET');
         err.code = 'FLAGSHIP_CADENCE_WINDOW';
         throw err;
       }
@@ -1712,7 +1744,7 @@ async function prepareResumeCampaign(sendId) {
   const totalDeliveries = Number(deliveryTotal?.c || 0);
   const leaseCutoff = new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000);
 
-  const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
+  const { requiresClaimValidation } = require('../config/newsletter-types');
   // A promoted legacy flagship has newsletter_type NULL; the manual and
   // scheduled paths classify it by its calendar link and validate it as the
   // flagship type — so does the resume path (codex round 12 P1): its
@@ -2006,7 +2038,7 @@ async function pestInsiderDispatchStop(row, now = new Date()) {
  * can't stampede the others.
  */
 async function processScheduledSends() {
-  const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
+  const { requiresClaimValidation } = require('../config/newsletter-types');
   const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
 
   const due = await db('newsletter_sends')
@@ -2094,11 +2126,11 @@ async function processScheduledSends() {
           const reason = !eventSelection.valid
             ? eventSelection.errors.join(', ')
             : !currentTarget
-              ? 'scheduled_for is not the current issue Tuesday at 6:00 AM ET'
-              : (recheckReason || 'missed the Tuesday 6:00–6:14 AM ET delivery window');
+              ? 'scheduled_for is not the current issue Thursday at 6:00 AM ET'
+              : (recheckReason || 'missed the Thursday 6:00–6:14 AM ET delivery window');
           logger.error(`[newsletter-scheduler] flagship send ${row.id} blocked: ${reason}`);
           // Reverting an approved schedule INVALIDATES the approval: the
-          // state the owner signed off (lineup, target Tuesday) no longer
+          // state the owner signed off (lineup, target Thursday) no longer
           // holds, so the draft must never keep stale approval metadata.
           await revertBlockedScheduledSend(row, reason);
           continue;

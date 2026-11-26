@@ -342,7 +342,7 @@ export function HistoryView({ sendsData, sendsLoading, sendsReads, onRefresh }) 
           </ActionFeedback>
         ) : sends.length === 0 ? (
           <div className="text-ui-body text-ink-secondary p-8 text-center">
-            No campaigns yet. The weekly issue appears here after the Monday autopilot drafts it.
+            No campaigns yet. The weekly issue appears here after the Wednesday autopilot drafts it.
           </div>
         ) : (
           <div className="space-y-0">

@@ -34,7 +34,8 @@ const {
   normalizeDigestTitle,
   excludeRepeatedDateIdentities,
   dedupeDigestEvents,
-  getActiveNewsletterTuesday,
+  getActiveNewsletterIssueDay,
+  getNewsletterIssueWindow,
   FEATURED_ISSUE_LOOKAHEAD_MS,
 } = require('./event-freshness');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
@@ -167,12 +168,12 @@ function repeatedDateTitleKeys(events) {
 }
 
 async function loadRoutineIdentityPool(knex = db, reference = new Date()) {
-  const issueTuesday = getActiveNewsletterTuesday(reference);
-  const issueStart = parseETDateTime(`${issueTuesday}T00:00:00`);
-  // Both bounds are anchored to whichever of (issue Tuesday, reference)
-  // reaches further — on a Monday run the issue Tuesday is TOMORROW, so an
+  const issueDay = getActiveNewsletterIssueDay(reference);
+  const issueStart = parseETDateTime(`${issueDay}T00:00:00`);
+  // Both bounds are anchored to whichever of (issue Thursday, reference)
+  // reaches further — on a Wednesday run the issue Thursday is TOMORROW, so an
   // issue-only lower bound would start a day late and hide an earlier
-  // sibling in the Monday-to-Tuesday slice (Codex P2, mirror of the
+  // sibling in the Wednesday-to-Thursday slice (Codex P2, mirror of the
   // upper-bound fix below).
   const issueLower = parseETDateTime(
     `${etDateString(addETDays(issueStart, -ROUTINE_IDENTITY_HORIZON_DAYS))}T00:00:00`,
@@ -182,8 +183,8 @@ async function loadRoutineIdentityPool(knex = db, reference = new Date()) {
   );
   const horizonStart = referenceLower < issueLower ? referenceLower : issueLower;
   // The pool must reach at least as far as curation's own candidate
-  // horizon (reference + 90 days). Anchored only to the issue Tuesday it
-  // ends 1–5 days short on Wed–Sun runs, and a daily/custom debut series
+  // horizon (reference + 90 days). Anchored only to the issue Thursday it
+  // ends 1–5 days short on Fri–Wed runs, and a daily/custom debut series
   // whose siblings all sit in that uncovered tail would make EVERY row
   // look like the first occurrence (Codex P2, 2026-07-28).
   const issueEnd = parseETDateTime(
@@ -733,9 +734,8 @@ function assessFlagshipEventSelection(
   const ordered = ids.map((id) => byId.get(id)).filter(Boolean);
   if (ordered.length !== new Set(ids).size) errors.push('One or more locked events no longer exist.');
 
-  const issueTuesday = getActiveNewsletterTuesday(reference);
-  const windowStart = parseETDateTime(`${issueTuesday}T00:00:00`);
-  const windowEnd = parseETDateTime(`${etDateString(addETDays(windowStart, 6))}T23:59:59`);
+  const issueDay = getActiveNewsletterIssueDay(reference);
+  const { start: windowStart, end: windowEnd } = getNewsletterIssueWindow(issueDay);
   const repeatedTitles = repeatedDateTitleKeys(issueIdentityPool);
   const eligible = [];
   for (const event of ordered) {

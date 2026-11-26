@@ -5,7 +5,7 @@
  * passes the same validation gate the manual Send button enforces, a proof
  * copy is emailed to the owner (contact@) with an "ACT: [PROOF-<token>]" subject.
  * Replying "approved" to that email — from an allowlisted owner address —
- * queues the issue for its linked Tuesday 6:00 AM ET target. Any other reply
+ * queues the issue for its linked Thursday 6:00 AM ET target. Any other reply
  * (or no reply) leaves the draft untouched: the flow fails closed, and the
  * eventual list send still happens through the same atomic draft→sending
  * claim as a manual send.
@@ -16,7 +16,7 @@
  *
  * GATE_NEWSLETTER_AUTO_SEND (default OFF; owner 2026-10-30, option A): the
  * weekly flagship that passes every check here gets an FYI copy instead of
- * a proof, and queues itself for its Tuesday 6:00 AM ET target once that
+ * a proof, and queues itself for its Thursday 6:00 AM ET target once that
  * copy went out. A HOLD reply to the copy skips the week. Unset the switch
  * and the issue waits for an APPROVED reply again.
  *
@@ -33,12 +33,13 @@ const sendgrid = require('./sendgrid-mail');
 const NewsletterSender = require('./newsletter-sender');
 const { wrapNewsletter, bodyIsDarkAware } = require('./email-template');
 const { validateNewsletterDraft, lockedPricesForSend } = require('./newsletter-validator');
-const { requiresClaimValidation, isFlagshipType, PEST_INSIDER_TYPE } = require('../config/newsletter-types');
+const { requiresClaimValidation, isFlagshipType, PEST_INSIDER_TYPE, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
 const { pestInsiderProofLive, newsletterAutoSendLive, pestInsiderAutoSendLive } = require('../config/feature-gates');
 const { issueContextForSend, moveIssueForSend } = require('./pest-insider/schedule');
+const { ensureFlagshipAudience, warmPhaseNote } = require('./newsletter-weekly-audience');
 
 /**
  * Internal diagnostics panel rendered ABOVE the recipient preview in the
@@ -51,8 +52,7 @@ async function buildProofDiagnosticsHtml(send, lineupEvents, scheduledFor) {
   try {
     const { effectiveScore, unmetConstraints, isWeekend } = require('./newsletter-portfolio');
     const { heroScoreFloor, featureScoreFloor } = require('./event-scoring');
-    const { getActiveNewsletterTuesday } = require('./event-freshness');
-    const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
+    const { getActiveNewsletterIssueDay, getNewsletterIssueWindow } = require('./event-freshness');
 
     const ids = (lineupEvents || []).map((e) => String(e.id));
     if (!ids.length) return '';
@@ -64,9 +64,8 @@ async function buildProofDiagnosticsHtml(send, lineupEvents, scheduledFor) {
     const byId = new Map(rows.map((r) => [String(r.id), r]));
     const ordered = ids.map((id) => byId.get(id)).filter(Boolean);
 
-    const issueTuesday = getActiveNewsletterTuesday(scheduledFor || new Date());
-    const windowStart = parseETDateTime(`${issueTuesday}T00:00:00`);
-    const windowEnd = parseETDateTime(`${etDateString(addETDays(windowStart, 6))}T23:59:59`);
+    const issueDay = getActiveNewsletterIssueDay(scheduledFor || new Date());
+    const { start: windowStart, end: windowEnd } = getNewsletterIssueWindow(issueDay);
     // The REAL eligible pool — same pipeline the autopilot plans from
     // (routine/repeated/featured-history/eligibility filters applied), so
     // the approver never sees an inflated count of usable alternatives.
@@ -580,40 +579,54 @@ async function renderSendPreview(send, toEmail) {
   return { html, text, unsubscribeUrl: demoUrl };
 }
 
-// The flagship's calendar-linked target is a future Tuesday 6:00 AM ET —
+// The flagship's calendar-linked target is a future Thursday 6:00 AM ET —
 // approval only QUEUES it, the scheduler tick dispatches it later. Every
 // other type (Pest Insider included) schedules for approval time itself
 // (newsletter-proof.js's own `scheduledFor = new Date()` when
 // !eventSelection.flagship), so the very next scheduler tick — at most a
-// minute later — sends it. Codex P1: the banner promised the Tuesday
+// minute later — sends it. Codex P1: the banner promised the Thursday
 // target unconditionally, so an approver of a non-flagship proof could
-// think they had until Tuesday and instead broadcast within a minute.
+// think they had until Thursday and instead broadcast within a minute.
 function proofTimingCopy(flagship) {
-  return flagship ? 'Tuesday at 6:00 AM ET' : 'immediately (the next scheduler check, usually within a minute)';
+  return flagship ? 'Thursday at 6:00 AM ET' : 'immediately (the next scheduler check, usually within a minute)';
 }
 
-function proofBannerHtml(recipientCount, flagship) {
+// Who the issue goes to, for the owner's copy. The weekly's first issues go only to warm
+// readers (newsletter-weekly-audience.js): warmNote = { issueNumber, of } says so.
+function audienceHtml(recipientCount, warmNote) {
+  return warmNote
+    ? `<strong>${recipientCount}</strong> first readers (people who opened a Waves email in the last 90 days; first-readers issue ${warmNote.issueNumber} of ${warmNote.of}, then every active subscriber)`
+    : `<strong>${recipientCount}</strong> active subscribers`;
+}
+
+function audienceText(recipientCount, warmNote) {
+  return warmNote
+    ? `${recipientCount} first readers (people who opened a Waves email in the last 90 days; first-readers issue ${warmNote.issueNumber} of ${warmNote.of}, then every active subscriber)`
+    : `${recipientCount} active subscribers`;
+}
+
+function proofBannerHtml(recipientCount, flagship, warmNote = null) {
   return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Proof — not yet sent to the list</p>
-<p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to send this issue <strong>${proofTimingCopy(flagship)}</strong> to <strong>${recipientCount}</strong> active subscribers. Any other reply — or no reply — and it stays a draft in the composer.</p>
+<p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to send this issue <strong>${proofTimingCopy(flagship)}</strong> to ${audienceHtml(recipientCount, warmNote)}. Any other reply — or no reply — and it stays a draft in the composer.</p>
 </div>\n`;
 }
 
-function proofBannerText(recipientCount, flagship) {
-  return `PROOF — NOT YET SENT TO THE LIST\nReply APPROVED to send this issue ${proofTimingCopy(flagship)} to ${recipientCount} active subscribers. Any other reply (or no reply) and it stays a draft.\n\n----------------------------------------\n\n`;
+function proofBannerText(recipientCount, flagship, warmNote = null) {
+  return `PROOF — NOT YET SENT TO THE LIST\nReply APPROVED to send this issue ${proofTimingCopy(flagship)} to ${audienceText(recipientCount, warmNote)}. Any other reply (or no reply) and it stays a draft.\n\n----------------------------------------\n\n`;
 }
 
 // The owner's copy of an issue the auto-send switch queued: FYI, no reply
 // needed. HOLD (or Cancel schedule in History) skips the week.
-function autoSendBannerHtml(recipientCount) {
+function autoSendBannerHtml(recipientCount, warmNote = null) {
   return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Sends by itself — no reply needed</p>
-<p style="margin:0;font-size:14px;color:#1f2937;">This issue goes to <strong>${recipientCount}</strong> active subscribers <strong>Tuesday at 6:00 AM ET</strong>. To skip this week, reply <strong>HOLD</strong>, or press Cancel schedule in Newsletter → History.</p>
+<p style="margin:0;font-size:14px;color:#1f2937;">This issue goes to ${audienceHtml(recipientCount, warmNote)} <strong>Thursday at 6:00 AM ET</strong>. To skip this week, reply <strong>HOLD</strong>, or press Cancel schedule in Newsletter → History.</p>
 </div>\n`;
 }
 
-function autoSendBannerText(recipientCount) {
-  return `SENDS BY ITSELF — NO REPLY NEEDED\nThis issue goes to ${recipientCount} active subscribers Tuesday at 6:00 AM ET. To skip this week, reply HOLD, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
+function autoSendBannerText(recipientCount, warmNote = null) {
+  return `SENDS BY ITSELF — NO REPLY NEEDED\nThis issue goes to ${audienceText(recipientCount, warmNote)} Thursday at 6:00 AM ET. To skip this week, reply HOLD, or press Cancel schedule in Newsletter → History.\n\n----------------------------------------\n\n`;
 }
 
 // The owner's copy of a Waves Pest Insider issue the auto-send switch queued. The HOLD deadline is
@@ -697,7 +710,7 @@ async function releaseRefusedProofClaim(sendId, token, reason) {
  * weekly issue that passed every check gets an FYI copy and is queued once
  * the copy went out (queueAutoSendIssue).
  */
-function proofDelivery(calendarContext, recipientCount, issueContext = null) {
+function proofDelivery(calendarContext, recipientCount, issueContext = null, warmNote = null) {
   // A planned Waves Pest Insider issue: sendNewsletterProof proofs it only with its switch on.
   if (issueContext) {
     return {
@@ -708,18 +721,18 @@ function proofDelivery(calendarContext, recipientCount, issueContext = null) {
     };
   }
   if (calendarContext.flagship && newsletterAutoSendLive()) {
-    return { autoSend: true, prefix: 'FYI', bannerHtml: autoSendBannerHtml(recipientCount), bannerText: autoSendBannerText(recipientCount) };
+    return { autoSend: true, prefix: 'FYI', bannerHtml: autoSendBannerHtml(recipientCount, warmNote), bannerText: autoSendBannerText(recipientCount, warmNote) };
   }
   return {
     autoSend: false,
     prefix: 'ACT',
-    bannerHtml: proofBannerHtml(recipientCount, calendarContext.flagship),
-    bannerText: proofBannerText(recipientCount, calendarContext.flagship),
+    bannerHtml: proofBannerHtml(recipientCount, calendarContext.flagship, warmNote),
+    bannerText: proofBannerText(recipientCount, calendarContext.flagship, warmNote),
   };
 }
 
 /**
- * Queue an auto-send issue for its Tuesday target once the owner's FYI copy
+ * Queue an auto-send issue for its Thursday target once the owner's FYI copy
  * went out. Until then the proof claim is a draft the dispatcher never picks
  * up, so a crash or a run near 6:00 AM cannot send an issue the owner got no
  * copy of. Bound to the claim (token, draft, no edit since the claim): an
@@ -773,8 +786,8 @@ async function queueAutoSendIssue(send, token, claimedAt, calendarContext, issue
 
 /**
  * Send the proof email for a draft. Idempotent: a send that already has
- * proof_sent_at (or isn't a draft anymore) is skipped, so the Monday/early-
- * Tuesday catch-up jobs can call this safely every tick.
+ * proof_sent_at (or isn't a draft anymore) is skipped, so the Wednesday/early-
+ * Thursday catch-up jobs can call this safely every tick.
  *
  * @returns {{ sent?: boolean, skipped?: boolean, reason?: string, notified?: boolean }} — `notified`
  *   says whether the owner's blocked notice was actually delivered.
@@ -789,11 +802,15 @@ async function sendNewsletterProof(sendId) {
   }
   if (!sendgrid.isConfigured()) return { skipped: true, reason: 'sendgrid_not_configured' };
 
-  const send = await db('newsletter_sends').where({ id: sendId }).first();
+  let send = await db('newsletter_sends').where({ id: sendId }).first();
   if (!send) return { skipped: true, reason: 'not_found' };
   if (send.status !== 'draft') return { skipped: true, reason: `status_${send.status}` };
   if (send.proof_sent_at) return { skipped: true, reason: 'proof_already_sent' };
   if (!send.html_body && !send.text_body) return { skipped: true, reason: 'empty_body' };
+  // A weekly draft gets its audience phase (first readers or everyone) before its copy is
+  // counted and proofed, so the owner's copy names the real audience. Idempotent; the autopilot
+  // sets it when it builds the draft, and this covers a draft that has none yet.
+  send = await ensureFlagshipAudience(send);
 
   const to = assertInternalEmailRecipient(proofRecipient());
 
@@ -826,7 +843,7 @@ async function sendNewsletterProof(sendId) {
   // rules (handlePlannedIssueReply). With its switch off nothing proofs or queues it.
   if (issueContext && !pestInsiderAutoSendLive()) return { skipped: true, reason: 'auto_send_off' };
   if (!calendarContext.valid) {
-    const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
+    const errors = ['The linked calendar must target its own future issue Thursday at exactly 6:00 AM ET.'];
     const notified = await notifyProof('newsletter_proof_blocked', { sendId: send.id, subject: send.subject, errors });
     return { skipped: true, reason: 'calendar_target_invalid', errors, notified };
   }
@@ -869,7 +886,7 @@ async function sendNewsletterProof(sendId) {
     ? send.proof_token.toLowerCase()
     : crypto.randomBytes(4).toString('hex');
   const now = new Date();
-  const delivery = proofDelivery(calendarContext, recipientCount, issueContext);
+  const delivery = proofDelivery(calendarContext, recipientCount, issueContext, await warmPhaseNote(send));
   const claimQuery = db('newsletter_sends')
     .where({ id: send.id, status: 'draft' })
     .whereNull('proof_sent_at');
@@ -996,7 +1013,7 @@ async function ignorePlannedHold(send, from, kind) {
 
 /**
  * HOLD reply on an auto-queued issue: back to draft and the week skipped, so
- * neither the catch-up nor the Monday autopilot proofs or queues it again
+ * neither the catch-up nor the Wednesday autopilot proofs or queues it again
  * (sendNewsletterProof skips a skipped week). The proof token is cleared, so
  * a later reply on the thread is ordinary mail and can never approve the
  * held issue. Too late once the send is claimed.
@@ -1076,7 +1093,7 @@ async function handlePlannedIssueReply(send, token, from, replyText) {
 /**
  * Inbound-email hook (called from the Gmail sync on every newly stored
  * email). Detects a reply to a proof email and, when it is an allowlisted
- * owner saying "approved", queues the list send for Tuesday at 6:00 AM ET.
+ * owner saying "approved", queues the list send for Thursday at 6:00 AM ET.
  * On an issue the auto-send switch already queued, a HOLD reply skips the
  * week instead.
  *
@@ -1196,6 +1213,26 @@ async function maybeHandleProofApproval(email) {
     return true;
   }
 
+  // A weekly draft proofed before the first-readers step has no audience phase, and the sender
+  // refuses it. Refuse the approval the same way as a stale one: drop the old proof and send a
+  // fresh proof, whose copy names the real audience (sendNewsletterProof records the phase).
+  if (send.newsletter_type === FLAGSHIP_TYPE_KEY && !send.audience_phase) {
+    logger.info(`[newsletter-proof] send ${send.id} has no audience phase — refusing approval, re-proofing`);
+    await notifyProof('newsletter_proof_blocked', { sendId: send.id,
+      subject: send.subject,
+      errors: ['This weekly draft has no audience step recorded (first readers or everyone) — approval refused. A fresh proof is on its way; reply APPROVED to that one.'],
+    });
+    try {
+      await db('newsletter_sends')
+        .where({ id: send.id, proof_token: token })
+        .update({ proof_token: null, proof_sent_at: null, proof_refused_at: new Date(), updated_at: new Date() });
+      await sendNewsletterProof(send.id);
+    } catch (reproofErr) {
+      logger.error(`[newsletter-proof] re-proof after approval with no audience phase failed for ${send.id}: ${reproofErr.message}`);
+    }
+    return true;
+  }
+
   // Re-run the manual Send button's gates at approval time — the draft may
   // have been edited between proof and approval.
   const recipientCount = await countRecipients(send);
@@ -1228,7 +1265,7 @@ async function maybeHandleProofApproval(email) {
   if (!calendarContext.valid) {
     await notifyProof('newsletter_proof_blocked', { sendId: send.id,
       subject: send.subject,
-      errors: ['Approved, but the linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET. The draft was left unscheduled.'],
+      errors: ['Approved, but the linked calendar must target its own future issue Thursday at exactly 6:00 AM ET. The draft was left unscheduled.'],
     });
     return true;
   }
@@ -1277,7 +1314,7 @@ async function maybeHandleProofApproval(email) {
   // check above and this write turns the claim into a 0-row no-op instead
   // of broadcasting content the owner never proofed.
   // The claim also flips the row to 'scheduled'. Flagship approval uses the
-  // linked calendar's future Tuesday 6:00 AM ET target — never approval time:
+  // linked calendar's future Thursday 6:00 AM ET target — never approval time:
   // the scheduler's processScheduledSends tick is the durable executor. A
   // process crash after this commit cannot strand an approved campaign.
   const approvalClaim = db('newsletter_sends')
@@ -1312,7 +1349,7 @@ async function maybeHandleProofApproval(email) {
 
   logger.info(`[newsletter-proof] send ${send.id} approved by ${maskEmail(from)} — scheduled for ${scheduledFor.toISOString()}`);
 
-  // The weekly flagship always waits for Tuesday's scheduler tick, and so
+  // The weekly flagship always waits for Thursday's scheduler tick, and so
   // does a Pest Insider issue: processScheduledSends re-reads the row, re-runs
   // the gates and the validator against what is stored THEN, and a PATCH
   // that lands after this approval has already returned the row to 'draft'

@@ -199,7 +199,7 @@ function addPolls(polls, landingLine) {
       question,
       emailCta: 'Tap one, then confirm. Just for fun.',
       landingLine,
-      // The archive and the owner's Monday or FYI copy show the poll with no links.
+      // The archive and the owner's Wednesday or FYI copy show the poll with no links.
       neutralLine: 'Readers vote right in the email. Just for fun.',
       landingCtaSuppressed: true,
       poll: true,
@@ -615,15 +615,15 @@ function newestReachedIssues({ newsletterType, knex, limit, columns }) {
  *
  * An issue no reader got yet still holds its poll while a Resume could mail
  * one of its rows (newsletter-sender.js outstandingEligibleDeliveries: a
- * retryable row of a still-eligible reader): sendCampaign skips the Tuesday
+ * retryable row of a still-eligible reader): sendCampaign skips the Thursday
  * window for a resume of existing rows, so that issue can go out after a
  * later one. Its poll is never chosen again, and is skipped if the issue is
  * never resumed. It is held, not every poll: a failed issue nobody resumes
  * would otherwise stop the polls for good.
  * Any other unsent issue holds nothing: a fresh send of a flagship issue goes
- * out only on its own Tuesday at 6:00 AM ET (newsletter-sender.js
+ * out only on its own Thursday at 6:00 AM ET (newsletter-sender.js
  * isCurrentFlagshipTarget + isFlagshipDeliveryWindow), and its approval needs
- * that Tuesday still ahead (newsletter-proof.js resolveFlagshipCalendarContext),
+ * that Thursday still ahead (newsletter-proof.js resolveFlagshipCalendarContext),
  * so last week's unsent issue cannot follow this week's.
  */
 async function newsletterIssuePolls({ newsletterType, knex = require('../models/db') } = {}) {
@@ -641,7 +641,7 @@ async function newsletterIssuePolls({ newsletterType, knex = require('../models/
   // window on those paths for this newsletter, so such an issue can go out
   // after a later one. A poll held by an issue that never goes out is skipped
   // until that row is deleted: with six polls, a skipped one is cheaper than a
-  // repeated one. A flagship issue goes out only on its own Tuesday, so there
+  // repeated one. A flagship issue goes out only on its own Thursday, so there
   // only a resumable row holds.
   const UNSENT = ['draft', 'scheduled', 'sending', 'failed'];
   const newest = await newestReachedIssues({ newsletterType, knex, limit: POLL_ISSUE_GAP, columns: ['s.html_body', 's.text_body'] });

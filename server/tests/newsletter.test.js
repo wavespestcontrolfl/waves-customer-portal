@@ -46,9 +46,10 @@ const {
   editorialNoveltyScore,
   dedupeDigestEvents,
   excludeRepeatedDateIdentities,
-  getCurrentNewsletterTuesday,
-  getNextNewsletterTuesday,
-  getActiveNewsletterTuesday,
+  getCurrentNewsletterIssueDay,
+  getNextNewsletterIssueDay,
+  getActiveNewsletterIssueDay,
+  getNewsletterIssueWindow,
   getNewsletterWeekOf,
   defaultTargetSendAt,
   isFlagshipTargetForWeek,
@@ -471,37 +472,62 @@ describe('newsletter digest identity dedupe', () => {
   });
 });
 
-describe('newsletter Tuesday cadence helpers', () => {
-  test('anchors the issue week to the most recent Tuesday in ET', () => {
-    expect(getCurrentNewsletterTuesday(new Date('2026-07-14T11:00:00Z'))).toBe('2026-07-14'); // Tue 7am ET
-    expect(getCurrentNewsletterTuesday(new Date('2026-07-20T16:00:00Z'))).toBe('2026-07-14'); // Monday
-    expect(getNewsletterWeekOf('2026-07-19')).toBe('2026-07-14');
+describe('newsletter Thursday cadence helpers', () => {
+  test('anchors the issue week to the most recent Thursday in ET', () => {
+    expect(getCurrentNewsletterIssueDay(new Date('2026-07-16T11:00:00Z'))).toBe('2026-07-16'); // Thu 7am ET
+    expect(getCurrentNewsletterIssueDay(new Date('2026-07-20T16:00:00Z'))).toBe('2026-07-16'); // Monday
+    expect(getNewsletterWeekOf('2026-07-19')).toBe('2026-07-16');
+    expect(getNewsletterWeekOf('2026-07-16')).toBe('2026-07-16');
   });
 
-  test('Monday drafting anchors to the upcoming Tuesday, not the expired prior window', () => {
-    expect(getActiveNewsletterTuesday(new Date('2026-07-20T11:00:00Z'))).toBe('2026-07-21'); // Mon 7am ET
-    expect(getActiveNewsletterTuesday(new Date('2026-07-21T09:30:00Z'))).toBe('2026-07-21'); // Tue 5:30am ET
-    expect(getNewsletterDraftWindowStart('2026-07-21').toISOString()).toBe('2026-07-20T04:00:00.000Z');
+  test('Monday through Wednesday anchor to the coming Thursday, Thursday through Sunday to the one that just started', () => {
+    expect(getActiveNewsletterIssueDay(new Date('2026-07-22T11:15:00Z'))).toBe('2026-07-23'); // Wed 7:15am ET draft
+    expect(getActiveNewsletterIssueDay(new Date('2026-07-23T08:30:00Z'))).toBe('2026-07-23'); // Thu 4:30am ET catch-up
+    expect(getActiveNewsletterIssueDay(new Date('2026-07-23T10:05:00Z'))).toBe('2026-07-23'); // Thu 6:05am ET send
+    expect(getActiveNewsletterIssueDay(new Date('2026-07-26T16:00:00Z'))).toBe('2026-07-23'); // Sunday
+    expect(getActiveNewsletterIssueDay(new Date('2026-07-27T16:00:00Z'))).toBe('2026-07-30'); // Monday: window over
+    expect(getActiveNewsletterIssueDay(new Date('2026-07-28T16:00:00Z'))).toBe('2026-07-30'); // Tuesday
+    // the Wednesday draft window opens at 00:00 ET the day before the issue
+    expect(getNewsletterDraftWindowStart('2026-07-23').toISOString()).toBe('2026-07-22T04:00:00.000Z');
   });
 
-  test('planner points at Tuesday and default send is exactly 6am ET across DST', () => {
-    expect(getNextNewsletterTuesday(new Date('2026-07-16T16:00:00Z'))).toBe('2026-07-21');
-    expect(defaultTargetSendAt('2026-07-14').toISOString()).toBe('2026-07-14T10:00:00.000Z'); // EDT
-    expect(defaultTargetSendAt('2026-12-01').toISOString()).toBe('2026-12-01T11:00:00.000Z'); // EST
-    expect(isFlagshipScheduledTime('2026-07-14T10:00:00.000Z')).toBe(true);
-    expect(isFlagshipScheduledTime('2026-12-01T11:00:00.000Z')).toBe(true);
-    expect(isFlagshipScheduledTime('2026-07-14T10:01:00.000Z')).toBe(false);
-    expect(isFlagshipTargetForWeek('2026-07-21T10:00:00.000Z', '2026-07-21')).toBe(true);
-    expect(isFlagshipTargetForWeek('2026-07-28T10:00:00.000Z', '2026-07-21')).toBe(false);
-    expect(isCurrentFlagshipTarget('2026-07-21T10:00:00.000Z', new Date('2026-07-21T10:05:00Z'))).toBe(true);
-    expect(isCurrentFlagshipTarget('2026-07-14T10:00:00.000Z', new Date('2026-07-21T10:05:00Z'))).toBe(false);
+  test('the event window is Thursday 00:00 through Sunday 23:59:59 ET, across the November DST change', () => {
+    const summer = getNewsletterIssueWindow('2026-07-23');
+    expect(summer.start.toISOString()).toBe('2026-07-23T04:00:00.000Z');
+    expect(summer.end.toISOString()).toBe('2026-07-27T03:59:59.000Z');
+    // DST ends Sunday 2026-11-01 at 2am: the Sunday ends at EST midnight
+    const fall = getNewsletterIssueWindow('2026-10-29');
+    expect(fall.start.toISOString()).toBe('2026-10-29T04:00:00.000Z');
+    expect(fall.end.toISOString()).toBe('2026-11-02T04:59:59.000Z');
+    // a Monday event is outside it, a Sunday late-night event inside
+    expect(new Date('2026-07-27T04:00:00Z') > summer.end).toBe(true);
+    expect(new Date('2026-07-27T03:30:00Z') <= summer.end).toBe(true);
   });
 
-  test('delivery executor has only a tight 15-minute Tuesday 6am tolerance', () => {
-    expect(isFlagshipDeliveryWindow('2026-07-14T10:00:00.000Z')).toBe(true);
-    expect(isFlagshipDeliveryWindow('2026-07-14T10:14:59.000Z')).toBe(true);
-    expect(isFlagshipDeliveryWindow('2026-07-14T10:15:00.000Z')).toBe(false);
-    expect(isFlagshipDeliveryWindow('2026-07-13T10:00:00.000Z')).toBe(false);
+  test('planner points at Thursday and default send is exactly 6am ET across DST', () => {
+    expect(getNextNewsletterIssueDay(new Date('2026-07-20T16:00:00Z'))).toBe('2026-07-23');
+    expect(defaultTargetSendAt('2026-07-16').toISOString()).toBe('2026-07-16T10:00:00.000Z'); // EDT
+    expect(defaultTargetSendAt('2026-12-03').toISOString()).toBe('2026-12-03T11:00:00.000Z'); // EST
+    expect(isFlagshipScheduledTime('2026-07-16T10:00:00.000Z')).toBe(true);
+    expect(isFlagshipScheduledTime('2026-12-03T11:00:00.000Z')).toBe(true);
+    expect(isFlagshipScheduledTime('2026-07-16T10:01:00.000Z')).toBe(false);
+    // the old Tuesday 6:00 AM target is no longer a flagship time
+    expect(isFlagshipScheduledTime('2026-07-14T10:00:00.000Z')).toBe(false);
+    expect(isFlagshipTargetForWeek('2026-07-23T10:00:00.000Z', '2026-07-23')).toBe(true);
+    expect(isFlagshipTargetForWeek('2026-07-30T10:00:00.000Z', '2026-07-23')).toBe(false);
+    expect(isFlagshipTargetForWeek('2026-07-21T10:00:00.000Z', '2026-07-21')).toBe(false);
+    expect(isCurrentFlagshipTarget('2026-07-23T10:00:00.000Z', new Date('2026-07-23T10:05:00Z'))).toBe(true);
+    expect(isCurrentFlagshipTarget('2026-07-16T10:00:00.000Z', new Date('2026-07-23T10:05:00Z'))).toBe(false);
+    // a target queued Wednesday is the current one that evening, too
+    expect(isCurrentFlagshipTarget('2026-07-23T10:00:00.000Z', new Date('2026-07-22T20:00:00Z'))).toBe(true);
+  });
+
+  test('delivery executor has only a tight 15-minute Thursday 6am tolerance', () => {
+    expect(isFlagshipDeliveryWindow('2026-07-16T10:00:00.000Z')).toBe(true);
+    expect(isFlagshipDeliveryWindow('2026-07-16T10:14:59.000Z')).toBe(true);
+    expect(isFlagshipDeliveryWindow('2026-07-16T10:15:00.000Z')).toBe(false);
+    expect(isFlagshipDeliveryWindow('2026-07-15T10:00:00.000Z')).toBe(false);
+    expect(isFlagshipDeliveryWindow('2026-07-14T10:00:00.000Z')).toBe(false); // the old Tuesday slot
   });
 });
 

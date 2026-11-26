@@ -22,7 +22,7 @@ const NEWSLETTER_TYPES = {
     label: 'Local Weekly Fresh Events',
     flagship: true,
     cadence: 'weekly',
-    defaultSendDay: 'Tuesday',
+    defaultSendDay: 'Thursday',
     defaultSendTimeET: '06:00',
     voiceProfile: 'waves_phase_3_local',
     coverage: {
