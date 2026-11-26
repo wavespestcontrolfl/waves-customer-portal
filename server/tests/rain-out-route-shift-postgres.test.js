@@ -4,7 +4,8 @@
  * (services/rain-out.js, routeShiftRows), on REAL Postgres rows: the DATE and TIME
  * columns as pg reads them back, the real reader of the rest of the route, the real
  * readers of the hours and of the work days. The same rows prove the office's shift
- * line for a picked slot on the pickers' check (checkSlots, pickedShiftLines).
+ * line for a picked hour (pickedShiftLines): the tapped stop's own hour on that sheet
+ * (checkTarget), and a picked slot on the pickers' check (checkSlots).
  *
  * Runs in the DB-gated CI step (DATABASE_URL on the migrated waves_test database) or a
  * local scratch Postgres; it skips without one. Fixtures are fictitious. Every row it
@@ -168,6 +169,60 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
       .results.map((result) => result.shiftWarning ?? null);
     const weekdayOf = (date) => new Date(`${date}T12:00:00Z`).getUTCDay();
     const allDaysBut = (weekday) => [0, 1, 2, 3, 4, 5, 6].filter((day) => day !== weekday);
+
+    test('the tapped stop: the hour the office picks, with the visit\'s stored length, on the target\'s day', async () => {
+      const technicianId = await makeTech();
+      const line = await lineOf(technicianId);
+      const anchor = await makeStop(technicianId, '09:00', '10:00');
+      // A visit may start at the shift's start and end at its end.
+      expect(await check(anchor, laterDay, '08:00', '09:00')).not.toHaveProperty('shiftWarning');
+      expect(await check(anchor, laterDay, '16:00', '17:00')).not.toHaveProperty('shiftWarning');
+      expect((await check(anchor, laterDay, '16:30', '17:30')).shiftWarning).toBe(line);
+      expect((await check(anchor, laterDay, '07:30', '08:30')).shiftWarning).toBe(line);
+      // A later hour today is the same question.
+      expect((await check(anchor, today, '16:30', '17:30')).shiftWarning).toBe(line);
+      // The picked window ends in the hours; the visit's stored ninety minutes do not.
+      await db('scheduled_services').where({ id: anchor }).update({ estimated_duration_minutes: 90 });
+      expect((await check(anchor, laterDay, '16:00', '16:30')).shiftWarning).toBe(line);
+      expect(await check(anchor, laterDay, '15:00', '15:30')).not.toHaveProperty('shiftWarning');
+    });
+
+    test('the tapped stop: a recurring visit\'s day move is judged on the hour the commit books', async () => {
+      const technicianId = await makeTech();
+      const line = await lineOf(technicianId);
+      const anchor = await makeStop(technicianId, '09:00', '10:00', { is_recurring: true });
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      try {
+        // The commit books 16:30 on another day as 16:00 to 17:00, which the shift holds; 17:30 as 17:00 to 18:00.
+        expect(await check(anchor, laterDay, '16:30', '17:30')).not.toHaveProperty('shiftWarning');
+        expect((await check(anchor, laterDay, '17:30', '18:30')).shiftWarning).toBe(line);
+        // A later hour today is no day move: the picked window books as it is.
+        expect((await check(anchor, today, '16:30', '17:30')).shiftWarning).toBe(line);
+        // A visit that is not recurring books the picked window.
+        await db('scheduled_services').where({ id: anchor }).update({ is_recurring: false });
+        expect((await check(anchor, laterDay, '16:30', '17:30')).shiftWarning).toBe(line);
+      } finally {
+        delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+      }
+    });
+
+    test('the tapped stop: no line on a day the technician does not work, with no set hours, or with the gate off', async () => {
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      const weekday = weekdayOf(laterDay);
+      const technicianId = await makeTech({ work_days: allDaysBut(weekday) });
+      const line = await lineOf(technicianId);
+      const anchor = await makeStop(technicianId, '09:00', '10:00');
+      const late = () => check(anchor, laterDay, '16:30', '17:30');
+      // The shift is not an off day's: the move itself is told the day-off line.
+      expect(await late()).not.toHaveProperty('shiftWarning');
+      await db('technicians').where({ id: technicianId }).update({ work_days: [weekday] });
+      expect((await late()).shiftWarning).toBe(line);
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(await late()).not.toHaveProperty('shiftWarning');
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      await db('technicians').where({ id: technicianId }).update({ shift_start: null, shift_end: null });
+      expect(await late()).not.toHaveProperty('shiftWarning');
+    });
 
     test('a picked slot: each slot that names a technician gets that technician\'s line, on the picked window and the length sent', async () => {
       const technicianId = await makeTech({ shift_end: '12:00' });
