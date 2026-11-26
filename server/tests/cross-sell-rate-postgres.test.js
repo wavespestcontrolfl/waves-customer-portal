@@ -90,8 +90,10 @@ postgres('cross-sell rate (live Postgres)', () => {
     trx = await database.transaction();
     mockConnection = trx;
     phoneSeq = 0;
-    // The QA database may hold rows from other suites' committed fixtures: count only what this test inserts.
-    await trx('scheduled_services').del();
+    // The QA database may hold rows from other suites' committed fixtures: count only what this test inserts. Every
+    // count skips deleted customers, so the older ones are marked deleted inside this rolled-back transaction (a delete
+    // of their visits would trip other tables' foreign keys, e.g. series_moves in CI).
+    await trx('customers').whereNull('deleted_at').update({ deleted_at: trx.fn.now() });
   });
   afterEach(async () => { await trx.rollback(); });
 
