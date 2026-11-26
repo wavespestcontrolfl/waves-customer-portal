@@ -3,13 +3,13 @@
  * plus the Stripe-side delivery probe. Contracts pinned here:
  *
  *  - nonzero ledger failures (error set OR abandoned claim, NO time
- *    window — dead letters repeat until fixed or purged) → one FIX: email
- *    listing event types + ids;
- *  - zero ledger failures AND Stripe-side clean → no email at all
- *    (exception-based: a quiet day is silent);
- *  - Stripe-side failures alone still email (they never reach the ledger);
- *  - a broken CHECK with a quiet ledger also emails (job_health has no
- *    automatic notifier — the digest is the only operator rail that says
+ *    window — dead letters stay on the alert until fixed or purged) → one
+ *    Billing admin alert whose detail lists event types + ids;
+ *  - zero ledger failures AND Stripe-side clean → nothing raised
+ *    (exception-based: a quiet day is silent) and a standing row is closed;
+ *  - Stripe-side failures alone still raise (they never reach the ledger);
+ *  - a broken CHECK with a quiet ledger also raises (job_health has no
+ *    automatic notifier — the row is the only operator rail that says
  *    Stripe-side delivery status is UNKNOWN) and still surfaces the
  *    blocking stripeCheckError;
  *  - Stripe-side results are reconciled against the local ledger: an event
@@ -25,40 +25,36 @@
  *    "too fresh to judge" at one tick still alerts at the next;
  *  - missing STRIPE_SECRET_KEY in deployed production is a BLOCKING check
  *    failure (fail closed), while dev/test/preview keeps the benign skip;
- *  - a failed ledger query or Stripe-side probe EMAILS (status unknown)
+ *  - a failed ledger query or Stripe-side probe RAISES (status unknown)
  *    AND carries ledgerCheckError/stripeCheckError so the scheduler
  *    wrapper converts it into a job_health failure — the check never
  *    swallows its own breakage, and job_health alone is never the only
  *    signal (it has no automatic notifier);
- *  - stored error TEXT never appears in the email at all — arbitrary prose
+ *  - stored error TEXT never appears in the alert at all — arbitrary prose
  *    (Knex SQL prefixes, provider echoes) cannot be made PII-safe by
- *    pattern scrubbing, so the digest carries fixed generic descriptions +
- *    identifiers only, and a thrown check error reaches the email as a
- *    generic line + allowlisted token, never raw err.message;
- *  - the ops_email_send_state marker dedupes a deploy-overlap double tick's
- *    SEND only — the checks still run first, so a deduped tick surfaces
- *    stripeCheckError to job_health instead of masking a broken check.
+ *    pattern scrubbing, so the alert carries fixed generic descriptions +
+ *    identifiers only, and a thrown check error reaches it as a generic
+ *    line + allowlisted token, never raw err.message;
+ *  - every composed alert passes the admin-notification copy rules, and one
+ *    standing problem rings once: a refresh rings only when a new event or
+ *    a newly broken check joins the set.
  *
  * (The ledger query's in-flight-claim exclusion is pinned in
  * stripe-webhook-health-query.test.js against the compiled SQL.)
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/sendgrid-mail', () => ({
-  isConfigured: jest.fn(() => true),
-  sendOne: jest.fn(async () => ({})),
-}));
 jest.mock('../models/db', () => {
-  // Marker reads/writes are try/caught in the service; loaders are injected.
+  // Loaders and the alert writer are injected; the db is never touched.
   const qb = () => { throw new Error('db must not be touched when loaders are injected'); };
   qb.raw = () => { throw new Error('db.raw must not be touched when loaders are injected'); };
   return qb;
 });
 
-const sendgrid = require('../services/sendgrid-mail');
+const { composeAdminAlert } = require('../services/admin-alert-compose');
 const {
   runStripeWebhookHealthCheck,
-  _private: { composeWebhookHealthDigest },
+  _private: { composeWebhookHealthAlert, ringOnNewItem },
 } = require('../services/stripe-webhook-health');
 
 function ledgerRow(overrides = {}) {
@@ -74,8 +70,8 @@ function ledgerRow(overrides = {}) {
 
 function baseOpts(overrides = {}) {
   return {
-    sentRecently: jest.fn(async () => false),
-    stampSendMarker: jest.fn(async () => {}),
+    raiseAlert: jest.fn(async () => ({ rang: true })),
+    clearAlert: jest.fn(async () => 0),
     loadLedgerFailures: jest.fn(async () => ({ total: 0, rows: [] })),
     loadLedgerEventIds: jest.fn(async () => new Set()),
     stripeConfigured: true,
@@ -85,39 +81,41 @@ function baseOpts(overrides = {}) {
   };
 }
 
+// The spec every raise carries, read back from the injected writer.
+const raised = (opts) => opts.raiseAlert.mock.calls[0][0];
+
 beforeEach(() => {
   jest.clearAllMocks();
-  sendgrid.isConfigured.mockReturnValue(true);
   delete process.env.STRIPE_WEBHOOK_HEALTH_DISABLED;
-  delete process.env.STRIPE_WEBHOOK_HEALTH_EMAIL;
 });
 
-describe('composeWebhookHealthDigest', () => {
+describe('composeWebhookHealthAlert', () => {
   test('clean ledger + clean Stripe side composes nothing (quiet day)', () => {
-    expect(composeWebhookHealthDigest({
+    expect(composeWebhookHealthAlert({
       ledger: { total: 0, rows: [] },
       stripeSide: { undelivered_events: [], total_undelivered: 0 },
       stripeCheckError: null,
     })).toBeNull();
   });
 
-  test('FIX subject carries the ledger count; body lists id + type but WITHHOLDS the stored error text', () => {
-    const composed = composeWebhookHealthDigest({
+  test('ledger failures: headline carries the count; detail lists id + type but WITHHOLDS the stored error text', () => {
+    const composed = composeWebhookHealthAlert({
       ledger: { total: 2, rows: [ledgerRow(), ledgerRow({ id: 'evt_dead_2', event_type: 'charge.refunded', error: null })] },
       stripeSide: null,
       stripeCheckError: null,
     });
-    expect(composed.subject).toBe('FIX: 2 unresolved Stripe webhook events failed/unprocessed');
-    expect(composed.text).toContain('evt_dead_1 (payment_intent.succeeded)');
-    expect(composed.text).toContain('error recorded (text withheld');
-    expect(composed.text).not.toContain('relation locked');
-    expect(composed.text).toContain('evt_dead_2 (charge.refunded)');
-    expect(composed.text).toContain('unprocessed (no error recorded');
+    expect(composeAdminAlert(composed.spec).headline).toBe('Billing — check 2 stuck Stripe events');
+    expect(composed.detail).toContain('evt_dead_1 (payment_intent.succeeded)');
+    expect(composed.detail).toContain('error recorded (text withheld');
+    expect(composed.detail).not.toContain('relation locked');
+    expect(composed.detail).toContain('evt_dead_2 (charge.refunded)');
+    expect(composed.detail).toContain('unprocessed (no error recorded');
     expect(composed.count).toBe(2);
+    expect(composed.itemKeys).toEqual(['evt_dead_1', 'evt_dead_2']);
   });
 
-  test('Stripe-side-only failures still compose a FIX email', () => {
-    const composed = composeWebhookHealthDigest({
+  test('Stripe-side-only failures still compose an alert', () => {
+    const composed = composeWebhookHealthAlert({
       ledger: { total: 0, rows: [] },
       stripeSide: {
         undelivered_events: [{ id: 'evt_side_1', type: 'payout.paid', created: '2026-08-07T09:00:00.000Z', pending_webhooks: 1 }],
@@ -125,18 +123,18 @@ describe('composeWebhookHealthDigest', () => {
       },
       stripeCheckError: null,
     });
-    expect(composed.subject).toBe('FIX: 1 possible Stripe webhook delivery failure (Stripe-side) in last 48h');
-    expect(composed.text).toContain('Possible Stripe-side delivery failures');
-    expect(composed.text).toContain('evt_side_1 (payout.paid)');
+    expect(composeAdminAlert(composed.spec).headline).toBe('Billing — check 1 Stripe event we may have missed');
+    expect(composed.detail).toContain('Possible Stripe-side delivery failures');
+    expect(composed.detail).toContain('evt_side_1 (payout.paid)');
     expect(composed.stripeFailureCount).toBe(1);
   });
 
-  test('stored error text never reaches the email — not even in scrubber-proof forms', () => {
+  test('stored error text never reaches the alert — not even in scrubber-proof forms', () => {
     // Synthetic fixture only. Includes PII shapes a scrub regex CANNOT
     // recognize (unquoted name, street address) alongside quoted
     // literals/emails/phones — the contract is that NONE of the stored
-    // error text survives into the digest.
-    const composed = composeWebhookHealthDigest({
+    // error text survives into the alert.
+    const composed = composeWebhookHealthAlert({
       ledger: {
         total: 1,
         rows: [ledgerRow({ error: "insert into \"invoices\" values ('Jane Q Fixture') - duplicate key; customer Jane Q Fixture at 123 Palmetto Fixture Ln, +19415551234, jane.doe@example.com, charged $36.33" })],
@@ -144,162 +142,170 @@ describe('composeWebhookHealthDigest', () => {
       stripeSide: null,
       stripeCheckError: null,
     });
-    expect(composed.text).not.toContain('Jane Q Fixture');
-    expect(composed.text).not.toContain('Palmetto Fixture');
-    expect(composed.text).not.toContain('9415551234');
-    expect(composed.text).not.toContain('jane.doe@example.com');
-    expect(composed.text).not.toContain('36.33');
-    expect(composed.text).toContain('error recorded (text withheld');
-    expect(composed.html).not.toContain('Jane Q Fixture');
+    const everything = JSON.stringify(composed);
+    for (const leak of ['Jane Q Fixture', 'Palmetto Fixture', '9415551234', 'jane.doe@example.com', '36.33']) {
+      expect(everything).not.toContain(leak);
+    }
+    expect(composed.detail).toContain('error recorded (text withheld');
   });
 
   test('beyond-cap unreconciled remainder is reported as POSSIBLE failures, never as confirmed endpoint failures', () => {
-    const composed = composeWebhookHealthDigest({
+    const composed = composeWebhookHealthAlert({
       ledger: { total: 0, rows: [] },
       stripeSide: { undelivered_events: [], total_undelivered: 0, unreconciled_undelivered: 48 },
       stripeCheckError: null,
     });
-    expect(composed.subject).toBe('FIX: 48 possible Stripe webhook delivery failures (Stripe-side, unreconciled) in last 48h');
+    expect(composeAdminAlert(composed.spec).headline).toBe('Billing — check 48 Stripe events we may have missed');
     expect(composed.stripeFailureCount).toBe(0);
     expect(composed.stripeUnreconciledCount).toBe(48);
-    expect(composed.text).toContain('could NOT be reconciled');
-    expect(composed.text).toContain('possible failures only');
+    expect(composed.detail).toContain('could NOT be reconciled');
+    expect(composed.detail).toContain('possible failures only');
   });
 
-  test('a broken check with everything else quiet still composes a FIX email (status UNKNOWN, never silent)', () => {
-    const composed = composeWebhookHealthDigest({
+  test('a broken check with everything else quiet still composes an alert (status UNKNOWN, never silent)', () => {
+    const composed = composeWebhookHealthAlert({
       ledger: { total: 0, rows: [] },
       stripeSide: null,
       stripeCheckError: 'STRIPE_SECRET_KEY is not set in deployed production — Stripe-side delivery check cannot run',
     });
-    expect(composed.subject).toBe('FIX: Stripe webhook delivery check FAILED — Stripe-side status unknown');
-    expect(composed.text).toContain('Stripe-side delivery status is UNKNOWN');
-    expect(composed.text).toContain('Stripe-side delivery check itself FAILED');
-    expect(composed.text).toContain('STRIPE_SECRET_KEY');
+    const alert = composeAdminAlert(composed.spec);
+    expect(alert.headline).toBe('Billing — fix the daily Stripe webhook check');
+    expect(alert.link).toBe('/admin/settings?tab=integrations');
+    expect(composed.detail).toContain('Stripe-side delivery status is UNKNOWN');
+    expect(composed.detail).toContain('Stripe-side delivery check itself FAILED');
+    expect(composed.detail).toContain('STRIPE_SECRET_KEY');
     expect(composed.count).toBe(0);
+    expect(composed.itemKeys).toEqual(['check:stripe']);
+  });
+
+  test('every composition shape passes the admin-notification copy rules', () => {
+    const shapes = [
+      { ledger: { total: 40, rows: [ledgerRow()] }, stripeSide: { undelivered_events: [], total_undelivered: 0, unreconciled_undelivered: 12 } },
+      { ledger: { total: 1, rows: [ledgerRow()] }, ledgerCheckError: 'the ledger health query threw an unexpected error' },
+      { ledger: { total: 0, rows: [] }, ledgerCheckError: 'the ledger health query threw an unexpected error' },
+    ];
+    for (const shape of shapes) expect(() => composeAdminAlert(composeWebhookHealthAlert(shape).spec)).not.toThrow();
+  });
+});
+
+describe('ringOnNewItem', () => {
+  const rings = (composed, prior) => ringOnNewItem(composed)(null, prior);
+
+  test('the same standing set stays quiet; a new event or a bigger total rings', () => {
+    const prior = { itemKeys: ['evt_a', 'evt_b'], count: 2 };
+    expect(rings({ itemKeys: ['evt_a', 'evt_b'], total: 2 }, prior)).toBe(false);
+    expect(rings({ itemKeys: ['evt_a'], total: 1 }, prior)).toBe(false);
+    expect(rings({ itemKeys: ['evt_a', 'evt_b', 'evt_c'], total: 3 }, prior)).toBe(true);
+    expect(rings({ itemKeys: ['evt_a', 'evt_b'], total: 30 }, prior)).toBe(true);
+    expect(rings({ itemKeys: ['check:stripe'], total: 0 }, prior)).toBe(true);
   });
 });
 
 describe('runStripeWebhookHealthCheck', () => {
-  test('emails FIX on nonzero ledger count and stamps the send marker', async () => {
+  test('raises one Billing alert on nonzero ledger count', async () => {
     const opts = baseOpts({
       loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.sent).toBe(true);
-    expect(result.count).toBe(1);
-    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
-    const mail = sendgrid.sendOne.mock.calls[0][0];
-    expect(mail.to).toBe('contact@wavespestcontrol.com');
-    expect(mail.subject).toMatch(/^FIX: /);
-    expect(mail.text).toContain('evt_dead_1');
-    expect(opts.stampSendMarker).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ raised: true, outcome: 'raised', count: 1 });
+    expect(opts.raiseAlert).toHaveBeenCalledTimes(1);
+    const { spec, detail, itemKeys, total } = raised(opts);
+    expect(spec).toMatchObject({ area: 'Billing', severity: 'needs-you', subject: { type: 'check', id: 'stripe-webhook-health' }, doneWhen: 'count_zero' });
+    expect(detail).toContain('evt_dead_1');
+    expect(itemKeys).toEqual(['evt_dead_1']);
+    expect(total).toBe(1);
+    expect(opts.clearAlert).not.toHaveBeenCalled();
   });
 
-  test('silent when ledger and Stripe side are both clean', async () => {
+  test('a standing problem that did not ring is reported as unchanged, not as a new alert', async () => {
+    const opts = baseOpts({
+      raiseAlert: jest.fn(async () => ({ rang: false })),
+      loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
+    });
+    const result = await runStripeWebhookHealthCheck(opts);
+    expect(result).toMatchObject({ raised: true, outcome: 'unchanged', count: 1 });
+  });
+
+  test('silent when ledger and Stripe side are both clean, and closes a standing alert', async () => {
     const opts = baseOpts();
     const result = await runStripeWebhookHealthCheck(opts);
     expect(result).toEqual({ skipped: 'nothing_found' });
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(opts.stampSendMarker).not.toHaveBeenCalled();
+    expect(opts.raiseAlert).not.toHaveBeenCalled();
+    expect(opts.clearAlert).toHaveBeenCalledTimes(1);
   });
 
-  test('ledger query throw EMAILS (status unknown) and surfaces the blocking ledgerCheckError', async () => {
+  test('a failure to close the standing alert never fails the check', async () => {
+    const opts = baseOpts({ clearAlert: jest.fn(async () => { throw new Error('db down'); }) });
+    expect(await runStripeWebhookHealthCheck(opts)).toEqual({ skipped: 'nothing_found' });
+  });
+
+  test('ledger query throw RAISES (status unknown) and surfaces the blocking ledgerCheckError', async () => {
     const opts = baseOpts({
       loadLedgerFailures: jest.fn(async () => { throw new Error('relation vanished near Jane Q Fixture'); }),
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.sent).toBe(true);
+    expect(result.raised).toBe(true);
     expect(result.ledgerCheckError).toContain('relation vanished');
-    const mail = sendgrid.sendOne.mock.calls[0][0];
-    expect(mail.subject).toBe('FIX: Stripe webhook health check FAILED — status unknown');
-    expect(mail.text).toContain('LEDGER health query itself FAILED');
-    expect(mail.text).toContain('webhook health status is UNKNOWN');
-    // The thrown error's arbitrary prose stays OUT of the email.
-    expect(mail.text).not.toContain('relation vanished');
-    expect(mail.text).not.toContain('Jane Q Fixture');
+    const { spec, detail } = raised(opts);
+    expect(composeAdminAlert(spec).headline).toBe('Billing — fix the daily Stripe webhook check');
+    expect(detail).toContain('LEDGER health query itself FAILED');
+    expect(detail).toContain('webhook health status is UNKNOWN');
+    // The thrown error's arbitrary prose stays OUT of the alert.
+    expect(detail).not.toContain('relation vanished');
+    expect(JSON.stringify(raised(opts))).not.toContain('Jane Q Fixture');
   });
 
-  test('failed Stripe-side probe with a quiet ledger EMAILS (status unknown) and still surfaces the blocking stripeCheckError', async () => {
+  test('failed Stripe-side probe with a quiet ledger RAISES (status unknown) and still surfaces the blocking stripeCheckError', async () => {
     // job_health has no automatic notifier — if this only failed job_health
     // the operator would never learn the check broke.
     const opts = baseOpts({
       stripeOpsTools: { getStripeWebhookFailures: jest.fn(async () => { throw new Error('Stripe API timed out after 15s'); }) },
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.sent).toBe(true);
+    expect(result.raised).toBe(true);
     expect(result.stripeCheckError).toContain('timed out');
-    const mail = sendgrid.sendOne.mock.calls[0][0];
-    expect(mail.subject).toBe('FIX: Stripe webhook delivery check FAILED — Stripe-side status unknown');
-    expect(mail.text).toContain('Stripe-side delivery status is UNKNOWN');
-    // The thrown error's arbitrary prose stays OUT of the email — generic
+    const { spec, detail } = raised(opts);
+    expect(composeAdminAlert(spec).headline).toBe('Billing — fix the daily Stripe webhook check');
+    expect(detail).toContain('Stripe-side delivery status is UNKNOWN');
+    // The thrown error's arbitrary prose stays OUT of the alert — generic
     // line only (full text lives on the result → job_health → logs).
-    expect(mail.text).not.toContain('timed out');
-    expect(mail.text).toContain('threw an unexpected error');
+    expect(detail).not.toContain('timed out');
+    expect(detail).toContain('threw an unexpected error');
   });
 
-  test('failed Stripe-side probe with ledger findings still emails AND surfaces stripeCheckError', async () => {
+  test('failed Stripe-side probe with ledger findings still raises AND surfaces stripeCheckError', async () => {
     const opts = baseOpts({
       loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
       stripeOpsTools: { getStripeWebhookFailures: jest.fn(async () => { throw new Error('Stripe API returned HTTP 500'); }) },
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.sent).toBe(true);
+    expect(result.raised).toBe(true);
     expect(result.stripeCheckError).toContain('HTTP 500');
-    expect(sendgrid.sendOne.mock.calls[0][0].text).toContain('Stripe-side delivery check itself FAILED');
+    expect(raised(opts).detail).toContain('Stripe-side delivery check itself FAILED');
   });
 
-  test('recent send marker dedupes the SEND but the checks still run and findings surface', async () => {
-    const opts = baseOpts({
-      sentRecently: jest.fn(async () => true),
-      loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
-    });
-    const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.skipped).toBe('recent_send');
-    expect(result.count).toBe(1);
-    expect(opts.loadLedgerFailures).toHaveBeenCalledTimes(1);
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(opts.stampSendMarker).not.toHaveBeenCalled();
-  });
-
-  test('a deduped rerun after a partial run still surfaces stripeCheckError — recent_send never masks a broken check', async () => {
-    // The partial run emailed the ledger alert but the Stripe-side probe
-    // failed; a deploy-overlap rerun within 20h must NOT report a healthy
-    // recent_send that overwrites the failed job_health state.
-    const opts = baseOpts({
-      sentRecently: jest.fn(async () => true),
-      loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
-      stripeOpsTools: { getStripeWebhookFailures: jest.fn(async () => { throw new Error('Stripe API returned HTTP 500'); }) },
-    });
-    const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.skipped).toBe('recent_send');
-    expect(result.stripeCheckError).toContain('HTTP 500');
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
-  });
-
-  test('a capped (non-exhaustive) Stripe scan with nothing found EMAILS and blocks — never a silent pass', async () => {
+  test('a capped (non-exhaustive) Stripe scan with nothing found RAISES and blocks — never a silent pass', async () => {
     const opts = baseOpts({
       stripeOpsTools: {
         getStripeWebhookFailures: jest.fn(async () => ({ undelivered_events: [], total_undelivered: 0, scan_exhaustive: false })),
       },
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.sent).toBe(true);
+    expect(result.raised).toBe(true);
     expect(result.stripeCheckError).toContain('scan cap');
-    expect(sendgrid.sendOne.mock.calls[0][0].text).toContain('scan cap');
+    expect(raised(opts).detail).toContain('scan cap');
   });
 
-  test('non-internal recipient fails closed', async () => {
-    process.env.STRIPE_WEBHOOK_HEALTH_EMAIL = 'stranger@example.com';
+  test('a raise that throws reports error (the scheduler wrapper fails the run) and keeps the findings', async () => {
     const opts = baseOpts({
+      raiseAlert: jest.fn(async () => { throw new Error('write failed'); }),
       loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.skipped).toBe('recipient');
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ raised: false, error: true, count: 1 });
   });
 
-  test('kill switch skips the send but reports what it would have sent', async () => {
+  test('kill switch raises nothing but reports what it would have raised', async () => {
     process.env.STRIPE_WEBHOOK_HEALTH_DISABLED = '1';
     const opts = baseOpts({
       loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
@@ -307,7 +313,8 @@ describe('runStripeWebhookHealthCheck', () => {
     const result = await runStripeWebhookHealthCheck(opts);
     expect(result.skipped).toBe('disabled');
     expect(result.count).toBe(1);
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(opts.raiseAlert).not.toHaveBeenCalled();
+    expect(opts.clearAlert).not.toHaveBeenCalled();
   });
 
   test('unconfigured Stripe key outside deployed prod skips the Stripe-side probe without failing the run', async () => {
@@ -322,7 +329,7 @@ describe('runStripeWebhookHealthCheck', () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
-  test('missing STRIPE_SECRET_KEY in deployed production EMAILS and blocks — never a benign skip', async () => {
+  test('missing STRIPE_SECRET_KEY in deployed production RAISES and blocks — never a benign skip', async () => {
     const probe = jest.fn();
     const opts = baseOpts({
       stripeConfigured: false,
@@ -331,37 +338,25 @@ describe('runStripeWebhookHealthCheck', () => {
     });
     const result = await runStripeWebhookHealthCheck(opts);
     // stripeCheckError on the result is the scheduler wrapper's blocking
-    // signal → job_health failure; the email is the operator notification
+    // signal → job_health failure; the alert is the operator notification
     // (job_health has none of its own).
-    expect(result.sent).toBe(true);
+    expect(result.raised).toBe(true);
     expect(result.stripeCheckError).toContain('STRIPE_SECRET_KEY');
     expect(probe).not.toHaveBeenCalled();
-    const mail = sendgrid.sendOne.mock.calls[0][0];
-    expect(mail.subject).toBe('FIX: Stripe webhook delivery check FAILED — Stripe-side status unknown');
-    expect(mail.text).toContain('STRIPE_SECRET_KEY');
+    expect(composeAdminAlert(raised(opts).spec).headline).toBe('Billing — fix the daily Stripe webhook check');
+    expect(raised(opts).detail).toContain('STRIPE_SECRET_KEY');
   });
 
-  test('a deduped tick with ONLY a broken check still surfaces stripeCheckError (recent_send never masks it)', async () => {
-    const opts = baseOpts({
-      sentRecently: jest.fn(async () => true),
-      stripeOpsTools: { getStripeWebhookFailures: jest.fn(async () => { throw new Error('Stripe API timed out after 15s'); }) },
-    });
-    const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.skipped).toBe('recent_send');
-    expect(result.stripeCheckError).toContain('timed out');
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
-  });
-
-  test('missing key in deployed prod with ledger findings still emails AND surfaces the blocking stripeCheckError', async () => {
+  test('missing key in deployed prod with ledger findings still raises AND surfaces the blocking stripeCheckError', async () => {
     const opts = baseOpts({
       stripeConfigured: false,
       deployedProd: true,
       loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.sent).toBe(true);
+    expect(result.raised).toBe(true);
     expect(result.stripeCheckError).toContain('STRIPE_SECRET_KEY');
-    expect(sendgrid.sendOne.mock.calls[0][0].text).toContain('Stripe-side delivery check itself FAILED');
+    expect(raised(opts).detail).toContain('Stripe-side delivery check itself FAILED');
   });
 
   test('Stripe-side failures already present in the local ledger are foreign-endpoint failures — excluded from the alert', async () => {
@@ -379,11 +374,10 @@ describe('runStripeWebhookHealthCheck', () => {
     });
     const result = await runStripeWebhookHealthCheck(opts);
     expect(opts.loadLedgerEventIds).toHaveBeenCalledWith(['evt_foreign_1', 'evt_ours_dead']);
-    expect(result.sent).toBe(true);
+    expect(result.raised).toBe(true);
     expect(result.stripeFailureCount).toBe(1);
-    const mail = sendgrid.sendOne.mock.calls[0][0];
-    expect(mail.text).toContain('evt_ours_dead');
-    expect(mail.text).not.toContain('evt_foreign_1');
+    expect(raised(opts).detail).toContain('evt_ours_dead');
+    expect(raised(opts).detail).not.toContain('evt_foreign_1');
   });
 
   test('when EVERY Stripe-side failure reconciles to the local ledger the run is silent', async () => {
@@ -398,7 +392,7 @@ describe('runStripeWebhookHealthCheck', () => {
     });
     const result = await runStripeWebhookHealthCheck(opts);
     expect(result).toEqual({ skipped: 'nothing_found' });
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(opts.raiseAlert).not.toHaveBeenCalled();
   });
 
   test('beyond-cap remainder survives reconciliation as unreconciled instead of masquerading as confirmed failures', async () => {
@@ -419,14 +413,12 @@ describe('runStripeWebhookHealthCheck', () => {
       },
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.sent).toBe(true);
+    expect(result.raised).toBe(true);
     expect(result.stripeFailureCount).toBe(0);
     expect(result.stripeUnreconciledCount).toBe(48);
-    const mail = sendgrid.sendOne.mock.calls[0][0];
-    expect(mail.subject).toContain('possible');
-    expect(mail.subject).toContain('unreconciled');
-    expect(mail.text).not.toContain('evt_foreign_1');
-    expect(mail.text).toContain('could NOT be reconciled');
+    expect(composeAdminAlert(raised(opts).spec).headline).toContain('we may have missed');
+    expect(raised(opts).detail).not.toContain('evt_foreign_1');
+    expect(raised(opts).detail).toContain('could NOT be reconciled');
   });
 
   test('a failed ledger-reconciliation query still alerts (unreconciled) AND surfaces the blocking stripeCheckError', async () => {
@@ -443,11 +435,9 @@ describe('runStripeWebhookHealthCheck', () => {
       },
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.sent).toBe(true);
+    expect(result.raised).toBe(true);
     expect(result.stripeCheckError).toContain('ledger lookup timed out');
-    const mail = sendgrid.sendOne.mock.calls[0][0];
-    expect(mail.text).toContain('evt_x');
-    expect(mail.text).toContain('Stripe-side delivery check itself FAILED');
+    expect(raised(opts).detail).toContain('Stripe-side delivery check itself FAILED');
   });
 
   test('probe runs on the 48h lookback so a pending-at-one-tick event still alerts the next day', async () => {
@@ -467,8 +457,8 @@ describe('runStripeWebhookHealthCheck', () => {
     const opts = baseOpts({ stripeOpsTools: { getStripeWebhookFailures: probe } });
     const result = await runStripeWebhookHealthCheck(opts);
     expect(probe).toHaveBeenCalledTimes(1);
-    expect(result.sent).toBe(true);
-    expect(sendgrid.sendOne.mock.calls[0][0].text).toContain('evt_pending_exhausted');
+    expect(result.raised).toBe(true);
+    expect(raised(opts).detail).toContain('evt_pending_exhausted');
   });
 
   test('lookback invariant: window exceeds the daily interval plus the probe pending grace', () => {

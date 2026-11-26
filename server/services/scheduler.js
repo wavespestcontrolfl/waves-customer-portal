@@ -2653,11 +2653,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY KNOWLEDGE-GAPS EMAIL — Monday 8:43am ET (owner 2026-10-01: "send
+  // WEEKLY KNOWLEDGE-GAPS ALERT — Monday 8:43am ET (owner 2026-10-01: "send
   // me a weekly email" of the questions the knowledge base could not fully
-  // answer), then hourly at :43 until Tuesday 8:43pm as catch-up ticks: the
-  // once-per-week send stamp makes them no-ops after a successful send, so a
-  // failed send or a deploy over 8:43 still reports that week. Minute 43 on
+  // answer; an admin notification since 2026-11-26), then hourly at :43 until
+  // Tuesday 8:43pm as catch-up ticks: the week-named dedupe key makes them
+  // no-ops after a successful raise, so a failed write or a deploy over 8:43
+  // still reports that week. Minute 43 on
   // Mon/Tue 8am-8pm is shared only with the every-minute jobs — no other
   // scheduled digest or sweep lands on it (#5490 r1: :41 met the autopay
   // SMS digest at 9:41:30). Kill: KNOWLEDGE_GAPS_WEEKLY=off.
@@ -2668,9 +2669,9 @@ function initScheduledJobs() {
       const lockRes = await runExclusive('knowledge-gaps-weekly', async () => {
         const { runKnowledgeGapsWeekly } = require('./knowledge/knowledge-gaps-weekly');
         const result = await runKnowledgeGapsWeekly();
-        logger.info(`[knowledge-gaps-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, gaps: result.gaps ?? null })}`);
-        if (result?.error || ['query_failed', 'unconfigured', 'recipient'].includes(result?.skipped)) {
-          throw new Error(`knowledge-gaps weekly email did not complete (${result.skipped || 'send_failed'})`);
+        logger.info(`[knowledge-gaps-weekly] cron run: ${JSON.stringify({ raised: result.raised || false, skipped: result.skipped || null, gaps: result.gaps ?? null })}`);
+        if (result?.error || result?.skipped === 'query_failed') {
+          throw new Error(`knowledge-gaps weekly alert did not complete (${result.skipped || 'raise_failed'})`);
         }
       });
       if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
@@ -2678,7 +2679,7 @@ function initScheduledJobs() {
         throw new Error(`knowledge-gaps weekly tick skipped: ${lockRes.reason || 'no_connection'}`);
       }
     } catch (err) {
-      logger.error(`Weekly knowledge-gaps email failed: ${err.message}`);
+      logger.error(`Weekly knowledge-gaps alert failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3498,13 +3499,12 @@ function initScheduledJobs() {
       const lockRes = await runExclusive('stripe-webhook-health', async () => {
         const { runStripeWebhookHealthCheck } = require('./stripe-webhook-health');
         const result = await runStripeWebhookHealthCheck();
-        logger.info(`[stripe-webhook-health] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0, stripeSide: result.stripeFailureCount || 0 })}`);
+        logger.info(`[stripe-webhook-health] cron run: ${JSON.stringify({ raised: result.raised || false, skipped: result.skipped || null, count: result.count || 0, stripeSide: result.stripeFailureCount || 0 })}`);
         // Delivery-BLOCKING skips count as failures; expected skips
-        // (nothing_found / disabled / recent_send) stay healthy. A failed
+        // (nothing_found / disabled) stay healthy. A failed
         // Stripe-side probe or ledger query fails the run even when the
-        // alert email went out — the check did not fully complete.
+        // alert was raised — the check did not fully complete.
         if (result?.skipped === 'query_failed' || result?.error
-            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient'
             || result?.skipped === 'stripe_check_failed'
             || result?.stripeCheckError || result?.ledgerCheckError) {
           const reason = result.skipped
