@@ -182,6 +182,45 @@ it('seeds Alpine WSG + Gentrol IGR + Advion Cockroach Gel Bait on a completed, t
   expect(screen.getByText('Advion Cockroach Gel Bait')).toBeTruthy();
 });
 
+// Protocols audit 2026-11-26, item 11: the form skipped every bed bug visit, so treatment 1 opened with no products, and an
+// Antapex row added by hand started at the bottom of the catalog band (10) where the card mixes 20 g per gallon.
+const bedBugCatalog = [
+  { id: 'b1', name: 'MGK Crossfire Bed Bug Concentrate', category: 'Insecticide', default_unit: 'fl_oz' },
+  { id: 'b2', name: 'Atticus Antapex WSG', category: 'Insecticide', default_rate: '10-30', default_unit: 'g/gal' },
+];
+const bedBugDefaultsResponse = {
+  serviceId: 'cockroach-visit-1', programKey: 'bed_bug', matchedVisit: { visit: 2, reason: 'bed_bug_treatment', matched: true }, source: 'protocol_visit',
+  products: [
+    { id: 'b1', name: 'MGK Crossfire Bed Bug Concentrate', defaultRate: null, defaultUnit: 'fl_oz', completionApplicationMethod: 'spot_treatment' },
+    { id: 'b2', name: 'Atticus Antapex WSG', defaultRate: '10-30', defaultUnit: 'g/gal', completionApplicationMethod: 'spot_treatment', cardStartRate: 20 },
+  ],
+  unresolved: [],
+};
+const bedBugService = () => cockroachService({ serviceType: 'Bed Bug Treatment Service',
+  completionProfile: { serviceKey: 'bed_bug_treatment', findingsType: null, requiresProducts: true }, findingsSchema: null });
+
+it('a bed bug treatment starts with its card\'s products, Antapex at the card\'s 20 g per gallon', async () => {
+  stubFetchWithImmediateDefaults(bedBugDefaultsResponse);
+  await act(async () => {
+    render(<CompletionPanel service={bedBugService()} products={bedBugCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  await screen.findByText('MGK Crossfire Bed Bug Concentrate');
+  const antapexRow = screen.getByText('Atticus Antapex WSG').closest('div');
+  expect(within(antapexRow).getByDisplayValue('20')).toBeTruthy();
+  expect(within(antapexRow).queryByDisplayValue('10')).toBeNull();
+  expect(within(antapexRow).getByDisplayValue('Spot treatment')).toBeTruthy();
+});
+
+it('a bed bug visit whose card lists no products (the inspection, a follow-up) starts empty', async () => {
+  stubFetchWithImmediateDefaults({ ...bedBugDefaultsResponse, source: 'none', products: [] });
+  await act(async () => {
+    render(<CompletionPanel service={bedBugService()} products={bedBugCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  await waitFor(() => expect(fetch).toHaveBeenCalled());
+  expect(screen.queryByText('MGK Crossfire Bed Bug Concentrate')).toBeNull();
+  expect(screen.queryByText('Atticus Antapex WSG')).toBeNull();
+});
+
 it('does NOT seed on a declined outcome, even once the server response lands', async () => {
   const { resolveDefaults } = stubFetchWithDeferredDefaults();
   await act(async () => {

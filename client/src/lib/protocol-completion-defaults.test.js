@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { labelUseItemFor, protocolCompletionDefaultSelections, withLabelUseRates } from './protocol-completion-defaults';
+import { cardRateRow, labelUseItemFor, protocolCompletionDefaultSelections, withLabelUseRates } from './protocol-completion-defaults';
 import { resolveRatePrefill } from './product-rate-prefill';
 
 // The home cockroach card mixes Tekko Pro at its label's cockroach rate, 2 fl oz per gallon, while the catalog row keeps the
@@ -80,5 +80,26 @@ describe('labelUseItemFor', () => {
     expect(labelUseItemFor(response, 't')).toMatchObject({ defaultRate: '2', completionApplicationMethod: 'spot_treatment' });
     expect(labelUseItemFor(response, 'a')).toBeNull();
     expect(labelUseItemFor(null, 't')).toBeNull();
+  });
+});
+
+describe('cardRateRow', () => {
+  const antapex = { id: 'a', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal' };
+  const response = { source: 'protocol_visit', programKey: 'bed_bug', products: [{ id: 'x' }, { id: 'a', cardStartRate: 20, completionApplicationMethod: 'spot_treatment' }] };
+
+  it('carries the card\'s own tank rate as the start of the rate, and leaves the catalog band (the review ceiling) alone', () => {
+    expect(cardRateRow(response, antapex)).toEqual({ product: antapex, applicationMethodOverride: undefined, startRate: 20 });
+    // A product with no card rate, and a product the visit's card does not list.
+    expect(cardRateRow(response, { id: 'x' }).startRate).toBeUndefined();
+    expect(cardRateRow(response, { id: 'other' }).startRate).toBeUndefined();
+  });
+
+  it('gives no start rate from a response this hook would not seed, or from a value that is not a rate', () => {
+    expect(cardRateRow(null, antapex).startRate).toBeUndefined();
+    expect(cardRateRow({ ...response, source: 'none' }, antapex).startRate).toBeUndefined();
+    expect(cardRateRow({ ...response, programKey: 'pest' }, antapex).startRate).toBeUndefined();
+    for (const cardStartRate of [0, -5, 'x', null, Infinity]) {
+      expect(cardRateRow({ ...response, products: [{ id: 'a', cardStartRate }] }, antapex).startRate).toBeUndefined();
+    }
   });
 });

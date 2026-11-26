@@ -94,7 +94,7 @@ const { matchServiceProtocol, followupVisitMatch } = require('./protocol-matcher
 const { isLaterPackageVisit } = require('./protocol-package-stage');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
-const { completionRateFields } = require('../utils/protocol-label-rate');
+const { completionRateFields, cardStartRateFields } = require('../utils/protocol-label-rate');
 
 // -- name parsing / dedupe (pure) --------------------------------------
 
@@ -198,7 +198,8 @@ function lineFactsByName(visit, names) {
     const method = completionApplicationMethodForName(visit, name);
     if (method) methodsByName[name.toLowerCase()] = method;
     const meta = lineMetaForName(visit, name);
-    if (meta?.labelRatePerGallon) labelRateMetaByName[name.toLowerCase()] = meta;
+    // A line that declares its tank's rate goes along too: the form starts its rate there (cardStartRateFields).
+    if (meta?.labelRatePerGallon || meta?.tankRatePerGallon) labelRateMetaByName[name.toLowerCase()] = meta;
   }
   return { methodsByName, labelRateMetaByName };
 }
@@ -226,7 +227,7 @@ async function addonCardHints(db, serviceId, protocols) {
 // A line's meta, marked sharedRate when a booked add-on's card lists one of its products (that card may mix it at another rate)
 // or the add-ons are unknown: completionRateFields then starts its rate blank. A line with no label rate passes through.
 function labelRateFor(meta, hints) {
-  if (!meta?.labelRatePerGallon) return meta;
+  if (!meta?.labelRatePerGallon && !meta?.tankRatePerGallon) return meta;
   const shared = !hints || (meta.catalogProductHints || []).some((hint) => hints.has(String(hint).toLowerCase()));
   return shared ? { ...meta, sharedRate: true } : meta;
 }
@@ -295,6 +296,7 @@ function shapeCompletionProductLine(row, resolved, name) {
     defaultUnit: row.default_unit || null,
     // The prefill and the review ceiling for a line that carries its label's rate for this pest (protocol-label-rate.js).
     ...completionRateFields(resolved.labelRateMetaByName?.[String(name || '').toLowerCase()], row),
+    ...cardStartRateFields(resolved.labelRateMetaByName?.[String(name || '').toLowerCase()], row),
     applicationMethod: row.application_method || null,
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work -> 'spot_treatment') — overrides the client's

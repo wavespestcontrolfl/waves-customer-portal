@@ -85,9 +85,18 @@ export function labelUseItemFor(response, productId) {
 
 // A product about to land on the full form, with the visit card's rate and method when it is a card-rate product, however it
 // lands (the seeded row, or the tech removing it and adding it again from the picker). A method the caller names wins.
+// `startRate`: the card's own tank rate inside the catalog band (the bed bug card's Antapex at 20 g per gallon, band 10-30),
+// or undefined. The form starts the row's per-gallon rate there instead of at the bottom of the band; the band's top stays
+// the review ceiling.
 export function cardRateRow(response, product, methodOverride) {
   const item = labelUseItemFor(response, product.id);
-  return { product: labelUseProduct(product, item), applicationMethodOverride: methodOverride || item?.completionApplicationMethod || undefined };
+  const start = shouldApplyProtocolCompletionDefaults(response)
+    ? Number(response.products.find((row) => String(row?.id) === String(product.id))?.cardStartRate) : NaN;
+  return {
+    product: labelUseProduct(product, item),
+    applicationMethodOverride: methodOverride || item?.completionApplicationMethod || undefined,
+    ...(start > 0 && Number.isFinite(start) ? { startRate: start } : {}),
+  };
 }
 
 // The visit's catalog rows with each card-rate product (labelUseProduct) set to its card's rate: the Fast Complete sheet
