@@ -9,6 +9,16 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/twilio', () => ({ isKnownOwnerPhone: (phone) => ['+19415550100', '+19415550101'].includes(phone) }));
 
 const cols = require('../services/monthly-snapshot-buyer-columns');
+const jobCosting = require('../services/job-costing');
+
+// The configured Average Drive Time job-costing reads (pricing_config global_drive_time): a fixed 20 here, 30 in one test.
+let mockDrive = 20;
+beforeEach(() => {
+  mockDrive = 20;
+  jest.spyOn(jobCosting, 'refreshDriveTimeSetting').mockResolvedValue();
+  jest.spyOn(jobCosting, 'standardDriveMinutes').mockImplementation(() => mockDrive);
+});
+afterEach(() => { jest.restoreAllMocks(); });
 
 // A knex fake: every call on a table's chain is recorded, and awaiting the chain gives results[table].
 function makeDb(results = {}) {
@@ -114,6 +124,13 @@ describe('the owner and the owner\'s field time', () => {
     expect(await cols.ownerFieldMinutes(db, 't1', '2026-10-01', '2026-10-31')).toEqual({ minutes: (45 + 20) + (25 + 20) + (30 + 20), stops: 3 });
   });
 
+  test('the drive is the configured Average Drive Time, read once through job-costing, not a fixed 20', async () => {
+    mockDrive = 30;
+    const db = makeDb({ service_records: stops });
+    expect(await cols.ownerFieldMinutes(db, 't1', '2026-10-01', '2026-10-31')).toEqual({ minutes: (45 + 30) + (25 + 30) + (30 + 30), stops: 3 });
+    expect(jobCosting.refreshDriveTimeSetting).toHaveBeenCalledTimes(1);
+  });
+
   test('hours and allowance: hundredths of an hour x the rate in effect; no rate counts 0; an unresolvable owner is unavailable', async () => {
     const results = { technicians: [{ id: 't1', phone: OWNER, employment_type: null }], service_records: stops };
     expect(await cols.ownerFieldTime(makeDb(results), { owner_field_hourly_rate: '25.00' }, '2026-10-01', '2026-10-31'))
@@ -127,6 +144,44 @@ describe('the owner and the owner\'s field time', () => {
   test('an owner on payroll: the hours are reported, no allowance is charged', async () => {
     const db = makeDb({ technicians: [{ id: 't1', phone: OWNER, employment_type: 'w2' }], service_records: stops });
     expect(await cols.ownerFieldTime(db, { owner_field_hourly_rate: '25.00' }, '2026-10-01', '2026-10-31')).toEqual({ hours: 2.67, allowance: 0, onPayroll: true });
+  });
+});
+
+describe('the plan-visit rule text', () => {
+  test('has no question mark (knex would read one as a binding) and reads the tier frozen on the record before the customer\'s tier now', () => {
+    expect(cols.PLAN_VISIT_SQL).not.toContain('?');
+    expect(cols.PLAN_VISIT_SQL).toContain('sr.service_tier');
+    expect(cols.PLAN_VISIT_SQL).toContain("sv.billing_type = 'one_time'");
+    expect(cols.PLAN_VISIT_SQL.indexOf("sv.billing_type = 'one_time'")).toBeLessThan(cols.PLAN_VISIT_SQL.indexOf('recurring_parent_id'));
+  });
+});
+
+describe('migration 20261126140000', () => {
+  const eligibleMigration = require('../models/migrations/20261126140000_snapshot_eligible_revenue');
+  const makeKnex = (present) => {
+    const added = [];
+    const dropped = [];
+    let has = present;
+    return {
+      added,
+      dropped,
+      schema: {
+        hasColumn: async () => has,
+        alterTable: async (_t, cb) => cb({
+          decimal: (name, p, s) => { added.push(`${name} ${p},${s}`); has = true; return { nullable: () => {} }; },
+          dropColumn: (name) => { dropped.push(name); has = false; },
+        }),
+      },
+    };
+  };
+
+  test('adds eligible_job_revenue numeric(12,2) once, and down drops it', async () => {
+    const knex = makeKnex(false);
+    await eligibleMigration.up(knex);
+    await eligibleMigration.up(knex);
+    expect(knex.added).toEqual(['eligible_job_revenue 12,2']);
+    await eligibleMigration.down(knex);
+    expect(knex.dropped).toEqual(['eligible_job_revenue']);
   });
 });
 

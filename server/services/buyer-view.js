@@ -11,7 +11,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { monthOffset, monthWindow } = require('./monthly-financial-snapshot');
 const { excludeInternalTestCustomers } = require('./mrr-breakdown');
-const { ownerForSnapshot, ownerFieldMinutes, PLAN_START_SQL, PLAN_VISIT_SQL } = require('./monthly-snapshot-buyer-columns');
+const { ownerForSnapshot, ownerFieldMinutes, PLAN_START_SQL, PLAN_VISIT_SQL, planVisitJoins } = require('./monthly-snapshot-buyer-columns');
 
 const WINDOW_MONTHS = 12;
 const HOURS_WEEKS = 12;
@@ -93,36 +93,24 @@ function revenueMetric({ window, prior }) {
   };
 }
 
-/**
- * Completed-visit revenue by month ('YYYY-MM') for the same customers the recurring numerator counts: every customer except
- * the internal test accounts. The snapshot's completed_job_revenue includes those accounts, so it is not the denominator.
- */
-async function eligibleRevenueByMonth(db, from, to) {
-  const rows = await db('service_records as sr')
-    .join('customers as c', 'c.id', 'sr.customer_id')
-    .whereBetween('sr.service_date', [from, to])
-    .whereNotNull('sr.revenue')
-    .modify(excludeInternalTestCustomers(db))
-    .groupByRaw("to_char(sr.service_date, 'YYYY-MM')")
-    .select(db.raw("to_char(sr.service_date, 'YYYY-MM') AS ym"), db.raw('SUM(sr.revenue)::text AS total'));
-  return new Map(rows.map((r) => [r.ym, num(r.total)]));
-}
-
-function recurringMetric({ window }, eligibleByMonth = null) {
-  const recurring = sumColumn(window, 'recurring_revenue');
-  const mature = sumColumn(window, 'recurring_mature_revenue');
-  const total = eligibleByMonth
-    ? window.filter((r) => r.recurring_revenue != null).reduce((sum, r) => sum + (eligibleByMonth.get(String(r.month).slice(0, 7)) || 0), 0)
-    : 0;
+function recurringMetric({ window }) {
+  // Both sides come from the same stored month (recurring_revenue and eligible_job_revenue are written in one snapshot), and only
+  // months that have both count.
+  const both = window.filter((r) => r.recurring_revenue != null && r.eligible_job_revenue != null);
+  const recurring = sumColumn(both, 'recurring_revenue');
+  const mature = sumColumn(both, 'recurring_mature_revenue');
+  const total = sumColumn(both, 'eligible_job_revenue');
   return {
-    share: pctOf(recurring.total, total),
+    share: pctOf(recurring.total, total.total),
     matureShareOfRecurring: pctOf(mature.total, recurring.total),
-    matureShareOfRevenue: pctOf(mature.total, total),
+    matureShareOfRevenue: pctOf(mature.total, total.total),
     recurringRevenue: round2(recurring.total),
     monthsCounted: recurring.months,
-    basis: 'Visit revenue from plan customers over the revenue of all completed visits, same months, test accounts left out of both. A visit is '
-      + 'plan revenue when it belongs to a recurring series or an annual-prepay term, or when the customer held a real WaveGuard tier and '
-      + 'had started and not yet churned on the visit date. "Mature" = plans at least 12 months old at the start of the month: plan age '
+    basis: 'Visit revenue from plan customers over the revenue of all completed visits, same months, test accounts left out of both '
+      + '(both stored together when the month was written). A visit is plan revenue when it is its own recurring series or belongs to an '
+      + 'annual-prepay term; or, unless it is an identifiable one-time job (a one-time or inspection service), when it is a visit of a '
+      + 'recurring series or the customer was a paying member that day (the tier recorded on the visit, else a real WaveGuard tier '
+      + 'held from the day the plan started until the customer churned). "Mature" = plans at least 12 months old at the start of the month: plan age '
       + 'is the earliest recurring-series visit or prepay term, and only a customer with a tier and no such record uses their customer-since '
       + 'date. Visit revenue is job-costing\'s figure for each visit (annual-prepay visits at their prepay share), not cash.',
   };
@@ -201,9 +189,7 @@ function keptWindows(now) {
 async function planRevenueKept(db, now) {
   const { current, then } = keptWindows(now);
   const inEarlier = 'sr.service_date BETWEEN ?::date AND ?::date';
-  const per = db('service_records as sr')
-    .join('customers as c', 'c.id', 'sr.customer_id')
-    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+  const per = planVisitJoins(db('service_records as sr').join('customers as c', 'c.id', 'sr.customer_id'))
     .whereBetween('sr.service_date', [then.start, current.end])
     .whereNotNull('sr.revenue')
     .whereRaw(`${PLAN_START_SQL} <= ?::date`, [then.start])
@@ -268,18 +254,15 @@ async function getBuyerView({ db = require('../models/db'), now = new Date(), lo
     officeHourly: financials && !financials.error ? financials.owner_office_hourly_rate : null,
     fieldHourly: financials && !financials.error ? financials.owner_field_hourly_rate : null,
   };
-  const [kept, hours, eligible] = await Promise.all([
+  const [kept, hours] = await Promise.all([
     settled('plan revenue kept', logger, () => planRevenueKept(db, now)),
     settled('owner hours', logger, () => ownerHoursPerWeek(db, now)),
-    latest
-      ? settled('eligible revenue', logger, () => eligibleRevenueByMonth(db, windows.window[0].month, monthWindow(latest.month).endDate))
-      : Promise.resolve(null),
   ]);
   return {
     asOf: etDateString(now),
     months: { count: windows.window.length, from: windows.window[0] ? windows.window[0].month : null, to: latest ? latest.month : null },
     revenue: revenueMetric(windows),
-    recurring: recurringMetric(windows, eligible instanceof Map ? eligible : null),
+    recurring: recurringMetric(windows),
     planRevenueKept: kept,
     grossMargin: grossMarginMetric(windows, rates),
     ownerProfit: ownerProfitMetric(windows, rates),
@@ -301,7 +284,6 @@ async function getBuyerView({ db = require('../models/db'), now = new Date(), lo
 module.exports = {
   getBuyerView,
   planRevenueKept,
-  eligibleRevenueByMonth,
   ownerHoursPerWeek,
   splitWindows,
   sumColumn,

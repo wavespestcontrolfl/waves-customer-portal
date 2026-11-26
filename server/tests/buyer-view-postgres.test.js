@@ -25,11 +25,21 @@ const { buildPnlReport } = require('../services/pnl-report');
 jest.setTimeout(60000);
 const OWNER_PHONE = '+19415550100';
 const NOW = new Date('2026-11-26T15:00:00Z'); // Thursday, 10 AM ET
+const DRIVE_KEY = 'global_drive_time';
 
 postgres('buyer view (live Postgres)', () => {
   let database;
   let trx;
   let seq = 0;
+  const pricingConstants = require('../services/pricing-engine/constants');
+  const OLD_DRIVE = pricingConstants.GLOBAL.DRIVE_TIME;
+  // The configured Average Drive Time job-costing reads (pricing_config global_drive_time), set inside the transaction and
+  // loaded by the same refresh job-costing runs (the sync is due once the cache is invalidated).
+  const setDrive = async (minutes) => {
+    await trx('pricing_config').insert({ config_key: DRIVE_KEY, name: 'Average drive time', category: 'global', data: JSON.stringify({ value: minutes }) })
+      .onConflict('config_key').merge(['data']);
+    require('../services/pricing-engine').invalidatePricingConfigCache();
+  };
 
   const customer = async (fields = {}) => {
     seq += 1;
@@ -108,9 +118,12 @@ postgres('buyer view (live Postgres)', () => {
     await trx('technicians').update({ role: 'technician', employment_status: 'inactive' });
     await trx('service_records').del();
     await trx('scheduled_services').del();
+    await setDrive(20);
   });
   afterEach(async () => {
     await trx.rollback();
+    pricingConstants.GLOBAL.DRIVE_TIME = OLD_DRIVE;
+    require('../services/pricing-engine').invalidatePricingConfigCache();
   });
 
   describe('the owner and the owner\'s field time', () => {
@@ -127,6 +140,14 @@ postgres('buyer view (live Postgres)', () => {
       await visit(home, '2026-09-30', { technician_id: owner }); // the day before the month
       await visit(home, '2026-11-01', { technician_id: owner }); // the day after
       expect(await cols.ownerFieldMinutes(trx, owner, '2026-10-01', '2026-10-31')).toEqual({ minutes: (25 + 20 + 20) + (25 + 20), stops: 2 });
+    });
+
+    it('the drive is the configured Average Drive Time: 30 minutes, not a fixed 20', async () => {
+      const owner = await technician({ role: 'admin', phone: OWNER_PHONE });
+      const home = await customer();
+      await visit(home, '2026-10-06', { technician_id: owner });
+      await setDrive(30);
+      expect(await cols.ownerFieldMinutes(trx, owner, '2026-10-01', '2026-10-31')).toEqual({ minutes: 25 + 30, stops: 1 });
     });
 
     it('hours x the wage in effect on the last day: later rows never change an earlier month', async () => {
@@ -236,6 +257,32 @@ postgres('buyer view (live Postgres)', () => {
       expect(result.recurring_mature_revenue).toBe(100); // seriesOld 60 + tierOnly 40
     });
 
+    it('an identifiable one-time job is not plan revenue even for a tiered customer or when it hangs off a series; plan visits still are', async () => {
+      const other = await technician({ role: 'technician' });
+      const member = await customer({ waveguard_tier: 'Gold', member_since: '2024-01-01' });
+      const wdo = await trx('services').insert({ service_key: `wdo_${seq}`, name: 'WDO Inspection Service', category: 'termite', billing_type: 'one_time' }).returning('id');
+      const wdoId = wdo[0].id || wdo[0];
+      await visit(member, '2026-10-02', { revenue: 150, technician_id: other, service_id: wdoId }); // a standalone WDO inspection
+      const parent = randomUUID();
+      await trx('scheduled_services').insert({ id: parent, customer_id: member, scheduled_date: '2026-01-05', service_type: 'Pest Control Visit', status: 'completed', is_recurring: true });
+      await visit(member, '2026-10-05', { revenue: 90, technician_id: other, service_id: wdoId }, { recurring_parent_id: parent }); // a one-time booster on the series
+      await visit(member, '2026-10-06', { revenue: 80, technician_id: other }, { service_type: 'WDO Inspection', recurring_parent_id: parent }); // no catalog link: the type says inspection
+      await visit(member, '2026-10-07', { revenue: 60, technician_id: other }, { recurring_parent_id: parent }); // the plan's own visit
+      await visit(member, '2026-10-09', { revenue: 40, technician_id: other }); // a plain visit by a tiered member: membership
+      expect((await cols.recurringRevenue(trx, '2026-10-01', '2026-10-31', NOW)).recurring_revenue).toBe(60 + 40);
+    });
+
+    it('membership uses the tier frozen on the visit when recorded: a label is not a member, a member then stays one after the tier is cleared', async () => {
+      const other = await technician({ role: 'technician' });
+      const label = await customer({ waveguard_tier: 'Gold', member_since: '2024-01-01' }); // tier today, but a label on that visit
+      await visit(label, '2026-10-02', { revenue: 11, technician_id: other, service_tier: 'Gold', service_tier_source: 'auto' });
+      const wasMember = await customer({ waveguard_tier: null, member_since: '2024-01-01' }); // tier since cleared (no churn date)
+      await visit(wasMember, '2026-10-03', { revenue: 70, technician_id: other, service_tier: 'Silver', service_tier_source: 'manual' });
+      const sentinel = await customer({ waveguard_tier: 'Gold', member_since: '2024-01-01' }); // recorded as one-time on that visit
+      await visit(sentinel, '2026-10-04', { revenue: 13, technician_id: other, service_tier: 'One-Time', service_tier_source: 'manual' });
+      expect((await cols.recurringRevenue(trx, '2026-10-01', '2026-10-31', NOW)).recurring_revenue).toBe(70);
+    });
+
     it('stores field time, the books margin, SDE and owner-paid profit with the owner\'s allowances taken out', async () => {
       await seedMonth();
       const row = await snapshot.computeMonthSnapshot('2026-10', trx);
@@ -289,17 +336,18 @@ postgres('buyer view (live Postgres)', () => {
   });
 
   describe('the recurring share denominator', () => {
-    it('is the revenue of every customer except the internal test accounts, by month', async () => {
+    it('is stored in the same snapshot: the revenue of every customer except the internal test accounts', async () => {
       const plan = await customer({ waveguard_tier: 'Gold', member_since: '2024-01-01' });
       const oneTime = await customer({ waveguard_tier: 'One-Time' });
       const testAccount = await customer({ first_name: 'Adam', last_name: 'Martinez', waveguard_tier: 'Gold', member_since: '2024-01-01' });
       await visit(plan, '2026-10-02', { revenue: 100 });
       await visit(oneTime, '2026-10-03', { revenue: 100 });
       await visit(testAccount, '2026-10-04', { revenue: 5000 });
-      await visit(plan, '2026-09-30', { revenue: 7000 }); // outside the range asked for
-      expect(await view.eligibleRevenueByMonth(trx, '2026-10-01', '2026-10-31')).toEqual(new Map([['2026-10', 200]]));
-      // End to end: a stored month (which counts the test account in completed_job_revenue) is divided by the eligible 200.
-      await trx('monthly_financial_snapshots').insert({ month: '2026-10-01', cash_revenue: 300, completed_job_revenue: 5200, recurring_revenue: 100, recurring_mature_revenue: 100 });
+      await visit(plan, '2026-09-30', { revenue: 7000 }); // the day before: out
+      expect(await cols.eligibleJobRevenue(trx, '2026-10-01', '2026-10-31')).toBe(200);
+      const stored = await snapshot.upsertMonthSnapshot('2026-10', trx);
+      expect(stored).toMatchObject({ recurring_revenue: 100, eligible_job_revenue: 200 });
+      expect(stored.completed_job_revenue).toBe(5200); // includes the test account, so it is not the denominator
       const payload = await view.getBuyerView({ db: trx, now: NOW });
       expect(payload.recurring).toMatchObject({ share: 50, matureShareOfRevenue: 50 }); // 100 / 200, not 100 / 5200
     });
@@ -338,6 +386,39 @@ postgres('buyer view (live Postgres)', () => {
       expect(await cols.prepaidOwed(trx, '2026-10-19')).toBe(0); // not collected yet
       await termVisit(termId, '2026-11-10');
       expect(await cols.prepaidOwed(trx, '2026-11-30')).toBe(900);
+    });
+
+    describe('refunds against the term\'s invoice', () => {
+      const payment = (pi, fields = {}) => trx('payments').insert({
+        customer_id: home, amount: 1200, status: 'paid', payment_date: '2026-06-02', processor: 'stripe', stripe_payment_intent_id: pi, ...fields,
+      }).returning('id').then((r) => r[0].id || r[0]);
+      const refund = (paymentId, amount, at) => trx('stripe_payout_transactions').insert({
+        type: 'refund', reporting_category: 'refund', amount: -amount, payment_id: paymentId, created_at_stripe: at,
+      });
+
+      it('a partial refund recorded by month end reduces what is owed; one recorded later does not yet', async () => {
+        const termId = await term({}, { stripe_payment_intent_id: 'pi_sample_1' });
+        const paymentId = await payment('pi_sample_1', { refund_amount: 500, refund_status: 'partial' });
+        await refund(paymentId, 200, '2026-09-10T15:00:00Z');
+        await refund(paymentId, 300, '2026-11-10T15:00:00Z');
+        await termVisit(termId, '2026-06-10');
+        expect(await cols.prepaidOwed(trx, '2026-10-31')).toBe(1200 - 300 - 200); // visit 300, refund 200 so far
+        expect(await cols.prepaidOwed(trx, '2026-11-30')).toBe(1200 - 300 - 500);
+      });
+
+      it('a refund the ledger cannot date (the payment says more was refunded than the ledger holds) leaves the month NULL, never a wrong figure', async () => {
+        await term({}, { stripe_payment_intent_id: 'pi_sample_2' });
+        const paymentId = await payment('pi_sample_2', { refund_amount: 500, refund_status: 'partial' });
+        await refund(paymentId, 200, '2026-09-10T15:00:00Z'); // 300 of the 500 has no ledger row
+        expect(await cols.prepaidOwed(trx, '2026-10-31')).toBeNull();
+      });
+
+      it('a term with no refunds is unaffected by another term\'s refund', async () => {
+        await term({}, { stripe_payment_intent_id: 'pi_sample_3' });
+        const otherPayment = await payment('pi_sample_other', { refund_amount: 100, refund_status: 'partial' });
+        await refund(otherPayment, 100, '2026-09-10T15:00:00Z');
+        expect(await cols.prepaidOwed(trx, '2026-10-31')).toBe(1200);
+      });
     });
 
     it('only paid coverage counts: unpaid, paid after month end, expired and cancelled terms are left out; a fully used term owes 0', async () => {
@@ -436,10 +517,10 @@ postgres('buyer view (live Postgres)', () => {
         .whereIn('table_name', ['monthly_financial_snapshots', 'company_financials'])
         .whereIn('column_name', [
           'book_gross_profit', 'book_gross_margin_pct', 'owner_field_hours', 'owner_field_allowance', 'owner_paid_profit', 'sde', 'recurring_revenue',
-          'recurring_mature_revenue', 'prepaid_owed', 'autopay_renewing_share', 'owner_field_hourly_rate',
+          'recurring_mature_revenue', 'prepaid_owed', 'autopay_renewing_share', 'owner_field_hourly_rate', 'eligible_job_revenue',
         ])
         .select('column_name', 'data_type', 'numeric_precision', 'numeric_scale', 'is_nullable');
-      expect(rows).toHaveLength(11);
+      expect(rows).toHaveLength(12);
       expect(rows.every((r) => r.data_type === 'numeric' && r.is_nullable === 'YES')).toBe(true);
       const byName = Object.fromEntries(rows.map((r) => [r.column_name, [r.numeric_precision, r.numeric_scale]]));
       expect(byName.owner_field_hourly_rate).toEqual([8, 2]);

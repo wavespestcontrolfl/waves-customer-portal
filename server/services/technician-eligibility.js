@@ -561,6 +561,45 @@ function shiftBounds(shift, openMin, closeMin) {
   return { openMin: Math.max(openMin, shift.startMin), closeMin: Math.min(closeMin, shift.endMin) };
 }
 
+/**
+ * A visit booked with no technician on it (the assistant's zone engine,
+ * availability.js): the hour is one some technician can work. True when any
+ * of `technicianIds` has no set hours that day, or a shift that holds the
+ * whole visit (start at or after the shift start, end by the shift end).
+ * No technician at all: true (nothing to judge by). Pure.
+ */
+function anyShiftHolds(technicianIds, shiftOf, date, startMin, endMin) {
+  if (!technicianIds.length) return true;
+  return technicianIds.some((id) => {
+    const day = shiftBounds(shiftOf(id, date), 0, 24 * 60);
+    return startMin >= day.openMin && endMin <= day.closeMin;
+  });
+}
+
+/**
+ * GATE_TECH_SHIFT_HOURS (D4): anyShiftHolds over the technicians a visit
+ * can be given to (applyAssignable), read once. Returns
+ * (date, startMin, endMin) => boolean. Gate off: nothing is read and every
+ * hour holds. A failed read throws: the caller offers and books nothing.
+ *
+ * `dateFrom` / `dateTo` (YYYY-MM-DD, the dates the caller will ask about): a
+ * technician who is out or off on a date (absentTechDays, as the finders
+ * read it) does not count on that date, and a date on which every
+ * technician is out holds no hour. With no technician at all there is
+ * nothing to judge by, and every hour holds.
+ */
+async function loadAnyShiftHolds(conn, { now = new Date(), dateFrom = null, dateTo = null } = {}) {
+  if (!techShiftHoursLive()) return () => true;
+  const technicianIds = (await applyAssignable(conn('technicians')).select('technicians.id')).map((row) => row.id);
+  if (!technicianIds.length) return () => true;
+  const shiftOf = await loadTechShifts(conn, { technicianIds, now });
+  const out = dateFrom && dateTo ? await absentTechDays(conn, { dateFrom, dateTo, technicianIds }) : new Set();
+  return (date, startMin, endMin) => {
+    const working = technicianIds.filter((id) => !out.has(`${id}:${date}`));
+    return working.length > 0 && anyShiftHolds(working, shiftOf, date, startMin, endMin);
+  };
+}
+
 /** Minutes after midnight as 'HH:MM'. Pure. */
 function clockOf(minutes) {
   return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
@@ -646,6 +685,8 @@ module.exports = {
   absentTechDays,
   offDayTechDays,
   loadTechShifts,
+  anyShiftHolds,
+  loadAnyShiftHolds,
   shiftBounds,
   shiftExcluding,
   shiftLostByDayChange,

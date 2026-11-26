@@ -11,12 +11,10 @@ const view = require('../services/buyer-view');
 // A stored row; months are 'YYYY-MM-01'. Month 1 = 2025-01 ... month 24 = 2026-12 for compactness.
 const monthKey = (n) => `${2025 + Math.floor((n - 1) / 12)}-${String(((n - 1) % 12) + 1).padStart(2, '0')}-01`;
 const row = (n, fields = {}) => ({
-  month: monthKey(n), cash_revenue: 1000, completed_job_revenue: 1200, gross_margin_pct: 50, book_gross_margin_pct: 40, book_gross_profit: 400,
+  month: monthKey(n), cash_revenue: 1000, completed_job_revenue: 1200, gross_margin_pct: 50, book_gross_margin_pct: 40, book_gross_profit: 400, eligible_job_revenue: 1200,
   office_cost: 100, paid_stops: 10, owner_allowance: 0, owner_field_allowance: 0, owner_paid_profit: 200, sde: 300,
   recurring_revenue: 600, recurring_mature_revenue: 300, ...fields,
 });
-// Eligible (test accounts left out) revenue by month, 1200 a month for the 24 months used here, as the live query would give.
-const eligible = (rows, perMonth = 1200) => new Map(rows.map((r) => [r.month.slice(0, 7), perMonth]));
 const run = (from, to, fields) => Array.from({ length: to - from + 1 }, (_, i) => row(from + i, typeof fields === 'function' ? fields(from + i) : fields));
 
 describe('splitWindows', () => {
@@ -54,20 +52,23 @@ describe('revenue and growth', () => {
 
 describe('the other tiles', () => {
   test('recurring share is plan revenue over completed-visit revenue; the mature part is shown against both', () => {
-    const all = run(1, 12);
-    expect(view.recurringMetric(view.splitWindows(all), eligible(all))).toMatchObject({ share: 50, matureShareOfRecurring: 50, matureShareOfRevenue: 25, monthsCounted: 12 });
+    expect(view.recurringMetric(view.splitWindows(run(1, 12)))).toMatchObject({ share: 50, matureShareOfRecurring: 50, matureShareOfRevenue: 25, monthsCounted: 12 });
   });
 
   test('a month stored before the column existed is left out of the sums and of the revenue it is divided by', () => {
     const rows = run(1, 12, (n) => (n <= 6 ? { recurring_revenue: null, recurring_mature_revenue: null } : {}));
-    expect(view.recurringMetric(view.splitWindows(rows), eligible(rows))).toMatchObject({ share: 50, monthsCounted: 6 });
+    expect(view.recurringMetric(view.splitWindows(rows))).toMatchObject({ share: 50, monthsCounted: 6 });
   });
 
-  test('the share is divided by eligible revenue (test accounts left out), not the stored completed-visit revenue that includes them', () => {
-    const rows = run(1, 12, { completed_job_revenue: 5000 }); // the stored figure carries a big test-account month
-    expect(view.recurringMetric(view.splitWindows(rows), eligible(rows, 800))).toMatchObject({ share: 75 }); // 600 / 800, not 600 / 5000
-    expect(view.recurringMetric(view.splitWindows(rows), null)).toMatchObject({ share: null, matureShareOfRevenue: null }); // the live read failed
-    expect(view.recurringMetric(view.splitWindows(rows), new Map())).toMatchObject({ share: null }); // no eligible revenue at all
+  test('the share is divided by the eligible revenue stored in the same month (test accounts left out), not completed-visit revenue that includes them', () => {
+    const rows = run(1, 12, { completed_job_revenue: 5000, eligible_job_revenue: 800 }); // the stored total carries a big test-account month
+    expect(view.recurringMetric(view.splitWindows(rows))).toMatchObject({ share: 75 }); // 600 / 800, not 600 / 5000
+  });
+
+  test('a month without the stored eligible revenue is left out of both sides, so numerator and denominator always match', () => {
+    const rows = run(1, 12, (n) => (n <= 4 ? { eligible_job_revenue: null } : {}));
+    expect(view.recurringMetric(view.splitWindows(rows))).toMatchObject({ share: 50, monthsCounted: 8, recurringRevenue: 4800 });
+    expect(view.recurringMetric(view.splitWindows(run(1, 12, { eligible_job_revenue: 0 })))).toMatchObject({ share: null });
   });
 
   test('gross margin: book margin is total book profit over total revenue; per-job margin is weighted by completed-visit revenue', () => {
@@ -134,8 +135,8 @@ describe('getBuyerView', () => {
     expect(payload.ownerFieldHoursPerWeek).toEqual({ error: 'unavailable' });
     expect(payload.revenue.value).toBe(12000);
     expect(payload.months).toEqual({ count: 12, from: '2026-01-01', to: '2026-12-01' });
-    expect(payload.recurring).toMatchObject({ share: null, recurringRevenue: 7200 }); // the live denominator failed: no share, never a wrong one
-    expect(logger.error).toHaveBeenCalledTimes(3);
+    expect(payload.recurring).toMatchObject({ share: 50, recurringRevenue: 7200 }); // stored together: no live read to fail
+    expect(logger.error).toHaveBeenCalledTimes(2);
   });
 
   test('no stored months is an empty, honest payload: dashes, zero months, no growth', async () => {

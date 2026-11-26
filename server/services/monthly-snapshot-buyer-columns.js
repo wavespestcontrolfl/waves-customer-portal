@@ -13,7 +13,8 @@
  *   recurring_revenue / recurring_mature_revenue / autopay_renewing_share
  *                                               visit revenue (service_records.revenue, job-costing's stored figure) of plan
  *                                               members, of members at least 12 months old, and its share on chargeable autopay
- *   prepaid_owed                                annual-prepay money collected for visits not done by month end
+ *   eligible_job_revenue                        completed-visit revenue of every customer but the test accounts (the share's denominator)
+ *   prepaid_owed                                annual-prepay money collected for visits not done by month end, less refunds
  *
  * Where each rule lives (CLAUDE.md rule 22): standard minutes = job-costing JOB_COST_STANDARD / standardLaborMinutesFor;
  * what a visit earns = job-costing (read from service_records.revenue, never restated); plan members = billing-lane
@@ -62,12 +63,15 @@ async function ownerForSnapshot(db) {
 
 /**
  * Minutes of the owner's field time in [startDate, endDate]: ops-buyer-metrics.js ownerStopRows (per physical stop, a
- * grouped visit is one stop) at the job-costing standard minutes of every service done there plus one standard drive
+ * grouped visit is one stop) at the job-costing standard minutes of every service done there plus one configured drive
  * (standardStopMinutes). App tap spans are never read. Every completed stop counts, callbacks included.
  */
 async function ownerFieldMinutes(db, ownerId, startDate, endDate) {
+  const standard = require('./job-costing');
+  // The drive is the configured Average Drive Time job-costing charges each stop, refreshed and read the way ops-buyer-metrics does.
+  await standard.refreshDriveTimeSetting(db);
   const stops = await ownerStopRows(db, ownerId, startDate, endDate);
-  return { minutes: standardStopMinutes(stops, require('./job-costing')), stops: stops.length };
+  return { minutes: standardStopMinutes(stops, standard, standard.standardDriveMinutes()), stops: stops.length };
 }
 
 /**
@@ -110,13 +114,19 @@ function profitColumns({ pnl, officeAllowance, field, cashRevenue }) {
 }
 
 /**
- * Is this visit plan revenue, as of the visit's own date? Needs service_records `sr`, a LEFT JOIN of scheduled_services
- * `ss` and customers `c`. Yes when the visit carries a plan marker (it belongs to a recurring series or to an annual-prepay
- * term: facts of the visit that no later change to the customer undoes), or the customer holds a real WaveGuard tier
- * (billing-lane MEMBERSHIP_TIER_SQL) and, on that date, had started (PLAN_START_SQL) and had not yet churned
- * (customers.churned_at). Offboarding clears the tier, so the markers and the churn date are what keep a departed
- * customer's earlier plan visits counted. No cancel date exists for a customer whose tier was cleared without churned_at,
- * so those are kept only through the visit markers.
+ * Is this visit plan revenue, as of the visit's own date? Needs service_records `sr`, customers `c`, and LEFT JOINs of
+ * scheduled_services `ss` and the services catalog `sv` (planVisitJoins). In order:
+ *  1. the visit is its own recurring series (is_recurring) or belongs to an annual-prepay term: plan revenue;
+ *  2. an identifiable one-time job is not plan revenue, whatever else is true of it (ONE_TIME_VISIT_SQL: its catalog service is
+ *     billed one_time, or with no catalog link its service type names a one-time job or an inspection). That covers a tiered
+ *     customer's standalone WDO inspection and a paid one-time booster that only hangs off a series (recurring_parent_id);
+ *  3. a child visit of a recurring series (recurring_parent_id) is plan revenue;
+ *  4. otherwise membership on the visit date: the tier FROZEN on the service record at completion (service_tier, with
+ *     service_tier_source 'auto' meaning a label, not a paying member) where it was recorded; else the customer's tier now
+ *     (billing-lane MEMBERSHIP_TIER_SQL), counted only after the plan started (PLAN_START_SQL) and before churned_at.
+ * Offboarding clears the tier, so the markers, the frozen tier and the churn date keep a departed customer's earlier plan
+ * visits counted. No cancel date exists for a customer whose tier was cleared without churned_at, so those are kept only
+ * through the markers or the frozen tier.
  */
 // When the customer's plan began: the earliest plan evidence (the first scheduled visit of a recurring series or annual-prepay
 // term, or an annual-prepay term's start), else, for a customer with a tier and no such evidence, member_since (customer
@@ -128,11 +138,29 @@ const PLAN_START_SQL = `COALESCE(
     (SELECT MIN(pt.term_start) FROM annual_prepay_terms pt WHERE pt.customer_id = c.id)),
   c.member_since,
   (c.created_at AT TIME ZONE 'America/New_York')::date)`;
+// The same one-time words the plan resolvers refuse (self-booking-plan-sync ONE_TIME_CATALOG_IDENTITY_RE), written without a
+// question mark because knex reads one as a binding.
+const ONE_TIME_VISIT_SQL = `COALESCE(sv.billing_type = 'one_time' OR (sv.id IS NULL
+  AND COALESCE(ss.service_type, sr.service_type) ~* '(^|[^a-z0-9])(one[-_ ]time|onetime|clean[-_ ]out|cleanout|initial[-_ ]only|inspection)($|[^a-z0-9])'), false)`;
+// MEMBERSHIP_TIER_SQL (billing-lane) pointed at the tier frozen on the service record instead of the customer's tier now.
+const FROZEN_MEMBERSHIP_SQL = MEMBERSHIP_TIER_SQL.replaceAll('waveguard_tier', 'sr.service_tier');
 const PLAN_VISIT_SQL = `(
-  ss.is_recurring IS TRUE OR ss.recurring_parent_id IS NOT NULL OR ss.annual_prepay_term_id IS NOT NULL
-  OR (${MEMBERSHIP_TIER_SQL}
-      AND ${PLAN_START_SQL} <= sr.service_date
-      AND (c.churned_at IS NULL OR sr.service_date <= c.churned_at)))`;
+  ss.is_recurring IS TRUE OR ss.annual_prepay_term_id IS NOT NULL
+  OR (NOT ${ONE_TIME_VISIT_SQL}
+      AND (ss.recurring_parent_id IS NOT NULL
+        OR (CASE WHEN sr.service_tier IS NOT NULL
+              THEN ${FROZEN_MEMBERSHIP_SQL} AND sr.service_tier_source IS DISTINCT FROM 'auto'
+              ELSE ${MEMBERSHIP_TIER_SQL}
+                AND ${PLAN_START_SQL} <= sr.service_date
+                AND (c.churned_at IS NULL OR sr.service_date <= c.churned_at)
+            END))))`;
+
+/** Joins the plan-visit rule needs onto a service_records `sr` query that already joins customers `c`. */
+function planVisitJoins(query) {
+  return query
+    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+    .leftJoin('services as sv', 'sv.id', 'sr.service_id');
+}
 
 /**
  * Visit revenue of plan members in the window (PLAN_VISIT_SQL), with the part from members at least 12 months old at the window start
@@ -142,9 +170,7 @@ const PLAN_VISIT_SQL = `(
  */
 async function recurringRevenue(db, startDate, endDate, now) {
   const autopay = autopayActivePredicate(now);
-  const row = await db('service_records as sr')
-    .join('customers as c', 'c.id', 'sr.customer_id')
-    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+  const row = await planVisitJoins(db('service_records as sr').join('customers as c', 'c.id', 'sr.customer_id'))
     .whereBetween('sr.service_date', [startDate, endDate])
     .whereNotNull('sr.revenue')
     .whereRaw(PLAN_VISIT_SQL)
@@ -167,37 +193,94 @@ async function recurringRevenue(db, startDate, endDate, now) {
 }
 
 /**
+ * The month's completed-visit revenue of every customer except the internal test accounts (visits with a revenue figure):
+ * the population recurring_revenue is a slice of, stored in the same snapshot so the recurring share has one source.
+ */
+async function eligibleJobRevenue(db, startDate, endDate) {
+  const row = await db('service_records as sr')
+    .join('customers as c', 'c.id', 'sr.customer_id')
+    .whereBetween('sr.service_date', [startDate, endDate])
+    .whereNotNull('sr.revenue')
+    .modify(excludeInternalTestCustomers(db))
+    .select(db.raw('COALESCE(SUM(sr.revenue), 0)::text AS total'))
+    .first();
+  return round2(row && row.total);
+}
+
+/**
+ * Money refunded against one prepay term's invoice by `endDate`, in dollars, or null when a refund exists that cannot be
+ * placed in time. Refunds are the Stripe ledger's outflow rows (pnl-report outflowTransactionsQuery: refund, dispute and the
+ * like, dated by when they happened) tied to the invoice or to its payment. payments.refund_amount is a cumulative stamp with
+ * no date: when it is more than the ledger holds in total, part of a refund has no date, so the month cannot be allocated.
+ */
+async function termRefunds(db, term, endDate) {
+  const { outflowTransactionsQuery } = require('./pnl-report');
+  const tied = (query) => query.where(function tiedToTermInvoice() {
+    this.where('spt.invoice_id', term.invoice_id);
+    if (term.payment_intent_id) this.orWhere('lp.stripe_payment_intent_id', term.payment_intent_id);
+    if (term.charge_id) this.orWhere('lp.stripe_charge_id', term.charge_id);
+  });
+  const total = (query) => tied(query).select(db.raw('COALESCE(SUM(-spt.amount), 0)::text AS total')).first();
+  const byEnd = num((await total(outflowTransactionsQuery(db, '1900-01-01', endDate))).total);
+  const ever = num((await total(outflowTransactionsQuery(db, '1900-01-01', '2999-12-31'))).total);
+  const stamped = await db('payments')
+    .whereRaw("COALESCE(metadata->>'source', '') <> 'invoice_refund'")
+    .where(function paymentOfTermInvoice() {
+      this.whereRaw('false');
+      if (term.payment_intent_id) this.orWhere('stripe_payment_intent_id', term.payment_intent_id);
+      if (term.charge_id) this.orWhere('stripe_charge_id', term.charge_id);
+    })
+    .select(db.raw('COALESCE(SUM(refund_amount), 0)::text AS total'))
+    .first();
+  return num(stamped.total) > ever + 0.005 ? null : byEnd;
+}
+
+/**
  * Annual-prepay money collected and not yet earned at month end: for each term with paid coverage (coveredTermsAsOf with
  * no date: a paid status, an invoice not void or refunded, a payment not fully refunded) that was paid by the month's last
  * day (the collection date, so an October payment for a term that starts in November is owed at October's end) and has not
- * ended by then, the prepay amount less the revenue of its visits completed by then.
- * A visit's revenue is its prepay share (job-costing rule 1), so the difference is the share of visits still to do.
+ * ended by then, the prepay amount less the revenue of its visits completed by then and less refunds against its invoice
+ * recorded by then (termRefunds). A visit's revenue is its prepay share (job-costing rule 1), so the difference is the share
+ * of visits still to do. NULL (never a wrong figure) when a refund cannot be placed in time.
  * This is NOT the dashboard's "Deposits on Hand" (the retired estimate-deposit ledger, a different pool of money).
  * Coverage status is read as of today: a term that was later cancelled or refunded is not counted for older months.
  */
 async function prepaidOwed(db, endDate) {
   const { coveredTermsAsOf } = require('./annual-prepay-renewals');
-  const row = await coveredTermsAsOf(db, null)
+  const terms = await coveredTermsAsOf(db, null)
     .where('t.prepay_amount', '>', 0)
     .where('t.term_end', '>=', endDate)
     .whereRaw("COALESCE((i.paid_at AT TIME ZONE 'America/New_York')::date, (t.created_at AT TIME ZONE 'America/New_York')::date) <= ?::date", [endDate])
-    .select(db.raw(
-      `COALESCE(SUM(GREATEST(t.prepay_amount - COALESCE((
-         SELECT SUM(sr.revenue) FROM scheduled_services ss
-           JOIN service_records sr ON sr.scheduled_service_id = ss.id
-          WHERE ss.annual_prepay_term_id = t.id AND sr.status = 'completed'
-            AND sr.service_date <= ?::date AND sr.revenue IS NOT NULL), 0), 0))::text, '0') AS owed`,
-      [endDate],
-    ))
-    .first();
-  return round2(row && row.owed);
+    .select(
+      't.id',
+      't.prepay_amount',
+      'i.id as invoice_id',
+      'i.stripe_payment_intent_id as payment_intent_id',
+      'i.stripe_charge_id as charge_id',
+      db.raw(
+        `COALESCE((
+           SELECT SUM(sr.revenue) FROM scheduled_services ss
+             JOIN service_records sr ON sr.scheduled_service_id = ss.id
+            WHERE ss.annual_prepay_term_id = t.id AND sr.status = 'completed'
+              AND sr.service_date <= ?::date AND sr.revenue IS NOT NULL), 0)::text AS recognized`,
+        [endDate],
+      ),
+    );
+  let owed = 0;
+  for (const term of terms) {
+    const refunded = await termRefunds(db, term, endDate);
+    if (refunded === null) return null;
+    owed += Math.max(0, num(term.prepay_amount) - num(term.recognized) - refunded);
+  }
+  return round2(owed);
 }
 
 /** Every buyer-view column of one month. `pnl` is the month's buildPnlReport result; pure reads on `db`. */
 async function buyerColumns(db, { startDate, endDate, financials, pnl, officeAllowance, cashRevenue, now = new Date() }) {
-  const [field, recurring, owed] = await Promise.all([
+  const [field, recurring, eligible, owed] = await Promise.all([
     ownerFieldTime(db, financials, startDate, endDate),
     recurringRevenue(db, startDate, endDate, now),
+    eligibleJobRevenue(db, startDate, endDate),
     prepaidOwed(db, endDate),
   ]);
   return {
@@ -205,6 +288,7 @@ async function buyerColumns(db, { startDate, endDate, financials, pnl, officeAll
     owner_field_allowance: field.allowance,
     ...profitColumns({ pnl, officeAllowance, field, cashRevenue }),
     ...recurring,
+    eligible_job_revenue: eligible,
     prepaid_owed: owed,
   };
 }
@@ -219,7 +303,10 @@ module.exports = {
   ebitdaOf,
   profitColumns,
   recurringRevenue,
+  eligibleJobRevenue,
+  termRefunds,
   prepaidOwed,
+  planVisitJoins,
   buyerColumns,
   ADD_BACK_CATEGORIES,
 };
