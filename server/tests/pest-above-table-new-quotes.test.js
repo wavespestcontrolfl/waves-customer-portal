@@ -324,6 +324,17 @@ describe('a save the server cannot price: no pest row above 5,500 sq ft (admin-e
     refused({ engineResult: { lineItems: [{ service: 'pest_control', price: 128 }] }, ...big });
     refused({ result: { results: {} }, engineResult: { lineItems: [{ service: 'one_time_pest', price: 250 }] }, ...big });
     refused({ results: { pest: row(128) }, ...big });
+    // Tier rows straight under the result with only a cadence and a price (the shape the public page's v1 reader also accepts).
+    refused({ result: { pestTiers: [{ freq: 'quarterly', pa: 128 }] }, ...big });
+    refused({ result: { pestTiers: [{ label: 'Quarterly' }] }, ...big });
+    refused({ pestTiers: [{ freq: 'quarterly', mo: 42.67 }], ...big });
+    // The frozen send bundle of a sent estimate names the plan too.
+    refused({ result: { results: {} }, sendSnapshot: { pricingBundle: { frequencies: [{ service: 'pest_control', monthly: 42.67 }] } }, ...big });
+    // A priced row named for pest with no service key, wherever the word sits in its name.
+    refused({ result: { recurring: { services: [{ name: 'Quarterly Pest Control', monthly: 42.67 }] } }, ...big });
+    refused({ result: { oneTime: { items: [{ label: 'One-Time Pest Treatment', price: 250 }] } }, ...big });
+    // A name with the word in it and no price is not a row (the company name), and another service's row is not a pest row.
+    passes({ result: { company: { name: 'Waves Pest Control' }, recurring: { services: [{ name: 'Lawn + Pest-Free Turf', service: 'lawn_care', mo: 60 }] } }, ...big });
     // No pest row: a big home is not a reason to refuse (the browser prices the other services as it does on main).
     passes({ result: { results: { lawn: [{ mo: 60 }] }, recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 60 }] } }, ...big });
     // A pest REQUEST in the inputs is not a priced row.
@@ -383,6 +394,10 @@ describe('a save the server cannot price: no pest row above 5,500 sq ft (admin-e
       expect(small.result.pricingMetadata.legacyPestAboveTable).toBe(false);
       expect(small.result.results.pest.pa).toBe(126);
     }
+    // Tier rows straight under the result (cadence and price only) are refused through the same decision, and never stamped new.
+    const topTiers = { result: { pestTiers: [{ freq: 'quarterly', pa: 128 }] }, inputs: { homeSqFt: 10000, stories: '1' } };
+    await expect(price(topTiers)).rejects.toMatchObject({ statusCode: 409 });
+    expect(topTiers.result.pricingMetadata).toBeUndefined();
     // An engine that throws is the same refusal.
     await expect(price(browser(128, { inputs: { homeSqFt: 10000 } }), null, async () => { throw new Error('boom'); })).rejects.toMatchObject({ statusCode: 409 });
     // The server priced it: no refusal for a big home, and the server's own result (with the engine's stamp) stands.

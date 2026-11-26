@@ -2089,21 +2089,32 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
 // zero and the browser's price is the server's price. The check sits where the pricing authority is decided, not behind a
 // browser-shape test.
 const PEST_ROW_SERVICES = new Set(['pest_control', 'one_time_pest']);
+const NOT_A_PEST_ROW_NAME = /termite|mosquito|rodent|lawn|shrub|palm|mist|wdo|exclusion|flea|roach|bed ?bug/i;
+const PEST_ROW_PRICE_KEYS = ['pa', 'perApp', 'perVisit', 'perTreatment', 'basePrice', 'mo', 'monthly', 'monthlyBase', 'ann', 'annual',
+  'annualTotal', 'annualAfterDiscount', 'price', 'amount', 'priceAfterDiscount', 'estimatedPrice', 'total'];
 const SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$/;
 const isPlainRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
-// True when the saved blob holds a pest row anywhere outside its input carriers: the browser's plan rows (results.pest, pestTiers),
-// a recurring or one-time row, or an engine line, in `result`, `engineResult`, the bare data or the send snapshot.
+// True when the saved blob holds a pest row anywhere outside its input carriers: the browser's plan rows (results.pest, pestTiers
+// under `results` or straight under the result), a recurring or one-time row, or an engine line, in `result`, `engineResult`, the
+// bare data or the send snapshot. The stamp reader's own list of saved pest shapes (storedPestServices, shared with the public
+// page) is asked first, so a shape that page can show is never one this check cannot see; a reader that fails counts as a row.
 function saveHoldsPestRow(estimateData) {
+  try {
+    if (require('./estimate-floor-signal-replay').storedPestServices(estimateData).size > 0) return true;
+  } catch { return true; }
   const seen = new Set();
   const walk = (node) => {
     if (!node || typeof node !== 'object' || seen.has(node)) return false;
     seen.add(node);
     if (Array.isArray(node)) return node.some(walk);
-    if (PEST_ROW_SERVICES.has(String(node.service || '')) || /^(pest\b|one[- ]time pest)/i.test(String(node.name || ''))) return true;
+    if (PEST_ROW_SERVICES.has(String(node.service || ''))) return true;
+    // A row named for pest (the browser and the mapper name rows, they do not always key them), carrying any price.
+    const label = String(node.name || node.label || '');
+    if (/pest/i.test(label) && !NOT_A_PEST_ROW_NAME.test(label) && PEST_ROW_PRICE_KEYS.some((key) => Number(node[key]) > 0)) return true;
     return Object.entries(node).some(([key, value]) => {
       if (SAVE_INPUT_CARRIER_KEY.test(key)) return false;
-      if (key === 'results' && isPlainRecord(value)
-        && (isPlainRecord(value.pest) || (Array.isArray(value.pestTiers) && value.pestTiers.length > 0))) return true;
+      if (key === 'pestTiers' && Array.isArray(value) && value.length > 0) return true;
+      if (key === 'results' && isPlainRecord(value) && isPlainRecord(value.pest)) return true;
       return walk(value);
     });
   };
