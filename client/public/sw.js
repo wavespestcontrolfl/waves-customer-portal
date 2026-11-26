@@ -373,6 +373,20 @@ async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigatio
 // customer page even after a report or staff page moved '/'. Its build is
 // always retained (pruneStaleAssets), so its assets stay with it.
 const CUSTOMER_SHELL_URL = '/__waves/customer-shell';
+// What the customer copy records about itself, in the same write that stores
+// it (customerCopy): when it was saved, and every file its build needs to run
+// a customer screen (its own entry files plus the chunks the home page loads,
+// from the build's customer-build-assets.json). A copy with no stamp, or none
+// of the file list, was written by an older worker: it counts as too old and
+// as incomplete, so it is only ever served by the slow-network rule.
+const SAVED_AT_HEADER = 'x-waves-saved-at';
+const COPY_FILES_HEADER = 'x-waves-copy-files';
+// A saved copy answers a customer screen at once only while it is this young.
+const SAVED_FIRST_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// The files of one build that a customer screen can load (client/src/lib/
+// customerBuildAssets.js writes it). Its name ends in build-assets.json, so
+// the server never caches it (server/index.js), as with the build's file list.
+const CUSTOMER_ASSETS_URL = '/customer-build-assets.json';
 // The files of the customer copy this worker last served on a slow load: the
 // page runs that build even after a late refresh moves the copy on, so every
 // prune keeps them by path while this worker lives (one set, replaced on the
@@ -388,9 +402,44 @@ async function customerShellKeep(cache) {
   const assets = shellAssetUrls(await shell.text());
   if (!assets.length) return null;
   const buildId = buildIdOf(assets);
-  const paths = new Set(assets);
+  const paths = new Set([...assets, ...copyFilesOf(shell)]);
   for (const owned of (await ownedAssetsOf(cache, buildId)) || []) paths.add(owned);
   return { buildId, paths };
+}
+
+// The customer copy as the commit stores it: the shell's own bytes, rebuilt
+// without a URL (withoutUrl), with the save time and the file list.
+function customerCopy(response, files) {
+  const headers = new Headers(response.headers);
+  headers.set(SAVED_AT_HEADER, String(Date.now()));
+  if (files && files.length) headers.set(COPY_FILES_HEADER, files.join(','));
+  else headers.delete(COPY_FILES_HEADER);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+function copyFilesOf(shell) {
+  return String((shell && shell.headers.get(COPY_FILES_HEADER)) || '').split(',').filter(Boolean);
+}
+
+// The customer copy when it may answer a customer screen before the network
+// does: saved within SAVED_FIRST_MAX_AGE_MS, naming its build's customer
+// files, and every one of them in the cache now. A chunk the cache lacks is a
+// round trip to a server that keeps no old build, and then a reload to heal,
+// so such a copy is never served first. Null otherwise, and on any error.
+async function freshCompleteCopy() {
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    const shell = await cache.match(CUSTOMER_SHELL_URL);
+    if (!shell) return null;
+    const age = Date.now() - Number(shell.headers.get(SAVED_AT_HEADER));
+    if (!(age >= 0 && age < SAVED_FIRST_MAX_AGE_MS)) return null;
+    const files = copyFilesOf(shell);
+    const assets = shellAssetUrls(await shell.clone().text());
+    if (!assets.length || !assets.every(asset => files.includes(asset))) return null;
+    const cached = await Promise.all(files.map(file => cache.match(file)));
+    return cached.every(Boolean) ? shell : null;
+  } catch {
+    return null;
+  }
 }
 
 // advanceLive false: the page that asked for this refresh runs an older,
@@ -431,6 +480,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   // serve the next build's list. A null result simply leaves this build
   // without one, and the worker guesses as it always has.
   const ownedAssets = await fetchBuildManifest(assets);
+  const customerFiles = await fetchCustomerAssets(customerShell, assets, ownedAssets);
   // The asset fetches above take time; a newer navigation may have landed
   // meanwhile. Check again before committing anything.
   if (await isSuperseded()) throw new Error('Shell refresh superseded by a newer navigation');
@@ -531,7 +581,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     // failure (quota) rolls back and takes the quota retry, like the '/' write.
     if (customerShell) {
       try {
-        await cache.put(CUSTOMER_SHELL_URL, withoutUrl(shellResponse.clone()));
+        await cache.put(CUSTOMER_SHELL_URL, customerCopy(shellResponse.clone(), customerFiles));
       } catch (err) {
         await restorePreviousShell();
         await withAssetWrites(rollBackCreated);
@@ -595,6 +645,55 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   // cached its own chunks already, and its queued refresh only restores the
   // shell's direct assets — not the routes that page already loaded.
   if (previousBuildId !== buildId) await pruneStaleAssets(cache, [buildId, previousBuildId, liveBuildId]);
+  // Last, once the prune has freed what the older build held: the copy is
+  // committed and stays a valid slow-network copy whatever happens here. The
+  // install leaves this to the first refresh, so it is never slowed by it.
+  await cacheCustomerFiles(cache, buildId, supersedable ? customerFiles : null, assets).catch(() => {});
+}
+
+// The build's list of customer files. Like the build's file list, it is
+// believed only when it fits the shell just fetched: it names every one of
+// the shell's own files, and the build's file list owns every file it names.
+// Null leaves the copy without a list, so it is never served first.
+async function fetchCustomerAssets(customerShell, assets, owned) {
+  if (!customerShell || !owned) return null;
+  try {
+    const response = await fetch(new Request(CUSTOMER_ASSETS_URL, { cache: 'reload' }));
+    if (!response.ok) return null;
+    const files = JSON.parse(await response.text());
+    if (!Array.isArray(files) || !files.length) return null;
+    const listed = new Set(files);
+    const ownedSet = new Set(owned);
+    if (!files.every(file => typeof file === 'string' && isPlainAssetPath(file) && ownedSet.has(file))) return null;
+    if (!assets.every(asset => listed.has(asset))) return null;
+    return files;
+  } catch {
+    return null;
+  }
+}
+
+// Keep the build's customer chunks in the cache, tagged with the build, so a
+// copy of it opens with no round trip. A file already cached (a hashed name
+// is the same bytes in every build) is only claimed for this build. A file
+// that fails is left for the next refresh; the copy stays unserved-first until
+// every file is there (freshCompleteCopy).
+async function cacheCustomerFiles(cache, buildId, listed, shellAssets) {
+  if (!listed) return;
+  await Promise.allSettled(listed.filter(file => !shellAssets.includes(file)).map(async file => {
+    const have = await cache.match(file);
+    if (have && rawTagsOf(have).includes(buildId)) return;
+    let response = null;
+    if (!have) {
+      response = await fetch(new Request(file));
+      if (!response.ok) throw new Error(`Customer file failed (${response.status}): ${file}`);
+      if (response.redirected) throw new Error(`Customer file redirected: ${file}`);
+    }
+    await withAssetWrites(async () => {
+      const latest = (await cache.match(file)) || response;
+      if (!latest) throw new Error(`Customer file gone: ${file}`);
+      await cache.put(file, tagWithBuild(latest, [buildId]));
+    });
+  }));
 }
 
 // Drop every cached /assets/* entry tagged with none of the retained builds
@@ -758,7 +857,14 @@ function withoutUrl(response) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
-// A page load that the network has not answered in SLOW_NAV_MS is answered
+// A customer screen is answered from the saved copy before the network does
+// when the copy is young and whole (freshCompleteCopy); the fetch keeps
+// running and the refresh saves the new build, so the next open shows it. A
+// page that opened from the copy runs that build, and a newer one reaches it
+// on its next open: customers get no update prompt (staff tabs do, from the
+// build header on their API answers, lib/portalVersion.js).
+//
+// Otherwise, a page load that the network has not answered in SLOW_NAV_MS is answered
 // from the saved app copy (the shell stored under OFFLINE_URL), when the
 // current bucket holds one. On weak cell signal a fetch often hangs instead
 // of failing, so waiting for it to throw left the screen blank for a minute.
@@ -804,7 +910,7 @@ async function noteServedCopy(shell, navSeq) {
     const buildId = buildIdOf(assets);
     advanceLiveBuild(buildId, navSeq);
     const cache = await caches.open(CACHE_NAME);
-    servedCopyPaths = new Set([...assets, ...((await ownedAssetsOf(cache, buildId)) || [])]);
+    servedCopyPaths = new Set([...assets, ...copyFilesOf(shell), ...((await ownedAssetsOf(cache, buildId)) || [])]);
   } catch { /* the build tags still hold its files */ }
 }
 
@@ -862,6 +968,15 @@ async function answerNavigation(request, attempt, { customer, networkOnly }, dec
       }
     });
     if (!networkOnly) {
+      // A copy that is young and whole answers now, on any signal; the fetch
+      // above keeps running and the refresh saves the new build for the next
+      // open. Everything else waits for the network, up to SLOW_NAV_MS.
+      const fresh = await freshCompleteCopy();
+      if (fresh) {
+        decide('saved');
+        await noteServedCopy(fresh, navSeq);
+        return fresh;
+      }
       const slow = new Promise(resolve => { timer = setTimeout(resolve, SLOW_NAV_MS, 'slow'); });
       const first = await Promise.race([bodyReady, slow]);
       // Slow, a body that broke off, or no answer at all: the customer copy.
