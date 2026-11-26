@@ -446,6 +446,14 @@ describe('the alert after an office call', () => {
     expect(saved().promises).toEqual(['I cannot waive the fee, sorry.']);
   });
 
+  test('a staff line too long to show whole is left out, never cut', async () => {
+    setCall({ acceptance: staffAnswer });
+    say([...CALL, ['staff', `${'Let me explain how this works. '.repeat(5)}I'll waive the fee only if the manager approves.`]]);
+    reply(JSON.stringify({ ...JSON_REPLY, promises: ["I'll waive the fee"] }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(saved().promises).toEqual([]);
+  });
+
   test('a quote that drops a condition is saved as the whole staff line, condition kept', async () => {
     setCall({ acceptance: staffAnswer });
     say([...CALL, ['staff', "I'll waive the fee only if the manager approves."]]);

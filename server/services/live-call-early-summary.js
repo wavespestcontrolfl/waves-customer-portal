@@ -269,8 +269,8 @@ function raiseOfficeAlert(trx, callSid, call, name, reply) {
 }
 
 // The promises the staff side really said: a model quote is kept only when it is a contiguous quote of one "Agent:"
-// line (case, curly quotes, punctuation and spacing aside), and what is saved is that staff line itself, cut to the
-// promise budget: so a caller's words, a model's guess, a flipped refusal ("cannot" read as "can") or a dropped
+// line (case, curly quotes, punctuation and spacing aside), and what is saved is that whole staff line (left out when
+// it is longer than the promise budget): so a caller's words, a model's guess, a flipped refusal ("cannot" read as "can") or a dropped
 // condition ("only if the manager approves") never shows under a staff member's name.
 const normalized = (t) => String(t || '').toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
 function groundedPromises(promises, transcript) {
@@ -279,7 +279,9 @@ function groundedPromises(promises, transcript) {
   for (const p of promises) {
     const quote = normalized(p);
     const line = quote.length >= 8 && agentLines.find((l) => ` ${normalized(l)} `.includes(` ${quote} `));
-    const shown = line ? cleanText(line, MAX_PROMISE_CHARS) : null;
+    // A staff line too long to show whole is left out: a cut could hide the promise or its condition.
+    const shown = line ? cleanText(line, 10000) : null;
+    if (shown && shown.length > MAX_PROMISE_CHARS) continue;
     if (shown && !kept.includes(shown)) kept.push(shown);
   }
   return kept;

@@ -4915,11 +4915,14 @@ fewer than 3 utterances or one the recording pipeline already processed. Its
 (owner 2026-11-26 "build both"), all card-masked and capped. When a staff
 member who is not the owner answered (`forward_acceptance` names someone
 other than `ADAM_PHONE`), with no warm transfer, no card-pause stamp, no
-masked card number and no card words in the live text, the saved summary
+masked card number and none of the card-pause detector's card words
+(`isCardIntent`: card number, credit or debit card, card ending, expiration
+date, security code, CVV/CVC, code on the back) in any live line, the saved summary
 raises ONE admin bell row and phone banner (category and banner kind
 `live_call_next_step`, dedupe `live-call-next-step:<CallSid>`, admin role
-only, no night banner). A later card-number quarantine deletes that bell
-row with the summary. A quarantined call saves none and raises none.
+only, no night banner). The banner words carry no run of 3+ digits, no
+access code and no card number (else fixed copy). A later card line or a
+card-number quarantine deletes that bell row. A quarantined call saves none and raises none.
 `GATE_CALL_EARLY_SUMMARY` off: no model call and no new summary.
 `GATE_LIVE_CALL_TRANSCRIPTION` off: no start, and the press-1 TwiML is
 byte-identical),
