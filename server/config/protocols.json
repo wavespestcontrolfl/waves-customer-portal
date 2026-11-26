@@ -1999,7 +1999,7 @@
     "notes": [
       "Rodent service is inspection-led: find and photograph the entry points first. Traps and bait show where rats come from; exclusion is what ends it. Only a fully excluded home gets a guarantee.",
       "Trapping is attic only, 8 traps at most, spread apart, never bunched: the traps that catch show which side the rats come in, and that leads to the entry points (owner 2026-11-23).",
-      "Trap checks happen only when the customer reports a sound or a dead-rat smell (owner 2026-11-23). The exclusion visit is the last trap check: every trap comes out then.",
+      "Trap checks happen only when the customer reports a sound or a dead-rat smell (owner 2026-11-23). After trapping, the exclusion-only visit is the last trap check: every trap comes out then. The combined exclusion-and-trapping service seals first and traps after: its last trap check removes every trap.",
       "Bait at homes is Tomcat Bromethalin in a locked EVO station. Contrac Blox (a second-generation bait that kills owls and pets that eat the rats) is for commercial sites only. No glue boards.",
       "Wildlife (raccoons, opossums, squirrels, bats) is referred out. Waves keeps the seal-up work after the animal is gone."
     ],
@@ -2029,13 +2029,41 @@
           "Ask about peanut allergies in the home before trapping": {
             "scope": "interior",
             "treatmentApplied": false
+          },
+          "Rodent Inspection / Activity Assessment": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Inspect top down: roof-wall gaps, soffit returns, tile eave gaps, vents, AC line chases, garage door corners and pipe holes": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "A gap over 1/2 in lets a rat in; over 1/4 in, a mouse": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Photograph and number every entry point: this is the exclusion quote": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Look for droppings, rub marks, gnawing, nesting, sounds and smells; note food and water sources": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Check for bats before quoting any sealing": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Quote exclusion separately; refer wildlife out": {
+            "scope": "interior",
+            "treatmentApplied": false
           }
         }
       },
       {
         "visit": 2,
         "month": "Any",
-        "primary": "Rodent Trapping Setup\nAttic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched\nSet each on a top plate, joist, rafter, pipe or beam with rub marks or droppings; screw or zip-tie every trap\nOn a floor or ledge: the trap at a right angle to the wall, trigger end against it\nBait each trap with a pea-size amount: rotate peanut butter, nut meat, raisin or prune; hazelnut spread or dried fruit if anyone has a peanut allergy\nMap each trap (A1 to A8) and photograph it in place",
+        "primary": "Rodent Trapping Setup\nAttic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched\nSet each on a top plate, joist, rafter, pipe or beam with rub marks or droppings; screw or zip-tie every trap\nOn a floor or ledge: the trap at a right angle to the wall, trigger end against it\nAsk about peanut allergies in the home before baiting\nBait each trap with a pea-size amount: rotate peanut butter, nut meat, raisin or prune; hazelnut spread or dried fruit if anyone has a peanut allergy\nMap each trap (A1 to A8) and photograph it in place",
         "secondary": "Outdoor activity: quote the bait-station service (its own card); no bait goes out on a trapping visit\nNo glue boards, and no open snap trap outdoors\nTell the customer: nobody goes into the attic, no children or pets near the traps, and call us on a snap or a dead-rat smell",
         "lineMeta": {
           "Attic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched": {
@@ -2076,6 +2104,10 @@
           "Outdoor activity: quote the bait-station service (its own card); no bait goes out on a trapping visit": {
             "scope": "exterior",
             "treatmentApplied": false
+          },
+          "Ask about peanut allergies in the home before baiting": {
+            "scope": "interior",
+            "treatmentApplied": false
           }
         },
         "material_cost": "inventory",
@@ -2104,6 +2136,30 @@
         "notes": "The exclusion visit is the last trap check (owner 2026-11-25, D15a). Exclusion is a separate scope unless the estimate includes it.",
         "lineMeta": {
           "Final trap check: remove every trap, log the catches by trap (A1 to A8), and take out the trap map": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Exclusion / Entry-Point Repair": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Seal every numbered entry with 1/4 in galvanized hardware cloth, sheet metal, copper mesh with sealant, or mortar at tile eaves": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Foam alone, chicken wire and steel wool (it rusts) are not exclusion": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Check for bats and live animals before sealing: never seal an animal into an occupied void": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Flag inaccessible or declined repairs in the customer note": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Recommend sanitation or trimming when pressure is recurring": {
             "scope": "interior",
             "treatmentApplied": false
           }
@@ -2141,6 +2197,18 @@
             "treatmentApplied": false
           },
           "Last check (no new catches and the entries are sealed): remove every trap and the trap map": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Remove each catch with nitrile gloves: spray 1 part bleach to 9 parts water, wait 5 minutes, double-bag": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Repeat catches on one side mean an entry is still open: quote exclusion": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "If activity does not match rats or mice, refer wildlife out": {
             "scope": "interior",
             "treatmentApplied": false
           }
@@ -2187,6 +2255,10 @@
           "Outdoors when activity is unclear: non-toxic monitoring blocks in a locked station first, no rodenticide": {
             "scope": "exterior",
             "treatmentApplied": false
+          },
+          "Inspect the exterior for new entry points; quote exclusion when they are active": {
+            "scope": "exterior",
+            "treatmentApplied": false
           }
         },
         "material_cost": "inventory",
@@ -2202,7 +2274,7 @@
       {
         "visit": 6,
         "month": "Any",
-        "primary": "Rodent Exclusion & Trapping\nInspect top down and number every entry point (photo each)\nSeal every numbered entry with 1/4 in galvanized hardware cloth, sheet metal, copper mesh with sealant, or mortar at tile eaves\nAttic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched\nScrew or zip-tie every trap; bait each with a pea-size amount (no peanut if anyone has a peanut allergy)\nMap each trap (A1 to A8): the follow-up checks catch the rats sealed inside, and the last check removes every trap",
+        "primary": "Rodent Exclusion & Trapping\nInspect top down and number every entry point (photo each)\nSeal every numbered entry with 1/4 in galvanized hardware cloth, sheet metal, copper mesh with sealant, or mortar at tile eaves\nAttic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched\nAsk about peanut allergies in the home before baiting\nScrew or zip-tie every trap; bait each with a pea-size amount (no peanut if anyone has a peanut allergy)\nMap each trap (A1 to A8): the follow-up checks catch the rats sealed inside, and the last check removes every trap",
         "secondary": "Check for bats and live animals before sealing: never seal an animal into an occupied void\nFoam alone, chicken wire and steel wool are not exclusion\nTell the customer: call us on a snap or a dead-rat smell",
         "lineMeta": {
           "Attic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched": {
@@ -2217,6 +2289,34 @@
             "treatmentApplied": false
           },
           "Map each trap (A1 to A8): the follow-up checks catch the rats sealed inside, and the last check removes every trap": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Rodent Exclusion & Trapping": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Inspect top down and number every entry point (photo each)": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Seal every numbered entry with 1/4 in galvanized hardware cloth, sheet metal, copper mesh with sealant, or mortar at tile eaves": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Ask about peanut allergies in the home before baiting": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Check for bats and live animals before sealing: never seal an animal into an occupied void": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Foam alone, chicken wire and steel wool are not exclusion": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Tell the customer: call us on a snap or a dead-rat smell": {
             "scope": "interior",
             "treatmentApplied": false
           }
@@ -2244,7 +2344,33 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "An exclusion follow-up: the traps came out at the exclusion visit (owner 2026-11-25, D15a). No traps and no bait on this visit."
+        "notes": "An exclusion follow-up: the traps came out at the exclusion visit (owner 2026-11-25, D15a). No traps and no bait on this visit.",
+        "lineMeta": {
+          "Rodent Exclusion Re-inspection": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Check every numbered seal from the exclusion visit: intact, chewed, pulled or moved; photograph each": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Inspect top down for new entries, fresh droppings, rub marks or gnawing": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Repair a failed seal under the exclusion warranty; quote a new entry separately": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Check for bats and live animals before closing any reopened entry": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Fresh activity inside with every seal intact: look for a missed entry before quoting trapping": {
+            "scope": "interior",
+            "treatmentApplied": false
+          }
+        }
       }
     ]
   },
