@@ -126,7 +126,9 @@ function pestFrequencyFromText(text) {
 
 // "shrubs" after a location word ("mosquito control around shrubs") says where
 // another service happens, not that the lead wants plant care.
-const TREE_SHRUB_INTEREST = /\btree and shrub\b|(?<!\b(?:around|near|in|inside|under|by|from|on|behind|beside|along)\s(?:the\s|my\s|our\s)?(?:(?:trees?|palms?) and )?)\b(?:shrubs?|ornamentals?)\b/;
+// A plant-care verb before the preposition ("fertilization on my shrubs") is
+// still plant care, so it is matched before the location exclusion applies.
+const TREE_SHRUB_INTEREST = /\btree and shrub\b|\b(?:fertiliz\w*|care)\s(?:for|on|of|to)\s(?:the\s|my\s|our\s)?(?:(?:trees?|palms?) and )?(?:shrubs?|ornamentals?)\b|(?<!\b(?:around|near|in|inside|under|by|from|on|behind|beside|along)\s(?:the\s|my\s|our\s)?(?:(?:trees?|palms?) and )?)\b(?:shrubs?|ornamentals?)\b/;
 
 // Interest text that names work automation never prices, so the lead parks
 // for manual scoping instead of drafting a partial or wrong quote.
@@ -135,20 +137,23 @@ function interestManualScopeReason(text, wants) {
     return 'lawn_aeration_plugging_requires_manual_scope';
   }
   if (!wants(TREE_SHRUB_INTEREST)) return null;
-  // Judge the clauses that name tree & shrub, so "wasp nest removal, plus
-  // shrub care" is not an arborist request. A cadence that follows alone
+  // Trimming, pruning and removal OF the plants is arborist work the T&S
+  // program does not price. Phrase-level and negation-aware, so "wasp nest
+  // removal, plus shrub care" drafts and "no shrub trimming" is not a request.
+  const PLANT = '(?:tree|shrub|palm|plant|hedge|ornamental)s?';
+  const WORK = '(?:trim\\w*|prun\\w*|remov\\w*|cut\\w*)';
+  if (wants(new RegExp(`\\b${PLANT}\\s+${WORK}\\b|\\b${WORK}\\s+(?:\\w+\\s+){0,2}${PLANT}\\b|\\b${PLANT}\\s+(?:\\w+\\s+){0,3}(?:removed|trimmed|pruned|cut)\\b`))) {
+    return 'tree_shrub_trimming_or_removal_requires_manual_scope';
+  }
+  // The only T&S draft is the recurring Standard program. Cadence comes from
+  // the clause that names it; a lone cadence clause right after it
   // ("shrub care (one-time)" normalizes to its own clause) belongs to it.
   const clauses = text.split(' . ');
   const plantClauses = clauses
     .map((clause, i) => (TREE_SHRUB_INTEREST.test(clause)
-      ? `${clause} ${/^one time( only)?[ .]*$/.test(clauses[i + 1] || '') ? clauses[i + 1] : ''}`
+      ? `${clause} ${/^one time( only| treatment| service| visit)?[ .]*$/.test(clauses[i + 1] || '') ? clauses[i + 1] : ''}`
       : null))
     .filter(Boolean);
-  // Trimming, pruning and removal are arborist work the T&S program does not price.
-  if (plantClauses.some((clause) => /\b(trim\w*|prun\w*|remov\w*|cut|cutting)\b/.test(clause))) {
-    return 'tree_shrub_trimming_or_removal_requires_manual_scope';
-  }
-  // The only T&S draft is the recurring Standard program.
   if (plantClauses.some(isOneTimeServiceText)) {
     return 'tree_shrub_one_time_requires_manual_scope';
   }
@@ -175,7 +180,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
   // "Tree & Shrub Pest Control" is the plant program's own name, not a
   // second request for household pest control.
   const text = normalizedServiceClauses(serviceInterest)
-    .replace(/\b(?:tree and )?shrub (?:pest )?(?:control|care|program|service)s?\b/g, 'tree and shrub');
+    .replace(/\b(?:(?:tree and )?shrub|ornamental)s? (?:pest )?(?:control|care|program|service)s?\b/g, 'tree and shrub');
   const services = {};
   const review = [];
 

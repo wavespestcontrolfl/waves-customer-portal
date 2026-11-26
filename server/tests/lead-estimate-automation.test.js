@@ -573,6 +573,21 @@ describe('service-interest mapper hardening', () => {
       .toEqual({ treeShrub: { tier: 'standard', palmCountUnverified: true } });
   });
 
+  test('negated arborist work, separate tree removal, ornamental pest control, fertilization on shrubs', () => {
+    expect(mapServiceInterestToEstimateServices('Recurring shrub care, no shrub trimming').services)
+      .toMatchObject({ treeShrub: { tier: 'standard' } });
+    expect(mapServiceInterestToEstimateServices('Tree removal, shrub care')).toMatchObject({
+      supported: false,
+      unsupportedReason: 'tree_shrub_trimming_or_removal_requires_manual_scope',
+    });
+    expect(mapServiceInterestToEstimateServices('Ornamental pest control').services)
+      .toEqual({ treeShrub: { tier: 'standard', palmCountUnverified: true } });
+    expect(mapServiceInterestToEstimateServices('Fertilization on my shrubs').services)
+      .toEqual({ treeShrub: { tier: 'standard', palmCountUnverified: true } });
+    expect(mapServiceInterestToEstimateServices('Mosquito control, shrub care (one-time treatment)'))
+      .toMatchObject({ supported: false, unsupportedReason: 'tree_shrub_one_time_requires_manual_scope' });
+  });
+
   test('mixed pest and tree & shrub maps both services', () => {
     const mapped = mapServiceInterestToEstimateServices('Recurring pest control and tree & shrub care');
     expect(mapped).toMatchObject({
