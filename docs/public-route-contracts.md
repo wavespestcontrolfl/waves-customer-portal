@@ -9211,9 +9211,9 @@ under Twilio's default) can end the disclosure early and fall through to
 the recording: every key press reaches `/relay-sandbox/cell`, which replays
 the disclosure first. Any other caller, a refused call, or the gate off
 gets the unchanged document. The CallSid recovery
-lookup never brings the recording onto the sandbox row: `/call-status` and
-the lookup itself each refuse an internal row by its stored source, not by
-the callback's `To`. Any change to the
+lookup never brings the recording onto the sandbox row: the lookup refuses
+an internal row by its stored source, whatever `To` the `/call-status`
+callback that scheduled it carried. Any change to the
 number gate or the dry-run invariant is security-critical).
 `/api/webhooks/twilio/relay-sandbox/live-complete` + the `/ws/voice-live/{CallSid}/{token}` WebSocket path
 (GPT-Live trial, dark behind `GATE_VOICE_GPT_LIVE_TEST`, owner 2026-11-19, spend cap $5. With the gate on, cell code

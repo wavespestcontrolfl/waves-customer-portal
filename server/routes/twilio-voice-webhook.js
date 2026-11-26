@@ -4335,11 +4335,11 @@ router.post('/call-status', async (req, res) => {
     // A sandbox call has no pipeline recording (its only audio is the staff test
     // recording behind GATE_VOICE_SANDBOX_RECORDING, which stays at Twilio) and
     // must never be handed recording audio by the CallSid-keyed recovery lookup
-    // (codex r12 P2); neither has a call to the tech voice line. The row's own
-    // stored source counts as much as this callback's To: a callback can carry
-    // another To, and the sandbox number can change while a call is open.
-    const internalRow = require('../services/voice-agent/relay-protocol').isInternalCallSource(matchedSource);
-    if (!isOutbound && CallStatus === 'completed' && !internalLine(req) && !internalRow) {
+    // (codex r12 P2); neither has a call to the tech voice line. A callback
+    // that carries another To still schedules it: recoverRecordingForCall
+    // refuses an internal row by its stored source, after any card-data
+    // cleanup the row is owed.
+    if (!isOutbound && CallStatus === 'completed' && !internalLine(req)) {
       scheduleRecordingRecovery(CallSid);
     }
     // The caller's call ended during a conference ring: no staff leg may keep ringing for it. With the

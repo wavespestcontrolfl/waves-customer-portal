@@ -370,30 +370,6 @@ describe('POST /relay-sandbox', () => {
     }
   });
 
-  // The stored source decides as much as this callback's To (pre-push audit): a completed callback that carries
-  // another number (a delayed one after the sandbox number changed) or none must not schedule the CallSid-keyed
-  // recovery for a sandbox row, which would now find the staff test recording at Twilio.
-  test('a completed /call-status for a sandbox-sourced row schedules no recording recovery, whatever To the callback carries', async () => {
-    jest.useFakeTimers();
-    try {
-      for (const To of ['+19415550111', undefined]) {
-        primeInsert({ existing: { id: 7, source: VOICE_RELAY_SANDBOX_SOURCE, status: 'in-progress', metadata: { relay_sandbox: true } } });
-        await handlerFor('/call-status')({ body: { CallSid: 'CA-sb-status', From: STAFF_PHONE, To, CallStatus: 'completed', CallDuration: '42', Direction: 'inbound' } }, mockRes());
-        jest.advanceTimersByTime(2 * 60 * 1000 + 1);
-        await Promise.resolve();
-        expect(recoverRecordingForCall).not.toHaveBeenCalled();
-      }
-      // The same callback for an ordinary row still schedules it: the refusal is the stored source, nothing wider.
-      primeInsert({ existing: { id: 8, source: null, status: 'in-progress', metadata: {} } });
-      await handlerFor('/call-status')({ body: { CallSid: 'CA-plain', From: '+19415550100', To: '+19415550111', CallStatus: 'completed', CallDuration: '42', Direction: 'inbound' } }, mockRes());
-      jest.advanceTimersByTime(2 * 60 * 1000 + 1);
-      await Promise.resolve();
-      expect(recoverRecordingForCall).toHaveBeenCalledWith('CA-plain');
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
   // The production relay legs (/voice answers-first, /call-complete backstop)
   // stamp the chosen profile on the row BEFORE the relay opens, so a setup
   // Twilio rejects stays attributable (codex r12 P2). Fail-soft, no-op without
