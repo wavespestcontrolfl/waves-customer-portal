@@ -37,7 +37,14 @@ const RODENT_CHECK = /check|monitor|inspect/i;
 // (admin-customers scheduleLinesFromEstimate): treatment work, not an
 // estimate visit (Codex #6102 r4). Treatment words win over an inspection
 // word: "Termite Inspection & Spot Treatment" applies product (r8).
-const OUTDOOR = /exterior|exclu|mesh|seal|remediat|accepted|treat|liquid|spot|applicat|spray|fumigat|foam/i;
+const OUTDOOR_WORDS = 'exclu|mesh|seal|remediat|accepted|liquid|spot|applicat|spray|fumigat';
+const OUTDOOR = new RegExp(`exterior|${OUTDOOR_WORDS}|treat`, 'i');
+// Termite foam goes into wall voids and is rain-OK by key (foam_drill,
+// foam_recurring: owner 2026-11-01, #7381), so the words agree. Its names
+// say "Foam Treatment" / "Foam Drill Treatment": "treat" does not make a
+// foam service outdoor, but every other outdoor word still does.
+const FOAM = /\bfoam\b/i;
+const OUTDOOR_BESIDE_FOAM = new RegExp(`exterior|${OUTDOOR_WORDS}`, 'i');
 
 // Interior-only lanes whose catalog names say "treatment" without saying
 // "interior" (trace-eligibility.js: bed_bug, german_roach_knockdown,
@@ -48,6 +55,7 @@ const INDOOR_TREATMENT = /bed ?bugs?|german (cock)?roach|cockroach treatment/i;
 function rainOkService(name) {
   if (/exterior/i.test(name)) return false;
   if (INDOOR_TREATMENT.test(name)) return true;
+  if (FOAM.test(name)) return !OUTDOOR_BESIDE_FOAM.test(name);
   if (OUTDOOR.test(name)) return false;
   if (RAIN_OK.test(name)) return true;
   return RODENT.test(name) && RODENT_CHECK.test(name);
