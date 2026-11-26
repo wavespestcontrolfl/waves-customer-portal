@@ -238,6 +238,20 @@ router.delete('/production-share/stop-override', requireFullAccess, async (req, 
   } catch (err) { fail(res, 'clear the credit of a stop', err); }
 });
 
+// The owner answers a refund on a PAID stop with the TOTAL credit to take back for it (the code never measures a refund). Owner account
+// only. 409 when the check is not final or the refunds on the stop changed since the page loaded.
+router.put('/production-share/refund-take-back', requireFullAccess, async (req, res) => {
+  try {
+    res.json({ takeBack: await productionShare.setRefundTakeBack(req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set the refund take-back', err); }
+});
+
+router.delete('/production-share/refund-take-back', requireFullAccess, async (req, res) => {
+  try {
+    res.json({ cleared: await productionShare.clearRefundTakeBack({ ...req.query, ...(req.body || {}) }, req.technicianId) });
+  } catch (err) { fail(res, 'clear the refund take-back', err); }
+});
+
 // A payout decides an employee's last wages (the handbook's two exceptions need the owner's judgment), so it
 // is the owner account's alone: the predicate every owner-only money action uses (ib-access.js).
 router.put('/technicians/:id/pto-payout-week', timeOffOnly, requireFullAccess, async (req, res) => {

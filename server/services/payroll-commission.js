@@ -74,13 +74,15 @@ const { stackDocumentDiscounts } = require('./discount-stack');
 const { roundDiv } = require('./payroll-calc');
 const { payrollPayLinesLive, payrollCommissionLedgerLive } = require('../config/feature-gates');
 const { payrollUnits } = require('../utils/payroll-units');
+const {
+  AUTO_MINT_RE, namedIn, COLLECTED_DEPOSITS, VOIDED_INVOICE, depositApplications, depositReversal, showsFullRefund,
+} = require('./payment-refund-facts');
 const { etDateString } = require('../utils/datetime-et');
 const { STAFF_TIME_ZONE, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
 const SOURCE_TYPE = 'commission_payment';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 // The acceptance mint's own stamp (estimate-public.js, estimate-converter.js): every line of that invoice is the estimate's.
-const AUTO_MINT_RE = /Auto-generated from accepted estimate #([0-9a-f-]{8,})/gi;
 // Any invoice that names the estimate in its notes, as acceptedEstimateIdFromNotes (setup-fee-alert-reconcile.js) reads
 // it (the office bills a missed setup fee or first application that way), kept here so payroll does not load the
 // notification stack.
@@ -222,9 +224,6 @@ function shareOf(invoice, proof, lineage, linkedVisitIds) {
   return { own: sum(nets.filter(mine)), all: sum(nets) };
 }
 
-/** The estimate ids a note names through `pattern` (lower case). */
-const namedIn = (notes, pattern) => [...String(notes || '').matchAll(pattern)].map((match) => match[1].toLowerCase());
-
 // The frozen dollars and the canonical sort key a saved discount line replays with: invoice.js storedDiscountDollars
 // and frozenSortKeyFields.
 const hasNumber = (value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
@@ -329,32 +328,11 @@ const etDateOf = (value) => etDateString(value instanceof Date ? value : new Dat
 
 // ---- 2b. Deposits
 
-// Deposit rows that hold money Waves collected (estimate-deposits.js): pending and failed never collected anything.
-const COLLECTED_DEPOSITS = ['received', 'credited', 'refunding', 'refunded'];
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const VOIDED_INVOICE = ['void', 'canceled', 'cancelled'];
-const invoiceLines = (invoice) => (Array.isArray(invoice.line_items) ? invoice.line_items.filter(Boolean) : []);
 const depositKey = (estimateId, invoiceId) => `${String(estimateId).toLowerCase()}|${invoiceId}`;
 
-/**
- * An estimate deposit has no payments row (estimate-deposits.js). The invoice writer applies it to an invoice as a
- * deposit_credit line naming the estimate, after tax, as a prior payment (invoice.js create), and one deposit can be
- * applied in parts to several invoices (consumeDepositCredit). So each application, the deposit credit an invoice
- * carries for one estimate, is a payment on that invoice, shared by every sale with lines on it like any payment. Its
- * identity is the pair (the deposit's estimate, the invoice): payment_source 'estimate_deposit', payment_id = the
- * estimate id, invoice_id = the invoice id. Map estimate id -> cents applied on this invoice; a credit line that names no
- * estimate counts for the estimate whose acceptance mint the invoice is.
- */
-function depositApplications(invoice) {
-  const minted = namedIn(invoice.notes, AUTO_MINT_RE)[0] || '';
-  const applied = new Map();
-  for (const line of invoiceLines(invoice)) {
-    if (line.category !== 'deposit_credit' || !(Number(line.amount) < 0)) continue;
-    const estimateId = String(line.estimate_id || minted).toLowerCase();
-    if (UUID_RE.test(estimateId)) applied.set(estimateId, (applied.get(estimateId) || 0n) - payrollUnits(line.amount));
-  }
-  return applied;
-}
+// An estimate deposit has no payments row: depositApplications (payment-refund-facts.js) reads the deposit credit an invoice carries for one
+// estimate, and each application, the pair (the deposit's estimate, the invoice), is a payment on that invoice, shared by every sale
+// with lines on it like any payment: payment_source 'estimate_deposit', payment_id = the estimate id, invoice_id = the invoice id.
 
 /**
  * What the deposit ledger says about an estimate's applied deposit money, per estimate: applied (credited_amount) and the
@@ -370,12 +348,9 @@ async function depositLedgers(trx, estimateIds) {
     .select('estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount') : [];
   for (const row of rows) {
     const ledger = ledgers.get(String(row.estimate_id).toLowerCase());
-    const amount = payrollUnits(row.amount);
-    const credited = payrollUnits(row.credited_amount);
-    const refunded = row.status === 'refunded' && payrollUnits(row.refunded_amount) <= 0n ? amount : payrollUnits(row.refunded_amount);
-    const intoApplied = refunded - (amount - credited);
-    ledger.applied += credited;
-    ledger.reversed += intoApplied <= 0n ? 0n : (intoApplied < credited ? intoApplied : credited);
+    const { applied, reversed } = depositReversal(row);
+    ledger.applied += applied;
+    ledger.reversed += reversed;
   }
   return ledgers;
 }
@@ -498,7 +473,7 @@ function surchargeShare(payment, refundedTotal) {
 function refundedNow(payment) {
   const base = BigInt(payment.base_cents);
   const refundedTotal = payrollUnits(payment.refund_amount);
-  if (payment.status === 'disputed' || (payment.status === 'refunded' && refundedTotal <= 0n)) return base;
+  if (showsFullRefund(payment.status, refundedTotal)) return base;
   const refunded = refundedTotal - surchargeShare(payment, refundedTotal);
   if (refunded <= 0n) return 0n;
   return refunded < base ? refunded : base;

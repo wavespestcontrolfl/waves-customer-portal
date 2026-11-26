@@ -1,7 +1,8 @@
 /**
  * Production share, PR 1: the weekly CREDIT, its dated settings and the numbers an admin preview shows (Technician
  * Terms v3, "Production share"; owner 2026-11-23). It pays NOTHING: no pay line, no check, no gate. PR 2 puts the share
- * on the paycheck; PR 3 takes refunds back.
+ * on the paycheck; PR 3a asks the owner about refunds (production-share-refunds.js: the code never measures a refund, it detects one
+ * and the owner sets the take-back).
  *
  * The rule, in integer cents:
  *   share = rate x max(0, credited production - bar), never below $0.
@@ -45,8 +46,11 @@
  *     pay is never guessed up.
  *   - $0                                a free assessment (no-cost-visit-types.js isConsultationServiceType with no
  *     price of its own) and the always-free visit types (isAlwaysFreeServiceType).
- *   - A refund                          takes back the credit of that stop; PR 3 does it. PR 1 only exposes the stop's
- *     refund total (refundCents): refunds on the payments of the visit's linked invoices (the same links and the same split
+ *   - A refund                          the code does NOT work out what a refund takes back (owner 2026-11-25). A stop with ANY refund
+ *     signal (production-share-refunds.js refundSignalsOf: payments, parked refunds, returned credit, a refunded invoice, a statement
+ *     refund) is $0 and needs review, kind refund_flagged, until the owner sets its credit; a refund that appears on a stop a final check
+ *     already paid is listed (takeBackToSet) and the owner sets the total to take back. refundCents is only the stop's recorded refund
+ *     total, shown for information: refunds on the payments of the visit's linked invoices (the same links and the same split
  *     as the amount), plus, for a prepaid plan visit, its share of the refunds on the term's prepay invoice, spread over the
  *     term's stamped visits so the shares add up to the term refund. The term invoice is counted once, in the term share.
  */
@@ -58,6 +62,7 @@ const { completionInvoiceAmount, hasAuthoritativeZeroPrice, ANNUAL_PREPAY_PREPAI
 const { NON_CHARGEABLE_CLOSEOUT_OUTCOMES } = require('./visit-outcomes');
 const { TWO_TREATMENT_PACKAGE_KEYS } = require('./typed-followup-obligation');
 const { isReService } = require('./re-service');
+const refunds = require('./production-share-refunds');
 const {
   isAlwaysFreeServiceType, isConsultationServiceType,
   ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, CONSULTATION_SERVICE_TYPE_SQL_REGEX,
@@ -737,8 +742,9 @@ async function weekStops(conn, technicianIds, weekStart) {
 }
 
 /*
- * CREDIT RULES. What finalized pay runs already paid decides what a later week may credit. A stop row of a check that paid a share above
- * $0 records the invoice ids linked to its visit at the time, whatever priced its credit (stops[].invoices), and, for a package visit,
+ * CREDIT RULES. What finalized pay runs already paid decides what a later week may credit. A finalized check OWNS every positive-credit
+ * stop row on it, whatever its share or take-backs (a $0-share week included): one simple rule, no tracking of which credit paid what. A stop
+ * row of such a check records the invoice ids linked to its visit at the time, whatever priced its credit (stops[].invoices), and, for a package visit,
  * { basisType: 'job', basisId: root, totalCents, sold, slot } (stops[].bases). In every other week:
  *   ALREADY PAID  a visit already credited on such a check is already_paid ($0 + review).
  *   INVOICE       a stop priced from an invoice that is now linked to ANY visit already credited on such a check of another week (a
@@ -790,7 +796,7 @@ async function loadCreditFacts(conn, stops) {
   // The stops, and every visit of their packages (root and siblings): the related ids of a stop reach the invoices of all of them.
   const billed = await billedByVisit(conn, [...new Set([...stops.map((stop) => stop.id),
     ...[...jobs.values()].filter((job) => job && job.root).flatMap((job) => [job.root.id, ...job.planned])])]);
-  return { jobs, billed, prepaidRefunds: await termRefunds(conn, stops) };
+  return { jobs, billed, prepaidRefunds: await termRefunds(conn, stops), signals: await refunds.refundSourcesOf(conn, stops.map((stop) => stop.id)) };
 }
 
 // What a visit was billed, as plain sorted data: the amounts and the visits and weights of each invoice, so a price edited, a visit added to
@@ -848,7 +854,7 @@ function packageSlotOf(stop, job, callback, credit) {
  * from them). `facts` = loadCreditFacts of a wider set of stops (the pay run reads them once for everyone); read here when not given.
  */
 async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) {
-  const { jobs, billed, prepaidRefunds } = facts || await loadCreditFacts(conn, stops);
+  const { jobs, billed, prepaidRefunds, signals } = facts || await loadCreditFacts(conn, stops);
 
   const rows = [];
   for (const stop of stops) {
@@ -866,6 +872,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
     else if (callback) credit = await callbackCredit(conn, stop, technicianId, inForce);
     else credit = ownPriceCredit(stop, billed.get(stop.id));
     const invoiced = billed.get(stop.id) || {};
+    const refundSource = (signals && signals.get(canonicalId(stop.id))) || { signals: [], invoiceIds: [] };
     // The package slot of a package visit, review rows too: an owner-set credit keeps it as a job basis (applyLedger, withOverride).
     const packageSlot = packageSlotOf(stop, job, callback, credit);
     const shown = { ...credit };
@@ -877,6 +884,11 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
       // So the owner can find the visit behind a review row (the preview only; never stored with a check).
       scheduledDate: stop.scheduled_day || null, address: addressLine(stop), completedAt: stop.completed_at ? new Date(stop.completed_at).toISOString() : null, ...shown,
       refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
+      // Every sign of a refund on the visit's invoices (production-share-refunds.js), sorted: a stop with any is flagged in applyLedger.
+      refundSignals: refundSource.signals,
+      // The invoice ids behind them (live links, a package's, an annual term's prepay invoice): frozen with a paid stop, so a deleted visit or a
+      // relinked invoice still asks about a later refund (snapshot stops[].refundInvoices).
+      refundInvoices: refundSource.invoiceIds,
       // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
       unallocatedRefunds: invoiced.unallocated || [],
       ledger: ledgerOf(credit, invoiced),
@@ -890,14 +902,13 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
   return rows;
 }
 
-// The stop rows of finalized checks of finalized runs that PAID a share above $0, in a week other than the one being worked out, with
-// a credit above $0: the record every later week reads (calc_snapshot.productionShare.stops). The week is bound first.
+// The stop rows of finalized checks of finalized runs, in a week other than the one being worked out, with a credit above $0 (a finalized
+// check owns its stops, whatever its share): the record every later week reads (calc_snapshot.productionShare.stops). The week is bound first.
 const PAID_FROM_SQL = `FROM payroll_checks c
     JOIN payroll_runs r ON r.id = c.run_id
     CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(c.calc_snapshot->'productionShare'->'stops') = 'array'
       THEN c.calc_snapshot->'productionShare'->'stops' ELSE '[]'::jsonb END) AS stop(value)
     WHERE c.status = 'finalized' AND r.status = 'finalized' AND c.week_start <> ?::date
-      AND COALESCE(c.production_share_cents, 0) > 0
       AND COALESCE((stop.value->>'creditCents')::bigint, 0) > 0`;
 const STOP_BASES_SQL = `CASE WHEN jsonb_typeof(stop.value->'bases') = 'array' THEN stop.value->'bases' ELSE '[]'::jsonb END`;
 const STOP_INVOICES_SQL = `CASE WHEN jsonb_typeof(stop.value->'invoices') = 'array' THEN stop.value->'invoices' ELSE '[]'::jsonb END`;
@@ -950,6 +961,17 @@ async function paidLedger(conn, visitIds, invoiceIds, rootIds, weekStart) {
   return ledger;
 }
 
+const REFUND_FLAGGED_REASON = 'A refund is recorded on this visit. Set its credit in the production share preview.';
+
+// A stop that would credit above $0 and has a refund signal is $0 and needs review until the owner sets its credit (production-share-refunds.js).
+// A stop that is already review, $0 or already paid keeps its own answer; its signals still ride in the conflict tuples.
+function flagRefund(row, result) {
+  const flagged = (row.refundSignals || []).length > 0 && !result.needsReview && result.creditCents > 0 && result.kind !== 'already_paid';
+  if (!flagged) return result;
+  // $0 uses no package slot (a review row records none until the owner sets its credit).
+  return { ...result, bases: [], ...toReview('refund_flagged', REFUND_FLAGGED_REASON) };
+}
+
 // A stop whose work was not done or not confirmed, or that a pay run paid: never credited by the owner's hand (saving a credit refuses
 // it, and an earlier credit is ignored when the stop turns into one).
 const MANUAL_CREDIT_INELIGIBLE = new Set(['not_performed', 'unverified', 'already_paid']);
@@ -967,7 +989,7 @@ const reviewFrom = (row, kind, reason, runs) => ({ ...review(row, kind, reason),
 function applyLedger(rows, paid, overrides = new Map()) {
   return rows.map((row) => {
     const tuples = conflictTuplesOf(row);
-    const base = settle(row);
+    const base = flagRefund(row, settle(row));
     // The owner's credit for this stop and week (stop override) replaces whatever the rules computed, review rows included (a visit a pay
     // run already paid stays already paid). The invoices linked to the visit are still recorded with a paid row, so a later week of
     // another visit of them is caught.
@@ -1013,13 +1035,25 @@ function applyLedger(rows, paid, overrides = new Map()) {
       return { ...review(row, 'owner_override_closeout_changed', 'The closeout of this stop changed since the owner set its credit (its work is no longer confirmed): clear that credit in the production share preview.'), overrideRevision: set.revision };
     }
     // A NEW conflict (an invoice or package of the stop paid elsewhere since the owner set the credit) is checked before the credit is used.
-    if (tuples.some((tuple) => !(set.conflictTuples || []).includes(tuple))) {
+    // The refund signals are compared by EQUALITY (a new one, or one the owner saw that is gone, puts his credit aside); every other
+    // conflict tuple (a paid row elsewhere) only by what is new.
+    const isRefund = (tuple) => tuple.startsWith('refund:');
+    const [storedRefunds, nowRefunds] = [(set.conflictTuples || []).filter(isRefund), tuples.filter(isRefund)];
+    const newRefund = nowRefunds.some((tuple) => !storedRefunds.includes(tuple));
+    if (newRefund || storedRefunds.some((tuple) => !nowRefunds.includes(tuple))) {
+      const reason = newRefund
+        ? 'A new refund is recorded on this visit since the owner set its credit: clear that credit, then set it again in the production share preview.'
+        : 'A refund the owner saw on this visit is gone since he set its credit: clear that credit, then set it again in the production share preview.';
+      return { ...review(row, 'owner_override_refund_changed', reason), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
+    }
+    const added = tuples.filter((tuple) => !(set.conflictTuples || []).includes(tuple));
+    if (added.length) {
       return { ...review(row, 'owner_override_conflict_changed', 'This stop, its invoice or its package was paid elsewhere since the owner set its credit: clear that credit and look at the stop again in the production share preview.'), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
     }
     return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: slotBasis(row), overrideRevision: set.revision, dependsOnRuns: dependsOnRunsOf(row) };
   }
 
-  // The conflict state of a stop, ONE rule: EVERY paid stop row (finalized, non-void, a share above $0, another week) that touches what
+  // The conflict state of a stop, ONE rule: EVERY paid stop row (finalized, non-void, another week) that touches what
   // the stop is related to (row.related: itself, its package root and siblings, every invoice linked to any of those, every visit on
   // those invoices), whole: run, week, visit, the invoice ids it recorded and its package basis, as a sorted list of strings. The credit
   // the owner sets stores the list; a run ignores the credit when a tuple that is NOT in the stored list shows later.
@@ -1035,10 +1069,13 @@ function applyLedger(rows, paid, overrides = new Map()) {
     return [...new Set(touchingRows(row).map((one) => one.runId))].sort();
   }
 
+  // The refund signals of the stop are conflict state too: an override set before a new signal appeared is no longer used (the subset
+  // rule of withOverride reports owner_override_refund_changed), and the stop's revision moves with them.
   function conflictTuplesOf(row) {
-    return [...new Set(touchingRows(row)
+    return [...new Set([...touchingRows(row)
       .map((one) => JSON.stringify([one.runId, one.weekStart, one.visitId, [...one.invoices].sort(),
-        one.bases.map((basis) => [basis.basisType, basis.basisId, basis.slot]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1))])))].sort();
+        one.bases.map((basis) => [basis.basisType, basis.basisId, basis.slot]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1))])),
+    ...(row.refundSignals || []).map((id) => `refund:${id}`)])].sort();
   }
 
   // A short revision of the stop as the rules see it: their kind, the visit, its pricing facts (service type, the original work of a
@@ -1157,7 +1194,7 @@ async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
  * The ledger is applied to all of them together: one paid-ledger read, and the REMAINING of an invoice or a job shared by two
  * technicians is split once.
  */
-async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = false, retryPerTechnician = true } = {}) {
+async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = false, retryPerTechnician = true, refundLedger = true } = {}) {
   requireWeek(weekStart);
   const ids = [...settingsById.keys()].map(canonicalId);
   const stops = await weekStops(conn, ids, weekStart);
@@ -1191,15 +1228,38 @@ async function weekCreditsFor(conn, settingsById, weekStart, { skipOverrides = f
   const done = applyLedger(all, await paidOf(conn, all, weekStart), skipOverrides ? new Map() : await overridesOf(conn, weekStart));
   const byVisit = new Map(done.map((row) => [row.visitId, row]));
   for (const [id, one] of credits) if (one.rows) credits.set(id, { ...one, rows: one.rows.map((row) => byVisit.get(row.visitId)) });
+  if (refundLedger) await attachRefundLedger(conn, credits, ids, weekStart, retryPerTechnician, message);
   return credits;
 }
 
 /**
- * The credit rows of one technician for a pay week, from the same grouped read the pay run uses (weekCreditsFor over every W-2
+ * What the paid weeks ask of this week and what the owner answered (production-share-refunds.js refundLedgerOf), per technician, read in
+ * a savepoint so a failed read ends there. Sets takeBackOwed / takeBackToSet / takeBackAnswers on each entry of `credits` that has rows.
+ * When the shared read fails, a draft or preview (retryPerTechnician) reads each technician on his own and marks him `degraded` (a draft
+ * built from it is never the one a finalize accepts); under the lock (no retry) every technician is an error.
+ */
+async function attachRefundLedger(conn, credits, ids, weekStart, retryPerTechnician, message) {
+  let ledger = null;
+  let ledgerError = null;
+  try { ledger = await conn.transaction((sp) => refunds.refundLedgerOf(sp, ids, weekStart)); } catch (err) { ledgerError = err; }
+  for (const [id, one] of credits) {
+    if (!one.rows) continue;
+    let mine = ledger && ledger.get(id);
+    let degraded = Boolean(one.degraded);
+    if (!mine && retryPerTechnician) {
+      try { mine = (await conn.transaction((sp) => refunds.refundLedgerOf(sp, [id], weekStart))).get(id); degraded = true; } catch (err) { ledgerError = err; }
+    }
+    if (!mine) { credits.set(id, { error: message(ledgerError) }); continue; }
+    credits.set(id, { ...one, ...(degraded ? { degraded: true } : {}), takeBackOwed: mine.owed, takeBackToSet: mine.toSet, takeBackAnswers: mine.answers });
+  }
+}
+
+/**
+ * The credit rows and refund ledger of one technician for a pay week, from the same grouped read the pay run uses (weekCreditsFor over every W-2
  * technician with settings in force, plus this one): the credits of a basis shared with another technician's stops are split once, so
  * the preview shows what a pay run draws. Throws the read's own error for this technician.
  */
-async function creditsOfWeek(conn, technicianId, weekStart, settings, opts = {}) {
+async function weekOfTechnician(conn, technicianId, weekStart, settings, opts = {}) {
   const settingsById = new Map();
   for (const id of await conn('technicians').where({ employment_type: 'w2' }).pluck('id')) {
     // Another employee's settings that cannot be read leave that employee out of the preview, not the selected one.
@@ -1211,8 +1271,12 @@ async function creditsOfWeek(conn, technicianId, weekStart, settings, opts = {})
   settingsById.set(technicianId, settings);
   const one = (await weekCreditsFor(conn, settingsById, weekStart, opts)).get(technicianId);
   if (one.error) throw new PayrollError(500, `The production share could not be worked out: ${one.error}`);
-  return one.rows;
+  return one;
 }
+
+// The credit rows alone (the owner's stop credit reads no refund ledger).
+const creditsOfWeek = async (conn, technicianId, weekStart, settings, opts = {}) => (
+  await weekOfTechnician(conn, technicianId, weekStart, settings, { ...opts, refundLedger: false })).rows;
 
 // ---------------------------------------------------------------- stop credit overrides
 
@@ -1343,6 +1407,75 @@ async function clearStopOverride(input, actor, conn = db) {
   });
 }
 
+// What a finalized check of the technician froze for the week: { credits: Map visit id -> cents paid, figures: the check's productionShare snapshot
+// or null }; null when no finalized check covers the week.
+async function finalizedWeekOf(conn, technicianId, weekStart) {
+  const check = await conn('payroll_checks as c').join('payroll_runs as r', 'r.id', 'c.run_id')
+    .where({ 'c.status': 'finalized', 'r.status': 'finalized', 'c.technician_id': technicianId, 'c.week_start': weekStart })
+    .first(conn.raw("c.calc_snapshot->'productionShare' AS figures"));
+  if (!check) return null;
+  const figures = check.figures && typeof check.figures === 'object' ? check.figures : null;
+  const stops = figures && Array.isArray(figures.stops) ? figures.stops : [];
+  return { credits: new Map(stops.map((one) => [canonicalId(one.visitId), Number(one.creditCents) || 0])), figures };
+}
+
+// Which rows a week is shown with: the frozen ones when a final check froze a production share; none when a final check recorded no production
+// share (the gate was off, or it covered only time off: nothing is worked out live); the live ones otherwise.
+// The week as the pay run works it out: every W-2 technician with numbers in force is read together (an invoice or a package shared by two
+// technicians is split once), and this technician's rows are returned. For a week a final check covers it is optional (display details): null when it
+// is not read (the check recorded no share) or when the read fails.
+async function liveWeekFor(conn, technicianId, weekStart, settings, paidWeek) {
+  if (!paidWeek) return weekOfTechnician(conn, technicianId, weekStart, settings);
+  const frozen = paidWeek.figures && Number.isFinite(Number(paidWeek.figures.shareCents));
+  if (!frozen) return null;
+  try { return await weekOfTechnician(conn, technicianId, weekStart, settings); } catch { return null; }
+}
+
+function weekRowsOf(paidWeek, week) {
+  const frozen = paidWeek && paidWeek.figures && Number.isFinite(Number(paidWeek.figures.shareCents)) ? paidWeek.figures : null;
+  const recordedNone = Boolean(paidWeek) && !frozen;
+  const stops = frozen ? frozenStopRows(frozen, week ? week.rows : []) : (recordedNone ? [] : week.rows);
+  return { frozen, recordedNone, stops, days: shiftDays(stops) };
+}
+
+// The take-backs, the share figures and the outstanding take-back of a week: a take-back the owner set for a refund on a paid stop comes off the
+// week's credited production, as the pay run takes it; a week a final check covers shows what that check froze. outstanding = null omits the line
+// (a check finalized before it was recorded).
+function weekFigures({ frozen, recordedNone, stops, week, settings, days }) {
+  if (recordedNone) return { applied: { takeBacks: [], refundTakeBackCents: 0 }, result: shareForWeek({ credits: [], shifts: 0, settings: null }), outstanding: null };
+  if (!frozen) {
+    const applied = refunds.applyTakeBacks(stops, week.takeBackOwed);
+    return { applied, result: shareForWeek({ credits: [applied.creditedCents], shifts: days.length, settings }), outstanding: applied.outstandingCents };
+  }
+  const recorded = frozen.outstandingTakeBackCents;
+  return {
+    applied: { takeBacks: Array.isArray(frozen.takeBacks) ? frozen.takeBacks : [], refundTakeBackCents: Number(frozen.refundTakeBackCents || 0) },
+    result: {
+      creditedCents: Number(frozen.creditedCents), barCents: Number(frozen.barCents), aboveBarCents: Number(frozen.aboveBarCents), shareCents: Number(frozen.shareCents),
+      shifts: Number(frozen.shifts), configured: true,
+    },
+    outstanding: recorded == null || !Number.isFinite(Number(recorded)) ? null : Number(recorded),
+  };
+}
+
+// The stop rows of a week a final check covers, from what the check froze: its credit, kind and review mark. The live row of the same visit only
+// fills display details (service type, day, address, completion time); a visit that is gone still shows its frozen row.
+function frozenStopRows(figures, liveRows) {
+  const live = new Map(liveRows.map((row) => [canonicalId(row.visitId), row]));
+  return (Array.isArray(figures.stops) ? figures.stops : []).map((one) => {
+    const now = live.get(canonicalId(one.visitId)) || {};
+    return {
+      visitId: one.visitId, workDate: one.workDate, kind: one.kind, creditCents: Number(one.creditCents) || 0, needsReview: one.needsReview === true,
+      reason: now.refundSignals && now.refundSignals.length
+        ? 'Paid by a final pay run. A refund on it is answered under "Refunds on paid stops" in a later week\'s preview.'
+        : 'Paid by a final pay run: this is what it was paid with.',
+      serviceType: now.serviceType || null, scheduledDate: now.scheduledDate || null, address: now.address || null, completedAt: now.completedAt || null,
+      // A frozen row is history: no credit can be set or cleared on it (the paid-week guard refuses both).
+      readOnly: true, refundCents: 0, unallocatedRefunds: [],
+    };
+  });
+}
+
 /**
  * Everything the preview shows for one technician and week: the credit rows, the shifts, the settings in force, the
  * share it would be, the stops to review and the refund total. A preview only: nothing is stored or paid.
@@ -1355,26 +1488,45 @@ async function previewWeek(technicianId, weekStart, conn = db) {
   // From here on the id is the one the database holds (lowercase), whatever the caller typed.
   const id = canonicalId(technician.id);
   const settings = await settingsFor(conn, id, weekStart);
-  // The week as the pay run works it out: every W-2 technician with numbers in force is read together (an invoice or a package shared
-  // by two technicians is split once), and this technician's rows are returned.
-  const stops = await creditsOfWeek(conn, id, weekStart, settings);
-  const days = shiftDays(stops);
-  const result = shareForWeek({ credits: stops, shifts: days.length, settings });
+  // A week a final check covers shows what that check froze and nothing read now for a number: its stop rows (credit, kind, review mark), take-backs,
+  // credited production, share and outstanding take-back. Live visit data only fills display details (type, time, address). A refund on one of its
+  // stops is answered as a take-back in a later week, never as an own-week credit the guard would refuse (and no own-week bell rings for it).
+  // The final check is read FIRST. The live week (below) is needed only for a week no final check covers; for a covered week it only fills display
+  // details and the prompts about earlier weeks, so a failure there drops those and never the frozen figures (a no-share check reads none).
+  const paidWeek = await finalizedWeekOf(conn, id, weekStart);
+  const week = await liveWeekFor(conn, id, weekStart, settings, paidWeek);
+  const { frozen, recordedNone, stops, days } = weekRowsOf(paidWeek, week);
+  const prompts = week && !recordedNone ? { toSet: week.takeBackToSet, answers: week.takeBackAnswers } : { toSet: [], answers: [] };
+  const { applied, result, outstanding } = weekFigures({ frozen, recordedNone, stops, week, settings, days });
+  await require('./production-share-refund-alerts').raiseRefundFlagAlerts({ technicianId: id, weekStart, stops: paidWeek ? [] : stops, takeBackToSet: prompts.toSet });
   // The conflict tuples stay on the server: the page gets the stop's revision.
-  const shown = stops.map((stop) => { const copy = { ...stop }; delete copy.conflictTuples; return copy; });
+  const shown = stops.map((stop) => { const copy = { ...stop }; delete copy.conflictTuples; delete copy.refundInvoices; return copy; });
   return {
     technician: { id, name: technician.name },
     weekStart,
     weekEnd: addStaffWorkDays(weekStart, 6),
-    settings,
+    // The numbers a final check was paid with are its own, whatever the settings in force say now.
+    settings: frozen && settings ? { ...settings, rateBps: Number(frozen.rateBps), barType: frozen.barType, barCents: Number(frozen.barPerUnitCents) } : settings,
     history: await settingsHistory(conn, id),
     shiftDays: days,
     ...result,
     stops: shown,
     needsReview: shown.filter((stop) => stop.needsReview),
-    refundCents: stops.reduce((sum, stop) => sum + stop.refundCents, 0),
+    // A frozen week has no refund total of its own: what is recorded now is not what that week was paid with.
+    refundCents: frozen ? 0 : stops.reduce((sum, stop) => sum + stop.refundCents, 0),
+    // Refunds the owner is asked about: paid stops with a new refund (takeBackToSet), his answers (takeBackAnswers, with the total he set),
+    // and what this week takes (takeBacks, signed; negative = credit given back; refundTakeBackCents is the net, owedTakeBackCents all that is owed).
+    ...(recordedNone ? { recordedNoProductionShare: true } : {}),
+    takeBackToSet: prompts.toSet,
+    takeBackAnswers: prompts.answers,
+    takeBacks: applied.takeBacks,
+    refundTakeBackCents: applied.refundTakeBackCents,
+    owedTakeBackCents: frozen || recordedNone ? 0 : week.takeBackOwed.reduce((sum, one) => sum + Math.max(0, one.cents), 0),
+    // What is still owed after this week's take-backs: the week's own balance live, the balance frozen at finalize for a final week (a check
+    // finalized before it was recorded omits the line).
+    ...(outstanding == null ? {} : { outstandingTakeBackCents: outstanding }),
     // Whole refunds on shared invoices that could not be split, each invoice once.
-    unallocatedRefundCents: [...new Map(stops.flatMap((stop) => stop.unallocatedRefunds).map((u) => [u.invoiceId, u.refundCents])).values()]
+    unallocatedRefundCents: frozen ? 0 : [...new Map(stops.flatMap((stop) => stop.unallocatedRefunds).map((u) => [u.invoiceId, u.refundCents])).values()]
       .reduce((sum, cents2) => sum + cents2, 0),
   };
 }
@@ -1382,4 +1534,5 @@ async function previewWeek(technicianId, weekStart, conn = db) {
 module.exports = {
   allocateCents, BAR_TYPES, OWN_CALLBACK_DAYS, shareForWeek, jobPartCents, shiftDays, settingsFor, settingsHistory, saveSettings, weekCredits, weekCreditsFor, weekStops, creditsOfStops, paidLedger, applyLedger, loadCreditFacts,
   previewWeek, overridesOf, setStopOverride, clearStopOverride,
+  setRefundTakeBack: refunds.setRefundTakeBack, clearRefundTakeBack: refunds.clearRefundTakeBack,
 };
