@@ -158,8 +158,14 @@ describe('a label rate per gallon is bound to its spray volume', () => {
 
   test('a picked rig at the card\'s volume, or under it, gets the amount', async () => {
     expect(await mix(home, null, { equipmentSystemId: 'sys-2' })).toMatchObject({ amount: 2, gallons: 1, sprayVolumeGalPer1000: 1, coversSqft: 1000, rig: { name: 'Hand sprayer' } });
+    // A rig under the card's volume: the tank covers what that rig sprays (1 gallon at 0.5 gal per 1,000 = 2,000 sq ft), not the card's figure.
     const light = { ...hand, carrier_gal_per_1000: 0.5 };
-    expect(await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck, light] })).toMatchObject({ amount: 2, sprayVolumeGalPer1000: 1 });
+    expect(await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck, light] })).toMatchObject({ amount: 2, sprayVolumeGalPer1000: 1, coversSqft: 2000 });
+    // The card's volume is the limit itself: a rig a hundredth over it gets no amount.
+    const over = { ...hand, carrier_gal_per_1000: 1.01 };
+    const refused = await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck, over] });
+    expect(refused.amount).toBeNull();
+    expect(refused.reason).toMatch(/Hand sprayer sprays 1\.01/);
     // A picked rig with no calibration on file has no volume to judge.
     expect(await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck] })).toMatchObject({ amount: 2, sprayVolumeGalPer1000: 1 });
   });
