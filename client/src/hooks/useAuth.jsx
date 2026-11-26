@@ -1,11 +1,11 @@
-import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { AuthContext } from './authContext';
 import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
 import { clearNativeBadge } from '../native/nativeBadge';
 import { endVisitCards } from '../native/visitCard';
 import { clearSavedHome, homeIdentityKey, readHomeSnapshot, snapshotEligible, writeHomeSnapshot } from '../lib/homeSnapshot';
 
-const AuthContext = createContext(null);
 
 // Contact session (GATE_CONTACT_LOGIN): /auth/me names an on-location contact
 // signed in with their own number as actor.kind 'contact'. One reader for the
@@ -798,12 +798,6 @@ export function AuthProvider({ children }) {
       {children}
     </AuthContext.Provider>
   );
-}
-
-// Same as useAuth, but null outside an AuthProvider (the Face ID lock also
-// renders in isolated tests).
-export function useOptionalAuth() {
-  return useContext(AuthContext);
 }
 
 export function useAuth() {

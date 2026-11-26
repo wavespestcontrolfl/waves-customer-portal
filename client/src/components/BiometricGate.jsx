@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { isNativeApp, hasSessionToken } from '../native/platform';
 import { authenticateBiometric, NEEDS_PHONE_CODE } from '../native/biometric';
-import { useOptionalAuth } from '../hooks/useAuth';
+import { useOptionalAuth } from '../hooks/authContext';
 import { NATIVE_PICKER_EVENT } from '../native/camera';
 import { COLORS, FONTS } from '../theme-brand';
 import { useGlassMotion } from '../glass/glass-motion';
