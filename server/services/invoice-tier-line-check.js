@@ -123,8 +123,8 @@ function matchedServiceKey(line) {
 // the printed tier row. That row, and only that row, carries the tier's rate (acceptedDiscountRows), so a staff label
 // that starts with "WaveGuard" is not one. Null when the line's saving has no tier share.
 function pricedTierRow(estimate, line) {
-  const { acceptedPricing, estimateDiscountContext } = require('./completion-pricing');
-  const rows = acceptedPricing(line, estimateDiscountContext(estimate)).discounts;
+  const { acceptedPricing, invoiceDiscountContext } = require('./completion-pricing');
+  const rows = acceptedPricing(line, invoiceDiscountContext(estimate)).discounts;
   const index = rows.findIndex((row) => row.percent !== undefined);
   return index < 0 ? null : { index, dollars: rows[index].dollars };
 }
@@ -153,7 +153,7 @@ function printedLabelMiss({ estimate, line, data, block, lineItems, serviceKey }
 
 // A saving the invoice leaves unnamed, that its own pricing of the matched line names, in its own discount context with
 // only its tier reading (savedEstimateTier) replaced by the witness's tier and rate. Not read when the invoice names no
-// tier by design (completion-pricing.js estimateDiscountContext, savedEstimateTier): a staff discount reaches recurring
+// tier by design (completion-pricing.js invoiceDiscountContext, savedEstimateTier): a staff discount reaches recurring
 // work in any saved shape, or the legacy nested block also supplies service rows. One part must be the tier row: the
 // row that carries a tier rate, as pricedTierRow reads it. Its name is not read, so a row whose own record names no
 // tier (it prints a bare "WaveGuard", pre-push audit) still counts. Records that disagree name no saving: the matched
@@ -161,12 +161,12 @@ function printedLabelMiss({ estimate, line, data, block, lineItems, serviceKey }
 // in that pricing and can claim another rate, which the pricing caps at the saving, pre-push audit). The tier left off,
 // or null.
 function unnamedSavingMiss({ estimate, line, data, block, lineItems, serviceKey }) {
-  const { acceptedPricing, estimateDiscountContext, staffDiscountOnRecurring } = require('./completion-pricing');
+  const { acceptedPricing, invoiceDiscountContext, staffDiscountOnRecurring } = require('./completion-pricing');
   if (staffDiscountOnRecurring(data, block) || list(legacyNestedBlock(data).services).length) return null;
   const record = lineItems.length ? engineTierRecord(lineItems, serviceKey) : NO_ENGINE_RECORD;
   const witness = record ? recordsTier(estimate, data, block, record) : null;
   if (!witness) return null;
-  const context = estimateDiscountContext({ ...estimate, estimate_data: data });
+  const context = invoiceDiscountContext({ ...estimate, estimate_data: data });
   const { discounts } = acceptedPricing(line, { ...context, estimateTier: { tier: witness.tier, amount: witness.rate } });
   const tierRow = discounts.find((d) => d.percent !== undefined);
   const named = discounts.length > 0 && discounts.every((d) => d.named) && !!tierRow

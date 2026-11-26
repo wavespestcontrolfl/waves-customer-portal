@@ -164,8 +164,16 @@ function estimateDiscountContext(estimate) {
     manualName: reachesRecurring ? String(manual.label || '').trim() || null : null,
     tierDiscounted: saved.discounted,
     estimateTier: staffDiscountOnRecurring(data, saved.recurring) ? null : saved.tier,
-    engineLineItems: pricingRecords(data).lineItems,
   };
+}
+
+// The discount context of an invoice's breakdown (acceptedVisitBreakdown) and of the check that audits it
+// (invoice-tier-line-check.js): the estimate's context plus the engine's line items, which give a row that saved only
+// its net its list price (engineListBasis). Only the invoice reads them: the Complete Service card prices from
+// estimateDiscountContext alone, so a recovered list price never becomes a price a proposal could cut to.
+function invoiceDiscountContext(estimate) {
+  if (!estimate) return {};
+  return { ...estimateDiscountContext(estimate), engineLineItems: pricingRecords(object(estimate.estimate_data)).lineItems };
 }
 
 // The saved result the estimate's lines come from (estimate-public.js acceptanceServiceLists: result, else engineResult)
@@ -312,8 +320,10 @@ function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDisco
 // the row keeps its own net as its base, no saving, and one invoice line.
 // The net-only shape: no net or list figure of its own beside the base, and no WaveGuard record of its own.
 function netOnlyRow(raw) {
+  const applied = object(raw.discount).appliedDiscounts;
+  // A discount record that is not a list (malformed) is not the shape either: the row keeps its own net.
   return money(raw.priceAfterDiscount) === null && money(raw.annualBeforeDiscount) === null
-    && !(object(raw.discount).appliedDiscounts || []).some((item) => item?.type === 'waveguard');
+    && (applied == null || (Array.isArray(applied) && !applied.some((item) => item?.type === 'waveguard')));
 }
 
 function engineListBasis(raw, line, amount, ownBase, context = {}) {
@@ -332,15 +342,18 @@ function engineListBasis(raw, line, amount, ownBase, context = {}) {
   return rows.length === 1 && rows[0].named && rows[0].percent !== undefined ? basis : null;
 }
 
-// The engine line's list price for one visit, in cents, when its figures are the row's: the same visit count, the same
-// net annual, and the list annual's per-visit share at the tier rate is the visit's net. Else null.
+// The engine line's list price for one visit, in cents, when its figures are the row's and the tier's: the same visit
+// count, the same net annual, that net annual is the tier rate on the list annual (in whole cents), and the list
+// annual's per-visit share at the tier rate is the visit's net. Else null.
 function engineListCents(raw, item, rate, amount) {
   const visits = visitCount(raw);
   const listAnnual = money(item.annualBeforeDiscount);
   const netAnnual = money(item.annualAfterDiscount);
   if (!visits || visitCount(item) !== visits || !(listAnnual > 0) || netAnnual === null) return null;
+  const cents = (value) => Math.round(value * 100);
   const listCents = Math.round((listAnnual / visits) * 100);
-  const agrees = money(raw.annualAfterDiscount) === netAnnual && tierNetCents(listCents, rate).includes(Math.round(amount * 100));
+  const agrees = money(raw.annualAfterDiscount) === netAnnual && tierNetCents(cents(listAnnual), rate).includes(cents(netAnnual))
+    && tierNetCents(listCents, rate).includes(cents(amount));
   return agrees ? listCents : null;
 }
 
@@ -672,7 +685,7 @@ async function acceptedVisitBreakdown(service, { database = db, firstApplication
   const match = matchServiceLine(service, await estimateScheduleLines(database, source.estimate));
   if (match.status !== 'matched') return none(`line_${match.status}`);
   const matched = { estimate: source.estimate, line: match.line };
-  const quote = acceptedPricing(match.line, estimateDiscountContext(source.estimate));
+  const quote = acceptedPricing(match.line, invoiceDiscountContext(source.estimate));
   if (quote.unit !== 'application') return none('not_per_application');
   if (!quote.breakdownAvailable) return { ...none('no_breakdown'), ...matched };
   if (!(quote.savings > 0) && !firstApplication) return none('no_discount');
@@ -683,5 +696,5 @@ async function acceptedVisitBreakdown(service, { database = db, firstApplication
 
 module.exports = { MONEY_FIELDS, visitPriceDecisionRecorded, loadCompletionPricing, prepareCompletionPricingReview, lockCompletionPricingEstimate,
   commitCompletionPricingReview, lockCompletionPricingParent, committedCompletionPrice, acceptedPricing, acceptedVisitBreakdown,
-  matchServiceLine, propertyMatches, money, sameMoney, estimateDiscountContext, staffDiscountOnRecurring,
+  matchServiceLine, propertyMatches, money, sameMoney, estimateDiscountContext, invoiceDiscountContext, staffDiscountOnRecurring,
   pricingRecords, serviceEngineLines, engineTierRecord };

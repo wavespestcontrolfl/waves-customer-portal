@@ -1,4 +1,4 @@
-const { acceptedPricing, acceptedVisitBreakdown, matchServiceLine, propertyMatches } = require('../services/completion-pricing');
+const { acceptedPricing, acceptedVisitBreakdown, matchServiceLine, propertyMatches, estimateDiscountContext, invoiceDiscountContext } = require('../services/completion-pricing');
 
 describe('completion estimate evidence', () => {
   const line = { source: 'recurring', cadence: 'quarterly', serviceId: 'pest',
@@ -181,6 +181,19 @@ describe('completion estimate evidence', () => {
     expect(quote(lawnRow(), silver([engineLawn(), engineLawn({ annual: 1200, annualBeforeDiscount: 1200 })]))).toEqual(oneLine);
     expect(quote(lawnRow(), silver([]))).toEqual(oneLine);
     expect(quote(lawnRow(), silver([engineLawn()], null))).toEqual(oneLine);
+    // Both annuals agree with each other but not with the tier rate on the list annual ($1,068 at 10% is $961.20).
+    expect(quote(lawnRow({ annual: 961.23, annualAfterDiscount: 961.23 }), silver([engineLawn({ annualAfterDiscount: 961.23 })])))
+      .toEqual(oneLine);
+    // A malformed discount record on the row keeps one line and does not throw.
+    expect(quote(lawnRow({ discount: { effectiveDiscount: 0.1, appliedDiscounts: 'silver' } }), silver())).toEqual(oneLine);
+    // Only the invoice's context carries the engine lines: the Complete Service card prices from the estimate's context
+    // alone, so a recovered list price never becomes a price a proposal could cut to.
+    const saved = { id: 'e1', waveguard_tier: 'Silver',
+      estimate_data: { engineResult: { lineItems: [engineLawn()] }, result: { recurring: { tier: 'Silver', discount: 0.1 } } } };
+    expect(estimateDiscountContext(saved)).not.toHaveProperty('engineLineItems');
+    expect(invoiceDiscountContext(saved)).toEqual({ ...estimateDiscountContext(saved), engineLineItems: [engineLawn()] });
+    expect(quote(lawnRow(), estimateDiscountContext(saved))).toEqual(oneLine);
+    expect(quote(lawnRow(), invoiceDiscountContext(saved))).toEqual([118.67, 106.8, [['WaveGuard Silver', 11.87, 10, true]]]);
     // A row with its own list or net figures is priced by them, never by the engine line.
     expect(quote(lawnRow({ priceAfterDiscount: 106.8 }), silver())).toEqual(oneLine);
     // The engine list price is taken only when the list-price rules name the whole saving as the tier: a row that
