@@ -43,7 +43,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
+import { WavesShell, CustomerColumn, PublicStateCard, BackToAccountButton } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
@@ -722,6 +722,7 @@ export default function SecureAppointmentPage() {
             ? 'This Auto Pay setup link has expired or Auto Pay is already set up. Text or call us for a fresh link — we’re happy to help.'
             : <>This appointment doesn&rsquo;t need a card on file anymore. If anything changed, text or call us — we&rsquo;re happy to help.</>}
         </PublicStateCard>
+        {handoffMode ? null : <BackToAccountButton />}
       </Shell>
     );
   }
@@ -755,6 +756,8 @@ export default function SecureAppointmentPage() {
           ) : null}
           {data ? <VisitSummary data={data} /> : null}
           {handoffMode ? null : <ContactRow />}
+          {/* Native app + signed in only; the locked shell hides it too. */}
+          {handoffMode ? null : <BackToAccountButton />}
         </Card>
       </Shell>
     );

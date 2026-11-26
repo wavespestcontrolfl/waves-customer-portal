@@ -95,6 +95,9 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
+import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
+import { canSaveNative, saveUrlNative } from '../native/nativeFile';
+import { hasSessionToken } from '../native/platform';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import PayPromoCode from '../components/billing/PayPromoCode';
@@ -3045,6 +3048,16 @@ export default function PayPageV2() {
                       href={`${API_BASE}/pay/${token}/attachments/${attachment.id}`}
                       target="_blank"
                       rel="noopener noreferrer"
+                      onClick={(e) => {
+                        // In the app a _blank link opens a webview with no way
+                        // back: save through the share sheet instead (F-046).
+                        // A binary without the plugins keeps the plain link.
+                        if (canSaveNative()) {
+                          e.preventDefault();
+                          saveUrlNative(`${API_BASE}/pay/${token}/attachments/${attachment.id}`, attachment.fileName)
+                            .catch(() => showCustomerAlert('Could not save the attachment. Please try again.'));
+                        }
+                      }}
                       data-glass="chip" data-glass-pill=""
                       style={{
                         minHeight: 44,
@@ -3176,7 +3189,7 @@ export default function PayPageV2() {
                     <SummaryRow label="Previous balance" value={fmtCurrency(prev.total)} />
                     <SummaryRow label="Total due today" value={fmtCurrency(prev.combinedTotal)} strong />
                     <div style={{ marginTop: SP.sm, fontSize: FS.body, color: DOC.muted, fontFamily: DOC_FONT }}>
-                      See every invoice in detail in your <a href="/login" style={{ color: DOC.ink, fontWeight: FW.semibold }}>customer portal</a> or the Waves app.
+                      See every invoice in detail in your <a href={hasSessionToken() ? '/' : '/login'} style={{ color: DOC.ink, fontWeight: FW.semibold }}>customer portal</a> or the Waves app.
                     </div>
                   </>
                 );
