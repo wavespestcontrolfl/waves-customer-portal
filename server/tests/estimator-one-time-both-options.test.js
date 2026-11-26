@@ -9,7 +9,7 @@
  * on a text thread, next to other services, for a current customer, or on
  * a bedroom-band unit.
  */
-const { offerPlanWithOneTimeChoice } = require('../services/estimator-engine/one-time-pest-both-options');
+const { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice } = require('../services/estimator-engine/one-time-pest-both-options');
 const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
 const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
 const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
@@ -43,12 +43,34 @@ describe('one-time pest ask: both options', () => {
     ['a text thread, not a call', intentWith({ oneTimePest: {} }), { channel: 'sms_thread' }],
     ['a bedroom-band unit', intentWith({ oneTimePest: {} }), { channel: 'call', unitBandPricing: { eligible: true } }],
     ['a current customer', intentWith({ oneTimePest: {} }), { channel: 'call', currentCustomer: true }],
-    ['the lookup says the property is commercial', intentWith({ oneTimePest: {} }), { channel: 'call', propertyType: 'commercial' }],
-    ['the lookup says the property is an office', intentWith({ oneTimePest: {} }), { channel: 'call', propertyType: 'office' }],
   ])('leaves the ask alone when %s', (_label, intent, where = onCall) => {
     const before = JSON.stringify(intent.services);
     expect(offerPlanWithOneTimeChoice(intent, where)).toBe(false);
     expect(JSON.stringify(intent.services)).toBe(before);
+  });
+
+  test.each([
+    ['the engine prices the property as commercial', 'office'],
+    ['the lookup type is commercial', 'commercial'],
+  ])('restores the one-time ask when %s', (_label, propertyType) => {
+    const intent = intentWith({ oneTimePest: {} });
+    const asked = intent.services;
+    const swapped = offerPlanWithOneTimeChoice(intent, {
+      ...onCall,
+      planShowsOneTimeChoice: () => {
+        const engineInputs = { ...buildEngineInput({ intent, propertyFacts: facts, context: {} }), propertyType };
+        const engineResult = generateEstimate(engineInputs);
+        return planCanShowOneTimeChoice({ engineInputs, engineResult });
+      },
+    });
+    expect(swapped).toBe(false);
+    expect(intent.services).toBe(asked);
+  });
+
+  test('restores the one-time ask when the trial pricing throws', () => {
+    const intent = intentWith({ oneTimePest: {} });
+    expect(offerPlanWithOneTimeChoice(intent, { ...onCall, planShowsOneTimeChoice: () => { throw new Error('x'); } })).toBe(false);
+    expect(Object.keys(intent.services)).toEqual(['oneTimePest']);
   });
 
   test('the priced plan passes the estimate page rule for the one-time choice, with no one-time row', () => {

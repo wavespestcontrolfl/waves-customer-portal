@@ -76,7 +76,7 @@ const {
   classifyLane,
   createDraftEstimate,
 } = require('./draft-builder');
-const { offerPlanWithOneTimeChoice } = require('./one-time-pest-both-options');
+const { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice } = require('./one-time-pest-both-options');
 const { flagLookupPalmCountForReview } = require('./lookup-palm-review');
 
 
@@ -2883,52 +2883,61 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       unitBandPricing = null;
     }
     result.unitBandPricing = unitBandPricing;
+    // One place for the engine input of this draft: the pricing below and
+    // the both-options trial read the same arguments.
+    const engineInputArgs = () => ({
+      intent,
+      // A home pest program starts at quarterly visits on this draft
+      // (owner 2026-11-17); classifyLane names the count that was discussed.
+      quarterlyPestStart: true,
+      // Gate ON: a true property switch must not PRICE the quoted
+      // property with the original property's type either — scopeFacts
+      // fences it, so an unresolved type reaches the pricer as 'unknown'
+      // (neutral default) and the stamp below parks the draft instead of
+      // green-laning on a type that describes another address (codex r26
+      // P1). Same object as propertyFacts on every other path.
+      // Built HERE, not from the pre-mutation scopeFacts clone: the V2 and
+      // unit-scope applies REPLACE home/lot on propertyFacts (clearing a
+      // master-parcel lot, for one), and pricing from a stale clone would
+      // charge for a lot the lane review shows as cleared (codex r27 P1).
+      propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled()
+        && crossPropertyRegather)
+        ? fenceCrossPropertyFacts(propertyFacts)
+        : propertyFacts,
+      context,
+      priorQualifyingServices,
+      profileDescribesQuotedProperty,
+      profileMeasurementUnitExact,
+      // Feature modifiers resolved by the lookup of the QUOTED address
+      // (effectiveSignals tracks the re-gather) — pool/cage, landscaping,
+      // water adjacency feed real pricing adjustments.
+      // GATE_CAGE_START_MEDIUM: the office cage start for THIS draft only
+      // (a county cage of 601-2,000 sq ft starts at Medium; a cage with no
+      // decided pool is dropped, as the estimate tool does). Gate off =
+      // the same object.
+      lookupEnriched: require('../property-lookup/office-cage-start').agentDraftCageProfile(effectiveSignals.enriched),
+      unitBandPricing,
+    });
     // Owner ruling 2026-11-23: a one-time pest ask on a call shows both
-    // options (the rule and its limits: one-time-pest-both-options.js).
+    // options (the rule and its limits: one-time-pest-both-options.js). The
+    // swap stays only when the plan it prices can show the one-time choice
+    // on the estimate page; otherwise the caller's one-time ask is priced.
     context.oneTimeAskBothOptions = offerPlanWithOneTimeChoice(intent, {
       channel: origin?.channel,
       unitBandPricing,
       currentCustomer: context.isExistingCustomer === true || priorQualifyingServices.length > 0,
-      propertyType: propertyFacts?.propertyType || context.customer?.property_type,
+      planShowsOneTimeChoice: () => {
+        const trialInput = buildEngineInput(engineInputArgs());
+        const trialResult = generateEstimateSafely(trialInput);
+        return planCanShowOneTimeChoice({ engineInputs: trialInput, engineResult: trialResult, totals: deriveTotals(trialResult) });
+      },
     });
 
     let engineResult = null;
     let engineInput = null;
     let totals = { monthly: 0, annual: 0, oneTime: 0 };
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
-      engineInput = buildEngineInput({
-        intent,
-        // A home pest program starts at quarterly visits on this draft
-        // (owner 2026-11-17); classifyLane names the count that was discussed.
-        quarterlyPestStart: true,
-        // Gate ON: a true property switch must not PRICE the quoted
-        // property with the original property's type either — scopeFacts
-        // fences it, so an unresolved type reaches the pricer as 'unknown'
-        // (neutral default) and the stamp below parks the draft instead of
-        // green-laning on a type that describes another address (codex r26
-        // P1). Same object as propertyFacts on every other path.
-        // Built HERE, not from the pre-mutation scopeFacts clone: the V2 and
-        // unit-scope applies REPLACE home/lot on propertyFacts (clearing a
-        // master-parcel lot, for one), and pricing from a stale clone would
-        // charge for a lot the lane review shows as cleared (codex r27 P1).
-        propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled()
-          && crossPropertyRegather)
-          ? fenceCrossPropertyFacts(propertyFacts)
-          : propertyFacts,
-        context,
-        priorQualifyingServices,
-        profileDescribesQuotedProperty,
-        profileMeasurementUnitExact,
-        // Feature modifiers resolved by the lookup of the QUOTED address
-        // (effectiveSignals tracks the re-gather) — pool/cage, landscaping,
-        // water adjacency feed real pricing adjustments.
-        // GATE_CAGE_START_MEDIUM: the office cage start for THIS draft only
-        // (a county cage of 601-2,000 sq ft starts at Medium; a cage with no
-        // decided pool is dropped, as the estimate tool does). Gate off =
-        // the same object.
-        lookupEnriched: require('../property-lookup/office-cage-start').agentDraftCageProfile(effectiveSignals.enriched),
-        unitBandPricing,
-      });
+      engineInput = buildEngineInput(engineInputArgs());
       // Stamp what ACTUALLY fed pricing (gate ON only — the kill switch
       // must restore the previous lane behavior exactly, codex r1 P2): a
       // residential draft parks for review when the type that reached the

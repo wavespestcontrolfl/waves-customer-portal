@@ -19,20 +19,41 @@
 //   - not a bedroom-band unit: the page's amount is not the band's own
 //     one-time rate.
 // Returns true when it swapped the ask for the plan.
-const { isCommercialProperty } = require('../pricing-engine/commercial-helpers');
+const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
 
 function offerPlanWithOneTimeChoice(intent, {
-  channel = null, unitBandPricing = null, currentCustomer = false, propertyType = null,
+  channel = null, unitBandPricing = null, currentCustomer = false, planShowsOneTimeChoice = null,
 } = {}) {
   if (channel !== 'call' || unitBandPricing || currentCustomer) return false;
-  // A property the pricing engine would class as commercial (office, retail,
-  // ...) keeps the manual-quote path, whatever the call's own category says.
-  if (propertyType && isCommercialProperty({ propertyType })) return false;
   const keys = Object.keys(intent?.services || {});
   if (intent?.decision !== 'draft' || intent.is_commercial === true) return false;
   if (keys.length !== 1 || keys[0] !== 'oneTimePest') return false;
+  const asked = intent.services;
   intent.services = { pest: { frequency: 'quarterly' } };
-  return true;
+  // The swap stays only when the priced plan can show the one-time choice on
+  // the estimate page (a property the engine prices as commercial, or a plan
+  // with no derivable price, cannot). Otherwise the caller's ask is restored.
+  let shows = false;
+  try { shows = planShowsOneTimeChoice ? planShowsOneTimeChoice() === true : true; } catch { shows = false; }
+  if (!shows) intent.services = asked;
+  return shows;
 }
 
-module.exports = { offerPlanWithOneTimeChoice };
+// Whether a priced plan can carry the [Recurring | One-time] choice: the
+// engine priced one home pest line and the estimate page's own rule accepts it.
+function planCanShowOneTimeChoice({ engineInputs, engineResult, totals }) {
+  // The engine's own verdict: the plan must come back as the one home pest
+  // line. A property it prices as commercial (office, retail, ...) returns a
+  // commercial line and keeps the caller's one-time ask on the manual path.
+  const lines = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
+  if (lines.length !== 1 || lines[0].service !== 'pest_control') return false;
+  return !validateEstimateDeliveryOptions({
+    showOneTimeOption: true,
+    onetimeTotal: totals?.oneTime,
+    monthlyTotal: totals?.monthly,
+    annualTotal: totals?.annual,
+    estimateData: { engineInputs, engineResult },
+  });
+}
+
+module.exports = { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice };
