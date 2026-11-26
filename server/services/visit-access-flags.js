@@ -6,17 +6,22 @@
  * decision_reviews row per provider and question. This module reads those
  * rows back as flags for the technician and takes their Right / Wrong tap:
  *
- *   accessFlagsFor(dbh, visit)        flags for the visit's NEWEST stored state
- *   tapAccessFlag(dbh, visit, ...)    Right / Wrong: labels the question's rows
+ *   accessFlagsFor(dbh, visit)   flags for the visit's NEWEST stored state
+ *   tapAccessFlag(dbh, tap, who) Right / Wrong: labels the question's rows
  *
  * Nothing here calls a model. A question is flagged when ANY provider said yes
  * (a missed dog is worse than an extra flag) and no one has marked it wrong.
- * A tap labels every row of the question for that state from what the
- * technician says is true, through the shared label write
- * (typed-decisions/label-write.js), so the review lane learns from it. The
- * only write beside the label is the pet save: Right on a dog flag, with no
- * pets on file, saves one pet_details line to the customer's profile. Neither
- * write sends anything to a customer.
+ * A Right confirmation on an EARLIER state of the same visit carries forward
+ * (the pet save itself changes the state, and the warning must survive it); a
+ * Wrong does not (new evidence should show again).
+ *
+ * A tap is bound to the evidence the technician saw (`subjectHash`) and runs
+ * in one transaction that holds a FOR SHARE lock on the visit row, so the
+ * assignment check and every write after it see the same assignment: a
+ * reassignment cannot land in between. The labels go through the shared label
+ * write (typed-decisions/label-write.js). The only write beside them is the pet
+ * save: an accepted Right on a dog flag, while the profile holds no pets,
+ * writes one pet_details line. Neither write sends anything to a customer.
  */
 const logger = require('./logger');
 const { packageFor } = require('./typed-decisions/packages');
@@ -97,27 +102,39 @@ function humanStatus(rows) {
   return truths.length ? 'wrong' : 'open';
 }
 
-async function newestState(dbh, visitId) {
-  return dbh(STATES).where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc').first('subject_hash', 'state', 'created_at');
-}
-
-function reviewRows(dbh, visitId, subjectHash) {
-  return dbh(REVIEWS)
-    .where({ package_id: PACKAGE_ID, subject_type: SUBJECT_TYPE, subject_id: visitId, subject_hash: subjectHash })
-    .select('id', 'provider', 'question_id', 'subject_hash', 'jev_answer', 'label', 'label_status', 'package_id');
-}
-
 const saidYes = (row) => parse(row.jev_answer)?.yes === true;
+const newestAt = (rows) => rows.reduce((best, row) => (row.created_at && (!best || new Date(row.created_at) > best) ? new Date(row.created_at) : best), null);
 
-// Groups a state's rows by question, in the package's order.
-function byQuestion(rows) {
-  const out = [];
-  for (const id of Object.keys(packageFor(PACKAGE_ID).questions)) {
-    const mine = rows.filter((row) => row.question_id === id);
-    if (mine.length) out.push([id, mine]);
-  }
-  return out;
+// Everything one visit's flags are read from: the newest stored state and
+// every review row of the visit (all states: an earlier state's Right carries).
+async function loadEvidence(dbh, visitId) {
+  const stored = await dbh(STATES).where({ scheduled_service_id: visitId }).orderBy('created_at', 'desc').first('subject_hash', 'state', 'created_at');
+  if (!stored) return null;
+  const rows = await dbh(REVIEWS)
+    .where({ package_id: PACKAGE_ID, subject_type: SUBJECT_TYPE, subject_id: visitId })
+    .select('id', 'provider', 'question_id', 'subject_hash', 'jev_answer', 'label', 'label_status', 'package_id', 'created_at');
+  const atNewest = rows.filter((row) => row.subject_hash === stored.subject_hash);
+  return { stored, state: parse(stored.state) || {}, rows, atNewest, readAt: newestAt(atNewest) || new Date(stored.created_at) };
 }
+
+// One question as the technician sees it: its status, and whether a card shows.
+// Newest state: any provider yes, not marked wrong. A Right confirmed on an
+// earlier state of the visit carries forward while the newest state's rows are
+// unlabeled; a Wrong never does.
+function questionView(ev, questionId) {
+  const mine = ev.atNewest.filter((row) => row.question_id === questionId);
+  let status = humanStatus(mine);
+  if (status === 'open') {
+    const earlier = new Map();
+    for (const row of ev.rows) {
+      if (row.question_id === questionId && row.subject_hash !== ev.stored.subject_hash) earlier.set(row.subject_hash, [...(earlier.get(row.subject_hash) || []), row]);
+    }
+    if ([...earlier.values()].some((rows) => humanStatus(rows) === 'right')) status = 'right';
+  }
+  return { mine, status, shown: status === 'right' || (status === 'open' && mine.some(saidYes)) };
+}
+
+const shownQuestionIds = (ev) => Object.keys(packageFor(PACKAGE_ID).questions).filter((id) => questionView(ev, id).shown);
 
 // Pets are "on file" when the profile has a count or any detail text.
 async function petsOnFile(dbh, customerId) {
@@ -132,19 +149,16 @@ async function petsOnFile(dbh, customerId) {
  */
 async function accessFlagsFor(dbh, visit) {
   try {
-    const stored = await newestState(dbh, visit.id);
-    if (!stored) return [];
-    const state = parse(stored.state) || {};
-    const readAt = new Date(stored.created_at).toISOString();
-    const rows = await reviewRows(dbh, visit.id, stored.subject_hash);
+    const ev = await loadEvidence(dbh, visit.id);
+    if (!ev) return [];
     const flags = [];
-    for (const [questionId, mine] of byQuestion(rows)) {
-      const status = humanStatus(mine);
-      if (!mine.some(saidYes) || status === 'wrong') continue;
+    for (const questionId of shownQuestionIds(ev)) {
+      const view = questionView(ev, questionId);
       const flag = FLAGS[questionId];
       flags.push({
-        questionId, title: flag.title, tone: flag.tone, status, readAt, ...pickQuote(state, questionId),
-        saveToFile: questionId === 'dog_on_property' && !(await petsOnFile(dbh, visit.customer_id)) ? 'pets' : null,
+        questionId, title: flag.title, tone: flag.tone, status: view.status, subjectHash: ev.stored.subject_hash,
+        readAt: (newestAt(view.mine) || ev.readAt).toISOString(), ...pickQuote(ev.state, questionId),
+        saveToFile: questionId === 'dog_on_property' && view.status === 'open' && !(await petsOnFile(dbh, visit.customer_id)) ? 'pets' : null,
       });
     }
     return flags;
@@ -154,36 +168,32 @@ async function accessFlagsFor(dbh, visit) {
   }
 }
 
-// Right on a dog flag with no pets on file: one pet_details line, written
-// through the same compare-and-set writer the text-note Save button uses.
-// Sends nothing (property_preferences has no customer-facing hook for
-// pet_details; its two triggers watch the gate code and the irrigation fields).
-async function savePet(dbh, visit, who) {
-  const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
+// Right on a dog flag: one pet_details line, written in the tap's transaction.
+// The profile row is locked, and the write itself holds the condition (no pet
+// count, no pet text): nothing read earlier stands in for it, so a profile
+// that gained pets since the card was shown is never overwritten. Says only
+// what the technician confirmed: an animal is on the property.
+async function savePet(trx, visit, who) {
   const { recordAuditEvent } = require('./audit-log');
   const { etParts } = require('../utils/datetime-et');
-  if (await petsOnFile(dbh, visit.customer_id)) return false;
+  await trx('property_preferences').insert({ customer_id: visit.customer_id }).onConflict('customer_id').ignore();
+  const locked = await trx('property_preferences').where({ customer_id: visit.customer_id }).forUpdate().first('id');
+  if (!locked) return false;
   const { month, day } = etParts();
-  const proposedRaw = `Dog (customer text; confirmed by tech ${month}/${day})`;
-  const existing = await dbh('property_preferences').where({ customer_id: visit.customer_id }).first('pet_details');
-  try {
-    await dbh.transaction(async (trx) => {
-      const proposal = { scope_id: visit.customer_id, field: 'pet_details', resource_id: null };
-      const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: existing ? existing.pet_details ?? null : null });
-      await applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw });
-      await recordAuditEvent({
-        trx, critical: true, actor_type: 'technician', actor_id: who.actorId,
-        action: 'visit_access_flag.pet_saved', resource_type: 'property_preferences', resource_id: target.id,
-        metadata: { visit_id: visit.id, customer_id: visit.customer_id, field: 'pet_details', labeled_by: who.labeledBy },
-        ip_address: who.ip, user_agent: who.userAgent,
-      });
-    });
-    return true;
-  } catch (err) {
-    // The profile changed under the compare-and-set: nothing was saved.
-    if (err.status === 409) return false;
-    throw err;
-  }
+  const [written] = await trx('property_preferences')
+    .where({ id: locked.id })
+    .whereRaw('(pet_count IS NULL OR pet_count = 0)')
+    .whereRaw("(pet_details IS NULL OR btrim(pet_details) = '')")
+    .update({ pet_details: `Animal on property (tech confirmed ${month}/${day})`, updated_at: trx.fn.now() })
+    .returning('id');
+  if (!written) return false;
+  await recordAuditEvent({
+    trx, critical: true, actor_type: 'technician', actor_id: who.actorId,
+    action: 'visit_access_flag.pet_saved', resource_type: 'property_preferences', resource_id: locked.id,
+    metadata: { visit_id: visit.id, customer_id: visit.customer_id, field: 'pet_details', labeled_by: who.labeledBy },
+    ip_address: who.ip, user_agent: who.userAgent,
+  });
+  return true;
 }
 
 // One row's verdict from what the technician says is true: its answer
@@ -194,36 +204,57 @@ function rowRequest(row, truth) {
   return { verdict: seen.yes === truth ? 'jev_right' : 'jev_wrong', seen, seenSubject: row.subject_hash, note: null, reason: null, force: false };
 }
 
-/**
- * A technician's tap on one flag. Labels every still-unlabeled row of the
- * question for the visit's newest state, then (Right on a dog flag with no
- * pets on file) saves the pet line. A row somebody already confirmed is left
- * alone, so the same tap twice changes nothing.
- * @param {{verdict:'right'|'wrong', questionId:string}} tap
- * @param {{labeledBy:string, actorId:string|null, ip:string|null, userAgent:string|null}} who
- * @returns {Promise<null | {status:string, saved:boolean}>} null when the visit holds no rows for the question
- */
-async function tapAccessFlag(dbh, visit, { questionId, verdict }, who) {
-  const stored = await newestState(dbh, visit.id);
-  const mine = stored ? (await reviewRows(dbh, visit.id, stored.subject_hash)).filter((row) => row.question_id === questionId) : [];
-  if (!mine.length) return null;
-  const truth = verdict === 'right';
+async function labelRows(trx, rows, truth, who) {
   const labeler = { labeledBy: who.labeledBy, machine: false, actorType: 'technician', actorId: who.actorId, ip: who.ip, userAgent: who.userAgent };
-  for (const row of mine) {
+  for (const row of rows) {
     if (CONFIRMED.includes(row.label_status)) continue;
     const request = rowRequest(row, truth);
-    if (!request) continue;
-    const correct = correctValueFor(row, request, truth);
-    if (correct.error) continue;
-    const written = await writeLabel(row.id, request, correct, labeler);
-    // Another tap or a reviewer got there first: that row stays as it is.
+    const correct = request && correctValueFor(row, request, truth);
+    if (!correct || correct.error) continue;
+    const written = await writeLabel(row.id, request, correct, labeler, trx);
+    // Another writer got there first: that row stays as it is.
     if (!written.row && written.status !== 409) throw new Error(`label write failed (${written.status})`);
   }
-  await require('./typed-decisions/daily-review-item').closeIfQueueEmpty()
-    .catch((err) => logger.warn(`[visit-access-flags] review item close failed: ${err.message}`));
-  const status = humanStatus(await reviewRows(dbh, visit.id, stored.subject_hash).where({ question_id: questionId }));
-  const saved = truth && questionId === 'dog_on_property' ? await savePet(dbh, visit, who) : false;
-  return { status, saved };
+}
+
+/**
+ * A technician's tap on one flag, as one transaction.
+ *
+ * `scope(query)` adds the caller's assignment check to a scheduled_services
+ * query; the visit row is read under FOR SHARE with it, so a reassignment
+ * waits for this transaction and the check holds for every write below.
+ *
+ * Results: { notFound } (not this technician's visit), { conflict } (the flag
+ * is not one that shows now, or the evidence moved since the card was read),
+ * else { status, saved }: the question's status after the tap. A tap that
+ * contradicts a confirmed answer is refused with nothing written (the first
+ * confirmation stands), and only an accepted Right saves the pet line.
+ *
+ * @param {{visitId:string, scope:Function, questionId:string, verdict:'right'|'wrong', subjectHash:string}} tap
+ * @param {{labeledBy:string, actorId:string|null, ip:string|null, userAgent:string|null}} who
+ */
+async function tapAccessFlag(dbh, tap, who) {
+  const { visitId, scope, questionId, verdict, subjectHash } = tap;
+  const truth = verdict === 'right';
+  const out = await dbh.transaction(async (trx) => {
+    const visit = await scope(trx('scheduled_services').where({ 'scheduled_services.id': visitId }))
+      .forShare().first('scheduled_services.id', 'scheduled_services.customer_id');
+    if (!visit) return { notFound: true };
+    const ev = await loadEvidence(trx, visit.id);
+    if (!ev || ev.stored.subject_hash !== subjectHash) return { conflict: true };
+    const view = questionView(ev, questionId);
+    if (!view.shown) return view.status === verdict ? { status: view.status, saved: false } : { conflict: true };
+    if (view.status !== 'open' && view.status !== verdict) return { status: view.status, saved: false };
+    await labelRows(trx, view.mine, truth, who);
+    const after = questionView(await loadEvidence(trx, visit.id), questionId);
+    const saved = truth && questionId === 'dog_on_property' && after.status === 'right' ? await savePet(trx, visit, who) : false;
+    return { status: after.status, saved, labeled: true };
+  });
+  if (out.labeled) {
+    await require('./typed-decisions/daily-review-item').closeIfQueueEmpty()
+      .catch((err) => logger.warn(`[visit-access-flags] review item close failed: ${err.message}`));
+  }
+  return out.labeled ? { status: out.status, saved: out.saved } : out;
 }
 
 module.exports = { FLAGS, accessFlagsFor, tapAccessFlag, pickQuote, humanStatus };

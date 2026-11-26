@@ -24899,13 +24899,13 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       return awayWatch ? { ...payload, awayWatch } : payload;
     };
     // GATE_VISIT_ACCESS_FLAGS=on: the flags the hourly access sweep found for this visit (services/visit-access-flags.js),
-    // with their Right / Wrong status. They quote the customer's redacted words, so they get the same reassignment
-    // recheck as the facts: a visit that moved to another technician while they were read answers nothing. Gate off
-    // (or shadow): no read at all. Fail-soft: a read failure omits the key.
+    // with their Right / Wrong status. The answer may already hold live access codes, so after EVERY lookup (flags,
+    // none, or a failed read) the assignment is checked again, and when it cannot be verified (no longer assigned, or
+    // the check itself failed) the whole answer is withheld like the facts block does. Gate off (or shadow): no read
+    // and no recheck. A failed flag read alone only omits the key.
     const withAccessFlags = async (payload) => {
       if (!require('../config/feature-gates').visitAccessCardsLive()) return payload;
       const accessFlags = await require('../services/visit-access-flags').accessFlagsFor(db, svc);
-      if (!accessFlags || !accessFlags.length) return payload;
       try {
         const stillOwned = await db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id })
@@ -24914,9 +24914,9 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         if (!stillOwned) return { brief: null };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief access flags recheck failed for ${svc.id}: ${err.message}`);
-        return payload;
+        return { brief: null };
       }
-      return { ...payload, accessFlags };
+      return accessFlags && accessFlags.length ? { ...payload, accessFlags } : payload;
     };
     const answer = async (payload) => res.json(await withAwayWatch(await withAccessFlags(await withFacts(payload))));
     if (!svc.pre_service_brief) return answer({ brief: null });
@@ -24951,11 +24951,13 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/schedule/:id/access-flags/:questionId   body { verdict: 'right' | 'wrong' }
-// The technician's tap on one visit access flag (GATE_VISIT_ACCESS_FLAGS=on; off or shadow = 404). Labels the
-// question's review rows for the visit's newest stored state through the shared label write, and on Right for a dog
-// flag with no pets on file saves one pet line to the profile (services/visit-access-flags.js). Sends nothing to a
-// customer. Same assignment check as GET /:id/visit-brief: a technician reaches only a visit assigned to them.
+// POST /api/admin/schedule/:id/access-flags/:questionId   body { verdict: 'right' | 'wrong', subjectHash }
+// The technician's tap on one visit access flag (GATE_VISIT_ACCESS_FLAGS=on; off or shadow = 404). `subjectHash` is
+// the evidence the card was read from: when it is no longer the visit's newest stored state, or the question no longer
+// shows a card, the answer is 409 flag_changed and nothing is written. Labels the question's review rows through the
+// shared label write, and on an accepted Right for a dog flag with no pets on file saves one pet line to the profile,
+// all in one transaction that holds a FOR SHARE lock on the visit row (services/visit-access-flags.js). Sends nothing
+// to a customer. Same assignment check as GET /:id/visit-brief: a technician reaches only a visit assigned to them.
 router.post('/:id/access-flags/:questionId', async (req, res, next) => {
   try {
     const { visitAccessCardsLive } = require('../config/feature-gates');
@@ -24967,16 +24969,16 @@ router.post('/:id/access-flags/:questionId', async (req, res, next) => {
     }
     const verdict = req.body && req.body.verdict;
     if (verdict !== 'right' && verdict !== 'wrong') return res.status(400).json({ error: "verdict must be 'right' or 'wrong'" });
-    const svc = await db('scheduled_services')
-      .where({ 'scheduled_services.id': req.params.id })
-      .modify((q) => technicianCurrentVisitFilter(req, q))
-      .first('scheduled_services.id', 'scheduled_services.customer_id');
-    if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    const subjectHash = req.body && req.body.subjectHash;
+    if (typeof subjectHash !== 'string' || !/^[0-9a-f]{64}$/.test(subjectHash)) return res.status(400).json({ error: 'subjectHash is required' });
     const { labelerName } = require('../services/typed-decisions/label-write');
-    const result = await require('../services/visit-access-flags').tapAccessFlag(db, svc, { questionId, verdict }, {
+    const result = await require('../services/visit-access-flags').tapAccessFlag(db, {
+      visitId: req.params.id, scope: (q) => technicianCurrentVisitFilter(req, q), questionId, verdict, subjectHash,
+    }, {
       labeledBy: labelerName(req), actorId: req.technicianId ? String(req.technicianId) : null, ip: req.ip, userAgent: req.get('user-agent') || null,
     });
-    if (!result) return res.status(404).json({ error: 'No such flag on this visit' });
+    if (result.notFound) return res.status(404).json({ error: 'Scheduled service not found' });
+    if (result.conflict) return res.status(409).json({ error: 'flag_changed', code: 'flag_changed' });
     res.json(result.saved ? { status: result.status, saved: true } : { status: result.status });
   } catch (err) { next(err); }
 });

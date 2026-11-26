@@ -1,10 +1,12 @@
 /**
  * Visit access flags on the routes (routes/admin-schedule.js):
  *  - GET /:id/visit-brief carries `accessFlags` only under GATE_VISIT_ACCESS_FLAGS=on (shadow and off leave the
- *    answer exactly as before, and read nothing); a reassignment during the read withholds the whole answer;
- *    a failed read omits the key and the brief still serves;
- *  - POST /:id/access-flags/:questionId is 404 unless the cards are live, 400 for an unknown flag or verdict, 404 for
- *    a visit that is not the technician's, and otherwise taps the flag as that technician.
+ *    answer exactly as before, and read nothing); the assignment is re-checked after EVERY lookup (flags, none, or a
+ *    failed read) and a reassignment, or a check that cannot be made, withholds the whole answer; a failed flag read
+ *    alone omits the key and the brief still serves;
+ *  - POST /:id/access-flags/:questionId is 404 unless the cards are live, 400 for an unknown flag, verdict or missing
+ *    evidence hash, 404 for a visit that is not the technician's, 409 flag_changed when the card moved, and otherwise
+ *    taps the flag as that technician.
  */
 jest.mock('../models/db', () => {
   const dbFn = jest.fn();
@@ -57,10 +59,11 @@ const setGate = (value) => {
   if (value) { process.env.GATE_TYPED_DECISIONS = 'true'; process.env.GATE_VISIT_ACCESS_FLAGS = value; }
 };
 
-const FLAG = { questionId: 'dog_on_property', title: 'Dog or other animal may be loose', tone: 'amber', status: 'open' };
+const HASH = 'a'.repeat(64);
+const FLAG = { questionId: 'dog_on_property', subjectHash: HASH, title: 'Dog or other animal may be loose', tone: 'amber', status: 'open' };
 
 // `owned` answers the atomic ownership-scoped fetch; `stillOwned` the recheck probe after the flags were read.
-function stubVisit({ owned = true, stillOwned = true } = {}) {
+function stubVisit({ owned = true, stillOwned = true, recheckThrows = false } = {}) {
   const row = { id: 'svc-1', customer_id: 'cust-1', pre_service_brief: null };
   db.mockImplementation(() => {
     const q = {};
@@ -68,7 +71,10 @@ function stubVisit({ owned = true, stillOwned = true } = {}) {
     q.whereNotIn = jest.fn(() => q);
     q.modify = jest.fn((cb) => { cb(q); return q; });
     q.first = jest.fn(async (...cols) => {
-      if (cols[0] === 'scheduled_services.id' && cols.length === 1) return stillOwned ? { id: 'svc-1' } : undefined;
+      if (cols[0] === 'scheduled_services.id' && cols.length === 1) {
+        if (recheckThrows) throw new Error('db down');
+        return stillOwned ? { id: 'svc-1' } : undefined;
+      }
       return owned ? row : undefined;
     });
     return q;
@@ -128,8 +134,20 @@ describe('GET /:id/visit-brief access flags', () => {
     });
   });
 
-  test('a visit reassigned while the flags were read withholds them', async () => {
+  test.each([
+    ['flags found', [FLAG]], ['no flags', []], ['a failed flag read', null],
+  ])('a visit reassigned after the lookup (%s) withholds the whole answer', async (_name, flagsAnswer) => {
     stubVisit({ stillOwned: false });
+    mockAccessFlagsFor.mockResolvedValue(flagsAnswer);
+    await withServer(async (base) => {
+      const res = await call(base, '/admin/schedule/svc-1/visit-brief', { role: 'technician' });
+      expect(await res.json()).toEqual({ brief: null });
+    });
+  });
+
+  test('an ownership check that cannot be made withholds the answer too', async () => {
+    stubVisit({ recheckThrows: true });
+    mockAccessFlagsFor.mockResolvedValue([]);
     await withServer(async (base) => {
       const res = await call(base, '/admin/schedule/svc-1/visit-brief', { role: 'technician' });
       expect(await res.json()).toEqual({ brief: null });
@@ -139,7 +157,7 @@ describe('GET /:id/visit-brief access flags', () => {
 
 describe('POST /:id/access-flags/:questionId', () => {
   const tap = (base, over = {}) => call(base, `/admin/schedule/svc-1/access-flags/${over.questionId || 'dog_on_property'}`, {
-    method: 'POST', role: over.role || 'technician', body: 'body' in over ? over.body : { verdict: 'right' },
+    method: 'POST', role: over.role || 'technician', body: 'body' in over ? over.body : { verdict: 'right', subjectHash: HASH },
   });
 
   test.each(['shadow', null])('gate %s: 404 before anything is read', async (value) => {
@@ -151,26 +169,38 @@ describe('POST /:id/access-flags/:questionId', () => {
     expect(mockTap).not.toHaveBeenCalled();
   });
 
-  test('an unknown flag or verdict is 400 and touches nothing', async () => {
+  test('an unknown flag, verdict or evidence hash is 400 and touches nothing', async () => {
     stubVisit();
     await withServer(async (base) => {
       expect((await tap(base, { questionId: 'constructor' })).status).toBe(400);
       expect((await tap(base, { questionId: 'not_a_question' })).status).toBe(400);
-      expect((await tap(base, { body: { verdict: 'maybe' } })).status).toBe(400);
+      expect((await tap(base, { body: { verdict: 'maybe', subjectHash: HASH } })).status).toBe(400);
+      expect((await tap(base, { body: { verdict: 'right' } })).status).toBe(400);
+      expect((await tap(base, { body: { verdict: 'right', subjectHash: 'not-a-hash' } })).status).toBe(400);
       expect((await tap(base, { body: undefined })).status).toBe(400);
     });
     expect(mockTap).not.toHaveBeenCalled();
   });
 
-  test('a technician who is not assigned the visit gets 404 and no tap', async () => {
-    stubVisit({ owned: false });
+  test('a visit that is not this technician\'s is 404 (the check runs inside the tap\'s transaction)', async () => {
+    stubVisit();
+    mockTap.mockResolvedValueOnce({ notFound: true });
     await withServer(async (base) => {
       expect((await tap(base)).status).toBe(404);
     });
-    expect(mockTap).not.toHaveBeenCalled();
   });
 
-  test('the assigned technician taps: the flag is labeled as that technician and the status comes back', async () => {
+  test('a card that moved is 409 flag_changed', async () => {
+    stubVisit();
+    mockTap.mockResolvedValueOnce({ conflict: true });
+    await withServer(async (base) => {
+      const res = await tap(base);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'flag_changed', code: 'flag_changed' });
+    });
+  });
+
+  test('the assigned technician taps: the tap carries the visit, the evidence hash and the assignment scope', async () => {
     stubVisit();
     mockTap.mockResolvedValueOnce({ status: 'right', saved: true });
     await withServer(async (base) => {
@@ -178,17 +208,15 @@ describe('POST /:id/access-flags/:questionId', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ status: 'right', saved: true });
     });
-    expect(mockTap).toHaveBeenCalledWith(db, expect.objectContaining({ id: 'svc-1' }), { questionId: 'dog_on_property', verdict: 'right' },
+    expect(mockTap).toHaveBeenCalledWith(db, expect.objectContaining({ visitId: 'svc-1', questionId: 'dog_on_property', verdict: 'right', subjectHash: HASH, scope: expect.any(Function) }),
       expect.objectContaining({ labeledBy: 'tech@example.test', actorId: 'tech-1' }));
   });
 
-  test('no saved key unless the pet line was written; a visit with no such flag is 404', async () => {
+  test('no saved key unless the pet line was written', async () => {
     stubVisit();
+    mockTap.mockResolvedValueOnce({ status: 'wrong', saved: false });
     await withServer(async (base) => {
-      mockTap.mockResolvedValueOnce({ status: 'wrong', saved: false });
-      expect(await (await tap(base, { body: { verdict: 'wrong' } })).json()).toEqual({ status: 'wrong' });
-      mockTap.mockResolvedValueOnce(null);
-      expect((await tap(base)).status).toBe(404);
+      expect(await (await tap(base, { body: { verdict: 'wrong', subjectHash: HASH } })).json()).toEqual({ status: 'wrong' });
     });
   });
 });

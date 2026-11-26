@@ -23,22 +23,23 @@ const SERVICE = {
 };
 const stop = { key: 'row:svc-1', isVisit: false, services: [SERVICE], primary: SERVICE, liveCount: 1 };
 
+const HASH = 'a'.repeat(64);
 const DOG = {
   questionId: 'dog_on_property', title: 'Dog or other animal may be loose', tone: 'amber', status: 'open',
-  readAt: '2026-10-06T14:05:00.000Z', quote: 'Our dog Biscuit will be in the yard', source: 'Customer text', saveToFile: 'pets',
+  readAt: '2026-10-06T14:05:00.000Z', subjectHash: HASH, quote: 'Our dog Biscuit will be in the yard', source: 'Customer text', saveToFile: 'pets',
 };
 const CALL = {
   questionId: 'contact_before_arrival', title: 'Customer asked for a call or text before you arrive', tone: 'plain', status: 'open',
-  readAt: '2026-10-06T14:05:00.000Z', quote: null, source: 'Read: customer text', saveToFile: null,
+  readAt: '2026-10-06T14:05:00.000Z', subjectHash: HASH, quote: null, source: 'Read: customer text', saveToFile: null,
 };
 
-function renderWith(brief, request = vi.fn(async () => ({ status: 'right' }))) {
+function renderWith(brief, request = vi.fn(async () => ({ status: 'right' })), onRetry = vi.fn()) {
   render(
     <VisitBriefPanel
       stop={stop}
       detail={{ status: 'ready', byService: { 'svc-1': { estimate: null, brief } } }}
       request={request}
-      onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      onRetry={onRetry} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
     />,
   );
   return request;
@@ -79,7 +80,7 @@ describe('Visit Brief: Before you go in', () => {
     const request = renderWith({ brief: null, accessFlags: [CALL] }, vi.fn(async () => ({ status: 'right' })));
     fireEvent.click(screen.getByRole('button', { name: 'Right' }));
     await waitFor(() => expect(screen.getByText('Marked right. Thanks.')).toBeInTheDocument());
-    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/access-flags/contact_before_arrival', { method: 'POST', body: JSON.stringify({ verdict: 'right' }) });
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/access-flags/contact_before_arrival', { method: 'POST', body: JSON.stringify({ verdict: 'right', subjectHash: HASH }) });
     expect(screen.queryByRole('button', { name: 'Wrong' })).toBeNull();
   });
 
@@ -93,13 +94,23 @@ describe('Visit Brief: Before you go in', () => {
     const request = renderWith({ brief: null, accessFlags: [DOG] }, vi.fn(async () => ({ status: 'wrong' })));
     fireEvent.click(screen.getByRole('button', { name: 'Wrong' }));
     await waitFor(() => expect(screen.getByText('Marked wrong. Hidden for this visit.')).toBeInTheDocument());
-    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/access-flags/dog_on_property', { method: 'POST', body: JSON.stringify({ verdict: 'wrong' }) });
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/access-flags/dog_on_property', { method: 'POST', body: JSON.stringify({ verdict: 'wrong', subjectHash: HASH }) });
   });
 
   it('a flag already marked right shows its line on load, with no buttons', () => {
     renderWith({ brief: null, accessFlags: [{ ...CALL, status: 'right' }] });
     expect(screen.getByText('Marked right. Thanks.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Right' })).toBeNull();
+  });
+
+  it('a card that moved (409) reads the brief again and says so, keeping the buttons', async () => {
+    const onRetry = vi.fn();
+    const changed = Object.assign(new Error('flag_changed'), { status: 409, code: 'flag_changed' });
+    renderWith({ brief: null, accessFlags: [DOG] }, vi.fn(async () => { throw changed; }), onRetry);
+    fireEvent.click(screen.getByRole('button', { name: 'Right · save to file' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This flag changed. Check it again.'));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Wrong' })).not.toBeDisabled();
   });
 
   it('a failed tap says so and keeps the buttons so the tech can try again', async () => {

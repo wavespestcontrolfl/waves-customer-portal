@@ -43,8 +43,8 @@ function correctValueFor(target, { verdict, seen }, value) {
 
 // Why a guarded update matched no row: gone (404), already confirmed without
 // force, or the Jev answer / transcript version moved since the page loaded (409, by code).
-async function unwrittenLabel(id, force, machine = false) {
-  const existing = await db(TABLE).where({ id }).first('id', 'label_status');
+async function unwrittenLabel(id, force, machine = false, conn = db) {
+  const existing = await conn(TABLE).where({ id }).first('id', 'label_status');
   if (!existing) return [404, { error: 'Review not found' }];
   if (machine && existing.label_status !== 'unreviewed') {
     return [409, { error: 'A person has already labeled this review', code: 'already_labeled', labelStatus: existing.label_status }];
@@ -58,13 +58,16 @@ async function unwrittenLabel(id, force, machine = false) {
 /**
  * Writes one label. `request` is the parsed label request ({ verdict, seen,
  * seenSubject, note, reason, force }), `correct` the result of correctValueFor.
- * `who` is { labeledBy, machine, actorType, actorId, ip, userAgent }.
+ * `who` is { labeledBy, machine, actorType, actorId, ip, userAgent }. `conn` is
+ * a transaction when the caller wants the label and its audit row to commit (or
+ * not) with its other writes; the audit row is then critical, so a failed
+ * audit rolls the label back.
  * @returns {Promise<{row: object, labelStatus: string} | {status: number, payload: object}>}
  */
-async function writeLabel(id, request, correct, who) {
+async function writeLabel(id, request, correct, who, conn = db) {
   const { verdict, seen, seenSubject, note, reason, force } = request;
   const labelStatus = VERDICT_STATUS[verdict];
-  const update = db(TABLE).where({ id }).update({
+  const update = conn(TABLE).where({ id }).update({
     label: JSON.stringify({ verdict, correct_value: correct.correctValue, note, reason }),
     label_status: labelStatus,
     labeled_by: who.labeledBy,
@@ -79,7 +82,7 @@ async function writeLabel(id, request, correct, who) {
   update.whereRaw('subject_hash IS NOT DISTINCT FROM ?', [seenSubject]);
   const [row] = await update.returning('*');
   if (!row) {
-    const [status, payload] = await unwrittenLabel(id, force, who.machine);
+    const [status, payload] = await unwrittenLabel(id, force, who.machine, conn);
     return { status, payload };
   }
   await recordAuditEvent({
@@ -91,6 +94,7 @@ async function writeLabel(id, request, correct, who) {
     metadata: { capability: row.capability, question_id: row.question_id, verdict, reason, label_status: labelStatus, forced: force, has_correct_value: correct.correctValue !== null, labeled_by: who.labeledBy },
     ip_address: who.ip,
     user_agent: who.userAgent,
+    ...(conn === db ? {} : { trx: conn, critical: true }),
   });
   return { row, labelStatus };
 }

@@ -247,17 +247,19 @@ function flagLine(status, saved) {
   return saved ? 'Saved to Pets. Thanks.' : 'Marked right. Thanks.';
 }
 
-function AccessFlagCard({ flag, serviceId, request }) {
+function AccessFlagCard({ flag, serviceId, request, onChanged }) {
   const [tap, setTap] = useState({ busy: false, status: flag.status === 'right' ? 'right' : null, saved: false, error: '' });
   const amber = flag.tone === 'amber';
   const answered = tap.status === 'right' || tap.status === 'wrong';
   async function send(verdict) {
     setTap((t) => ({ ...t, busy: true, error: '' }));
     try {
-      const out = await request(`/admin/schedule/${encodeURIComponent(serviceId)}/access-flags/${encodeURIComponent(flag.questionId)}`, { method: 'POST', body: JSON.stringify({ verdict }) });
+      const out = await request(`/admin/schedule/${encodeURIComponent(serviceId)}/access-flags/${encodeURIComponent(flag.questionId)}`, { method: 'POST', body: JSON.stringify({ verdict, subjectHash: flag.subjectHash }) });
       setTap({ busy: false, status: out?.status === 'wrong' || out?.status === 'right' ? out.status : verdict, saved: out?.saved === true, error: '' });
     } catch (err) {
-      setTap((t) => ({ ...t, busy: false, error: err?.message || 'Could not save. Try again.' }));
+      // The evidence moved (a newer read, or someone already answered): read the brief again.
+      if (err?.status === 409) onChanged?.();
+      setTap((t) => ({ ...t, busy: false, error: err?.status === 409 ? 'This flag changed. Check it again.' : (err?.message || 'Could not save. Try again.') }));
     }
   }
   return (
@@ -308,7 +310,7 @@ function collectAccessFlags(services, byService) {
   return out;
 }
 
-function AccessFlagsSection({ flags, request }) {
+function AccessFlagsSection({ flags, request, onChanged }) {
   if (!request || !flags.length) return null;
   const readAt = flags.map((f) => f.readAt).filter(Boolean).sort().pop();
   return (
@@ -317,7 +319,7 @@ function AccessFlagsSection({ flags, request }) {
         <span>Before you go in</span>
         {readAt && <span style={{ fontWeight: 400, color: DARK.muted }}>{`Read by AI \u00B7 ${formatETTime(readAt)} ET`}</span>}
       </div>
-      {flags.map((f) => <AccessFlagCard key={f.questionId} flag={f} serviceId={f.serviceId} request={request} />)}
+      {flags.map((f) => <AccessFlagCard key={f.questionId} flag={f} serviceId={f.serviceId} request={request} onChanged={onChanged} />)}
     </div>
   );
 }
@@ -1391,7 +1393,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         />
       )}
       {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
-      <AccessFlagsSection flags={accessFlags} request={request} />
+      <AccessFlagsSection flags={accessFlags} request={request} onChanged={onRetry} />
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
       {request && fertilizerVisits.map(member => <div key={member.id}>
         {fertilizerVisits.length > 1 && <strong>{member.serviceType || member.service_type}</strong>}
