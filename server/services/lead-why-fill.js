@@ -137,7 +137,7 @@ const RIVALS = [
   ['Rentokil', /rentokil/i],
 ];
 
-const RIVAL_USE = RIVALS.map(([name, re]) => [name, new RegExp(RIVAL_USE_LEAD + '(?:' + re.source + ')\\w*' + RIVAL_SHOPPING_TAIL, 'i')]);
+const RIVAL_USE = RIVALS.map(([name, re]) => [name, new RegExp(RIVAL_USE_LEAD + '(?:' + re.source + ')\\w*\\b' + RIVAL_SHOPPING_TAIL, 'i')]);
 
 const SWITCH_REASONS = SWITCH_RULES.map(([reason]) => reason);
 const NOT_BOOKED_REASONS = [...NOT_BOOKED_RULES.map(([reason]) => reason), 'no_response'];
@@ -176,8 +176,11 @@ function planLeadWhy(lead, chunks, facts = {}) {
   if (switchChunks.length) {
     const text = joinText(switchChunks);
     next.switch_reason = firstRule(SWITCH_RULES, text);
-    const named = RIVAL_USE.filter(([, re]) => re.test(text)).map(([name]) => name);
-    if (named.length === 1) next.previous_company = named[0];
+    // Exactly one rival named anywhere in the switch talk, and named in a use
+    // phrase. "We had Turner and Orkin" names two: left unset.
+    const mentioned = RIVALS.filter(([, re]) => re.test(text)).map(([name]) => name);
+    const used = RIVAL_USE.filter(([, re]) => re.test(text)).map(([name]) => name);
+    if (mentioned.length === 1 && used.length === 1) next.previous_company = used[0];
   }
 
   // Only a lead whose status says it did not book (lost / unresponsive), that
@@ -300,10 +303,10 @@ async function loadChunksByLead(conn, leads, now) {
 // Leads with an active visit linked to THAT lead by exact record evidence
 // (lead-related-visits.js, the same rule as the admin lead card). A visit for
 // another inquiry of the same customer never counts.
-// A checkout slot hold is not a booking: the customer may abandon it. Claiming
-// it sets customer_id and clears reservation_expires_at (20260423000001).
+// A checkout slot hold is not a booking: the customer may abandon it. A claimed
+// visit has a customer_id (a staff claim can leave the expiry set).
 function notUnclaimedHold() {
-  this.whereNull('ss.reservation_expires_at');
+  this.whereNull('ss.reservation_expires_at').orWhereNotNull('ss.customer_id');
 }
 
 // A visit booked by phone on the call: call-recording-processor.js records it as

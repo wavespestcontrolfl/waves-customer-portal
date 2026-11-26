@@ -90,6 +90,10 @@ describe('prior-provider evidence (Codex #8521)', () => {
       expect(patch.switch_reason).toBeUndefined();
     }
   });
+  test('a partial name cannot slip past the quote guard; two used rivals stay unset', () => {
+    expect(planLeadWhy(lead(), [chunk('competitor_mention', 'I had Hobsons quote me a price')]).previous_company).toBeUndefined();
+    expect(planLeadWhy(lead(), [chunk('competitor_mention', 'We had Turner and Orkin and they raised the price')]).previous_company).toBeUndefined();
+  });
   test('calling a rival for a price is not use', () => {
     const patch = planLeadWhy(lead(), [chunk('competitor_mention', 'I had called Orkin for a price')]);
     expect(patch.previous_company).toBeUndefined();
