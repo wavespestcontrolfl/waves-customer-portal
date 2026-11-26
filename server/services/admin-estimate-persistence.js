@@ -2102,6 +2102,10 @@ const isPlainRecord = (value) => !!value && typeof value === 'object' && !Array.
 // so a stale field can refuse a save and never pass one.
 const PEST_LIVING_AREA_KEY = /^(home_?sq_?ft|square_?footage|living_?area(_?sq_?ft)?|living_?sq_?ft|heated_?sq_?ft)$/i;
 const PEST_FOOTPRINT_KEY = /footprint|^buildingSqFt$/i;
+// The engine also takes a building footprint from two service blocks' own `sqft` (services.exclusionV2.sqft and
+// services.rodentGuaranteeCombo.sqft, estimate-engine.js). A bare `sqft` anywhere else is another area (a lawn, a bed), so only
+// these two blocks are read; a test fails when the engine reads a third.
+const PEST_SERVICE_FOOTPRINT_BLOCK_KEY = /^(exclusionV2|rodentGuaranteeCombo)$/;
 function savedPestFootprints(estimateData) {
   const { resolvePestFootprint } = require('./pricing-engine/service-pricing');
   const unwrap = (raw) => (isPlainRecord(raw) && Object.prototype.hasOwnProperty.call(raw, 'value') ? raw.value : raw);
@@ -2119,6 +2123,7 @@ function savedPestFootprints(estimateData) {
       const size = sizeOf(value);
       if (size !== null && PEST_FOOTPRINT_KEY.test(key)) found.push(size);
       else if (size !== null && PEST_LIVING_AREA_KEY.test(key)) found.push(resolvePestFootprint({ homeSqFt: size, stories: unwrap(node.stories) }).footprint);
+      else if (PEST_SERVICE_FOOTPRINT_BLOCK_KEY.test(key) && isPlainRecord(value) && sizeOf(value.sqft) !== null) found.push(sizeOf(value.sqft));
       walk(value);
     }
   };

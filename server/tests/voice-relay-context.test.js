@@ -1327,6 +1327,13 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 12000, stories: 1.5 }));
     await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, stories: '0.5' }, { customerId: null });
     expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ stories: 1 }));
+    // A value that is not a count (true, a list, text, zero) is no answer: the tool asks again and states no price.
+    generateEstimate.mockClear();
+    for (const junk of [true, [2], 'two', 0, -1, '', null, { value: 2 }]) {
+      const again = await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, stories: junk }, { customerId: null });
+      expect(again).toContain('how many stories the home has');
+    }
+    expect(generateEstimate).not.toHaveBeenCalled();
   });
 
   test('at or under 5,500 sq ft, and for every other plan, the story count is neither asked for nor used', async () => {

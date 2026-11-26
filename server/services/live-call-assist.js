@@ -88,12 +88,9 @@ function size(value) {
   return typeof n === 'number' && Number.isFinite(n) && n > 0 && n <= 5000000 ? Math.round(n) : null;
 }
 
-// How many stories the caller said the home has, in the website's own bounds (1 to 3; a split level said as 1.5 stays 1.5). The
-// price tool asks for it before it prices pest for a home above 5,500 sq ft (owner 2026-11-26: pest rises with the footprint).
-function storyCount(value) {
-  const n = typeof value === 'string' ? Number(value.trim()) : value;
-  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.max(1, Math.min(3, n)) : null;
-}
+// How many stories the caller said the home has: the phone price tool's own parser, so both read a count the same way. The price
+// tool asks for it before it prices pest for a home above 5,500 sq ft (owner 2026-11-26: pest rises with the footprint).
+const { storyCount } = require('./voice-agent/story-count');
 
 function oneOf(set, value) {
   const v = typeof value === 'string' ? value.trim().toLowerCase() : '';

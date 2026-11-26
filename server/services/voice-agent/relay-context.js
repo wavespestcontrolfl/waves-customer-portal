@@ -1590,9 +1590,8 @@ async function pricingText(input = {}, { practiceLine = false } = {}) {
   // 20,000 sq ft residential bound is refused below as a custom quote, so no story count is asked for it.
   const pestAboveTable = service === 'pest_control' && !!homeSqFt && homeSqFt <= 20000
     && homeSqFt > Number(require('../pricing-engine/constants').PEST.aboveTableStartSqFt);
-  const statedStories = positiveNumber(input.stories);
-  // The website's own bounds (1 to 3), and its own arithmetic: a split level said as 1.5 stories stays 1.5.
-  const stories = statedStories ? Math.max(1, Math.min(3, statedStories)) : null;
+  // A real count only (a number or a numeric string, in the website's bounds of 1 to 3): true or a list is no count, so it is asked again.
+  const stories = require('./story-count').storyCount(input.stories);
 
   const missing = [];
   if (!homeSqFt) missing.push('the home\'s approximate square footage (home_sqft)');

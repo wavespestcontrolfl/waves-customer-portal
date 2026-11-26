@@ -354,6 +354,26 @@ describe('a save the server cannot price: no building above 5,500 sq ft (admin-e
     refused({ result: { results: {} }, inputs: { homeSqFt: 9000, svcPest: true }, engineInputs: { homeSqFt: 9000, services: { pest: { frequency: 'quarterly' } } } });
   });
 
+  test('a building size that only a service block names is read: exclusionV2.sqft and rodentGuaranteeCombo.sqft, posted or stored', () => {
+    // The engine takes these two as a building footprint (property.footprint is only their fallback). Either can be the only size.
+    for (const block of ['exclusionV2', 'rodentGuaranteeCombo']) {
+      const sized = (sqft) => ({ engineInputs: { services: { [block]: { sqft }, pest: { frequency: 'quarterly' } } } });
+      refused(browser(128, sized(10000)));
+      refused(browser(128, sized('10000')));
+      refused(browser(128, sized({ value: 10000, source: 'manual' })));
+      passes(browser(128, sized(5500)));
+      passes(browser(128, sized(null)));
+      refused(browser(128), { storedEstimateData: browser(128, sized(10000)) });
+      refused(browser(128), { storedEstimateData: { engineRequest: { inputs: { services: { [block]: { sqft: 9000 } } } } } });
+    }
+    // A bare sqft under any other block is another area (a lawn above 5,500 sq ft is ordinary), never a building.
+    passes(browser(128, { engineInputs: { homeSqFt: 2000, stories: 1, services: { lawn: { sqft: 9000 }, mosquito: { sqft: 30000 } } } }));
+    // The engine reads a building size from a service block's own sqft in these two places only: a third must be added to the check.
+    const engine = fs.readFileSync(require.resolve('../services/pricing-engine/estimate-engine'), 'utf8');
+    const blocks = [...engine.matchAll(/services\.(\w+)\.sqft\b/g)].map((m) => m[1]);
+    expect([...new Set(blocks)].sort()).toEqual(['exclusionV2', 'rodentGuaranteeCombo']);
+  });
+
   test('a footprint in the estimators\' wrapped measurement form { value, source } is read, posted or stored', () => {
     // Both estimators write a termite bait row's footprint this way; it can be the only size a save names.
     const wrapped = (footprint) => ({ result: { recurring: { services: [
