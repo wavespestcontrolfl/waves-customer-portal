@@ -350,7 +350,17 @@ function etWallClockHHMM(date) {
 // still holding the old, timezone-dropped instant; reconciling those is a
 // data-quality cleanup, not something a key-shape change should do own its
 // own (see the ops note in ingestSource's module docstring / PR notes).
-function extractedEventDedupKeys(title, start, urlKey) {
+//
+// A source that carries its own stable item id (a WordPress post id) passes it
+// as `stableId`: the key is then that id alone, so a rescheduled or retitled
+// item updates one row instead of inserting a second. external_id is unique
+// per source, so the id needs no further scoping. There is no legacy shape to
+// migrate, so both keys are the same.
+function extractedEventDedupKeys(title, start, urlKey, stableId = '') {
+  if (stableId) {
+    const id = stableId.slice(0, 256);
+    return { externalId: id, legacyExternalId: id };
+  }
   const titleKey = title.toLowerCase().slice(0, 80);
   const startKey = start ? `${etDateString(start)}T${etWallClockHHMM(start)}` : '';
   const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
@@ -835,7 +845,8 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   // don't have a UID/guid, so we key on the post-normalization fields.
   // Title is lowercased so casing drift from Claude (e.g. "Boat Parade" vs
   // "BOAT PARADE") doesn't create duplicates either.
-  const { externalId, legacyExternalId } = extractedEventDedupKeys(title, start, eventUrl || '');
+  const stableId = typeof ev.externalId === 'string' ? ev.externalId.trim() : '';
+  const { externalId, legacyExternalId } = extractedEventDedupKeys(title, start, eventUrl || '', stableId);
 
   // Clamp to varchar(128) — events_raw.city per migration
   // 20260427000003. Claude can return long location strings; without
@@ -1372,11 +1383,42 @@ async function pullScrapeSource(source) {
 // map every item through the source's adapter, then reuse the scrape path's
 // validation + upsert so windows, ET parsing and dedup keys stay in one place.
 const MAX_JSON_PAGES = 5;
+// A real page is ~200 KB (100 items); anything near this is a wrong or hostile
+// endpoint, so it is refused before parsing instead of buffered whole.
+const MAX_JSON_BYTES = 4 * 1024 * 1024;
+
+// Read a fetch Response body up to maxBytes and parse it as JSON. The
+// Content-Length header rejects an oversized page up front; the running byte
+// count rejects one that lies about it (or is chunked) before it is buffered.
+async function readJsonBodyCapped(resp, maxBytes = MAX_JSON_BYTES) {
+  const tooBig = () => new Error(`JSON response larger than ${maxBytes} bytes`);
+  const declared = Number(resp.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await resp.body?.cancel().catch(() => {});
+    throw tooBig();
+  }
+  const chunks = [];
+  let received = 0;
+  if (resp.body) {
+    const reader = resp.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw tooBig();
+      }
+      chunks.push(value);
+    }
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
 
 async function fetchJsonPages(source) {
   const ua = source.scrape_config?.userAgent || DEFAULT_BOT_UA;
   const items = [];
-  for (let page = 1; page <= MAX_JSON_PAGES; page += 1) {
+  for (let page = 1; page <= MAX_JSON_PAGES && items.length < MAX_ITEMS_PER_FEED; page += 1) {
     const url = new URL(source.feed_url);
     if (page > 1) url.searchParams.set('page', String(page));
     const controller = new AbortController();
@@ -1386,7 +1428,7 @@ async function fetchJsonPages(source) {
       const resp = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': ua, Accept: 'application/json' } });
       if (!resp.ok) throw new Error(`Status code ${resp.status}`);
       totalPages = Number(resp.headers.get('x-wp-totalpages')) || 1;
-      const body = await resp.json();
+      const body = await readJsonBodyCapped(resp);
       if (!Array.isArray(body)) throw new Error('JSON feed is not an array');
       items.push(...body);
     } finally {
@@ -1520,6 +1562,7 @@ module.exports = {
   extractedEventDedupKeys, // exported for the dedup-key-stability regression tests
   upsertExtractedEvents, // exported for the legacy-key-migration DB test
   pullJsonSource, // exported for the JSON-feed pull test
+  readJsonBodyCapped, // exported for the oversized-body test
   recurrenceMetadataFromIcalEvent,
   recoverEventObjectsFromTruncatedJson,
   escapeBareXmlEntities,

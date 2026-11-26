@@ -69,6 +69,7 @@ const UNFIXABLE = [
   const bySource = (feedUrl) => db('event_sources').where({ feed_url: feedUrl }).first();
 
   beforeEach(async () => {
+    await db.schema.dropTableIfExists('event_source_restore_20261126');
     await db('audit_log').del();
     await db('event_sources').del();
     const off = { enabled: false, consecutive_failures: 7, consecutive_zero_yields: 3, last_error: 'HTTP 403' };
@@ -141,10 +142,20 @@ const UNFIXABLE = [
     expect((await bySource(CVB)).enabled).toBe(true);
   });
 
-  test('does not rename City of Sarasota onto a URL another row already holds', async () => {
-    await db('event_sources').insert({ name: 'Sarasota dup', url: SARASOTA_NEW, feed_url: SARASOTA_NEW, feed_type: 'scrape', scrape_config: '{}' });
+  test('does not touch a row that already owns the new Sarasota URL, nor rename the old row onto it', async () => {
+    await db('event_sources').insert({
+      name: 'Sarasota dup', url: SARASOTA_NEW, feed_url: SARASOTA_NEW, feed_type: 'scrape',
+      scrape_config: JSON.stringify({ contentSelector: '#custom' }), enabled: true,
+    });
+    const ownerBefore = await bySource(SARASOTA_NEW);
+    const oldBefore = await bySource(SARASOTA_OLD);
     await migration.up(db);
-    expect(await bySource(SARASOTA_OLD)).toBeDefined();
+    expect(await bySource(SARASOTA_NEW)).toEqual(ownerBefore);
+    expect(await bySource(SARASOTA_OLD)).toEqual(oldBefore);
+    // down() has nothing recorded for Sarasota and leaves both rows alone.
+    await migration.down(db);
+    expect(await bySource(SARASOTA_NEW)).toEqual(ownerBefore);
+    expect(await bySource(SARASOTA_OLD)).toEqual(oldBefore);
   });
 
   test('down() restores the replaced values and turns the two feeds back off', async () => {
@@ -152,13 +163,46 @@ const UNFIXABLE = [
     await migration.down(db);
 
     const cvb = await bySource(CVB);
-    expect(cvb).toMatchObject({ enabled: false, feed_type: 'scrape' });
+    expect(cvb).toMatchObject({ enabled: false, feed_type: 'scrape', consecutive_failures: 7, consecutive_zero_yields: 3, last_error: 'HTTP 403' });
     expect(cvb.scrape_config).toEqual(SEEDED);
     const selby = await bySource(SELBY);
-    expect(selby.enabled).toBe(false);
+    expect(selby).toMatchObject({ enabled: false, consecutive_failures: 7, last_error: 'HTTP 403' });
     expect(selby.scrape_config).toEqual({ contentSelector: '.mec-skin-list-events-container', maxHtmlChars: 60000, maxEvents: 10 });
     expect((await bySource(NORTH_PORT)).scrape_config).toEqual({ ...SEEDED });
     expect(await bySource(SARASOTA_NEW)).toBeUndefined();
+    expect(await bySource(SARASOTA_OLD)).toMatchObject({ url: SARASOTA_OLD, enabled: false });
     expect((await bySource(SARASOTA_OLD)).scrape_config).toEqual(SEEDED);
+    expect(await db.schema.hasTable('event_source_restore_20261126')).toBe(false);
+  });
+
+  test('down() never turns off a feed that was already on before up(), and keeps later operator edits', async () => {
+    // Selby was already on (an operator had fixed it) and had its own UA.
+    await db('event_sources').where({ feed_url: SELBY }).update({
+      enabled: true, consecutive_failures: 0, last_error: null,
+      scrape_config: JSON.stringify({ contentSelector: '.mec-skin-list-events-container', userAgent: 'OperatorBot/2' }),
+    });
+    await migration.up(db);
+    expect(await db('audit_log').where({ resource_id: (await bySource(SELBY)).id })).toHaveLength(0);
+    // An operator also edits unrelated config on CVB after up().
+    await db('event_sources').where({ feed_url: CVB }).update({
+      scrape_config: db.raw(`scrape_config || '{"maxEvents": 40}'::jsonb`),
+    });
+    await migration.down(db);
+
+    const selby = await bySource(SELBY);
+    expect(selby.enabled).toBe(true);
+    expect(selby.scrape_config).toEqual({ contentSelector: '.mec-skin-list-events-container', userAgent: 'OperatorBot/2' });
+    const cvb = await bySource(CVB);
+    expect(cvb).toMatchObject({ enabled: false, feed_type: 'scrape' });
+    expect(cvb.scrape_config).toEqual({ ...SEEDED, maxEvents: 40 });
+  });
+
+  test('a rerun keeps the first recorded values, so down() returns to the pre-migration state', async () => {
+    await migration.up(db);
+    await migration.up(db);
+    await migration.down(db);
+    expect((await bySource(CVB)).feed_type).toBe('scrape');
+    expect((await bySource(CVB)).enabled).toBe(false);
+    expect((await bySource(SELBY)).scrape_config.userAgent).toBeUndefined();
   });
 });

@@ -89,6 +89,9 @@ function eventasticItemToExtractedEvent(item) {
   const time = to24Hour(meta.eventastic_start_time);
 
   return {
+    // The WordPress post id is the item's identity: a rescheduled or retitled
+    // post must update its row, not add a second one.
+    externalId: item.id != null && String(item.id).trim() ? `wp:${String(item.id).trim()}` : undefined,
     title,
     startAt: time ? `${startDate}T${time}:00` : startDate,
     venueName: venueFor(item, meta),

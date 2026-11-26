@@ -1,9 +1,10 @@
 // Eventastic WP REST items -> extracted events. Fixtures are trimmed copies of
 // the public bradentongulfislands.com /wp-json/wp/v2/event response (2026-11-26).
 const { eventasticToExtractedEvents, eventasticItemToExtractedEvent } = require('../services/event-json-adapters');
-const { normalizeExtractedEvent } = require('../services/event-ingestion');
+const { normalizeExtractedEvent, pullJsonSource, readJsonBodyCapped } = require('../services/event-ingestion');
 
 const item = (meta, extra = {}) => ({
+  id: 28790,
   title: { rendered: 'Christmas in Cortez' },
   link: 'https://www.bradentongulfislands.com/event/christmas-in-cortez/',
   excerpt: { rendered: '<p>Cortez&#8217;s village &amp; fishing festival&#8230;</p>\n' },
@@ -24,6 +25,7 @@ const item = (meta, extra = {}) => ({
 describe('eventastic adapter', () => {
   test('maps a one-off event: ET wall clock, decoded text, city, street venue, page link', () => {
     expect(eventasticItemToExtractedEvent(item())).toEqual({
+      externalId: 'wp:28790',
       title: 'Christmas in Cortez',
       startAt: '2026-12-12T10:00:00',
       venueName: '4415 119th Street West',
@@ -72,5 +74,62 @@ describe('eventastic adapter', () => {
     expect(row.city).toBe('cortez');
     const noCity = eventasticItemToExtractedEvent(item({ eventastic_city: '' }));
     expect(normalizeExtractedEvent(source, noCity, nowMs).row.city).toBe('bradenton');
+  });
+});
+
+describe('eventastic identity: a rescheduled post updates one row', () => {
+  const source = { id: 's1', coverage_geo: ['bradenton'] };
+  const nowMs = Date.parse('2026-11-26T12:00:00Z');
+  const keyOf = (it) => normalizeExtractedEvent(source, eventasticItemToExtractedEvent(it), nowMs).row.external_id;
+
+  test('same post id keeps its key when the date, time, title and link change', () => {
+    const before = item();
+    const after = item(
+      { eventastic_start_date: '2026-12-19', eventastic_start_time: '2:00 pm' },
+      { title: { rendered: 'Christmas in Cortez (new date)' }, link: 'https://www.bradentongulfislands.com/event/christmas-in-cortez-2/' },
+    );
+    expect(keyOf(before)).toBe('wp:28790');
+    expect(keyOf(after)).toBe(keyOf(before));
+  });
+
+  test('different post ids keep different keys even for the same title and time', () => {
+    expect(keyOf(item({}, { id: 1 }))).not.toBe(keyOf(item({}, { id: 2 })));
+  });
+
+  test('an item without an id falls back to the title/date/url key', () => {
+    expect(keyOf(item({}, { id: undefined }))).toMatch(/^christmas in cortez\|2026-12-12T10:00\|/);
+  });
+});
+
+describe('JSON body size cap', () => {
+  const streamOf = (...chunks) => new ReadableStream({
+    start(controller) { chunks.forEach((c) => controller.enqueue(Buffer.from(c))); controller.close(); },
+  });
+
+  test('parses a body under the cap, including one split across chunks', async () => {
+    const resp = new Response(streamOf('[{"a":', '1}]'));
+    expect(await readJsonBodyCapped(resp, 100)).toEqual([{ a: 1 }]);
+  });
+
+  test('rejects a declared-oversize body without reading it', async () => {
+    const resp = new Response(streamOf('[1]'), { headers: { 'content-length': '5000' } });
+    await expect(readJsonBodyCapped(resp, 100)).rejects.toThrow(/larger than 100 bytes/);
+  });
+
+  test('rejects a body that outgrows the cap while streaming (no content-length)', async () => {
+    const resp = new Response(streamOf('[', '1,'.repeat(40), '1]'));
+    await expect(readJsonBodyCapped(resp, 50)).rejects.toThrow(/larger than 50 bytes/);
+  });
+
+  test('pullJsonSource fails the pull on an oversized page before any parsing or write', async () => {
+    const realFetch = global.fetch;
+    global.fetch = jest.fn(async () => new Response(streamOf('[1]'), { headers: { 'content-length': String(64 * 1024 * 1024) } }));
+    try {
+      await expect(pullJsonSource({
+        id: 's1', feed_url: 'https://example.invalid/wp-json/wp/v2/event', scrape_config: { jsonAdapter: 'eventastic' },
+      })).rejects.toThrow(/larger than/);
+    } finally {
+      global.fetch = realFetch;
+    }
   });
 });
