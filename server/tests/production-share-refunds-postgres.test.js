@@ -1326,6 +1326,40 @@ postgres('production share refunds', () => {
       expect((await signals([visit])).get(visit)).toEqual([expect.stringMatching(/^orphan-stmt:/)]);
     });
 
+    it('own week: the owner\'s credit holds for the parked statement refund he saw, and a second parked refund takes it out of force', async () => {
+      const webhook = require('../routes/stripe-webhook');
+      const id = await tech('Sample Alpha');
+      await settings(id);
+      const customerId = await customer();
+      const visit = await stop(id, W1, '100.00', customerId);
+      const invoiceId = await invoiceFor(customerId, '100.00', { scheduled_service_id: visit });
+      const [payer] = await trx('payers').insert({ display_name: 'Sample Payer' }).returning('id');
+      const [stmt] = await trx('payer_statements').insert({
+        payer_id: payer.id, period_start: '2026-09-01', period_end: '2026-09-30', terms_snapshot: 'due_on_receipt', token: randomUUID(), stripe_payment_intent_id: 'pi_own_stmt',
+      }).returning('id');
+      await trx('invoices').where({ id: invoiceId }).update({ payer_statement_id: stmt.id });
+      const charge = (refundId, cents, cumulative) => ({
+        id: 'ch_own_stmt', payment_intent: 'pi_own_stmt', amount: 10000, amount_refunded: cumulative, refunded: false,
+        refunds: { data: [{ id: refundId, amount: cents, created: 1790000000 }] },
+      });
+      await webhook._handleChargeRefunded(charge('re_a', 800, 800));
+      // The parked refund flags the stop in its own week at $0 until the owner answers.
+      expect(rowOf(await preview(id, W1), visit)).toMatchObject({
+        kind: 'refund_flagged', creditCents: 0, needsReview: true, refundSignals: [expect.stringMatching(/^orphan:/)],
+      });
+      expect((await override({ technicianId: id, visitId: visit, weekStart: W1, creditCents: 9200, reason: 'Refund was $8' })).status).toBe(200);
+      expect(rowOf(await preview(id, W1), visit)).toMatchObject({ kind: 'owner_set', creditCents: 9200, needsReview: false });
+      // A replay of the same refund event changes nothing: his answer still holds.
+      await webhook._handleChargeRefunded(charge('re_a', 800, 800));
+      expect(rowOf(await preview(id, W1), visit)).toMatchObject({ kind: 'owner_set', creditCents: 9200, needsReview: false });
+      // A second parked refund lands on the same row: his answer no longer covers it, the stop reads $0 and asks again.
+      await webhook._handleChargeRefunded(charge('re_b', 700, 1500));
+      expect(await trx('stripe_orphan_charges').where({ stripe_payment_intent_id: 'pi_own_stmt' })).toHaveLength(1);
+      expect(rowOf(await preview(id, W1), visit)).toMatchObject({
+        kind: 'owner_override_refund_changed', creditCents: 0, needsReview: true, reason: expect.stringMatching(/new refund/),
+      });
+    });
+
     it('a dispute that closed won or warning_closed leaves the status-only signal and the status suffix; a recorded refund amount stays', async () => {
       const id = await tech('Sample Alpha');
       await settings(id);
