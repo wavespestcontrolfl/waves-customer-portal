@@ -466,9 +466,9 @@ async function routeKeepsWindows(candidate, { conn, env, request, caches }) {
   });
   if (result?.feasible !== true) return `route_${result?.reason || 'unknown'}`;
   // The engine compares the route with and without the new visit, and both have the moved stops at their new hours.
-  // So each moved stop's own modeled end is read here: the move alone may not carry it past the shift end.
-  if (candidate.shiftEndMin != null && (result.arrivals || []).some((arrival) => moved.has(String(arrival.id))
-    && minutesOf(arrival.departure) > candidate.shiftEndMin)) return 'route_shift_end';
+  // So the move's own effect is read here: no stop of the modeled route, moved or after a moved one, may end after
+  // the shift end. A day that already runs past its shift end gets no make-room hour.
+  if (candidate.shiftEndMin != null && (result.arrivals || []).some((arrival) => minutesOf(arrival.departure) > candidate.shiftEndMin)) return 'route_shift_end';
   // find-time's own test: `fit.detourMinutes > capFor(date, tech.id)`.
   if (request.detourCap && result.detourMinutes > request.detourCap(candidate.dateStr, candidate.techId)) return 'detour_cap';
   return true;

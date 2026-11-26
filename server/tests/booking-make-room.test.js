@@ -1682,17 +1682,20 @@ describe('technician shift hours', () => {
     expect(report.byReason.route_shift_end).toBeGreaterThan(0);
   });
 
-  test('a moved stop the route finishes after the shift end refuses the hour, though the engine saw no change from the new visit', async () => {
-    // The engine passes the route; its arrivals say when each stop ends. D (moved to 12:00) ends at 13:10.
-    const ends = (dEnd) => jest.fn(() => ({ feasible: true, detourMinutes: ROUTE_DETOUR_MIN, arrivals: [
+  test('a stop the modeled route finishes after the shift end refuses the hour, though the engine saw no change from the new visit', async () => {
+    // The engine passes the route; its arrivals say when each stop ends.
+    const ends = (dEnd, eEnd = '14:00') => jest.fn(() => ({ feasible: true, detourMinutes: ROUTE_DETOUR_MIN, arrivals: [
       { id: 'visit-b', arrival: '10:00', departure: '11:00' }, { id: 'visit-c', arrival: '11:00', departure: '12:00' },
-      { id: 'visit-d', arrival: '12:10', departure: dEnd }, { id: 'visit-e', arrival: '13:20', departure: '14:20' },
+      { id: 'visit-d', arrival: '12:10', departure: dEnd }, { id: 'visit-e', arrival: '13:00', departure: eEnd },
     ] }));
-    expect(await prove(shiftDeps(hours(8, 13), { evaluateArrivalPlacement: ends('13:10') }))).toEqual({ reason: 'route_shift_end' });
-    // The exact shift end is kept. E is not a moved stop: its end is the engine's to compare.
-    expect((await prove(shiftDeps(hours(8, 13), { evaluateArrivalPlacement: ends('13:00') }))).moves).toHaveLength(3);
+    // A moved stop (D, moved to 12:00) ends at 13:10.
+    expect(await prove(shiftDeps(hours(8, 13), { evaluateArrivalPlacement: ends('13:10', '13:00') }))).toEqual({ reason: 'route_shift_end' });
+    // A stop after the moved ones (E, not moved) ends at 14:01.
+    expect(await prove(shiftDeps(hours(8, 14), { evaluateArrivalPlacement: ends('13:00', '14:01') }))).toEqual({ reason: 'route_shift_end' });
+    // The exact shift end is kept.
+    expect((await prove(shiftDeps(hours(8, 14), { evaluateArrivalPlacement: ends('13:10', '14:00') }))).moves).toHaveLength(3);
     // No set hours: the ends are not read.
-    expect((await prove(shiftDeps(null, { evaluateArrivalPlacement: ends('23:00') }))).moves).toHaveLength(3);
+    expect((await prove(shiftDeps(null, { evaluateArrivalPlacement: ends('23:00', '23:30') }))).moves).toHaveLength(3);
   });
 
   test('the real dependencies are the gate reader and the shift loader', () => {

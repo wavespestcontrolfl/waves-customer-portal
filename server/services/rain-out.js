@@ -1808,6 +1808,10 @@ async function checkSlots({ targets, caller = null } = {}) {
           // The warning names the stop, window and minutes (no customer
           // name, so a technician's row reads the same).
           detail: true,
+          // GATE_TECH_SHIFT_HOURS: the route's shift end is read only for a technician whose hours the
+          // caller may ask about (mayAskShiftOf): an admin any, a technician its own and only when the
+          // slot names it. Otherwise a `shift_end` answer would tell another technician's hours.
+          shiftHours: caller?.isAdmin === true || (!!p.technicianId && mayAskShiftOf(caller, p.technicianId)),
           // The pickers' Google road times are staff-only: a technician's
           // check stays on the model. Counted against the admin who asked
           // (picker-road-spend.js).

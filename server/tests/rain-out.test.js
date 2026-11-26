@@ -5498,6 +5498,45 @@ describe('checkSlots: paid road times are staff-only', () => {
   });
 });
 
+// GATE_TECH_SHIFT_HOURS (D4): the route's shift end is asked only for a technician whose hours the caller may
+// ask about. A `shift_end` answer for another technician's route would tell a technician that one's hours.
+describe('checkSlots: the route\'s shift end is asked only for hours the caller may see', () => {
+  const SERVICE = '11111111-1111-4111-8111-111111111111';
+  const TECH = '22222222-2222-4222-8222-222222222222';
+  const OTHER_TECH = '44444444-4444-4444-8444-444444444444';
+  const asked = async (caller, technicianId) => {
+    const arrival = require('../services/scheduling/arrival-route');
+    const routing = jest.spyOn(arrival, 'arrivalWindowRoutingEnabled').mockReturnValue(true);
+    const check = jest.spyOn(arrival, 'checkArrivalPlacement').mockResolvedValue({ feasible: true });
+    try {
+      const { checkSlots } = require('../services/rain-out');
+      await checkSlots({ targets: [{ date: '2035-01-02', window: { start: '09:00', end: '10:00' }, serviceId: SERVICE, ...(technicianId ? { technicianId } : {}) }], caller });
+      expect(check).toHaveBeenCalledTimes(1);
+      return check.mock.calls[0][0].shiftHours;
+    } finally {
+      routing.mockRestore();
+      check.mockRestore();
+    }
+  };
+
+  test('an admin: any technician, and a slot that names none', async () => {
+    expect(await asked({ isAdmin: true, technicianId: null }, OTHER_TECH)).toBe(true);
+    expect(await asked({ isAdmin: true, technicianId: TECH }, null)).toBe(true);
+  });
+
+  test('a technician: its own route only, in any spelling of its id, and never a slot that names no technician', async () => {
+    expect(await asked({ isAdmin: false, technicianId: TECH }, TECH)).toBe(true);
+    expect(await asked({ isAdmin: false, technicianId: TECH }, TECH.toUpperCase())).toBe(true);
+    expect(await asked({ isAdmin: false, technicianId: TECH }, OTHER_TECH)).toBe(false);
+    expect(await asked({ isAdmin: false, technicianId: TECH }, null)).toBe(false);
+  });
+
+  test('no caller: no one\'s', async () => {
+    expect(await asked(null, TECH)).toBe(false);
+    expect(await asked({ isAdmin: 'true', technicianId: null }, TECH)).toBe(false);
+  });
+});
+
 // Rain-out keeps rain-OK stops (owner 2026-11-01): on a RAIN move the
 // rest-of-route list leaves out a stop whose services are all rain-OK, and the
 // efficacy sentence skips a rain-OK service. Any other reason moves the whole

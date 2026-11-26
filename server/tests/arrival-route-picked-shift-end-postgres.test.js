@@ -103,6 +103,12 @@ postgres('the route check holds a picked block to the shift end (real Postgres)'
     // The visit is reached after 12:00, so it ends after 13:00: this is what the shift end refused.
     const visitRow = free.arrivals.find((row) => row.id === made13.visit);
     expect(visitRow.departure > '13:00').toBe(true);
+    // A caller that may not learn this technician's hours: they are not read, and the answer is the one with the gate off.
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    const blind = await check(made13, '12:00', '13:00', { shiftHours: false });
+    expect({ feasible: blind.feasible, arrivals: blind.arrivals }).toEqual({ feasible: true, arrivals: free.arrivals });
+    expect(await check(made13, '12:00', '13:00', { shiftHours: true })).toMatchObject({ feasible: false, reason: 'shift_end' });
+    delete process.env.GATE_TECH_SHIFT_HOURS;
     // A caller's own shift end stands with the gate off (the finders pass theirs).
     expect(await check(made13, '12:00', '13:00', { shiftEndMin: 13 * 60 })).toMatchObject({ feasible: false, reason: 'shift_end' });
   });

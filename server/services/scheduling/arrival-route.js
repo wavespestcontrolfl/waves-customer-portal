@@ -1620,8 +1620,10 @@ async function checkArrivalPlacement({
   const loadContext = options.conn?.isTransaction && roads !== true ? loadSavedRouteContext : loadArrivalRouteContext;
   const context = await loadContext({ fromActiveStop: live, ...options });
   // A caller's own `shiftEndMin` stands; otherwise the picked block's technician's (pickedShiftEnd).
+  // `shiftHours: false`: the caller may not learn this technician's hours (a technician's picker asking
+  // about another technician, rain-out.js mayAskShiftOf), so they are not read and the answer cannot tell.
   const shiftEndMin = Number.isFinite(options.shiftEndMin) ? options.shiftEndMin
-    : await pickedShiftEnd(context, { conn: options.conn, date: options.date, windowStart, windowEnd, durationMinutes });
+    : options.shiftHours === false ? null : await pickedShiftEnd(context, { conn: options.conn, date: options.date, windowStart, windowEnd, durationMinutes });
   // `lateDays`: only the staff picked-hour verdict asks for it, so an hour the
   // list offered on an already-late day is judged the same when picked. Saves and every other caller do not.
   const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false, ...(lateDays === true ? { lateDays: true } : {}),
