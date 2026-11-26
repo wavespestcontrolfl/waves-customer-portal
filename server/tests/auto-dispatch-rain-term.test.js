@@ -5,15 +5,19 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({
   DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60, findValidCandidateSlots: jest.fn(),
 }));
-// The catalog read is faked (no database here); rainFitFor stays the real classifier.
+// The visit's stored services read is faked (no database here); rainFitFor stays the real classifier.
 jest.mock('../services/scheduling/rain-fit', () => ({
   ...jest.requireActual('../services/scheduling/rain-fit'),
-  withCatalogKeys: jest.fn(async (items) => items.map((i) => (i.serviceKey ? i : i.name))),
+  bookingRainPlan: jest.fn(async ({ serviceType }) => ({ services: [serviceType], rainSpan: null })),
 }));
+// The run's grouped-move check (apply.js previewGroupMove): allows everything unless a test says otherwise.
+jest.mock('../services/auto-dispatch/apply', () => ({ previewGroupMove: jest.fn(async () => null) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 
 const candidateSlots = require('../services/auto-dispatch/candidate-slots');
 const flexTier = require('../services/auto-dispatch/flex-tier');
+const apply = require('../services/auto-dispatch/apply');
+const rainFit = require('../services/scheduling/rain-fit');
 const rainTerm = require('../services/auto-dispatch/rain-term');
 const { ZONE_COORDS } = require('../services/scheduling/forecast-zones');
 const { recordAuditEvent } = require('../services/audit-log');
@@ -39,7 +43,9 @@ const WET_DAYS = {
   '2026-11-29': 90, '2026-11-30': 10, '2026-12-01': 85, '2026-12-02': 10,
 };
 
-const run = { runId: 'run9', today: TODAY, nowDate: NOW };
+const run = {
+  runId: 'run9', today: TODAY, nowDate: NOW, config: { guardMode: 'flex' }, lockBoundary: '2026-11-28',
+};
 
 function visit(over = {}) {
   return {
@@ -55,7 +61,9 @@ function flexGuard(service) {
   return { window, meta: { mode: 'flex', anchor: service.scheduled_date, neighbors, radius_days: 5, window } };
 }
 
-const cand = (date, technician_id = 't1') => ({ date, technician_id, start_time: '09:00' });
+const cand = (date, technician_id = 't1', start_time = '09:00') => ({
+  date, technician_id, start_time, end_time: '10:00',
+});
 const freshEval = () => ({ kind: 'no_change', audit: { constraints: { lock_boundary: '2026-11-28' } } });
 
 async function stateWith(read) {
@@ -292,6 +300,101 @@ describe('per-visit verdict', () => {
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'auto_dispatch.rain_term_shadow', resource_id: 'run9', metadata: expect.objectContaining({ in_range: 1 }),
     }));
+  });
+});
+
+describe('review fixes (Codex pre-push)', () => {
+  const allWet = async () => stateWith(async () => hoursFor(WET_DAYS));
+  const noteVisit = async (state, service, over = {}) => {
+    const evalResult = freshEval();
+    await rainTerm.note(state, {
+      service, prefs: { p: 1 }, ctx: {}, guard: flexGuard(service), evalResult, run, ...over,
+    });
+    return evalResult.audit.constraints.rain_term;
+  };
+
+  test('the whole visit is classified: add-ons and live siblings count, read by the move screens\' own reader', async () => {
+    const state = await allWet();
+    // The visit's own service is rain-OK, a sibling on the same stop is a spray: the stop is outdoor.
+    rainFit.bookingRainPlan.mockResolvedValueOnce({ services: ['WaveGuard Assessment', 'Exterior Pest Spray'], rainSpan: null });
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')] });
+    const row = await noteVisit(state, visit({ service_type: 'WaveGuard Assessment' }));
+    expect(row.reason).toBe('drier_date_found');
+    expect(rainFit.bookingRainPlan).toHaveBeenCalledWith(expect.objectContaining({
+      bestRows: true, serviceId: 'v1', serviceTypes: [], moveAlone: false,
+    }), expect.anything());
+    // Every service rain-OK: not outdoor.
+    rainFit.bookingRainPlan.mockResolvedValueOnce({ services: ['WaveGuard Assessment', 'Interior Inspection'], rainSpan: null });
+    expect((await noteVisit(state, visit({ service_type: 'WaveGuard Assessment' }))).reason).toBe('not_outdoor');
+  });
+
+  test('a destination the grouped-move check refuses is not a move: the next slot is tried, refusals are kept', async () => {
+    const state = await allWet();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-11-30'), cand('2026-12-02')] });
+    apply.previewGroupMove.mockImplementation(async (_svc, slot) => (slot.date === '2026-12-02'
+      ? { code: 'GROUP_MEMBER_GUARD', description: 'Grouped visit would be refused at apply - member frozen' } : null));
+    const row = await noteVisit(state, visit());
+    expect(row.best_5day).toBeNull();
+    expect(row.would_move).toBe(false);
+    expect(row.best_73h.date).toBe('2026-11-30');
+    expect(row.reason).toBe('drier_date_only_with_73h_floor');
+    expect(row.group_refusals).toEqual([expect.objectContaining({ date: '2026-12-02', code: 'GROUP_MEMBER_GUARD' })]);
+    // The check ran with the run's config, the visit's prefs and the lock boundary, on the slot itself.
+    expect(apply.previewGroupMove).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'v1' }),
+      expect.objectContaining({ date: '2026-12-02', start_time: '09:00' }),
+      expect.objectContaining({ guardMode: 'flex', prefs: { p: 1 }, lockBoundary: '2026-11-28' }),
+    );
+    // Everything refused: group_refused, never a move.
+    apply.previewGroupMove.mockResolvedValue({ code: 'GROUP_MEMBER_GUARD', description: 'no' });
+    const refused = await noteVisit(state, visit());
+    expect(refused).toMatchObject({ would_move: false, best_5day: null, best_73h: null, reason: 'group_refused' });
+    // An unreadable group is a refusal too, not a throw.
+    apply.previewGroupMove.mockRejectedValue(new Error('read failed'));
+    expect((await noteVisit(state, visit())).group_refusals[0].code).toBe('GROUP_CHECK_UNREADABLE');
+    apply.previewGroupMove.mockReset().mockResolvedValue(null);
+  });
+
+  test('the search keeps the visit\'s technician at generation and lifts the legacy cap; a full list is uncertain, not "none"', async () => {
+    const state = await allWet();
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [] });
+    await noteVisit(state, visit());
+    const searchCtx = candidateSlots.findValidCandidateSlots.mock.calls[0][2];
+    expect(searchCtx.keepTech).toBe(true);
+    expect(searchCtx.scoreCap).toBeGreaterThan(80);
+    // An unassigned visit searches every technician.
+    candidateSlots.findValidCandidateSlots.mockClear();
+    await noteVisit(state, visit({ technician_id: null }));
+    expect(candidateSlots.findValidCandidateSlots.mock.calls[0][2].keepTech).toBeUndefined();
+    // A list as long as the cap may have been cut: no answer is not "no drier date".
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({
+      candidates: Array.from({ length: searchCtx.scoreCap }, () => cand('2026-11-29', 't1')),
+    });
+    expect((await noteVisit(state, visit())).reason).toBe('uncertain_capped');
+  });
+
+  test('73-hour floor: the boundary date stays, and each slot starts 73 hours or more from now', async () => {
+    // 10:00 AM ET Nov 26: 73 hours out is 11:00 AM Nov 29. The visit is on Nov 30 and Nov 29 is dry.
+    const later = { ...run, nowDate: new Date('2026-11-26T15:00:00Z') };
+    const state = await stateWith(async () => hoursFor({
+      '2026-11-29': 10, '2026-11-30': 90, '2026-12-01': 90, '2026-12-02': 90,
+    }));
+    const service = visit({ scheduled_date: '2026-11-30' });
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-11-29', 't1', '08:00'), cand('2026-11-29', 't1', '12:00')] });
+    const evalResult = freshEval();
+    await rainTerm.note(state, {
+      service, prefs: {}, ctx: {}, guard: flexGuard(service), evalResult, run: later,
+    });
+    const row = evalResult.audit.constraints.rain_term;
+    expect(row.best_73h).toMatchObject({ date: '2026-11-29', start_time: '12:00' });
+    expect(row.best_5day).toBeNull();
+    // Only an early slot on the boundary date: it starts before the floor, so no 73-hour answer.
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-11-29', 't1', '08:00')] });
+    const early = freshEval();
+    await rainTerm.note(state, {
+      service, prefs: {}, ctx: {}, guard: flexGuard(service), evalResult: early, run: later,
+    });
+    expect(early.audit.constraints.rain_term).toMatchObject({ best_73h: null, reason: 'no_drier_date' });
   });
 });
 

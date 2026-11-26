@@ -48,6 +48,7 @@ const flexTier = require('./flex-tier');
 const { DAY_OPEN, DAY_CLOSE } = require('./candidate-slots');
 const { ZONE_COORDS, stopForecastZone } = require('../scheduling/forecast-zones');
 const { getNwsHourlyRain, getNwsHourlyRainPatient } = require('../weather-forecast');
+const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const MODE_SHADOW = 'shadow';
 // Days out of the forecast window the rain term looks at, and how far each lead is trusted.
@@ -67,6 +68,11 @@ const POP_SPAN = 50;
 const FLOOR_HOURS_PENDING = 73;
 // At most this many drier-date searches per run: each is a read-only slot search.
 const MAX_SEARCHES_PER_RUN = 60;
+// The search lifts the legacy first-80 cap (candidate-slots.js SCORE_CAP) to this; reaching it means the list may be cut.
+const SEARCH_SCORE_CAP = 1000;
+// Grouped-move checks asked per answer, and refusals kept on the row.
+const MAX_PREVIEWS_PER_ANSWER = 6;
+const MAX_REFUSALS_SHOWN = 4;
 const HOUR_MIN = 60;
 
 const REASONS = {
@@ -79,6 +85,8 @@ const REASONS = {
   BUDGET: 'search_budget',
   ERROR: 'error',
   NONE: 'no_drier_date',
+  CAPPED: 'uncertain_capped',
+  GROUP_REFUSED: 'group_refused',
   FOUND: 'drier_date_found',
   FOUND_73H: 'drier_date_only_with_73h_floor',
 };
@@ -168,34 +176,37 @@ function areaOf(service) {
   });
 }
 
-// Outdoor = rain-fit.js's own class for the visit's catalog identity: 'avoid'.
+// Outdoor = rain-fit.js's own class for everything that moves with the visit:
+// bookingRainPlan, the reader the move screens use, gives the visit's stored
+// primary service, its add-ons and every live service that shares the stop.
 async function isOutdoor(service) {
-  const { rainFitFor, withCatalogKeys } = require('../scheduling/rain-fit');
-  const items = await withCatalogKeys([{ name: service.service_type, serviceKey: service.service_key_snapshot }], db);
-  return rainFitFor(items) === 'avoid';
+  const { rainFitFor, bookingRainPlan } = require('../scheduling/rain-fit');
+  const plan = await bookingRainPlan({
+    bestRows: true, serviceType: service.service_type, serviceTypes: [], serviceKeys: [], serviceId: service.id, moveAlone: false,
+  }, db);
+  return rainFitFor(plan.services) === 'avoid';
 }
 
-// The first ET date whose first work hour is at least FLOOR_HOURS_PENDING from now.
-function floorDate73(nowDate, today) {
-  const { parseETDateTime } = require('../../utils/datetime-et');
-  const earliest = nowDate.getTime() + FLOOR_HOURS_PENDING * 3600 * 1000;
-  for (let d = 0; d < 10; d++) {
-    const day = shiftDateStr(today, d);
-    const open = parseETDateTime(`${day}T${String(Math.floor(DAY_OPEN / HOUR_MIN)).padStart(2, '0')}:00`);
-    if (open && open.getTime() >= earliest) return day;
-  }
-  return shiftDateStr(today, 4);
+// The earliest start a 73-hour floor allows, and the ET date it falls on.
+const floorInstant = (run) => run.nowDate.getTime() + FLOOR_HOURS_PENDING * 3600 * 1000;
+const floorDate73 = (run) => etDateString(new Date(floorInstant(run)));
+
+// A slot's ET start against the 73-hour floor: the boundary date stays, its early slots do not.
+function startsAfterFloor(slot, run) {
+  const at = parseETDateTime(`${toDateStr(slot.date)}T${String(slot.start_time || '').slice(0, 5)}`);
+  return !!at && at.getTime() >= floorInstant(run);
 }
 
 // The run's own window (5-day landing floor) and the same window with the
-// 73-hour floor: flexTierMoveWindow again, with only its `today` moved.
+// 73-hour floor: flexTierMoveWindow again, with only its `today` moved so its
+// landing floor is the date 73 hours out (slots on it are checked by start time).
 function bandsFor(service, guard, run) {
   const meta = guard && guard.meta;
   if (!guard || !guard.window || !meta || meta.mode !== 'flex') return null;
   const pending = flexTier.flexTierMoveWindow({
     origDate: service.scheduled_date,
     anchorDate: meta.anchor,
-    today: shiftDateStr(floorDate73(run.nowDate, run.today), -MIN_DESTINATION_DAYS_OUT),
+    today: shiftDateStr(floorDate73(run), -MIN_DESTINATION_DAYS_OUT),
     neighbors: meta.neighbors,
     radiusDays: meta.radius_days,
   });
@@ -203,44 +214,81 @@ function bandsFor(service, guard, run) {
 }
 
 // The search ctx: the run's own, with the arrival search on and no road reader
-// (the zero-paid-call settings), and the wider window.
-function searchCtx(ctx, band, meta) {
+// (the zero-paid-call settings), the wider window, and the technician kept at
+// generation (keepTech) with the legacy cap lifted (scoreCap), so the first 80
+// ranked survivors cannot hide the one dry slot of the visit's own technician.
+function searchCtx(ctx, band, meta, service) {
   return {
-    ...ctx, arrivalSearch: true, roadTravel: null, tierWindow: band, tierMeta: { ...meta, window: band },
+    ...ctx,
+    arrivalSearch: true,
+    roadTravel: null,
+    tierWindow: band,
+    tierMeta: { ...meta, window: band },
+    scoreCap: SEARCH_SCORE_CAP,
+    ...(service.technician_id ? { keepTech: true } : {}),
   };
 }
 
-// The drier date among free same-technician slots admitted by `band`: lowest
-// expected wetness, nearest the current date on a tie; null when none beats the
-// current day by DRIER_MARGIN.
-function bestDrier(candidates, {
-  service, band, run, currentWet, wetByDate,
+// Slots that beat the current day by DRIER_MARGIN inside `band` (and, with
+// `afterFloor`, that start 73 hours or more from now), best first: lowest
+// expected wetness, nearest the current date, earliest start.
+function drierOptions(candidates, {
+  service, band, run, currentWet, wetByDate, afterFloor,
 }) {
   const orig = toDateStr(service.scheduled_date);
-  let best = null;
-  for (const cand of candidates) {
-    const date = toDateStr(cand.date);
+  const out = [];
+  for (const slot of candidates) {
+    const date = toDateStr(slot.date);
     const lead = daysBetween(run.today, date);
     const wet = wetByDate.get(date);
     if (date === orig || wet == null || !trustFor(lead) || !flexTier.flexWindowAdmits(band, orig, date)) continue;
+    if (afterFloor && !startsAfterFloor(slot, run)) continue;
     const expected = expectedWetness(wet, lead);
     if (currentWet - expected < DRIER_MARGIN) continue;
-    const dist = Math.abs(daysBetween(orig, date));
-    if (!best || expected < best.expected || (expected === best.expected && dist < best.dist)) {
-      best = { date, wetness: round2(wet), lead_days: lead, expected: round2(expected), dist };
-    }
+    out.push({
+      slot, date, wetness: round2(wet), lead_days: lead, expected: round2(expected), dist: Math.abs(daysBetween(orig, date)),
+    });
   }
-  return best && {
-    date: best.date, wetness: best.wetness, lead_days: best.lead_days, expected: best.expected,
-  };
+  return out.sort((a, b) => a.expected - b.expected || a.dist - b.dist || String(a.slot.start_time).localeCompare(String(b.slot.start_time)));
 }
 
-// Free slots on the visit's technician inside the wider window, read-only.
+// The run's own grouped-move check (apply.js previewGroupMove, the one pass 1 runs on
+// every move) on one slot: null = the visit and everything that moves with it may go.
+async function groupRefusal(slot, { service, prefs, run, memo }) {
+  const key = `${slot.date}|${slot.start_time}|${slot.technician_id}`;
+  if (!memo.has(key)) {
+    try {
+      const { previewGroupMove } = require('./apply');
+      memo.set(key, await previewGroupMove(service, slot, { ...run.config, prefs, lockBoundary: run.lockBoundary }));
+    } catch (err) {
+      memo.set(key, { code: 'GROUP_CHECK_UNREADABLE', description: String(err && err.message).slice(0, 160) });
+    }
+  }
+  return memo.get(key);
+}
+
+// The first option the grouped-move check allows; refusals are kept for the row.
+async function firstAllowed(options, ctx, refusals) {
+  let asked = 0;
+  for (const opt of options) {
+    if (asked >= MAX_PREVIEWS_PER_ANSWER) break;
+    const refusal = await groupRefusal(opt.slot, ctx);
+    asked += 1;
+    if (!refusal) return { date: opt.date, start_time: opt.slot.start_time, wetness: opt.wetness, lead_days: opt.lead_days, expected: opt.expected };
+    refusals.set(`${opt.date}|${opt.slot.start_time}`, {
+      date: opt.date, start_time: opt.slot.start_time, code: refusal.code, description: String(refusal.description || '').slice(0, 200),
+    });
+  }
+  return null;
+}
+
+// Free slots in the wider window (same technician only when the visit has one), read-only.
 async function freeSlots(service, prefs, ctx, bands) {
   const { findValidCandidateSlots } = require('./candidate-slots');
-  const found = await findValidCandidateSlots(service, prefs, searchCtx(ctx, bands.pending73h, bands.meta));
+  const found = await findValidCandidateSlots(service, prefs, searchCtx(ctx, bands.pending73h, bands.meta, service));
   const tech = service.technician_id ? String(service.technician_id) : null;
-  return ((found && found.candidates) || []).filter((c) => !tech || String(c.technician_id) === tech);
+  const all = (found && found.candidates) || [];
+  return { slots: all.filter((c) => !tech || String(c.technician_id) === tech), capped: all.length >= SEARCH_SCORE_CAP };
 }
 
 function rowFor(service, area, lead, wet, extra) {
@@ -256,24 +304,43 @@ function rowFor(service, area, lead, wet, extra) {
   };
 }
 
+function verdictReason({ best5, best73, capped, refused }) {
+  if (best5) return REASONS.FOUND;
+  if (best73) return REASONS.FOUND_73H;
+  if (capped) return REASONS.CAPPED;
+  return refused ? REASONS.GROUP_REFUSED : REASONS.NONE;
+}
+
 // The verdict for a visit already known wet and outdoor: searches once, answers twice.
-async function searchVerdict({ service, prefs, ctx, guard, run }, state, base, wetByDate) {
+async function searchVerdict({
+  service, prefs, ctx, guard, run,
+}, state, base, wetByDate) {
   const bands = bandsFor(service, guard, run);
   if (!bands) return { ...base, reason: REASONS.NO_BAND };
   if (state.searches >= MAX_SEARCHES_PER_RUN) return { ...base, reason: REASONS.BUDGET };
   state.searches += 1;
-  const candidates = await freeSlots(service, prefs, ctx, bands);
-  const currentWet = base.current.wetness;
-  const pick = (band) => bestDrier(candidates, {
-    service, band, run, currentWet, wetByDate,
-  });
-  const best5 = pick(bands.current);
-  const best73 = pick(bands.pending73h);
-  let reason = REASONS.NONE;
-  if (best5) reason = REASONS.FOUND;
-  else if (best73) reason = REASONS.FOUND_73H;
+  const { slots, capped } = await freeSlots(service, prefs, ctx, bands);
+  const common = {
+    service, run, currentWet: base.current.wetness, wetByDate,
+  };
+  const check = {
+    service, prefs, run, memo: new Map(),
+  };
+  const refusals = new Map();
+  const best5 = await firstAllowed(drierOptions(slots, { ...common, band: bands.current }), check, refusals);
+  const best73 = await firstAllowed(drierOptions(slots, { ...common, band: bands.pending73h, afterFloor: true }), check, refusals);
+  const floor5 = shiftDateStr(run.today, MIN_DESTINATION_DAYS_OUT);
+  const shown = [...refusals.values()].slice(0, MAX_REFUSALS_SHOWN).map((r) => (r.date < floor5 ? { ...r, below_5day_floor: true } : r));
   return {
-    ...base, best_5day: best5, best_73h: best73, would_move: !!best5, would_move_73h: !!best73, reason,
+    ...base,
+    best_5day: best5,
+    best_73h: best73,
+    would_move: !!best5,
+    would_move_73h: !!best73,
+    ...(shown.length ? { group_refusals: shown } : {}),
+    reason: verdictReason({
+      best5, best73, capped, refused: refusals.size > 0,
+    }),
   };
 }
 

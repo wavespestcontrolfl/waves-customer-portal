@@ -753,9 +753,12 @@ function failedPlacementAudit(fresh, pm, lockBoundary, applyErr) {
     scores: built.scores,
     prefsSnapshot: prefs.raw_snapshot,
     routeMetrics: { ...built.routeMetrics, attempts: applyErr.attemptsTried || 1 },
-    constraints: withMinutesRule(carryDryTime(built, evaluation, applyErr.lastAttempted), {
-      service, evaluation, cand: applyErr.lastAttempted, candScore: attemptedScore,
-    }).constraints,
+    constraints: {
+      ...withMinutesRule(carryDryTime(built, evaluation, applyErr.lastAttempted), {
+        service, evaluation, cand: applyErr.lastAttempted, candScore: attemptedScore,
+      }).constraints,
+      ...rainTerm.kept(fresh),
+    },
   };
 }
 

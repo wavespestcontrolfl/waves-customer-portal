@@ -2464,4 +2464,17 @@ describe('rain term shadow (GATE_AUTO_DISPATCH_RAIN_TERM, owner 2026-11-26)', ()
       process.env.AUTO_DISPATCH_ALLOW_APPLY = prevApply;
     }
   });
+  test('shadow: a failed apply that names its last attempt keeps the rain row on the failed decision', async () => {
+    process.env[ENV] = 'shadow';
+    const prevApply = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE], drops: {} });
+      apply.applyAutoDispatchMove.mockRejectedValue(Object.assign(new Error('taken'), { code: 'SLOT_TAKEN', lastAttempted: CAND_MODERATE, attemptsTried: 2 }));
+      await runAutoDispatch({ mode: 'apply' });
+      expect(lastDecision('failed').constraints.rain_term).toMatchObject({ mode: 'shadow', lead_days: 3 });
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prevApply;
+    }
+  });
 });
