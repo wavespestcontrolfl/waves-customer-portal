@@ -1584,8 +1584,18 @@ async function pricingText(input = {}, { practiceLine = false } = {}) {
         + 'office for exact pricing. Do not promise a callback.');
   }
 
+  // Pest keeps rising with the FOOTPRINT above 5,500 sq ft (owner 2026-11-26), and a footprint is the living area over the stories:
+  // 12,000 sq ft on one floor and on two floors are different prices. So a home above that size is not priced until the caller says
+  // how many stories it has. At or under it the tool prices as it always has (no story count asked or used). A home above the
+  // 20,000 sq ft residential bound is refused below as a custom quote, so no story count is asked for it.
+  const pestAboveTable = service === 'pest_control' && !!homeSqFt && homeSqFt <= 20000
+    && homeSqFt > Number(require('../pricing-engine/constants').PEST.aboveTableStartSqFt);
+  const statedStories = positiveNumber(input.stories);
+  const stories = statedStories ? Math.max(1, Math.min(3, Math.round(statedStories))) : null;
+
   const missing = [];
   if (!homeSqFt) missing.push('the home\'s approximate square footage (home_sqft)');
+  if (pestAboveTable && !stories) missing.push('how many stories the home has (stories)');
   if (['lawn_care', 'mosquito', 'tree_shrub'].includes(service) && !lotSqFt && !(service === 'lawn_care' && lawnSqFt)) {
     missing.push('the approximate lot size in square feet (lot_sqft)');
   }
@@ -1612,6 +1622,7 @@ async function pricingText(input = {}, { practiceLine = false } = {}) {
 
   const engineInput = {
     homeSqFt: sqft,
+    ...(pestAboveTable ? { stories } : {}),
     lotSqFt: lot,
     ...(lawnSqFt ? { lawnSqFt: Math.max(500, Math.min(200000, lawnSqFt)) } : {}),
     // Property type MATTERS to the price (PROPERTY_TYPE_ADJ discounts a condo

@@ -1299,6 +1299,41 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(generateEstimate).not.toHaveBeenCalled();
   });
 
+  // Pest above the 5,500 sq ft footprint table (owner 2026-11-26): the footprint is the living area over the stories, so a large
+  // home's story count is asked for before a price is stated. Without it a two-story 12,000 sq ft home would be quoted as a
+  // 12,000 sq ft footprint.
+  test('pest on a home above 5,500 sq ft asks for the story count first, then prices the footprint', async () => {
+    const asked = await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000 }, { customerId: null });
+    expect(asked).toContain('stories');
+    expect(asked).toMatch(/Do NOT guess/i);
+    expect(asked).not.toMatch(/\$\d/);
+    expect(generateEstimate).not.toHaveBeenCalled();
+
+    generateEstimate.mockReturnValue({
+      lineItems: [{
+        service: 'pest_control', perApp: 132, monthly: 44, annual: 528, monthlyAfterDiscount: 44, annualAfterDiscount: 528,
+        frequency: 'quarterly', visitsPerYear: 4, initialFee: 99, requiresManualReview: false,
+      }],
+      summary: {},
+    });
+    const out = await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, stories: 2 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 12000, stories: 2 }));
+    expect(out).toContain('$132 per application');
+    // A story count outside 1 to 3 is clamped, as on the website.
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, stories: 5 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ stories: 3 }));
+  });
+
+  test('at or under 5,500 sq ft, and for every other plan, the story count is neither asked for nor used', async () => {
+    generateEstimate.mockReturnValue({ lineItems: [], summary: {} });
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 5500, stories: 2 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenCalledTimes(1);
+    expect(generateEstimate.mock.calls[0][0]).not.toHaveProperty('stories');
+    await executeTool('get_pricing', { service: 'termite_bait', home_sqft: 12000, stories: 2 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenCalledTimes(2);
+    expect(generateEstimate.mock.calls[1][0]).not.toHaveProperty('stories');
+  });
+
   test('a building beyond the residential bounds refuses instead of clamping down', async () => {
     const out = await executeTool('get_pricing', {
       service: 'pest_control', home_sqft: 50000,
