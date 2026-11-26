@@ -243,7 +243,8 @@ function tierPricedRow(raw, base, savings, rate) {
   const annual = money(raw.annualAfterDiscount);
   if (!visits || !(annual > 0) || Math.round((annual / visits) * 100) !== netCents) return false;
   const savedLists = [raw.annualBeforeDiscount, raw.annual].map(money)
-    .filter((list) => list !== null && Math.round(Math.round(list * 100) / visits) === baseCents);
+    // At an exact half cent the share rounds either way (a float divide or whole cents), as tierNetCents allows.
+    .filter((list) => list !== null && [Math.round((list / visits) * 100), Math.round(Math.round(list * 100) / visits)].includes(baseCents));
   return [baseCents * visits, ...savedLists.map((list) => Math.round(list * 100))]
     .some((listCents) => tierNetCents(listCents, rate).includes(Math.round(annual * 100)));
 }

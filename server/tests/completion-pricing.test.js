@@ -184,6 +184,11 @@ describe('completion estimate evidence', () => {
     const fourVisits = lawnRow({ annual: 540.27, annualAfterDiscount: 540.27, visitsPerYear: 4 }, 135.07);
     expect(quote(fourVisits, silver([engineLawn({ frequency: 4, annual: 600.3, annualBeforeDiscount: 600.3, annualAfterDiscount: 540.27 })])))
       .toEqual([150.08, 135.07, [['WaveGuard Silver', 15.01, 10, true]]]);
+    // A list-price row that saved $150.07 for that same annual (a float divide) still proves the tier at $135.07.
+    const floatSaved = { ...line, perApplicationPrice: 135.07, parentRecurringDiscounted: true, sourceLine: { service: 'pest_control',
+      perTreatment: 150.07, annual: 600.3, annualAfterDiscount: 540.27, visitsPerYear: 4 } };
+    expect(quote(floatSaved, { tierDiscounted: true, estimateTier: { tier: 'silver', amount: 0.1 } }))
+      .toEqual([150.07, 135.07, [['WaveGuard Silver', 15, 10, true]]]);
     // Two engine lines of the service, none, or no tier the estimate itself names (a staff discount on recurring work,
     // a Bronze estimate).
     expect(quote(lawnRow(), silver([engineLawn(), engineLawn({ annual: 1200, annualBeforeDiscount: 1200 })]))).toEqual(oneLine);
