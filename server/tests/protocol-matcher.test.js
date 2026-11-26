@@ -456,6 +456,9 @@ describe('a later stage named anywhere in a flea, cockroach or bed bug name', ()
     ['Bed Bug Treatment 3', ['bed_bug', 3, 'bed_bug_followup']],
     ['Cockroach Treatment Service Visit 2 of 3', ['cockroach', 3, 'cockroach_followup']],
     ['Flea Control Service (Visit 2)', ['flea', 2, 'flea_followup']],
+    ['Flea Treatment 2 of 2 Visits', ['flea', 2, 'flea_followup']],
+    ['Bed Bug Treatment 2 Day 14', ['bed_bug', 3, 'bed_bug_followup']],
+    ['Cockroach Treatment Service 2 - recheck', ['cockroach', 3, 'cockroach_followup']],
   ])('%s is the later card', (name, expected) => {
     expect(stage(name)).toEqual(expected);
   });
@@ -463,6 +466,8 @@ describe('a later stage named anywhere in a flea, cockroach or bed bug name', ()
   test('the stage in the name outranks the catalog key, as "treatment 2" already did', () => {
     expect(stage('Flea Control Service Recheck', 'flea_tick')).toEqual(['flea', 2, 'flea_followup']);
     expect(stage('Flea Control Service', 'flea_tick')).toEqual(['flea', 1, 'flea_service']);
+    // A conjunction inside the service name is not a package extra (the legacy flea_tick name; without its key the name is a tick job).
+    expect(stage('Flea & Tick Yard Treatment Service Recheck', 'flea_tick')).toEqual(['flea', 2, 'flea_followup']);
   });
 
   // A package sold on the first visit names its later visit as an extra, or counts the visits sold.
@@ -480,6 +485,11 @@ describe('a later stage named anywhere in a flea, cockroach or bed bug name', ()
     ['Flea Treatment (2 Visits)', ['flea', 1, 'flea_service']],
     ['Bed Bug Treatment 2-Visit Package', ['bed_bug', 2, 'bed_bug_treatment']],
     ['Bed Bug Treatment 2 treatments', ['bed_bug', 2, 'bed_bug_treatment']],
+    // A follow-up the name rules out.
+    ['German Roach Initial Treatment (no follow-up)', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Flea Control Service without recheck', ['flea', 1, 'flea_service']],
+    ['German Roach Treatment 2-bedroom apartment', ['cockroach', 1, 'german_roach_cleanout']],
+    ['Flea Treatment 1 of 2 Visits', ['flea', 1, 'flea_service']],
     // A number that counts rooms is not a visit number.
     ['German Roach Treatment 2 bedrooms', ['cockroach', 1, 'german_roach_cleanout']],
     ['Flea Treatment 2 rooms', ['flea', 1, 'flea_service']],

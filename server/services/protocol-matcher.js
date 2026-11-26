@@ -518,24 +518,30 @@ function mistingSystemMatchOverride(serviceType, serviceKey) {
 const STAGE_BY_NAME_RULES = { bed_bug: 'bed_bug_followup', flea: 'flea_followup', cockroach: 'cockroach_followup' };
 const LATER_STAGE_WORD = '(?:re-?check|follow[\\s-]?up|clearance)';
 const LATER_STAGE_RE = new RegExp(`\\b${LATER_STAGE_WORD}\\b`, 'i');
-// "Treatment 2", "Visit #3", "Visit 2 of 3", "2nd treatment", "third visit". The number must end the phrase: "Treatment 2
-// bedrooms" counts rooms.
-const NUMBERED_STAGE_RE = /\b(?:treatment|visit|service)\s*#?\s*[23]\b(?=\s*(?:$|[^a-z0-9\s]|of\s+\d))|\b(?:second|third|2nd|3rd)\s+(?:treatment|visit|service)\b/i;
+// "Treatment 2", "Visit #3", "Treatment 2 Day 14", "2nd treatment", "third visit". The number must end the phrase or carry a day:
+// "Treatment 2 bedrooms" and "Treatment 2-bedroom apartment" count rooms.
+const NUMBERED_STAGE_RE = /\b(?:treatment|visit|service)\s*#?\s*[23]\b(?=\s*(?:$|[^a-z0-9\s-]|-(?![a-z])|(?:day|week)\b))|\b(?:second|third|2nd|3rd)\s+(?:treatment|visit|service)\b/i;
+// "Visit 2 of 3", "Treatment 2 of 2 Visits": read before the visit counts are taken out.
+const STAGE_OF_TOTAL_RE = /\b(?:treatment|visit|service)\s*#?\s*[23]\s+of\s+\d+\b/i;
 // What a package sold on the first visit says about its later visits. These phrases are taken out, and the rest of the name is
 // read for a stage, so "Visit 2 with Recheck" is still visit 2:
-//   - a later visit named as an extra: "Cleanout + 14 Day Follow-up", "Service with a free follow-up" (at most 4 words between);
+//   - a later visit named as an extra or ruled out: "Cleanout + 14 Day Follow-up", "Service with a free follow-up", "(no
+//     follow-up)". Only filler words may sit between: "Flea & Tick Yard Treatment Service Recheck" is a recheck;
 //   - "(Follow-up included)", "recheck is included";
 //   - a count of visits sold: "(2 Visits)", "2-Visit Package", "3 treatments".
-// Each word in the first pattern must end in a separator, so one long run of letters is never split and retried.
-const PACKAGE_PHRASE_RES = [
-  new RegExp(`(?:\\+|&|\\b(?:and|with|plus|incl|includes|including)\\b)[^a-z0-9]*(?:[a-z0-9]+[^a-z0-9]+){0,4}?${LATER_STAGE_WORD}\\b(?:[^a-z0-9]*includ(?:ed|ing)\\b)?`, 'gi'),
+const EXTRA_FILLER = '(?:an?|one|the|free|complimentary|included|\\d+|days?|weeks?|months?)';
+const PACKAGE_EXTRA_RES = [
+  new RegExp(`(?:\\+|&|\\b(?:and|with|without|plus|incl|includes|including|no)\\b)[^a-z0-9]*(?:${EXTRA_FILLER}[^a-z0-9]+){0,4}${LATER_STAGE_WORD}\\b(?:[^a-z0-9]*includ(?:ed|ing)\\b)?`, 'gi'),
   new RegExp(`\\b${LATER_STAGE_WORD}\\b[^a-z0-9]*(?:is\\s+|are\\s+)?includ(?:ed|ing)\\b`, 'gi'),
-  /\b\d+\s*-?\s*(?:visits?|treatments?|services?|pack(?:age)?s?|x)\b/gi,
 ];
+const VISIT_COUNT_RE = /\b\d+\s*-?\s*(?:visits?|treatments?|services?|pack(?:age)?s?|x)\b/gi;
 
-// The name with the package phrases taken out. Free text, so only its first 200 characters are read.
-function ownStageName(serviceType) {
-  return PACKAGE_PHRASE_RES.reduce((name, phrase) => name.replace(phrase, ' '), String(serviceType || '').slice(0, 200));
+// Whether the name itself states a later stage, and the name with its package phrases taken out (the older side-by-side terms read
+// that). Free text, so only its first 200 characters are read.
+function stageInName(serviceType) {
+  const noExtras = PACKAGE_EXTRA_RES.reduce((name, phrase) => name.replace(phrase, ' '), String(serviceType || '').slice(0, 200));
+  const own = noExtras.replace(VISIT_COUNT_RE, ' ');
+  return { own, later: STAGE_OF_TOTAL_RE.test(noExtras) || LATER_STAGE_RE.test(own) || NUMBERED_STAGE_RE.test(own) };
 }
 
 // The rule for a booking: the first rule of its program whose terms the name carries, or the rule that claims its catalog
@@ -544,11 +550,11 @@ function ownStageName(serviceType) {
 // "Flea Treatment (2 Visits)" is the first visit of two, not "flea treatment 2".
 function ruleFor(keyRule, rules, normalized, serviceType, programKey) {
   const laterReason = STAGE_BY_NAME_RULES[programKey] || null;
-  const own = laterReason ? ownStageName(serviceType) : '';
-  const ownNormalized = laterReason ? normalize(own) : '';
+  const stage = laterReason ? stageInName(serviceType) : { own: '', later: false };
+  const ownNormalized = laterReason ? normalize(stage.own) : '';
   const named = rules.find((rule) => rule.terms.some((term) => matchesTerm(laterReason && rule.reason === laterReason ? ownNormalized : normalized, term)));
   if (named?.explicitStage) return named;
-  const later = laterReason && (LATER_STAGE_RE.test(own) || NUMBERED_STAGE_RE.test(own)) ? rules.find((rule) => rule.reason === laterReason) : null;
+  const later = stage.later ? rules.find((rule) => rule.reason === laterReason) : null;
   return later || keyRule || named;
 }
 
