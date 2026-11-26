@@ -1652,6 +1652,18 @@ describe('technician shift hours', () => {
     expect(ask(12 * 60, 12 * 60)).toEqual({ reason: 'past_day_close' });
   });
 
+  test('a moved stop whose service is longer than its window is judged on the service length', async () => {
+    // D keeps its 1-hour window (to 12:00-13:00) and has 90 minutes of work: it runs to 13:30.
+    const rows = exampleDay().map((row) => (row.id === 'visit-d' ? { ...row, estimated_duration_minutes: 90 } : row));
+    const long = (shift) => Object.assign(shiftDeps(shift), { loadDayStops: jest.fn(async () => rows) });
+    expect(await prove(long(hours(8, 13)))).toEqual({ reason: 'past_shift_end' });
+    expect(at9((await check({ deps: long(hours(8, 13)) })).report)).toBeUndefined();
+    expect((await prove(long({ startMin: 8 * 60, endMin: 13 * 60 + 30, source: 'roster' }))).moves).toHaveLength(3);
+    // A service shorter than the window: the window is the block.
+    const short = exampleDay().map((row) => (row.id === 'visit-d' ? { ...row, estimated_duration_minutes: 30 } : row));
+    expect(await prove(Object.assign(shiftDeps({ startMin: 8 * 60, endMin: 12 * 60 + 45, source: 'roster' }), { loadDayStops: jest.fn(async () => short) }))).toEqual({ reason: 'past_shift_end' });
+  });
+
   test('the real dependencies are the gate reader and the shift loader', () => {
     const deps = _internals.defaultDeps();
     expect(deps.shiftHoursOn).toBe(require('../config/feature-gates').techShiftHoursLive);

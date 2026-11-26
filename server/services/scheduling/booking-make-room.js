@@ -78,7 +78,8 @@
  * byte-identical days, checks and report.
  *
  * Technician shift hours (GATE_TECH_SHIFT_HOURS, D4, read at call time): the new visit starts and ends inside its
- * technician's shift that day (outside_shift), and every moved stop still ends by the shift end (past_shift_end). The
+ * technician's shift that day (outside_shift), and every moved stop, at the longer of its window and its service
+ * length, still ends by the shift end (past_shift_end). The
  * finder, the page's offer and the hold's proof read the shifts once (loadCheckFacts). A technician with no set hours
  * is held to the day close only. A failed read offers nothing and fails the proof. Gate off: no read, same answers.
  *
@@ -211,7 +212,8 @@ function buildChain(own, { startMin, durationMin, closeMin, shiftMin = shiftMinu
     const toMin = range.startMin + shift;
     if (toMin + widthMin > closeMin) return { reason: 'past_day_close' };
     // GATE_TECH_SHIFT_HOURS: a moved stop still ends by its technician's shift end (`shiftEndMin`; null: no shift).
-    if (shiftEndMin != null && toMin + widthMin > shiftEndMin) return { reason: 'past_shift_end' };
+    // Its block is the longer of its window and its service length (window-rules.js rowBlockMinutes).
+    if (shiftEndMin != null && toMin + Math.max(widthMin, Number(row.estimated_duration_minutes) || 0) > shiftEndMin) return { reason: 'past_shift_end' };
     if (moves.length && toMin < Math.max(...moves.map((m) => m.toMin + m.widthMin))) return { reason: 'moved_stops_overlap' };
     moves.push({ row, fromMin: range.startMin, toMin, widthMin });
     busyUntil = Math.max(busyUntil, toMin + widthMin);

@@ -1998,6 +1998,13 @@ tech-day and zone locks; any failure is the ordinary `SLOT_UNAVAILABLE` and
 no hold is written. This check includes staff-booked appointments at the
 proposed destinations even after their original estimate holds expire.
 An expired, unclaimed hold at a destination frees that time.
+With `GATE_TECH_SHIFT_HOURS` on (dark), the offer and every proof (reserve,
+extend, accept) also hold the hour to its technician's shift that day: the
+new visit starts and ends inside the shift, and each moved stop, at its
+longer of window and service length, still ends by the shift end. An hour
+that fails is not offered, and a proof that fails is the ordinary
+`SLOT_UNAVAILABLE`. A failed read of the hours offers nothing and fails the
+proof. Gate off: the hours are not read.
 The hold stores the stops that would move in
 `scheduled_services.make_room_moves`. While that hold is live its moves'
 destinations stay busy for every other offer, reserve, same-slot refresh,
