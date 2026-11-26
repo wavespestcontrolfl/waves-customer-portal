@@ -3167,7 +3167,7 @@ async function assertHoldMintable(project, holdRequested, { database = db, linke
 }
 
 // The checks that need no invoice. Returns { status, code, error } or null.
-function reportHoldRequestRefusal(project, projectCols, customer) {
+async function reportHoldRequestRefusal(project, projectCols, customer) {
   if (!wdoReportHoldLive()) {
     return { status: 422, code: 'hold_not_enabled', error: 'Holding the report until it is paid is not turned on.' };
   }
@@ -3188,8 +3188,8 @@ function reportHoldRequestRefusal(project, projectCols, customer) {
 
 // The promise is "sent once paid": a report the automatic release would refuse today (a signature, an omission
 // that needs an override reason, no email) is not held; staff use the normal send.
-function holdReleasabilityRefusal(project, customer) {
-  const notReleasable = heldReleaseBlocker(project, customer);
+async function holdReleasabilityRefusal(project, customer) {
+  const notReleasable = await heldReleaseBlocker(project, customer);
   return notReleasable
     ? { status: 422, code: 'hold_not_releasable', error: `This report could not be sent by itself after payment: ${notReleasable}. Fix that, or use Send report + invoice.` }
     : null;
@@ -3783,7 +3783,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer || {}, { applyReportRule: true });
     const isResendSend = Boolean(project.sent_at || project.status === 'sent');
     if (heldRelease) {
-      const sent = await sendHeldReportEmailAndCopies({
+      // The release's email, requestor copies and text (its once-only marker), so a takeover never repeats a text.
+      const sent = await sendHeldReport({
         link: { refreshed: updatedProject, reportUrl }, customer, invoice: heldRelease.invoice, wdoPdf, wdoFiling, ownClaim: heldRelease.ownClaim,
       });
       Object.assign(channels, sent.channels);
@@ -3842,7 +3843,9 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     const digits = String(customer?.phone || '').replace(/\D/g, '');
     const normalizedPhone = digits.length === 11 && digits.startsWith('1') ? `+${digits}`
       : digits.length === 10 ? `+1${digits}` : null;
-    if (!customer?.phone) {
+    if (heldRelease) {
+      // A held report's text went with the release step above (or was skipped there after a failed email).
+    } else if (!customer?.phone) {
       channels.sms = { ok: false, error: 'No phone on file' };
     } else if (!normalizedPhone) {
       channels.sms = { ok: false, error: `Invalid phone format: ${customer.phone}` };
@@ -3902,7 +3905,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         : 'partial')
       : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
     const deliveryUpdate = {
-      delivery_channels: channels,
+      delivery_channels: manualSendChannelsWrite(heldRelease, channels),
       delivery_status: deliveryStatus,
       last_delivery_at: db.fn.now(),
       updated_at: db.fn.now(),
@@ -4159,7 +4162,7 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
     // Not due yet is not a delivery failure: no attempt is burned.
     if (!invoice) return await revertToHeld('invoice_not_settled', { countAttempt: false });
     ctx.customer = project.customer_id ? await loadProjectCustomer(project.customer_id) : null;
-    const blocked = heldReleaseBlocker(project, ctx.customer);
+    const blocked = await heldReleaseBlocker(project, ctx.customer);
     if (blocked) return await revertToHeld(blocked);
 
     // The signed PDF is validated and archived BEFORE the report link is published: a failure here leaves no token
@@ -4284,7 +4287,7 @@ async function loadSettledHoldInvoice(project) {
 }
 
 // The same gates as /send. Returns a reason string, or null when the report may go.
-function heldReleaseBlocker(project, customer) {
+async function heldReleaseBlocker(project, customer) {
   if (!customer) return 'Customer record missing';
   const sigState = wdoSignatureFreshness(project);
   if (!sigState.signed) return 'Licensee signature required, re-sign to release the paid report';
@@ -4297,8 +4300,10 @@ function heldReleaseBlocker(project, customer) {
   if (readiness.missing.length > 0) {
     return `Missing details, staff must press Send report and give a reason: ${readiness.missing.map((m) => m.label).join('; ')}`;
   }
-  const emailRecipient = ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
-  return emailRecipient.email ? null : 'No email on file, the FDACS-13645 PDF is delivered by email';
+  // The address the release really sends to (a service contact who declines email falls back to the holder).
+  const emailRecipient = await ProjectEmail.resolveProjectEmailRecipientForSend(customer, { applyReportRule: true })
+    .catch(() => ({ email: null }));
+  return emailRecipient?.email ? null : 'No email on file that accepts email, the FDACS-13645 PDF is delivered by email';
 }
 
 // Report link and portal stamps, as /send does (a hold send minted no link).
@@ -4369,6 +4374,15 @@ function manualHeldRelease({ isWdo, updatedProject, project, sendClaimToken }) {
   return { invoice: { id: updatedProject.invoice_id }, ownClaim: { id: project.id, delivery_claim_token: sendClaimToken } };
 }
 
+// What a manual send records in delivery_channels. A held report MERGES its results into the stored release state
+// (the archived filing it may have delivered, the blocked-email counter that moves the email key, the text marker), so a
+// failed or uncertain attempt leaves the next one, by hand or by the sweep, on the same filing and key.
+function manualSendChannelsWrite(heldRelease, channels) {
+  return heldRelease
+    ? db.raw("coalesce(delivery_channels, '{}'::jsonb) || ?::jsonb", [JSON.stringify(channels)])
+    : channels;
+}
+
 // The manual send's FDACS PDF, built and archived BEFORE any channel send (fail closed): the PDF *is* the WDO
 // deliverable, and the archive is the record of the legal filing actually emailed. A held report resumes (or archives)
 // the release filing. Returns { wdoPdf, wdoFiling }, or { error, logMessage } when nothing may be sent.
@@ -4395,7 +4409,8 @@ async function buildManualSendFiling({ heldRelease, updatedProject, customer, te
 // The customer email, the realtor copies (after the email) and the courtesy text.
 async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim }) {
   const { channels } = await sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim });
-  if (!channels.email.ok) return { channels };
+  // The FDACS PDF rides on the email only: no text without it.
+  if (!channels.email.ok) return { channels: { ...channels, sms: { ok: false, error: 'Skipped — email delivery did not succeed' } } };
   channels.sms = await sendHeldReportTextOnce({ project: link.refreshed, customer, invoice, reportUrl: link.reportUrl, wdoFiling, ownClaim });
   return { channels };
 }
@@ -4831,7 +4846,7 @@ async function holdRequestRefused(res, project, customer, holdRequested) {
   // The arming transaction judges the same things again under the locks.
   let refusal = null;
   if (holdRequested) {
-    refusal = reportHoldRequestRefusal(project, await db('projects').columnInfo().catch(() => ({})), customer);
+    refusal = await reportHoldRequestRefusal(project, await db('projects').columnInfo().catch(() => ({})), customer);
     if (!refusal && await require('../services/project-report-hold').customerHasCredit(project.customer_id)) {
       refusal = { status: 409, code: 'hold_has_credit', error: 'This customer has account credit, which would settle the invoice before the report is held. Use Send report + invoice.' };
     }
@@ -4857,7 +4872,7 @@ async function holdInvoiceRefused(res, invoice, hold) {
 // Dry run keys (only while the gate is on, for a WDO): whether this send could hold the report.
 async function holdDryRunKeys({ holdRequested, isWdoProject, project, invoice, isPayerBilledPreview, customer }) {
   if (!wdoReportHoldLive() || !isWdoProject) return {};
-  const available = reportHoldRequestRefusal(project, await db('projects').columnInfo().catch(() => ({})), customer) === null
+  const available = (await reportHoldRequestRefusal(project, await db('projects').columnInfo().catch(() => ({})), customer)) === null
     && !(await require('../services/project-report-hold').customerHasCredit(project.customer_id))
     && !isPayerBilledPreview && !invoice.payer_statement_id && Number(invoice.total) > 0;
   const keys = { report_hold: holdRequested, report_hold_available: available };
@@ -4966,7 +4981,7 @@ async function armReportHold({ hold, project, invoice, customer, expectedFingerp
       || (expectedFingerprint && String(expectedFingerprint) !== billingFingerprintHash(lockedInvoice))) {
       throw holdRefusal(409, 'hold_invoice_changed', 'The invoice changed while this was being sent. Nothing was sent. Refresh and send again.');
     }
-    const notReleasable = holdReleasabilityRefusal(locked, customer);
+    const notReleasable = await holdReleasabilityRefusal(locked, customer);
     if (notReleasable) throw holdRefusal(notReleasable.status, notReleasable.code, notReleasable.error);
     if (locked.report_hold_status !== 'held' && (!lockedCustomer || Number(lockedCustomer.account_credits) > 0)) {
       throw holdRefusal(409, 'hold_has_credit', 'This customer has account credit, which would settle the invoice before the report is held. Use Send report + invoice.');
@@ -5101,7 +5116,14 @@ function heldInvoiceProviderHandoff({ invoice, project, deliveryClaimToken, reci
     if (billingFingerprint(live) !== billingFingerprint(invoice) || due !== expectedDue || !(due > 0)) {
       return refuse('HELD_INVOICE_CHANGED', 'The invoice amount changed before delivery');
     }
-    return require('../services/invoice-helpers').selfPayAtDispatch(invoice.id, database)();
+    const ownership = await require('../services/invoice-helpers').selfPayAtDispatch(invoice.id, database)();
+    if (ownership.ok !== true) return ownership;
+    // The authority reads collection holds only for the dunning templates, so this send asks itself, on the locked
+    // handle: an operator send skips a plain dispute hold; a wrong-number or wrong-party fallback hold stops the pay
+    // link, and an unreadable hold refuses (the shared read answers held).
+    const collectionHold = require('../services/collections/collection-hold');
+    const held = await collectionHold.messagingHeldByCollectionHold(customerId, database, { ignoreDisputeHold: collectionHold.holdExemptionApplies('operator') });
+    return held.held ? refuse('COLLECTION_HOLD', 'A collections hold applies to this customer') : { ok: true };
   };
   return (dispatch) => require('../services/billing-channel-email-authority').dispatchUnderBillingEmailAuthority({
     input: { customerId, invoiceId: invoice.id, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' } },
@@ -5421,9 +5443,10 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       // email), the billing-contact copy (same email, when a distinct billing
       // contact is configured), and the report-only third-party copies parsed
       // from the FDACS "Report Sent to Requestor and to:" line.
-      // A hold preview names the address the held invoice email will really use (the contact's email switch applied).
+      // A hold preview names the one address the held invoice email really goes to (the billing recipient the send
+      // resolves, with no second billing copy), and says so when there is none.
       const previewRecipient = holdRequested
-        ? await ProjectEmail.resolveProjectEmailRecipientForSend(customer, { applyReportRule: true })
+        ? await heldInvoiceEmailRecipient(customer, invoice)
         : ProjectEmail.resolveProjectEmailRecipient(customer, { applyReportRule: true });
       const previewPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
       const [previewBilling] = getInvoiceEmailRecipients(customer, previewPrefs || {});
@@ -5489,7 +5512,8 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           report_copies: previewReportCopies,
         } : {
           recipient: previewRecipient.email || null,
-          billing_copy: previewBillingEmail && previewBillingEmail !== previewRecipientEmail ? previewBillingEmail : null,
+          ...(previewRecipient.refusal ? { recipient_refused: previewRecipient.refusal.reason || 'not_sendable' } : {}),
+          billing_copy: !holdRequested && previewBillingEmail && previewBillingEmail !== previewRecipientEmail ? previewBillingEmail : null,
           // Same exclusion set the send applies: recipient, primary, billing.
           report_copies: previewReportCopies,
         },

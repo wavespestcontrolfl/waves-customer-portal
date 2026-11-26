@@ -523,8 +523,9 @@ describe('send-with-invoice hold_report_until_paid', () => {
       const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true, hold_report_until_paid: true, invoice_id: 'inv-1' });
       const body = await res.json();
       expect(body.report_hold_release).toEqual({ recipient: 'holder@example.com', copies: ['closing@abctitle.com'] });
-      // the confirm's own invoice recipient is the real one too (the contact's email switch applied)
-      expect(body.email_routing.recipient).toBe('holder@example.com');
+      // the confirm's own invoice recipient is the one the held invoice email really uses: the billing recipient, no copy
+      expect(body.email_routing.recipient).toBe(CUSTOMER.email);
+      expect(body.email_routing.billing_copy).toBeNull();
     });
   });
 
@@ -1383,6 +1384,18 @@ describe('audit fixes', () => {
       expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(false);
     });
 
+    test('a hold is refused when the address the paid report would go to does not accept email (the contact declined, no fallback)', async () => {
+      const { updates } = mockTables();
+      ProjectEmail.resolveProjectEmailRecipientForSend.mockResolvedValueOnce({ email: null });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor());
+        expect(res.status).toBe(422);
+        expect((await res.json()).code).toBe('hold_not_releasable');
+      });
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      expect((updates.projects || []).some((u) => u.report_hold_status === 'held')).toBe(false);
+    });
+
     test('the dry run refuses a hold for a report the release would refuse (the drawer shows why before anyone confirms)', async () => {
       mockTables({ project: wdoProject({ findings: { ...FINDINGS, inspection_scope: '' } }) });
       await withServer(async (baseUrl) => {
@@ -1600,6 +1613,17 @@ describe('audit fixes', () => {
       expect(await checkOn(opts, token, world)).toMatchObject({ ok: false, code });
     });
 
+    test('the fence asks the collections hold on the locked handle: a fallback hold or an unreadable hold refuses, a plain dispute is exempt', async () => {
+      const collectionHold = require('../services/collections/collection-hold');
+      const { opts, token } = await handoffOf();
+      collectionHold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'hold' });
+      expect(await checkOn(opts, token)).toMatchObject({ ok: false, code: 'COLLECTION_HOLD' });
+      expect(collectionHold.messagingHeldByCollectionHold).toHaveBeenLastCalledWith('customer-1', db, { ignoreDisputeHold: true });
+      collectionHold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'lookup_failed' });
+      expect(await checkOn(opts, token)).toMatchObject({ ok: false, code: 'COLLECTION_HOLD' });
+      expect(await checkOn(opts, token)).toEqual({ ok: true });
+    });
+
     test('a held send emails the invoice once, to the billing recipient: no second billing-contact copy', async () => {
       mockTables();
       const base = db.getMockImplementation();
@@ -1777,7 +1801,9 @@ describe('audit fixes', () => {
     test('a service contact that declines email falls back to the holder: the email, its key and the copy exclusion all use the holder', async () => {
       const findings = { ...FINDINGS, report_sent_to: 'Holder <holder@example.com>, ABC Title <closing@abctitle.com>' };
       mockTables({ project: wdoProject({ report_hold_status: 'held', findings }), invoice: invoiceRow({ status: 'paid' }) });
-      ProjectEmail.resolveProjectEmailRecipientForSend.mockResolvedValueOnce({ email: 'holder@example.com', name: 'Holder', role: 'primary' });
+      // asked twice: the release blocker (is there an address that accepts email?) and the email itself
+      const holder = { email: 'holder@example.com', name: 'Holder', role: 'primary' };
+      ProjectEmail.resolveProjectEmailRecipientForSend.mockResolvedValueOnce(holder).mockResolvedValueOnce(holder);
       const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
       expect(result.released).toBe(true);
       const calls = ProjectEmail.sendProjectReportReady.mock.calls.map(([args]) => args);
@@ -1942,6 +1968,27 @@ describe('audit fixes, round 2', () => {
       expect(Buffer.from(email.attachments[0].content, 'base64').toString()).toBe('archived-bytes');
       // the sweep's own key for this invoice, filing and recipient: the provider dedupes the sweep's earlier email
       expect(email.idempotencyKey).toMatch(/^project\.report_ready:project-1:hold_release:inv-1:[0-9a-f]{8}:[0-9a-f]{12}$/);
+    });
+
+    test('a manual Send report of a held report texts through the release marker: a takeover after the sweep texted sends no second text', async () => {
+      const base = wdoProject({ report_hold_status: 'held' });
+      const filing = archived(base);
+      const mark = `inv-1:${require('crypto').createHash('sha1').update([filing.content_hash, filing.signed_at, filing.photo_set_hash].map((v) => String(v ?? '')).join('|')).digest('hex').slice(0, 8)}`;
+      mockTables({ project: { ...base, invoice_id: 'inv-1', delivery_channels: { release_filing: filing, release_sms: mark } }, invoice: invoiceRow({ status: 'paid' }) });
+      mockS3Send.mockResolvedValueOnce({ Body: Readable.from([Buffer.from('archived-bytes')]) });
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, '/admin/projects/project-1/send')).status).toBe(200); });
+      expect(ProjectEmail.sendProjectReportReady).toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a failed manual Send report of a held report merges its results into the stored release state (filing and key kept)', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, blocked: true, reason: 'suppressed' });
+      const { updates } = mockTables({ project: { ...wdoProject({ report_hold_status: 'held' }), invoice_id: 'inv-1' }, invoice: invoiceRow() });
+      await withServer(async (baseUrl) => { await post(baseUrl, '/admin/projects/project-1/send'); });
+      const finalWrite = (updates.projects || []).find((u) => u.delivery_status && u.delivery_claim_token === null && u.last_delivery_at);
+      expect(finalWrite).toBeTruthy();
+      expect(finalWrite.delivery_channels.sql).toBe("coalesce(delivery_channels, '{}'::jsonb) || ?::jsonb");
+      expect(JSON.parse(finalWrite.delivery_channels.bindings[0]).email.ok).toBe(false);
     });
 
     test('a manual Send report of a held report sends the named billing contact its copy (only the recipient is left out)', async () => {
