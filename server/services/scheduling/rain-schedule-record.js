@@ -1,6 +1,6 @@
 /**
  * Schedule rain record. Owner 2026-11-23, plan v2: "a 2 PM decision the day before; reorder the day first; move a visit
- * to another day only when the whole day is wet; a move is one-off and never shifts the plan series; at most 10 moves
+ * to another day only when the whole day is wet [replaced 2026-11-26: see day_move below]; a move is one-off and never shifts the plan series; at most 10 moves
  * a day, one per visit; 2 weeks of test mode first (no texts, no moves)."
  *
  * This module RECORDS what that rain rule would do to tomorrow's schedule. It changes nothing. It writes only its own
@@ -17,8 +17,7 @@
  *     span plus RAIN_AFTER_HOURS (MOVE_PCT 70), shared stops as one physical stop, and the nearest dry open hour on
  *     the same date (DRY_PCT 40, the technician's other stops respected). loadStops, loadPoints and spanRain come
  *     from the same file.
- *   - ads/rain-mode.js: the whole-day-wet rule (countWetHours: RAIN_HOURS or more work hours at 70% or more), the radar
- *     wet threshold (WET_INCHES), the score give-up days, and the pattern: 'last' / 'history' / 'days' settings keys, a
+ *   - ads/rain-mode.js: RAIN_HOURS (the wet-area rule the day grade uses), the score give-up days, and the pattern: 'last' / 'history' / 'days' settings keys, a
  *     decision frozen at the 2 PM cutoff, a later run that rechecks beside it.
  *   - rain-out.js loadOccupancy / conflictsForTarget (one snapshot, read-only) and scheduling/blackout-dates.js
  *     getBlackoutDates (strict: a failed read stops the run), for a day move.
@@ -32,17 +31,17 @@
  *   2. for each outdoor visit of that day, in order of start then id, proposes the first that applies:
  *        reorder   a same-day re-time to a LATER dry open hour (owner 2026-11-26: rain texts move a visit later the same
  *                  day, never earlier): rain-pass's nearest one if later, else the nearest later one.
- *        day_move  only when no dry open hour exists AND the whole day is wet (4 or more work hours at 70% or more at
- *                  the visit's point): the NEXT WORK DAY only (owner 2026-11-26: a texted rain move lands later the same
- *                  day or the next work day; Monday to Saturday, a closure day is skipped) at a start where its
- *                  technician is free for the visit's own length and the span reads below DRY_PCT. `plan_moves` names
+ *        day_move  only when no LATER dry open hour exists that day, whatever the rest of the day reads (owner 2026-11-26, per
+ *                  visit: later the same day, then the next work day, then the call list; this replaces the plan v2 rule
+ *                  that only a wholly wet day moves): the NEXT WORK DAY only (Monday to Saturday, a closure day is
+ *                  skipped) at a start where its technician is free for the visit's own length and the span reads below DRY_PCT. `plan_moves` names
  *                  what the move does to the plan: 'whole_plan' for a recurring visit (owner 2026-11-26: a rain-out move
  *                  shifts the whole plan), 'one_visit' otherwise and for a lawn round moved 7 days or less
  *                  (lawn-rounds.js datesMoveSeries). Recorded only.
- *        call_list a wet visit on a wholly wet day with no dry slot on the next work day: it would go to the office call
+ *        call_list a wet visit with no later dry slot that day and none on the next work day: it would go to the office call
  *                  list, not a text. Unread forecast hours on that day keep it unread_forecast, never call_list.
- *        none      a wet visit with no dry hour on a day that is not wholly wet, or a visit whose forecast or point could
- *                  not be read. The reason is kept. Unread is never dry.
+ *        none      a visit whose forecast or point could not be read, or one with an hour (a later start that day or the next
+ *                  work day) that has no reading and none read wet. The reason is kept. Unread is never dry.
  *      At most MAX_PROPOSALS (10) reorders and day moves per target day, one per physical stop. A visit past the cap
  *      is recorded as `cap` with what it would have been.
  *   3. freezes the cutoff proposals on the day's row. The recheck is kept beside them and never replaces them.
@@ -200,6 +199,26 @@ async function reorderStart(row, ctx) {
 }
 
 /**
+ * True when a later same-day start that is free for the visit has an hour with no reading and no hour read wet: the day
+ * could not be called without a dry hour. (A reading at or above DRY_PCT settles that start as not dry.)
+ */
+function laterHourUnread(row, hourly, ctx) {
+  const { day, taken } = ctx;
+  const { reach } = row.visit;
+  const length = reach.endMin - reach.startMin;
+  const before = reach.ownStartMin - reach.startMin;
+  const { startMin, endMin } = ctx.dayHours;
+  for (let own = Math.max(startMin, reach.ownStartMin + 60, ctx.earliestMin); own + 60 <= endMin; own += 60) {
+    const start = own - before;
+    if (start < startMin || start + length > endMin) continue;
+    if (ctx.occupied(row.visit, day, start, start + length) || clashes(taken, techOf(row), day, start, start + length)) continue;
+    const rain = rainPass.spanRain(hourly, day, start, start + length);
+    if (!rain.complete && !(rain.peak >= DRY_PCT)) return true;
+  }
+  return false;
+}
+
+/**
  * One visit's proposal (a dry visit is none/forecast_dry), or null when it is not outdoor. `open` is false once the day's cap is used.
  */
 async function proposeFor(row, ctx) {
@@ -227,15 +246,14 @@ async function proposeFor(row, ctx) {
     taken.push({ tech: techOf(row), date: day, start, end: start + length });
     return { ...base, decision: 'reorder', to_start: toHHMM(own) };
   }
-  // No dry open hour left on the day. Only a wholly wet day moves to another one: the point's own hours, read again
-  // (the NWS read is cached by grid cell). The move is checked against the accepted targets before the cap is named:
-  // a stop over the cap is `cap` only when a valid move exists, else it keeps its true reason.
+  // No later dry open hour on the day. Owner ruling 2026-11-26, per visit: later the same day first, then the next work day,
+  // then the office call list, whatever the rest of the day reads (the 'wholly wet day' gate of plan v2 is gone). The point's
+  // own hours are read again (the NWS read is cached by grid cell). The move is checked against the accepted targets before
+  // the cap is named: a stop over the cap is `cap` only when a valid move exists, else it keeps its true reason.
   const hourly = await read(row.visit.point.lat, row.visit.point.lng);
   if (!Array.isArray(hourly)) return { ...base, decision: 'none', reason: 'unread_forecast' };
-  const { wet, missing } = rainMode.countWetHours(hourly, day);
-  // A day whose unread hours could still make it wholly wet is not settled (the ads rain rule's open area): unread, not dry.
-  if (wet < rainMode.RAIN_HOURS && wet + missing >= rainMode.RAIN_HOURS) return { ...base, decision: 'none', reason: 'unread_forecast' };
-  if (wet < rainMode.RAIN_HOURS) return { ...base, decision: 'none', reason: 'no_dry_hour' };
+  // A later hour with no reading could still have been dry: unread, never a move or a call.
+  if (laterHourUnread(row, hourly, ctx)) return { ...base, decision: 'none', reason: 'unread_forecast' };
   const { target, unread } = await dryDayFor(row, hourly, ctx);
   // No dry slot today and none on the next work day: the visit goes to the office call list (no text).
   if (!target) return unread ? { ...base, decision: 'none', reason: 'unread_forecast' } : { ...base, decision: 'call_list', reason: 'no_dry_slot' };

@@ -305,12 +305,21 @@ describe('proposals', () => {
     });
   });
 
-  test('a wet visit with no dry open hour on a day that is not wholly wet is none', async () => {
+  test('a visit whose span is wet with no later dry slot goes to the next work day even when the day is not wholly wet (owner 2026-11-26, per visit)', async () => {
+    // Only 3 wet work hours (8 to 10), so the day is not wholly wet; every hour after 09:00 today is taken by other stops.
+    const taken = () => jest.fn((_s, _id, date) => (date === WED ? [{ id: 'other' }] : []));
     const d = deps([stop()]);
-    d.rainOut.conflictsForTarget = jest.fn(() => [{ id: 'other' }]); // every other hour is taken
+    d.rainOut.conflictsForTarget = taken();
     const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hoursFor({ [WED]: [8, 9, 10] })) });
-    expect(out.proposals).toEqual([{ id: 'v01', start: '09:00', span: expect.any(Array), peak: 80, decision: 'none', reason: 'no_dry_hour' }]);
-    expect(d.blackoutDates).not.toHaveBeenCalled();
+    expect(out.proposals).toEqual([{
+      id: 'v01', start: '09:00', span: expect.any(Array), peak: 80, decision: 'day_move', to_date: THU, to_start: '08:00', plan_moves: 'one_visit',
+    }]);
+    // The next work day wet as well: the office call list.
+    n = 0;
+    const wet = deps([stop()]);
+    wet.rainOut.conflictsForTarget = taken();
+    const call = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: wet, read: jest.fn(async () => hoursFor({ [WED]: [8, 9, 10], [THU]: 'all' })) });
+    expect(call.proposals[0]).toMatchObject({ decision: 'call_list', reason: 'no_dry_slot' });
   });
 
   test('a visit with no point is none with its reason; a dry visit is stored as forecast_dry so a miss can score', async () => {
@@ -765,11 +774,10 @@ describe('audit fixes', () => {
     expect(JSON.parse(conn.store[record.LAST_KEY]).error).toBe('scoring failed: points down');
   });
 
-  test('a day whose unread hours could still make it wholly wet is unread, not no_dry_hour', async () => {
+  test('a later hour with no reading and none read wet is unread_forecast, never a move or a call', async () => {
     const d = deps([stop()]);
-    d.rainOut.conflictsForTarget = jest.fn(() => [{ id: 'other' }]); // no open hour
-    // 3 wet work hours and the 16:00 hour unread: 3 + 1 reaches 4.
-    const hours = hoursFor({ [WED]: [8, 9, 10] }).filter((h) => !h.startTime.startsWith(`${WED}T11`));
+    // Rain 8 to 11, and no reading from 12:00 on: no later start can be called dry or wet.
+    const hours = hoursFor({ [WED]: [8, 9, 10, 11] }).filter((h) => !(h.startTime.startsWith(WED) && Number(h.startTime.slice(11, 13)) >= 12));
     const out = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: d, read: jest.fn(async () => hours) });
     expect(out.proposals[0]).toMatchObject({ decision: 'none', reason: 'unread_forecast' });
     expect(d.blackoutDates).not.toHaveBeenCalled();
