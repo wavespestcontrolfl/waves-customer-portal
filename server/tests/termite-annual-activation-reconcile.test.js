@@ -25,6 +25,7 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
     jest.dontMock('../services/annual-prepay-renewals');
     jest.dontMock('../services/estimate-converter');
     jest.dontMock('../services/termite-annual-signature-charge');
+    jest.dontMock('../services/assessment-booking');
     jest.dontMock('../routes/admin-customers');
     jest.dontMock('../routes/estimate-public');
     jest.dontMock('../services/new-recurring-welcome-sms');
@@ -395,6 +396,11 @@ describe('reconcileTermiteAnnualActivations sweep', () => {
       recordInstallationWait: jest.fn(async () => ({ agreed: false })),
       AWAITING_INSTALLATION: 'awaiting_installation',
       NEVER_INSTALLED_ALERT_DAYS: 14,
+    }));
+    // The activation reads the customer's first paid visit for the term start; this fake knex holds none.
+    jest.doMock('../services/assessment-booking', () => ({
+      ...jest.requireActual('../services/assessment-booking'),
+      paidEstimateVisitsQuery: () => ({ first: async () => null }),
     }));
     jest.doMock('../routes/admin-customers', () => ({ _private: { lockAndAssertNoAnnualPrepayOverlap: jest.fn().mockResolvedValue(undefined) } }));
     jest.doMock('../routes/estimate-public', () => ({ registerAcceptedEstimateAppointmentReminder: jest.fn().mockResolvedValue(null) }));
