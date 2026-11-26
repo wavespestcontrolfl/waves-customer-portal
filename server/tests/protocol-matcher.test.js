@@ -95,11 +95,39 @@ describe('protocol matcher specialty routing', () => {
       visit: 4,
       reason: 'rodent_followup',
     });
+    // The traps came out at exclusion (D15a): an exclusion follow-up re-inspects, never resets traps.
     expect(match('Rodent Exclusion Follow Up')).toEqual({
       programKey: 'rodent',
-      visit: 4,
-      reason: 'rodent_followup',
+      visit: 7,
+      reason: 'rodent_exclusion_recheck',
     });
+  });
+
+  // Owner 2026-11-23 / 2026-11-25 (D9, D15b): bait stations get their own card (Tomcat at homes), never the attic trap card; a trap
+  // check, an added check and every trap-only retainer get the check card, by catalog key when the name says no rodent.
+  test('routes rodent bait stations, trap checks and retainers to their own cards', () => {
+    const byKey = (serviceType, serviceKey) => {
+      const result = matchServiceProtocol(protocols, serviceType, { serviceKey });
+      return [result.programKey, result.matchedVisit?.visit, result.reason];
+    };
+    expect(byKey('Quarterly Rodent Bait Station Service', 'rodent_bait_quarterly')).toEqual(['rodent', 5, 'rodent_bait_station']);
+    expect(byKey('Rodent Bait Station Setup Fee Service', 'rodent_bait_setup')).toEqual(['rodent', 5, 'rodent_bait_station']);
+    expect(match('Rodent Bait Station Install')).toEqual({ programKey: 'rodent', visit: 5, reason: 'rodent_bait_station' });
+    expect(byKey('Rodent Trapping Service', 'rodent_trapping')).toEqual(['rodent', 2, 'rodent_trapping_baiting']);
+    expect(byKey('Rodent Trap Check - Additional', 'rodent_trap_check_additional')).toEqual(['rodent', 4, 'rodent_followup']);
+    for (const key of ['trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly']) {
+      expect(byKey('Standard Retainer Service', key)).toEqual(['rodent', 4, 'rodent_followup']);
+    }
+    // The combined service places traps too: its own reason, so a follow-up of it is a trap check.
+    expect(byKey('Rodent Exclusion & Trapping Service', 'rodent_exclusion')).toEqual(['rodent', 6, 'rodent_exclusion_trapping']);
+    // A legacy retainer booking with no catalog key still gets the trap check.
+    expect(match('Standard Trap-Only Retainer Service')).toEqual({ programKey: 'rodent', visit: 4, reason: 'rodent_followup' });
+    expect(byKey('Rodent Exclusion Only Service', 'rodent_exclusion_only')).toEqual(['rodent', 3, 'rodent_exclusion']);
+    const followup = (serviceType, serviceKey) => followupVisitMatch(matchServiceProtocol(protocols, serviceType, { serviceKey }), true).matchedVisit.visit;
+    expect(followup('Rodent Exclusion & Trapping Service', 'rodent_exclusion')).toBe(4);
+    expect(followup('Rodent Exclusion Only Service', 'rodent_exclusion_only')).toBe(7);
+    expect(followup('Rodent Trapping Service', 'rodent_trapping')).toBe(4);
+    expect(followup('Quarterly Rodent Bait Station Service', 'rodent_bait_quarterly')).toBe(5);
   });
 
   test('routes bed bug method labels to treatment protocol', () => {

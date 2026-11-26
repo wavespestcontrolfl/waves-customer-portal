@@ -124,6 +124,8 @@ const INPUT = {
     { serviceKey: 'pest', productName: 'Atticus Antapex WSG', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Ant Gel', status: 'in_stock', onHand: 8 },
+    // The pest rodent visit names home bait (Tomcat) and commercial bait (Contrac) as separate lines (owner 2026-11-25, D15b).
+    { serviceKey: 'pest', productName: 'Tomcat Bait Chunx with Bromethalin', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Contrac Blox', status: 'in_stock', onHand: 8 },
   ],
 };
