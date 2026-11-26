@@ -152,7 +152,7 @@ export default function ProfileEditCard({ customer, refreshCustomer }) {
     setBusy(true);
     setError('');
     try {
-      await api.confirmCustomerEmail({ code });
+      await api.confirmCustomerEmail({ code, email: pendingEmail });
       await reload();
       setNotice('Saved.');
       setPendingEmail('');

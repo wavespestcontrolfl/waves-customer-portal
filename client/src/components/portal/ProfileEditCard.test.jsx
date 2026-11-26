@@ -105,7 +105,7 @@ describe('ProfileEditCard', () => {
       fireEvent.change(screen.getByLabelText('Code'), { target: { value: '123456' } });
       fireEvent.click(confirmBtn);
       await waitFor(() => expect(refreshCustomer).toHaveBeenCalledTimes(1));
-      expect(api.confirmCustomerEmail).toHaveBeenCalledWith({ code: '123456' });
+      expect(api.confirmCustomerEmail).toHaveBeenCalledWith({ code: '123456', email: NEW });
       expect(screen.queryByTestId('profile-code-form')).toBeNull();
       expect(screen.getByRole('status')).toHaveTextContent(/^Saved\.$/);
     });

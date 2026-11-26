@@ -45,7 +45,7 @@ afterAll(() => jest.useRealTimers());
 
 const ON_FILE = 'On.File@Example.test';
 const issue = (email = 'New.Address@Example.test', fromEmail = ON_FILE) => Code.issueRequest(trx, { customerId: CUSTOMER, newEmail: email, fromEmail });
-const check = (code, currentEmail = ON_FILE) => Code.checkCode(trx, { customerId: CUSTOMER, code, currentEmail });
+const check = (code, currentEmail = ON_FILE, expectedEmail = undefined) => Code.checkCode(trx, { customerId: CUSTOMER, code, currentEmail, ...(expectedEmail === undefined ? {} : { expectedEmail }) });
 
 describe('issueRequest', () => {
   test('a 6-digit code, 15 minutes, only an HMAC stored, address trimmed and lower-cased', async () => {
@@ -118,6 +118,14 @@ describe('checkCode', () => {
     expect((await check(code)).outcome).toBe('ok');
     jest.setSystemTime(new Date('2026-11-26T12:15:00Z'));
     expect((await check(code)).outcome).toBe('expired');
+  });
+
+  test('mismatch: a confirm naming a different pending address than the open request is refused, costs no attempt and consumes nothing', async () => {
+    const { code } = await issue('first.pending@example.test');
+    const res = await check(code, ON_FILE, 'other.pending@example.test');
+    expect(res.outcome).toBe('mismatch');
+    expect(trx.rows[0]).toMatchObject({ attempts: 0, consumed_at: null });
+    expect((await check(code, ON_FILE, ' First.Pending@Example.test ')).outcome).toBe('ok');
   });
 
   test('stale: if the address on file moved after the code was sent, even the right code is refused and the request is consumed', async () => {

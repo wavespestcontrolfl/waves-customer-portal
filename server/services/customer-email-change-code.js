@@ -7,7 +7,7 @@
 //   issueRequest   inside the caller's transaction: replace the customer's open request with a new one
 //                  (new code, 15 minutes, attempts 0) and return the plain code once, for the email.
 //   checkCode      inside the caller's transaction, under the request row lock: judge a typed code.
-//                  Outcomes: ok | missing | expired | stale | attempts | wrong. `stale` = the customer's stored
+//                  Outcomes: ok | missing | mismatch | expired | stale | attempts | wrong. `stale` = the customer's stored
 //                  email is no longer the one recorded when the code was issued (the request is consumed).
 //                  A wrong code adds one attempt (the caller MUST commit, not roll back, or the attempt is
 //                  lost); 5 attempts end the request.
@@ -78,9 +78,12 @@ async function dropRequest(trx, id) {
   await trx(TABLE).where({ id }).del();
 }
 
-async function checkCode(trx, { customerId, code, currentEmail }) {
+async function checkCode(trx, { customerId, code, currentEmail, expectedEmail = null }) {
   const request = await trx(TABLE).where({ customer_id: customerId }).whereNull('consumed_at').forUpdate().first();
   if (!request) return { outcome: 'missing' };
+  // The caller names the address its form showed ("We sent a code to ..."); a request for any other address (another
+  // tab asked again) is not this code's, and costs no attempt.
+  if (expectedEmail !== null && emailKey(expectedEmail) !== emailKey(request.new_email)) return { outcome: 'mismatch', request };
   // The address on file moved since the code was issued (staff edit, another confirm): this code must not overwrite
   // that change, whatever the typed code is.
   if (emailKey(request.from_email) !== emailKey(currentEmail)) {

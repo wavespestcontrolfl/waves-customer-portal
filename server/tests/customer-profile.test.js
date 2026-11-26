@@ -49,8 +49,8 @@ const mockResend = jest.fn(async () => {});
 jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: (...a) => mockEmailFanout(...a), resendPendingConfirmation: (...a) => mockResend(...a) }));
 const mockNameFanout = jest.fn(async () => { mockOrder.push('nameFanout'); });
 jest.mock('../services/customer-contact-fanout', () => ({ propagateCustomerNameChange: (...a) => mockNameFanout(...a) }));
-const mockConflict = jest.fn(async () => null);
-jest.mock('../services/customer-email-write', () => ({ findCrossAccountEmailConflict: (...a) => mockConflict(...a) }));
+const mockApplyEmail = jest.fn();
+jest.mock('../services/customer-email-write', () => ({ applyOperatorCustomerEmail: (...a) => mockApplyEmail(...a) }));
 const mockDb = { transaction: jest.fn(async (fn) => fn(Object.assign((table) => mockTrxBuilder(table), { fn: { now: () => 'NOW' }, raw: (sql) => sql }))) };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -110,8 +110,7 @@ beforeEach(() => {
   mockOrder = [];
   mockWhereIn = [];
   mockSavedInHour = 0;
-  mockConflict.mockClear();
-  mockConflict.mockResolvedValue(null);
+  mockApplyEmail.mockReset();
   mockLockedWhere = null;
   mockLockEmails.mockClear();
   mockEmailFanout.mockClear();
@@ -140,9 +139,9 @@ async function put(body) {
   try { json = await res.json(); } catch { /* none */ }
   return { status: res.status, body: json || {} };
 }
-async function confirm(code) {
+async function confirm(code, email = 'new.address@example.test') {
   const res = await fetch(`${baseUrl}/api/customer/profile/confirm-email`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code }),
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, ...(email === null ? {} : { email }) }),
   });
   let json = null;
   try { json = await res.json(); } catch { /* none */ }
@@ -227,7 +226,7 @@ describe('PUT /api/customer/profile', () => {
       expect(res).toMatchObject({ status: 200, body: { changed: [], emailPending: { email: NEW_EMAIL, expiresInMinutes: 15 }, profile: { email: OLD_EMAIL } } });
       expect(mockUpdates).toHaveLength(0);
       expect(mockLockEmails).not.toHaveBeenCalled();
-      expect(mockConflict).not.toHaveBeenCalled();
+      expect(mockApplyEmail).not.toHaveBeenCalled();
       expect(mockEmailFanout).not.toHaveBeenCalled();
       expect(mockCode.issueRequest.mock.calls[0][1]).toEqual({ customerId: CUSTOMER_ID, newEmail: NEW_EMAIL, fromEmail: OLD_EMAIL });
       expect(mockCode.sendCode).toHaveBeenCalledWith({ to: NEW_EMAIL, code: '123456' });
@@ -240,7 +239,7 @@ describe('PUT /api/customer/profile', () => {
 
     test('the audit row for the code carries no address and no code', async () => {
       await put({ email: NEW_EMAIL });
-      expect(savedAudits()).toEqual(['customer.profile_email_code_sent']);
+      expect(savedAudits()).toEqual(['customer.profile_email_code_requested']);
       expect(JSON.stringify(mockAudit.mock.calls[0][0].metadata)).not.toMatch(/example|123456/);
     });
 
@@ -257,7 +256,7 @@ describe('PUT /api/customer/profile', () => {
       expect(res).toMatchObject({ status: 200, body: { changed: ['firstName'], emailPending: { email: NEW_EMAIL } } });
       expect(mockUpdates).toEqual([{ first_name: 'Sam', updated_at: 'NOW' }]);
       expect(mockEmailFanout).not.toHaveBeenCalled();
-      expect(savedAudits().sort()).toEqual(['customer.profile_edit', 'customer.profile_email_code_sent']);
+      expect(savedAudits().sort()).toEqual(['customer.profile_edit', 'customer.profile_email_code_requested']);
       await flush();
       expect(mockSend).toHaveBeenCalledTimes(1);
       expectGenericNotice(mockSend.mock.calls[0][0], OLD_EMAIL);
@@ -283,7 +282,7 @@ describe('PUT /api/customer/profile', () => {
       expect(res.body.emailPending.email).toBe(NEW_EMAIL);
     });
 
-    test('a suppressed address: 409 email_unavailable_for_code, nothing stored, no code, no quota row; a name saved beside it still saved', async () => {
+    test('a suppressed address: 409 email_unavailable_for_code, no code stored or sent, one quota row for the refusal; a name saved beside it still saved', async () => {
       mockCode.addressSuppressed.mockResolvedValue(true);
       const res = await put({ firstName: 'Sam', email: NEW_EMAIL });
       expect(res).toMatchObject({
@@ -293,26 +292,30 @@ describe('PUT /api/customer/profile', () => {
       expect(mockCode.addressSuppressed.mock.calls[0][1]).toBe(NEW_EMAIL);
       expect(mockCode.issueRequest).not.toHaveBeenCalled();
       expect(mockCode.sendCode).not.toHaveBeenCalled();
-      expect(savedAudits()).toEqual(['customer.profile_edit']);
+      expect(savedAudits()).toEqual(['customer.profile_edit', 'customer.profile_email_code_requested']);
+      // The refusal row names its outcome only: no field, no address.
+      expect(mockAudit.mock.calls[1][0].metadata).toEqual({ outcome: 'refused', source: 'customer_portal' });
       expect(res.body.error).not.toMatch(/suppress|bounce|unsubscrib|complaint/i);
     });
 
-    test('a suppressed address alone: 409, no audit, no write, no notice', async () => {
+    test('a suppressed address alone: 409, the refusal uses one quota unit, no write, no notice', async () => {
       mockCode.addressSuppressed.mockResolvedValue(true);
       const res = await put({ email: NEW_EMAIL });
       expect(res).toMatchObject({ status: 409, body: { code: 'email_unavailable_for_code', changed: [] } });
-      expect(mockAudit).not.toHaveBeenCalled();
+      expect(savedAudits()).toEqual(['customer.profile_email_code_requested']);
       expect(mockUpdates).toHaveLength(0);
       await flush();
       expect(mockSend).not.toHaveBeenCalled();
     });
 
-    test('the suppression check runs only for an address that would change, and before the quota is spent', async () => {
+    test('the suppression check runs only for an address that would change, and only under the quota: a spent quota answers 429 without looking the address up', async () => {
       await put({ email: OLD_EMAIL.toUpperCase() });
       expect(mockCode.addressSuppressed).not.toHaveBeenCalled();
       mockSavedInHour = 10;
       mockCode.addressSuppressed.mockResolvedValue(true);
-      expect((await put({ email: NEW_EMAIL })).status).toBe(409);
+      expect((await put({ email: NEW_EMAIL })).status).toBe(429);
+      expect(mockCode.addressSuppressed).not.toHaveBeenCalled();
+      expect(mockAudit).not.toHaveBeenCalled();
     });
 
     test('quota: code emails count with saved changes; 10 in the last hour refuses with 429 and sends nothing', async () => {
@@ -329,8 +332,22 @@ describe('PUT /api/customer/profile', () => {
     test('the quota query counts BOTH audit actions, from the audit table, inside the transaction', async () => {
       await put({ email: NEW_EMAIL });
       expect(mockWhereIn.filter((w) => w.table === 'audit_log')).toEqual([
-        { table: 'audit_log', col: 'action', vals: ['customer.profile_edit', 'customer.profile_email_code_sent'] },
+        { table: 'audit_log', col: 'action', vals: ['customer.profile_edit', 'customer.profile_email_code_requested'] },
       ]);
+    });
+
+    test.each([
+      ['a conclusive provider rejection', { status: 400 }],
+      ['a 5xx', { status: 503 }],
+      ['a network failure with no status', {}],
+      ['a suppression found at the provider handoff', { code: 'address_suppressed' }],
+    ])('%s: 502, the request is dropped, and the code request keeps its quota unit (no second audit row)', async (_label, props) => {
+      mockCode.sendCode.mockRejectedValueOnce(Object.assign(new Error('not sent or unknown'), props));
+      const res = await put({ email: NEW_EMAIL });
+      expect(res.status).toBe(502);
+      expect(mockCode.dropRequest).toHaveBeenCalledWith(mockDb, 'req-1');
+      expect(savedAudits()).toEqual(['customer.profile_email_code_requested']);
+      expect(mockAudit.mock.calls[0][0].metadata).toEqual({ outcome: 'issued', source: 'customer_portal' });
     });
 
     test('a failed send drops the request and answers 502; nothing else changed', async () => {
@@ -361,9 +378,9 @@ describe('PUT /api/customer/profile', () => {
     expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('name change fans out to open records with the locked before/after rows; order is lock, update, fan-out', async () => {
+  test('name change fans out to open records with the locked before/after rows', async () => {
     await put({ firstName: 'Sam' });
-    expect(mockLockedWhere).toEqual({ id: CUSTOMER_ID, active: true });
+    expect(mockLockedWhere).toEqual({ id: CUSTOMER_ID });
     expect(mockNameFanout).toHaveBeenCalledTimes(1);
     const [args] = mockNameFanout.mock.calls[0];
     expect(args.before).toMatchObject({ first_name: 'Pat' });
@@ -384,6 +401,15 @@ describe('PUT /api/customer/profile', () => {
     expect(mockUpdates).toHaveLength(0);
     expect(mockAudit).not.toHaveBeenCalled();
     expect(mockCode.issueRequest).not.toHaveBeenCalled();
+  });
+
+  test('an inactive row (cancelled after authenticate) is refused 403 on both steps, judged on the LOCKED row', async () => {
+    mockRow.active = false;
+    expect((await put({ firstName: 'Sam' })).status).toBe(403);
+    expect((await confirm('123456')).status).toBe(403);
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockCode.checkCode).not.toHaveBeenCalled();
+    expect(mockApplyEmail).not.toHaveBeenCalled();
   });
 
   test('a profile that moved to another account after authenticate is refused 403 on both steps', async () => {
@@ -420,31 +446,30 @@ describe('PUT /api/customer/profile', () => {
 });
 
 describe('POST /api/customer/profile/confirm-email', () => {
-  test.each(['', '12345', '1234567', 'abcdef', '12 456'])('code %p is a 400 before anything is read', async (code) => {
-    const res = await confirm(code);
-    expect(res.status).toBe(400);
+  const changed = (over = {}) => ({ outcome: 'changed', before: { ...mockRow }, emailSync: { pendingConfirmation: null, heldNewsletterResume: null }, ...over });
+
+  test.each([['', NEW_EMAIL], ['12345', NEW_EMAIL], ['1234567', NEW_EMAIL], ['abcdef', NEW_EMAIL], ['12 456', NEW_EMAIL], ['123456', null], ['123456', 'not-an-email']])('code %p with address %p is a 400 before anything is read', async (code, email) => {
+    expect((await confirm(code, email)).status).toBe(400);
     expect(mockCode.checkCode).not.toHaveBeenCalled();
+    expect(mockApplyEmail).not.toHaveBeenCalled();
   });
 
-  test('a right code runs the locked commit: row, address key, conflict check, update, fan-out, audit, then consume; notices to old and new', async () => {
+  test('a right code DELEGATES to the shared operator email write (the one admin triage uses); then consumes, audits, notices', async () => {
     mockCode.checkCode.mockResolvedValue(okCheck());
+    mockApplyEmail.mockImplementation(async () => changed());
     mockSavedInHour = 10; // the quota was spent when the code was sent; the confirm itself is never refused by it
     const res = await confirm('123456');
     expect(res).toMatchObject({ status: 200, body: { changed: ['email'], profile: { email: NEW_EMAIL } } });
-    expect(mockLockedWhere).toEqual({ id: CUSTOMER_ID, active: true });
-    expect(mockOrder).toEqual(['lock', 'update', 'emailFanout']);
-    expect(mockLockEmails.mock.calls[0][1]).toEqual({ email: NEW_EMAIL });
-    expect(mockConflict.mock.calls[0][1]).toMatchObject({ customerId: CUSTOMER_ID, email: NEW_EMAIL });
-    expect(mockUpdates).toEqual([{ email: NEW_EMAIL, updated_at: 'NOW' }]);
-    const [args] = mockEmailFanout.mock.calls[0];
-    expect(args.before).toMatchObject({ email: OLD_EMAIL });
-    expect(args.after).toMatchObject({ email: NEW_EMAIL });
-    // The SAME fan-out the admin editor runs, with its default options (no narrowed review scope, newsletter included).
-    expect(args.reviewReasonCodes).toBeUndefined();
-    expect(args.source).toBe('Customer app profile edit');
+    expect(mockApplyEmail).toHaveBeenCalledTimes(1);
+    const [trxArg, args] = mockApplyEmail.mock.calls[0];
+    expect(typeof trxArg).toBe('function');
+    expect(args).toMatchObject({ customerId: CUSTOMER_ID, email: NEW_EMAIL, source: 'Customer app profile edit' });
+    expect(mockCode.consume).toHaveBeenCalledWith(expect.anything(), 'req-1');
     expect(savedAudits()).toEqual(['customer.profile_edit']);
     expect(mockAudit.mock.calls[0][0].metadata).toEqual({ fields: ['email'], source: 'customer_portal' });
-    expect(mockCode.consume).toHaveBeenCalledWith(expect.anything(), 'req-1');
+    // The route no longer writes customers or fans out itself: that is the shared writer's job.
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockEmailFanout).not.toHaveBeenCalled();
     await flush();
     expect(mockSend).toHaveBeenCalledTimes(2);
     const [toNew, toOld] = mockSend.mock.calls.map((c) => c[0]);
@@ -455,72 +480,84 @@ describe('POST /api/customer/profile/confirm-email', () => {
     expect(toOld.idempotencyKey).not.toBe(toNew.idempotencyKey);
   });
 
-  test('the code check is given the address on file under the lock, so a request issued for another address is judged stale', async () => {
+  test('the rowAllowed it hands the writer refuses an inactive row and a row on another account', async () => {
     mockCode.checkCode.mockResolvedValue(okCheck());
+    mockApplyEmail.mockImplementation(async () => changed());
     await confirm('123456');
-    expect(mockCode.checkCode.mock.calls[0][1]).toMatchObject({ customerId: CUSTOMER_ID, code: '123456', currentEmail: OLD_EMAIL });
+    const { rowAllowed } = mockApplyEmail.mock.calls[0][1];
+    expect(rowAllowed({ id: CUSTOMER_ID, active: true })).toBe(true);
+    expect(rowAllowed({ id: CUSTOMER_ID, active: false })).toBe(false);
+    expect(rowAllowed({ id: CUSTOMER_ID, active: true, account_id: 'another-account' })).toBe(false);
   });
 
-  test('the request records the address on file when the code is issued', async () => {
-    await put({ email: NEW_EMAIL });
-    expect(mockCode.issueRequest.mock.calls[0][1]).toEqual({ customerId: CUSTOMER_ID, newEmail: NEW_EMAIL, fromEmail: OLD_EMAIL });
+  test('the code check is given the address on file under the lock and the address the form showed', async () => {
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    mockApplyEmail.mockImplementation(async () => changed());
+    await confirm('123456');
+    expect(mockCode.checkCode.mock.calls[0][1]).toMatchObject({ customerId: CUSTOMER_ID, code: '123456', currentEmail: OLD_EMAIL, expectedEmail: NEW_EMAIL });
   });
 
-  test('the address that gets written is the one the code was SENT to, never one in the confirm request', async () => {
+  test('the address that gets written is the one the code was SENT to', async () => {
     mockCode.checkCode.mockResolvedValue(okCheck('sent.to@example.test'));
-    const res = await fetch(`${baseUrl}/api/customer/profile/confirm-email`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: '123456', email: 'attacker@example.test' }),
-    });
-    expect(res.status).toBe(200);
-    expect(mockUpdates).toEqual([{ email: 'sent.to@example.test', updated_at: 'NOW' }]);
+    mockApplyEmail.mockImplementation(async () => changed());
+    const res = await confirm('123456', 'sent.to@example.test');
+    expect(res.body.profile.email).toBe('sent.to@example.test');
+    expect(mockApplyEmail.mock.calls[0][1].email).toBe('sent.to@example.test');
   });
 
   test.each([
     ['wrong', { outcome: 'wrong', attemptsLeft: 3 }, 400, 'code_wrong', { attemptsLeft: 3 }],
     ['expired', { outcome: 'expired' }, 400, 'code_expired', {}],
     ['stale (the address on file moved since the code was sent)', { outcome: 'stale' }, 400, 'code_expired', {}],
+    ['for a different pending address than the form showed', { outcome: 'mismatch' }, 400, 'code_expired', {}],
     ['missing (never asked, or already used)', { outcome: 'missing' }, 400, 'code_expired', {}],
     ['too many attempts', { outcome: 'attempts' }, 429, 'code_attempts', {}],
   ])('%s: refused, nothing written, no notice, and the transaction COMMITS (the attempt count must persist)', async (_l, check, status, code, extra) => {
     mockCode.checkCode.mockResolvedValue(check);
     const res = await confirm('123456');
     expect(res).toMatchObject({ status, body: { code, ...extra } });
-    expect(mockUpdates).toHaveLength(0);
-    expect(mockEmailFanout).not.toHaveBeenCalled();
+    expect(mockApplyEmail).not.toHaveBeenCalled();
     expect(mockAudit).not.toHaveBeenCalled();
     expect(mockCode.consume).not.toHaveBeenCalled();
     await flush();
     expect(mockSend).not.toHaveBeenCalled();
-    // The handler RETURNED (no throw), so the transaction callback resolved and a real transaction would commit.
     await expect(mockDb.transaction.mock.results[0].value).resolves.toMatchObject({ refused: check });
   });
 
-  test('an address another account holds: 409 with no wording about whose it is, the request is consumed, nothing is written', async () => {
+  test('an address another account holds (the shared writer refused): 409 with no wording about whose it is, the request is consumed, nothing else', async () => {
     mockCode.checkCode.mockResolvedValue(okCheck());
-    mockConflict.mockResolvedValue({ id: 'other', account_id: 'other-account' });
+    mockApplyEmail.mockResolvedValue({ outcome: 'email_in_use', conflict: { id: 'other', account_id: 'other-account' } });
     const res = await confirm('123456');
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('email_unavailable');
     expect(res.body.error).not.toMatch(/another|account|customer/i);
-    expect(mockUpdates).toHaveLength(0);
-    expect(mockEmailFanout).not.toHaveBeenCalled();
     expect(mockCode.consume).toHaveBeenCalledWith(expect.anything(), 'req-1');
+    expect(mockAudit).not.toHaveBeenCalled();
+    await flush();
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test.each(['not_allowed', 'customer_not_found'])('the shared writer answering %s is a 403 and nothing is sent', async (outcome) => {
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    mockApplyEmail.mockResolvedValue({ outcome });
+    expect((await confirm('123456')).status).toBe(403);
+    expect(mockAudit).not.toHaveBeenCalled();
     await flush();
     expect(mockSend).not.toHaveBeenCalled();
   });
 
   test('a deferred DOI confirmation from the fan-out is sent after commit', async () => {
     mockCode.checkCode.mockResolvedValue(okCheck());
-    mockEmailFanout.mockResolvedValueOnce({ pendingConfirmation: { id: 'sub-1', email: NEW_EMAIL } });
+    mockApplyEmail.mockImplementation(async () => changed({ emailSync: { pendingConfirmation: { id: 'sub-1', email: NEW_EMAIL } } }));
     await confirm('123456');
     expect(mockResend).toHaveBeenCalledWith({ id: 'sub-1', email: NEW_EMAIL });
   });
 
-  test('the code was for the address the customer already has: consumed, no change, no audit, no notice', async () => {
+  test('the code was for the address the customer already has (writer: unchanged): consumed, no audit, no notice', async () => {
     mockCode.checkCode.mockResolvedValue(okCheck(OLD_EMAIL));
-    const res = await confirm('123456');
+    mockApplyEmail.mockResolvedValue({ outcome: 'unchanged', before: { ...mockRow }, emailSync: null });
+    const res = await confirm('123456', OLD_EMAIL);
     expect(res).toMatchObject({ status: 200, body: { changed: [] } });
-    expect(mockUpdates).toHaveLength(0);
     expect(mockAudit).not.toHaveBeenCalled();
     expect(mockCode.consume).toHaveBeenCalled();
     await flush();

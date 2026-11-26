@@ -457,11 +457,11 @@ export class ApiClient {
     });
   }
 
-  // Step 2 of an email change: the 6-digit code mailed to the new address.
-  confirmCustomerEmail({ code }) {
+  // Step 2 of an email change: the 6-digit code mailed to the new address, and that address as the form showed it.
+  confirmCustomerEmail({ code, email }) {
     return this.request('/customer/profile/confirm-email', {
       method: 'POST',
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ code, email }),
     });
   }
 
