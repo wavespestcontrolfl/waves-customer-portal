@@ -6382,9 +6382,14 @@ function priceOneTimePest(property, options = {}) {
     isRecurringCustomer = false,
     recurringPestPerApp = null,
     roachType: requestedRoachTypeInput = 'none',
+    smallJob = false,
   } = options;
 
   const roachMeta = normalizeRoachType(requestedRoachTypeInput);
+  // GATE_ONE_TIME_PEST_SMALL_JOB: the engine decides (gate, replay stamp, roach, config price).
+  if (smallJob === true) {
+    return priceOneTimePestSmallJob({ urgency, afterHours, isRecurringCustomer, roachMeta });
+  }
   const footprintResolution = resolvePestFootprint(property);
   const warnings = [...roachMeta.roachWarnings, ...footprintResolution.warnings];
   let base;
@@ -6472,6 +6477,53 @@ function priceOneTimePest(property, options = {}) {
     requiresManualReview: !!(baselinePest?.requiresManualReview || footprintResolution.requiresManualReview),
     manualReviewReasons: combineManualReviewMetadata(baselinePest?.manualReviewReasons, footprintResolution.manualReviewReasons),
     warnings: uniqueList([...warnings, ...(baselinePest?.warnings || [])]),
+  };
+}
+
+// Small one-spot one-time pest job (owner 2026-11-26, GATE_ONE_TIME_PEST_SMALL_JOB): the flat
+// ONE_TIME.pest.smallJobPrice, then the same urgency / after-hours multiplier and recurring-customer
+// discount as the full one-time price. No $199 floor and no recurring-incentive clamp: the flat price
+// is the price (the job is one spot, not a visit a plan could replace). Stamped `smallJob: true` so a
+// saved estimate replays at the price it was sold on.
+function priceOneTimePestSmallJob({ urgency, afterHours, isRecurringCustomer, roachMeta }) {
+  const flatPrice = Number(ONE_TIME.pest.smallJobPrice);
+  const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
+  const discountBase = flatPrice * urgencyMultiplier;
+  const discounted = applyOneTimeRecurringCustomerDiscount(discountBase, { isRecurringCustomer });
+  const price = discounted.price;
+  return {
+    service: 'one_time_pest',
+    name: 'One-Time Pest Control (small job: one spot)',
+    smallJob: true,
+    price,
+    urgency,
+    afterHours,
+    isRecurringCustomer,
+    basePrice: flatPrice,
+    quarterlyPerApp: null,
+    multiplier: null,
+    recurringVisitOneCost: null,
+    recurringIncentiveClampApplied: false,
+    baseSource: 'small_job_flat_price',
+    baselinePestBasePrice: null,
+    selectedFloor: null,
+    floorAppliedBeforeUrgency: false,
+    floorAppliedAfterDiscount: false,
+    requestedRoachType: roachMeta.requestedRoachType,
+    roachType: roachMeta.roachType,
+    roachTypeWasDefaulted: roachMeta.roachTypeWasDefaulted,
+    preUrgencyPrice: flatPrice,
+    urgencyMultiplier,
+    subtotalBeforeRecurringCustomerDiscount: Math.round(discountBase),
+    recurringCustomerDiscountRate: discounted.rate,
+    recurringCustomerDiscountAmount: Math.max(0, Math.round(discountBase) - price),
+    discountHandledByPricingFunction: true,
+    footprintUsed: null,
+    footprintSource: null,
+    footprintWasDefaulted: false,
+    requiresManualReview: false,
+    manualReviewReasons: [],
+    warnings: [...roachMeta.roachWarnings],
   };
 }
 

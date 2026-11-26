@@ -1369,6 +1369,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     v1Input.roofStyleReplay = require('./estimate-roof-style-replay').roofStyleReplaySignal(estimateData) || undefined;
     // One-time pest home-age rule (GATE_ONE_TIME_PEST_NO_HOME_AGE): the rule the saved one-time line was priced on.
     v1Input.oneTimePestNoHomeAgeReplay = require('./pricing-engine/one-time-pest-home-age').oneTimePestNoHomeAgeReplaySignal(estimateData) || undefined;
+    // One-time pest small-job price (GATE_ONE_TIME_PEST_SMALL_JOB): the saved one-time line's stamp.
+    v1Input.oneTimePestSmallJobReplay = require('./pricing-engine/one-time-pest-small-job').oneTimePestSmallJobReplaySignal(estimateData) || undefined;
     // A customer restore deleted the old termite result row on removal, so
     // the ordinary reader above has no quote-time stamp to recover. The
     // service-mix route passes the server-captured removal provenance for

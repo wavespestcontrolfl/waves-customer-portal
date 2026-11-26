@@ -1614,6 +1614,10 @@ const ONE_TIME = {
   pest: {
     multiplier: 2.2,
     floor: r(199),
+    // Flat price of a small one-spot job (owner 2026-11-26 "150 for small one time
+    // jobs"; GATE_ONE_TIME_PEST_SMALL_JOB). Overlaid from the `smallJobPrice` key of
+    // the live `onetime_pest` pricing_config row; not part of the multiple/floor invariant.
+    smallJobPrice: r(150),
   },
   lawn: {
     treatmentMultipliers: {

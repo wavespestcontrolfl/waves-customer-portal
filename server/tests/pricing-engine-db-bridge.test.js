@@ -281,7 +281,8 @@ describe('pricing engine DB bridge', () => {
 
     await expect(syncConstantsFromDB(db)).resolves.toBe(true);
 
-    expect(constants.ONE_TIME.pest).toEqual({ floor: 199, multiplier: 2.2 });
+    // The live row has no smallJobPrice key: the code default stays.
+    expect(constants.ONE_TIME.pest).toEqual({ floor: 199, multiplier: 2.2, smallJobPrice: 150 });
     expect(constants.ONE_TIME.lawn.floor).toBe(115);
     expect(constants.ONE_TIME.lawn.oneTimeMultiplier).toBe(1.5);
     expect(constants.ONE_TIME.lawn.treatmentMultipliers.fungicide).toBe(1.38);
@@ -299,6 +300,16 @@ describe('pricing engine DB bridge', () => {
     }));
     expect(constants.MOSQUITO.basePrices.SMALL).toEqual([105, 90]);
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
+  });
+
+  test('overlays smallJobPrice from the onetime_pest row when the key is present', async () => {
+    try {
+      const db = pricingConfigDb([{ config_key: 'onetime_pest', data: { floor: 199, multiplier: 2.2, smallJobPrice: 140 } }]);
+      await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+      expect(constants.ONE_TIME.pest.smallJobPrice).toBe(140);
+    } finally {
+      constants.ONE_TIME.pest.smallJobPrice = 150;
+    }
   });
 
   test('applies treatable-sf mosquito lot brackets from pricing_config', async () => {

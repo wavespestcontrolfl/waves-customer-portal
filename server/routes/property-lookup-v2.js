@@ -5873,7 +5873,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
 
   // One-time — urgency/afterHours threaded through; recurringCustomer perk
   // applied inside priceOneTimePest/priceOneTimeLawn via top-level override.
-  if (sel.has('OT_PEST')) services.oneTimePest = { urgency, afterHours };
+  // Small one-spot job (GATE_ONE_TIME_PEST_SMALL_JOB): staff-set; the engine ignores it while the gate is off.
+  if (sel.has('OT_PEST')) services.oneTimePest = { urgency, afterHours, ...(o.oneTimePestSmallJob === true ? { smallJob: true } : {}) };
   if (sel.has('OT_LAWN')) {
     const otLawnType = String(o.onetimeLawnType || 'WEED').toUpperCase();
     const OT_LAWN_TYPE = { FERT: 'fert', WEED: 'weed', PEST: 'pest', FUNGICIDE: 'fungicide' };

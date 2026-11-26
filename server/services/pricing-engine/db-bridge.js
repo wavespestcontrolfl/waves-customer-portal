@@ -240,6 +240,7 @@ function validatePestPricingConfig(snapshot = constants) {
   // one-time = max(otFloor, quarterlyPerApp × multiplier).
   if (!isPositiveNumber(ONE_TIME.pest?.multiplier)) errors.push('ONE_TIME.pest.multiplier must be positive');
   if (!isPositiveNumber(ONE_TIME.pest?.floor)) errors.push('ONE_TIME.pest.floor must be positive');
+  if (ONE_TIME.pest?.smallJobPrice != null && !isPositiveNumber(ONE_TIME.pest.smallJobPrice)) errors.push('ONE_TIME.pest.smallJobPrice must be positive');
   // Combined incentive invariant: one-time must stay STRICTLY ABOVE a recurring
   // customer's visit-1 cost (PEST.floor quarterly + PEST.initialFee setup) for
   // every property — otherwise a one-off visit is no more expensive than
@@ -2131,6 +2132,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       if (ot.multiplier != null) {
         constants.ONE_TIME.pest.multiplier = Number(ot.multiplier);
       }
+      // Flat small-job price (GATE_ONE_TIME_PEST_SMALL_JOB); a row without the key keeps the code default.
+      if (ot.smallJobPrice != null) constants.ONE_TIME.pest.smallJobPrice = r(Number(ot.smallJobPrice));
     }
     if (config.onetime_lawn) {
       const ot = config.onetime_lawn;

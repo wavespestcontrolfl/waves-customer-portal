@@ -99,6 +99,7 @@ const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, areaAddOnConfig } = require('../services/pricing-engine/constants');
 const { storedOneTimeAnchorPerApp, oneTimePestNoHomeAgeReplaySignal } = require('../services/pricing-engine/one-time-pest-home-age');
+const { oneTimePestSmallJobReplaySignal } = require('../services/pricing-engine/one-time-pest-small-job');
 const { isRetiredTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
@@ -20875,6 +20876,8 @@ function savedFloorReplayOverrides(estData) {
   overrides.roofStyleReplay = require('../services/estimate-roof-style-replay').roofStyleReplaySignal(estData) || undefined;
   // One-time pest home-age rule (GATE_ONE_TIME_PEST_NO_HOME_AGE): same contract, set even when empty.
   overrides.oneTimePestNoHomeAgeReplay = oneTimePestNoHomeAgeReplaySignal(estData) || undefined;
+  // One-time pest small-job price (GATE_ONE_TIME_PEST_SMALL_JOB): same contract, the saved line's stamp.
+  overrides.oneTimePestSmallJobReplay = oneTimePestSmallJobReplaySignal(estData) || undefined;
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.

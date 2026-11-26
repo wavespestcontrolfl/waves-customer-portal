@@ -937,6 +937,7 @@ const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
 const PER_JOB_ELIGIBILITY_KEYS = [
   ...RODENT_GUARANTEE_ELIGIBILITY_KEYS,
   "bermudaSuppression",
+  "oneTimePestSmallJob",
 ];
 
 const MOSQUITO_PROTOCOL_STEPS = [
@@ -1942,6 +1943,7 @@ export default function EstimateToolViewV2({
     linePriceOverrides: {},
     lawnFreq: "9",
     bermudaSuppression: false,
+    oneTimePestSmallJob: false,
     measuredTurfSf: "",
     pestFreq: "4",
     plugArea: "",
@@ -4810,6 +4812,8 @@ export default function EstimateToolViewV2({
           && !isCommercialEstimateInput(form)
           ? { bermudaSuppression: true }
           : {}),
+        // Small one-spot job (GATE_ONE_TIME_PEST_SMALL_JOB): the server ignores it while the gate is off.
+        ...(form.svcOnetimePest && form.oneTimePestSmallJob ? { oneTimePestSmallJob: true } : {}),
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
         manualDiscount,
         serviceSpecificDiscounts,
@@ -8180,6 +8184,14 @@ export default function EstimateToolViewV2({
               )}
               <SubGroupLabel className="mt-3">Pest</SubGroupLabel>{" "}
               <CheckboxV2 k="svcOnetimePest" label="One-Time Pest Control Service" />{" "}
+              {form.svcOnetimePest && (
+                <div className="ml-7 mb-3">
+                  <CheckboxV2 k="oneTimePestSmallJob" label="Small job (one spot)" />
+                  <div className="text-14 text-zinc-500 leading-snug">
+                    One wasp nest, one room, one sink area or one small area. Flat price when the small-job rule is on. Not for roach work.
+                  </div>
+                </div>
+              )}
               <CheckboxV2 k="svcOnetimeMosquito" label="One-Time Mosquito Control Service" />{" "}
               <CheckboxV2 k="svcFlea" label="Flea Control Service" />{" "}
               {form.svcFlea && (
