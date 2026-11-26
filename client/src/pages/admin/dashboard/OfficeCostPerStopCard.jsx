@@ -19,6 +19,21 @@ import FormulaNote from "./FormulaNote";
 const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const monthLabel = (ym) => `${MONTH_ABBR[Number(String(ym).slice(5, 7)) - 1] || "?"} ’${String(ym).slice(2, 4)}`;
 
+// "Aug ’26 – Oct ’26", or one month's label, or null with no months.
+const rangeLabel = (months = []) => {
+  const [first] = months;
+  const last = months[months.length - 1];
+  if (first === undefined) return null;
+  return first === last ? monthLabel(first) : `${monthLabel(first)} – ${monthLabel(last)}`;
+};
+
+// The note under the headline, by how many of the trailing months used the owner's office-time allowance.
+const OWNER_TIME_NOTE = {
+  none: () => "Your own office time is not counted yet. Add your hours and rate in Settings → Financials → Costs.",
+  some: (o) => `Your own office time is counted in ${o.monthsWithAllowance} of the last ${o.months} months `
+    + "(it was added to Settings partway through), so this figure mixes the two.",
+};
+
 const TOOLTIP_STYLE = {
   background: "#FFFFFF",
   border: "0.5px solid #E4E4E7",
@@ -61,12 +76,11 @@ export default function OfficeCostPerStopCard({ data }) {
   }
   const series = months.map((m) => ({ ...m, label: monthLabel(m.month) }));
   const trailing = data.trailing || {};
-  const trailingLabel = trailing.months?.length
-    ? trailing.months.length === 1
-      ? monthLabel(trailing.months[0])
-      : `${monthLabel(trailing.months[0])} – ${monthLabel(trailing.months[trailing.months.length - 1])}`
-    : null;
-  const counted = !!data.ownerOfficeTime?.counted;
+  const trailingLabel = rangeLabel(trailing.months);
+  // From what each stored month used (owner_allowance), not from today's settings.
+  const owner = data.ownerOfficeTime || { status: "none", monthsWithAllowance: 0, months: 0 };
+  const ownerNote = OWNER_TIME_NOTE[owner.status]?.(owner);
+  const pnlIncomplete = data.pnlIncompleteMonths ?? [];
 
   return (
     <UiSurface>
@@ -80,9 +94,11 @@ export default function OfficeCostPerStopCard({ data }) {
         {trailingLabel ? `${trailingLabel} · ` : ""}
         {fmtMoney(trailing.officeCost || 0)} office cost over {fmtInt(trailing.paidStops || 0)} paid stops
       </div>
-      {!counted && (
+      {ownerNote && <div className="mt-2 text-ui-caption text-ink-secondary">{ownerNote}</div>}
+      {pnlIncomplete.length > 0 && (
         <div className="mt-2 text-ui-caption text-ink-secondary">
-          Your own office time is not counted yet. Add your hours and rate in Settings → Financials → Costs.
+          Cash revenue and net income for {pnlIncomplete.map(monthLabel).join(", ")} were stored before the
+          Stripe ledger finished syncing, so they can still change. Office cost and paid stops are not affected.
         </div>
       )}
 
@@ -111,7 +127,7 @@ export default function OfficeCostPerStopCard({ data }) {
 
       <FormulaNote>
         Office cost = ledger expenses in {(data.officeCategories || []).join(", ")}
-        {counted ? ", plus your own office hours × your hourly rate" : ""}. Insurance, vehicle, ads, card fees,
+        {owner.status !== "none" ? ", plus your own office hours × your hourly rate (in the months it was set)" : ""}. Insurance, vehicle, ads, card fees,
         interest, taxes, supplies and depreciation are left out on purpose: they are field or non-office costs.
         Paid stops = completed visits in the month that are not callbacks or free returns. Each month is stored
         on the 2nd of the next month and re-written once more a month later for late entries.

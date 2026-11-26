@@ -15,7 +15,8 @@ const month = (m, officeCost, paidStops, extra = {}) => ({
 const DATA = {
   months: [month("2026-07-01", 900, 90), month("2026-08-01", 1000, 100), month("2026-09-01", 1100, 100), month("2026-10-01", 1200, 100)],
   trailing: { months: ["2026-08-01", "2026-09-01", "2026-10-01"], officeCost: 3300, paidStops: 300, officeCostPerStop: 11 },
-  ownerOfficeTime: { counted: false, hoursPerMonth: null, hourlyRate: null },
+  ownerOfficeTime: { status: "none", monthsWithAllowance: 0, months: 3 },
+  pnlIncompleteMonths: [],
   officeCategories: ["Office Expenses", "Utilities"],
 };
 
@@ -32,11 +33,22 @@ describe("OfficeCostPerStopCard", () => {
     expect(screen.getByRole("img", { name: "Paid stops" })).toBeInTheDocument();
   });
 
-  test("says the owner's own office time is not counted until it is", () => {
+  test("owner-time note comes from the stored months: none, some, all", () => {
     const { rerender } = render(<OfficeCostPerStopCard data={DATA} />);
     expect(screen.getByText(/Your own office time is not counted yet/)).toBeInTheDocument();
-    rerender(<OfficeCostPerStopCard data={{ ...DATA, ownerOfficeTime: { counted: true, hoursPerMonth: 10, hourlyRate: 40 } }} />);
+    rerender(<OfficeCostPerStopCard data={{ ...DATA, ownerOfficeTime: { status: "some", monthsWithAllowance: 1, months: 3 } }} />);
     expect(screen.queryByText(/not counted yet/)).not.toBeInTheDocument();
+    expect(screen.getByText(/counted in 1 of the last 3 months/)).toBeInTheDocument();
+    rerender(<OfficeCostPerStopCard data={{ ...DATA, ownerOfficeTime: { status: "all", monthsWithAllowance: 3, months: 3 } }} />);
+    expect(screen.queryByText(/not counted yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/counted in \d of the last/)).not.toBeInTheDocument();
+  });
+
+  test("names the months whose cash figures were stored before the ledger finished syncing", () => {
+    const { rerender } = render(<OfficeCostPerStopCard data={DATA} />);
+    expect(screen.queryByText(/before the\s+Stripe ledger/)).not.toBeInTheDocument();
+    rerender(<OfficeCostPerStopCard data={{ ...DATA, pnlIncompleteMonths: ["2026-10-01"] }} />);
+    expect(screen.getByText(/Oct ’26 were stored before the/)).toBeInTheDocument();
   });
 
   test("no stops in the window shows a dash, never $0.00", () => {

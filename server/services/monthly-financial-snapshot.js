@@ -12,7 +12,7 @@
  * screens they sit beside. Nothing here sends, charges or changes a customer record.
  */
 
-const { etMonthStart, etDateString } = require('../utils/datetime-et');
+const { etMonthStart, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { pnlPayRunWagesLive } = require('../config/feature-gates');
 const { buildPnlReport } = require('./pnl-report');
@@ -89,18 +89,34 @@ async function officeLedgerCost(db, startDate, endDate) {
 }
 
 /**
- * Completed visits that earn their own pay: service_records rows with status completed,
- * not flagged is_callback (re-services and free returns carry that flag; see
- * services/re-service.js and the 20260618000002 backfill).
+ * Paid stops: physical stops with completed work that earns money. A service_records row counts when
+ *  - its status is completed and neither it nor its scheduled visit is flagged is_callback (re-services and free
+ *    returns; services/re-service.js, the 20260618000002 backfill),
+ *  - its scheduled visit is not an included follow-up (followup_included), and
+ *  - job-costing booked revenue above $0 on it. job-costing.js deriveRevenueFromOwnSources is the one place that
+ *    decides what a visit earns (prepay share, recorded amount, price, linked invoice, dues; $0 for always-free
+ *    types, included follow-ups, a stamped zero or a visit marked intentionally free), so its stored result is
+ *    read, not restated. A paid annual-prepay visit carries its prepay share and stays in. A visit job-costing has
+ *    not costed (NULL revenue) is left out, the same as in the gross-margin tile.
+ * A grouped visit (scheduled_services.visit_id, one parent service_visits row per physical stop) counts once
+ * however many of its services were done; a record with no group counts on its own.
  */
 async function paidStopsForWindow(db, startDate, endDate) {
-  const row = await db('service_records')
-    .whereBetween('service_date', [startDate, endDate])
-    .where('status', 'completed')
-    .where(function notCallback() {
-      this.whereNull('is_callback').orWhere('is_callback', false);
+  const row = await db('service_records as sr')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+    .whereBetween('sr.service_date', [startDate, endDate])
+    .where('sr.status', 'completed')
+    .where('sr.revenue', '>', 0)
+    .where(function recordNotCallback() {
+      this.whereNull('sr.is_callback').orWhere('sr.is_callback', false);
     })
-    .count({ n: '*' })
+    .where(function visitNotCallback() {
+      this.whereNull('ss.is_callback').orWhere('ss.is_callback', false);
+    })
+    .where(function visitNotIncludedFollowup() {
+      this.whereNull('ss.followup_included').orWhere('ss.followup_included', false);
+    })
+    .select(db.raw('COUNT(DISTINCT COALESCE(ss.visit_id::text, sr.id::text)) as n'))
     .first();
   return Number(row && row.n) || 0;
 }
@@ -126,9 +142,16 @@ async function jobRevenueForWindow(db, startDate, endDate) {
   };
 }
 
-/** The newest company_financials row, the same accessor every other settings reader uses. */
-async function latestFinancials(db) {
-  return (await db('company_financials').orderBy('effective_date', 'desc').first()) || null;
+/**
+ * The company_financials row in effect on `onDate` (the newest row with effective_date on or before it), or null
+ * when none had started yet. A month's owner allowance is read as of the month's last day, so a figure the owner
+ * enters later never changes a month it did not apply to, and a re-write of an older month gives the same answer.
+ */
+async function financialsEffectiveOn(db, onDate) {
+  return (await db('company_financials')
+    .where('effective_date', '<=', onDate)
+    .orderBy('effective_date', 'desc')
+    .first()) || null;
 }
 
 /** Everything one month's snapshot row holds. Pure reads; writes nothing. */
@@ -138,7 +161,7 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
     officeLedgerCost(db, startDate, endDate),
     paidStopsForWindow(db, startDate, endDate),
     jobRevenueForWindow(db, startDate, endDate),
-    latestFinancials(db),
+    financialsEffectiveOn(db, endDate),
     buildPnlReport(db, startDate, endDate),
   ]);
   const allowance = ownerAllowance(financials);
@@ -155,37 +178,52 @@ async function computeMonthSnapshot(month, db = require('../models/db')) {
     office_cost_per_stop: officeCostPerStop(officeCost, stops),
     net_income: round2(pnl.netIncome),
     net_margin_pct: cashRevenue > 0 ? round2(num(pnl.netMargin) * 100) : null,
+    // buildPnlReport's coverage verdict: the balance ledger synced past month end, so the refunds, disputes and
+    // card fees inside cash revenue and net income are final.
+    pnl_complete: !!(pnl.coverage && pnl.coverage.complete),
   };
 }
 
 /** Compute and store one month (one row per month: a re-run replaces it). Returns the stored values. */
-async function upsertMonthSnapshot(month, db = require('../models/db')) {
+async function upsertMonthSnapshot(month, db = require('../models/db'), computedAt = new Date()) {
   const snapshot = await computeMonthSnapshot(month, db);
   await db('monthly_financial_snapshots')
-    .insert({ ...snapshot, computed_at: new Date() })
+    .insert({ ...snapshot, computed_at: computedAt })
     .onConflict('month')
     .merge();
   return snapshot;
 }
 
 /**
- * The monthly job body. On the 2nd it writes last month and re-writes the month before it
- * (late ledger entries). With catchUp it first checks that last month's row exists and does
- * nothing when it does, so a lost tick on the 2nd is made up on days 3 to 7 without a
- * second write.
+ * Does last month still need this month's run? True when its row is missing, was written before this month's
+ * run window opened (the 2nd, 00:00 ET: a backfill or an older run, so the month before it was not refreshed
+ * with it), or says its P&L figures were not complete (the balance ledger had not synced past month end).
+ */
+async function lastMonthNeedsRun(db, last, now) {
+  const row = await db('monthly_financial_snapshots').where({ month: last }).first('computed_at', 'pnl_complete');
+  if (!row) return true;
+  if (row.pnl_complete === false) return true;
+  const runOpened = parseETDateTime(`${etMonthStart(now).slice(0, 8)}02T00:00`);
+  return !row.computed_at || new Date(row.computed_at) < runOpened;
+}
+
+/**
+ * The monthly job body. On the 2nd it writes last month and re-writes the month before it (late ledger entries),
+ * both in ONE transaction: if either write fails neither row changes, so last month stays missing (or stale) and a
+ * catch-up run on days 3 to 7 does the whole pair again. With catchUp it does nothing unless lastMonthNeedsRun.
  */
 async function runMonthlyFinancialSnapshots({ now = new Date(), catchUp = false, db = require('../models/db') } = {}) {
   const last = monthOffset(now, -1);
   const beforeLast = monthOffset(now, -2);
-  if (catchUp) {
-    const existing = await db('monthly_financial_snapshots').where({ month: last }).first('id');
-    if (existing) return { skipped: 'already_written', months: [] };
-  }
-  const written = [];
-  for (const month of [last, beforeLast]) {
-    await upsertMonthSnapshot(month, db);
-    written.push(month);
-  }
+  if (catchUp && !(await lastMonthNeedsRun(db, last, now))) return { skipped: 'already_written', months: [] };
+  const written = await db.transaction(async (trx) => {
+    const done = [];
+    for (const month of [last, beforeLast]) {
+      await upsertMonthSnapshot(month, trx, now);
+      done.push(month);
+    }
+    return done;
+  });
   logger.info(`[monthly-financial-snapshot] wrote ${written.join(', ')}`);
   return { skipped: null, months: written };
 }
@@ -204,6 +242,7 @@ function shapeRow(r) {
     officeCostPerStop: decimalOrNull(r.office_cost_per_stop),
     netIncome: num(r.net_income),
     netMarginPct: decimalOrNull(r.net_margin_pct),
+    pnlComplete: r.pnl_complete == null ? null : !!r.pnl_complete,
   };
 }
 
@@ -220,21 +259,32 @@ function trailingThreeMonths(rows) {
   };
 }
 
-/** The dashboard card's payload: the last `months` stored rows, oldest first, plus the headline and the owner-time note. */
+/**
+ * Whether the owner's own office time is inside the trailing months' office cost, read from each stored row's
+ * owner_allowance (what that month actually used), never from today's settings: 'all', 'some' or 'none'.
+ */
+function ownerTimeStatus(trailingRows) {
+  const withAllowance = trailingRows.filter((r) => r.ownerAllowance > 0).length;
+  let status = 'some';
+  if (withAllowance === 0) status = 'none';
+  else if (withAllowance === trailingRows.length) status = 'all';
+  return { status, monthsWithAllowance: withAllowance, months: trailingRows.length };
+}
+
+/** The dashboard card's payload: the last `months` stored rows, oldest first, plus the headline and the owner-time and P&L-coverage notes. */
 async function getOfficeCostPerStopSeries({ months = 12, db = require('../models/db') } = {}) {
   const limit = Math.max(1, Math.min(36, parseInt(months, 10) || 12));
   const rows = (await db('monthly_financial_snapshots').orderBy('month', 'desc').limit(limit))
     .map(shapeRow)
     .reverse();
-  const financials = await latestFinancials(db);
+  const trailingRows = rows.slice(-3);
   return {
     months: rows,
     trailing: trailingThreeMonths(rows),
-    ownerOfficeTime: {
-      counted: ownerAllowance(financials) > 0,
-      hoursPerMonth: decimalOrNull(financials && financials.owner_office_hours_per_month),
-      hourlyRate: decimalOrNull(financials && financials.owner_office_hourly_rate),
-    },
+    ownerOfficeTime: ownerTimeStatus(trailingRows),
+    // Months whose cash revenue and net income were stored before the balance ledger synced past month end.
+    // Office cost and paid stops do not depend on that ledger.
+    pnlIncompleteMonths: trailingRows.filter((r) => r.pnlComplete === false).map((r) => r.month),
     officeCategories: OFFICE_CATEGORIES,
     asOf: etDateString(),
   };

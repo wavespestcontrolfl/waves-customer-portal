@@ -32,7 +32,8 @@ const PAYLOAD = {
     { month: '2026-10-01', officeCost: 1000, paidStops: 100, officeCostPerStop: 10 },
   ],
   trailing: { months: ['2026-09-01', '2026-10-01'], officeCost: 1900, paidStops: 200, officeCostPerStop: 9.5 },
-  ownerOfficeTime: { counted: false, hoursPerMonth: null, hourlyRate: null },
+  ownerOfficeTime: { status: 'none', monthsWithAllowance: 0, months: 2 },
+  pnlIncompleteMonths: [],
 };
 const mockSeries = jest.fn(async () => PAYLOAD);
 jest.mock('../services/monthly-financial-snapshot', () => ({

@@ -33,12 +33,30 @@ postgres('monthly financial snapshot (live Postgres)', () => {
       category_id: cat ? cat.id : null, description: `Sample ${categoryName || 'uncategorized'}`, amount, expense_date: date, tax_year: Number(date.slice(0, 4)),
     });
   };
-  const visit = async (date, fields = {}) => {
+  // A completed service_records row. `scheduled` makes its scheduled_services row too (callback flag, included
+  // follow-up, group); `scheduled.visit_id` puts it in a grouped visit.
+  const visit = async (date, fields = {}, scheduled = null) => {
+    let scheduledServiceId = null;
+    if (scheduled) {
+      scheduledServiceId = randomUUID();
+      await trx('scheduled_services').insert({
+        id: scheduledServiceId, customer_id: customerId, scheduled_date: date, service_type: 'Sample Visit', status: 'completed', ...scheduled,
+      });
+    }
     await trx('service_records').insert({
-      id: randomUUID(), customer_id: customerId, service_date: date, service_type: 'Sample Visit', status: 'completed', ...fields,
+      id: randomUUID(), customer_id: customerId, service_date: date, service_type: 'Sample Visit', status: 'completed',
+      scheduled_service_id: scheduledServiceId, ...fields,
     });
   };
-  const settings = (fields) => trx('company_financials').insert({ effective_date: '2099-01-01', ...fields });
+  const group = async (date) => {
+    const id = randomUUID();
+    await trx('service_visits').insert({
+      id, customer_id: customerId, scheduled_date: date, stop_base_key: `sample:${id}`, created_by: 'test',
+    });
+    return id;
+  };
+  // An effective-dated settings row; the default date is before the October fixtures, after the seeded row.
+  const settings = (fields, effective_date = '2026-09-15') => trx('company_financials').insert({ effective_date, ...fields });
 
   beforeAll(async () => {
     const target = new URL(process.env.DATABASE_URL);
@@ -126,6 +144,42 @@ postgres('monthly financial snapshot (live Postgres)', () => {
       expect(await svc.jobRevenueForWindow(trx, '2026-10-01', '2026-10-31')).toEqual({ revenue: 300, grossMarginPct: 46.67 });
     });
 
+    it('free work without the callback flag is not a paid stop: a $0 included follow-up, one flagged on its visit, one marked free', async () => {
+      await visit('2026-10-02', { revenue: '100.00', gross_profit: '60.00' });
+      await visit('2026-10-03', { revenue: '0.00', gross_profit: '-15.00' }, { followup_included: true }); // is_callback false, $0
+      await visit('2026-10-04', { revenue: '80.00', gross_profit: '10.00' }, { followup_included: true }); // included follow-up that carries a price
+      await visit('2026-10-05', { revenue: '90.00', gross_profit: '20.00' }, { is_callback: true }); // the visit is the callback, the record flag unset
+      await visit('2026-10-06', { revenue: '0.00', gross_profit: '-10.00' }, { is_callback: false }); // job-costing booked $0 (stamped zero or intentionally free)
+      await visit('2026-10-07', { revenue: null }); // never costed
+      expect(await svc.paidStopsForWindow(trx, '2026-10-01', '2026-10-31')).toBe(1);
+    });
+
+    it('a paid annual-prepay visit keeps its prepay share as revenue and stays in', async () => {
+      await visit('2026-10-02', { revenue: '55.00', gross_profit: '30.00' }, { prepaid_amount: '55.00' });
+      await visit('2026-10-09', { revenue: '55.00', gross_profit: '30.00' }, { is_callback: false });
+      expect(await svc.paidStopsForWindow(trx, '2026-10-01', '2026-10-31')).toBe(2);
+    });
+
+    it('a grouped visit counts once per physical stop; standalone records and other groups count on their own', async () => {
+      const stopA = await group('2026-10-02');
+      const stopB = await group('2026-10-09');
+      await visit('2026-10-02', { revenue: '100.00', gross_profit: '50.00' }, { visit_id: stopA }); // three services, one stop
+      await visit('2026-10-02', { revenue: '60.00', gross_profit: '30.00' }, { visit_id: stopA });
+      await visit('2026-10-02', { revenue: '40.00', gross_profit: '20.00' }, { visit_id: stopA });
+      await visit('2026-10-09', { revenue: '70.00', gross_profit: '35.00' }, { visit_id: stopB });
+      await visit('2026-10-09', { revenue: '0.00', gross_profit: '-5.00' }, { visit_id: stopB }); // free part of that stop: still one stop
+      await visit('2026-10-12', { revenue: '80.00', gross_profit: '40.00' }); // no scheduled row
+      await visit('2026-10-13', { revenue: '80.00', gross_profit: '40.00' }, {}); // scheduled row, no group
+      await visit('2026-10-14', { revenue: '80.00', gross_profit: '40.00' }, {}); // a second standalone one
+      expect(await svc.paidStopsForWindow(trx, '2026-10-01', '2026-10-31')).toBe(5);
+    });
+
+    it('a group whose only work is free is not a paid stop', async () => {
+      const stop = await group('2026-10-02');
+      await visit('2026-10-02', { revenue: '0.00' }, { visit_id: stop, followup_included: true });
+      expect(await svc.paidStopsForWindow(trx, '2026-10-01', '2026-10-31')).toBe(0);
+    });
+
     it('a month with no visits has 0 stops and no margin', async () => {
       expect(await svc.paidStopsForWindow(trx, '2026-10-01', '2026-10-31')).toBe(0);
       expect(await svc.jobRevenueForWindow(trx, '2026-10-01', '2026-10-31')).toEqual({ revenue: 0, grossMarginPct: null });
@@ -175,6 +229,16 @@ postgres('monthly financial snapshot (live Postgres)', () => {
       expect((await svc.computeMonthSnapshot('2026-10', trx)).owner_allowance).toBe(0);
     });
 
+    it('the allowance is the settings row in effect on the month\'s last day: later rows never change an earlier month', async () => {
+      await seedMonth();
+      await settings({ owner_office_hours_per_month: '10', owner_office_hourly_rate: '30.00' }, '2026-10-15'); // in effect at October's end
+      await settings({ owner_office_hours_per_month: '20', owner_office_hourly_rate: '30.00' }, '2026-11-05'); // after it
+      expect((await svc.computeMonthSnapshot('2026-10', trx)).owner_allowance).toBe(300);
+      expect((await svc.computeMonthSnapshot('2026-11', trx)).owner_allowance).toBe(600);
+      // September ended before either row started: the seeded row has no owner time.
+      expect((await svc.computeMonthSnapshot('2026-09', trx)).owner_allowance).toBe(0);
+    });
+
     it('zero paid stops: the ratio is null and the office cost is still stored', async () => {
       await expense('Utilities', '60.00', '2026-10-10');
       await visit('2026-10-12', { revenue: '0.00', is_callback: true });
@@ -204,7 +268,70 @@ postgres('monthly financial snapshot (live Postgres)', () => {
       const out = await svc.getOfficeCostPerStopSeries({ months: 12, db: trx });
       expect(out.months.map((m) => m.month)).toEqual(['2026-07-01', '2026-08-01', '2026-09-01', '2026-10-01']);
       expect(out.trailing).toEqual({ months: ['2026-08-01', '2026-09-01', '2026-10-01'], officeCost: 900, paidStops: 30, officeCostPerStop: 30 });
-      expect(out.ownerOfficeTime.counted).toBe(false);
+      expect(out.ownerOfficeTime).toEqual({ status: 'none', monthsWithAllowance: 0, months: 3 });
+    });
+
+    it('the owner-time note comes from the stored allowances, whatever the settings say today', async () => {
+      await settings({ owner_office_hours_per_month: '10', owner_office_hourly_rate: '30.00' }, '2026-11-20'); // today's settings: counted
+      for (const [month, allowance] of [['2026-08-01', 0], ['2026-09-01', 0], ['2026-10-01', 300]]) {
+        await trx('monthly_financial_snapshots').insert({ month, office_cost: 100, owner_allowance: allowance, paid_stops: 10 });
+      }
+      const out = await svc.getOfficeCostPerStopSeries({ db: trx });
+      expect(out.ownerOfficeTime).toEqual({ status: 'some', monthsWithAllowance: 1, months: 3 });
+    });
+
+    it('P&L completeness: stored false while the balance ledger has not synced past month end, true after', async () => {
+      await seedMonth();
+      expect((await svc.upsertMonthSnapshot('2026-10', trx)).pnl_complete).toBe(false); // never synced
+      expect((await trx('monthly_financial_snapshots').where({ month: '2026-10-01' }).first()).pnl_complete).toBe(false);
+      await trx('stripe_sync_state').insert({ sync_type: 'balance_transactions', last_sync_at: '2026-11-01T12:00:00Z' });
+      expect((await svc.upsertMonthSnapshot('2026-10', trx)).pnl_complete).toBe(true);
+      expect((await trx('monthly_financial_snapshots').where({ month: '2026-10-01' }).first()).pnl_complete).toBe(true);
+      // A sync that ran inside the month is not past its end.
+      await trx('stripe_sync_state').update({ last_sync_at: '2026-10-31T12:00:00Z' });
+      expect((await svc.upsertMonthSnapshot('2026-10', trx)).pnl_complete).toBe(false);
+      const out = await svc.getOfficeCostPerStopSeries({ db: trx });
+      expect(out.pnlIncompleteMonths).toEqual(['2026-10-01']);
+    });
+
+    describe('the monthly pair', () => {
+      const NOW = new Date('2026-12-02T10:35:00Z'); // 05:35 ET on the 2nd: last month is November
+      const CATCH_UP = new Date('2026-12-04T10:35:00Z');
+      const failOctober = async () => {
+        await trx.raw(`CREATE FUNCTION snapshot_pair_fail() RETURNS trigger AS $$
+          BEGIN IF NEW.month = DATE '2026-10-01' THEN RAISE EXCEPTION 'sample failure'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+        await trx.raw('CREATE TRIGGER snapshot_pair_fail BEFORE INSERT OR UPDATE ON monthly_financial_snapshots FOR EACH ROW EXECUTE FUNCTION snapshot_pair_fail()');
+      };
+
+      it('writes last month and the month before, both rows in one run', async () => {
+        await expense('Office Expenses', '50.00', '2026-11-10');
+        await expense('Office Expenses', '70.00', '2026-10-10');
+        const res = await svc.runMonthlyFinancialSnapshots({ now: NOW, db: trx });
+        expect(res.months).toEqual(['2026-11-01', '2026-10-01']);
+        const rows = await trx('monthly_financial_snapshots').orderBy('month');
+        expect(rows.map((r) => Number(r.office_cost))).toEqual([70, 50]);
+      });
+
+      it('a failure on the month-before refresh keeps neither row, and the catch-up then does the pair', async () => {
+        await failOctober();
+        await expect(svc.runMonthlyFinancialSnapshots({ now: NOW, db: trx })).rejects.toThrow(/sample failure/);
+        expect(await trx('monthly_financial_snapshots').count({ n: '*' }).first()).toMatchObject({ n: '0' }); // November rolled back too
+        await trx.raw('DROP TRIGGER snapshot_pair_fail ON monthly_financial_snapshots');
+        const res = await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP, catchUp: true, db: trx });
+        expect(res.months).toEqual(['2026-11-01', '2026-10-01']);
+        expect(await trx('monthly_financial_snapshots').count({ n: '*' }).first()).toMatchObject({ n: '2' });
+      });
+
+      it('the catch-up skips a pair this month\'s run finished with the ledger synced, and redoes one stored while it was not', async () => {
+        await trx('stripe_sync_state').insert({ sync_type: 'balance_transactions', last_sync_at: '2026-12-02T09:00:00Z' });
+        await svc.runMonthlyFinancialSnapshots({ now: NOW, db: trx }); // pnl_complete true
+        expect((await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP, catchUp: true, db: trx })).skipped).toBe('already_written');
+        await trx('monthly_financial_snapshots').where({ month: '2026-11-01' }).update({ pnl_complete: false });
+        expect((await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP, catchUp: true, db: trx })).months).toEqual(['2026-11-01', '2026-10-01']);
+        // A row written before this month's run window opened (a backfill on the 1st) is redone too.
+        await trx('monthly_financial_snapshots').where({ month: '2026-11-01' }).update({ computed_at: '2026-12-01T20:00:00Z', pnl_complete: true });
+        expect((await svc.runMonthlyFinancialSnapshots({ now: CATCH_UP, catchUp: true, db: trx })).skipped).toBeNull();
+      });
     });
   });
 });
