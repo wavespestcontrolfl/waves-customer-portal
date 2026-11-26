@@ -200,18 +200,23 @@ export default function VisualNotesPanel({ service }) {
     loadMoments();
   }, [loadMoments]);
 
-  // Weekly clip goal line. Fails quietly: any error hides the line.
+  // Weekly clip goal line. Fails quietly: any error hides the line. Only the
+  // newest request may set the line, so a slow older answer never wins.
+  const clipWeekRequestRef = useRef(0);
   const loadClipWeek = useCallback(async () => {
+    clipWeekRequestRef.current += 1;
+    const requestId = clipWeekRequestRef.current;
+    let next = null;
     try {
       const res = await fetch(`${API}/api/tech/visual-moments/clip-week`, {
         headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.enabled === false || !Number.isFinite(data.okClips)) throw new Error('clip week unavailable');
-      setClipWeek(data);
+      if (res.ok && data.enabled !== false && Number.isFinite(data.okClips)) next = data;
     } catch {
-      setClipWeek(null);
+      next = null;
     }
+    if (requestId === clipWeekRequestRef.current) setClipWeek(next);
   }, []);
 
   useEffect(() => {

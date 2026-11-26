@@ -346,7 +346,7 @@ describe('codex #5568 r16', () => {
       expect(r).toMatch(/const \{ row, refusal \} = await lockedMomentUpdate\(req, moment, updates\);/);
       const txn = r.indexOf('await db.transaction(async (trx) => {');
       const jobLock = r.indexOf("trx('scheduled_services').where({ id: moment.job_id }).forUpdate().first()");
-      const momentLock = r.indexOf('.forUpdate()', jobLock + 10);
+      const momentLock = r.search(/const lockedMoment = await trx\('visual_service_moments'\)\s*\.where\(\{ id: moment\.id \}\)\s*\.whereNull\('deleted_at'\)\s*\.forUpdate\(\)\s*\.first\(\);/);
       const mutate = r.indexOf('canMutateMoment(req, lockedMoment)');
       const update = r.indexOf("[row] = await trx('visual_service_moments')");
       expect(txn).toBeGreaterThan(0);

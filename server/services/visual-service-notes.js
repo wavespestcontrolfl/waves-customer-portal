@@ -192,7 +192,9 @@ function dateOrNow(value) {
 // field is absent or not a recognizable boolean.
 function parseYoutubeOk(value) {
   if (value === true || value === false) return value;
-  if (value == null) return undefined;
+  // Only a boolean, string or number counts: an array like [true] or an object
+  // never stamps the mark.
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
   const normalized = String(value).trim().toLowerCase();
   if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
   if (['false', '0', 'no', 'off'].includes(normalized)) return false;

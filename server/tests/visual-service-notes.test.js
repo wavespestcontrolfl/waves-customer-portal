@@ -174,6 +174,9 @@ describe('visual service notes', () => {
         .toEqual({ youtube_ok_at: null, youtube_ok_by: null });
       expect(youtubeOkColumns({ mediaType: 'video', technicianId: 't' })).toEqual({});
       expect(youtubeOkColumns({ mediaType: 'video', youtubeOk: 'maybe', technicianId: 't' })).toEqual({});
+      for (const junk of [['true'], [true], { v: true }, ['1']]) {
+        expect(youtubeOkColumns({ mediaType: 'video', youtubeOk: junk, technicianId: 't' })).toEqual({});
+      }
     });
 
     test('the shared formatter (public report) never carries the YouTube mark; staff fields do', () => {
