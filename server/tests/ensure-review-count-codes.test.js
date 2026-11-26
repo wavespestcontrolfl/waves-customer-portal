@@ -63,7 +63,9 @@ describe('unusableReason', () => {
   const form = 'https://g.page/r/x/review';
   test('a live row aimed at the planned review form is ready', () => {
     expect(unusableReason({ expires_at: null, target_url: form }, form, now)).toBeNull();
-    expect(unusableReason({ expires_at: '2027-01-01T00:00:00Z', target_url: form }, form, now)).toBeNull();
+  });
+  test('a future expiry is not ready either: a printed badge outlives it', () => {
+    expect(unusableReason({ expires_at: '2027-01-01T00:00:00Z', target_url: form }, form, now)).toBe('has an expiry date');
   });
   test('an expired row cannot count', () => {
     expect(unusableReason({ expires_at: '2026-11-01T00:00:00Z', target_url: form }, form, now)).toBe('expired');

@@ -47,7 +47,8 @@ function planRows({ offices, techs, techSlugRe, fallbackOfficeId }) {
 // Why an existing row is not ready, or null when it is. resolveShortCode skips an expired row, and the public
 // /l/<code> alias redirects to target_url, so the stored target must be exactly the review form this run plans.
 function unusableReason(row, expectedTarget, now = Date.now()) {
-  if (row.expires_at && new Date(row.expires_at).getTime() < now) return 'expired';
+  // A badge is printed once and worn for years: any expiry, past or future, will stop the count one day.
+  if (row.expires_at) return new Date(row.expires_at).getTime() < now ? 'expired' : 'has an expiry date';
   if (String(row.target_url || '') !== expectedTarget) return 'target is not the planned review form';
   return null;
 }
@@ -83,6 +84,10 @@ async function main() {
   const current = process.env.DATABASE_URL || '';
   if (process.env.DATABASE_PUBLIC_URL && (!current || /\.railway\.internal\b/.test(current))) {
     process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+  }
+  if (!process.env.DATABASE_URL) {
+    // Never let the database model fall back to a default connection: the run must name its database.
+    throw Object.assign(new Error('no DATABASE_URL: run it with the nested Railway command above'), { code: 'PRIVATE_DB_URL' });
   }
   if (/\.railway\.internal\b/.test(process.env.DATABASE_URL || '')) {
     throw Object.assign(new Error('only the private database URL is set: run it with the nested Postgres command above'), { code: 'PRIVATE_DB_URL' });
