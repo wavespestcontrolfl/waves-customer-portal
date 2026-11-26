@@ -1589,10 +1589,11 @@ function declaredTankRate(meta, hints, product) {
   if (hints.length !== 1) return {};
   const labelUse = labelUseRate(meta, product);
   if (labelUse) return { declaredRate: { lo: labelUse.amount, hi: labelUse.amount, unit: labelUse.unit }, labelUseRate: true };
-  // The line names a label rate for another registration: its text states that rate too, so no rate is read from it (rateOf below
-  // honors this) and the resolved product keeps its catalog band.
-  if (meta?.labelRatePerGallon) return { labelRateRefused: true };
+  // The line names a label rate for another registration. With its own tank rate too (the flea card's Tekko Pro, weaker than the
+  // catalog band), the card keeps that tank rate. With none, its text states the label rate, so no rate is read from it (rateOf
+  // below honors this) and the resolved product keeps its catalog band.
   const amount = Number(meta?.tankRatePerGallon?.amount);
+  if (meta?.labelRatePerGallon && !(amount > 0)) return { labelRateRefused: true };
   if (!(amount > 0)) return {};
   return { declaredRate: { lo: amount, hi: amount, unit: String(meta.tankRatePerGallon.unit) } };
 }

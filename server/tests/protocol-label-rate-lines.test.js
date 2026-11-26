@@ -20,6 +20,11 @@ const REVIEWED = [
   ['mosquito', 3, 'Suspend Polyzone', 1.1, 'fl_oz'],
   // Tekko Pro IGR, EPA 53883-335, "CONTROL OF COCKROACHES AND CRICKETS": 2 oz per gallon of water, 1 gallon per 1,000 sq ft.
   ['cockroach', 1, 'Tekko Pro IGR', 2, 'fl_oz'],
+  // Tekko Pro IGR, EPA 53883-335, fleas: "Dilute spray solution: 1 oz. per gal. of water ... Spray rate: 1 gal. per 1,500 ft2", so
+  // 1 fl oz per 1,500 sq ft. The flea card sprays the shared Antapex tank at 1 gallon per 1,000 sq ft, so the tank carries 0.66 fl oz
+  // per gallon (0.66 per 1,000 sq ft, under the label's 0.667). Below the catalog's 1 per gallon: the close-out must start here, or a
+  // gallon per 1,000 sq ft puts down 1.5 times the label amount.
+  ['flea', 1, 'Tekko Pro IGR', 0.66, 'fl_oz'],
 ];
 
 function labelRateLines() {
@@ -49,14 +54,17 @@ describe('card lines that carry a label rate for their own pest', () => {
     expect(_test.protocolBand(label, { rate: { lo: 2, hi: 2, unit: 'g' }, declared: true, labelUse: true })).toBeNull();
   });
 
-  test('the cockroach card line resolves with the label rate; the flea card keeps its weaker shared-tank rate', () => {
+  test('the cockroach card line resolves with its label rate, and the flea card line with its own shared-tank label rate', () => {
     const catalog = [TEKKO];
     const lineFor = (programKey, visitNo) => _test.linesFromLineMeta(protocols[programKey].visits.find((visit) => visit.visit === visitNo), catalog)
       .find((line) => line.product.id === 't');
     expect(lineFor('cockroach', 1)).toMatchObject({ declaredRate: { lo: 2, hi: 2, unit: 'fl_oz' }, labelUseRate: true, selected: true });
     const flea = lineFor('flea', 1);
-    expect(flea.declaredRate).toEqual({ lo: 0.66, hi: 0.66, unit: 'fl_oz' });
-    expect(flea.labelUseRate).toBeUndefined();
+    expect(flea).toMatchObject({ declaredRate: { lo: 0.66, hi: 0.66, unit: 'fl_oz' }, labelUseRate: true });
+    // Another registration: the flea card keeps its own tank rate (weaker than the catalog's 1), never the catalog band.
+    const other = _test.linesFromLineMeta(protocols.flea.visits.find((visit) => visit.visit === 1), [{ ...TEKKO, epa_reg_number: null }]).find((line) => line.product.id === 't');
+    expect(other.declaredRate).toEqual({ lo: 0.66, hi: 0.66, unit: 'fl_oz' });
+    expect(other.labelUseRate).toBeUndefined();
   });
 
   test('the card line names no product or rate: a completion action records the generic step, the verified rate rides only with the product', () => {
@@ -127,8 +135,12 @@ describe('the completion form gets the cockroach label rate', () => {
     // Another registration, or a catalog band in another unit, keeps the catalog rate.
     expect((await run({ ...TEKKO, epa_reg_number: '53883-444' }, 'German Roach Cleanout', 'german_roach')).defaultRate).toBe('1');
     expect((await run({ ...TEKKO, default_unit: 'fl_oz/1000sqft' }, 'German Roach Cleanout', 'german_roach')).defaultRate).toBe('1');
-    // The flea card lists Tekko Pro with its own shared-tank rate, never the cockroach label rate.
-    expect((await run(TEKKO, 'Flea Treatment', 'flea_tick')).defaultRate).toBe('1');
+    // The flea card prefills and reviews Tekko Pro at its own shared-tank rate: never the cockroach 2, and never the catalog 1
+    // (1 fl oz per gallon at the card's gallon per 1,000 sq ft is 1.5 times the flea label amount).
+    expect(await run(TEKKO, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66', labelUseRate: true });
+    expect((await run({ ...TEKKO, epa_reg_number: '53883-444' }, 'Flea Treatment', 'flea_tick')).defaultRate).toBe('1');
+    // A booked cockroach add-on lists Tekko Pro at 2: the flea rate starts blank too.
+    expect(await run(TEKKO, 'Flea Treatment', 'flea_tick', [{ service_name: 'German Roach Cleanout', service_key: 'german_roach' }])).toMatchObject({ defaultRate: '', labelUseRate: true });
     // A booked flea add-on lists Tekko Pro at 0.66: the rate starts blank (neither the 2 nor the catalog 1), the tech records what went out.
     const withFlea = await run(TEKKO, 'German Roach Cleanout', 'german_roach', [{ service_name: 'Flea Treatment', service_key: 'flea_tick' }]);
     expect(withFlea).toMatchObject({ defaultRate: '', labelUseRate: true });
