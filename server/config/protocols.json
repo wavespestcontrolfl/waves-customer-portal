@@ -2109,10 +2109,12 @@
             "catalogProductHints": [
               "Suspend Polyzone"
             ],
-            "completionApplicationMethod": "perimeter_spray",
-            "tankRatePerGallon": {
+            "completionApplicationMethod": "foliar_spray",
+            "labelRatePerGallon": {
               "amount": 1.1,
-              "unit": "fl_oz"
+              "unit": "fl_oz",
+              "use": "mosquitoes",
+              "epa": "101563-143"
             }
           },
           "Growth regulator in the same tank: Tekko Pro 1 fl oz per gallon": {
@@ -2121,7 +2123,7 @@
             "catalogProductHints": [
               "Tekko Pro IGR"
             ],
-            "completionApplicationMethod": "perimeter_spray",
+            "completionApplicationMethod": "foliar_spray",
             "tankRatePerGallon": {
               "amount": 1,
               "unit": "fl_oz"
@@ -2166,10 +2168,7 @@
             ],
             "completionApplicationMethod": "spot_treatment"
           }
-        },
-        "completionDefaultProducts": [
-          "Summit Mosquito Dunk Tablets"
-        ]
+        }
       },
       {
         "visit": 3,
@@ -2192,10 +2191,12 @@
             "catalogProductHints": [
               "Suspend Polyzone"
             ],
-            "completionApplicationMethod": "perimeter_spray",
-            "tankRatePerGallon": {
+            "completionApplicationMethod": "foliar_spray",
+            "labelRatePerGallon": {
               "amount": 1.1,
-              "unit": "fl_oz"
+              "unit": "fl_oz",
+              "use": "mosquitoes",
+              "epa": "101563-143"
             }
           },
           "Growth regulator in the same tank: Tekko Pro 1 fl oz per gallon": {
@@ -2204,7 +2205,7 @@
             "catalogProductHints": [
               "Tekko Pro IGR"
             ],
-            "completionApplicationMethod": "perimeter_spray",
+            "completionApplicationMethod": "foliar_spray",
             "tankRatePerGallon": {
               "amount": 1,
               "unit": "fl_oz"
@@ -2246,7 +2247,7 @@
             "catalogProductHints": [
               "LESCO Crosscheck Plus"
             ],
-            "completionApplicationMethod": "perimeter_spray"
+            "completionApplicationMethod": "foliar_spray"
           }
         },
         "material_cost": "inventory",

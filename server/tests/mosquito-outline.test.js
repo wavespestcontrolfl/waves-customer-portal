@@ -128,7 +128,7 @@ describe('the Mosquito packet', () => {
     expect(result.content.property).toEqual(expect.objectContaining({ programLabel: 'One routine for every yard', turfType: null }));
     expect(result.meta).toEqual(expect.objectContaining({
       serviceLine: 'mosquito',
-      contentLibraryVersion: 'mosquito-v1-copy-1',
+      contentLibraryVersion: 'mosquito-v1-copy-2',
       protocolVersion: PROTOCOLS.mosquito.version ?? null,
     }));
     expect(result.inputSnapshot).toEqual(expect.objectContaining({ serviceLine: 'mosquito', addOns: { dunks: 0, stations: 0 } }));
@@ -309,7 +309,7 @@ describe('who gets the page: an exact recurring mosquito row', () => {
 
   test('the registry entry carries the stamps, the keys and the send words', () => {
     const program = OUTLINE_PROGRAMS.mosquito;
-    expect(program.contentLibraryVersion()).toBe('mosquito-v1-copy-1');
+    expect(program.contentLibraryVersion()).toBe('mosquito-v1-copy-2');
     expect(program.protocolVersion()).toBe(PROTOCOLS.mosquito.version ?? null);
     expect(program.listKeys).toEqual({ available: 'mosquitoOutlineAvailable', outline: 'mosquitoServiceOutline' });
     expect(program.offError).toBe('Mosquito outlines are not turned on.');

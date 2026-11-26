@@ -35,7 +35,7 @@ const featureGates = require('../config/feature-gates');
 const PROTOCOLS = require('../config/protocols.json');
 
 const SERVICE_LINE = 'mosquito';
-const MOSQUITO_CONTENT_LIBRARY_VERSION = 'mosquito-v1-copy-1';
+const MOSQUITO_CONTENT_LIBRARY_VERSION = 'mosquito-v1-copy-2';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 // GATE_MOSQUITO_OUTLINE: staff can build and send a Mosquito outline from an estimate. Off = no Mosquito outline can be
@@ -118,7 +118,7 @@ const MOSQUITO_COPY = Object.freeze({
   treatments: Object.freeze([
     Object.freeze({ key: 'inspection', label: 'Inspection', text: 'A walk of the yard each visit: shady resting spots, and anything holding water.' }),
     Object.freeze({ key: 'dry_spots', label: 'Source reduction', text: 'Standing water tipped out where we can. Sources we can\'t reach, or that need a fix such as a clogged gutter or poor drainage, go on your report.' }),
-    Object.freeze({ key: 'insects', label: 'Barrier spray', text: 'A fine spray from a backpack sprayer into and beneath the shaded leaves where adults rest, with a growth regulator in the same spray: eggs don’t hatch and young insects can’t grow into breeding adults. Kept off blooms with pollinators on them, edible plants, and open water.' }),
+    Object.freeze({ key: 'insects', label: 'Barrier spray', text: 'A fine spray from a backpack sprayer into and beneath the shaded leaves where adults rest, with a growth regulator in the same spray: eggs don’t hatch and young insects can’t grow into breeding adults. Kept off blooms with pollinators on them and edible plants, at least 25 feet from ponds, lakes and canals, and 10 feet from storm drains.' }),
     Object.freeze({ key: 'spots', label: 'Larval control', text: 'Bti dunks and a mosquito station when your estimate includes them, where the label and the site allow.' }),
   ]),
   productsTitle: 'Products We May Use',
