@@ -31,6 +31,12 @@ export function nativePlatform() {
  * scoped out), so the Face ID lock keys off the customer token only.
  */
 export function hasSessionToken() {
-  if (typeof localStorage === 'undefined') return false;
-  return Boolean(localStorage.getItem('waves_token'));
+  // Blocked browser storage throws on access: treat it as signed out so
+  // public token pages (pay, receipt, report) still render.
+  try {
+    if (typeof localStorage === 'undefined') return false;
+    return Boolean(localStorage.getItem('waves_token'));
+  } catch {
+    return false;
+  }
 }

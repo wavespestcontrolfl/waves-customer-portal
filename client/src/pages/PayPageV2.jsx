@@ -809,8 +809,8 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
           invoice number in the memo.
         </PayFaqItem>
         <PayFaqItem question="How do I pay from my bank automatically?">
-          Check “Save this bank account” when you pay by bank, or add one anytime in the Waves app
-          under Billing, Auto Pay. Or call or email billing@wavespestcontrol.com and we’ll set it up.
+          Future visits can be billed to a bank account kept on file. Call or email
+          billing@wavespestcontrol.com and we’ll set it up with you.
         </PayFaqItem>
         <PayFaqItem question="Can I prepay for the year?">
           Yes — a year of pest or lawn service can be paid up front. Call us to set it up. If you
