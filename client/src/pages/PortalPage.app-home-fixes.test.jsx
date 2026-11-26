@@ -88,6 +88,24 @@ describe('fix 4: requests show their real status and sit near the top of Home', 
     expect(pillFor('Add lawn care')).toHaveTextContent('Scheduled');
   });
 
+  it('keeps resolved, closed and cancelled requests off the open list, and labels an unknown status Received', async () => {
+    api.getRequests.mockResolvedValue({ requests: ['resolved', 'closed', 'cancelled', 'mystery'].map((status) => (
+      { id: status, subject: `Request ${status}`, category: 'general', status, createdAt: recentIso() }
+    )) });
+    render(<MyRequestsCard />);
+    await screen.findByText('Request mystery');
+    expect(screen.queryByText('Request resolved')).not.toBeInTheDocument();
+    expect(screen.queryByText('Request closed')).not.toBeInTheDocument();
+    expect(screen.queryByText('Request cancelled')).not.toBeInTheDocument();
+    expect(within(screen.getByText('Request mystery').closest('article')).getByText('Received')).toBeInTheDocument();
+  });
+
+  it.each([['closed', 'Closed'], ['cancelled', 'Cancelled']])('shows a %s request by its real status when a notification opens it', async (status, label) => {
+    api.getRequests.mockResolvedValue({ requests: [{ id: 'r9', subject: 'Old request', category: 'general', status, createdAt: '2025-01-01' }] });
+    render(<MyRequestsCard focusRequestId="r9" />);
+    expect(await screen.findByText(label)).toBeInTheDocument();
+  });
+
   it('renders the card under the shortcuts and above the blog, social and newsletter rows', async () => {
     api.getRequests.mockResolvedValue({ requests: [
       { id: 'r1', subject: 'Ants in the kitchen', category: 'general', status: 'acknowledged', createdAt: recentIso() },
@@ -197,7 +215,13 @@ describe('fix 7: service-day tracker rows and missed visits', () => {
     render(<ServiceTracker onReschedule={onReschedule} />);
     await screen.findByText(headline);
     fireEvent.click(screen.getByRole('button', { name: 'Reschedule' }));
+    // A fresh schedule-change request that names this visit, with every other field cleared.
     expect(onReschedule).toHaveBeenCalledTimes(1);
+    expect(onReschedule).toHaveBeenCalledWith({
+      category: 'schedule_change',
+      note: `Please reschedule my Quarterly Pest Control visit on Sep 14, which ${state === 'no_show' ? 'was missed' : 'was cancelled'}.`,
+      location: '', photos: [], photoIdSource: null,
+    });
   });
 
   it('links straight to the visit reschedule page when the data carries one', async () => {

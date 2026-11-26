@@ -3012,7 +3012,7 @@ function rememberPetNameAskDone(customerId) {
   } catch { /* storage unavailable: the card hides for this visit to Home only */ }
 }
 
-function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, onOpenAccess, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
+function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, onOpenAccess, onRescheduleRequest, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
   const dashboardSavedScope = properties.some((p) => p.key);
@@ -3354,7 +3354,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, on
           on the day of service, where the tech is matters more than the
           greeting. ServiceTracker renders null on every other day, so
           non-service-day layout is unchanged. */}
-      <ServiceTracker currentEntry={dashboardEntry} savedScope={dashboardSavedScope} selectedProperty={selectedProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} onOpenAccess={onOpenAccess} onOpenPets={onOpenPets} onReschedule={() => onSwitchTab?.('request')} />
+      <ServiceTracker currentEntry={dashboardEntry} savedScope={dashboardSavedScope} selectedProperty={selectedProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} onOpenAccess={onOpenAccess} onOpenPets={onOpenPets} onReschedule={onRescheduleRequest} />
 
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
@@ -14044,14 +14044,23 @@ function TrackerChecklistRow({ item, interactive }) {
 
 // A missed or cancelled visit says "Reschedule any time", so it carries the button. The tracker
 // read has no reschedule link of its own: use one if the data ever has it, otherwise open the
-// request flow (the same one the Home "Request" shortcut opens).
+// request form, opened fresh as a schedule change that names this visit.
+// The form values for a fresh schedule-change request naming the missed or cancelled visit. Every field is
+// set, so the overlay never shows a draft the customer dismissed earlier (the same handoff Photo ID uses).
+function trackerReschedulePrefill(tracker) {
+  const when = tracker?.service?.date ? fmtDate(tracker.service.date, { month: 'short', day: 'numeric' }) : '';
+  const what = tracker?.service?.type || 'service';
+  const outcome = tracker?.state === 'no_show' ? 'was missed' : 'was cancelled';
+  return { category: 'schedule_change', note: `Please reschedule my ${what} visit${when ? ` on ${when}` : ''}, which ${outcome}.`, location: '', photos: [], photoIdSource: null };
+}
+
 function TrackerRescheduleButton({ tracker, onReschedule }) {
   const style = { ...PORTAL_PRIMARY_ACTION, width: '100%', minHeight: 48, marginTop: 16, boxSizing: 'border-box', textDecoration: 'none', textTransform: 'none' };
   if (tracker?.rescheduleUrl) {
     return <a href={tracker.rescheduleUrl} data-glass-accent="" data-glass-size="primary" style={style}>Reschedule</a>;
   }
   if (typeof onReschedule !== 'function') return null;
-  return <button type="button" onClick={onReschedule} data-glass-accent="" data-glass-size="primary" style={style}>Reschedule</button>;
+  return <button type="button" onClick={() => onReschedule(trackerReschedulePrefill(tracker))} data-glass-accent="" data-glass-size="primary" style={style}>Reschedule</button>;
 }
 
 function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null, onOpenAccess, onOpenPets, onReschedule }) {
@@ -17626,7 +17635,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 // =========================================================================
 // The pill shows the office's real status on every Home visit, not only when the
 // customer opened the request from a notification. An unknown value reads "Received".
-const REQUEST_STATUS_LABELS = { new: 'Received', acknowledged: 'Acknowledged', scheduled: 'Scheduled', resolved: 'Resolved' };
+const REQUEST_STATUS_LABELS = { new: 'Received', acknowledged: 'Acknowledged', scheduled: 'Scheduled', resolved: 'Resolved', closed: 'Closed', cancelled: 'Cancelled' };
+// The office's terminal statuses (admin-requests.js TERMINAL_STATUSES): off the open list, still readable when a notification opens one.
+const TERMINAL_REQUEST_STATUSES = ['resolved', 'closed', 'cancelled'];
 function requestStatusLabel(status) {
   return REQUEST_STATUS_LABELS[status] || 'Received';
 }
@@ -17673,7 +17684,7 @@ function MyRequestsCard({ focusRequestId } = {}) {
   const recent = requests
     .filter(r => {
       if (focusRequestId) return r.id === focusRequestId;
-      if (r.status === 'resolved') return false; // dropped once the office marks it handled
+      if (TERMINAL_REQUEST_STATUSES.includes(r.status)) return false; // dropped once the office marks it handled
       const created = new Date(r.createdAt).getTime();
       return Number.isFinite(created) && Date.now() - created < RECENT_WINDOW_MS;
     })
@@ -19662,7 +19673,7 @@ export default function PortalPage() {
         )}
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && !contactSession && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
-        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} onOpenPets={() => navigate('/?tab=property#pets')} onOpenAccess={() => navigate('/?tab=property#access')} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} onOpenPets={() => navigate('/?tab=property#pets')} onOpenAccess={() => navigate('/?tab=property#access')} onRescheduleRequest={(prefill) => { setReportIssuePrefill(prefill); setShowReportIssue(true); }} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} messagesEnabled={messagesGate.enabled} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
