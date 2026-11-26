@@ -501,7 +501,7 @@ describe('stale claim recovery', () => {
     expect(await retireMarkedEmails()).toBe(1);
     expect(tables.emails.calls).toContainEqual(['where', { auto_action: 'zelle_notice_retry' }]);
     expect(insertsOf('inbound_payment_notices')[0]).toMatchObject({ email_id: 'email-marked', source: 'capitalone_zelle', status: 'processing' });
-    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'parse_failed' });
+    expect(closesOf('inbound_payment_notices')[0]).toMatchObject({ status: 'parked', park_reason: 'parse_failed', apply_error: expect.stringContaining('never verified') });
     expect(updatesOf('emails')[0]).toMatchObject({ auto_action: 'zelle_notice_parked:parse_failed' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('payment', expect.any(String), expect.stringContaining('left unprocessed'), expect.objectContaining({ dedupeKey: 'zelle-notice:notice-m' }));
     expect(recordManualPayment).not.toHaveBeenCalled();

@@ -451,6 +451,7 @@ async function retireMarkedEmails() {
         .onConflict('email_id').ignore().returning('*');
       if (notice) {
         await finishParked(notice, email, 'parse_failed', {
+          applyError: 'The sender was never verified as Capital One. Confirm the credit in the bank account before recording it.',
           why: 'This Zelle email was left unprocessed, so check the bank first.',
         });
       } else {
