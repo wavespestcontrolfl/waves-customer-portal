@@ -229,10 +229,14 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // STAFF FACTS (owner 2026-11-25, texting AI fix step 2): seven lines are appended to COMPANY FACTS (perimeter band, lawn insect control, a pest
 // report before a visit, rain moves, new sod, wasp nests, ants). The exact render changed, so the numbers move to "53" / "54" (here) and
 // "55" / "56" (B1). The 49-52 render is a known earlier render (sms-company-facts.js) with no retired line.
+// STAFF FACTS B (owner 2026-11-25, texting AI fix step 2; owner ruling 2026-09-30, price and fee questions are explained from the estimate and invoice on
+// file): the open estimate's per-application price and applications a year become rendered Payment status sentences, and the PENDING ESTIMATE line points at
+// them. Only a price LISTED on the estimate: no prepay invoice total, no setup fee, no waiver. The render changed, so the numbers move once more, to "61" /
+// "62" (here) and "63" / "64" (B1).
 // STAFF FACTS (owner 2026-11-25, texting AI fix step 2): the customer's prepaid visits left become a rendered Payment status sentence. A new sentence
 // family appears in the facts, so the numbers move once more, to "57" / "58" (here) and "59" / "60" (B1). The company facts text is unchanged, so no
 // line is retired.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}57_n`;
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}61_n`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
 // scheduling text from a customer whose upcoming visits are ONE recurring series gets
 // OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
@@ -242,16 +246,16 @@ const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}57_n`;
 // stamps REAL_ANSWERS_PROMPT_VERSION. The two differ ONLY by that rule, and the two
 // behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
 // gate moves. A prompt or facts revision moves BOTH numbers.
-const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}58_n`;
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}62_n`;
 // PROMPT B1 (owner 2026-10-24 "go b1" / "yes all", GATE_SMS_PROMPT_B1): the drafter stops stalling (a missed visit and a covered pest
 // re-service text get real times to offer) and stops false promises (no claimed sends, no promised office actions, the follow-up
 // wording promises only a reply, no name greeting mid-thread), and the latest finished visit's customer-safe notes and findings
 // reach the facts. A prompt AND facts revision, so both bases move once more: "27" (scheduler gate off) / "28" (on). Same
-// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers60_n'
+// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers64_n'
 // is 32 chars, 39 with the six tags b c e l m v (+ separator), under PROMPT_VERSION_COLUMN_MAX (40) - pinned by a test. The
 // effective version follows the gate (realAnswersBaseVersion), so B1 drafts never pool with the 25/26 cohorts.
-const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}59_n`;
-const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}60_n`;
+const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}63_n`;
+const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}64_n`;
 const SHADOW_STATUS = 'shadow';
 
 // ── DRAFT KINDS (owner 2026-11-25) ──
@@ -5537,9 +5541,15 @@ function buildFactsBlock(context, extras = {}) {
   // per-application display rule — monthly_total is not customer billing
   // copy; the estimate itself leads with per-application pricing, so the
   // fact points there).
+  // Owner ruling 2026-09-30 (price and fee questions are explained from the estimate on file) with the money contract: the price listed per application
+  // and the applications a year reach the model only as rendered sentences under Payment status sentences (gate on).
   const est = context.pendingEstimate;
+  const estimatePriceNote = realAnswersWording(
+    ' — state a price or the applications a year ONLY by copying a matching sentence from Payment status sentences word for word (with none there, state none); say nothing about a setup fee or a prepay discount',
+    '',
+  );
   const estimateLine = est
-    ? `${est.status}${est.tier ? `, ${est.tier}` : ''}${est.pricedPerApplication ? ', priced per application' : ''}${est.sentAt ? `, sent ${formatEtInstant(est.sentAt)}` : ''} — full breakdown is in their estimate`
+    ? `${est.status}${est.tier ? `, ${est.tier}` : ''}${est.pricedPerApplication ? ', priced per application' : ''}${est.sentAt ? `, sent ${formatEtInstant(est.sentAt)}` : ''} — full breakdown is in their estimate${estimatePriceNote}`
     : 'None';
 
   // v10: property & preferences — pets, irrigation, HOA, instructions. All

@@ -72,7 +72,7 @@ const AMT = '\\$\\d+\\.\\d{2}';
 const TENDER = '(?: (?:card|ACH))?';
 const DAY = '[A-Z][a-z]{2} \\d{1,2}, \\d{4}';
 const INVOICE = '[A-Za-z0-9][A-Za-z0-9-]{0,29}';
-// a service name inside a prepaid-plan sentence (no period or comma, so the sentence cannot split or pose as another one)
+// a service name inside an estimate or prepaid-plan sentence (no period or comma, so the sentence cannot split or pose as another one)
 const PLAN_LABEL = "[A-Za-z][A-Za-z0-9 &'()/+-]{1,58}";
 const SHAPES = Object.freeze({
   payment_received: new RegExp(`^We received your ${AMT}${TENDER} payment on ${DAY}\\.$`),
@@ -93,6 +93,9 @@ const SHAPES = Object.freeze({
   dues_card_charge: new RegExp(`^When your dues are charged to the credit card on file, the monthly charge is ${AMT}: ${AMT} dues plus a ${AMT} credit-card fee\\.$`),
   // prepaid recurring plans (owner 2026-11-25, texting AI fix step 2): rendered from the plan rollup (sms-staff-facts.js), copied the same
   // way. A prepaid plan sentence states visits, never money.
+  // the open estimate (owner 2026-11-25): the price LISTED per application and the applications a year, from the estimate's own per-application
+  // average (sms-staff-facts.js). Never a total, a prepay price, a setup fee or a waiver: those have their own authorities and stay with staff.
+  estimate_application_price: new RegExp(`^Your estimate lists ${PLAN_LABEL} at ${AMT} per application, \\d{1,2} applications? a year\\.$`),
   prepaid_visits_left: new RegExp(`^Your prepaid ${PLAN_LABEL} plan has \\d{1,3} of \\d{1,3} prepaid visits? left\\.$`),
   zelle_offer: new RegExp(`^You can pay invoice ${INVOICE} by Zelle to [^,\\n]{3,80}, with your name or the invoice number in the Zelle memo\\.$`),
   zelle_invoice_unavailable: new RegExp(`^Zelle isn't available for invoice ${INVOICE} right now\\.$`),
@@ -246,10 +249,27 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   const depositUnknown = billing.hasDepositActivity !== false;
   const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length || depositUnknown || !everyRowRenders(billing, rows, todayParts))
     ? null : absenceSentence(billing, rows, todayParts);
-  return [...out, ...(absence ? [absence] : []), ...duesSentences(context), ...prepaidSentences(context), ...zelleSentences(billing.zelleFacts)];
+  return [...out, ...(absence ? [absence] : []), ...duesSentences(context), ...estimateSentences(context), ...prepaidSentences(context), ...zelleSentences(billing.zelleFacts)];
 }
 
 const labelOk = (label) => new RegExp(`^${PLAN_LABEL}$`).test(String(label || ''));
+
+// The open estimate (context.estimateFacts, sms-staff-facts.loadEstimateFacts): what each priced line costs per application (customer copy never
+// says "per visit", AGENTS.md) and how many applications a year. A label outside the shape's own character set renders no sentence; so does a
+// label two lines share.
+function estimateSentences(context) {
+  const lines = Array.isArray(context?.estimateFacts?.perApplication) ? context.estimateFacts.perApplication : [];
+  const labelCount = new Map();
+  for (const line of lines) labelCount.set(String(line?.label).toLowerCase(), (labelCount.get(String(line?.label).toLowerCase()) || 0) + 1);
+  const out = [];
+  for (const line of lines.slice(0, 4)) {
+    const applications = Number(line?.applications);
+    if (labelCount.get(String(line?.label).toLowerCase()) === 1 && labelOk(line?.label) && finiteCents(line?.cents / 100) && Number.isInteger(applications) && applications > 0 && applications < 100) {
+      out.push({ kind: 'estimate_application_price', text: `Your estimate lists ${line.label} at ${money(Math.round(line.cents))} per application, ${applications} application${applications === 1 ? '' : 's'} a year.` });
+    }
+  }
+  return out;
+}
 
 // Prepaid recurring plans (context.prepaidPlans, sms-staff-facts.loadPrepaidPlanFacts): visits left of the visits paid for.
 function prepaidSentences(context) {
@@ -633,13 +653,21 @@ const NAMED_PLAN_ASK_RE = /\b(?:my|our|the)\s+(?!(?:prepaid|current|whole|entire
 const FOR_SERVICE_ASK_RE = /\b(?:visits?|appointments?|applications?|treatments?|services?)\s+(?:for|of|on)\s+(?!(?:my|our|the|this|next|that|me|us|you|a|an|any|each|every|plan)\b)[a-z-]+/i;
 // A cadence the customer named ("monthly", "quarterly") must be in the plan's own label too: a quarterly plan's count never answers a monthly one.
 const PLAN_CADENCES = [/\bmonthly\b/i, /\bquarterly\b/i, /\bbi-?monthly\b/i, /\bweekly\b/i, /\bannual(?:ly)?\b/i];
-function prepaidCountOffTarget(sentence, inbound) {
-  const label = String(/^Your prepaid (.+) plan has /.exec(sentence)?.[1] || '');
+// The service a copied estimate or prepaid sentence is about: its own label.
+const sentenceServiceLabel = (sentence) => String((/^Your prepaid (.+) plan has /.exec(sentence) || /^Your estimate lists (.+) at \$/.exec(sentence))?.[1] || '');
+const FOR_PRICE_ASK_RE = /\bhow much\b[^.?!]{0,20}\bfor\s+(?!(?:my|our|the|this|it|that|a|an|each|every|one|everything|all|both|me|us)\b)[a-z-]+/i;
+function planServiceOffTarget(sentence, inbound) {
+  const label = sentenceServiceLabel(sentence);
   if (PLAN_CADENCES.some((cadence) => cadence.test(inbound) && !cadence.test(label))) return true;
   const asked = PLAN_SERVICES.filter((service) => service.test(inbound));
-  if (asked.length === 0) return NAMED_SERVICE_ASK_RE.test(inbound) || FOR_SERVICE_ASK_RE.test(inbound) || NAMED_PLAN_ASK_RE.test(inbound); // an unrecognized service name needs a person
+  if (asked.length === 0) return NAMED_SERVICE_ASK_RE.test(inbound) || FOR_SERVICE_ASK_RE.test(inbound) || NAMED_PLAN_ASK_RE.test(inbound) || FOR_PRICE_ASK_RE.test(inbound); // an unrecognized service name needs a person
   return !asked.every((service) => service.test(label)); // naming two services ("Lawn Pest Control") needs a plan that names both
 }
+// An estimate's listed price answers a question about the price, cost or estimate, never a payment, receipt or count question.
+// ...nor a question about what is owed, an invoice or a past charge, unless it also names the estimate.
+const OWED_ASK_RE = /\b(?:owe|owed|balance|invoices?|bills?|billed|paid|payments?|refunds?|charged|past due|overdue)\b/i;
+const NAMES_ESTIMATE_RE = /\b(?:estimate|quote|quoted|proposal)\b/i;
+const ESTIMATE_ASK_RE = /\b(?:price|prices|pricing|priced|cost|costs|how much|estimate|quote|quoted|charge|charged|rate|per (?:visit|application|treatment))\b/i;
 function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
   if (!inbound || !copied.length) return false;
@@ -668,7 +696,8 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const statusAsked = inboundAsksPaymentStatus(inbound);
   return copied.some((sentence) => {
     const t = String(sentence);
-    if (SHAPES.prepaid_visits_left.test(t)) return prepaidCountOffTarget(t, inbound);
+    if (SHAPES.prepaid_visits_left.test(t)) return planServiceOffTarget(t, inbound);
+    if (SHAPES.estimate_application_price.test(t)) return !ESTIMATE_ASK_RE.test(inbound) || (OWED_ASK_RE.test(inbound) && !NAMES_ESTIMATE_RE.test(inbound)) || planServiceOffTarget(t, inbound);
     // a Zelle offer / unavailability line answers a question about Zelle, or a GENERIC how-to-pay question - never a receipt question
     // (round 75) or a question about another way to pay ("Can I pay by check?", round 78)
     if (isZelleTenderLine(t) && (statusAsked || !(ZELLE_WORD_RE.test(inbound) || inboundIsGenericHowToPay(inbound)))) return true;
@@ -723,6 +752,13 @@ const asksCount = (inbound) => String(inbound ?? '').split(/[?.!;,]|\band\b|\bbu
 // exception the question side makes, and only when the reply carries a day or opening cue and names no plan.
 const SLOT_REPLY_CUE_RE = /\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|openings?|slots?|available|this week|next week)\b/i;
 const isSlotAnswer = (body, inbound) => inbound != null && SLOT_ASK_RE.test(String(inbound)) && !PLAN_WORD_RE.test(String(inbound)) && !PLAN_WORD_RE.test(body) && SLOT_REPLY_CUE_RE.test(body);
+// The estimate's applications a year ("4 applications a year", "six visits per year", "four treatments annually") and a setup / enrollment fee
+// waived (alone or "when you prepay") are terms of the estimate: only the rendered sentence may state the count, and no sentence states a fee
+// waiver (the prepay invoice and the setup fee have their own authority), so a standalone claim of either is held, whatever the question.
+const ESTIMATE_COUNT_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:\\w+\\s+)?(?:visits?|applications?|treatments?|services?|times)\\s+(?:a|per|each|every)\\s+year\\b|\\b${COUNT_NUM}\\s+(?:\\w+\\s+)?(?:visits?|applications?|treatments?)\\s+(?:annually|yearly)\\b|\\b(?:visits?|applications?|treatments?)\\s+(?:a|per|each|every)\\s+year\\b|\\b(?:annually|yearly)\\s+(?:${COUNT_NUM}\\s+)?(?:visits?|applications?|treatments?)\\b`, 'i');
+const FEE_WORD = '(?:(?:set-?up|start-?up|initial|one-time|enrollment|activation|sign-?up)\\s+){1,2}(?:service\\s+)?fees?';
+const FEE_WAIVER_RE = new RegExp(`\\b${FEE_WORD}\\b[^.?!]{0,60}\\b(?:waive[ds]?|waiver|free|no charge|no cost|comp(?:ed)?|skipped|removed|dropped|forgiven|covered)\\b|\\b(?:waive[ds]?|waiving|waiver|no|without|skip(?:s|ped|ping)?|drop(?:s|ped|ping)?|remove[ds]?)\\s+(?:of\\s+)?(?:the\\s+|your\\s+|a\\s+)?${FEE_WORD}\\b`, 'i');
+const claimsEstimateTerms = (text) => ESTIMATE_COUNT_RE.test(String(text ?? '')) || FEE_WAIVER_RE.test(String(text ?? ''));
 const claimsPrepaidCount = (text, inboundText = null) => {
   const body = String(text ?? '');
   if (PREPAID_COUNT_RE.test(body)) return !isSlotAnswer(body, inboundText);
@@ -732,7 +768,7 @@ const claimsPrepaidCount = (text, inboundText = null) => {
 };
 function remainderHasMoney(remainder, inboundText = null) {
   const text = String(remainder ?? '');
-  if (MONEY_FIGURE_RE.test(text) || ZELLE_WORD_RE.test(text) || claimsPrepaidCount(text, inboundText)) return true;
+  if (MONEY_FIGURE_RE.test(text) || ZELLE_WORD_RE.test(text) || claimsPrepaidCount(text, inboundText) || claimsEstimateTerms(text)) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
@@ -985,6 +1021,7 @@ module.exports = {
   autoSendScopeBlock,
   remainderIsInert,
   claimsPrepaidCount,
+  claimsEstimateTerms,
   // every module regex, for the adversarial-input timing test
-  REGEXES: { PREPAID_COUNT_RE, COUNT_ASK_RE, COUNT_ANSWER_RE, TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
+  REGEXES: { ESTIMATE_COUNT_RE, FEE_WAIVER_RE, PREPAID_COUNT_RE, COUNT_ASK_RE, COUNT_ANSWER_RE, TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
 };

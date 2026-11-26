@@ -177,7 +177,7 @@ function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = 
   const text = String(body || '');
   if (!text) return false;
   // a prepaid visit count (the rendered sentence or the model's own words) is judged and fingerprinted like an amount, whatever the customer asked
-  if (bodyAmountCents(text).length || ZELLE_WORD_RE.test(text) || paymentStatus.claimsPrepaidCount(text, inboundMessage)) return true;
+  if (bodyAmountCents(text).length || ZELLE_WORD_RE.test(text) || paymentStatus.claimsPrepaidCount(text, inboundMessage) || paymentStatus.claimsEstimateTerms(text)) return true;
   if (statusVocabulary && strictForVersion(promptVersion)
       && paymentStatus.assertsPaymentStatus(text, { inboundText: inboundMessage == null ? null : String(inboundMessage) })) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
@@ -187,14 +187,17 @@ const bodyNeedsBillingBoundaryCheck = bodyNeedsPaymentRecheck;
 
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing
 // context is a failed read, not an empty account.
-// `staffFacts` ({ prepaid: true }, ...): also the facts a copied texting-AI sentence is rendered from, so it is re-rendered from live rows.
+// `staffFacts` ({ prepaid: true }, { estimate: true }): also the facts a copied texting-AI sentence is rendered from, so it is re-rendered from live rows.
 async function loadCustomerContext(customerId, dbh = db, staffFacts = null) {
   const customerRow = await dbh('customers').where({ id: customerId }).first();
   return customerRow ? require('./context-aggregator').getContextForCustomer(customerRow, staffFacts ? { includeSmsStaffFacts: staffFacts } : {}) : null;
 }
 // The staff facts (sms-staff-facts) a copied sentence is rendered from: the option that reads them, the context key and the sentence shape.
 // Only the facts a copy needs are read at send, and a read that FAILED (null) is an outage.
-const STAFF_FACT_SENTENCES = [{ option: 'prepaid', key: 'prepaidPlans', shape: 'prepaid_visits_left' }];
+const STAFF_FACT_SENTENCES = [
+  { option: 'prepaid', key: 'prepaidPlans', shape: 'prepaid_visits_left' },
+  { option: 'estimate', key: 'estimateFacts', shape: 'estimate_application_price' },
+];
 const staffFactsFor = (copied) => STAFF_FACT_SENTENCES.filter(({ shape }) => copied.some((t) => paymentStatus.SHAPES[shape].test(t)));
 
 /**
@@ -231,14 +234,15 @@ async function paymentStatusVerdict({ customerId, body, snapshot = null, inbound
   return copied.length ? copiedSentencesStillRendered({ customerId, copied, snapshot, ctx, dbh, autoSend }) : { reason: null, zelle: null };
 }
 // A staff-EDITED body keeps the staff member's own wording, but a staff-fact sentence the AI copied and the edit left in place (a greeting was
-// added around it) is still a claim about live rows: re-render it ({ stale, reason } or null).
+// added around it) is still a claim about live rows: re-render it. { stale: true, reason } when it no longer holds, else { stale: false, rest }:
+// the body with the revalidated copies removed (the owed-amount rule then judges only what staff typed: a copy's own figure is not an amount owed).
 async function retainedStaffFactStale({ customerId, text, snapshot, dbh }) {
   const authorized = Array.isArray(snapshot?.sentences) ? snapshot.sentences.filter((s) => typeof s === 'string') : [];
   const flat = text.replace(/\s+/g, ' ').replace(/[\u2018\u2019]/g, "'");
   const retained = authorized.filter((t) => staffFactsFor([t]).length && flat.includes(t)); // plain text: the AI-wording rules of copiedSentences are stricter than a staff edit
-  if (!retained.length) return null;
+  if (!retained.length) return { stale: false, rest: text };
   const live = await copiedSentencesStillRendered({ customerId, copied: retained, snapshot: snapshot || {}, ctx: null, dbh });
-  return live.reason ? { stale: true, reason: live.reason } : null;
+  return live.reason ? { stale: true, reason: live.reason } : { stale: false, rest: retained.reduce((rest, t) => rest.split(t).join(' '), flat) };
 }
 async function paymentStatusSendBlockReason(args = {}) {
   return (await paymentStatusVerdict(args)).reason;
@@ -358,10 +362,10 @@ async function outgoingAmountsStale({
   // (an AI draft = a prompt version on the decision; a hand-typed body with none is the staff member's own wording)
   if (promptVersion && humanEditedBody !== true && ZELLE_WORD_RE.test(text) && !zelleBodyContacts(text).length) return { stale: true, reason: 'zelle_claim_unverifiable' };
   const retained = await retainedStaffFactStale({ customerId, text, snapshot: paymentStatusSnapshot, dbh });
-  if (retained) return retained;
+  if (retained.stale) return retained;
   const zelle = await staffZelleStale({ customerId, text, zelleInvoiceId, inboundMessage, dbh });
   if (zelle.stale) return { stale: true, reason: zelle.reason };
-  const amounts = trustOwedAmounts ? { stale: false } : await ownedAmountsStale({ customerId, text, dbh });
+  const amounts = trustOwedAmounts ? { stale: false } : await ownedAmountsStale({ customerId, text: retained.rest, dbh });
   return amounts.stale ? amounts : { stale: false, ...(zelle.zelle ? { zelle: zelle.zelle } : {}) };
 }
 
