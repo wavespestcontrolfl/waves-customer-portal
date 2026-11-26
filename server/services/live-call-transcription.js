@@ -410,6 +410,9 @@ async function purgeLiveUtterances(callSid) {
       .where('twilio_call_sid', callSid)
       .whereRaw("(metadata -> 'live_transcription' -> 'early_summary') IS NOT NULL")
       .update({ metadata: trx.raw("jsonb_set(metadata, '{live_transcription}', (metadata -> 'live_transcription') - 'early_summary', true)") });
+    // The office-call alert carries words from that summary (live-call-early-summary.js alertOfficeCall), so its bell
+    // row goes too. A call with card talk never raises one; this covers a quarantine with no card words heard.
+    await trx('notifications').whereRaw("metadata ->> 'dedupeKey' = ?", [`live-call-next-step:${callSid}`]).del();
     return purged;
   });
 }

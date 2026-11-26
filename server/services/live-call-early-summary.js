@@ -201,20 +201,30 @@ function whyFor(name, reply) {
 // The alert's action (the bell title after "Comms — "): the model's title, or a fixed line when it breaks the rules.
 function actionFor(name, reply) {
   const room = MAX_HEADLINE_CHARS - 'Comms — '.length;
-  const title = reply.alert_title ? cutAtWord(reply.alert_title, room) : '';
+  const { redactedWords } = require('./admin-alert-names');
+  const plain = reply.alert_title ? redactedWords(reply.alert_title) : '';
+  const title = plain ? cutAtWord(plain, room) : '';
   return title && !breaksAlertRules(title) ? title : `read ${name || 'the office'}'s call summary`;
 }
 
 // ONE admin alert per call answered by a staff member who is not the owner: no forward_acceptance (not a press-1
 // staff answer) and an owner answer raise nothing. A needs-you row when the call left a next step, else an FYI row.
 // Never throws: the saved summary stands whatever happens here.
-async function alertOfficeCall(callSid, reply) {
+// A phone banner cannot be taken back, so a call with any card talk (a card-pause stamp, a masked card number, or card
+// words in its live text) raises nothing: those are the calls a later card-number quarantine can clear. A quarantined
+// call raises nothing, and a quarantine that lands after the row is written deletes the row (purgeLiveUtterances).
+// A warm transfer (a second staff member on the same Agent track) raises nothing either: the name would be wrong.
+async function alertOfficeCall(callSid, reply, transcript) {
   try {
-    const call = await db('call_log').where('twilio_call_sid', callSid).first('id', 'metadata');
+    const call = await db('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id', 'metadata');
     let meta = call?.metadata;
     if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
     const acceptance = meta?.forward_acceptance;
     if (!call || !acceptance || ownerAnswered(acceptance)) return;
+    if (meta?.conference_path?.hold?.transfer?.status === 'accepted') return;
+    if (meta?.live_transcription?.card_pause || require('./live-call-card-pause').isCardIntent(transcript)) return;
+    const masked = await db('call_live_utterances').where({ call_sid: callSid, pan_masked: true }).first('id');
+    if (masked) return;
     const name = staffNameOf(acceptance);
     await raiseAdminAlert('live_call_next_step', {
       area: 'Comms',
@@ -245,7 +255,7 @@ async function writeEarlySummary(callSid, { now = () => new Date() } = {}) {
     const reply = await summarize(text);
     if (!reply) return { written: false, reason: 'no_summary' };
     const written = await saveSummary(callSid, reply, now());
-    if (written) await alertOfficeCall(callSid, reply);
+    if (written) await alertOfficeCall(callSid, reply, text);
     return { written, reason: null };
   } catch (err) {
     logger.warn(`[live-call-early-summary] failed: ${err?.code || err?.name || 'error'}`);

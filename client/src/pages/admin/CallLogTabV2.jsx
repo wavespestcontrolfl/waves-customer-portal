@@ -259,7 +259,9 @@ export function nextStepFor(call) {
     .filter((p) => typeof p === "string" && p.trim())
     .map((p) => p.trim());
   if (!nextStep && !promises.length) return null;
-  const csr = meta?.forward_acceptance?.csr_name;
+  // A warm transfer puts a second staff member on the same Agent track, so the first answerer's name would be wrong.
+  const transferred = meta?.conference_path?.hold?.transfer?.status === "accepted";
+  const csr = transferred ? "" : meta?.forward_acceptance?.csr_name;
   return { nextStep, promises, staffName: typeof csr === "string" && csr.trim() ? csr.trim() : "Staff" };
 }
 

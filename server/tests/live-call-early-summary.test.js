@@ -69,9 +69,22 @@ jest.mock('../models/db', () => {
       return [...state.utterances].sort((a, b) => a.spoken_at - b.spoken_at || a.id - b.id);
     });
     q.del = jest.fn(async () => { const n = state.utterances.length; state.utterances = []; return n; });
+    q.first = jest.fn(async () => state.utterances.find((u) => u.pan_masked));
     return q;
   }
-  const db = jest.fn((table) => (table === 'call_log' ? callLog() : utterances()));
+  // notifications: the purge deletes the office-call alert row by its dedupe key.
+  function notifications() {
+    const q = {};
+    q.whereRaw = jest.fn((sql, bindings) => { q.key = bindings[0]; return q; });
+    q.del = jest.fn(async () => { state.deletedAlertKeys.push(q.key); return 1; });
+    return q;
+  }
+  state.deletedAlertKeys = [];
+  const db = jest.fn((table) => {
+    if (table === 'call_log') return callLog();
+    if (table === 'notifications') return notifications();
+    return utterances();
+  });
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   // The purge runs in one transaction (advisory lock, quarantine stamp, deletes); the fake runs it in place.
   db.transaction = jest.fn(async (fn) => fn(db));
@@ -386,6 +399,49 @@ describe('the alert after an office call', () => {
     });
     await early.writeEarlySummary(SID, { now: NOW });
     expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('a call with card words in its live text raises nothing; its summary is still saved', async () => {
+    setCall({ acceptance: staffAnswer });
+    say([...CALL, ['caller', 'Can I pay with my credit card now?']]);
+    reply(JSON.stringify(JSON_REPLY));
+    expect((await early.writeEarlySummary(SID, { now: NOW })).written).toBe(true);
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('a call with a masked card number or a card-pause stamp raises nothing', async () => {
+    setCall({ acceptance: staffAnswer });
+    say(CALL);
+    db.__state.utterances[1].pan_masked = true;
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    setCall({ acceptance: staffAnswer, liveState: { card_pause: { open: false } } });
+    say(CALL);
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('a warm-transferred call raises nothing (the answerer named may not be the one who promised)', async () => {
+    setCall({ acceptance: staffAnswer });
+    db.__state.call.metadata.conference_path = { hold: { transfer: { status: 'accepted' } } };
+    reply(JSON.stringify(JSON_REPLY));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise).not.toHaveBeenCalled();
+  });
+
+  test('a phone number in the model title is redacted before the bell row', async () => {
+    setCall({ acceptance: staffAnswer });
+    reply(JSON.stringify({ ...JSON_REPLY, alert_title: 'call 941-555-0123 back' }));
+    await early.writeEarlySummary(SID, { now: NOW });
+    expect(mockRaise.mock.calls[0][1].action).not.toMatch(/555/);
+  });
+
+  test('a card-number quarantine deletes the office-call alert row with the summary', async () => {
+    setCall({ acceptance: staffAnswer, liveState: { early_summary: { text: 'x' } } });
+    say(CALL);
+    await liveText.purgeLiveUtterances(SID);
+    expect(db.__state.deletedAlertKeys).toContain(`live-call-next-step:${SID}`);
   });
 
   test('an alert that fails keeps the saved summary and logs a warning', async () => {

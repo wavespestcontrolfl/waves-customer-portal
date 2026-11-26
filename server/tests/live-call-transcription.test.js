@@ -116,7 +116,18 @@ jest.mock('../models/db', () => {
     });
     return q;
   }
-  const db = jest.fn((table) => (table === 'call_log' ? callLog() : utterances()));
+  // notifications: the purge deletes the call's office-call alert row (live-call-early-summary.js) by dedupe key.
+  function notifications() {
+    const q = {};
+    q.whereRaw = jest.fn((sql, bindings) => { q.key = bindings[0]; return q; });
+    q.del = jest.fn(async () => { (state.deletedAlertKeys ||= []).push(q.key); return 0; });
+    return q;
+  }
+  const db = jest.fn((table) => {
+    if (table === 'call_log') return callLog();
+    if (table === 'notifications') return notifications();
+    return utterances();
+  });
   db.raw = jest.fn((sql, bindings) => {
     state.rawCalls.push(sql);
     if (/EXISTS/.test(sql) && /pan_detected/.test(sql)) { // purgeQuarantinedLiveText's lookup
