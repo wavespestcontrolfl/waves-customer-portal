@@ -1203,12 +1203,12 @@ function hasBannedCustomerCopy(text, opts = {}) {
 // no longer rest on the prompt. A real-answers reply carrying banned copy is
 // a violation, fed into the same revise/verify loop; exhausting the budget
 // leaves the draft unconverged, which nothing publishes or sends.
-function validateComplianceCopy({ reply, factsBlock, inboundMessage, factsAt } = {}) {
+function validateComplianceCopy({ reply, factsBlock, inboundMessage, bankAt } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const labelFactsText = labelFactsLib.labelFactsSectionFrom(factsBlock);
   const asked = inboundMessage == null ? [] : labelFactsLib.askedLabelKinds(inboundMessage);
   // the bank lines come from the draft's own stored block (never the live bank), so draft time and send time read the same list
-  const bankSentences = labelFactsLib.bankSentencesFromBlock(factsBlock, factsAt ? { at: factsAt } : undefined);
+  const bankSentences = labelFactsLib.bankSentencesFromBlock(factsBlock, bankAt ? { at: bankAt } : undefined);
   if (!reply || !hasBannedCustomerCopy(reply, { labelFactsText, rainTimeGuard: true, asked, bankSentences })) return { ok: true, violations: [] };
   const answerNote = asked.length ? ' - and when the customer asks about re-entry or rain, never answer yes / no / ok / "you can" / "not yet": copy the LABEL FACTS sentence, or give no timing' : '';
   // The LABEL FACTS wording only when the section actually carries a sentence.
@@ -4536,14 +4536,14 @@ function logUnreadableThread(thread, context, lane) {
   logger.warn(`[sms-shadow] label-facts thread unreadable (${thread.noSender ? 'no_inbound_phone' : 'no_same_sender_rows'}); customer ${context?.customer?.id || 'unknown'}, lane ${lane || 'live'} - facts none on file for a short follow-up`);
 }
 
-function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage, realAnswers = false, factsAt = null }) {
+function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage, realAnswers = false, bankAt = null }) {
   if (!reply) return null;
   const asked = labelFactsLib.askedLabelKinds(inboundMessage);
   // The owner-approved bank sentences (company-facts-bank) this reply copies, taken from the draft's OWN stored block, ride along in a
   // snapshot that exists anyway, so the send-time recheck reads the same company sentences the draft did, even after a retire. A reply
   // that copies none adds nothing (the snapshot stays byte-identical), and a bank-only copy never makes a snapshot by itself.
   const withBank = (snapshot) => {
-    const bank = realAnswers ? labelFactsLib.bankSentencesCopiedIn(reply, labelFactsLib.bankSentencesFromBlock(factsBlock, factsAt ? { at: factsAt } : undefined)) : [];
+    const bank = realAnswers ? labelFactsLib.bankSentencesCopiedIn(reply, labelFactsLib.bankSentencesFromBlock(factsBlock, bankAt ? { at: bankAt } : undefined)) : [];
     return bank.length ? { ...snapshot, bank_sentences: bank } : snapshot;
   };
   const copied = labelFacts
@@ -6080,13 +6080,13 @@ function draftPaymentStatusCheck({ realAnswersApplied, parsed, factsBlock, inbou
 // quoted a window a REVISION dropped, or vice versa; only what is actually about to be sent matters): the OPEN TIMES windows it quotes,
 // the payment-status sentences it copies (null = none; re-rendered from live data before any send), and the LABEL FACTS source (only
 // when the reply copies a label sentence).
-function draftSnapshots({ context, parsed, factsBlock, factsAt, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock, city, pricingEstimateId, serviceType, schedulerOffer }) {
+function draftSnapshots({ context, parsed, factsBlock, bankAt, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock, city, pricingEstimateId, serviceType, schedulerOffer }) {
   return {
     openTimesSnapshot: computeOpenTimesSnapshot({
       openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
     }),
     paymentStatusSnapshot: computePaymentStatusSnapshot({ customerId: context?.customer?.id || null, reply: parsed?.reply, factsBlock, inboundMessage, context }),
-    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts, realAnswers: realAnswersApplied, factsAt }),
+    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage: askedTexts, realAnswers: realAnswersApplied, bankAt }),
   };
 }
 
@@ -6139,7 +6139,7 @@ function draftPromptHints({ context, reserviceLaneDecides, reserviceState, inbou
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, promptPatch: presetPromptPatch, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false, asOf = null, allowAck }) {
+async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, promptPatch: presetPromptPatch, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false, asOf = null, bankAt: presetBankAt = null, allowAck }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -6316,7 +6316,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // once, here, and ride into the facts block. Only the facts block carries the phrase (never the system prompt). A failed read
   // keeps the plain phrase and logs a warning (sms-followup-sla loadFollowupClosedDates).
   const closedDates = presetFactsBlock || !gateEnvValue('GATE_SMS_REAL_ANSWERS') ? null : await followupSla.loadFollowupClosedDates(factsAt);
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { portalCancelAvailable, closedDates, openTimesBlock, reserviceOpeningsBlock: reserviceOpenings.block, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, ...paymentFactsExtras, labelFacts, now: factsAt });
+  // The ONE instant the owner-approved bank is read at and its approval is checked at (sms-company-facts isOwnerBankLine). A live or late draft
+  // renders the bank NOW, so it is checked now (not at factsAt, the inbound time a late draft's SLA clock uses). A replay of a frozen block
+  // (the sealed exam) carries the original draft's time in `bankAt`; with none it falls back to now.
+  const bankAt = presetFactsBlock ? (presetBankAt instanceof Date && !Number.isNaN(presetBankAt.getTime()) ? presetBankAt : null) : new Date();
+  const builtFactsBlock = presetFactsBlock || buildFactsBlock(context, { portalCancelAvailable, closedDates, openTimesBlock, reserviceOpeningsBlock: reserviceOpenings.block, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, reserviceLinkDownLanes: reserviceState?.linkDownLanes, ...paymentFactsExtras, labelFacts, now: factsAt });
+  // A bank section that does not verify never reaches the drafter or the verifier prompt (the rest of the block is untouched).
+  const factsBlock = require('./sms-company-facts').withoutUnverifiedBankSection(builtFactsBlock, bankAt ? { at: bankAt } : undefined);
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -6423,7 +6429,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     }
     return {
       parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked,
-      ...draftSnapshots({ context, parsed, factsBlock, factsAt, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock: openTimesBlock || reserviceOpenings.block, city, pricingEstimateId, serviceType, schedulerOffer: schedulerOffer || reserviceOpenings.offer }),
+      ...draftSnapshots({ context, parsed, factsBlock, bankAt, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock: openTimesBlock || reserviceOpenings.block, city, pricingEstimateId, serviceType, schedulerOffer: schedulerOffer || reserviceOpenings.offer }),
     };
   }
 
@@ -6450,7 +6456,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays: offerDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
-    const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts, factsAt });
+    const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts, bankAt });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
     // Payment status (owner ruling 2026-10-01): only a word-for-word copy of a rendered "Payment status sentences" line may state one.
     const openLoopCheck = validateOpenLoopAnswer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, offeredTimes: parsed.offered_times });
@@ -6535,7 +6541,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   return {
     parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked,
     // Computed off the FINAL parsed.reply (after every revision pass) — see draftSnapshots.
-    ...draftSnapshots({ context, parsed, factsBlock, factsAt, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock: openTimesBlock || reserviceOpenings.block, city, pricingEstimateId, serviceType, schedulerOffer: schedulerOffer || reserviceOpenings.offer }),
+    ...draftSnapshots({ context, parsed, factsBlock, bankAt, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock: openTimesBlock || reserviceOpenings.block, city, pricingEstimateId, serviceType, schedulerOffer: schedulerOffer || reserviceOpenings.offer }),
   };
 }
 
