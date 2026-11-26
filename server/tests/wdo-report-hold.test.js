@@ -599,7 +599,7 @@ describe('send-with-invoice hold_report_until_paid', () => {
       PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1', paymentTerms: 'net30', snapshot: { company_name: 'ABC Title' } });
       mockTables({ project: wdoProject({ invoice_id: null }) });
       await withServer(async (baseUrl) => {
-        const res = await post(baseUrl, SEND_WITH_INVOICE(), { hold_report_until_paid: true });
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true, hold_report_until_paid: true });
         const body = await res.json();
         expect(res.status).toBe(422);
         expect(body.code).toBe('hold_statement_accrued');
@@ -611,7 +611,7 @@ describe('send-with-invoice hold_report_until_paid', () => {
       PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1', paymentTerms: 'due_on_receipt', snapshot: { company_name: 'ABC Title' } });
       mockTables({ project: wdoProject({ invoice_id: null }) });
       await withServer(async (baseUrl) => {
-        const res = await post(baseUrl, SEND_WITH_INVOICE(), { hold_report_until_paid: true });
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true, hold_report_until_paid: true });
         const body = await res.json();
         expect(res.status).toBe(422);
         expect(body.code).toBe('hold_payer_billed');
@@ -1106,7 +1106,7 @@ describe('audit fixes', () => {
       // the linked invoice reads as voided; no other invoice matches the visit
       const { updates } = mockTables({ project, invoice: null, invoiceFirstResults: [invoiceRow({ status: 'void' }), null, null] });
       await withServer(async (baseUrl) => {
-        const res = await post(baseUrl, SEND_WITH_INVOICE(), { hold_report_until_paid: true });
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true, hold_report_until_paid: true });
         expect(res.status).toBe(409);
         expect((await res.json()).code).toBe('hold_invoice_unusable');
       });
@@ -1668,12 +1668,74 @@ describe('audit fixes', () => {
     });
   });
 
+  describe('round 14: the held send never creates the invoice; the handoff re-reads who it goes to', () => {
+    test('a held send without the confirmed invoice id is refused before anything is created', async () => {
+      mockTables({ project: wdoProject({ invoice_id: null }) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), { hold_report_until_paid: true });
+        expect(res.status).toBe(422);
+        expect((await res.json()).code).toBe('hold_invoice_required');
+      });
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+    });
+
+    test('the prepared invoice (no hold, nothing sent) hands back the fingerprint the confirm is bound to', async () => {
+      mockTables();
+      const out = await withServer(async (baseUrl) => (await post(baseUrl, SEND_WITH_INVOICE(), { prepare_invoice: true })).json());
+      expect(out.prepared).toBe(true);
+      expect(out.invoice.billing_fingerprint).toMatch(/^[0-9a-f]{16}$/);
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['the invoice moved to another customer (a merge)', { liveInvoice: { customer_id: 'customer-2' } }],
+      ['the project moved to another customer', { liveProject: { customer_id: 'customer-2' } }],
+    ])('the handoff gate refuses when %s after arming', async (_label, { liveInvoice, liveProject }) => {
+      mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const gate = ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0].beforeHandoff;
+      mockTables({ project: wdoProject({ ...(liveProject || {}) }), invoice: invoiceRow({ ...(liveInvoice || {}) }) });
+      expect(await gate()).toBe(false);
+    });
+
+    test('the handoff gate refuses a recipient that is no longer one of the customer\'s addresses', async () => {
+      mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const gate = ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0].beforeHandoff;
+      expect(await gate()).toBe(true);
+      // the account's address changed since the email was prepared (the old recipient is a former contact's)
+      mockTables({ customer: { ...CUSTOMER, email: 'new-owner@example.com' } });
+      expect(await gate()).toBe(false);
+    });
+
+    test('a failure alert is not raised when a manual release finished meanwhile (the hold is no longer held)', async () => {
+      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, reason: 'blocked' });
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      const base = db.getMockImplementation();
+      let projectReads = 0;
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'projects') {
+          const original = c.first;
+          // the re-read after the revert finds the report released by a manual send
+          c.first = jest.fn(async (...args) => { projectReads += 1; return args[0] === 'report_hold_status' ? { report_hold_status: 'released' } : original(...args); });
+        }
+        return c;
+      });
+      const result = await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(result.released).toBe(false);
+      expect(projectReads).toBeGreaterThan(0);
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+  });
+
   describe('P1: the payer lookup fails closed', () => {
     test('a lookup error refuses the hold before any invoice is created, and asks the lookup to throw', async () => {
       PayerService.resolveForInvoice.mockRejectedValueOnce(new Error('db down'));
       mockTables({ project: wdoProject({ invoice_id: null }) });
       await withServer(async (baseUrl) => {
-        const res = await post(baseUrl, SEND_WITH_INVOICE(), { hold_report_until_paid: true });
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true, hold_report_until_paid: true });
         expect(res.status).toBe(500);
       });
       expect(InvoiceService.create).not.toHaveBeenCalled();

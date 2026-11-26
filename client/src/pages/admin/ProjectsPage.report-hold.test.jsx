@@ -41,16 +41,20 @@ const baseProject = {
   wdo_signature: { signed: true, content_stale: false },
 };
 
-function stubProject(project) {
+// newInvoice: the preview finds no invoice yet (a brand-new WDO) until a prepare call creates the draft.
+// emailOutcome: what the send reports for the email leg.
+function stubProject(project, { newInvoice = false, emailOutcome = { ok: true } } = {}) {
+  let prepared = !newInvoice;
   vi.stubGlobal("fetch", vi.fn(async (url, opts = {}) => {
     const path = String(url).replace(/^\/api/, "");
     if (path === "/admin/projects/project-1") return response({ project, photos: [], closeoutPreview: { canClose: true, billing: { required: false }, followup: { required: false } } });
     if (path.endsWith("/activity")) return response({ activity: [] });
     if (path.endsWith("/send-with-invoice")) {
       const body = JSON.parse(opts.body);
+      if (body.prepare_invoice) { prepared = true; return response({ prepared: true, invoice: { id: "inv-1", invoice_number: "WPC-1", total: 175, billing_fingerprint: "0123456789abcdef" } }); }
       return body.dry_run
-        ? response({ dry_run: true, invoice: { id: "inv-1", invoice_number: "WPC-1", total: 175, created: false, billing_fingerprint: "0123456789abcdef" }, email_routing: { recipient: "synthetic@example.invalid" }, report_hold_release: { recipient: "synthetic@example.invalid", copies: ["closing@example.invalid"] } })
-        : response({ sent: true, report_held: !!body.hold_report_until_paid, invoice: { invoice_number: "WPC-1" }, channels: { email: { ok: true } } });
+        ? response({ dry_run: true, invoice: { id: prepared ? "inv-1" : null, invoice_number: "WPC-1", total: 175, created: false, billing_fingerprint: "0123456789abcdef" }, email_routing: { recipient: "synthetic@example.invalid" }, report_hold_release: { recipient: "synthetic@example.invalid", copies: ["closing@example.invalid"] } })
+        : response({ sent: true, report_held: !!body.hold_report_until_paid, invoice: { invoice_number: "WPC-1" }, channels: { email: emailOutcome } });
     }
     throw new Error("Unexpected synthetic project request: " + path);
   }));
@@ -77,6 +81,24 @@ afterEach(() => {
 });
 
 describe("WDO report hold on the project page", () => {
+  it("a held send of a brand-new WDO prepares the invoice first, confirms THAT invoice, and sends its id and fingerprint", async () => {
+    stubProject({ ...baseProject, report_payment_hold_available: true }, { newInvoice: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Invoice now, report after payment" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Send" }));
+    await waitFor(() => expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/send-with-invoice")).length).toBe(4));
+    const bodies = fetch.mock.calls.filter(([url]) => String(url).endsWith("/send-with-invoice")).map(([, opts]) => JSON.parse(opts.body));
+    expect(bodies.map((b) => (b.prepare_invoice ? "prepare" : b.dry_run ? "dry_run" : "send"))).toEqual(["dry_run", "prepare", "dry_run", "send"]);
+    expect(bodies[1]).not.toHaveProperty("hold_report_until_paid");
+    expect(bodies[3]).toEqual(expect.objectContaining({ invoice_id: "inv-1", hold_report_until_paid: true, expected_billing_fingerprint: "0123456789abcdef" }));
+  });
+
+  it("an invoice email of unknown outcome says to check before resending, and that the report stays held", async () => {
+    stubProject({ ...baseProject, report_payment_hold_available: true }, { emailOutcome: { ok: false, uncertain: true, error: "timeout" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Invoice now, report after payment" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Send" }));
+    expect(await screen.findByText(/invoice email outcome is unknown\. Check that the customer got it before resending\. The report stays held/)).toBeInTheDocument();
+  });
+
   it("a held report on a closed project still offers Send report now, and no other send button", async () => {
     stubProject({ ...baseProject, status: "closed", report_hold_status: "held" });
     expect(await screen.findByRole("button", { name: "Send report now" })).toBeInTheDocument();

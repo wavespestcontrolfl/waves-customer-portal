@@ -4251,7 +4251,7 @@ function makeHeldReverter({ project, claim, ctx, source }) {
     const { attemptsSoFar, previousDeliveryStatus, ownClaim } = claim;
     const nextAttempts = countAttempt ? attemptsSoFar + 1 : attemptsSoFar;
     const delayMinutes = countAttempt ? hold.reportHoldBackoffMinutes(nextAttempts) : 2;
-    await db('projects').where(ownClaim).update({
+    const reverted = await db('projects').where(ownClaim).update({
       report_hold_status: 'held',
       report_hold_locked_at: null,
       report_hold_attempts: nextAttempts,
@@ -4266,13 +4266,16 @@ function makeHeldReverter({ project, claim, ctx, source }) {
     // ONE bell, rung until an alert is recorded: the attempt count is saved first, so a failed insert (or a stop
     // between the writes) must not mean the bell is never raised. A marker on the row says one was recorded.
     const channelsNow = typeof project.delivery_channels === 'string' ? safeJsonParse(project.delivery_channels) : project.delivery_channels;
-    if (countAttempt && channelsNow?.release_bell !== true) {
+    // ...and only while the hold is still unreleased: a revert that lost its claim, or a manual release that finished
+    // meanwhile (and closed the alert), must not be followed by a new failure alert.
+    const stillHeld = reverted && (await db('projects').where({ id: project.id }).first('report_hold_status'))?.report_hold_status === 'held';
+    if (countAttempt && stillHeld && channelsNow?.release_bell !== true) {
       if (attemptsSoFar === 0) {
         await logProjectActivity(null, project, 'project_report_release_blocked',
           `Paid report release blocked: ${String(reason || 'release failed').slice(0, 200)}`, { source }).catch(() => {});
       }
       if (await hold.raiseReleaseFailedBell({ project, customer: ctx.customer, reason })) {
-        await db('projects').where({ id: project.id }).update({
+        await db('projects').where({ id: project.id, report_hold_status: 'held' }).update({
           delivery_channels: db.raw("coalesce(delivery_channels, '{}'::jsonb) || '{\"release_bell\": true}'::jsonb"),
         }).catch((err) => logger.warn(`[projects] release bell marker not stored for ${project.id}: ${err.message}`));
       }
@@ -4978,7 +4981,7 @@ function buildSendReportPdf(hold, refreshed, customer) {
 // The customer email: invoice-first for a hold, report-only for a payer-billed invoice, else combined.
 function sendInvoiceEmail({ hold, isPayerInvoice, isWdoProject, project, refreshed, customer, reportUrl, payUrl, invoice, attachments, reportAttachments, recipient }) {
   if (hold.active) {
-    return ProjectEmail.sendProjectInvoiceBeforeReport({ project: refreshed, customer, payUrl, invoice, attachments, recipient, beforeHandoff: heldInvoiceHandoffGate(invoice) });
+    return ProjectEmail.sendProjectInvoiceBeforeReport({ project: refreshed, customer, payUrl, invoice, attachments, recipient, beforeHandoff: heldInvoiceHandoffGate({ invoice, project, customerId: project.customer_id, recipientEmail: recipient?.email }) });
   }
   if (isPayerInvoice) {
     // Payer-billed: homeowner gets the report only (FDACS PDF for WDO + report link), never the invoice PDF or pay link.
@@ -5002,7 +5005,7 @@ function sendBillingCopyEmail({ hold, isWdoProject, project, refreshed, customer
   const stamp = new Date().toISOString();
   if (hold.active) {
     return ProjectEmail.sendProjectInvoiceBeforeReport({
-      project: refreshed, customer, payUrl, invoice, attachments, recipient, beforeHandoff: heldInvoiceHandoffGate(invoice),
+      project: refreshed, customer, payUrl, invoice, attachments, recipient, beforeHandoff: heldInvoiceHandoffGate({ invoice, project, customerId: project.customer_id, recipientEmail: billing.email }),
       idempotencyKey: `project.invoice_before_report:${project.id}:${invoice.id}:billing:${stamp}`,
     });
   }
@@ -5045,15 +5048,28 @@ function invoiceEmailUncertain(result) {
 }
 
 // The invoice handoff gate a held invoice email runs at the provider boundary, the checks the canonical invoice email
-// (invoice-email.js) runs there: the invoice still bills what this send read, it is still the homeowner's own bill,
-// and no collections hold applies (a deliberate operator send passes a plain dispute hold; a wrong-number or
-// wrong-party fallback hold still stops the pay link). Fails closed: anything unreadable refuses.
-function heldInvoiceHandoffGate(invoice) {
+// (invoice-email.js) runs there, plus who it goes to: the invoice and the project still belong to the customer the hold
+// was armed for (an account merge in between moves them), the invoice still bills what this send read, it is still the
+// homeowner's own bill, the recipient is still one of THAT customer's addresses (the contact's current email choices), and
+// no collections hold applies (a deliberate operator send passes a plain dispute hold; a wrong-number or wrong-party
+// fallback hold still stops the pay link). Fails closed: anything unreadable refuses.
+function heldInvoiceHandoffGate({ invoice, project, customerId, recipientEmail }) {
   return async () => {
-    const live = await db('invoices').where({ id: invoice.id }).first();
-    if (!live || billingFingerprint(live) !== billingFingerprint(invoice)) return false;
+    const [live, liveProject] = await Promise.all([
+      db('invoices').where({ id: invoice.id }).first(),
+      db('projects').where({ id: project.id }).first('customer_id'),
+    ]);
+    if (!live || !liveProject || [live.customer_id, liveProject.customer_id].some((id) => String(id) !== String(customerId))) return false;
+    if (billingFingerprint(live) !== billingFingerprint(invoice)) return false;
     const ownership = await require('../services/invoice-helpers').selfPayAtDispatch(invoice.id, db)();
     if (ownership.ok !== true) return false;
+    const owner = await loadProjectCustomer(customerId);
+    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+    const allowed = [
+      (await ProjectEmail.resolveProjectEmailRecipientForSend(owner || {}, { applyReportRule: true }))?.email,
+      getInvoiceEmailRecipients(owner || {}, prefs || {})[0]?.email,
+    ].map((email) => String(email || '').trim().toLowerCase());
+    if (!allowed.includes(String(recipientEmail || '').trim().toLowerCase())) return false;
     const collectionHold = require('../services/collections/collection-hold');
     const held = await collectionHold.messagingHeldByCollectionHold(live.customer_id, db, { ignoreDisputeHold: collectionHold.holdExemptionApplies('operator') });
     return !held.held;
@@ -5309,6 +5325,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // by itself once the invoice is paid. Prepare mode never arms a hold.
     const holdRequested = sendHoldFlag(req.body, prepareInvoice);
     if (await holdRequestRefused(res, project, customer, holdRequested)) return;
+    // A held send bills an invoice that already exists (the drawer prepares the draft first and the operator confirms ITS
+    // amount): it never creates the invoice itself, so the amount confirmed is the amount sent.
+    if (holdRequested && !dryRun && !req.body?.invoice_id) {
+      return res.status(422).json({ error: 'A held send needs the invoice the operator confirmed. Prepare the invoice first.', code: 'hold_invoice_required' });
+    }
 
     const hold = createSendHold(project, holdRequested);
     const { invoice, created } = await resolveOrCreateProjectInvoice({
@@ -5337,6 +5358,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           status: invoice.status,
           created,
           payer_billed: !!invoice.payer_id,
+          billing_fingerprint: billingFingerprintHash(invoice),
         },
       });
     }

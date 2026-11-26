@@ -2164,15 +2164,7 @@ export function ProjectDetail({
     try {
       const savedRevision = await saveDirtyProjectEdits("Could not save project before sending");
       // dry_run first so the operator can confirm the invoice amount.
-      const preview = await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
-        method: "POST",
-        body: {
-          dry_run: true,
-          ...holdBody(holdReport),
-          ...(overrideReason ? { override_reason: overrideReason } : {}),
-        },
-      });
-      const pv = await readJsonResponse(preview, "Could not prepare invoice");
+      const pv = await fetchSendWithInvoicePreview({ projectId, holdReport, overrideReason });
       const inv = pv.invoice || {};
       const amount = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : "the amount shown";
       const verb = inv.created ? "Create and send" : "Send";
@@ -3938,9 +3930,27 @@ function sendWithInvoiceConfirmMessage({ holdReport, verb, invoiceLabel, amount,
   );
 }
 
+// The preview the operator confirms. A held send bills an invoice that already exists, so a brand-new WDO gets its draft
+// prepared first (no hold, nothing sent) and the preview is read again: the confirm shows, and the send is bound to, that
+// invoice's own amount.
+async function fetchSendWithInvoicePreview({ projectId, holdReport, overrideReason }) {
+  const call = async (body) => readJsonResponse(await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
+    method: "POST",
+    body: { ...body, ...(overrideReason ? { override_reason: overrideReason } : {}) },
+  }), "Could not prepare invoice");
+  const dryRun = { dry_run: true, ...holdBody(holdReport) };
+  const pv = await call(dryRun);
+  if (!(holdReport && pv.invoice && !pv.invoice.id)) return pv;
+  await call({ prepare_invoice: true });
+  return call(dryRun);
+}
+
 function sendWithInvoiceNotice(d) {
   const number = d.invoice?.invoice_number || "";
   const summary = deliverySummary(d.channels);
+  if (d.channels?.email?.uncertain) {
+    return `Invoice ${number}: the invoice email outcome is unknown. Check that the customer got it before resending. The report stays held until the invoice is paid. ${summary}`.trim();
+  }
   return d.report_held
     ? `Invoice ${number} sent. The report is held and goes out by itself once the invoice is paid. ${summary}`.trim()
     : `Report + invoice ${number} delivered. ${summary}`.trim();
