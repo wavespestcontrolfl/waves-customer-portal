@@ -4,8 +4,7 @@
  *   cursor, so the next run re-lists and stores it; Gmail never offers it
  *   again once the cursor passes. A message that keeps failing is passed
  *   after MESSAGE_RETRY_RUNS runs, and only once the office has a needs-you
- *   alert for it. A Zelle notice whose retry record was lost holds for as
- *   long as it fails.
+ *   alert for it.
  * - C02: an email row and its attachment rows commit together, so a failed
  *   attachment insert leaves nothing and the retry stores the whole message;
  *   a stored row missing attachment rows gets only the missing ones back
@@ -25,11 +24,7 @@ jest.mock('../services/email/spam-blocker', () => ({
   isBlocked: jest.fn(async () => false), domainFromAddress: (a) => String(a || '').split('@')[1] || '',
 }));
 jest.mock('../services/email/email-classifier', () => ({ classifyEmail: jest.fn(async () => undefined) }));
-jest.mock('../services/zelle-notice-reconciler', () => ({
-  ZELLE_RETRY_MARK: 'zelle_notice_retry', isZelleReconcileEnabled: jest.fn(() => false),
-  sweepStaleClaims: jest.fn(async () => 0), maybeHandleZelleNotice: jest.fn(async () => false),
-}));
-jest.mock('../services/zelle-notice', () => ({ isZelleNoticeCandidate: jest.fn(() => false) }));
+jest.mock('../services/zelle-notice-reconciler', () => ({ sweepStaleClaims: jest.fn(async () => 0) }));
 jest.mock('../services/content/email-approvals', () => ({ isApprovalControlMessage: jest.fn(async () => false) }));
 jest.mock('../services/newsletter-proof', () => ({ maybeHandleProofApproval: jest.fn(async () => false) }));
 jest.mock('../config/feature-gates', () => ({ gateEnvValue: () => false }));
@@ -38,8 +33,6 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 const db = require('../models/db');
 const gmail = require('../services/email/gmail-client');
 const { notifyAdmin } = require('../services/notification-service');
-const { isZelleReconcileEnabled, maybeHandleZelleNotice } = require('../services/zelle-notice-reconciler');
-const { isZelleNoticeCandidate } = require('../services/zelle-notice');
 const { syncEmails, upsertEmail } = require('../services/email/email-sync');
 
 const MESSAGE_RETRY_RUNS = 15;
@@ -150,8 +143,6 @@ beforeEach(() => {
   gmail.getProfileHistoryId.mockResolvedValue('200');
   gmail.listMessages.mockImplementation(async () => [{ id: gmailId }]);
   notifyAdmin.mockResolvedValue({ id: 'alert-1' });
-  isZelleReconcileEnabled.mockReturnValue(false);
-  isZelleNoticeCandidate.mockReturnValue(false);
 });
 
 describe('C01: a failed message holds the incremental cursor', () => {
@@ -252,44 +243,12 @@ describe('C01: a failed message holds the incremental cursor', () => {
     expect(notifyAdmin).toHaveBeenCalledTimes(2);
   });
 
-  test('a Zelle notice whose retry record was lost holds past the retry runs, with no alert', async () => {
-    gmail.getMessage.mockRejectedValue(Object.assign(new Error('synthetic lost retry'), { zelleRetryLost: true }));
-    for (let run = 1; run <= MESSAGE_RETRY_RUNS + 2; run += 1) await syncEmails();
-    expect(state().last_history_id).toBe('100');
-    expect(state().errors).toContain('cursor withheld');
-    expect(notifyAdmin).not.toHaveBeenCalled();
-  });
-
   test('the cursor stops at the listing, not at a later historyId of a message changed during the loop', async () => {
     // '300' is lexically and numerically past the listing's '200': a cursor
     // there would pass an email that arrived between the two.
     gmail.getMessage.mockImplementation(async () => parsed({ historyId: '300' }));
     await syncEmails();
     expect(state()).toMatchObject({ last_history_id: '200', errors: null });
-  });
-
-  test('a live Zelle notice whose insert rolls back (mark included) holds with no cap, beside mail that saves', async () => {
-    isZelleReconcileEnabled.mockReturnValue(true);
-    isZelleNoticeCandidate.mockImplementation((row) => row.gmail_id === gmailId);
-    gmail.getMessage.mockImplementation(async (msgId) => parsed({
-      gmail_id: msgId, ...(msgId === gmailId ? { has_attachments: true, attachments: [attachment('notice.pdf')] } : {}),
-    }));
-    failures.attachmentInsert = new Error('synthetic attachment write failure');
-    for (let run = 1; run <= MESSAGE_RETRY_RUNS * 2; run += 1) {
-      newMailArrives();
-      await syncEmails();
-    }
-    expect(state().last_history_id).toBe('100');
-    expect(tables.emails.some((row) => row.gmail_id === gmailId)).toBe(false);
-    expect(tables.emails.length).toBe(MESSAGE_RETRY_RUNS * 2);
-    expect(notifyAdmin).not.toHaveBeenCalled();
-
-    // Fixed: the notice is stored (born marked) and offered to the reconciler.
-    failures.attachmentInsert = null;
-    await syncEmails();
-    expect(tables.emails.some((row) => row.gmail_id === gmailId)).toBe(true);
-    expect(maybeHandleZelleNotice).toHaveBeenCalledWith(expect.objectContaining({ gmail_id: gmailId, auto_action: 'zelle_notice_retry' }), { backfill: false });
-    expect(state().last_history_id).toBe('200');
   });
 
   test('a message Gmail no longer has (404) still passes the cursor and archives the row', async () => {

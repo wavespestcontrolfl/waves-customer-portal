@@ -535,15 +535,6 @@ const REGISTRY = {
             invoiceId: meta.invoice_id,
             channel: 'sms',
             purpose: 'late_payment',
-            // Shadow spacing only: a deferred bank-verification re-nudge is
-            // not an overdue reminder (Codex #5189 r6), so it names no rail;
-            // an overdue replay excludes its own standing reservation and
-            // the rest of its touch (the delivered email sibling).
-            ...(followupReplayIsVerification(meta) ? {} : {
-              source: 'invoice_followup_replay',
-              ...(meta.ledger_reservation_key ? { spacingExcludeKey: `followup-replay:${meta.ledger_reservation_key}` } : {}),
-              ...(meta.notificationEventKey ? { spacingExcludeEventKey: meta.notificationEventKey } : {}),
-            }),
             logTag: 'invoice-followup-replay',
           });
           if (!permitted) return { eligible: false, reason: 'collections-policy-denied' };

@@ -23,7 +23,6 @@ const FeatureGates = require('../../config/feature-gates');
 const { OPEN_STATUSES } = require('./constants');
 const Schedule = require('./schedule');
 const Admin = require('./admin');
-const Runner = require('./runner');
 const BalanceSet = require('./balance-set');
 
 /** The live engine covers this customer: the gate and its prerequisites are on, and the allowlist (if any) names them. */
@@ -74,8 +73,7 @@ let lastReadSawOpen = false;
  * releaseMembers, dated no earlier than the next run, so none sends today). Gate on with no allowlist
  * reads nothing. Never throws: a read or release failure is logged (and raised to the office when the
  * engine is reachable, see lastReadSawOpen), and the per-invoice run goes on. A schedule with a send in
- * flight (a fresh claim) is left for the next run. Under the shadow gate (live gate off), a dark schedule
- * shadowRun would judge gets its full shadow verdict logged first: released, it never reaches that scan.
+ * flight (a fresh claim) is left for the next run.
  */
 async function releaseIfDark(now = new Date()) {
   const tally = { released: 0, inFlight: 0, failed: 0 };
@@ -92,11 +90,9 @@ async function releaseIfDark(now = new Date()) {
     return tally;
   }
   lastReadSawOpen = open.length > 0;
-  const shadowFirst = FeatureGates.dunningCustomerScheduleShadowLive() && !FeatureGates.dunningCustomerScheduleLive();
   for (const schedule of open) {
     const reason = darkReason(schedule.customer_id);
     if (!reason) continue;
-    if (shadowFirst) await Runner.shadowVerdictBeforeRelease(schedule, now);
     await releaseOne(schedule, reason, now, tally);
   }
   if (tally.released || tally.inFlight || tally.failed) {

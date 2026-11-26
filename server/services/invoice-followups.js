@@ -1343,8 +1343,7 @@ async function openCustomerScheduleId(trx, customerId) {
 // for the per-invoice engine alone; production always exports them.
 function customerDunningGates() {
   const FeatureGates = require('../config/feature-gates');
-  return typeof FeatureGates.dunningCustomerScheduleLive === 'function'
-    && typeof FeatureGates.dunningCustomerScheduleShadowLive === 'function' ? FeatureGates : null;
+  return typeof FeatureGates.dunningCustomerScheduleLive === 'function' ? FeatureGates : null;
 }
 
 // Before the batch: release whatever is dark (releaseIfDark logs and raises
@@ -1363,22 +1362,20 @@ async function prepareCustomerSchedules(now) {
 }
 
 // After the per-invoice loop: the live schedules (GATE_DUNNING_CUSTOMER_SCHEDULE
-// and its prerequisites), else the shadow run, which writes NOTHING. A failure
-// here never costs the run its per-invoice result.
+// and its prerequisites). A failure here never costs the run its per-invoice
+// result.
 async function runCustomerScheduleEngine(now) {
   const gatesModule = customerDunningGates();
   if (!gatesModule) return;
-  const live = gatesModule.dunningCustomerScheduleLive();
-  if (!live && !gatesModule.dunningCustomerScheduleShadowLive()) return;
+  if (!gatesModule.dunningCustomerScheduleLive()) return;
   try {
     const Runner = require('./customer-dunning/runner');
     // `now` is runPending's start (read from the wall clock): claims are
     // stamped from it plus all time elapsed since, including the per-invoice
     // loop above, so none is born expired. Cadence still uses `now`.
-    if (live) await Runner.runCustomerSchedules(now, { clockStartedAt: now.getTime() });
-    else await Runner.shadowRun(now);
+    await Runner.runCustomerSchedules(now, { clockStartedAt: now.getTime() });
   } catch (err) {
-    logger.error(`[invoice-followups] customer-dunning ${live ? 'run' : 'shadow run'} failed: ${err.message}`);
+    logger.error(`[invoice-followups] customer-dunning run failed: ${err.message}`);
   }
 }
 

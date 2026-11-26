@@ -23,10 +23,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
-const mockGates = { shadow: false };
 jest.mock('../config/feature-gates', () => ({
   gates: {},
-  dunningCustomerScheduleShadowLive: () => mockGates.shadow,
   dunningCustomerScheduleAllowlist: () => null,
 }));
 jest.mock('../services/stripe', () => ({}));
@@ -38,7 +36,7 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn() }));
 jest.mock('../services/email-template', () => ({ currency: (n) => `$${Number(n).toFixed(2)}` }));
 jest.mock('../utils/date-only', () => ({ formatDateOnly: (v) => (v ? String(v) : '') }));
-const mockRunner = { shadowRun: jest.fn(), runCustomerSchedules: jest.fn(), processSchedule: jest.fn(), promote: jest.fn() };
+const mockRunner = { runCustomerSchedules: jest.fn(), processSchedule: jest.fn(), promote: jest.fn() };
 jest.mock('../services/customer-dunning/runner', () => mockRunner);
 
 const Followups = require('../services/invoice-followups');

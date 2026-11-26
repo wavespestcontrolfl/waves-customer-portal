@@ -22,27 +22,6 @@
 
 const logger = require('../logger');
 
-// Shadow-spacing inputs are forwarded only when set, so every existing
-// caller's evaluate() arguments stay exactly as they were.
-function shadowSpacingArgs(source, spacingExcludeKey, spacingExcludeEventKey) {
-  return {
-    ...(source ? { source } : {}),
-    ...(spacingExcludeKey ? { spacingExcludeKey } : {}),
-    ...(spacingExcludeEventKey ? { spacingExcludeEventKey } : {}),
-  };
-}
-
-// GATE_DUNNING_SPACING_SHADOW observes inside ContactPolicy.evaluate, which
-// the rails only reach while GATE_COLLECTIONS_POLICY is on (Codex #5189 r6):
-// the shadow needs both. Say so once per process instead of recording
-// nothing silently.
-let shadowWithoutPolicyWarned = false;
-function warnShadowWithoutPolicy() {
-  if (shadowWithoutPolicyWarned || process.env.GATE_DUNNING_SPACING_SHADOW !== 'true') return;
-  shadowWithoutPolicyWarned = true;
-  logger.warn('[rail-guard] GATE_DUNNING_SPACING_SHADOW is on but GATE_COLLECTIONS_POLICY is not — the spacing shadow records nothing until both are on');
-}
-
 /**
  * Active collections hold on the customer (dispute, or the wrong-number / wrong-party fallback; owner ruling 2026-09-30:
  * while it stands no pay link reaches them, and the Day 3-90 ladder and every
@@ -83,9 +62,6 @@ async function collectionsChannelVerdict({
   offLedgerBalanceCents = 0,
   excludeCollectionCaseId = null,
   excludeLedgerIds = [],
-  source = null,
-  spacingExcludeKey = null,
-  spacingExcludeEventKey = null,
   logTag = 'collections',
   holdExempt = null,
   database,
@@ -95,7 +71,6 @@ async function collectionsChannelVerdict({
     return { permitted: false, eligibleInvoiceIds: [], hold: true };
   }
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
-    warnShadowWithoutPolicy();
     return { permitted: true, eligibleInvoiceIds: null };
   }
   let verdict;
@@ -107,7 +82,6 @@ async function collectionsChannelVerdict({
       // or its own collection_hold denial would still block that send (dispute rows only).
       ...(require('./collection-hold').holdExemptionApplies(holdExempt) ? { ignoreDisputeHold: true } : {}),
       ...(database ? { database } : {}),
-      ...shadowSpacingArgs(source, spacingExcludeKey, spacingExcludeEventKey),
     });
   } catch (err) {
     logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);
@@ -143,11 +117,6 @@ async function collectionsChannelPermitted({
   offLedgerBalanceCents = 0,
   excludeCollectionCaseId = null,
   excludeLedgerIds = [],
-  // Shadow spacing only (dunning-spacing.js): the rail sending, and a
-  // reservation key the rail's own retry may already have written.
-  source = null,
-  spacingExcludeKey = null,
-  spacingExcludeEventKey = null,
   logTag = 'collections',
   detail = false,
   holdExempt = null,
@@ -161,7 +130,6 @@ async function collectionsChannelPermitted({
     return detail ? { allowed: false, durable: false, hold: true } : false;
   }
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
-    warnShadowWithoutPolicy();
     return answer(true);
   }
   let verdict;
@@ -173,7 +141,6 @@ async function collectionsChannelPermitted({
       // or its own collection_hold denial would still block that send (dispute rows only).
       ...(require('./collection-hold').holdExemptionApplies(holdExempt) ? { ignoreDisputeHold: true } : {}),
       ...(database ? { database } : {}),
-      ...shadowSpacingArgs(source, spacingExcludeKey, spacingExcludeEventKey),
     });
   } catch (err) {
     // evaluate() is documented never to throw (it denies internally), but a

@@ -6,8 +6,8 @@
 // members, fresh claim, concurrent workers, unique-violation), the claim and
 // OUR-stamp-only release, the guarded advance / final completion, close and
 // release of surviving members, the disposition writers, the boundary read on
-// a handed transaction under DB_POOL_MAX=2 (A-17), and that the shadow run
-// changes no row anywhere.
+// a handed transaction under DB_POOL_MAX=2 (A-17), and the read-only
+// transaction helper.
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 
@@ -27,7 +27,7 @@ const mockResolve = jest.fn();
 jest.mock('../services/customer-dunning/balance-set', () => ({
   resolveDunnableSet: (...a) => mockResolve(...a),
 }));
-// The shadow run now runs the live pre-send guards. Their reads that go through the
+// The live pre-send guards' reads that go through the
 // process-wide pool (delivery progress, autopay eligibility, the email template
 // library) are stubbed here; the customer, preference and schedule reads run on `app`.
 jest.mock('../services/billing-reminder-delivery', () => ({
@@ -921,15 +921,6 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
         expect((await fresh(row.id)).status).toBe('held');
         expect(holdAlerts()).toHaveLength(0);
       });
-
-      test('the shadow run raises no hold alert and writes nothing', async () => {
-        const { row, later } = await promoted();
-        mockNotify.mockClear();
-        autopay().mockResolvedValue(true);
-        await Runner.shadowRun(later);
-        expect(mockNotify).not.toHaveBeenCalled();
-        expect((await fresh(row.id)).status).toBe('active');
-      });
     });
 
     test('stage catch-up write moves step_index up and drops the link cache', async () => {
@@ -1329,61 +1320,15 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       expect(await findReminderReservation(c, `${eventKey}x`, 'email')).toBeNull();
       expect(await findReminderReservation(await customer(), eventKey, 'email')).toBeNull();
     });
-
-    test('shadow over real SQL: an old delivered reservation is would-settle, an old ambiguous one would-hold; nothing is written', async () => {
-      const logger = require('../services/logger');
-      const c = await customer();
-      const m = await member(c, { sentDaysAgo: 60, step: 4 });
-      const s = await openSchedule(c, { next_touch_at: ago(0.05) });
-      mockResolve.mockResolvedValue(setFor([m]));
-      const lines = () => logger.info.mock.calls.map(([x]) => String(x)).filter((x) => x.includes(`schedule=${s.id}`)).join('\n');
-      const eventKey = `customer-dunning:${s.id}:${s.episode}:d60_reminder`;
-      await reserve(c, eventKey, 'email', { delivered: true }, 150);
-      const before = await app('collections_contact_ledger').where({ customer_id: c });
-      await Runner.shadowRun(NOW);
-      expect(lines()).toMatch(/SHADOW would settle .* reason=already_delivered/);
-      await app('collections_contact_ledger').where({ customer_id: c }).del();
-      await reserve(c, eventKey, 'email', {}, 150);
-      logger.info.mockClear();
-      await Runner.shadowRun(NOW);
-      expect(lines()).toMatch(/SHADOW would hold .* reason=REMINDER_OUTCOME_UNCONFIRMED unclaimable=email/);
-      expect(before).toHaveLength(1);
-      expect(await app('collections_contact_ledger').where({ customer_id: c })).toHaveLength(1);
-    });
   });
 
-  // ── shadow: writes nothing ─────────────────────────────────────────────
-  describe('shadowRun', () => {
-    const snapshot = async () => {
-      const out = {};
-      for (const t of ['customers', 'invoices', 'invoice_followup_sequences', 'customer_dunning_schedules']) {
-        out[t] = JSON.stringify(await app(t).orderBy('id'));
-      }
-      return out;
-    };
-
-    test('PostgreSQL itself refuses a write inside the shadow transaction, and rolls back', async () => {
+  // ── read-only transaction ──────────────────────────────────────────────
+  describe('inReadOnlyTransaction', () => {
+    test('PostgreSQL itself refuses a write inside the read-only transaction, and rolls back', async () => {
       const c = await customer();
       await expect(Schedule.inReadOnlyTransaction(app, (trx) => trx('customers').insert({ id: randomUUID() })))
         .rejects.toMatchObject({ code: '25006' });
       expect(await app('customers').where({ id: c })).toHaveLength(1);
-    });
-
-    test('a shadow run with promotable customers and a due schedule changes no row in any table', async () => {
-      const promotable = await customer();
-      const a = await member(promotable, { sentDaysAgo: 45, step: 3 });
-      const b = await member(promotable, { sentDaysAgo: 20, step: 1 });
-      const owned = await customer();
-      const o1 = await member(owned, { sentDaysAgo: 60, step: 4 });
-      await openSchedule(owned);
-      mockResolve.mockImplementation(async (customerId) => (customerId === promotable
-        ? setFor([a, b]) : setFor([o1, o1])));
-      const before = await snapshot();
-      const tally = await Runner.shadowRun(NOW);
-      expect(await snapshot()).toEqual(before);
-      expect(tally.promote).toBeGreaterThanOrEqual(1);
-      expect(tally.send).toBeGreaterThanOrEqual(1);
-      expect(mockNotify).not.toHaveBeenCalled();
     });
   });
 });

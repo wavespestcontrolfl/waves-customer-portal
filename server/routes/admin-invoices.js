@@ -692,13 +692,13 @@ router.post('/email-message/ai', requireAdmin, async (req, res, next) => {
 });
 
 // GET /:id/recipients — preview invoice delivery recipients before sending
-// ── Zelle payment notices (GATE_ZELLE_NOTICE_RECONCILE lane) ──────────────
+// ── Zelle payment notices (parked by the bank-feed reconciler) ──
 // The park queue for Capital One Zelle notices the reconciler could not
 // settle on its own (services/zelle-notice-reconciler.js). Static paths —
 // declared BEFORE every /:id route so Express never reads "payment-notices"
 // as an invoice id, and listed in NAMED_INVOICE_GETS so the single-invoice
 // staff exemption above does not apply (admin only). These stay live with
-// the gate off so parked history remains actionable after a kill.
+// the bank-feed gate off so parked history remains actionable after a kill.
 const PAYMENT_NOTICE_LIST_MAX = 100;
 // The reconciler raises one review alert per parked notice; resolving the
 // notice here is its done-when (docs/admin-notifications.md). Never fails
@@ -718,7 +718,14 @@ router.get('/payment-notices', requireAdmin, async (req, res, next) => {
     const q = db('inbound_payment_notices').orderBy('received_at', 'desc').limit(limit);
     if (status) q.where({ status });
     const rows = await q.select('*');
-    res.json({ notices: rows });
+    // The source email's subject, so a notice with no payer or amount (a legacy retry-marked email
+    // retired from the removed email path; prod had 0 on 2026-11-26) can be told apart and checked.
+    const emailIds = rows.map((r) => r.email_id).filter(Boolean);
+    const subjects = new Map();
+    if (emailIds.length) {
+      for (const e of await db('emails').whereIn('id', emailIds).select('id', 'subject')) subjects.set(String(e.id), e.subject || null);
+    }
+    res.json({ notices: rows.map((r) => (r.email_id ? { ...r, email_subject: subjects.get(String(r.email_id)) || null } : r)) });
   } catch (err) { next(err); }
 });
 

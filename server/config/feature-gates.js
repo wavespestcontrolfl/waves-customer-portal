@@ -3632,26 +3632,9 @@ const gates = {
   // stay off in every environment until explicitly enabled.
   recordedAnnualPrepayReceipt: process.env.GATE_RECORDED_ANNUAL_PREPAY_RECEIPT === 'true',
 
-  // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
-  // "Someone sent you money with Zelle" notices (forwarded from the owner's
-  // personal inbox to contact@), matches the payer + exact amount to ONE open
-  // self-pay invoice and settles it through services/invoice-manual-payment.js
-  // — the operator's Add-payment path — INCLUDING the paid receipt (email +
-  // SMS). OWNER RULING 2026-09-02: an exact single match may mark the invoice
-  // paid and send the receipt with no human in the loop; anything else parks
-  // on the Invoices page for one-click Apply / Ignore. Money + a customer
-  // comm, so it ships dark in prod. OFF = the hook returns before any DB
-  // read and the email flows through normal classification exactly as
-  // today; the parked-notice admin routes stay live so history remains
-  // actionable after a kill. Read at CALL time (gateEnvValue) so unsetting
-  // GATE_ZELLE_NOTICE_RECONCILE on Railway is a live kill switch — the
-  // consumer (services/zelle-notice-reconciler.js) and logGateStatus must
-  // keep using this same parser.
-  zelleNoticeReconcile: isProd ? gateEnvValue('GATE_ZELLE_NOTICE_RECONCILE') : process.env.GATE_ZELLE_NOTICE_RECONCILE !== 'false',
-
   // Zelle payments from the Plaid bank feed — the same decision table and
-  // money path as zelleNoticeReconcile, fed by bank_transactions instead of
-  // email: after each hourly Plaid sync, a new "Zelle money received from
+  // money path as the retired email route, fed by bank_transactions:
+  // after each hourly Plaid sync, a new "Zelle money received from
   // <payer>" credit on a bank account settles the ONE open self-pay invoice
   // that matches it to the cent with a corroborating payer name, receipt
   // email + SMS included (owner ruling 2026-09-02); everything else parks on
@@ -4802,14 +4785,6 @@ const gates = {
   // services/newsletter-proof.js, newsletter-sunset.js and the History stop
   // route. Kill = unset: the issue waits for an APPROVED reply again.
   newsletterAutoSend: process.env.GATE_NEWSLETTER_AUTO_SEND === 'true',
-  // Seven-day overdue-reminder spacing rule, SHADOW ONLY (dunning
-  // unification PR 1, re-sequenced narrow 2026-09-28 — see #5108's wide
-  // version for what this deliberately leaves out). Ships DARK: off unless
-  // exactly 'true'. This entry is for logGateStatus only:
-  // services/collections/contact-policy.js reads GATE_DUNNING_SPACING_SHADOW
-  // at call time and only LOGS what the rule would have held — it never
-  // holds, denies, or changes a send.
-  dunningSpacingShadow: process.env.GATE_DUNNING_SPACING_SHADOW === 'true',
 
   // Orphan-invoice adoption sweep (dunning unification, PR 3b): invoices sent
   // outside the direct-send path never got an invoice_followup_sequences row.
@@ -5219,18 +5194,16 @@ const gates = {
   // Customer-level overdue reminders (dunning consolidation, PR 1: inert
   // foundations — nothing reads these yet). A customer with 2+ actively-
   // dunned open invoices gets ONE customer_dunning_schedules row that owns
-  // the cadence, instead of one reminder per invoice. Both gates ship DARK:
-  // off unless exactly 'true'. These three entries are for logGateStatus
+  // the cadence, instead of one reminder per invoice. The gate ships DARK:
+  // off unless exactly 'true'. These entries are for logGateStatus
   // only; the readers live in services/customer-dunning/ (later PRs), which
-  // read the env at call time. SHADOW computes and logs only (no rows, no
-  // mints, no reservations, no sends); the live gate additionally needs
+  // read the env at call time. The live gate needs
   // GATE_DUNNING_LADDER_90 and the pay-page balance gate (payIncludeBalance)
   // on. dunningCustomerScheduleAllowlist reads ENABLED when
   // DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST (comma list of customer uuids) is
   // CONFIGURED — unset = everyone, configured = only the valid ids, and a
   // configured list with no valid id = nobody (logGateStatus says so). The
   // one-customer canary before a full flip.
-  dunningCustomerScheduleShadow: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true',
   dunningCustomerSchedule: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true',
   dunningCustomerScheduleAllowlist: String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '').trim() !== '',
   // GATE_VISIT_LIVE_ACTIVITY: read at CALL time via visitLiveActivityLive(); this entry is for logGateStatus.
@@ -7746,20 +7719,14 @@ function outlinkTrackingLive() {
 
 // Customer-level dunning gates read at CALL time — strict `=== 'true'`. The
 // `dunningCustomerSchedule*` gates-map entries above are for logGateStatus
-// only. Both ship dark; the live reader is separate from the shadow reader so
-// a shadow run can never be mistaken for authority to send. BOTH readers also
-// require the prerequisites the schedule depends on and fail closed without
-// them: GATE_DUNNING_LADDER_90 (the Day 60/90 cadence, read as
+// only. The reader requires the prerequisites the schedule depends on and
+// fails closed without them: GATE_DUNNING_LADDER_90 (the Day 60/90 cadence, read as
 // invoice-followups.js reads it) and the pay-page balance gate
 // (payIncludeBalance, read as pay-combined.js reads it, via the gates map) —
 // without the first the cadence is the legacy Day 30 one, without the second
 // the page shows one invoice while a reminder names the set.
 function dunningCustomerSchedulePrereqsLive() {
   return process.env.GATE_DUNNING_LADDER_90 === 'true' && gates.payIncludeBalance === true;
-}
-
-function dunningCustomerScheduleShadowLive() {
-  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true' && dunningCustomerSchedulePrereqsLive();
 }
 
 function dunningCustomerScheduleLive() {
@@ -8485,7 +8452,6 @@ module.exports.lawnSinceLastLive = lawnSinceLastLive;
 module.exports.lawnWateringSmsLive = lawnWateringSmsLive;
 module.exports.lawnWateringEveryVisitLive = lawnWateringEveryVisitLive;
 module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrereqsLive;
-module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;
 module.exports.dunningCustomerScheduleLive = dunningCustomerScheduleLive;
 module.exports.dunningCustomerScheduleAllowlist = dunningCustomerScheduleAllowlist;
 module.exports.dunningCustomerScheduleAllowlistStatus = dunningCustomerScheduleAllowlistStatus;
