@@ -788,12 +788,17 @@ describe('syncRestaurantProspects', () => {
   let reads;
   let fetchText;
 
-  function makeStore() {
+  // pending: the unanswered rows the store holds (none by default, so a file test reads no report page).
+  function makeStore(pending = []) {
     upserts = [];
     raised = [];
     reads = {};
     return {
       upsertRecords: jest.fn(async (records) => { upserts.push(...records); return records.length; }),
+      // As the real store: only the rows whose key the run gives.
+      pendingInspections: jest.fn(async ({ keys }) => pending.filter((row) => keys.includes(row.source_key))),
+      saveReport: jest.fn(async () => true),
+      bumpAttempts: jest.fn(async () => {}),
       raiseVisits: jest.fn(async (later) => { raised.push(...later); return later.length; }),
       // As the real store, without the lock: the read is judged against the stored one and kept when it passes and
       // is fuller (judgeRead).
@@ -812,7 +817,8 @@ describe('syncRestaurantProspects', () => {
   // A fixed day (Thursday Nov 19, 2026, 10:36 AM ET), so the fiscal year and the freshness of the default rows never
   // depend on the day the tests run. A test may pass its own `now`.
   const NOW = new Date('2026-11-19T15:36:00Z');
-  const sync = (deps) => svc.syncRestaurantProspects({ now: NOW, ...deps });
+  const sleep = jest.fn(async () => {});
+  const sync = (deps) => svc.syncRestaurantProspects({ now: NOW, sleep, ...deps });
   // Both license files with one row on the given day, for a test with its own `now`.
   const licFiles = (date) => ({
     'newfood.csv': () => licCsv([licRow({ app: '7001', date })]),
@@ -831,6 +837,176 @@ describe('syncRestaurantProspects', () => {
     delete process.env.DBPR_PROSPECT_SYNC_DISABLED;
   });
   afterAll(() => { delete process.env.DBPR_PROSPECT_SYNC_DISABLED; });
+
+  // The inspection file listing these visits as cited first visits of Nov 16, 2026, and a pending row as the store
+  // gives one. Report pages by visit id: a 35A page and a 35B-only page of Nov 16.
+  // A visit is its id, or { visit, ...inspRow options } for a row with its own license id or date.
+  const visitsFile = (visits) => ({ '7fdinspi.csv': () => inspCsv(visits.map((v) => inspRow(typeof v === 'string' ? { visit: v } : v))) });
+  const pendingRow = (id, sourceKey, over = {}) => ({
+    id, source_key: sourceKey, license_id: '5001', violation35: 1, visitNumber: 1, visitDate: '2026-11-16', ...over,
+  });
+  const PEST_PAGE = reportPage('<tr><td>35A-02-8</td><td>&nbsp;</td><td>High Priority - Live roaches under the sink.</td></tr>');
+  const DOOR_PAGE = reportPage('<tr><td>35B-03-4</td><td>&nbsp;</td><td>Basic - Back door propped open.</td></tr>');
+  function fetchWith(fileOverrides, pages) {
+    return jest.fn(async (url) => {
+      const body = url.includes('inspectionDetail.asp')
+        ? pages[new URL(url).searchParams.get('InspVisitID')]
+        : (fileOverrides[url.split('/').pop()] || files[url.split('/').pop()])();
+      if (body instanceof Error) throw body;
+      if (body === undefined) throw new Error('unexpected url');
+      return body;
+    });
+  }
+  const reportCalls = () => fetchText.mock.calls.filter(([url]) => url.includes('inspectionDetail.asp'));
+
+  test('after the files, reads the pending report pages of the run\'s own first visits, one request a second, and saves each answer', async () => {
+    store = makeStore([pendingRow('id0', '9000'), pendingRow('id1', '9001'), pendingRow('id2', '9002')]);
+    fetchText = fetchWith(visitsFile(['9000', '9001', '9002']), { 9000: PEST_PAGE, 9001: DOOR_PAGE, 9002: PEST_PAGE });
+    const result = await sync({ fetchText, store });
+    expect(store.pendingInspections).toHaveBeenCalledWith({ cutoff: '2026-10-05', limit: 3, keys: ['9000', '9001', '9002'] });
+    expect(sleep.mock.calls).toEqual([[1000], [1000]]);
+    expect(store.saveReport.mock.calls.map(([read, report]) => [read.id, report.pestEvidence])).toEqual([['id0', true], ['id1', false], ['id2', true]]);
+    // The store gets the pending row as it gave it, and the parser's answer as it is.
+    expect(store.saveReport.mock.calls[0][0]).toEqual(pendingRow('id0', '9000'));
+    expect(store.saveReport.mock.calls[0][1]).toMatchObject({ inspectionType: 'Routine - Food', pestEvidence: true });
+    expect(result).toMatchObject({ failures: 0, reportsRead: 3, reportsFailed: 0, reportsLeft: 0, pestFound: 2 });
+    expect(reportCalls()[0]).toEqual(['https://www.myfloridalicense.com/inspectionDetail.asp?InspVisitID=9000&id=5001', 15000, 524288]);
+    // The three files come first.
+    expect(fetchText.mock.calls.findIndex(([url]) => url.includes('inspectionDetail.asp'))).toBe(3);
+  });
+
+  test('a failed download or a page that cannot answer adds one attempt and saves nothing', async () => {
+    store = makeStore([
+      pendingRow('a', '9000'), pendingRow('b', '9001'), pendingRow('c', '9002'), pendingRow('d', '9003'),
+    ]);
+    // A bad id never reaches a request: the file reader refuses it, and reportUrl too (its own test).
+    fetchText = fetchWith(visitsFile(['9000', '9001', '9002', '9003']), {
+      9000: new Error('HTTP 503'), 9001: '<html>error page</html>', 9002: new Error('timeout'), 9003: DOOR_PAGE,
+    });
+    const result = await sync({ fetchText, store });
+    expect(store.bumpAttempts.mock.calls.map(([id]) => id)).toEqual(['a', 'b', 'c']);
+    expect(store.saveReport.mock.calls.map(([read]) => read.id)).toEqual(['d']);
+    expect(reportCalls()).toHaveLength(4);
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 3, reportsLeft: 0, pestFound: 0 });
+  });
+
+  test('each page is read against its own row: the file\'s count, the visit\'s date and its number', async () => {
+    store = makeStore([
+      pendingRow('a', '9000', { violation35: 2 }), // the page lists one 35 row: fewer than the file counted
+      pendingRow('b', '9001', { visitDate: '2026-11-17' }), // another visit's page (the file dates it Nov 17 too)
+      pendingRow('c', '9002', { visitNumber: 2 }), // a later visit
+      pendingRow('d', '9003'),
+    ]);
+    fetchText = fetchWith(visitsFile(['9000', { visit: '9001', date: '11/17/2026' }, '9002', '9003']), { 9000: DOOR_PAGE, 9001: DOOR_PAGE, 9002: DOOR_PAGE, 9003: DOOR_PAGE });
+    const result = await sync({ fetchText, store });
+    expect(store.bumpAttempts.mock.calls.map(([id]) => id)).toEqual(['a', 'b', 'c']);
+    expect(store.saveReport.mock.calls.map(([read, report]) => [read.id, report.pestEvidence])).toEqual([['d', false]]);
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 3 });
+  });
+
+  test('a visit the newer file corrected (another license id or date than the stored row) is not read, at no attempt', async () => {
+    // The stored rows kept their first license id or date; the file now says 5001 and Nov 16. An answer would sit on
+    // the stored business and date, so neither is read. The third row matches and reads.
+    store = makeStore([pendingRow('a', '9000', { license_id: '4999' }), pendingRow('b', '9001', { visitDate: '2026-11-10' }), pendingRow('c', '9002')]);
+    fetchText = fetchWith(visitsFile(['9000', '9001', '9002']), { 9000: PEST_PAGE, 9001: PEST_PAGE, 9002: PEST_PAGE });
+    const result = await sync({ fetchText, store });
+    expect(reportCalls().map(([url]) => new URL(url).searchParams.get('InspVisitID'))).toEqual(['9002']);
+    expect(store.bumpAttempts).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 0, reportsSkipped: 2, pestFound: 1 });
+  });
+
+  test('a run requests at most 100 pages; a corrected row it skips takes none of them', async () => {
+    const ids = Array.from({ length: 102 }, (_, i) => String(9000 + i));
+    // The first two rows were corrected by the file (another license id): skipped, so 100 of the other 100 read.
+    store = makeStore(ids.map((id, i) => pendingRow(`r${i}`, id, i < 2 ? { license_id: '4999' } : {})));
+    fetchText = fetchWith(visitsFile(ids), Object.fromEntries(ids.map((id) => [id, DOOR_PAGE])));
+    const result = await sync({ fetchText, store });
+    expect(reportCalls()).toHaveLength(100);
+    expect(result).toMatchObject({ failures: 0, reportsRead: 100, reportsSkipped: 2 });
+  });
+
+  test('a failed read beside a page whose save was skipped is not a failed run: a page did read', async () => {
+    store = makeStore([pendingRow('a', '9000'), pendingRow('b', '9001')]);
+    store.saveReport.mockResolvedValueOnce(false);
+    fetchText = fetchWith(visitsFile(['9000', '9001']), { 9000: PEST_PAGE, 9001: '<html>a changed page</html>' });
+    const result = await sync({ fetchText, store });
+    expect(result).toMatchObject({ failures: 0, reportsRead: 0, reportsFailed: 1, reportsLeft: 1 });
+  });
+
+  test('an answer the store does not save (its row changed after it was picked) is left for a later run, at no attempt', async () => {
+    store = makeStore([pendingRow('a', '9000'), pendingRow('b', '9001')]);
+    store.saveReport.mockResolvedValueOnce(false);
+    fetchText = fetchWith(visitsFile(['9000', '9001']), { 9000: PEST_PAGE, 9001: PEST_PAGE });
+    const result = await sync({ fetchText, store });
+    expect(store.saveReport.mock.calls.map(([read]) => read.id)).toEqual(['a', 'b']);
+    expect(store.bumpAttempts).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ failures: 0, reportsRead: 1, reportsFailed: 0, reportsLeft: 1, pestFound: 1 });
+  });
+
+  test('a failed save is a database failure: it stops the reads, counts once, and costs the row no attempt', async () => {
+    store = makeStore([pendingRow('a', '9000'), pendingRow('b', '9001')]);
+    store.saveReport.mockRejectedValueOnce(new Error('connection lost'));
+    fetchText = fetchWith(visitsFile(['9000', '9001']), { 9000: DOOR_PAGE, 9001: DOOR_PAGE });
+    const result = await sync({ fetchText, store });
+    expect(result).toMatchObject({ failures: 1, reportsRead: 0, reportsFailed: 0, reportsLeft: 0 });
+    expect(store.saveReport.mock.calls.map(([read]) => read.id)).toEqual(['a']);
+    expect(store.bumpAttempts).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] report reads stopped early (Error)');
+  });
+
+  test('a run where every page read fails is a failed run, and the log carries counts only', async () => {
+    store = makeStore([pendingRow('a', '9000'), pendingRow('b', '9001')]);
+    fetchText = fetchWith(visitsFile(['9000', '9001']), { 9000: '<html>a changed page</html>', 9001: '<html>a changed page</html>' });
+    const result = await sync({ fetchText, store });
+    expect(result).toMatchObject({ failures: 1, reportsRead: 0, reportsFailed: 2 });
+    expect(logger.warn).toHaveBeenCalledWith('[dbpr-prospects] every report read failed (2)');
+    expect(logger.info.mock.calls.map((c) => c[0]).join('\n'))
+      .toMatch(/ reportsRead=0 reportsFailed=2 reportsLeft=0 pestFound=0 failures=1 \d+ms$/m);
+    const logged = [...logger.warn.mock.calls, ...logger.info.mock.calls].map((c) => c[0]).join('\n');
+    expect(logged).not.toMatch(/SAMPLE|inspectionDetail|5001/);
+  });
+
+  test('only a good read of the inspection file names visits to read: a failed, short or stale read names none', async () => {
+    const pending = [pendingRow('a', '9000')];
+    const onlyKeys = () => store.pendingInspections.mock.calls.map(([args]) => args.keys);
+    // A failed download.
+    store = makeStore(pending);
+    fetchText = fetchWith({ '7fdinspi.csv': () => new Error('HTTP 503') }, { 9000: PEST_PAGE });
+    expect(await sync({ fetchText, store })).toMatchObject({ failures: 1, reportsRead: 0, reportsFailed: 0 });
+    expect(onlyKeys()).toEqual([[]]);
+    // A short read: one row where the fullest complete read had 20.
+    store = makeStore(pending);
+    reads.inspection = { fiscalYear: '2026-07-01', rows: 20 };
+    fetchText = fetchWith(visitsFile(['9000']), { 9000: PEST_PAGE });
+    expect((await sync({ fetchText, store })).files.inspection.short).toBe(true);
+    expect(onlyKeys()).toEqual([[]]);
+    // A stale read: no row from the last 14 days, though the visit is inside the 45-day window.
+    store = makeStore(pending);
+    fetchText = fetchWith({ '7fdinspi.csv': () => inspCsv([inspRow({ visit: '9000', date: '10/20/2026' })]) }, { 9000: PEST_PAGE });
+    expect((await sync({ fetchText, store })).files.inspection.stale).toBe(true);
+    expect(onlyKeys()).toEqual([[]]);
+    expect(store.saveReport).not.toHaveBeenCalled();
+    expect(reportCalls()).toHaveLength(0);
+    // The same visit in a good read is read.
+    store = makeStore(pending);
+    fetchText = fetchWith(visitsFile(['9000']), { 9000: PEST_PAGE });
+    expect(await sync({ fetchText, store })).toMatchObject({ failures: 0, reportsRead: 1, pestFound: 1 });
+  });
+
+  test('the visits to read are the file\'s cited first visits from the last 45 days: no callback, none older', async () => {
+    store = makeStore();
+    const callback = (line) => line.replace('"34208","1","1","Food"', '"34208","1","2","Food"');
+    fetchText = fetchWith({ '7fdinspi.csv': () => inspCsv([
+      inspRow({ visit: '9000' }),
+      inspRow({ visit: '9001', date: '10/04/2026' }), // the day before the window
+      inspRow({ visit: '9002', date: '10/05/2026' }), // the window's first day
+      inspRow({ visit: '9003' }), callback(inspRow({ visit: '9003', v35: 0 })), // a callback copy makes 9003 visit 2
+      callback(inspRow({ visit: '9004' })), // a cited callback
+    ]) }, {});
+    expect((await sync({ fetchText, store })).failures).toBe(0);
+    expect(store.pendingInspections).toHaveBeenCalledWith({ cutoff: '2026-10-05', limit: 2, keys: ['9000', '9002'] });
+  });
+
 
   test('a visit any copy in the file names as a later visit is stored as that visit, in either row order', async () => {
     // The import reads a row at a time: the uncited visit-2 copy may come after the cited visit-1 copy, or before it.

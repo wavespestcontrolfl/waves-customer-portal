@@ -17,8 +17,9 @@
  *
  * Violation 35 holds two codes. 35A is pest evidence (roaches, rodents, flies); 35B is outer openings not protected
  * (a door that does not self-close). The CSV has only the count. pest_evidence: NULL = the public report page is not
- * read yet, true = a 35A finding, false = 35B only. The report-page reads that fill it are the next change; until
- * then every inspection stays NULL.
+ * read yet, true = a 35A finding, false = 35B only. After the files, each run reads the report pages of the cited
+ * first visits its own good read of the inspection file lists from the last 45 days: one page a second, at most 100
+ * a run, each row at most 3 times (readReports).
  *
  * Fail soft: a download, parse or database failure logs a count-only warning and goes into the result object; the
  * sync itself never throws. The scheduler marks a run with failures as failed in job_health. Logs carry counts and
@@ -36,7 +37,7 @@ const { isExcludedLocality, isExcludedZip, sharedZipNeedsCity } = require('../ex
 const { plainPage, htmlText } = require('./plain-html');
 const { eachDbprCsvRow, defaultFetchText } = require('../commercial-suite-size/dbpr-food-license');
 const { nanpNationalDigits, isValidNanpNumber } = require('../../utils/phone');
-const { etDateString, etCalendarDaysUntil } = require('../../utils/datetime-et');
+const { etDateString, etCalendarDaysUntil, addETDays } = require('../../utils/datetime-et');
 
 const EXTRACT_BASE = 'https://www2.myfloridalicense.com/sto/file_download/extracts/';
 const FILES = {
@@ -73,6 +74,15 @@ const FILE_TIMEOUT_MS = 60 * 1000;
 const REPORT_BASE = 'https://www.myfloridalicense.com/inspectionDetail.asp';
 const FINDING_TEXT_MAX = 400;
 const REPORT_MAX_ATTEMPTS = 3;
+// The report reads: each page's own timeout, a second between pages, inspections of the last 45 days, at most 100
+// pages a run.
+const REPORT_TIMEOUT_MS = 15 * 1000;
+// A report page is about 40 KB (three live pages, 2026-11-25): a larger one is refused before it is parsed, as the
+// parse runs on the portal's event loop.
+const REPORT_MAX_BYTES = 512 * 1024;
+const REPORT_GAP_MS = 1000;
+const REPORT_WINDOW_DAYS = 45;
+const REPORT_MAX_PER_RUN = 100;
 const UPSERT_CHUNK = 500;
 
 function syncDisabled(env = process.env) {
@@ -734,7 +744,8 @@ async function settleRead(kind, read, now) {
 
 // ── Weekly job ──────────────────────────────────────────────────
 
-const defaultStore = { upsertRecords, settleRead, raiseVisits };
+const defaultStore = { upsertRecords, settleRead, raiseVisits, pendingInspections, saveReport, bumpAttempts };
+const defaultSleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 // The row width each file has, as cells minus header names. The inspection file fills every header column. The
 // license files never fill their last two (Base Risk Level, Secondary Risk Level): every row of the 2026-11-20 files
@@ -873,7 +884,13 @@ function judgeRead(last, read, now) {
   return { problem, save: save ? { fiscalYear: read.fiscalYear, rows: read.rows } : null };
 }
 
+// Loads the three files. Returns the keys of the visits whose report pages the run reads (firstVisitKeys) and their
+// current license id and date (currentVisits), taken only
+// from a read of the inspection file that loaded and passed: a failed, short or stale read names none, since it may
+// list a visit a newer file corrected or dropped.
 async function syncFiles(deps, result) {
+  let keys = [];
+  let visits = new Map();
   for (const kind of Object.keys(FILES)) {
     try {
       const { records, malformed, rows, fiscalYear, newest, laterVisits } = await loadFile(kind, deps.fetchText, deps.now);
@@ -889,6 +906,9 @@ async function syncFiles(deps, result) {
         result.failures += 1;
         result.files[kind][problem.flag] = true;
         logger.warn(`[dbpr-prospects] ${kind} file ${problem.text}`);
+      } else if (kind === 'inspection') {
+        keys = firstVisitKeys(unique, reportCutoff(deps.now));
+        visits = currentVisits(unique, keys);
       }
     } catch (err) {
       result.failures += 1;
@@ -896,6 +916,7 @@ async function syncFiles(deps, result) {
       logger.warn(`[dbpr-prospects] ${kind} file failed (${err.code || err.name})`);
     }
   }
+  return { keys, visits };
 }
 
 // The public report page of one inspection visit, or null when either id is not digits only.
@@ -904,22 +925,101 @@ function reportUrl(visitId, licenseId) {
   return `${REPORT_BASE}?InspVisitID=${visitId}&id=${licenseId}`;
 }
 
+// The first day of the report reads' window, as an Eastern date.
+const reportCutoff = (now) => etDateString(addETDays(now, -REPORT_WINDOW_DAYS));
+
+// The visits whose report pages a run reads: the first visits with a violation-35 citation that its own read of the
+// inspection file lists, dated on or after `cutoff`. A visit the file also names as a later visit carries the higher
+// number (raiseVisit), so it is never one of them.
+function firstVisitKeys(records, cutoff) {
+  return records
+    .filter((record) => record.detail.visitNumber === 1 && record.detail.violation35 > 0 && record.event_date >= cutoff)
+    .map((record) => record.source_key);
+}
+
+// The same visits' license id and date as the run's own read lists them (source_key -> { license_id, visitDate }).
+// The stored row keeps its first license id and date (and the business they name), so a visit the newer file
+// corrected is not read: its answer would sit on the stored business and date (readReports skips it).
+function currentVisits(records, keys) {
+  const wanted = new Set(keys);
+  return new Map(records.filter((record) => wanted.has(record.source_key))
+    .map((record) => [record.source_key, { license_id: record.license_id, visitDate: record.event_date }]));
+}
+
+// Downloads and reads one report page for a pendingInspections row (its names are the parser's options). A failed
+// download, an id that is not digits only, or a page that cannot answer returns null: a failed read.
+async function readOneReport(row, deps) {
+  const url = reportUrl(row.source_key, row.license_id);
+  if (!url) return null;
+  try {
+    return parseInspectionReport(await deps.fetchText(url, REPORT_TIMEOUT_MS, REPORT_MAX_BYTES), row);
+  } catch {
+    return null;
+  }
+}
+
+// The report pages of the run's visits (keys) not answered yet, in the store's order (newest first), at most
+// REPORT_MAX_PER_RUN, one request a second. Each answer is saved as it is read, so a killed run keeps its progress.
+// A failed read adds one attempt (pendingInspections stops at REPORT_MAX_ATTEMPTS) and leaves pest_evidence NULL. An
+// answer the store does not save (the row changed after it was picked) is left for a later run, at no attempt. A
+// database failure is not a failed read: it stops the reads (the caller counts it) and costs the row no attempt.
+async function readReports(deps, result, keys, visits = new Map()) {
+  // Every pending row of the run's keys (one per key at most, so the batch is bounded by the file): a row the loop
+  // skips (corrected) never takes a request, and at most REPORT_MAX_PER_RUN pages are requested.
+  const pending = await deps.store.pendingInspections({ cutoff: reportCutoff(deps.now), limit: keys.length, keys });
+  let requests = 0;
+  for (let i = 0; i < pending.length && requests < REPORT_MAX_PER_RUN; i += 1) {
+    const current = visits.get(pending[i].source_key);
+    if (current && (current.license_id !== pending[i].license_id || current.visitDate !== pending[i].visitDate)) {
+      result.reportsSkipped += 1;
+      continue;
+    }
+    if (requests > 0) await deps.sleep(REPORT_GAP_MS);
+    requests += 1;
+    const report = await readOneReport(pending[i], deps);
+    if (!report) {
+      result.reportsFailed += 1;
+      await deps.store.bumpAttempts(pending[i].id);
+    } else if (await deps.store.saveReport(pending[i], report)) {
+      result.reportsRead += 1;
+      if (report.pestEvidence) result.pestFound += 1;
+    } else {
+      result.reportsLeft += 1;
+    }
+  }
+  // Every read failing (the site down, or a changed page) is a failed run, not a quiet week. Some failed reads beside
+  // a good one are not.
+  if (result.reportsFailed > 0 && result.reportsRead === 0 && result.reportsLeft === 0) {
+    result.failures += 1;
+    logger.warn(`[dbpr-prospects] every report read failed (${result.reportsFailed})`);
+  }
+}
+
 /**
- * The weekly job. Never throws: each file's failure is counted in the result. `deps` is for tests:
- * { fetchText, store, now }.
- * @returns {Promise<{ skipped?: string, failures: number, files: object, elapsedMs: number }>}
+ * The weekly job: the three files, then the report pages. Never throws: each failure is counted in the result.
+ * `deps` is for tests: { fetchText, sleep, store, now }.
+ * @returns {Promise<{ skipped?: string, failures: number, files: object, reportsRead: number, reportsFailed: number,
+ *   reportsLeft: number, pestFound: number, elapsedMs: number }>}
  */
 async function syncRestaurantProspects(deps = {}) {
   const started = Date.now();
-  const result = { failures: 0, files: {}, elapsedMs: 0 };
+  const result = { failures: 0, files: {}, reportsRead: 0, reportsFailed: 0, reportsLeft: 0, reportsSkipped: 0, pestFound: 0, elapsedMs: 0 };
   if (syncDisabled()) return { ...result, skipped: 'disabled' };
-  await syncFiles({ fetchText: defaultFetchText, store: defaultStore, now: new Date(), ...deps }, result);
+  const ctx = { fetchText: defaultFetchText, sleep: defaultSleep, store: defaultStore, now: new Date(), ...deps };
+  const { keys, visits } = await syncFiles(ctx, result);
+  try {
+    await readReports(ctx, result, keys, visits);
+  } catch (err) {
+    result.failures += 1;
+    logger.warn(`[dbpr-prospects] report reads stopped early (${err.code || err.name})`);
+  }
   result.elapsedMs = Date.now() - started;
   const counts = Object.entries(result.files)
     .map(([k, f]) => `${k}=${f.failed ? 'failed' : f.upserted}${READ_FLAGS.filter((flag) => f[flag]).map((flag) => `(${flag})`).join('')}`
       + `${f.malformed ? `(${f.malformed} malformed)` : ''}`)
     .join(' ');
-  logger.info(`[dbpr-prospects] ${counts} failures=${result.failures} ${result.elapsedMs}ms`);
+  logger.info(`[dbpr-prospects] ${counts} reportsRead=${result.reportsRead} reportsFailed=${result.reportsFailed} `
+    + `reportsLeft=${result.reportsLeft} pestFound=${result.pestFound} failures=${result.failures} ${result.elapsedMs}ms`);
   return result;
 }
 
