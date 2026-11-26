@@ -78,6 +78,13 @@ describe('resolveInvalidReasonFromRow (read time, rows older than the column)', 
     expect(resolveInvalidReasonFromRow({ ai_extraction: null })).toBeNull();
     expect(resolveInvalidReasonFromRow(null)).toBeNull();
   });
+  test('reads a validated v2 extraction from ai_extraction_enriched, and ignores an unvalidated one', () => {
+    const silent = JSON.stringify({ call_nature: 'silent_or_noise' });
+    expect(resolveInvalidReasonFromRow({ v2_extraction_status: 'valid', ai_extraction_enriched: silent })).toBe('silent');
+    expect(resolveInvalidReasonFromRow({ v2_extraction_status: 'valid', ai_extraction: { call_type: 'spam' },
+      ai_extraction_enriched: { call_nature: 'spam_solicitation' } })).toBe('solicitor');
+    expect(resolveInvalidReasonFromRow({ v2_extraction_status: 'schema_failed', ai_extraction_enriched: silent })).toBeNull();
+  });
 });
 
 describe('stampInvalidReason', () => {
@@ -96,12 +103,11 @@ describe('stampInvalidReason', () => {
     expect(update).toHaveBeenCalledWith({ invalid_reason: 'spam' });
   });
 
-  test('never writes null over a stored value: no resolution means no write', async () => {
-    const update = jest.fn();
+  test('a reprocess that finds a real lead clears the stored reason (writes null)', async () => {
+    const update = jest.fn().mockResolvedValue(1);
     const { database } = fakeDb(update);
     await expect(stampInvalidReason(database, 'call-1', { legacy: { is_spam: false } })).resolves.toBeNull();
-    expect(database).not.toHaveBeenCalled();
-    expect(update).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({ invalid_reason: null });
   });
 
   test('fails soft: a database error is logged, never thrown', async () => {

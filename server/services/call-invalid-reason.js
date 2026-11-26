@@ -33,8 +33,8 @@
  *   7. silent        v2 call_nature silent_or_noise
  * Otherwise null.
  *
- * resolveInvalidReason is pure. stampInvalidReason is the one writer: it never
- * overwrites a stored value with null, and it never throws (a stamp problem
+ * resolveInvalidReason is pure. stampInvalidReason is the one writer: the latest pass
+ * wins (null included), and it never throws (a stamp problem
  * must not fail call processing).
  */
 
@@ -102,17 +102,21 @@ function resolveInvalidReason(signals = {}) {
 /**
  * Resolve from a stored call_log row (read time, for rows older than the
  * column). A stored invalid_reason wins; otherwise the row's own signals decide.
- * The row's ai_extraction may be an object or a JSON string.
+ * The row's ai_extraction and ai_extraction_enriched may be objects or JSON strings.
  */
+function parseJson(value) {
+  if (typeof value !== 'string') return value || null;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 function resolveInvalidReasonFromRow(row) {
   if (!row) return null;
   if (row.invalid_reason) return row.invalid_reason;
-  let legacy = row.ai_extraction;
-  if (typeof legacy === 'string') {
-    try { legacy = JSON.parse(legacy); } catch { legacy = null; }
-  }
+  // A validated v2 extraction (ai_extraction_enriched) counts too, as in the live processor.
+  const v2 = row.v2_extraction_status === 'valid' ? parseJson(row.ai_extraction_enriched) : null;
   return resolveInvalidReason({
-    legacy,
+    legacy: parseJson(row.ai_extraction),
+    v2,
     disposition: row.disposition,
     processingStatus: row.processing_status,
     leadQuality: row.lead_quality,
@@ -121,16 +125,15 @@ function resolveInvalidReasonFromRow(row) {
 }
 
 /**
- * Stamp call_log.invalid_reason for one call. A null resolution writes nothing
- * (never null over a stored value); a different non-null resolution replaces
- * the stored one (the latest verdict wins). Fail soft: returns the written
- * reason, or null, and never throws.
+ * Stamp call_log.invalid_reason for one call after a processing pass. The
+ * latest pass wins, null included: a reprocess that turns a bad call into a
+ * real lead clears the old reason. Fail soft: returns the written reason, or
+ * null, and never throws (a failed write leaves the stored value as it was).
  */
 async function stampInvalidReason(database, callId, signals) {
   try {
     if (!callId) return null;
     const reason = resolveInvalidReason(signals);
-    if (!reason) return null;
     await database('call_log').where({ id: callId }).update({ invalid_reason: reason });
     return reason;
   } catch (err) {

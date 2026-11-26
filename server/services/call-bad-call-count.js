@@ -134,7 +134,7 @@ async function loadWeekRows({ start, end, database = db }) {
     .where('cl.created_at', '<', end)
     .select(
       'cl.source', 'cl.to_phone', 'cl.answered_by', 'cl.call_outcome', 'cl.answer_seconds', 'cl.invalid_reason',
-      'cl.disposition', 'cl.processing_status', 'cl.lead_quality', 'cl.enrichment_status', 'cl.ai_extraction',
+      'cl.disposition', 'cl.processing_status', 'cl.lead_quality', 'cl.enrichment_status', 'cl.ai_extraction', 'cl.ai_extraction_enriched', 'cl.v2_extraction_status',
     );
 }
 
