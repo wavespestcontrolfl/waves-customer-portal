@@ -319,13 +319,16 @@ function noteUnmoved(run, service, reasonCode) {
 // { clear: true } when it no longer conflicts. A visit whose only conflict is
 // the customer's mowing day (mowing-days.js) needs no person:
 // it reads clear here, so it raises no notice and closes an older one.
+// Conflicts a person never needs to hear about: the visit moves when a slot
+// fits and otherwise stays quietly (mowing-days.js; the saved day, owner 2026-11-25).
+const SILENT_CONFLICTS = new Set(['mowing_day', 'preferred_day']);
 async function standingConflict(seen, id) {
   const row = await db('scheduled_services').where({ id }).first('*');
   if (!row || !VALID_STATUSES.has(row.status) || !row.window_start) return null;
   const service = { ...seen.service, ...row };
   // Required lazily, like apply.js's conflict re-read.
   const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, seen.ctx);
-  return conflict && conflict.kind !== 'mowing_day' ? { service, conflict } : { clear: true };
+  return conflict && !SILENT_CONFLICTS.has(conflict.kind) ? { service, conflict } : { clear: true };
 }
 
 // Every visit whose conflict the run must read at its end: the ledger (each
@@ -1392,7 +1395,7 @@ function inConflict(pm) {
 }
 
 // "Moved (+12.5)", naming the conflict the move cleared when there was one.
-const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day', mowing_day: ' off the customer\'s mowing day' };
+const CONFLICT_PHRASE = { overlap: ' off an overlapping stop', closed_day: ' off a closed day', mowing_day: ' off the customer\'s mowing day', preferred_day: ' onto the customer\'s saved day' };
 function movedDescription(appliedAudit) {
   const conflict = appliedAudit.constraints && appliedAudit.constraints.conflict;
   return `Moved${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(appliedAudit.improvement)})`;

@@ -29,6 +29,12 @@
  *               (mowing-days.js; the row read here, so the apply-time and
  *               run-end re-reads see what is saved now). It raises no
  *               needs-a-person notice (index.js standingConflict).
+ *   preferred_day only when none of the above applies: the customer saved a
+ *               weekday in the app (property_preferences.preferred_day, read
+ *               by preferences.js normalizePreferences) and the visit is not on
+ *               it (owner 2026-11-25 "fix auto dispatch": a visit off the saved
+ *               day moves back to it even when no drive time is saved). Same
+ *               handling as mowing_day: no needs-a-person notice.
  *
  * The result only lifts the score bar and the drive floor for this visit
  * (move-rules.js). Every other guard still applies to it: eligibility, the
@@ -187,10 +193,24 @@ async function mowingDayConflict(service, conn, excludeIds, dateStr) {
   return { kind: 'mowing_day', date: dateStr, mowing_days: rule.days };
 }
 
+// The customer saved a weekday in the app and the visit's date is not on it.
+// Read here (not from the run's preference snapshot) so the apply-time and
+// run-end re-reads see what is saved now.
+async function preferredDayConflict(service, conn, dateStr) {
+  const row = await conn('property_preferences').where('customer_id', service.customer_id).first('preferred_day');
+  const { normalizePreferences } = require('./preferences');
+  const days = normalizePreferences(row, service.service_type).preferred_day_indexes || [];
+  if (!days.length) return null;
+  const dow = new Date(`${dateStr}T12:00:00Z`).getUTCDay();
+  if (Number.isNaN(dow) || days.includes(dow)) return null;
+  return { kind: 'preferred_day', date: dateStr, preferred_days: days };
+}
+
 /**
  * The visit's conflict, or null. `{ kind: 'closed_day', date }`,
  * `{ kind: 'overlap', date, with: [row ids] }` or
- * `{ kind: 'mowing_day', date, mowing_days: ['Mon', ...] }` — ids and codes only.
+ * `{ kind: 'mowing_day', date, mowing_days: ['Mon', ...] }` or
+ * `{ kind: 'preferred_day', date, preferred_days: [3] }` — ids and codes only.
  * A read failure propagates: the caller's evaluation fails for this visit
  * and the run records it, rather than a conflict being guessed either way.
  */
@@ -205,9 +225,9 @@ async function currentConflict(service, ctx, excludeIds) {
   const unitIds = excludeIds || new Set([String(service.id)]);
   const ids = await overlappingStopIds(service, ctx, unitIds, dateStr);
   if (ids.length) return { kind: 'overlap', date: dateStr, with: ids };
-  return mowingDayConflict(service, ctx.db, unitIds, dateStr);
+  return (await mowingDayConflict(service, ctx.db, unitIds, dateStr)) || preferredDayConflict(service, ctx.db, dateStr);
 }
 
 // isOtherStop and samePlaceIdsAt are also the plan writers' taken-hour rule
 // (scheduling/plan-taken-hour.js).
-module.exports = { currentConflict, isOtherStop, samePlace, samePlaceIdsAt, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds, mowingDayConflict } };
+module.exports = { currentConflict, isOtherStop, samePlace, samePlaceIdsAt, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds, mowingDayConflict, preferredDayConflict } };
