@@ -4,8 +4,10 @@
  * Nothing noticed a WDO that stalled BEFORE send. The July 2026 audit found
  * two flavors sitting silently in prod: inspections stuck on_site/pending
  * days past their date with no report ever created, and reports signed and
- * then never sent. Each is a legal filing a realtor/closing is waiting on —
- * this sweep rings ONE admin bell when any of them exists.
+ * then never sent. A third flavor (GATE_WDO_REPORT_HOLD): a paid, held
+ * report whose automatic release keeps failing. Each is a legal filing a
+ * realtor/closing is waiting on — this sweep rings ONE admin bell when any
+ * of them exists.
  *
  * Exception-based by design (owner's standing rule): quiet when the lane is
  * clean, one deduped notification when it isn't. A bell re-rings only when a
@@ -33,6 +35,9 @@ const { etDateString } = require('../utils/datetime-et');
 
 const SIGNED_UNSENT_HOURS = 48;
 const STUCK_APPT_HOURS = 24;
+const HOLD_ATTENTION_ATTEMPTS = 5;
+const { STALE_SEND_PARK_ERROR } = require('./invoice-helpers');
+const UNSETTLEABLE_INVOICE_STATUSES = ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible'];
 const REMIND_DAYS = 7;
 const CATEGORY = 'wdo_report_attention';
 const CLEARED_RESOLUTION = 'All WDO reports are sent and no WDO inspection is waiting.';
@@ -42,6 +47,8 @@ const SUPERSEDED_RESOLUTION = 'Replaced by a newer WDO alert.';
 // failed sweep in the scheduler's error log, never as clean:true (this sweep
 // exists to catch silence; it can't be allowed to produce it).
 async function findAttentionItems(now = new Date()) {
+  // A database migrated before the hold columns existed keeps both older checks: no hold exclusion, no hold bucket.
+  const holdColumns = await db.schema.hasColumn('projects', 'report_hold_status');
   // Signed but never sent: the licensee did their part and the filing is
   // sitting in drafts. 48h grace covers the normal same-week office send.
   // Aged from the signature's own signed_at — updated_at moves on every
@@ -60,6 +67,9 @@ async function findAttentionItems(now = new Date()) {
     .whereNull('sent_at')
     .whereNull('sent_outside_portal_at')
     .whereNotNull('wdo_signature')
+    // A report held until paid (GATE_WDO_REPORT_HOLD) parks its signed draft ON PURPOSE: it sends by itself once the
+    // invoice is paid. It is not stalled. A hold whose release keeps failing rings through the stuck-hold bucket below.
+    .where((q) => { if (holdColumns) q.whereRaw("coalesce(report_hold_status, '') NOT IN ('held', 'releasing')"); })
     .whereRaw("coalesce((wdo_signature->>'signed_at')::timestamptz, updated_at) < ?", [
       new Date(now.getTime() - SIGNED_UNSENT_HOURS * 3600e3),
     ])
@@ -86,13 +96,40 @@ async function findAttentionItems(now = new Date()) {
     .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
     .select('ss.id', 'ss.status', 'ss.scheduled_date', 'ss.customer_id');
 
-  return { signedUnsent, stuckAppts };
+  // A held report nobody is releasing: the release keeps failing (it retries forever by design, so after enough
+  // attempts a person reads report_hold_last_error), or its invoice can no longer settle (voided, refunded,
+  // cancelled, uncollectible, or gone): the sweep never selects it, so its attempt count stays at zero.
+  // Also: a hold whose invoice never left draft for a day (the customer has no bill to pay), an unpaid invoice that bills
+  // nothing (it can never settle), and a release stuck 'releasing' well past the 10-minute stale-claim recovery.
+  const dayAgo = new Date(now.getTime() - 24 * 3600e3);
+  const stuckHolds = !holdColumns ? [] : await db('projects as p')
+    .leftJoin('invoices as i', 'i.id', 'p.invoice_id')
+    .whereIn('p.project_type', ['wdo_inspection'])
+    .where((q) => q
+      .where((held) => held
+        .where('p.report_hold_status', 'held')
+        .where((stuck) => stuck
+          .where('p.report_hold_attempts', '>=', HOLD_ATTENTION_ATTEMPTS)
+          .orWhereNull('i.id')
+          .orWhereIn('i.status', UNSETTLEABLE_INVOICE_STATUSES)
+          .orWhere((draft) => draft.where('i.status', 'draft').where('i.updated_at', '<', dayAgo))
+          .orWhere((free) => free.whereNotIn('i.status', ['paid', 'prepaid']).where('i.total', '<=', 0))
+          // an invoice email of unknown outcome, parked for review a day ago (a missed bell must not hide it)
+          .orWhere((parked) => parked.where('i.status', 'scheduled').whereNull('i.scheduled_send_at')
+            .where('i.scheduled_send_error', 'like', `${STALE_SEND_PARK_ERROR}%`).where('i.updated_at', '<', dayAgo))))
+      .orWhere((releasing) => releasing
+        .where('p.report_hold_status', 'releasing')
+        .where('p.report_hold_locked_at', '<', new Date(now.getTime() - 60 * 60e3))))
+    .select('p.id', 'p.report_hold_attempts', 'p.report_hold_last_error');
+
+  return { signedUnsent, stuckAppts, stuckHolds };
 }
 
-function itemIds({ signedUnsent, stuckAppts }) {
+function itemIds({ signedUnsent, stuckAppts, stuckHolds }) {
   return [
     ...signedUnsent.map((p) => `signed_unsent:${p.id}`),
     ...stuckAppts.map((a) => `stuck_appt:${a.id}`),
+    ...stuckHolds.map((p) => `stuck_hold:${p.id}`),
   ].sort();
 }
 
@@ -118,13 +155,16 @@ async function priorBellCovers(currentIds, now = new Date()) {
   return currentIds.every((id) => covered.has(id));
 }
 
-function summarize({ signedUnsent, stuckAppts }) {
+function summarize({ signedUnsent, stuckAppts, stuckHolds }) {
   const parts = [];
   if (signedUnsent.length) {
     parts.push(`${signedUnsent.length} WDO report${signedUnsent.length === 1 ? '' : 's'} signed but never sent`);
   }
   if (stuckAppts.length) {
     parts.push(`${stuckAppts.length} WDO inspection${stuckAppts.length === 1 ? '' : 's'} past date without a completed report`);
+  }
+  if (stuckHolds.length) {
+    parts.push(`${stuckHolds.length} held report${stuckHolds.length === 1 ? '' : 's'} not releasing`);
   }
   return parts.join(' · ');
 }
@@ -141,6 +181,7 @@ function bellMetadata(items, ids) {
     item_ids: ids,
     signed_unsent: items.signedUnsent.map((p) => p.id),
     stuck_appointments: items.stuckAppts.map((a) => a.id),
+    stuck_holds: items.stuckHolds.map((p) => p.id),
   };
 }
 

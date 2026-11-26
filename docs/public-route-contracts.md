@@ -9072,8 +9072,12 @@ the sibling `/api/reports/project/:token/data` viewer
 (`extractProjectReportTokenLookup`), inherits the router-level 20 req/min
 `reportLimiter`, `no-store`/`noindex`/`no-referrer` privacy headers. Serves ONLY
 the already-emailed archived filing streamed from private S3 — never
-live/unsigned content — and returns a generic 404 for non-WDO projects, reports
-with no archived filing, or malformed tokens).
+live/unsigned content. A report held until paid (`GATE_WDO_REPORT_HOLD`) whose
+release has not finished (`report_hold_status` held or releasing) serves
+nothing here or on the sibling `/data` viewer: its link can exist only because
+a release email's outcome is unknown. Returns a
+generic 404 for non-WDO projects, reports with no archived filing, or malformed
+tokens).
 `/api/reports/project/:token/ask` (POST; Waves AI on project reports — owner
 ruling 2026-07-16. Deterministic keyword-routed template answers built ONLY
 from the project's own findings/recommendations/follow-up — data the sibling

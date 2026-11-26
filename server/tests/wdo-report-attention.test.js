@@ -7,6 +7,7 @@ jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  mock.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -58,6 +59,7 @@ describe('itemIds / summarize', () => {
   const items = {
     signedUnsent: [{ id: 'p1' }],
     stuckAppts: [{ id: 'a1' }, { id: 'a2' }],
+    stuckHolds: [],
   };
 
   test('itemIds is stable and namespaced', () => {
@@ -68,6 +70,7 @@ describe('itemIds / summarize', () => {
     const text = _private.summarize(items);
     expect(text).toContain('1 WDO report signed but never sent');
     expect(text).toContain('2 WDO inspections past date without a completed report');
+    expect(text).not.toContain('not releasing');
   });
 });
 
@@ -79,6 +82,48 @@ describe('findAttentionItems — reports marked sent another way', () => {
     expect(projects.whereNull).toHaveBeenCalledWith('sent_at');
     expect(projects.whereNull).toHaveBeenCalledWith('sent_outside_portal_at');
     expect(projects.whereNotNull).toHaveBeenCalledWith('wdo_signature');
+  });
+});
+
+describe('findAttentionItems — held reports that nobody is releasing', () => {
+  // Records every condition the stuck-hold query builds, nested groups included, as [method, ...args].
+  function recorder(log, result) {
+    const node = new Proxy({}, {
+      get(_t, method) {
+        if (method === 'then') return result ? (res, rej) => Promise.resolve(result).then(res, rej) : undefined;
+        if (method === 'select') return jest.fn(async () => []);
+        return (...args) => {
+          log.push([method, ...args.map((a) => (typeof a === 'function' ? 'fn' : a))]);
+          args.filter((a) => typeof a === 'function').forEach((fn) => fn(recorder(log)));
+          return node;
+        };
+      },
+    });
+    return node;
+  }
+
+  test('the stuck-hold query picks every hold nobody is releasing', async () => {
+    const log = [];
+    db.mockImplementation((table) => (table === 'projects as p' ? recorder(log) : chain()));
+    await _private.findAttentionItems(new Date('2026-11-02T12:00:00Z'));
+    const has = (...entry) => log.some((l) => JSON.stringify(l) === JSON.stringify(entry));
+    expect(has('leftJoin', 'invoices as i', 'i.id', 'p.invoice_id')).toBe(true);
+    // failing over and over, invoice gone, or one that can no longer settle
+    expect(has('where', 'p.report_hold_attempts', '>=', 5)).toBe(true);
+    expect(has('orWhereNull', 'i.id')).toBe(true);
+    expect(has('orWhereIn', 'i.status', ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible'])).toBe(true);
+    // an invoice still in draft a day later (the customer has nothing to pay)
+    expect(has('where', 'i.status', 'draft')).toBe(true);
+    expect(log.find((l) => l[0] === 'where' && l[1] === 'i.updated_at')[3]).toEqual(new Date('2026-11-01T12:00:00Z'));
+    // an unpaid invoice that bills nothing
+    expect(has('where', 'i.total', '<=', 0)).toBe(true);
+    // a release stuck past the stale-claim recovery
+    expect(has('where', 'p.report_hold_status', 'releasing')).toBe(true);
+    expect(log.find((l) => l[1] === 'p.report_hold_locked_at')[3]).toEqual(new Date('2026-11-02T11:00:00Z'));
+    // an invoice parked for review after an unknown-outcome email (a missed bell must not hide it)
+    expect(has('where', 'i.status', 'scheduled')).toBe(true);
+    expect(has('whereNull', 'i.scheduled_send_at')).toBe(true);
+    expect(log.find((l) => l[1] === 'i.scheduled_send_error')[3]).toMatch(/^Recovered from stale sending claim.*%$/);
   });
 });
 
@@ -103,10 +148,14 @@ describe('runWdoReportAttentionSweep', () => {
     isEnabled.mockReturnValue(true);
     db.mockImplementation((table) => {
       if (table === 'projects') {
-        // The projects query is signedUnsent: return one signed-unsent row.
+        // First projects query = signedUnsent, second = stuckHolds. Return one
+        // signed-unsent row on the whereNotNull('wdo_signature') variant only.
         return chain({
           whereNotNull: jest.fn().mockReturnThis(),
-          select: jest.fn().mockResolvedValue([{ id: 'p1', customer_id: 'c1', project_date: '2026-07-15', updated_at: '2026-07-17' }]),
+          select: jest.fn().mockImplementation(function selectImpl() {
+            const wantsHolds = this.whereIn.mock.calls.length > 0;
+            return Promise.resolve(wantsHolds ? [] : [{ id: 'p1', customer_id: 'c1', project_date: '2026-07-15', updated_at: '2026-07-17' }]);
+          }),
         });
       }
       if (table === 'notifications') return chain({ select: jest.fn().mockResolvedValue([]) });
@@ -125,9 +174,12 @@ describe('runWdoReportAttentionSweep', () => {
   test('already-covered items stay silent', async () => {
     isEnabled.mockReturnValue(true);
     db.mockImplementation((table) => {
-      if (table === 'projects') {
+      if (table === 'projects' || table === 'projects as p') {
         return chain({
-          select: jest.fn().mockResolvedValue([{ id: 'p1' }]),
+          select: jest.fn().mockImplementation(function selectImpl() {
+            const wantsHolds = this.whereIn.mock.calls.length > 0;
+            return Promise.resolve(wantsHolds ? [] : [{ id: 'p1' }]);
+          }),
         });
       }
       if (table === 'notifications') {
@@ -180,13 +232,44 @@ describe('runWdoReportAttentionSweep', () => {
     expect(apptChain.leftJoin).toHaveBeenCalledWith('services as s', 's.id', 'ss.service_id');
   });
 
+  test('held pay-before-report drafts are excluded from signed-unsent', async () => {
+    isEnabled.mockReturnValue(true);
+    const projectsChains = [];
+    db.mockImplementation((table) => {
+      const c = chain();
+      if (table === 'projects') projectsChains.push(c);
+      return c;
+    });
+    const exclusionSql = async () => {
+      projectsChains.length = 0;
+      await _private.findAttentionItems(new Date('2026-11-02T12:00:00Z'));
+      const sql = [];
+      for (const [arg] of projectsChains[0].where.mock.calls) {
+        if (typeof arg === 'function') arg({ whereRaw: (text) => sql.push(text) });
+      }
+      return sql;
+    };
+    // First projects query = signedUnsent: held/releasing rows are parked by
+    // design (pay-before-report), not stalled — they must not ring here.
+    expect(await exclusionSql()).toEqual([expect.stringContaining("NOT IN ('held', 'releasing')")]);
+    // A database without the hold columns keeps the older check working: no exclusion, and no stuck-hold query.
+    db.schema.hasColumn.mockResolvedValueOnce(false);
+    const tables = [];
+    db.mockImplementation((table) => { tables.push(table); const c = chain(); if (table === 'projects') projectsChains.push(c); return c; });
+    expect(await exclusionSql()).toEqual([]);
+    expect(tables).not.toContain('projects as p');
+  });
+
   test('a failed bell insert fails the sweep instead of recording a ring', async () => {
     isEnabled.mockReturnValue(true);
     NotificationService.notifyAdmin.mockResolvedValue(null); // insert failed
     db.mockImplementation((table) => {
-      if (table === 'projects') {
+      if (table === 'projects' || table === 'projects as p') {
         return chain({
-          select: jest.fn().mockResolvedValue([{ id: 'p1' }]),
+          select: jest.fn().mockImplementation(function selectImpl() {
+            const wantsHolds = this.whereIn.mock.calls.length > 0;
+            return Promise.resolve(wantsHolds ? [] : [{ id: 'p1' }]);
+          }),
         });
       }
       if (table === 'notifications') return chain({ select: jest.fn().mockResolvedValue([]) });
@@ -204,10 +287,18 @@ describe('runWdoReportAttentionSweep — rings', () => {
 
   // db fake: `signed` ids from projects, `priors` for the cover read, `standing` for the open-row read. Each
   // db('notifications') call is its own query; one that orders (standingRows) reads `standing`, the other `priors`.
-  function setup({ signed = [], priors = [], standing = [] } = {}) {
+  function setup({ signed = [], priors = [], standing = [], holds = [] } = {}) {
     const calls = { updates: [], whereRaw: [] };
     db.mockImplementation((table) => {
-      if (table === 'projects') return chain({ select: jest.fn().mockResolvedValue(signed.map((id) => ({ id }))) });
+      // The projects queries: signed-unsent (no whereIn) and stuck holds (whereIn on project_type).
+      if (table === 'projects' || table === 'projects as p') {
+        return chain({
+          select: jest.fn().mockImplementation(function selectImpl() {
+            const wantsHolds = this.whereIn.mock.calls.length > 0;
+            return Promise.resolve((wantsHolds ? holds : signed).map((id) => ({ id })));
+          }),
+        });
+      }
       if (table !== 'notifications') return chain();
       let ordered = false;
       const q = {
@@ -239,8 +330,17 @@ describe('runWdoReportAttentionSweep — rings', () => {
     expect(opts).toEqual({
       link: '/admin/projects',
       bellDefault: true,
-      metadata: { dedupeKey: KEY('signed_unsent:p1'), item_ids: ['signed_unsent:p1'], signed_unsent: ['p1'], stuck_appointments: [] },
+      metadata: { dedupeKey: KEY('signed_unsent:p1'), item_ids: ['signed_unsent:p1'], signed_unsent: ['p1'], stuck_appointments: [], stuck_holds: [] },
     });
+  });
+
+  test('a held report whose release keeps failing rings through the stuck-hold bucket', async () => {
+    setup({ holds: ['h1'] });
+    const r = await runWdoReportAttentionSweep({ now: NOW });
+    expect(r).toEqual({ ok: true, rang: true, items: 1 });
+    const [, , body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(body).toContain('1 held report not releasing');
+    expect(opts.metadata).toEqual(expect.objectContaining({ item_ids: ['stuck_hold:h1'], stuck_holds: ['h1'] }));
   });
 
   test('a muted result is not a ring (warn log, rang false, nothing closed)', async () => {
@@ -304,7 +404,7 @@ describe('runWdoReportAttentionSweep — rings', () => {
     const [sql, [json]] = [calls.updates[0].metadata.sql, calls.updates[0].metadata.bindings];
     expect(sql).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
     expect(JSON.parse(json)).toEqual({
-      dedupeKey: KEY('signed_unsent:p2'), item_ids: ['signed_unsent:p2'], signed_unsent: ['p2'], stuck_appointments: [],
+      dedupeKey: KEY('signed_unsent:p2'), item_ids: ['signed_unsent:p2'], signed_unsent: ['p2'], stuck_appointments: [], stuck_holds: [],
     });
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(episodes.closeAdminAlertIds).not.toHaveBeenCalled();

@@ -488,6 +488,21 @@ async function sendCustomerMessage(input) {
   return sendCustomerMessageCore(input);
 }
 
+// The WDO report hold's two locked texts (admin-projects.js, GATE_WDO_REPORT_HOLD): the paid report's text
+// (heldReportSmsHandoff: a bearer report link sent by the payment sweep with no one watching) and the pay-link text sent
+// with a held report's invoice (heldInvoiceSmsHandoff). Each re-reads the number, the customer and the project claim
+// under the phone locks through the provider request. One row per text: purpose, entry point, message type, and
+// whether the metadata must mark the send as held.
+const REPORT_HOLD_SMS_HANDOFFS = [
+  { purpose: 'support_resolution', entryPoint: 'project_report_hold_release', messageType: 'project_report', heldMark: false },
+  { purpose: 'payment_link', entryPoint: 'admin_project_report_with_invoice', messageType: 'invoice', heldMark: true },
+];
+function reportHoldSmsHandoffAllowed(input) {
+  return input.audience === 'customer' && REPORT_HOLD_SMS_HANDOFFS.some((row) => row.purpose === input.purpose
+    && row.entryPoint === input.entryPoint && row.messageType === input.metadata?.original_message_type
+    && (!row.heldMark || input.metadata?.report_hold === true));
+}
+
 async function sendCustomerMessageCore(input) {
   let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
   let providerHandoffReservation = null;
@@ -699,7 +714,8 @@ async function sendCustomerMessageCore(input) {
     // number is re-read (a phone correction can never send the answer to the old number).
     || (input.audience === 'customer' && input.purpose === 'support_resolution'
       && input.entryPoint === 'admin_portal_answer'
-      && input.metadata?.original_message_type === 'portal_answer');
+      && input.metadata?.original_message_type === 'portal_answer')
+    || reportHoldSmsHandoffAllowed(input);
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
