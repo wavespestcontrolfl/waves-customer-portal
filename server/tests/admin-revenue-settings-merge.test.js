@@ -65,6 +65,20 @@ describe('buildSettingsRow (revenue settings merge)', () => {
     expect(buildSettingsRow(LATEST, { loadedLaborRate: -1 }, '2026-07-04').error).toMatch(/loadedLaborRate/);
   });
 
+  test('owner office time saves overlay only the sent keys, carry forward, clear on null, and leave overhead_entered_at alone', () => {
+    const withOwner = { ...LATEST, owner_office_hours_per_month: '10.00', owner_office_hourly_rate: '40.00' };
+    const { row } = buildSettingsRow(withOwner, { ownerOfficeHoursPerMonth: 12.5 }, '2026-07-04');
+    expect(row.owner_office_hours_per_month).toBe(12.5);
+    expect(row.owner_office_hourly_rate).toBe('40.00'); // untouched key carried
+    expect(row.overhead_entered_at).toBe(LATEST.overhead_entered_at);
+    expect(buildSettingsRow(withOwner, { ownerOfficeHourlyRate: null }, '2026-07-04').row.owner_office_hourly_rate).toBeNull();
+    expect(buildSettingsRow(withOwner, { ownerOfficeHoursPerMonth: '8' }, '2026-07-04').row.owner_office_hours_per_month).toBe(8);
+    // An overhead save carries the owner figures forward too.
+    expect(buildSettingsRow(withOwner, { ovhRent: 5 }, '2026-07-04').row.owner_office_hourly_rate).toBe('40.00');
+    expect(buildSettingsRow(LATEST, { ownerOfficeHoursPerMonth: 'abc' }, '2026-07-04').error).toMatch(/ownerOfficeHoursPerMonth/);
+    expect(buildSettingsRow(LATEST, { ownerOfficeHourlyRate: -1 }, '2026-07-04').error).toMatch(/ownerOfficeHourlyRate/);
+  });
+
   test('first-ever save (no latest row) still works', () => {
     const { row } = buildSettingsRow(null, { loadedLaborRate: 35 }, '2026-07-04');
     expect(row.loaded_labor_rate).toBe(35);

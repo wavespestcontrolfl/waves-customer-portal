@@ -175,6 +175,17 @@ describe("Settings new UI foundation", () => {
     expect(JSON.parse(call[1].body)).toEqual({ ovhOfficePayroll: 1750.5 });
   });
 
+  it("saves the owner's own office time with the same PUT, blank clears it", async () => {
+    mount("operating-costs");
+    fireEvent.change(await screen.findByLabelText("Your office hours"), { target: { value: "12.5" } });
+    fireEvent.change(screen.getByLabelText("Your office hourly rate"), { target: { value: "40" } });
+    expect(screen.getByText("$500")).toBeInTheDocument(); // the allowance counted, 12.5 x 40
+    fireEvent.click(screen.getByRole("button", { name: "Save costs" }));
+    await screen.findByText(/Saved\. The dashboard's EBITDA bridge/);
+    const call = fetch.mock.calls.find(([url, options]) => url === "/api/admin/revenue/settings" && options?.method === "PUT");
+    expect(JSON.parse(call[1].body)).toEqual({ ownerOfficeHoursPerMonth: 12.5, ownerOfficeHourlyRate: 40 });
+  });
+
   it("preserves schedule mutation payloads and refreshes blackout data", async () => {
     mount("blackout-days");
     await screen.findByText("Holiday");

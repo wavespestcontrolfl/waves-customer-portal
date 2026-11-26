@@ -1223,6 +1223,17 @@ router.get('/kpi-history', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/office-cost-per-stop?months=12
+// Office cost per stop from the stored monthly snapshots (services/monthly-financial-snapshot.js,
+// written on the 2nd of each month): the last `months` rows, the trailing-three-month headline,
+// and whether the owner's own office time is counted. Reads one small table; no live P&L build.
+router.get('/office-cost-per-stop', dashboardCache, async (req, res, next) => {
+  try {
+    const { getOfficeCostPerStopSeries } = require('../services/monthly-financial-snapshot');
+    res.json(await getOfficeCostPerStopSeries({ months: req.query.months, db }));
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dashboard/ebitda-bridge
 // Month-to-date adjusted-EBITDA waterfall: revenue → gross profit → contribution
 // (after marketing actuals) → adjusted EBITDA (after owner-entered overhead

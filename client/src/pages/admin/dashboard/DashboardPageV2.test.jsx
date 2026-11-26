@@ -204,6 +204,16 @@ const FIXTURES = {
     period: { from: "2026-07-01", to: "2026-07-01", label: "Month to date", elapsedDays: 1, daysInMonth: 31 },
     uncostedRevenue: 0,
   },
+  "/admin/dashboard/office-cost-per-stop": {
+    months: [
+      { month: "2026-05-01", officeCost: 800, paidStops: 80, officeCostPerStop: 10 },
+      { month: "2026-06-01", officeCost: 900, paidStops: 90, officeCostPerStop: 10 },
+    ],
+    trailing: { months: ["2026-05-01", "2026-06-01"], officeCost: 1700, paidStops: 170, officeCostPerStop: 10 },
+    ownerOfficeTime: { status: "none", monthsWithAllowance: 0, months: 2 },
+    pnlIncompleteMonths: [],
+    officeCategories: ["Office Expenses"],
+  },
   "/admin/dashboard/service-mix": { mix: [], total_services: 3 },
   "/admin/dashboard/revenue-by-city": { cities: [], total: 331 },
   "/admin/dashboard/review-trend": { trend: [], total: 180, avgRating: 5 },
@@ -368,6 +378,13 @@ describe("DashboardPageV2 sections", () => {
     );
     expect(document.getElementById("profit")).toContainElement(
       screen.getByText("Adjusted EBITDA"),
+    );
+    // Office cost per stop: the stored-snapshot card, with the owner-time note while it is not counted.
+    expect(document.getElementById("profit")).toContainElement(
+      screen.getByText("per stop, last 2 months"),
+    );
+    expect(document.getElementById("profit")).toContainElement(
+      screen.getByText(/Your own office time is not counted yet/),
     );
     // RETENTION
     expect(document.getElementById("retention")).toContainElement(
