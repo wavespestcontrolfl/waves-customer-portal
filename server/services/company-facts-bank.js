@@ -75,7 +75,7 @@ const LINE_BREAK_RE = /[\r\n\u2028\u2029]/;
 // A sentence ends at . ! or ? followed by white space, whatever letter case comes next. Not a boundary: after a dotted abbreviation
 // ("a.m.", "e.g.", "i.e.", "U.S.") or a common title or short word ("Mr.", "Dr.", "vs.", "approx.").
 const SENTENCE_END_RE = /(?<=[.!?])\s+/;
-const ABBREVIATION_END_RE = /(?:\b[a-z]\.){2,}$|\b(?:mr|mrs|ms|dr|vs|approx|inc)\.$/i;
+const ABBREVIATION_END_RE = /(?:\b[a-z]\.){2,}$|\b(?:mr|mrs|ms|dr|vs|approx|inc|jr|sr|st|mt|ft|ave|blvd)\.$/i;
 
 // Pesticide safety and "natural" claims (AGENTS.md compliance language). The SMS screen (SMS_COMPLIANCE_CLAIM_RE) only reads "safe"
 // near a treatment word, so "We use safe pesticides" slipped past it; the bank refuses the claim anywhere, as the owner ruled
@@ -873,6 +873,7 @@ module.exports = {
   productTokens,
   mentionsProduct,
   readProductNames,
+  splitSentences,
   createDraft,
   editFact,
   restoreAsDraft,

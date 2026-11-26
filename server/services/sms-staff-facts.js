@@ -103,27 +103,40 @@ async function loadPrepaidPlanFacts(customerId, { db } = {}) {
 // ---- Prep guide ----------------------------------------------------------------------------------------------------------------------
 
 // The text parts of a published guide's blocks that read as prose: paragraphs, callouts and list items (never a heading, the service
-// details rows, the button or the signature: the page itself drops the last two for the same reason).
+// details rows, the button or the signature: the page itself drops the last two for the same reason). What the guide tells the customer
+// to DO comes first and its background (why fleas are hard to beat, what the technician does on the day, the FAQ) after it, each in guide
+// order: the drafter's budget is spent on the steps the customer asks about, not on the introduction.
+const BACKGROUND_HEADING = /^(?:why|what we do|how (?:we|it)|about|meet|faq|frequently|questions?)\b/i;
 function proseOfBlocks(blocks) {
-  const parts = [];
+  const steps = [];
+  const background = [];
+  let aside = false;
   for (const block of Array.isArray(blocks) ? blocks : []) {
     if (!block || typeof block !== 'object') continue;
+    if (block.type === 'heading') aside = BACKGROUND_HEADING.test(String(block.content || '').trim());
+    const parts = [];
     if (['paragraph', 'callout'].includes(block.type) && typeof block.content === 'string') parts.push(block.content);
     if (block.type === 'list' && Array.isArray(block.items)) parts.push(...block.items.filter((item) => typeof item === 'string'));
+    (aside ? background : steps).push(...parts);
   }
-  return parts;
+  return [...steps, ...background];
 }
 
 // One sentence of a guide the AI may repeat: a plain sentence about the service. Dropped: merge tags, links and addresses, em dashes, a
 // price, wording that points at the email or page itself, and a product or brand name (the company facts bank's own rule). The drafter
-// screens what is left for banned claims (prepGuideSection).
-const SENTENCE_END = /(?<=[.!?])\s+/;
+// screens what is left for banned claims (prepGuideSection). A full stop after an abbreviation is not a sentence end (the bank's own
+// splitter: "St. Augustine wants 3.5 to 4 inches.").
 function guideSentences(blocks, productNames) {
-  const { productTokens, mentionsProduct } = require('./company-facts-bank');
-  const tokens = productTokens(productNames);
+  const { productTokens, mentionsProduct, splitSentences } = require('./company-facts-bank');
+  const parts = proseOfBlocks(blocks);
+  // What the guide itself links is a product or brand it names (a pet medication, a collar): the catalog does not know those, so the link
+  // labels count as brand names too, in a sentence of the guide that names the product without the link.
+  const linked = parts.flatMap((part) => [...String(part).matchAll(/\[([^\]]{2,60})\]\(/g)].map((m) => m[1].trim()))
+    .flatMap((label) => [label, /^[A-Z][A-Za-z]{5,}/.exec(label)?.[0]]).filter(Boolean);
+  const tokens = productTokens([...productNames, ...linked]);
   const sentences = [];
-  for (const part of proseOfBlocks(blocks)) {
-    for (const raw of String(part).replace(/\s+/g, ' ').trim().split(SENTENCE_END)) {
+  for (const part of parts) {
+    for (const raw of splitSentences(String(part).replace(/\s+/g, ' ').trim())) {
       const sentence = raw.trim();
       if (sentence.length < 12 || sentence.length > 260) continue;
       if (/\{\{|\]\(|https?:|www\.|@|\u2014|\$/.test(sentence)) continue;

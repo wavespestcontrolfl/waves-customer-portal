@@ -41,7 +41,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const { resolveProjectEmailRecipientForSend, ensureServicePrepToken } = require('./project-email');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
-const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
+const { etDateString } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
@@ -281,9 +281,9 @@ function isSupportedChannel(channel) {
 // another guide while a later visit's is free (GH Codex #3856 r16 P2) — the
 // manual sender walks the WHOLE family (max Infinity) so a free visit behind
 // any number of taken ones is still found (GH Codex #3856 r27 P2). Empty
-// when nothing matches; THROWS on a lookup error.
+// when nothing matches; THROWS on a lookup error (and, with `strict`, on a stop whose members could not be read).
 const VISIT_PAGE = 10;
-async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywords = [] }, max) {
+async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywords = [] }, max, { strict = false } = {}) {
   const ids = [].concat(customerIds).filter(Boolean);
   const { pageStateForVisit } = require('../routes/appointment-public');
   const found = [];
@@ -327,7 +327,10 @@ async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywo
         'prep_template_key', 'prep_sent_at', 'prep_token', 'created_at', 'prep_first_viewed_at', 'prep_view_count',
       );
     for (const r of rows) {
-      if ((await pageStateForVisit(r)).state === 'upcoming') found.push(r);
+      const page = await pageStateForVisit(r);
+      // `strict` (the texting AI's prep guide pick): a grouped stop whose members could not be read is a failed lookup, never a visit to skip
+      if (strict && page.unknown) throw new Error(`visit ${r.id} could not be read as a stop`);
+      if (page.state === 'upcoming') found.push(r);
       if (found.length >= max) return found;
     }
     if (rows.length < VISIT_PAGE) return found;
@@ -372,23 +375,19 @@ function prepFamilyForServiceType(serviceType) {
 }
 
 /**
- * The prep guide the customer's BOOKED visit gets: the soonest upcoming visit across the guide families (the family queries above, the
- * composer's own tie-break by date, arrival window, id), and the guide that visit's page shows: its stored prep_template_key when it
- * names a guide here, else its family's. { visit, pestType, config } or null with no booked visit; pestType and config are null for a
- * visit whose stored key is not one of ours (no guide can be named, never a guess). THROWS on a lookup error: a failed read is not
- * "nothing booked".
+ * The prep guide the customer's BOOKED visit gets: the soonest upcoming visit as the customer's own page lists it (upcomingFamilyVisits'
+ * filters and order, across every service: a visit no guide covers is still THE booked visit, so an earlier completed service's guide is
+ * never put in its place), and the guide that visit's page shows: its stored prep_template_key when it names a guide here, else the
+ * family its service type belongs to. { visit, pestType, config } or null with no booked visit; pestType and config are null when no guide
+ * can be named. THROWS on a lookup error, including a grouped stop whose members could not be read: a failed read is not "nothing booked".
  */
 async function bookedPrepGuide(customerIds) {
-  const sortKey = (v) => `${etCalendarDayOf(v.scheduled_date)} ${v.window_start ? String(v.window_start).padStart(8, '0') : '~'} ${v.id}`;
-  let pick = null;
-  for (const [pestType, config] of Object.entries(PREP_CONFIG)) {
-    if (config.guide) continue;
-    const [visit] = await upcomingFamilyVisits(customerIds, config, 1);
-    if (visit && (!pick || sortKey(visit) < sortKey(pick.visit))) pick = { visit, pestType, config };
-  }
-  if (!pick || !pick.visit.prep_template_key || pick.visit.prep_template_key === pick.config.emailTemplateKey) return pick;
-  const stored = Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === pick.visit.prep_template_key);
-  return { visit: pick.visit, pestType: stored?.[0] || null, config: stored?.[1] || null };
+  const [visit] = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, 1, { strict: true });
+  if (!visit) return null;
+  const family = visit.prep_template_key
+    ? Object.entries(PREP_CONFIG).find(([, config]) => !config.guide && config.emailTemplateKey === visit.prep_template_key)
+    : prepFamilyForServiceType(visit.service_type);
+  return { visit, pestType: family?.[0] || null, config: family?.[1] || null };
 }
 
 // A visit's prep key is never MOVED between guides. The automated lanes

@@ -11,6 +11,11 @@ const path = require('path');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => false), sendOne: jest.fn() }));
+jest.mock('../services/notification-service', () => ({}));
+
+// The guides customers receive: the latest content migration's templates (prep-guide-content-v3-migration.test.js reads them the same way).
+const SEEDED = Object.fromEntries(require('../models/migrations/20260924000007_prep_guide_content_v3_codex_r6').TEMPLATES.map((t) => [t.key, t.blocks]));
 
 const GATE = 'GATE_SMS_REAL_ANSWERS';
 let priorGate;
@@ -105,6 +110,61 @@ describe('loadPrepGuideFacts', () => {
     expect((await load({ booked }, { withDb: false })).result).toBeNull();
   });
 
+  test('a full stop after an abbreviation or inside a number is not a sentence end: the published lawn copy keeps "St. Augustine wants 3.5 to 4 inches."', async () => {
+    const { result } = await load({ booked: { visit: { id: 'v1' }, pestType: 'lawn', config: { emailTemplateKey: 'prep.lawn', label: 'Lawn Treatment' } }, blocks: SEEDED['prep.lawn'] });
+    expect(result.sentences).toContain('St. Augustine wants 3.5 to 4 inches.');
+    expect(result.sentences.some((sentence) => /^Augustine/.test(sentence))).toBe(false);
+    const split = (await load({ booked: { visit: { id: 'v1' }, pestType: 'lawn', config: PEST }, blocks: [{ type: 'paragraph', content: 'Mow before the visit on Mt. Pleasant Road. Is it safe to mow? No. Keep the gate unlocked, e.g. with the code box.' }] })).result;
+    expect(split.sentences).toEqual(['Mow before the visit on Mt. Pleasant Road.', 'Is it safe to mow?', 'Keep the gate unlocked, e.g. with the code box.']);
+  });
+
+  test('the seeded flea guide: the steps come before the background, so the section answers how to vacuum and what bedding to wash', async () => {
+    const { result } = await load({ booked: { visit: { id: 'v1' }, pestType: 'flea', config: FLEA }, blocks: SEEDED['prep.flea'] });
+    const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+    const billing = { outstandingBalance: 0, recentPayments: [], hasProcessingPayment: false, recentPaymentsTruncated: false, invoiceStatuses: [], hasDepositActivity: false };
+    const text = buildFactsBlock({ summary: 'X', billing, prepGuide: result });
+    const rendered = (/PREP GUIDE \([^\n]*\n((?:- [^\n]*\n)*)/.exec(text) || [])[1] || '';
+    const lines = rendered.split('\n').filter(Boolean).map((l) => l.slice(2));
+    // how to vacuum, what bedding to wash, the canister, clearing the floor, the pet bowls: all there, word for word
+    for (const wanted of [
+      'Vacuum every carpet, rug and hard floor, slowly, including under beds, under couch cushions, behind and under furniture, along every baseboard, and inside closets.',
+      'Empty the canister or bag into a sealed trash bag and take it outside to the bin right away.',
+      'Wash or replace pet bedding.',
+      'Vacuum daily for the next 14 days, then every other day through week four.',
+    ]) expect(lines).toContain(wanted);
+    // the hot-wash line carries a drying time ("dry on high heat for at least 20 minutes"): only a LABEL FACTS sentence may give one, so it stays out
+    expect(lines.some((line) => /^Wash all bedding, throw blankets/.test(line))).toBe(false);
+    expect(lines.some((line) => /^Pick up toys/.test(line))).toBe(true);
+    // every line is a published sentence of the guide, none invented, and the background (why fleas are different) comes after the steps
+    const published = JSON.stringify(SEEDED['prep.flea']);
+    for (const line of lines) expect(published).toContain(line.replace(/"/g, '\\"'));
+    const why = lines.findIndex((line) => /^One adult female lays/.test(line));
+    const step = lines.findIndex((line) => /^Vacuum every carpet/.test(line));
+    expect(step).toBeGreaterThanOrEqual(0);
+    if (why >= 0) expect(why).toBeGreaterThan(step);
+    // no link, price, product or banned claim got through
+    expect(rendered).not.toMatch(/https?:|\$|\bCapstar\b|Frontline|NexGard|safe for/i);
+  });
+
+  test('a product the guide links is a brand name: a sentence naming it without the link is dropped too', async () => {
+    const booked = { visit: { id: 'v1' }, pestType: 'flea', config: FLEA };
+    const blocks = [{ type: 'list', items: ['Start a preventative: [Capstar](https://example.com/c) works fast.', 'Ask your vet about Capstar before the visit.', 'Wash the pet bedding before the visit.'] }];
+    expect((await load({ booked, blocks })).result.sentences).toEqual(['Wash the pet bedding before the visit.']);
+  });
+
+  test('every seeded guide fits the section whole: only the drafter\'s screens drop a sentence, the cap never does', async () => {
+    const { buildFactsBlock, hasBannedCustomerCopy } = require('../services/sms-shadow-drafter');
+    const billing = { outstandingBalance: 0, recentPayments: [], hasProcessingPayment: false, recentPaymentsTruncated: false, invoiceStatuses: [], hasDepositActivity: false };
+    for (const key of Object.keys(SEEDED)) {
+      const { result } = await load({ booked: { visit: { id: 'v1' }, pestType: 'x', config: { emailTemplateKey: key, label: 'Guide' } }, blocks: SEEDED[key] });
+      const text = buildFactsBlock({ summary: 'X', billing, prepGuide: result });
+      const lines = ((/PREP GUIDE \([^\n]*\n((?:- [^\n]*\n)*)/.exec(text) || [])[1] || '').split('\n').filter(Boolean).map((l) => l.slice(2));
+      const screened = result.sentences.filter((sentence) => !hasBannedCustomerCopy(sentence, { rainTimeGuard: true }));
+      expect({ key, rendered: lines.length, expected: screened.length }).toEqual({ key, rendered: screened.length, expected: screened.length });
+      expect(lines).toEqual(screened);
+    }
+  });
+
   test('one rule for which guide a visit gets: this module holds no keyword or exclusion rule of its own', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/sms-staff-facts.js'), 'utf8');
     expect(source).not.toMatch(/serviceKeywords|excludeKeywords|PREP_CONFIG|LIKE/);
@@ -145,11 +205,13 @@ describe('the PREP GUIDE section of the facts block', () => {
     ];
     const lines = section(block(guide({ sentences: hostile }))).split('\n').filter((l) => l.startsWith('- '));
     expect(lines).toEqual(['- Please clear the area under the sinks.', '- Wipe the baseboards before we arrive.']);
-    const long = Array.from({ length: 30 }, (_, i) => `Step number ${i + 1} is to clear the floor near the door of room ${i + 1}.`);
+    const long = Array.from({ length: 120 }, (_, i) => `Step number ${i + 1} is to clear the floor near the door of room ${i + 1}.`);
     const capped = section(block(guide({ sentences: long }))).split('\n').filter((l) => l.startsWith('- '));
-    expect(capped.length).toBe(10);
+    expect(capped.length).toBe(90);
     expect(capped[0]).toBe('- Step number 1 is to clear the floor near the door of room 1.'); // the first sentences in guide order, never reordered or reworded
-    expect(capped.join('\n').length).toBeLessThanOrEqual(1400 + capped.length * 3);
+    expect(capped.join('\n').length).toBeLessThanOrEqual(7500 + capped.length * 3);
+    const wide = Array.from({ length: 60 }, (_, i) => `Step ${i + 1}: ${'move the furniture away from the wall '.repeat(5).trim()}.`);
+    expect(section(block(guide({ sentences: wide }))).split('\n').filter((l) => l.startsWith('- ')).length).toBeLessThan(60); // the character budget stops it first
     // a section whose every sentence is screened out renders nothing at all
     expect(block(guide({ sentences: hostile.slice(0, 5) }))).not.toContain('PREP GUIDE');
   });

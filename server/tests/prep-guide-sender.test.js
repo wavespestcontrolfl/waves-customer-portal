@@ -1065,20 +1065,44 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
     expect(family(null)).toBeNull();
   });
 
-  test('bookedPrepGuide: the soonest guide visit and the guide its page shows (the stored key wins, an unknown one names no guide)', async () => {
+  test('bookedPrepGuide: the soonest visit as the page lists it, and the guide its page shows (a stored key wins, an unknown one names no guide)', async () => {
     upcomingVisitRow = VISIT;
-    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ visit: { id: 'svc-9' }, pestType: 'flea', config: { emailTemplateKey: 'prep.flea' } }); // every family finds it: table order breaks the tie
-    upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.lawn' };
-    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ pestType: 'lawn', config: { emailTemplateKey: 'prep.lawn' } });
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ visit: { id: 'svc-9' }, pestType: 'interior_pest', config: { emailTemplateKey: 'prep.interior_pest' } });
+    upcomingVisitRow = { ...VISIT, service_type: 'Flea & Tick Pest Control' };
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ pestType: 'flea' }); // table order, as the composer's scan breaks a tie
+    upcomingVisitRow = { ...VISIT, service_type: 'Lawn Health Inspection', prep_template_key: 'prep.lawn' };
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ pestType: 'lawn', config: { emailTemplateKey: 'prep.lawn' } }); // the stored key is what its page renders
     upcomingVisitRow = { ...VISIT, prep_template_key: 'prep.something_retired' };
     expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ visit: { id: 'svc-9' }, pestType: null, config: null });
     upcomingVisitRow = null;
     expect(await sender.bookedPrepGuide(['cust-1'])).toBeNull();
   });
 
-  test('bookedPrepGuide throws on a failed lookup: a failed read is never "nothing booked"', async () => {
+  test('bookedPrepGuide: a booked visit no guide covers is still THE booked visit (no guide), never skipped for a later one or an earlier service', async () => {
+    upcomingVisitRows = [{ ...VISIT, id: 'svc-1', service_type: 'Lawn Health Inspection' }, { ...VISIT, id: 'svc-2', service_type: 'Pest Control' }];
+    expect(await sender.bookedPrepGuide(['cust-1'])).toMatchObject({ visit: { id: 'svc-1' }, pestType: null, config: null });
+    // the query is not narrowed to one family: any service type, the same filters and order the guide emails use
+    const keywordGroup = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).find(([sql]) => /^\(LOWER\(service_type\) LIKE \?\)$/.test(String(sql)));
+    expect(keywordGroup[1]).toEqual(['%%']);
+    expect(scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).some(([sql]) => /NOT LIKE/.test(String(sql)))).toBe(false);
+  });
+
+  test('bookedPrepGuide throws on a failed lookup, and on a grouped stop whose members could not be read: a failed read is never "nothing booked"', async () => {
     visitLookupError = new Error('db down');
     await expect(sender.bookedPrepGuide(['cust-1'])).rejects.toThrow('db down');
+    visitLookupError = null;
+    upcomingVisitRow = VISIT;
+    const appointmentPublic = require('../routes/appointment-public');
+    const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit').mockResolvedValue({ state: 'not_available', phase: null, unknown: true });
+    try {
+      await expect(sender.bookedPrepGuide(['cust-1'])).rejects.toThrow('could not be read as a stop');
+      // a visit that is simply closed (not_available without the flag) is skipped, as before; the family queries never throw for it
+      spy.mockResolvedValue({ state: 'not_available', phase: null });
+      expect(await sender.bookedPrepGuide(['cust-1'])).toBeNull();
+      expect(await sender.nextUpcomingVisit(['cust-1'], 'flea')).toBeNull();
+      spy.mockResolvedValue({ state: 'not_available', phase: null, unknown: true });
+      expect(await sender.nextUpcomingVisit(['cust-1'], 'flea')).toBeNull(); // the composer's pick keeps skipping it (its own behavior is unchanged)
+    } finally { spy.mockRestore(); }
   });
 });
 

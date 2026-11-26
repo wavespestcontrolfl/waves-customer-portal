@@ -5045,8 +5045,8 @@ function paymentOptionsFactLine(context, extras) {
 // those), and the section is capped so the facts around it keep their room. The model may repeat these sentences and nothing else as prep
 // advice. The section sits after LAWN HEALTH, outside every structural marker the sealed exam reads. Gate off, no guide, or a failed read:
 // no section.
-const PREP_GUIDE_MAX_SENTENCES = 10;
-const PREP_GUIDE_MAX_CHARS = 1400;
+const PREP_GUIDE_MAX_SENTENCES = 90;
+const PREP_GUIDE_MAX_CHARS = 7500;
 function prepGuideSection(context) {
   const guide = context.prepGuide;
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !guide || !Array.isArray(guide.sentences) || !guide.label) return '';

@@ -733,6 +733,8 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     const { visitServicesFor } = appointmentRouter._test;
     mockDb.mockImplementation(() => ({ where: () => ({ whereNotIn: () => ({ orderBy: () => ({ select: async () => { throw new Error('db down'); } }) }) }) }));
     expect(await visitServicesFor({ id: 'a', visit_id: 'v1' })).toEqual({ visitUnknown: true });
+    // the page-state reader tells that from a closed visit: `unknown` (the texting AI's prep guide pick refuses on it)
+    expect(await appointmentRouter.pageStateForVisit({ id: 'a', visit_id: 'v1' })).toEqual({ state: 'not_available', phase: null, unknown: true });
   });
 
   test('a lost-race grouped confirm re-proves the anchor + membership under the stop lock and FANS OUT to the pending siblings (local audit r25) — a winner that was another surface never confirmed them', async () => {

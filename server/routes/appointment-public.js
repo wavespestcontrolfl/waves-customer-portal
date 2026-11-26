@@ -1677,7 +1677,9 @@ module.exports.slotMatchesShown = slotMatchesShown;
 // or the row's own. The composer's send seam re-runs it (GH Codex #3844 r13).
 module.exports.pageStateForVisit = async function pageStateForVisit(svc, now = new Date()) {
   const info = svc?.visit_id ? await visitServicesFor(svc) : {};
-  return info.visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, info, now);
+  // `unknown`: the stop's membership could not be read or no longer holds together (not a visit that is simply closed): a reader that must
+  // tell "nothing to show" from "could not look" (the texting AI's prep guide pick) reads it.
+  return info.visitUnknown ? { state: 'not_available', phase: null, unknown: true } : pageStateForGroup(svc, info, now);
 };
 // Visit-prep photos (customer-visit-photos-scope-20260928.md PR 4, "app
 // entry"): schedule.js's customer-authenticated POST /:id/prep-photos
