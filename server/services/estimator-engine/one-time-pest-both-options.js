@@ -36,6 +36,8 @@ function offerPlanWithOneTimeChoice(intent, {
   let shows = false;
   try { shows = planShowsOneTimeChoice ? planShowsOneTimeChoice() === true : true; } catch { shows = false; }
   if (!shows) intent.services = asked;
+  // The caller's own ask stays on the intent (replay and review read it there).
+  else intent.asked_services = asked;
   return shows;
 }
 

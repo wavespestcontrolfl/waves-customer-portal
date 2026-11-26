@@ -2922,10 +2922,22 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // options (the rule and its limits: one-time-pest-both-options.js). The
     // swap stays only when the plan it prices can show the one-time choice
     // on the estimate page; otherwise the caller's one-time ask is priced.
+    // A plan member keeps the plain one-time draft (the page's choice does not
+    // carry the member one-time perk). Membership is read from the plan record
+    // itself, not only the pipeline stage; an unreadable record counts as a member.
+    let callerIsPlanMember = context.isExistingCustomer === true || priorQualifyingServices.length > 0;
+    if (!callerIsPlanMember && context.customer?.id && origin?.channel === 'call' && intent.services?.oneTimePest) {
+      try {
+        callerIsPlanMember = await require('../waveguard-existing-services').isActivePlanCustomer(db, context.customer.id, { strict: true });
+      } catch (err) {
+        logger.warn(`[estimator-engine] both-options member check failed: ${err.message}`);
+        callerIsPlanMember = true;
+      }
+    }
     context.oneTimeAskBothOptions = offerPlanWithOneTimeChoice(intent, {
       channel: origin?.channel,
       unitBandPricing,
-      currentCustomer: context.isExistingCustomer === true || priorQualifyingServices.length > 0,
+      currentCustomer: callerIsPlanMember,
       planShowsOneTimeChoice: () => {
         const trialInput = buildEngineInput(engineInputArgs());
         const trialResult = generateEstimateSafely(trialInput);

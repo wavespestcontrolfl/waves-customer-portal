@@ -32,6 +32,7 @@ describe('one-time pest ask: both options', () => {
     const intent = intentWith({ oneTimePest: {} });
     expect(offerPlanWithOneTimeChoice(intent, onCall)).toBe(true);
     expect(intent.services).toEqual({ pest: { frequency: 'quarterly' } });
+    expect(intent.asked_services).toEqual({ oneTimePest: {} });
   });
 
   test.each([
