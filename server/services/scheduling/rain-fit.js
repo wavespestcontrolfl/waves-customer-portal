@@ -341,12 +341,18 @@ async function bookingServices(args, db) {
 }
 
 // bookingServices plus `rainSpan`: the shared stop's reach around the
-// tapped service (storedVisitServices `span`), or null.
-async function bookingRainPlan({ bestRows, serviceType, serviceTypes, serviceKeys, serviceId, moveAlone = false }, db) {
+// tapped service (storedVisitServices `span`), or null. `strict` (a caller
+// that must not guess, the night run's rain term): a visit whose stored
+// services cannot be read, or a failed catalog read, throws instead of
+// falling back to the names the caller sent. Default off: byte-identical.
+async function bookingRainPlan({
+  bestRows, serviceType, serviceTypes, serviceKeys, serviceId, moveAlone = false, strict = false,
+}, db) {
   if (bestRows !== true) return { services: [], rainSpan: null };
   let names = Array.isArray(serviceTypes) ? serviceTypes : [];
   let keys = Array.isArray(serviceKeys) && serviceKeys.length === names.length ? serviceKeys : [];
   const stored = serviceId ? await storedVisitServices(serviceId, { moveAlone }, db) : null;
+  if (strict && serviceId && !stored) throw Object.assign(new Error('visit services unreadable'), { code: 'SERVICES_UNREAD' });
   if (stored) {
     const sent = names.some((name) => typeof name === 'string' && name.trim());
     const list = [...(sent ? names.map((name, i) => ({ name, key: keys[i] })) : stored.own), ...stored.siblings];
@@ -357,7 +363,7 @@ async function bookingRainPlan({ bestRows, serviceType, serviceTypes, serviceKey
   // Services past the cap are not looked up, so they cannot be called
   // rain-OK: one unclassified entry makes the whole booking outdoor rather
   // than letting the classified ones speak for it (Codex #6120 r4).
-  const services = await withCatalogKeys(listed, db);
+  const services = strict ? await withCatalogKeys(listed, db, { strict: true }) : await withCatalogKeys(listed, db);
   return { services: overflow ? [...services, OVERFLOW_SERVICE] : services, rainSpan: stored?.span || null };
 }
 

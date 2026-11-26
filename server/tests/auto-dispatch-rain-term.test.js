@@ -11,8 +11,8 @@ jest.mock('../services/auto-dispatch/candidate-slots', () => ({
 let mockCurrentType = 'Pest Control Service';
 jest.mock('../services/scheduling/rain-fit', () => ({
   ...jest.requireActual('../services/scheduling/rain-fit'),
-  storedVisitServices: jest.fn(async () => ({ own: [{ name: mockCurrentType, key: '' }], siblings: [], span: null })),
-  withCatalogKeys: jest.fn(async (items) => items.map((i) => i.name)),
+  // The move screens' reader (strict option tested in booking-rain-rank.test.js): the visit's own service by default.
+  bookingRainPlan: jest.fn(async () => ({ services: [mockCurrentType], rainSpan: null })),
 }));
 // A shadow never calls apply.js (its grouped-move guard writes): every export is a spy the tests expect untouched.
 jest.mock('../services/auto-dispatch/apply', () => ({
@@ -323,32 +323,26 @@ describe('review fixes (Codex pre-push)', () => {
     return evalResult.audit.constraints.rain_term;
   };
 
-  test('the whole visit is classified: add-ons and live siblings count, read by the move screens\' own reader', async () => {
+  test('the whole visit is classified by the move screens\' reader, strictly', async () => {
     const state = await allWet();
     // The visit's own service is rain-OK, a sibling on the same stop is a spray: the stop is outdoor.
-    rainFit.storedVisitServices.mockResolvedValueOnce({
-      own: [{ name: 'WaveGuard Assessment', key: '' }], siblings: [{ name: 'Exterior Pest Spray', key: '' }], span: null,
-    });
+    rainFit.bookingRainPlan.mockResolvedValueOnce({ services: ['WaveGuard Assessment', 'Exterior Pest Spray'], rainSpan: null });
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')] });
     const row = await noteVisit(state, visit({ service_type: 'WaveGuard Assessment' }));
     expect(row.reason).toBe('drier_date_found');
-    expect(rainFit.storedVisitServices).toHaveBeenCalledWith('v1', { moveAlone: false }, expect.anything());
+    expect(rainFit.bookingRainPlan).toHaveBeenCalledWith(expect.objectContaining({
+      bestRows: true, serviceId: 'v1', serviceTypes: [], moveAlone: false, strict: true,
+    }), expect.anything());
     // Every service rain-OK: not outdoor.
-    rainFit.storedVisitServices.mockResolvedValueOnce({
-      own: [{ name: 'WaveGuard Assessment', key: '' }], siblings: [{ name: 'Interior Inspection', key: '' }], span: null,
-    });
+    rainFit.bookingRainPlan.mockResolvedValueOnce({ services: ['WaveGuard Assessment', 'Interior Inspection'], rainSpan: null });
     expect((await noteVisit(state, visit({ service_type: 'WaveGuard Assessment' }))).reason).toBe('not_outdoor');
   });
 
   test('a service list that cannot be read in full is an error, never not_outdoor', async () => {
     const state = await allWet();
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02')] });
-    rainFit.storedVisitServices.mockResolvedValueOnce(null);
+    rainFit.bookingRainPlan.mockRejectedValueOnce(Object.assign(new Error('visit services unreadable'), { code: 'SERVICES_UNREAD' }));
     expect(await noteVisit(state, visit({ service_type: 'WaveGuard Assessment' }))).toMatchObject({ reason: 'error', would_move: false, error: 'SERVICES_UNREAD' });
-    // A failed catalog read (strict) is an error too.
-    rainFit.withCatalogKeys.mockRejectedValueOnce(new Error('catalog down'));
-    expect((await noteVisit(state, visit())).reason).toBe('error');
-    expect(rainFit.withCatalogKeys).toHaveBeenLastCalledWith(expect.any(Array), expect.anything(), { strict: true });
     expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
   });
 
@@ -476,6 +470,67 @@ describe('review fixes (Codex pre-push)', () => {
       service, prefs: {}, ctx: {}, guard: flexGuard(service), evalResult: early, run: later,
     });
     expect(early.audit.constraints.rain_term).toMatchObject({ best_73h: null, reason: 'no_drier_date' });
+  });
+});
+
+describe('per-floor uncertainty and Sunday last', () => {
+  const allWet = async () => stateWith(async () => hoursFor({ ...WET_DAYS, '2026-12-03': 10 }));
+  const noteVisit = async (state, service = visit()) => {
+    const evalResult = freshEval();
+    await rainTerm.note(state, {
+      service, prefs: {}, ctx: {}, guard: flexGuard(service), evalResult, run,
+    });
+    return evalResult.audit.constraints.rain_term;
+  };
+
+  test('the 73-hour-only count needs a verified "no slot" on the 5-day floor; any doubt is uncertain', async () => {
+    const state = await allWet();
+    const probe = candidateSlots._internals.filterAndScoreSharedModelCandidates;
+    // Verified none: only an 11-30 slot exists (it lands under 73 hours only).
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-11-30')] });
+    const clean = await noteVisit(state);
+    expect(clean).toMatchObject({ status_5day: 'none', status_73h: 'found', reason: 'drier_date_only_with_73h_floor' });
+    expect(state.counts.would_move_73h_only).toBe(1);
+    expect(state.counts.uncertain).toBeUndefined();
+    // The 5-day slot cannot be vetted (probe unreadable) while 73 h has a verified slot: uncertain.
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-12-02'), cand('2026-11-30')] });
+    probe.mockImplementation(async (_svc, _geo, slots) => {
+      if (slots[0].date === '2026-12-02') throw new Error('probe read failed');
+      return slots;
+    });
+    const unsure = await noteVisit(state);
+    expect(unsure).toMatchObject({ status_5day: 'unverified', status_73h: 'found', would_move: false, reason: 'drier_date_with_73h_floor_5day_uncertain' });
+    expect(state.counts.uncertain).toBe(1);
+    expect(state.counts.would_move_73h_only).toBe(1);
+    probe.mockReset().mockImplementation(async (_svc, _geo, slots) => slots);
+    // A capped list with only a 73-hour slot is uncertain too.
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({
+      candidates: [cand('2026-11-30'), ...Array.from({ length: 999 }, () => cand('2026-11-29', 't1'))],
+    });
+    expect(await noteVisit(state)).toMatchObject({ status_5day: 'uncertain_capped', status_73h: 'found' });
+    expect(state.counts.uncertain).toBe(2);
+  });
+
+  test('Sunday is last under each floor: a Monday-Saturday slot that clears the margin always ranks first', async () => {
+    // Nov 29 is a Sunday. The visit is on Tue Dec 1 (lead 5); Sunday Nov 29 is the driest and the nearest-in-wetness slot.
+    expect(new Date('2026-11-29T12:00:00Z').getUTCDay()).toBe(0);
+    const service = visit({ scheduled_date: '2026-12-01' });
+    const options = rainTerm._test.drierOptions([cand('2026-11-29'), cand('2026-12-02'), cand('2026-11-30')], {
+      service, band: { dateFrom: '2026-11-29', dateTo: '2026-12-04' }, run, currentWet: 1,
+      wetByDate: new Map([['2026-11-29', 0], ['2026-11-30', 0.2], ['2026-12-02', 0.2]]),
+    });
+    expect(options.map((o) => o.date)).toEqual(['2026-11-30', '2026-12-02', '2026-11-29']);
+    expect(options[2].sunday).toBe(true);
+    // With no weekday slot, the Sunday is the answer (under the 73-hour floor, the only one that reaches Nov 29).
+    const state = await stateWith(async () => hoursFor({
+      '2026-11-29': 10, '2026-11-30': 10, '2026-12-01': 90, '2026-12-02': 10,
+    }));
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ candidates: [cand('2026-11-29')] });
+    const evalResult = freshEval();
+    await rainTerm.note(state, {
+      service, prefs: {}, ctx: {}, guard: flexGuard(service), evalResult, run,
+    });
+    expect(evalResult.audit.constraints.rain_term.best_73h).toMatchObject({ date: '2026-11-29' });
   });
 });
 

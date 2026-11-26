@@ -47,6 +47,7 @@ const db = require('../../models/db');
 const { toDateStr, shiftDateStr } = require('./dates');
 const { daysBetween, MIN_DESTINATION_DAYS_OUT } = require('./route-tiers');
 const flexTier = require('./flex-tier');
+const moveRules = require('./move-rules');
 const { DAY_OPEN, DAY_CLOSE } = require('./candidate-slots');
 const { ZONE_COORDS, stopForecastZone } = require('../scheduling/forecast-zones');
 const { getNwsHourlyRain, getNwsHourlyRainPatient } = require('../weather-forecast');
@@ -91,6 +92,7 @@ const REASONS = {
   OCCUPANCY: 'occupancy_unverified',
   FOUND: 'drier_date_found',
   FOUND_73H: 'drier_date_only_with_73h_floor',
+  FOUND_73H_UNSURE: 'drier_date_with_73h_floor_5day_uncertain',
 };
 
 // The call-time gate reader, tolerant of a suite that mocks feature-gates whole.
@@ -178,22 +180,16 @@ function areaOf(service) {
   });
 }
 
-// Outdoor = rain-fit.js's own class for everything that moves with the visit: the stored
-// primary service, its add-ons and every live service that shares the stop. The services
-// come from the move screens' own pieces (storedVisitServices, bookingServiceList, withCatalogKeys), in
-// bookingRainPlan's order but STRICT: bookingRainPlan falls back to the primary name when
-// a read fails, and a partial list could call a stop with a spray add-on indoor. An
-// unread service list throws, and the row says `error`, never `not_outdoor`.
+// Outdoor = rain-fit.js's own class for everything that moves with the visit: bookingRainPlan,
+// the move screens' reader, gives the stored primary service, its add-ons and every live
+// service that shares the stop. `strict`: an unread service list throws (the row says `error`),
+// never a fallback to the primary name that could call a stop with a spray add-on indoor.
 async function isOutdoor(service) {
-  const {
-    rainFitFor, storedVisitServices, bookingServiceList, withCatalogKeys, OVERFLOW_SERVICE,
-  } = require('../scheduling/rain-fit');
-  const stored = await storedVisitServices(service.id, { moveAlone: false }, db);
-  if (!stored) throw Object.assign(new Error('visit services unreadable'), { code: 'SERVICES_UNREAD' });
-  const list = [...stored.own, ...stored.siblings];
-  const { services: listed, overflow } = bookingServiceList(list.map((item) => ({ name: item.name, key: item.key })), service.service_type);
-  const services = await withCatalogKeys(listed, db, { strict: true });
-  return rainFitFor(overflow ? [...services, OVERFLOW_SERVICE] : services) === 'avoid';
+  const { rainFitFor, bookingRainPlan } = require('../scheduling/rain-fit');
+  const plan = await bookingRainPlan({
+    bestRows: true, serviceType: service.service_type, serviceTypes: [], serviceKeys: [], serviceId: service.id, moveAlone: false, strict: true,
+  }, db);
+  return rainFitFor(plan.services) === 'avoid';
 }
 
 // The earliest start a 73-hour floor allows, and the ET date it falls on.
@@ -239,7 +235,7 @@ function searchCtx(ctx, band, meta, service) {
 }
 
 // Slots that beat the current day by DRIER_MARGIN inside `band` (and, with
-// `afterFloor`, that start 73 hours or more from now), best first: lowest
+// `afterFloor`, that start 73 hours or more from now), best first: Monday-Saturday before Sunday, then lowest
 // expected wetness, nearest the current date, earliest start.
 function drierOptions(candidates, {
   service, band, run, currentWet, wetByDate, afterFloor,
@@ -255,10 +251,13 @@ function drierOptions(candidates, {
     const expected = expectedWetness(wet, lead);
     if (currentWet - expected < DRIER_MARGIN) continue;
     out.push({
-      slot, date, wet, lead_days: lead, expected, dist: Math.abs(daysBetween(orig, date)),
+      slot, date, wet, lead_days: lead, expected, dist: Math.abs(daysBetween(orig, date)), sunday: moveRules.isSundayDate(date),
     });
   }
-  return out.sort((a, b) => a.expected - b.expected || a.dist - b.dist || String(a.slot.start_time).localeCompare(String(b.slot.start_time)));
+  // Sunday last (owner 2026-10-24, move-rules.js isSundayDate): a Sunday ranks only when no
+  // Monday-Saturday slot clears the margin under this floor.
+  return out.sort((a, b) => Number(a.sunday) - Number(b.sunday) || a.expected - b.expected || a.dist - b.dist
+    || String(a.slot.start_time).localeCompare(String(b.slot.start_time)));
 }
 
 // Whether other live rows move with this visit (its shared stop). A shadow never runs the
@@ -341,11 +340,19 @@ async function firstFree(options, check) {
   return {};
 }
 
+// One floor's answer: found, none (a verified "no slot"), unverified (the probe could not
+// vet the slots it was given) or uncertain_capped (the search list may have been cut).
+function floorStatus(result, capped) {
+  if (result.opt) return 'found';
+  if (result.unverified) return 'unverified';
+  return capped ? 'uncertain_capped' : 'none';
+}
+
 function verdictReason({
-  best5, best73, capped, candidate,
+  best5, best73, capped, candidate, status5,
 }) {
   if (best5) return REASONS.FOUND;
-  if (best73) return REASONS.FOUND_73H;
+  if (best73) return status5 === 'none' ? REASONS.FOUND_73H : REASONS.FOUND_73H_UNSURE;
   if (candidate) return REASONS.GROUPED;
   return capped ? REASONS.CAPPED : REASONS.NONE;
 }
@@ -382,8 +389,18 @@ async function searchVerdict({
   }
   const best5 = shownSlot(r5.opt);
   const best73 = shownSlot(r73.opt);
+  const status5 = floorStatus(r5, capped);
   return {
-    ...base, best_5day: best5, best_73h: best73, would_move: !!best5, would_move_73h: !!best73, reason: verdictReason({ best5, best73, capped }),
+    ...base,
+    best_5day: best5,
+    best_73h: best73,
+    would_move: !!best5,
+    would_move_73h: !!best73,
+    status_5day: status5,
+    status_73h: floorStatus(r73, capped),
+    reason: verdictReason({
+      best5, best73, capped, status5,
+    }),
   };
 }
 
@@ -432,7 +449,11 @@ async function note(state, args) {
     row = { mode: MODE_SHADOW, would_move: false, reason: REASONS.ERROR, error: err.code || err.name || 'error' };
   }
   state.counts[row.reason] = (state.counts[row.reason] || 0) + 1;
-  if (row.would_move_73h && !row.would_move) state.counts.would_move_73h_only = (state.counts.would_move_73h_only || 0) + 1;
+  if (row.would_move_73h && !row.would_move) {
+    // 73h-only counts only when the 5-day floor was a verified "no slot"; any doubt is 'uncertain'.
+    const key = row.status_5day === 'none' ? 'would_move_73h_only' : 'uncertain';
+    state.counts[key] = (state.counts[key] || 0) + 1;
+  }
   args.evalResult.audit.constraints = { ...args.evalResult.audit.constraints, rain_term: row };
 }
 
