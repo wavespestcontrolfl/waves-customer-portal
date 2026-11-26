@@ -3039,8 +3039,8 @@
       {
         "visit": 4,
         "month": "Any",
-        "primary": "Vehicle German Roach Treatment\nAsk where the vehicle parks and whether the home or workplace has roaches; record the answer\nConfirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in\nVacuum seats, seat tracks, under seats, console, door pockets and trunk before any product\nApply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams\nUse non-repellent crack-and-crevice treatment in seat tracks, under-seat frames and trunk seams\nApply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft",
-        "secondary": "Place 2 monitors (under a front seat, in the trunk) and record the count\nLeave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then\nTell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up",
+        "primary": "Vehicle German Roach Treatment\nAsk where the vehicle parks and whether the home or workplace has roaches; record the answer\nConfirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in\nVacuum seats, seat tracks, under seats, console, door pockets and trunk before any product\nApply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams\nUse non-repellent crack-and-crevice treatment in seat tracks, under-seat frames and trunk seams\nApply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft\nPlace 2 monitors (under a front seat, in the trunk) and record the count\nLeave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then\nTell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up",
+        "secondary": "",
         "lineMeta": {
           "Vehicle German Roach Treatment": {
             "scope": "interior",
@@ -3120,8 +3120,8 @@
       {
         "visit": 5,
         "month": "Any",
-        "primary": "Vehicle Roach Add-On\nAsk where the vehicle parks and whether the home or workplace has roaches; record the answer\nConfirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in\nVacuum seats, seat tracks, under seats, console, door pockets and trunk before any product\nApply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams\nApply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft",
-        "secondary": "Place 2 monitors (under a front seat, in the trunk) and record the count\nLeave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then\nTell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up",
+        "primary": "Vehicle Roach Add-On\nAsk where the vehicle parks and whether the home or workplace has roaches; record the answer\nConfirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in\nVacuum seats, seat tracks, under seats, console, door pockets and trunk before any product\nApply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams\nApply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft\nPlace 2 monitors (under a front seat, in the trunk) and record the count\nLeave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then\nTell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up",
+        "secondary": "",
         "lineMeta": {
           "Vehicle Roach Add-On": {
             "scope": "interior",

@@ -2270,14 +2270,15 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // A card's label rate is stated over its own spray volume (Tekko Pro on cockroaches: 2 fl oz per gallon at 1 gallon per
   // 1,000 sq ft). The mix per gallon is the label amount per area only at that volume, so:
   //   - the answer names the volume and the area the tank covers at it;
-  //   - a rig NAMED for this dose (picked in the Tank section, or assigned to the visit) whose own calibration puts out more
-  //     water per area gets no amount: the same mix would put down more than the label amount. With no rig named, `tank` is
-  //     whichever calibration is on file and says nothing of the sprayer in the tech's hand, so it is not judged.
+  //   - a rig NAMED for this dose (picked in the Tank section, or assigned to the visit) whose own calibration puts out another
+  //     volume gets no amount: the same mix would put down more than the label amount (more water per area) or less than it
+  //     (less water). With no rig named, `tank` is whichever calibration is on file and says nothing of the sprayer in the
+  //     tech's hand, so it is not judged.
   const lineCarrier = protocolPerGallon && protocolLine?.labelUse && Number(protocolLine.carrier) > 0 ? Number(protocolLine.carrier) : null;
   const namedRig = Boolean(pickedRig || rigAssignment(svc).equipmentSystemId || rigAssignment(svc).calibrationId);
   const rigCarrier = namedRig && tank.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? Number(tank.carrierGalPer1000) : null;
-  // The card's volume is the most water per area the mix allows: any more is more product than the label amount.
-  const rigOverVolume = Boolean(lineCarrier && rigCarrier && rigCarrier > lineCarrier);
+  // No tolerance: the card's volume is the one volume at which the mix is the label amount (the difference guard is for float noise only).
+  const rigOffVolume = Boolean(lineCarrier && rigCarrier && Math.abs(rigCarrier - lineCarrier) > 1e-9);
   // Plan-wide blocks first; then THIS product through the same guards the
   // closeout applies (manager approvals: off-protocol, unselected
   // conditional, PGR on stressed turf, label max rate, rotation) plus the
@@ -2339,7 +2340,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     // planBlocks, so the card shows it, and the amount is still given. Every other product check withholds it.
     [Boolean(withholdingBlock), clean(withholdingBlock?.message, 160)],
     [Boolean(lineFacts.labelHold), lineFacts.labelHold],
-    [rigOverVolume, `The card's rate is for ${fmtGal(lineCarrier)} gal per 1,000 sq ft. ${pickedRig?.name || tank.systemName || 'This rig'} sprays ${fmtGal(tank.carrierGalPer1000)}: the same mix would put down more than the label amount. Use a sprayer at the card's volume`],
+    [rigOffVolume, `The card's rate is for ${fmtGal(lineCarrier)} gal per 1,000 sq ft. ${pickedRig?.name || tank.systemName || 'This rig'} sprays ${fmtGal(tank.carrierGalPer1000)}: the same mix would put down ${rigCarrier > lineCarrier ? 'more' : 'less'} than the label amount. Use a sprayer at the card's volume`],
     // An area add-on dose follows the treated area sold, so it is the label rate on
     // the card, never a tank amount off the catalog default rate.
     [Boolean(lineFacts.governed), 'Area add-on — apply the label rate on the card over the area sold; no tank amount'],
@@ -2355,7 +2356,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   ].find(([applies]) => applies);
   const mix = withheld
     ? { amount: null, unit: rateUnit || null, reason: withheld[1] }
-    : (perGallon ? buildPerGallonAmount(perGallon, volume, lineCarrier, rigCarrier) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
+    : (perGallon ? buildPerGallonAmount(perGallon, volume, lineCarrier) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
   const packSizes = await loadPackSizes(dbh, [product.id]);
   // The label rate is itself a dosing instruction: it rides only with a
   // permitted amount, never alongside a withheld one.
@@ -2474,7 +2475,7 @@ function conflictText(product, label, conflictLines) {
   if (!conflictLines) return null;
   const rateText = (rate) => `${rate.lo === rate.hi ? rate.lo : `${rate.lo}-${rate.hi}`} ${String(rate.unit).replace('_', ' ')} per gallon`;
   // A label rate is the label amount only at its spray volume, so the volume goes beside the rate.
-  const volumeText = (line) => (line.labelUse && Number(line.carrier) > 0 ? ` at no more than ${fmtGal(line.carrier)} gal per 1,000 sq ft` : '');
+  const volumeText = (line) => (line.labelUse && Number(line.carrier) > 0 ? ` at ${fmtGal(line.carrier)} gal per 1,000 sq ft` : '');
   const each = conflictLines.map((line) => {
     const band = protocolBand(label, line);
     return `${line.name} ${band ? `${rateText(band)}${volumeText(line)}` : 'see its card'}`;
@@ -2501,16 +2502,14 @@ function perGallonRate(product) {
 }
 
 // `carrierGalPer1000`: the spray volume a card's label rate is stated over, when it has one. The answer then names it
-// (sprayVolumeGalPer1000) and the area the tank covers, so the amount is tied to a treated area. `rigGalPer1000`: the named
-// rig's own calibrated volume, when it has one: the tank then covers what that rig sprays (a rig under the card's volume
-// covers more area), never the card's figure.
-function buildPerGallonAmount(rate, gallons, carrierGalPer1000 = null, rigGalPer1000 = null) {
+// (sprayVolumeGalPer1000) and the area the tank covers at that volume, so the amount is tied to a treated area. (A named rig at
+// another volume never gets here: mixForProduct withholds its dose.)
+function buildPerGallonAmount(rate, gallons, carrierGalPer1000 = null) {
   const gal = Number(gallons);
   if (!Number.isFinite(gal) || gal <= 0) return { amount: null, unit: rate.unit, reason: 'Pick a tank volume' };
   const round = (v) => Math.round(v * 10000) / 10000;
   const carrier = Number(carrierGalPer1000);
-  const sprayed = Number(rigGalPer1000) > 0 && Number.isFinite(Number(rigGalPer1000)) ? Number(rigGalPer1000) : carrier;
-  const bound = carrier > 0 && Number.isFinite(carrier) ? { sprayVolumeGalPer1000: carrier, coversSqft: Math.round((gal / sprayed) * 1000) } : {};
+  const bound = carrier > 0 && Number.isFinite(carrier) ? { sprayVolumeGalPer1000: carrier, coversSqft: Math.round((gal / carrier) * 1000) } : {};
   return { amount: round(rate.lo * gal), amountMax: rate.hi > rate.lo ? round(rate.hi * gal) : null, unit: rate.unit, gallons: gal, basis: 'per_gallon', ...bound, reason: null };
 }
 

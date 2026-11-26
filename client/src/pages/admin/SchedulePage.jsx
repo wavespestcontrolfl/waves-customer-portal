@@ -7411,7 +7411,7 @@ function JobCardTank({ tank, serviceId, ticks = "", D }) {
             )}
             {/* A card's label rate holds only at its own spray volume (Tekko Pro on cockroaches: 1 gal per 1,000 sq ft). */}
             {!busy && mix?.amount != null && mix.sprayVolumeGalPer1000 > 0 && (
-              <div style={{ fontSize: 14, color: D.text }}>Spray no more than {mix.sprayVolumeGalPer1000} gal per 1,000 sq ft. More water per area puts down more than the label amount.</div>
+              <div style={{ fontSize: 14, color: D.text }}>Spray {mix.sprayVolumeGalPer1000} gal per 1,000 sq ft. More water per area puts down more than the label amount, less water puts down less.</div>
             )}
             {!busy && mix?.amount != null && mix.rotationWarnings?.length > 0 && (
               <div role="alert" style={{ fontSize: 14, color: "#C8312F", display: "grid", gap: 4 }}>

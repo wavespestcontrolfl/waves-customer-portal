@@ -442,7 +442,7 @@ describe("Job card Tank section rigs", () => {
     const view = await act(async () => render(<ProtocolPanel service={service} onClose={() => {}} />));
     fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "tekko" } });
     fireEvent.click(await screen.findByRole("button", { name: "Tekko Pro IGR" }));
-    expect(await screen.findByText("Spray no more than 1 gal per 1,000 sq ft. More water per area puts down more than the label amount.")).toBeVisible();
+    expect(await screen.findByText("Spray 1 gal per 1,000 sq ft. More water per area puts down more than the label amount, less water puts down less.")).toBeVisible();
     expect(screen.getByText(/covers 4,000 sq ft/)).toBeVisible();
     view.unmount();
 
@@ -451,6 +451,6 @@ describe("Job card Tank section rigs", () => {
     fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "tekko" } });
     fireEvent.click(await screen.findByRole("button", { name: "Tekko Pro IGR" }));
     expect(await screen.findByText("Label rate 2 fl oz per gallon")).toBeVisible();
-    expect(screen.queryByText(/Spray no more than/)).toBeNull();
+    expect(screen.queryByText(/gal per 1,000 sq ft\. More water/)).toBeNull();
   });
 });

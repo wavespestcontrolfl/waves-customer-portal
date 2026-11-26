@@ -69,13 +69,15 @@ describe('vehicle roach services have their own cards', () => {
   test('neither card carries the house card\'s rooms, and every line is declared a treatment or not', () => {
     for (const n of [4, 5]) {
       const visit = visitNo(n);
-      const lines = [...visit.primary.split('\n'), ...visit.secondary.split('\n')];
+      const lines = visit.primary.split('\n');
       expect(lines.join(' ')).not.toMatch(/kitchen|bathroom|appliance|plumbing|cabinet/i);
       for (const line of lines) expect(typeof visit.lineMeta[line]?.treatmentApplied).toBe('boolean');
       // The label limits a vehicle adds (Advion 100-1484, Tekko Pro 53883-335; Antapex 91234-401 on the vehicle job).
       expect(visit.notes).toMatch(/never on the dash, in a vent or in direct sun \(above 120 F/);
       expect(visit.notes).toMatch(/never on wiring, switches, screens or other electrical parts; do not wet carpet or seats; test a hidden spot/);
-      expect(visit.secondary).toMatch(/Leave the doors open until the spray has dried/);
+      // Drying and re-entry are steps of every job, never an "if needed" line.
+      expect(visit.primary).toMatch(/Leave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then/);
+      expect(visit.secondary).toBe('');
     }
     expect(visitNo(4).notes).toMatch(/Antapex WSG, EPA 91234-401/);
     expect(visitNo(5).notes).toMatch(/no non-repellent spray in the vehicle/);
@@ -156,16 +158,18 @@ describe('a label rate per gallon is bound to its spray volume', () => {
     expect(out.reason).toMatch(/Tank #1 sprays 2/);
   });
 
-  test('a picked rig at the card\'s volume, or under it, gets the amount', async () => {
+  test('a picked rig at the card\'s volume gets the amount; any other volume, over or under, gets none', async () => {
     expect(await mix(home, null, { equipmentSystemId: 'sys-2' })).toMatchObject({ amount: 2, gallons: 1, sprayVolumeGalPer1000: 1, coversSqft: 1000, rig: { name: 'Hand sprayer' } });
-    // A rig under the card's volume: the tank covers what that rig sprays (1 gallon at 0.5 gal per 1,000 = 2,000 sq ft), not the card's figure.
+    // Under the volume the same mix is less than the label amount per area (half of it at 0.5 gal per 1,000 sq ft).
     const light = { ...hand, carrier_gal_per_1000: 0.5 };
-    expect(await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck, light] })).toMatchObject({ amount: 2, sprayVolumeGalPer1000: 1, coversSqft: 2000 });
-    // The card's volume is the limit itself: a rig a hundredth over it gets no amount.
+    const under = await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck, light] });
+    expect(under.amount).toBeNull();
+    expect(under.reason).toBe("The card's rate is for 1 gal per 1,000 sq ft. Hand sprayer sprays 0.5: the same mix would put down less than the label amount. Use a sprayer at the card's volume");
+    // No tolerance: a rig a hundredth over it gets no amount.
     const over = { ...hand, carrier_gal_per_1000: 1.01 };
     const refused = await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck, over] });
     expect(refused.amount).toBeNull();
-    expect(refused.reason).toMatch(/Hand sprayer sprays 1\.01/);
+    expect(refused.reason).toMatch(/Hand sprayer sprays 1\.01: the same mix would put down more than the label amount/);
     // A picked rig with no calibration on file has no volume to judge.
     expect(await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck] })).toMatchObject({ amount: 2, sprayVolumeGalPer1000: 1 });
   });
