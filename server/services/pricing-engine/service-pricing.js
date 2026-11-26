@@ -10206,9 +10206,20 @@ function priceRodentExclusionV2(options = {}) {
   const softLF = Math.max(0, Number(meshSoftLF) || 0);
   const hardLF = Math.max(0, Number(meshConcreteLF) || 0);
 
+  // Two-story factor (owner 2026-11-26, "fix this"): the roof/high points of a home of two or more stories take
+  // RODENT.exclusionV2.modifiers.twoStory on top of the roof-style multiplier. Roof/high points ONLY: ground points,
+  // bird boxes, linear mesh, the barrel closure, the job floor and the inspection never take it. Every priced row carries
+  // the rule version and the factor it was priced with (twoStoryRoofRule, twoStoryRoofFactor); a replay restores that
+  // factor (options.frozenTwoStoryFactor, estimate-roof-style-replay.js twoStoryRoofReplaySignal), and a saved row with no
+  // stamp was priced before the rule, so it replays with factor 1.
+  const twoStoryLive = Number(cfg.modifiers && cfg.modifiers.twoStory) > 0 ? Number(cfg.modifiers.twoStory) : 1;
+  const twoStoryFrozen = Number(options.frozenTwoStoryFactor) > 0 ? Number(options.frozenTwoStoryFactor) : null;
+  const twoStoryFactor = Number(options.stories) >= 2 ? (twoStoryFrozen ?? twoStoryLive) : 1;
+  const advancedPointRate = cfg.wireMeshPoints.advancedRoofHigh * (roof ? roof.multiplier : 1) * twoStoryFactor;
+
   const wireMeshPointSubtotal =
     stdPts * cfg.wireMeshPoints.standard +
-    advPts * cfg.wireMeshPoints.advancedRoofHigh * (roof ? roof.multiplier : 1);
+    advPts * advancedPointRate;
 
   const birdBoxSubtotal =
     stdBoxes * cfg.birdBoxes.standard +
@@ -10274,6 +10285,9 @@ function priceRodentExclusionV2(options = {}) {
     ...wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLinearMeshLF),
     ...roofStyleFields(roof),
     ...barrelHoldFields,
+    // The two-story rule this row was priced under (1 = the factor applies to the roof/high points of a two-story home).
+    twoStoryRoofRule: 1,
+    twoStoryRoofFactor: twoStoryFactor,
   };
 
   const parts = [];
@@ -10340,8 +10354,10 @@ function priceRodentExclusionV2(options = {}) {
       unitParts([
         [stdPts, `standard @ $${cfg.wireMeshPoints.standard}/pt`],
         [advPts, roof && roof.tile
-          ? `roof/high tile @ $${(cfg.wireMeshPoints.advancedRoofHigh * roof.multiplier).toFixed(2)}/pt`
-          : `roof/high @ $${cfg.wireMeshPoints.advancedRoofHigh}/pt`],
+          ? `roof/high tile${twoStoryFactor > 1 ? ' two-story' : ''} @ $${advancedPointRate.toFixed(2)}/pt`
+          : (twoStoryFactor > 1
+            ? `roof/high two-story @ $${advancedPointRate.toFixed(2)}/pt`
+            : `roof/high @ $${cfg.wireMeshPoints.advancedRoofHigh}/pt`)],
       ]));
   }
   if (birdBoxSubtotal > 0) {

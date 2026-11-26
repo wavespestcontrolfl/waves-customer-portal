@@ -1028,6 +1028,8 @@ function pestPropertyWithPhotoFacts(property, facts) {
 
 // Price rules fixed 2026-11-26 (owner, "fix all seven"): the palm credit minimum, the one-time lawn flat-stretch rise,
 // the barrel hold, commercial interior area and the urgent removal.
+// (The exclusion two-story roof-point factor, owner 2026-11-26 "fix this", does NOT use this stamp: quotes stamped false
+// were already sent without it. Its own row stamp twoStoryRoofRule carries it, see estimate-roof-style-replay.js.)
 // An estimate priced BEFORE them keeps its price on every replay: the saved-estimate readers derive
 // input.legacyPricingRules from the estimate's own pricingMetadata stamp (estimate-floor-signal-replay.js), and an
 // estimate with priced lines but no stamp was priced before the fixes. A fresh quote never sets it, and the engine
@@ -2489,6 +2491,12 @@ function generateEstimate(input) {
         approvedTotalForWaiver: services.exclusion.approvedTotal || 0,
         urgency: services.exclusion.urgency || 'ROUTINE',
         afterHours: services.exclusion.afterHours || false,
+        // Two or more stories: the roof/high points take the two-story factor (owner 2026-11-26). A stored quote replays the
+        // factor its own rows were priced with (input.twoStoryRoofReplay, read from the saved rows, honored only on a replay).
+        stories: services.exclusion.stories || property.stories || 1,
+        ...(input.savedEstimateReplay === true && input.twoStoryRoofReplay
+          ? { frozenTwoStoryFactor: input.twoStoryRoofReplay.factor }
+          : {}),
         ...wholeHomeSeal,
         ...(wholeHomeSeal ? { roofType: exclusionRoofType(wholeHomeSeal.roofType) } : {}),
         ...roofStyle,

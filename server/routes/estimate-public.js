@@ -20873,6 +20873,8 @@ function savedFloorReplayOverrides(estData) {
   overrides.wholeHomeSealReplay = require('../services/estimate-whole-home-replay').wholeHomeSealReplaySignal(estData) || undefined;
   // Roof style quote-time multiplier and per-foot terms (GATE_EXCLUSION_ROOF_STYLE_PRICING): same contract, set even when empty.
   overrides.roofStyleReplay = require('../services/estimate-roof-style-replay').roofStyleReplaySignal(estData) || undefined;
+  // Two-story roof-point factor: the factor the stored exclusion rows were priced with; rows without the stamp replay with none.
+  overrides.twoStoryRoofReplay = require('../services/estimate-roof-style-replay').twoStoryRoofReplaySignal(estData) || undefined;
   // One-time pest home-age rule (GATE_ONE_TIME_PEST_NO_HOME_AGE): same contract, set even when empty.
   overrides.oneTimePestNoHomeAgeReplay = oneTimePestNoHomeAgeReplaySignal(estData) || undefined;
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)

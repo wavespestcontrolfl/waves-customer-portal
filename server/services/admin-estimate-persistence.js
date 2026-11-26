@@ -1367,6 +1367,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     // Whole-home exclusion quote-time minimum and renewal price: the same stored-row reader the public replay uses.
     v1Input.wholeHomeSealReplay = require('./estimate-whole-home-replay').wholeHomeSealReplaySignal(estimateData) || undefined;
     v1Input.roofStyleReplay = require('./estimate-roof-style-replay').roofStyleReplaySignal(estimateData) || undefined;
+    v1Input.twoStoryRoofReplay = require('./estimate-roof-style-replay').twoStoryRoofReplaySignal(estimateData) || undefined;
     // One-time pest home-age rule (GATE_ONE_TIME_PEST_NO_HOME_AGE): the rule the saved one-time line was priced on.
     v1Input.oneTimePestNoHomeAgeReplay = require('./pricing-engine/one-time-pest-home-age').oneTimePestNoHomeAgeReplaySignal(estimateData) || undefined;
     // A customer restore deleted the old termite result row on removal, so

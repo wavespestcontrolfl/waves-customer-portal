@@ -42,6 +42,30 @@ function roofStyleReplaySignal(estData) {
   return null;
 }
 
+// Two-story roof-point rule (owner 2026-11-26, "fix this"). Every V2 exclusion row the pricer writes carries
+// twoStoryRoofRule (the rule version) and twoStoryRoofFactor (the factor it priced with, 1 when none applied). A saved
+// row WITHOUT the stamp was priced before the rule, so it replays with no factor, whatever its legacyPricingRules stamp
+// says (quotes stamped false were already sent without it). Same trust contract as roofStyleReplaySignal.
+function twoStoryRowFields(row) {
+  const { isRodentExclusionRow } = require('../../shared/estimate-purchased-warranty.cjs');
+  if (!isRodentExclusionRow(row) || !(Number(row.twoStoryRoofRule) >= 1)) return {};
+  return {
+    twoStoryRoofRule: Number(row.twoStoryRoofRule),
+    ...(positive(row.twoStoryRoofFactor) ? { twoStoryRoofFactor: positive(row.twoStoryRoofFactor) } : {}),
+  };
+}
+
+// { factor } from the first saved V2 exclusion row: its stamped factor, or 1 (no factor) when the row has no stamp.
+// null when the estimate holds no exclusion row (nothing was quoted, so the current rule prices it).
+function twoStoryRoofReplaySignal(estData) {
+  const { isRodentExclusionRow } = require('../../shared/estimate-purchased-warranty.cjs');
+  for (const row of require('./estimate-result-container').storedRodentExclusionRows(estData)) {
+    if (!isRodentExclusionRow(row)) continue;
+    return { factor: twoStoryRowFields(row).twoStoryRoofFactor || 1 };
+  }
+  return null;
+}
+
 // The measured eave feet of a Barrel tile pick, validated BEFORE any coercion: a finite number >= 0 or a numeric string;
 // empty, null or undefined = 0. Anything else (boolean, object, 'abc', negative, Infinity) is null = invalid.
 function parseBarrelEaveFt(value) {
@@ -110,5 +134,5 @@ function estimateHasUnmeasuredBarrelExclusion(estData) {
 }
 
 module.exports = {
-  roofStyleReplaySignal, roofStyleRowFields, parseBarrelEaveFt, invalidBarrelEaveFtError, estimateHasUnmeasuredBarrelExclusion,
+  roofStyleReplaySignal, roofStyleRowFields, twoStoryRowFields, twoStoryRoofReplaySignal, parseBarrelEaveFt, invalidBarrelEaveFtError, estimateHasUnmeasuredBarrelExclusion,
 };
