@@ -92,6 +92,7 @@ const {
   GATE: OUTBOUND_VOICEMAIL_SMS_GATE,
 } = require('../services/outbound-voicemail-sms');
 const { resolveOutboundCallReason } = require('../services/outbound-call-reason');
+const { inboundCallSource, stampAnswerSeconds } = require('../services/call-bad-call-count');
 
 function maskPhone(value) {
   const digits = phoneDigits(value);
@@ -634,7 +635,7 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNum
     accepted_at: new Date().toISOString(),
   };
 
-  return db('call_log')
+  const written = await db('call_log')
     .where('twilio_call_sid', parentCallSid)
     .update({
       metadata: db.raw(
@@ -643,6 +644,16 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNum
       ),
       updated_at: new Date(),
     });
+  // Answer speed (call_log.answer_seconds): a separate fail-soft write, so it can never undo the stamp above.
+  await stampAnswerSeconds({ parentCallSid, acceptedAt: new Date(acceptance.accepted_at) });
+  return written;
+}
+
+// The call_log.source column for a new inbound row: the lead source of the dialed number, or nothing
+// (an unmapped number leaves the column empty, as before).
+function dialedSourceColumn(dialedNumber) {
+  const source = inboundCallSource(dialedNumber);
+  return source ? { source } : {};
 }
 
 // Merge the /voice webhook's rich metadata onto a call_log row the
@@ -1566,6 +1577,7 @@ router.post('/voice', async (req, res) => {
           to_phone: toE164(To),
           twilio_call_sid: CallSid,
           status: CallStatus || 'ringing',
+          ...dialedSourceColumn(To),
           metadata: JSON.stringify(freshCallMetadata),
         });
       }
@@ -3498,6 +3510,7 @@ router.post('/recording-status', async (req, res) => {
               call_sid: CallSid,
               status: twilioCall?.status || 'completed',
               duration_seconds: parseInt(twilioCall?.duration || RecordingDuration || 0),
+              ...dialedSourceColumn(toPhone),
               metadata: JSON.stringify({
                 location: numberConfig?.label || 'unknown',
                 numberType: numberConfig?.type || 'unknown',
@@ -4297,6 +4310,7 @@ router.post('/call-status', async (req, res) => {
         twilio_call_sid: CallSid,
         status: CallStatus,
         duration_seconds: parseInt(CallDuration || 0),
+        ...dialedSourceColumn(toPhone),
         metadata: JSON.stringify({
           location: numberConfig?.label || 'unknown',
           numberType: numberConfig?.type || 'unknown',
@@ -5002,6 +5016,7 @@ router._test = {
   parseAddOnsForAudit,
   spokenCallerName,
   rememberForwardAccept,
+  dialedSourceColumn,
   resolveCsrName,
   resolveInboundDialCompletion,
   techLineUnacceptedLegSid,
