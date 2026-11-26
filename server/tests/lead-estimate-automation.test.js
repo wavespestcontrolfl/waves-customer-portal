@@ -543,6 +543,22 @@ describe('service-interest mapper hardening', () => {
     }
   });
 
+  test('plant-service name, ornamental location, fertilization order and per-clause cadence', () => {
+    // The product name is one plant service, not a second pest request.
+    expect(mapServiceInterestToEstimateServices('Tree & Shrub Pest Control').services)
+      .toEqual({ treeShrub: { tier: 'standard', palmCountUnverified: true } });
+    // An independently requested pest service is kept.
+    expect(mapServiceInterestToEstimateServices('Pest control and tree & shrub pest control').services)
+      .toMatchObject({ pest: expect.any(Object), treeShrub: { tier: 'standard' } });
+    expect(mapServiceInterestToEstimateServices('Mosquito control around ornamentals').services)
+      .toEqual({ mosquito: { tier: 'monthly12' } });
+    expect(mapServiceInterestToEstimateServices('Fertilization for shrubs').services)
+      .toEqual({ treeShrub: { tier: 'standard', palmCountUnverified: true } });
+    // Cadence is read from the clause that names tree & shrub.
+    expect(mapServiceInterestToEstimateServices('One-time mosquito control, recurring shrub care').services)
+      .toMatchObject({ oneTimeMosquito: {}, treeShrub: { tier: 'standard' } });
+  });
+
   test('mixed pest and tree & shrub maps both services', () => {
     const mapped = mapServiceInterestToEstimateServices('Recurring pest control and tree & shrub care');
     expect(mapped).toMatchObject({
