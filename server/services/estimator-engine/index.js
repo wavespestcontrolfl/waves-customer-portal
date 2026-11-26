@@ -76,6 +76,7 @@ const {
   classifyLane,
   createDraftEstimate,
 } = require('./draft-builder');
+const { addRecurringPestForOneTimeAsk } = require('./one-time-pest-both-options');
 const { flagLookupPalmCountForReview } = require('./lookup-palm-review');
 
 
@@ -2418,6 +2419,8 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     }
     const { intent, model } = composed;
     result.intent = intent;
+    // Owner ruling 2026-11-23: a one-time pest ask shows both options.
+    if (addRecurringPestForOneTimeAsk(intent)) context.ownerRuleServices = ['pest'];
     // Clarify write-back: the customer's texted unit is applied to the
     // composer's FINAL address deterministically — a model that returns
     // the whole building, or repeats the call's stale unit, must not

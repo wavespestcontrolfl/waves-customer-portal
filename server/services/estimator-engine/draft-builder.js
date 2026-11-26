@@ -35,6 +35,7 @@ const {
 } = require('../estimate-automation-duplicates');
 const { LOOKUP_PALM_REVIEW_REASON } = require('./lookup-palm-review');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
+const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
 const { callAutoSendShadowVerdict } = require('./call-auto-send-shadow');
 const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS } = require('../pricing-engine/unit-band-pricing');
 const { sameStreetAddress } = require('./address-compare');
@@ -956,7 +957,9 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   }
   if (intent.confidence !== 'high') reasons.push(`composer confidence ${intent.confidence}`);
   if ((intent.uncertainties || []).length) reasons.push(`open questions: ${intent.uncertainties.join(' | ')}`);
-  if ((intent.evidence || []).length < Object.keys(intent.services || {}).length) {
+  // A service the owner's rule added (not the caller) has no quote to cite.
+  const callerServiceCount = Object.keys(intent.services || {}).length - (context?.ownerRuleServices?.length || 0);
+  if ((intent.evidence || []).length < callerServiceCount) {
     reasons.push('evidence quotes do not cover every selected service');
   }
   const evidenceCheck = verifyEvidenceQuotes(intent, context);
@@ -1078,6 +1081,22 @@ function callAutoSendShadowStamp({ origin, intent, propertyFacts, context, prior
     logger.warn(`[estimator-engine] call auto-send shadow verdict failed: ${shadowErr.message}`);
     return {};
   }
+}
+
+// The estimate shows the [Recurring | One-time] choice only when the plan
+// was added by the owner's both-options rule (one-time-pest-both-options.js) AND the page's own rule for that choice
+// passes on what was actually priced (validateEstimateDeliveryOptions).
+function showsOneTimeChoice({ context, totals, engineInputs, engineResult }) {
+  if (!context?.ownerRuleServices?.includes('pest')) return false;
+  const refusal = validateEstimateDeliveryOptions({
+    showOneTimeOption: true,
+    onetimeTotal: totals?.oneTime,
+    monthlyTotal: totals?.monthly,
+    annualTotal: totals?.annual,
+    estimateData: { engineInputs, engineResult },
+  });
+  if (refusal) logger.info(`[estimator-engine] one-time choice not shown on a both-options draft: ${refusal}`);
+  return !refusal;
 }
 
 function resolveDraftCustomerPhone(intent, context) {
@@ -1507,6 +1526,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       // estimator-engine authority): the explicit SERVER stamp the send gate
       // and the auto-send lane require.
       pricing_authority: 'SERVER',
+      ...(showsOneTimeChoice({ context, totals, engineInputs: storedEngineInputs, engineResult }) ? { show_one_time_option: true } : {}),
       estimate_data: JSON.stringify({
         engineInputs: storedEngineInputs,
         engineResult,
