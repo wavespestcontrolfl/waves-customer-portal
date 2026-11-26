@@ -467,6 +467,11 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
   const stateRow = await dbh(STATES_TABLE).where({ scheduled_service_id: svc.id, subject_hash: built.subjectHash }).first('answers');
   const { known, backfill, onStateProviders } = currentAnswers({ providers, questionIds, stateRow, existing, subjectHash: built.subjectHash });
   const due = providers.filter((provider) => !known[provider]);
+  // A provider's review row for a question is stale when it describes another state and nothing has frozen it, or is missing.
+  const staleRows = (provider) => questionIds.some((id) => {
+    const rows = existing.filter((r) => r.provider === provider && r.question_id === id);
+    return !rows.some((r) => r.subject_hash === built.subjectHash) && rows.every((r) => r.label_status === 'unreviewed' && r.sampled_for !== 'heldout');
+  });
   // The state is kept before anyone is asked or any row is requeued, so every
   // stored answer has the exact text it was judged on, whatever is edited
   // later; an unchanged visit whose state was pruned gets it back here.
@@ -489,13 +494,29 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
       customer_id: svc.customer_id,
       ...(answers ? { answers: trx.raw(`COALESCE(${STATES_TABLE}.answers, '{}'::jsonb) || ?::jsonb`, [JSON.stringify(answers)]) } : {}),
     });
-  const keepState = () => dbh.transaction(async (trx) => {
+  // `restore`: providers whose answers for THIS state are cached on the state row but whose unreviewed review rows
+  // still describe another state (a visit that went A -> B -> A). They are written again with the recorder's own rule
+  // (labeled and held-out rows are never touched), from the cached yes / no answers: the model's p is not kept on the
+  // state row, so a restored row carries `restored: true` and no p, and never counts as a confident answer.
+  const keepState = (restore = []) => dbh.transaction(async (trx) => {
     await lockVisitAccess(trx, svc.id);
     await publishOn(trx, Object.keys(backfill).length ? backfill : null);
+    for (const provider of restore) {
+      const answers = Object.fromEntries(questionIds.map((id) => [id, { yes: known[provider][id], restored: true }]));
+      const siblingAnswers = {};
+      for (const id of questionIds) {
+        const others = Object.keys(known).filter((other) => other !== provider).map((other) => ({ yes: known[other][id] }));
+        if (others.length) siblingAnswers[id] = others;
+      }
+      await recordDecisions({
+        capability: pkg.capability, pkg, provider, subjectType: SUBJECT_TYPE, subjectId: svc.id,
+        result: { ok: true, answers }, baselines: built.baselines, siblingAnswers, subjectHash: built.subjectHash, conn: trx,
+      });
+    }
   });
   if (!due.length) {
     out.unchanged += 1;
-    await keepState();
+    await keepState(providers.filter((provider) => staleRows(provider)));
     // The refresh is idempotent and runs on unchanged passes too, so one
     // that failed after its rows were written is made good an hour later.
     await settleCohorts({ dbh, pkg, svc, built });
@@ -509,7 +530,13 @@ async function shadowVisit(svc, { dbh, providers, out, now }) {
   // answered too.
   const retry = existing.some((row) => row.subject_hash === built.subjectHash) || onStateProviders.length > 0;
   const budget = retry ? 'retryVisits' : 'askedVisits';
-  if (out[budget] >= (retry ? MAX_RETRY_VISITS : MAX_ASKED_VISITS)) { out.deferred += 1; return; }
+  if (out[budget] >= (retry ? MAX_RETRY_VISITS : MAX_ASKED_VISITS)) {
+    // The changed state is still published (no answers, so no card shows for it) before the visit waits for the next pass:
+    // the previous state's cards stop being the newest, and their evidence ids stop authorizing a verdict.
+    await keepState();
+    out.deferred += 1;
+    return;
+  }
   out[budget] += 1;
   await keepState();
 

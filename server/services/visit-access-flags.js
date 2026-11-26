@@ -42,6 +42,7 @@ const { PACKAGE_ID, visitSinglePremises, lockVisitAccess } = require('./typed-de
 const STATES = 'visit_access_states';
 const VERDICTS = 'visit_access_verdicts';
 const QUOTE_CHARS = 160;
+const CARRIED_SOURCE = 'Confirmed by a technician earlier on this visit';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Everything redactForState (and the text window) generates is a bracketed
 // marker: "[access detail withheld: ...]", "[redacted]", "[follow-up to ...]".
@@ -156,8 +157,12 @@ async function accessFlagsFor(dbh, visit) {
       const view = questionView(ev, questionId);
       if (!view.shown) continue;
       const flag = FLAGS[questionId];
+      // A Right carried from earlier evidence says what the technician confirmed, not what the newest state says: the
+      // newest text may say the opposite ("the dog is gone"), so none of it is quoted under the warning.
+      const carried = view.status === 'right' && !view.newestVerdict;
       flags.push({
-        questionId, title: flag.title, tone: flag.tone, status: view.status, evidenceId: ev.id, ...pickQuote(ev.state, questionId),
+        questionId, title: flag.title, tone: flag.tone, status: view.status, evidenceId: ev.id,
+        ...(carried ? { quote: null, source: CARRIED_SOURCE } : pickQuote(ev.state, questionId)),
         saveToFile: questionId === 'dog_on_property' && view.status === 'open' && !(await petsOnFile(dbh, visit.customer_id)) ? 'pets' : null,
       });
     }

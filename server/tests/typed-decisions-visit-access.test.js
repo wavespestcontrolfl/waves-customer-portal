@@ -493,6 +493,60 @@ describe('visit access shadow: rules that need no database', () => {
     expect(await sweep()).toMatchObject({ asked: 1, failed: 1, retryVisits: 1, askedVisits: 0 });
   });
 
+  test('a visit returning to a state it already answered gets that state\'s unreviewed review rows back; labeled rows are left alone', async () => {
+    const home = await visit();
+    await sweep();
+    const [first] = await database('visit_access_states').where({ scheduled_service_id: home });
+    await text('Our dog Biscuit is loose in the yard', '2026-10-05T13:00:00Z');
+    mockAsk.mockResolvedValue(reply({ dog_on_property: yes }));
+    await sweep();
+    const second = (await database('visit_access_states').where({ scheduled_service_id: home }).orderBy('created_at', 'desc'))[0];
+    expect(second.subject_hash).not.toBe(first.subject_hash);
+    expect((await rows(home)).every((r) => r.subject_hash === second.subject_hash)).toBe(true);
+    // a reviewer labels one row of the second state
+    await database('decision_reviews').where({ subject_id: home, question_id: 'past_access_problem' }).update({ label_status: 'confirmed_correct' });
+    // the text goes away: the visit is back at the first state, whose answers are cached on its state row
+    await database('sms_log').where({ message_body: 'Our dog Biscuit is loose in the yard' }).del();
+    mockAsk.mockClear();
+    expect(await sweep()).toMatchObject({ asked: 0, unchanged: 1 });
+    expect(mockAsk).not.toHaveBeenCalled();
+    const back = await rows(home);
+    for (const row of back) {
+      if (row.question_id === 'past_access_problem') expect(row).toMatchObject({ label_status: 'confirmed_correct', subject_hash: second.subject_hash });
+      else expect(row.subject_hash).toBe(first.subject_hash);
+    }
+    expect(back.find((r) => r.question_id === 'dog_on_property').jev_answer).toMatchObject({ yes: false, restored: true });
+    expect(back.find((r) => r.question_id === 'dog_on_property').jev_answer.p).toBeUndefined();
+    // another pass changes nothing
+    expect(await sweep()).toMatchObject({ asked: 0, unchanged: 1 });
+  });
+
+  test('a visit deferred by an exhausted budget still publishes its changed state, so the old card stops authorizing a verdict', async () => {
+    const flagsService = require('../services/visit-access-flags');
+    mockAsk.mockResolvedValue(reply({ dog_on_property: yes }));
+    // the visit, answered alone on its first state: a dog card shows
+    const home = await visit();
+    await sweep();
+    const card = (await flagsService.accessFlagsFor(database, { id: home, customer_id: customerId }))[0];
+    expect(card).toMatchObject({ questionId: 'dog_on_property', status: 'open' });
+    // 80 other visits use up the first-attempt budget before this one (its id sorts last) when the evidence changes
+    const lastId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    await database('scheduled_services').where({ id: home }).update({ id: lastId });
+    await database('visit_access_states').where({ scheduled_service_id: home }).update({ scheduled_service_id: lastId });
+    await database('decision_reviews').where({ subject_id: home }).update({ subject_id: lastId });
+    for (let i = 0; i < 80; i += 1) await visit();
+    await text('We have a new puppy', '2026-10-05T13:00:00Z');
+    const result = await sweep();
+    expect(result).toMatchObject({ askedVisits: 80, deferred: 1 });
+    // the changed state is the newest, with no answers: no card, and the old card's id is refused
+    const newest = (await database('visit_access_states').where({ scheduled_service_id: lastId }).orderBy('created_at', 'desc'))[0];
+    expect(newest.id).not.toBe(card.evidenceId);
+    expect(newest.answers).toBeNull();
+    expect(await flagsService.accessFlagsFor(database, { id: lastId, customer_id: customerId })).toEqual([]);
+    await expect(flagsService.tapAccessFlag(database, { visitId: lastId, scope: (q) => q, questionId: 'dog_on_property', verdict: 'right', evidenceId: card.evidenceId }, { labeledBy: 'tech', actorId: null, ip: null, userAgent: null }))
+      .resolves.toEqual({ conflict: true });
+  });
+
   test('publishing a state waits for the visit lock a technician\'s tap holds', async () => {
     const home = await visit();
     const holder = await database.transaction();

@@ -287,6 +287,21 @@ describe('visit access flags: the quote a technician reads', () => {
     expect((await flags.accessFlagsFor(database, visit())).map((f) => f.questionId)).not.toContain('contact_before_arrival');
   });
 
+  test('a carried Right says what the technician confirmed and quotes nothing from the newest state', async () => {
+    await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T09:00:00Z') });
+    await tap('dog_on_property', 'right');
+    await seed({ state: { recent_texts: '- The dog is gone, no pets here now.' }, answers: { typesafe: {} }, at: new Date('2026-10-06T10:00:00Z') });
+    const [card] = await flags.accessFlagsFor(database, visit());
+    expect(card).toMatchObject({ questionId: 'dog_on_property', status: 'right', title: 'Dog or other animal may be loose', quote: null, source: 'Confirmed by a technician earlier on this visit' });
+    expect(JSON.stringify(card)).not.toMatch(/gone/i);
+    // a Right given on the newest evidence itself still quotes that evidence
+    await database('visit_access_verdicts').del();
+    await database('visit_access_states').update({ answers: JSON.stringify({ typesafe: { dog_on_property: true } }) });
+    await seed({ state: { recent_texts: '- Our dog Biscuit is out back.' }, answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T11:00:00Z') });
+    await tap('dog_on_property', 'right');
+    expect((await flags.accessFlagsFor(database, visit()))[0]).toMatchObject({ status: 'right', quote: 'Our dog Biscuit is out back.', source: 'Customer text' });
+  });
+
   test('a carried Right still shows when the newest state holds no yes for the question', async () => {
     await seed({ answers: { typesafe: { dog_on_property: true } }, at: new Date('2026-10-06T09:00:00Z') });
     await tap('dog_on_property', 'right');
