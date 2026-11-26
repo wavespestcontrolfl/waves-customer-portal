@@ -90,6 +90,15 @@ describe('prior-provider evidence (Codex #8521)', () => {
       expect(patch.switch_reason).toBeUndefined();
     }
   });
+  test('calling a rival for a price is not use', () => {
+    const patch = planLeadWhy(lead(), [chunk('competitor_mention', 'I had called Orkin for a price')]);
+    expect(patch.previous_company).toBeUndefined();
+  });
+  test('spouse needs a spouse or partner named', () => {
+    const lost = lead({ status: 'lost' });
+    expect(planLeadWhy(lost, [chunk('objection', "I'll think about it")]).not_booked_reason).toBeUndefined();
+    expect(planLeadWhy(lost, [chunk('objection', 'I need to talk to my landlord about the price')]).not_booked_reason).toBe('price');
+  });
   test('a quote request does not erase a stated switch', () => {
     const c = chunk('competitor_mention', 'We left Orkin because they raised the price, and now we want a quote');
     expect(planLeadWhy(lead(), [c])).toMatchObject({ previous_company: 'Orkin', switch_reason: 'price_creep' });

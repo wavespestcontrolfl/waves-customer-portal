@@ -74,10 +74,10 @@ const SWITCH_TAGS = new Set(['competitor_mention', 'churn_signal', 'complaint'])
 const PRIOR_PROVIDER_RE = /(current|previous|prior|existing|former|old|last) (pest |lawn )?(provider|company|exterminator|guy|service)|switch(ing|ed)? (from|over from|providers|companies)|provider switch|currently (with|using) (a|an|another|them)|cancel+(ed|ing)? (with|our|my) (provider|company|service)/i;
 // A rival counts as the previous company only when a use phrase names it:
 // "we had Turner", "switching from Orkin", "been with Hughes".
-// At most one word between the phrase and the name ("had the Turner guy" is
-// two, so "we had ants and Orkin quoted us" never links Orkin).
+// Only "the" may sit between the phrase and the name ("had the Turner guy"),
+// so "we had ants and Orkin quoted us" and "had called Orkin" never link.
 // A negated use ("have not used Orkin", "never had Turner") is not use.
-const RIVAL_USE_LEAD = String.raw`(?<!(?:\bnot|\bnever|n't|\bno)\s+)(?<!(?:\bnot|\bnever|n't)\s+(?:been|ever)\s+)\b(?:had|have had|used|been using|been with|was with|were with|leaving|left|cancel+(?:ed|ing)?|switch(?:ing|ed)? from|currently (?:have|use|with))\s+(?:the\s+)?(?:\w+\s+)?`;
+const RIVAL_USE_LEAD = String.raw`(?<!(?:\bnot|\bnever|n't|\bno)\s+)(?<!(?:\bnot|\bnever|n't)\s+(?:been|ever)\s+)\b(?:had|have had|used|been using|been with|was with|were with|leaving|left|cancel+(?:ed|ing)?|switch(?:ing|ed)? from|currently (?:have|use|with))\s+(?:the\s+)?`;
 // The caller says they never had a provider: no switch evidence at all.
 const NO_PRIOR_PROVIDER_RE = /never (used|had|been with)|first time|no (current|previous|prior) (provider|company)|don'?t have (a|any) (provider|company|pest)/i;
 // A rival named for a quote ("had Orkin quote me") is shopping, not use. This
@@ -99,7 +99,8 @@ const SWITCH_RULES = [
 // First match wins. Run over caller speech in objection chunks only: a `need`
 // chunk is the caller's problem ("I want quarterly service"), not a rejection.
 const NOT_BOOKED_RULES = [
-  ['spouse', /talk to (my|her|his)|husband|wife|spouse|partner|landlord|\bhoa\b|property manager|think about it|run it by/],
+  // A spouse or partner must be named; "I'll think about it" alone is no reason.
+  ['spouse', /\b(husband|wife|spouse|partner|boyfriend|girlfriend|fianc[eé]e?)\b/],
   ['one_visit', /one[- ]time|just once|single (visit|treatment|service)|one visit|just the one/],
   // Needs words that turn the plan down: "the quarterly plan is too expensive" is a price objection.
   ['no_plan', /(don'?t|do not|not|no|never) (want|interested in|looking for|need|sign(ing)? up for|do) (a |any |the |to )?(plan|contract|commitment|commit|recurring|quarterly|annual|subscription|membership|ongoing)|(don'?t|do not|won'?t|not going to|can'?t) (want to )?(commit|sign (a |any )?contract|prepay|pay (up ?front|in advance))|no (contracts?|commitments?|plans?)\b/],
@@ -299,6 +300,12 @@ async function loadChunksByLead(conn, leads, now) {
 // Leads with an active visit linked to THAT lead by exact record evidence
 // (lead-related-visits.js, the same rule as the admin lead card). A visit for
 // another inquiry of the same customer never counts.
+// A checkout slot hold is not a booking: the customer may abandon it. Claiming
+// it sets customer_id and clears reservation_expires_at (20260423000001).
+function notUnclaimedHold() {
+  this.whereNull('ss.reservation_expires_at');
+}
+
 // A visit booked by phone on the call: call-recording-processor.js records it as
 // an appointment_booked activity with metadata.scheduledServiceId and leaves the
 // lead's status and converted_at as they were. Same customer ownership check as
@@ -306,6 +313,7 @@ async function loadChunksByLead(conn, leads, now) {
 function phoneBookedVisit(conn, lead) {
   return conn('scheduled_services as ss')
     .whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES)
+    .where(notUnclaimedHold)
     .whereExists(conn('lead_activities as la').select(conn.raw('1'))
       .where('la.lead_id', lead.id)
       .where('la.activity_type', 'appointment_booked')
@@ -318,7 +326,7 @@ async function bookedLeadIds(conn, leads) {
   const out = new Set();
   for (const l of leads) {
     if (!LOST_STATUSES.has(l.status) || l.converted_at) continue; // only these can get a reason
-    const active = await leadLinkedVisits(conn, l).whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES).first('ss.id')
+    const active = await leadLinkedVisits(conn, l).whereNotIn('ss.status', DEFAULT_EXCLUDE_STATUSES).where(notUnclaimedHold).first('ss.id')
       || await phoneBookedVisit(conn, l);
     if (active) out.add(l.id);
   }
