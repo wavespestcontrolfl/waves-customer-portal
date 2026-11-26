@@ -479,7 +479,7 @@ async function restockActionPlan(conn, request, product, input, guard) {
   const secondReceive = validateTransition(request, input.action, guard);
   if (input.action !== 'receive') return { secondReceive };
   const quantity = input.quantity ?? await require('./procurement/order-dispatch').orderedQuantityFor(conn, request.id)
-    ?? await require('./procurement/order-dispatch').emailOrderedQuantityFor(conn, request.id) // legacy rows from the removed email path; prod had 0 on 2026-11-26
+    ?? await require('./procurement/vendor-order-email').emailOrderedQuantityFor(conn, request.id)
     ?? numberOrNull(request.requested_quantity);
   if (!(quantity > 0)) throw inventoryError('Receive quantity is required');
   const enteredUnit = supportedUnit(input.unit || request.unit || product.inventory_unit);

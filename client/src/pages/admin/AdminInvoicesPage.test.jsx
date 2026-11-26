@@ -18,6 +18,7 @@ import {
   isAllowedAttachmentFile,
   noticeCandidateLabel,
   noticeMemoLine,
+  noticeEmailTag,
   orderNoticeCandidates,
   persistedSendDisposition,
   sendErrorMessage,
@@ -53,6 +54,8 @@ describe("AdminInvoicesPage Zelle notice candidates", () => {
     expect(noticeMemoLine({ source: "capitalone_zelle", memo: null })).toBe("No memo");
     expect(noticeMemoLine({ source: "capitalone_zelle", memo: "WPC-2026-0001" })).toBe("Memo: WPC-2026-0001");
     // A legacy retired-email notice has no memo: its source email's subject tells it apart.
+    expect(noticeEmailTag({ source: "capitalone_zelle", email_id: "11111111-2222-4333-8444-555555abcdef" })).toBe(" · email …abcdef");
+    expect(noticeEmailTag({ source: "plaid_zelle", email_id: null })).toBe("");
     expect(noticeMemoLine({ source: "capitalone_zelle", memo: null, email_subject: "Someone sent you money with Zelle" })).toBe("Email: Someone sent you money with Zelle");
   });
 });

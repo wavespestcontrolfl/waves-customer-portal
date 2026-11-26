@@ -167,7 +167,7 @@ test('placed: claim first, then ledger placed + request ordered + audit, no bell
   expect(notify).not.toHaveBeenCalled();
 });
 
-test.each(['sending', 'sent'])('a request whose order email to the vendor is %s is never claimed for the bot (legacy email rows)', async (status) => {
+test.each(['sending', 'sent'])('a request whose order email to the vendor is %s is never claimed for the bot (GATE_SITEONE_EMAIL_ORDER)', async (status) => {
   mockState.emailOrder = { id: 'email-1', status };
   const a = mockAdapter();
   expect(await run(a)).toEqual({ requestId: 'req-1', skipped: 'email_order' });

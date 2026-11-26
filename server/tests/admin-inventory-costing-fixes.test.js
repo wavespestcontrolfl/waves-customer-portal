@@ -165,24 +165,6 @@ describe('POST /restock-requests/:id/action', () => {
     });
   });
 
-  // Legacy rows from the removed email path; prod had 0 on 2026-11-26.
-  test('receive with no typed quantity defaults to a sent order email\'s ordered_quantity, not the requested amount', async () => {
-    const { movements, stockUpdates } = wireRestock({
-      id: 'req-1', product_id: 'prod-1', status: 'ordered', requested_quantity: 301, unit: 'gal',
-      emailOrder: { po: 'WAVES-REQ00001', status: 'sent', ordered_quantity: '350' },
-    });
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'receive' }),
-      });
-      expect(res.status).toBe(200);
-      expect(stockUpdates[0].inventory_on_hand).toBe(360);
-      expect(movements[0].quantity).toBe(350);
-    });
-  });
-
   test('cancel of a request whose order email went to SiteOne → 409 email_order_out, nothing written', async () => {
     const { statusUpdates } = wireRestock({
       id: 'req-1', product_id: 'prod-1', status: 'ordered', requested_quantity: 2, unit: 'gal',

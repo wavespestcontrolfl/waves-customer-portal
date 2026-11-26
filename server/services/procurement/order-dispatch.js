@@ -845,22 +845,12 @@ async function prefetchVendorLogin(conn, requestId, registry, deadAdapters = nul
 // rung by a gated sweep) — retired in the claim transaction, and when the
 // claim CANCELS the request: a bell telling staff to buy a need that is gone
 // is an unnecessary purchase (Codex r20 P1, r24 P1).
-// Legacy rows from the removed email path; prod had 0 on 2026-11-26. Read-only guard, no email is ever sent now.
-// An order EMAILED to the vendor for this request (vendor_order_emails):
+// An order EMAILED to the vendor for this request (vendor_order_emails, GATE_SITEONE_EMAIL_ORDER):
 // sent, or sending with the outcome unknown. The vendor has the order, or may: nothing may claim
 // it for the bot, tell staff to order it by hand, or cancel the request. The one read for the
 // claim, the bells, the manual cancel guard and the reorder sweep's stand-down. null = none.
 function emailOrderOutFor(conn, requestId) {
   return conn('vendor_order_emails').where({ restock_request_id: requestId }).whereIn('status', ['sending', 'sent']).first('po', 'status');
-}
-
-// Legacy rows from the removed email path; prod had 0 on 2026-11-26. What a SENT (or unconfirmed
-// 'sending') order email's packages hold, in the request's own unit: the Receive default when no
-// quantity is typed (301 lb asked of a 50 lb pack is 7 packages, and 350 lb arrives). null = none.
-async function emailOrderedQuantityFor(conn, requestId) {
-  const row = await conn('vendor_order_emails').where({ restock_request_id: requestId }).whereIn('status', ['sent', 'sending']).first('ordered_quantity');
-  const quantity = row && row.ordered_quantity != null ? Number(row.ordered_quantity) : null;
-  return quantity > 0 ? quantity : null;
 }
 
 function retireRequestBell(trx, requestId) {
@@ -988,7 +978,7 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) return { skipped: 'not_found' };
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
-  // Legacy rows from the removed email path; prod had 0 on 2026-11-26. An order EMAILED to the vendor (vendor_order_emails) for this
+  // An order EMAILED to the vendor (vendor_order_emails, GATE_SITEONE_EMAIL_ORDER) for this
   // request — sent, or sending with the outcome unknown — means the vendor has the order
   // (or may): never claim it for the bot as well. The email claim takes this same request
   // row lock, so the two cannot both pass.
@@ -1749,7 +1739,6 @@ module.exports = {
   assertNoLiveAutoOrder,
   assertManualActionAllowed,
   emailOrderOutFor,
-  emailOrderedQuantityFor,
   orderedQuantityFor,
   AUTO_ORDER_GATE: GATE,
   _internals: { siteoneRunsOnMac, macWatchdog, macStaleMs, poNumberFor, requestAdapterKey, adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },
