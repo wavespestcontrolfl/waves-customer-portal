@@ -316,8 +316,8 @@ customer's message by this rule.
    closes, edits and rings no bell and sends no text, email or call; the verdicts are scored against what staff did for a week before
    any live mode is built. It reads what came before the bell and every record created after it (texts, calls, visits, estimates,
    email-thread messages). Plain rules go first: an unknown missed call with no voicemail, a text-back already sent and 24 hours of
-   silence is `nothing_to_answer`; a delivered staff text, a sent staff email or a call a person answered (the call's `answered_by`,
-   never seconds alone) after the bell is `answered`, proof = that record. A bell that says we owe a quote, a callback or a promise
+   silence is `nothing_to_answer`; a delivered staff text, a sent staff email or a call a person answered, each by the repo's own witness
+   definitions above (never `message_type` manual or seconds alone), after the bell is `answered`, proof = that record. A bell that says we owe a quote, a callback or a promise
    (title "we still owe", or `doneWhen: 'promise_fulfilled'`) is closed only by that rule or a sent estimate, never by the model.
    Everything else is ONE Claude call (lane `alert_clear_agent`, tier `ALERT_CLEAR`, Sonnet class, paid API, 150 a day at most). The
    model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or

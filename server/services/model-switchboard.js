@@ -80,7 +80,7 @@ const SELECTORS = [
   { key: 'LAWN_CHALLENGE', env: 'MODEL_LAWN_CHALLENGE', description: 'Lawn diagnostic adversarial challenge', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'LIVE_CALL', env: 'MODEL_LIVE_CALL', description: 'Live-call upset-caller check (owner 2026-11-16: Haiku 5.5; dark behind GATE_LIVE_CALL_UPSET_ALERT)', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'DEAL_END_DATE', env: 'MODEL_DEAL_END_DATE', description: 'SiteOne deals bell offer end date (owner 2026-11-19: Haiku 5.5; dark behind GATE_SITEONE_DEAL_AI_END_DATE)', accepts: { providers: ['anthropic'], cap: 'text' } },
-  { key: 'ALERT_CLEAR', env: 'MODEL_ALERT_CLEAR', description: 'Alert clear-up agent (owner 2026-11-26: Sonnet 5.5 on the paid API; shadow only behind GATE_ALERT_CLEAR_AGENT)', accepts: { providers: ['anthropic'], cap: 'text' } },
+  { key: 'ALERT_CLEAR', env: 'MODEL_ALERT_CLEAR', description: 'Alert clear-up agent (owner 2026-11-26: Sonnet 5.5 on the paid API; shadow only behind GATE_ALERT_CLEAR_AGENT)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'VOICE_JUDGE', env: 'MODEL_VOICE_JUDGE', description: 'Voice relay eval judge (pinned: moving it re-baselines the voice agent scorecard)', accepts: { providers: ['anthropic'], cap: 'text' } },
   // deep: true — its only call sites are the newsletterWriter policy through
   // llm/call.js, whose wire cap gives always-thinking models (Opus 5.5, Fable)

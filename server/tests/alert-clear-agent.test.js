@@ -29,18 +29,24 @@ const ev = (over = {}) => ({
   type: 'sms', id: 'sms-1', key: 'sms:sms-1', at: after(30), inbound: false, proof: null, draft: false, line: 'WAVES AUTOMATED TEXT (reminder): hi', ...over,
 });
 const staffText = (over = {}) => ev({ id: 'sms-9', key: 'sms:sms-9', proof: 'staff_text', line: 'WAVES STAFF TEXT: on it', ...over });
-const timelineOf = (events = [], over = {}) => ({ alertAt: ALERT_AT, complete: true, customerKnown: true, ctx: ['CUSTOMER TEXT: Can you come Friday?'], events, call: null, reply: null, ...over });
+const timelineOf = (events = [], over = {}) => ({ alertAt: ALERT_AT, bellAt: ALERT_AT, trigger: 'sms:SM1', complete: true, customerKnown: true, ctx: ['CUSTOMER TEXT: Can you come Friday?'], events, call: null, reply: null, ...over });
 
 const makeDeps = (over = {}) => ({
+  cursor: jest.fn(async () => null),
+  saveCursor: jest.fn(async () => {}),
   candidates: jest.fn(async () => [alertRow()]),
   lastVerdicts: jest.fn(async () => new Map()),
   aiCountToday: jest.fn(async () => 0),
   timeline: jest.fn(async () => timelineOf()),
   judge: jest.fn(async () => ({ outcome: 'still_owed', why: 'no reply yet', proof: null, model: 'm' })),
   save: jest.fn(async () => {}),
+  reserve: jest.fn(async () => 'res-1'),
+  finish: jest.fn(async () => {}),
+  release: jest.fn(async () => {}),
   ...over,
 });
-const saved = (deps) => deps.save.mock.calls.map(([row]) => row);
+// Every verdict written: plain-rule rows (save) and finished model rows (finish).
+const saved = (deps) => [...deps.save.mock.calls.map(([row]) => row), ...deps.finish.mock.calls.map(([, row]) => row)];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -143,25 +149,32 @@ describe('rule 2: a person answered after the alert', () => {
     const { deps } = await answerOf([staffText({ at: after(-5) })]);
     expect(deps.judge).toHaveBeenCalledTimes(1);
   });
+
+  test('a text is a person\'s only when the caller says so (message_type manual alone is not enough)', () => {
+    const row = { id: 'x', direction: 'outbound', message_type: 'manual', status: 'delivered', created_at: after(5), message_body: 'hi' };
+    expect(agent.smsEvent(row, false).proof).toBeNull();
+    expect(agent.smsEvent(row, true).proof).toBe('staff_text');
+    expect(agent.smsEvent({ ...row, direction: 'inbound' }, false).proof).toBeNull();
+  });
 });
 
 describe('what counts as a person on a call', () => {
-  const call = (over) => ({ answered_by: null, duration_seconds: 90, direction: 'outbound', transcription: '', call_summary: '', ...over });
+  const row = (over) => ({ id: 'c1', created_at: after(1), ended_at: after(3), direction: 'outbound', answered_by: null, person_back: false, human_in: false, ...over });
 
-  test.each([
-    ['human', true], ['Human', true], ['voicemail', false], ['voice_agent', false], ['missed', false], ['machine_start', false],
-  ])('answered_by %s -> %s (seconds never decide)', (by, expected) => {
-    expect(agent.isHumanCall(call({ answered_by: by, duration_seconds: 300 }))).toBe(expected);
+  test('only the repo predicates make a call a person\'s: a staff bridge call back, or an inbound call a human answered', () => {
+    expect(agent.callEvent(row({ person_back: true })).proof).toBe('human_call');
+    expect(agent.callEvent(row({ direction: 'inbound', human_in: true, answered_by: 'human' })).proof).toBe('human_call');
   });
 
-  test('no answered_by: 18 seconds is not enough, and 30 seconds with no two-sided record is not enough', () => {
-    expect(agent.isHumanCall(call({ duration_seconds: 18, transcription: 'Agent: hi\nCaller: hello' }))).toBe(false);
-    expect(agent.isHumanCall(call({ duration_seconds: 30 }))).toBe(false);
-    expect(agent.isHumanCall(call({ duration_seconds: 30, call_summary: 'Left a voicemail for the customer.' }))).toBe(false);
+  test('seconds, a voicemail answer or a machine never make one', () => {
+    expect(agent.callEvent(row({ duration_seconds: 300 })).proof).toBeNull();
+    expect(agent.callEvent(row({ answered_by: 'voicemail' })).proof).toBeNull();
+    expect(agent.callEvent(row({ answered_by: 'voice_agent' })).proof).toBeNull();
   });
 
-  test('no answered_by: over 20 seconds and a two-speaker transcript counts', () => {
-    expect(agent.isHumanCall(call({ duration_seconds: 45, transcription: 'Agent: Waves.\nCaller: Hi, about Friday.' }))).toBe(true);
+  test('a call with no end stamp has no trustworthy end: no proof; with one, the event is dated by when it ended', () => {
+    expect(agent.callEvent(row({ person_back: true, ended_at: null })).proof).toBeNull();
+    expect(agent.callEvent(row({ person_back: true })).at).toEqual(after(3));
   });
 });
 
@@ -201,7 +214,7 @@ describe('the model verdict and the proof check', () => {
     await agent.runAlertClearAgent({ now: NOW, deps });
     return { deps, row: saved(deps)[0] };
   };
-  const booking = ev({ type: 'visit', id: 'v1', key: 'visit:v1:booked', proof: 'booking', line: 'VISIT created after the alert' });
+  const booking = ev({ type: 'visit', id: 'v1', key: 'visit:v1:booked', proof: 'booking', at: after(45), line: 'VISIT created after the alert' });
 
   test('answered with a real record after the alert is kept, with that record as proof', async () => {
     const { row } = await runWith([ev(), booking], { outcome: 'answered', why: 'visit booked for Friday', proof: 'E2' });
@@ -263,9 +276,10 @@ describe('errors fail safe', () => {
     expect(rows[0]).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'ai_error' });
   });
 
-  test('a missing API key writes no row', async () => {
-    const { rows } = await run(async () => { throw new agent.NoKeyError('no key'); });
+  test('a missing API key writes no row and gives the reservation back', async () => {
+    const { rows, deps } = await run(async () => { throw new agent.NoKeyError('no key'); });
     expect(rows).toHaveLength(0);
+    expect(deps.release).toHaveBeenCalledWith('res-1');
   });
 
   test('an incomplete timeline is not judged (a failed read is not "nothing happened")', async () => {
@@ -302,10 +316,12 @@ describe('fingerprint skip', () => {
   test('same after-events: judged once; a new event: judged again', async () => {
     const rows = new Map();
     let events = [ev()];
+    const remember = async (row) => { rows.set(row.notification_id, { ...row, created_at: NOW }); };
     const deps = makeDeps({
       timeline: async () => timelineOf(events),
       lastVerdicts: async () => new Map(rows),
-      save: jest.fn(async (row) => { rows.set(row.notification_id, { ...row, created_at: NOW }); }),
+      save: jest.fn(remember),
+      finish: jest.fn(async (_id, row) => remember(row)),
     });
     await agent.runAlertClearAgent({ now: NOW, deps });
     const again = await agent.runAlertClearAgent({ now: new Date(NOW.getTime() + 600000), deps });
@@ -394,5 +410,149 @@ describe('the model call', () => {
     await agent.runAlertClearAgent({ now: NOW, deps });
     expect(mockCreate).not.toHaveBeenCalled();
     expect(deps.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('P0: nothing secret goes to the model', () => {
+  const secretLine = 'WAVES AUTOMATED TEXT (receipt): your receipt https://pay.wavespestcontrol.com/r/Zk3pQ9xV7mN2bT8cL4wH5yJ6 and portal https://wavespestcontrol.com/portal/9f8e7d6c5b4a39281706f5e4d3c2b1a0 password: hunter2secret';
+
+  test('bearer links, tokens and passwords are removed before the cut, and card numbers are masked', () => {
+    const text = agent.clean('Pay here https://wavespestcontrol.com/pay/Zk3pQ9xV7mN2bT8cL4wH5yJ6 card 4242 4242 4242 4242 PIN is 4821');
+    expect(text).not.toMatch(/Zk3pQ9xV7mN2bT8cL4wH5yJ6/);
+    expect(text).not.toMatch(/4242 4242 4242 4242/);
+    expect(text).not.toMatch(/4821/);
+  });
+
+  test('the whole input text is clean even when a line was built without clean()', () => {
+    const input = agent.judgeInput(alertRow({ title: 'Text https://wavespestcontrol.com/estimate/9f8e7d6c5b4a39281706f5e4d3c2b1a0' }),
+      timelineOf([ev({ line: secretLine })], { ctx: ['CUSTOMER TEXT: my link https://wavespestcontrol.com/portal/9f8e7d6c5b4a39281706f5e4d3c2b1a0'] }), agent.computeFacts(timelineOf()));
+    expect(input).not.toMatch(/Zk3pQ9xV7mN2bT8cL4wH5yJ6|9f8e7d6c5b4a39281706f5e4d3c2b1a0|hunter2secret/);
+    expect(input).toMatch(/FIXED FACTS/);
+  });
+
+  test('an automated text with a receipt link is built with the link already gone', () => {
+    const line = agent.smsEvent({ id: 's', direction: 'outbound', message_type: 'receipt', status: 'sent', created_at: after(5), message_body: 'Receipt https://wavespestcontrol.com/receipt/Zk3pQ9xV7mN2bT8cL4wH5yJ6 thanks' }).line;
+    expect(line).not.toMatch(/Zk3pQ9xV7mN2bT8cL4wH5yJ6/);
+  });
+});
+
+describe('P0: the budget is reserved before the paid call', () => {
+  test('the attempt row is written first, the call second, the finish third', async () => {
+    const order = [];
+    const deps = makeDeps({
+      reserve: jest.fn(async () => { order.push('reserve'); return 'res-9'; }),
+      judge: jest.fn(async () => { order.push('judge'); return { outcome: 'still_owed', why: 'no reply yet', proof: null, model: 'm' }; }),
+      finish: jest.fn(async () => { order.push('finish'); }),
+    });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(order).toEqual(['reserve', 'judge', 'finish']);
+    expect(deps.reserve.mock.calls[0][0]).toMatchObject({ source: 'ai', rule: 'ai_reserved', outcome: 'still_owed' });
+    expect(deps.finish.mock.calls[0][0]).toBe('res-9');
+  });
+
+  test('a failed reservation means no paid call and the budget is given back', async () => {
+    const deps = makeDeps({ reserve: jest.fn(async () => { throw new Error('insert failed'); }) });
+    const out = await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(deps.judge).not.toHaveBeenCalled();
+    expect(out.skipped).toBe(1);
+  });
+
+  test('a failed finish keeps the reservation row, so the paid call is still counted; the retry waits an hour', async () => {
+    const deps = makeDeps({ finish: jest.fn(async () => { throw new Error('update failed'); }) });
+    const out = await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(out.unsaved).toBe(1);
+    expect(deps.release).not.toHaveBeenCalled();
+    const fp = agent.fingerprintOf(alertRow(), timelineOf(), NOW);
+    const row = (age) => ({ fingerprint: fp, rule: 'ai_reserved', created_at: new Date(NOW.getTime() - age) });
+    expect(agent.unchanged(row(5 * 60 * 1000), fp, NOW)).toBe(true);
+    expect(agent.unchanged(row(61 * 60 * 1000), fp, NOW)).toBe(false);
+  });
+
+  test('reservations count in the day cap: with the count already at the cap, even a retry cannot pay', async () => {
+    process.env.ALERT_CLEAR_AGENT_DAILY_CAP = '3';
+    const deps = makeDeps({ aiCountToday: async () => 3 });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(deps.reserve).not.toHaveBeenCalled();
+    expect(deps.judge).not.toHaveBeenCalled();
+  });
+});
+
+describe('fingerprint: re-rings and state changes get a new look', () => {
+  const fp = (alert, tl) => agent.fingerprintOf(alert, tl, NOW);
+  test('a new ring, a new triggering message or a changed record state changes it', () => {
+    const base = fp(alertRow(), timelineOf([ev()]));
+    expect(fp(alertRow(), timelineOf([ev()], { bellAt: after(90) }))).not.toBe(base);
+    expect(fp(alertRow(), timelineOf([ev()], { trigger: 'sms:SM2' }))).not.toBe(base);
+    expect(fp(alertRow(), timelineOf([ev({ key: 'sms:sms-1:delivered:n' })]))).not.toBe(base);
+    expect(fp(alertRow(), timelineOf([ev()]))).toBe(base);
+  });
+});
+
+describe('row limits: proof and fingerprint see every row, only the excerpts are cut', () => {
+  test('an answering record behind many other rows is still found by the rule', async () => {
+    const lots = Array.from({ length: 80 }, (_x, i) => ev({ id: `a${i}`, key: `sms:a${i}`, at: after(i + 1) }));
+    const deps = makeDeps({ timeline: async () => timelineOf([...lots, staffText({ at: after(200) })]) });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(saved(deps)[0]).toMatchObject({ outcome: 'answered', rule: 'staff_text', proof_id: 'sms-9' });
+  });
+
+  test('the model sees every proof record and only the latest context lines', () => {
+    const lots = Array.from({ length: 80 }, (_x, i) => ev({ id: `a${i}`, key: `sms:a${i}`, at: after(i + 1), line: `AUTO ${i}` }));
+    const booking = ev({ type: 'visit', id: 'v1', key: 'visit:v1', proof: 'booking', at: after(5), line: 'VISIT early booking' });
+    const input = agent.judgeInput(alertRow(), timelineOf([...lots, booking]), agent.computeFacts(timelineOf([booking])));
+    expect(input).toMatch(/VISIT early booking/);
+    expect(input).toMatch(/AUTO 79/);
+    expect(input).not.toMatch(/AUTO 3\b/);
+    expect((input.match(/^E\d+ \|/gm) || []).length).toBe(13);
+  });
+});
+
+describe('the booking requirement holds on every path', () => {
+  const reply = { lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?' };
+  const run = async (events, extra = {}, judge) => {
+    const deps = makeDeps({ timeline: async () => timelineOf(events, { reply, ...extra }), ...(judge ? { judge } : {}) });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    return { deps, row: saved(deps)[0] };
+  };
+  const booking = ev({ type: 'visit', id: 'v1', key: 'visit:v1:booked:pending', proof: 'booking', at: after(45), line: 'VISIT created' });
+
+  test('a plain-rule staff text after a bare yes to an offer is still_owed until a booking exists', async () => {
+    const none = await run([staffText()]);
+    expect(none.row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
+    const booked = await run([staffText(), booking]);
+    expect(booked.row.outcome).toBe('answered');
+  });
+
+  test('a model answered with a sent estimate is held the same way', async () => {
+    const estimate = ev({ type: 'estimate', id: 'es-1', key: 'estimate:es-1:sent', proof: 'estimate_sent', at: after(40), line: 'ESTIMATE handed' });
+    const { row } = await run([estimate], {}, jest.fn(async () => ({ outcome: 'answered', why: 'estimate sent', proof: 'E1', model: 'm' })));
+    expect(row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
+  });
+});
+
+describe('open alerts are paged with a rotating cursor', () => {
+  const page = (n, from = 0) => Array.from({ length: n }, (_x, i) => alertRow({ id: `cccccccc-cccc-4ccc-8ccc-${String(from + i).padStart(12, '0')}` }));
+
+  test('the cursor is read, passed to the page query, and saved as the last alert read when the page is full', async () => {
+    const alerts = page(agent.MAX_ALERTS);
+    const deps = makeDeps({ cursor: async () => 'cccccccc-cccc-4ccc-8ccc-000000000000', candidates: jest.fn(async () => alerts), timeline: async () => timelineOf([staffText()]) });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(deps.candidates).toHaveBeenCalledWith('cccccccc-cccc-4ccc-8ccc-000000000000');
+    expect(deps.saveCursor).toHaveBeenCalledWith(alerts[alerts.length - 1].id);
+  });
+
+  test('a short page covered everything: the cursor resets', async () => {
+    const deps = makeDeps({ candidates: async () => page(3), timeline: async () => timelineOf([staffText()]) });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(deps.saveCursor).toHaveBeenCalledWith(null);
+  });
+});
+
+describe('the model tier is selectable in the switchboard', () => {
+  test('ALERT_CLEAR declares accepts.deep, as every selector whose default requires deep does, and its default is accepted', () => {
+    const { SELECTORS } = require('../services/model-switchboard');
+    const selector = SELECTORS.find((x) => x.key === 'ALERT_CLEAR');
+    expect(selector.accepts).toMatchObject({ providers: ['anthropic'], cap: 'text', deep: true });
+    expect(MODELS.MODEL_CATALOG[MODELS.ALERT_CLEAR]).toMatchObject({ provider: 'anthropic', requires: 'deep' });
   });
 });
