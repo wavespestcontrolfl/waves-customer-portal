@@ -2024,7 +2024,7 @@ const SPECIALTY = {
         warrantyRisk: 'high_for_long_warranty',
         warnings: [
           'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120).',
-          'Do not attach long repair-and-retreat warranty without admin approval.',
+          'Do not attach long retreatment warranty without admin approval.',
         ],
       },
       // The bottle is Atticus Talak 7.9 F, 96 fl oz (owner 2026-10-24: "swap talstar
@@ -2047,7 +2047,7 @@ const SPECIALTY = {
         warrantyRisk: 'high_for_long_warranty',
         warnings: [
           'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120).',
-          'Do not attach long repair-and-retreat warranty without admin approval.',
+          'Do not attach long retreatment warranty without admin approval.',
         ],
       },
     },
@@ -2066,6 +2066,11 @@ const SPECIALTY = {
         manualReviewReason: 'high_rate_termite_trenching_selected',
       },
     },
+    // Owner ruling 2026-11-25 ("retreatment only until insurance confirms a cap"): Waves no longer sells termite
+    // damage-REPAIR coverage on new work. The tier KEYS three_year_repair_retreat / five_year_repair_retreat stay
+    // (saved estimates replay by key) and so do their price adders; what they promise is retreatment only: we
+    // re-treat at no charge if termites return within the term, with no repair of damage. Repair coverage returns
+    // only with an insurance-confirmed dollar cap. db-bridge rewrites any stored label that still says repair.
     warrantyTiers: {
       none: {
         label: 'No extended warranty',
@@ -2080,14 +2085,14 @@ const SPECIALTY = {
         requiresManualReview: false,
       },
       three_year_repair_retreat: {
-        label: '3-Year Repair + Retreat Warranty',
+        label: '3-Year Retreat Warranty',
         priceAdderPct: 0.15,
         allowedChemistryTypes: ['non_repellent'],
         repellentRequiresManualReview: true,
         manualReviewReason: 'long_warranty_on_repellent_termiticide_requires_review',
       },
       five_year_repair_retreat: {
-        label: '5-Year Repair + Retreat Warranty',
+        label: '5-Year Retreat Warranty',
         priceAdderPct: 0.25,
         allowedChemistryTypes: ['non_repellent'],
         repellentQuoteRequired: true,

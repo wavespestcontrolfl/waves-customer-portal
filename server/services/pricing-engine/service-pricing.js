@@ -7235,7 +7235,7 @@ function priceTrenching(property = {}, options = {}, replay) {
   const repellentWarrantyRisk = !chemistryAllowedForWarranty && product.chemistryType === 'repellent_pyrethroid';
   let warrantyQuoteRequired = false;
   if (repellentWarrantyRisk) {
-    warningList.push('Long repair-and-retreat warranty on bifenthrin is high risk and requires admin approval or custom quote.');
+    warningList.push('Long retreatment warranty on bifenthrin is high risk and requires admin approval or custom quote.');
     if (warrantyConfig.repellentQuoteRequired && !(
       options.allowWarrantyOverride || options.managerOverride || options.customManagerOverride
     )) {

@@ -242,14 +242,14 @@ function renderTermiteComparisonPdf(content) {
       );
       doc.font('Helvetica').fontSize(10).fillColor(BODY).text(
         ratesDescendWithTerm
-          ? 'Either ownership option can carry a termite bond — a repair warranty that rides the same quarterly station check. Pick the term on your estimate; longer terms lock a lower per-application rate, fixed for the term you pick.'
-          : 'Either ownership option can carry a termite bond — a repair warranty that rides the same quarterly station check. Pick the term on your estimate; each term’s per-application rate is fixed for the term you pick.',
+          ? 'Either ownership option can carry a termite bond — a retreatment warranty that rides the same quarterly station check. Pick the term on your estimate; longer terms lock a lower per-application rate, fixed for the term you pick.'
+          : 'Either ownership option can carry a termite bond — a retreatment warranty that rides the same quarterly station check. Pick the term on your estimate; each term’s per-application rate is fixed for the term you pick.',
         L, doc.y, { width: W, lineGap: 1.5 },
       );
       doc.moveDown(0.4);
       bullets(doc, [
         ...bondOptions.map((opt) => `${opt.label} term — adds ${money(opt.perApp)} per application`),
-        'Repair of new damage from covered termites, up to the coverage terms written in your signed bond.',
+        'Free retreatment if covered termites return during the term, as written in your signed bond. New bonds do not repair damage.',
         'Transferable to a new homeowner ($250 + transfer inspection) — the buyer inherits active termite protection with its documented history.',
       ]);
       noteParagraph(doc, 'Your signed termite agreement controls the covered structures, covered organisms, warranty type, renewal, limitations, and exclusions.');

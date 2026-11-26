@@ -92,6 +92,24 @@ function mergePlainObject(target, value) {
   Object.assign(target, value);
 }
 
+// Termite trenching copy is retreatment only (owner ruling 2026-11-25; see SPECIALTY.trenching.warrantyTiers). A
+// stored pricing_config row written before that ruling can carry a tier label or a product warning that still
+// says repair. Tier labels are the code's own, by tier key (a stored label never wins); warnings are rewritten.
+const TRENCHING_TIER_LABELS = Object.fromEntries(
+  Object.entries(constants.SPECIALTY.trenching.warrantyTiers).map(([key, tier]) => [key, tier.label]),
+);
+
+function applyRetreatOnlyTrenchingCopy(trenching) {
+  for (const [key, tier] of Object.entries(trenching.warrantyTiers || {})) {
+    if (tier && TRENCHING_TIER_LABELS[key]) tier.label = TRENCHING_TIER_LABELS[key];
+  }
+  for (const product of Object.values(trenching.products || {})) {
+    if (Array.isArray(product?.warnings)) {
+      product.warnings = product.warnings.map((w) => String(w).replace(/repair(\s*\+\s*|[\s-]+and[\s-]+|\s*&\s*)retreat\w*/gi, 'retreatment'));
+    }
+  }
+}
+
 function deepMergePlainObject(target, value) {
   if (!target || typeof target !== 'object' || Array.isArray(target)) return;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return;
@@ -2198,6 +2216,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       if (ot.warrantyTiers || ot.warranty_tiers) {
         mergePlainObject(constants.SPECIALTY.trenching.warrantyTiers, ot.warrantyTiers || ot.warranty_tiers);
       }
+      applyRetreatOnlyTrenchingCopy(constants.SPECIALTY.trenching);
     }
     if (config.onetime_boracare) {
       const bc = config.onetime_boracare;
