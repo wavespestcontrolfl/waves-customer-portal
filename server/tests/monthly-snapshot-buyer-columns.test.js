@@ -152,12 +152,11 @@ describe('migration 20261126120000', () => {
     return { knex, added, dropped, updates };
   }
 
-  test('adds the field wage and the ten snapshot columns, all nullable decimals, and seeds the owner\'s $25 once', async () => {
+  test('adds the field wage and the nine snapshot columns, all nullable decimals, and seeds the owner\'s $25 once', async () => {
     const { knex, added, updates } = makeKnex();
     await migration.up(knex);
     expect(added).toEqual([
       'company_financials.owner_field_hourly_rate 8,2',
-      'monthly_financial_snapshots.book_gross_profit 12,2',
       'monthly_financial_snapshots.book_gross_margin_pct 7,2',
       'monthly_financial_snapshots.owner_field_hours 8,2',
       'monthly_financial_snapshots.owner_field_allowance 12,2',
@@ -192,7 +191,27 @@ describe('migration 20261126120000', () => {
     ];
     const { knex, dropped } = makeKnex(all);
     await migration.down(knex);
-    expect(dropped).toHaveLength(11);
+    expect(dropped).toHaveLength(10);
     expect(dropped[dropped.length - 1]).toBe('company_financials.owner_field_hourly_rate');
+  });
+});
+
+describe('migration 20261126130000', () => {
+  const migration = require('../models/migrations/20261126130000_snapshot_book_gross_profit');
+  test('adds book_gross_profit once as a nullable decimal; down drops it', async () => {
+    const have = new Set();
+    const added = [];
+    const knex = { schema: {
+      hasColumn: async (table, name) => have.has(`${table}.${name}`),
+      alterTable: async (table, cb) => cb({
+        decimal: (name, p, sc) => { added.push(`${table}.${name} ${p},${sc}`); have.add(`${table}.${name}`); return { nullable: () => {} }; },
+        dropColumn: (name) => { have.delete(`${table}.${name}`); },
+      }),
+    } };
+    await migration.up(knex);
+    await migration.up(knex);
+    expect(added).toEqual(['monthly_financial_snapshots.book_gross_profit 12,2']);
+    await migration.down(knex);
+    expect(have.size).toBe(0);
   });
 });
