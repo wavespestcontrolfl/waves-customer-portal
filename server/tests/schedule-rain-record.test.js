@@ -747,10 +747,10 @@ describe('what a proposal stores for the replay and the grade', () => {
 
   test('a day move and a call list store the next work day\'s work hours it judged', async () => {
     const move = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()]), read: jest.fn(async () => hoursFor({ ...ALL_DAY, [THU]: [8, 9] })) });
-    expect(move.proposals[0]).toMatchObject({ decision: 'day_move', next_day: THU, next_day_chances: [80, 80, 10, 10, 10, 10, 10, 10, 10] });
+    expect(move.proposals[0]).toMatchObject({ decision: 'day_move', next_day: THU, next_day_chances: [80, 80, 10, 10, 10, 10, 10, 10, 10, 10, 10] });
     n = 0;
     const call = await run({ now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()]), read: jest.fn(async () => hoursFor({ ...ALL_DAY, [THU]: 'all' })) });
-    expect(call.proposals[0]).toMatchObject({ decision: 'call_list', next_day: THU, next_day_chances: Array(9).fill(80) });
+    expect(call.proposals[0]).toMatchObject({ decision: 'call_list', next_day: THU, next_day_chances: Array(11).fill(80) });
   });
 
   test('an error proposal keeps its gauges as well as its span', async () => {

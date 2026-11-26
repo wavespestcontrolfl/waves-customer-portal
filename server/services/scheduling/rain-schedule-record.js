@@ -292,9 +292,11 @@ async function proposeFor(row, ctx) {
   // A scan with no work day in it is unresolved, never a call list: the day is not frozen on it (see planDay).
   if (exhausted) return { ...base, decision: 'none', reason: 'no_work_day_in_scan' };
   // The next work day's work hours the search judged, raw, beside the decision that used them.
-  const nextDay = { next_day: date, next_day_chances: workHours.workHourChances(hourly, date) };
-  // No dry slot today and none on the next work day: the visit goes to the office call list (no text).
-  if (!target) return unread ? { ...base, decision: 'none', reason: 'unread_forecast' } : { ...base, ...nextDay, decision: 'call_list', reason: 'no_dry_slot' };
+  // Work hours plus drying hours after close, so a late candidate's drying hours are kept too.
+  const nextDay = { next_day: date, next_day_chances: workHours.dayChances(hourly, date, RAIN_AFTER_HOURS) };
+  // No dry slot today and none on the next work day: the visit goes to the office call list (no text). Unread keeps the
+  // next day's hours too, so an unresolved visit can be replayed.
+  if (!target) return unread ? { ...base, ...nextDay, decision: 'none', reason: 'unread_forecast' } : { ...base, ...nextDay, decision: 'call_list', reason: 'no_dry_slot' };
   const plans = planMovesOf(row.visit, await ctx.seriesRows(), target.date);
   if (!open) return { ...base, ...nextDay, decision: 'cap', would: 'day_move', to_date: target.date, to_start: target.start, ...plans };
   taken.push({ tech: techOf(row), date: target.date, start: target.startMin, end: target.end });
