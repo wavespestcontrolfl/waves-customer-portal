@@ -6655,10 +6655,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const liveEtaForcedOff = liveEta === false;
     const includeLiveEta = !liveEtaForcedOff && gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
     const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
-    const realAnswersGateOn = gateEnvValue('GATE_SMS_REAL_ANSWERS'); // the staff facts (prepaid visits left) are for a real-answers draft only
+    // the staff facts (prepaid visits left) are for a real-answers draft only; gate off adds no key, so the call stays byte-identical
+    const staffFactsOption = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? { includeSmsStaffFacts: true } : {};
     const loadContext = (withLiveEta) => (customer
-      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, includeSmsStaffFacts: realAnswersGateOn, ...(asOfDate ? { asOf: asOfDate } : {}) })
-      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, includeSmsStaffFacts: realAnswersGateOn, ...(asOfDate ? { asOf: asOfDate } : {}) }));
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(asOfDate ? { asOf: asOfDate } : {}) })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(asOfDate ? { asOf: asOfDate } : {}) }));
     // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
     // a fingerprint of this customer's facts that a delayed send re-derives
     // and compares (sms-unanswered-reply.factsFingerprintFor). Taken BEFORE

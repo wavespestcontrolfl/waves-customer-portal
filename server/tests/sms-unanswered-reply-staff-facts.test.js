@@ -28,7 +28,7 @@ test('the context is read WITH the staff facts, as the drafter does: only while 
   expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1' }), expect.objectContaining({ includeSmsStaffFacts: true }));
   delete process.env[GATE];
   await hashWith({});
-  expect(ContextAggregator.getContextForCustomer).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'c1' }), expect.objectContaining({ includeSmsStaffFacts: false }));
+  expect(ContextAggregator.getContextForCustomer.mock.calls.at(-1)[1]).not.toHaveProperty('includeSmsStaffFacts');
 });
 
 test('a change to the prepaid visits left changes the hash', async () => {
