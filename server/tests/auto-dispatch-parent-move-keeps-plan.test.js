@@ -84,3 +84,77 @@ describe('the customer reschedule page records "asked for this time" for a Waves
     await expect(dayPromiseMoveIntent(null)).resolves.toEqual({});
   });
 });
+
+// Codex #8590 r1 P1: the plan's add-ons are projected from the parent's cadence date, not the date the night run moved it to.
+describe('add-ons after a night move of the first visit', () => {
+  const { filterAddonLinesForDate } = require('../routes/admin-schedule')._test;
+  const { seriesBaseDate } = require('../services/recurring-appointment-seeder');
+  const line = { serviceKey: 'fixture_addon', recurringPattern: 'custom', recurringIntervalDays: 84 };
+  const parent = { ...PARENT, scheduled_date: '2027-01-12' };
+
+  test('an 84-day add-on due Apr 6 from Jan 12 stays due after the first visit moves to Jan 15', () => {
+    expect(filterAddonLinesForDate([line], seriesBaseDate(parent), '2027-04-06')).toHaveLength(1);
+    const after = moved(parent, '2027-01-15', 'auto_dispatch');
+    expect(seriesBaseDate(after)).toBe('2027-01-12');
+    expect(filterAddonLinesForDate([line], seriesBaseDate(after), '2027-04-06')).toHaveLength(1);
+    // The defect Codex found: projected from the moved date, Apr 6 no longer matches.
+    expect(filterAddonLinesForDate([line], after.scheduled_date, '2027-04-06')).toHaveLength(0);
+  });
+
+  test('a parent with no exception projects from its own date', () => {
+    expect(seriesBaseDate(parent)).toBe('2027-01-12');
+    expect(seriesBaseDate({ scheduled_date: '2027-02-02', date_exception: true, date_exception_cadence_date: null })).toBe('2027-02-02');
+  });
+
+  test('no add-on or ordinal reader outside the office series editor projects from the parent row\'s own date', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const editorStart = src.indexOf('async function scheduleUpdateDetailsHandler(');
+    const editorEnd = src.indexOf('\nasync function ', editorStart + 10);
+    const outside = src.slice(0, editorStart) + src.slice(editorEnd);
+    expect(outside).not.toMatch(/filterAddonLinesForDate\(parentAddons, parent\.scheduled_date/);
+    expect(outside).not.toMatch(/recurrenceOrdinalOptions\(parent\.scheduled_date/);
+  });
+});
+
+// Codex #8590 r1 P2: a night move of a first visit to another technician keeps the plan's technician.
+describe('keepPlanTechnician', () => {
+  const { keepPlanTechnician } = require('../services/auto-dispatch/apply');
+  function fakeTrx() {
+    const writes = [];
+    const trx = jest.fn(() => {
+      const q = { wheres: [] };
+      q.where = (arg) => { q.wheres.push(arg); return q; };
+      q.update = async (patch) => { writes.push({ wheres: q.wheres, patch }); return 1; };
+      return q;
+    });
+    trx.raw = (sql) => ({ sql });
+    trx.writes = writes;
+    return trx;
+  }
+
+  test('a first visit moving to another technician pins the technician it carries now, only if nothing is pinned', async () => {
+    const trx = fakeTrx();
+    await keepPlanTechnician(trx, [{ id: 'p1', is_recurring: true, recurring_parent_id: null, technician_id: 't1' }], 't2');
+    expect(trx.writes).toHaveLength(1);
+    expect(trx.writes[0].wheres[0]).toEqual({ id: 'p1' });
+    expect(typeof trx.writes[0].wheres[1]).toBe('function'); // override null or false only
+    expect(trx.writes[0].patch).toEqual({ recurring_technician_id: { sql: 'COALESCE(recurring_technician_id, technician_id)' }, recurring_technician_override: true });
+  });
+
+  test('a same-technician move, a plan visit and a one-time visit write nothing', async () => {
+    const trx = fakeTrx();
+    await keepPlanTechnician(trx, [
+      { id: 'p1', is_recurring: true, recurring_parent_id: null, technician_id: 't1' },
+      { id: 'c1', is_recurring: true, recurring_parent_id: 'p1', technician_id: 't1' },
+      { id: 'o1', is_recurring: false, recurring_parent_id: null, technician_id: 't1' },
+    ], 't1');
+    await keepPlanTechnician(trx, [{ id: 'c1', is_recurring: true, recurring_parent_id: 'p1', technician_id: 't1' }], 't2');
+    await keepPlanTechnician(trx, [{ id: 'o1', is_recurring: false, recurring_parent_id: null, technician_id: 't1' }], 't2');
+    expect(trx.writes).toHaveLength(0);
+  });
+
+  test('the pinned technician is what new plan visits take (admin-schedule recurringTemplateTechnicianId)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(src).toContain('if (parent?.recurring_technician_override) return parent.recurring_technician_id || null;');
+  });
+});

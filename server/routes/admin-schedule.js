@@ -620,7 +620,7 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern, seriesCadencePosition, seriesRoundAnchor } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, clampDateToRound, customerPrefersNoWeekends, lawnRoundsSeriesPattern, seriesCadencePosition, seriesRoundAnchor, seriesBaseDate } = require('../services/recurring-appointment-seeder');
 // Lawn 9x rounds (owner 2026-10-28): nine fixed rounds a year, one visit each.
 // The date walk lives in lawn-rounds.js, like the seasonal walk in the seeder.
 const { LAWN_ROUNDS_9, lawnRoundDateFrom, roundTaken, SeriesDates, seriesDatesFromRows, roundsRowMoveIsOneOff } = require('../services/lawn-rounds');
@@ -675,7 +675,7 @@ function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
 // stored nth / weekday / interval, and the lawn round anchor.
 function seriesRecurrenceOptions(parent) {
   return {
-    ...recurrenceOrdinalOptions(parent.scheduled_date, { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
+    ...recurrenceOrdinalOptions(seriesBaseDate(parent), { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
     intervalDays: parent.recurring_interval_days,
     roundAnchor: seriesRoundAnchor(parent),
   };
@@ -6446,7 +6446,7 @@ async function seriesExtensionDateVerdicts(conn, { parent, dates, parentAddons, 
     : null;
   return dates.map((d) => storedOccurrenceFloorVerdict(
     gatePriceParent,
-    filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent),
+    filterAddonLinesForDate(parentAddons, seriesBaseDate(parent), addonDate || d, blackoutDates, skipParent),
     parentAddons, storedDiscountScope, discountCaps,
   ));
 }
@@ -6567,7 +6567,7 @@ async function seriesVerdictWalk(conn, parentId) {
     const candidate = seasonalSafeShift(nextRecurringDate(latestStr, pattern, attempt, rOpts), pattern, skipParent, dirParent, blackoutDates);
     if (!candidate || recurringCandidateTooCloseToAnchor(latestStr, pattern, candidate) || candidate <= today) continue;
     const past = candidate > horizonEnd;
-    const key = filterAddonLinesForDate(parentAddons, parent.scheduled_date, candidate, blackoutDates, skipParent)
+    const key = filterAddonLinesForDate(parentAddons, seriesBaseDate(parent), candidate, blackoutDates, skipParent)
       .map((addon) => parentAddons.indexOf(addon)).join(',');
     if (!(past && byPricing.size)) byPricing.set(key, byPricing.get(key) ?? candidate);
     if (past) return { parent, dates: [...byPricing.values()], cols, parentAddons, blackoutDates, skipParent };
@@ -21374,7 +21374,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
     await anchorSoleProperty(data, cols, trx);
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, pickedAddonDate || nd, extendBlackoutDates, skipParent);
+    const dueAddons = filterAddonLinesForDate(parentAddons, seriesBaseDate(parent), pickedAddonDate || nd, extendBlackoutDates, skipParent);
     assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
     // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -21814,7 +21814,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       // this out of.
       await freezeLegacySeriesRootCaps(conn, parent, cols, parentAddons);
       const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
-      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates, skipParent);
+      const dueAddons = filterAddonLinesForDate(parentAddons, seriesBaseDate(parent), nextStr, autoExtendBlackoutDates, skipParent);
       // Anchored-split series (self-booked funnels, wizard plans): the
       // PARENT's estimated_price carries the annual's remainder cents
       // and every seeded follow-up bills the even quotient. Templating
@@ -29744,7 +29744,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // Another visit in the slot never skips it: the visit goes in on its
         // cadence date, without a time when another stop holds the hour.
         Object.assign(data, await cadenceSlotHandoffFields(trx, { ...parent, ...data }, nd, cols, 'recurring-alerts'));
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
+        const dueAddons = filterAddonLinesForDate(parentAddons, seriesBaseDate(parent), nd, alertBlackoutDates, skipParent);
         assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'runRecurringAlertAction:extend');
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -29842,7 +29842,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // Another visit in the slot never skips it: the visit goes in on its
         // cadence date, without a time when another stop holds the hour.
         Object.assign(data, await cadenceSlotHandoffFields(trx, { ...parent, ...data }, nd, cols, 'recurring-alerts'));
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
+        const dueAddons = filterAddonLinesForDate(parentAddons, seriesBaseDate(parent), nd, alertBlackoutDates, skipParent);
         assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'runRecurringAlertAction:convert_ongoing');
         // Anchored-split provenance governs the per-visit amount on EVERY
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
@@ -29930,7 +29930,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       ? await loadDiscountCapsById(trx, [spawnedPriceTemplate.line_discount_id, ...parentAddons.map((a) => a.discount_id)])
       : null;
     for (const row of spawned) {
-      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, row.date, alertBlackoutDates, skipParent);
+      const dueAddons = filterAddonLinesForDate(parentAddons, seriesBaseDate(parent), row.date, alertBlackoutDates, skipParent);
       // Canonical restack (GATE_DISCOUNT_STACKING): recomputed fresh per
       // spawned row's own due add-ons — see restackStoredVisitFinancials;
       // no-op off.
