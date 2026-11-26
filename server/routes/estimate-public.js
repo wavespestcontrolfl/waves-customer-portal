@@ -91,6 +91,7 @@ const {
   lineFlagsBlockPercentDiscount,
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
+const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
 // held slot's date key ahead of its estimate/customer row locks.
@@ -1853,8 +1854,9 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
       }
     })
     .andWhere((builder) => {
-      builder.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      // A visit staff booked for this customer stays adoptable after its old
+      // hold timestamp lapses; only an unclaimed hold drops out at expiry.
+      bookedVisitOrLiveHold(builder);
       if (holdGraceMinutes > 0 && estimate.id) {
         builder.orWhere((own) => {
           own.where('scheduled_services.source_estimate_id', estimate.id)
@@ -9021,6 +9023,8 @@ ${ssrMonthlyAverage ? `  // Monthly average: the average is computed for the ser
       }
       if (EXISTING_APPOINTMENT_ID) {
         payload.existingAppointmentId = EXISTING_APPOINTMENT_ID;
+        // This renderer offers only a booked visit, never a live hold.
+        payload.existingAppointmentWasHold = false;
         delete payload.slotId;
       }
       if (bookingState.serviceMode === 'recurring' && DEFAULT_RECURRING_FREQUENCY) {
@@ -10685,8 +10689,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
 
     // Slot commit inputs. Validate early so we can reject before opening
     // a transaction if the payload is malformed.
-    const slotId = req.body && typeof req.body.slotId === 'string' ? req.body.slotId.trim() : '';
-    const existingAppointmentId = req.body && typeof req.body.existingAppointmentId === 'string' ? req.body.existingAppointmentId.trim() : '';
+    let slotId = req.body && typeof req.body.slotId === 'string' ? req.body.slotId.trim() : '';
+    let existingAppointmentId = req.body && typeof req.body.existingAppointmentId === 'string' ? req.body.existingAppointmentId.trim() : '';
     if (slotId && existingAppointmentId) {
       return res.status(400).json({ error: 'Choose either a new slot or the existing appointment, not both' });
     }
@@ -10766,20 +10770,29 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     };
 
     let reservationRow = null;
+    // Set when the submitted slot turned out to be a visit staff booked for
+    // this customer: the accept then adopts that visit instead of a hold.
+    let recoveredStaffBooking = false;
     if (slotId) {
       const parsed = slotReservation._internals.parseSlotId(slotId);
       if (!parsed) return res.status(400).json({ error: 'invalid slotId format' });
 
-      // Find the reservation row for THIS estimate matching the requested
-      // slot. Prevents a malicious client from passing a slotId reserved
-      // for someone else's estimate.
-      reservationRow = await db('scheduled_services')
+      // Rows for THIS estimate matching the requested slot. Prevents a
+      // malicious client from passing a slotId reserved for someone else's
+      // estimate.
+      const rowsAtSlot = () => db('scheduled_services')
         .where({
           source_estimate_id: estimate.id,
           scheduled_date: parsed.date,
           window_start: parsed.windowStart,
         })
-        .modify((q) => { if (parsed.techId) q.where('technician_id', parsed.techId); })
+        .modify((q) => { if (parsed.techId) q.where('technician_id', parsed.techId); });
+      // A visit staff booked from this estimate's hold keeps the estimate link,
+      // and often its old hold timestamp. It is a booking, never a hold.
+      const bookedAtSlot = () => rowsAtSlot().whereNotNull('customer_id').whereIn('status', adoptableAppointmentStatuses());
+      const staffBooked = await bookedAtSlot().first();
+      reservationRow = await rowsAtSlot()
+        .whereNull('customer_id')
         .whereNotNull('reservation_expires_at')
         // Grace measured by POSTGRES, not this process's clock (pre-push
         // audit P1): commitReservation's authoritative check compares against
@@ -10799,14 +10812,33 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         .orderBy('reservation_expires_at', 'desc')
         .first();
 
-      // Row gone = swept past the grace (or never reserved): same recovery
-      // either way, the customer re-picks. Both 409s carry the code the
-      // client keys its "hold expired" banner on.
-      if (!reservationRow) {
-        return res.status(409).json(HOLD_EXPIRED_409);
-      }
-      if (reservationRow._beyond_grace) {
-        return res.status(409).json(HOLD_EXPIRED_409);
+      if (staffBooked) {
+        // Staff booked this slot while the customer was choosing it. Recover
+        // it only when unambiguous: one booked visit, this estimate's own
+        // customer, and no live unclaimed hold beside it. Anything else sends
+        // the customer back to the picker. The adoption lookup and the locked
+        // recheck below then judge the visit like any adopted one.
+        const secondBooking = await bookedAtSlot().whereNot({ id: staffBooked.id }).first();
+        if (secondBooking
+          || (reservationRow && !reservationRow._beyond_grace)
+          || !estimate.customer_id
+          || String(staffBooked.customer_id) !== String(estimate.customer_id)) {
+          return res.status(409).json(HOLD_EXPIRED_409);
+        }
+        recoveredStaffBooking = true;
+        existingAppointmentId = String(staffBooked.id);
+        slotId = '';
+        reservationRow = null;
+      } else {
+        // Row gone = swept past the grace (or never reserved): same recovery
+        // either way, the customer re-picks. Both 409s carry the code the
+        // client keys its "hold expired" banner on.
+        if (!reservationRow) {
+          return res.status(409).json(HOLD_EXPIRED_409);
+        }
+        if (reservationRow._beyond_grace) {
+          return res.status(409).json(HOLD_EXPIRED_409);
+        }
       }
     }
 
@@ -10890,6 +10922,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       })
       : null;
     if (existingAppointmentId && !existingAppointmentRow) {
+      // A staff booking recovered from the submitted slot that no longer
+      // qualifies (status, service family, callback): the customer re-picks.
+      if (recoveredStaffBooking) return res.status(409).json(HOLD_EXPIRED_409);
       // The estimate's OWN hold, offered as an "existing appointment" on a
       // reload, drops out of the adoptable set the moment it lapses past the
       // grace — that is a hold expiry, not a linkage problem, and the client
@@ -10931,6 +10966,22 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       && String(existingAppointmentRow.customer_id) !== String(estimate.customer_id)
     ) {
       return res.status(409).json({ error: 'existing appointment belongs to a different customer' });
+    }
+    // A page that showed a HOLD must not adopt it once staff have booked it:
+    // adopting rewrites the booked visit's price and service with this
+    // estimate's, and the customer never saw that visit. The current page
+    // reports what it showed (existingAppointmentWasHold). A tab opened before
+    // that field existed sends no boolean: for a visit made from this very
+    // estimate's hold and now booked, that cannot be told from a hold the page
+    // showed, so it re-reads first. A visit recovered from the submitted slot
+    // is the customer's own pick and is exempt.
+    const shownAsHold = req.body?.existingAppointmentWasHold;
+    if (existingAppointmentRow && !recoveredStaffBooking && !isReservationHeldAppointment(existingAppointmentRow)
+      && (shownAsHold === true
+        || (typeof shownAsHold !== 'boolean' && existingAppointmentRow.customer_id != null
+          && existingAppointmentRow.source_estimate_id != null
+          && String(existingAppointmentRow.source_estimate_id) === String(estimate.id)))) {
+      return res.status(409).json({ code: 'SLOT_UNAVAILABLE', error: 'slot no longer available — re-pick a slot' });
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
     const pricingBundle = await buildPricingBundle(estimateForPricing);
@@ -13454,7 +13505,11 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               && String(lockedAdoptRow.source_estimate_id) === String(estimate.id));
           const lockedPropertyOk = lockedRowExplicitlyLinked
             || await makeAdoptionPropertyScope(trx, estimate)(lockedAdoptRow);
-          if (!lockedAdoptRow || lockedAdoptRow.is_callback === true || !lockedFamilyOk || !lockedPropertyOk) {
+          // A booked visit keeps the owner the preflight saw: staff who cleared
+          // or changed it since must not have it restored here.
+          const lockedOwnerChanged = !!lockedAdoptRow && existingAppointmentRow.customer_id != null
+            && String(lockedAdoptRow.customer_id || '') !== String(existingAppointmentRow.customer_id);
+          if (!lockedAdoptRow || lockedOwnerChanged || lockedAdoptRow.is_callback === true || !lockedFamilyOk || !lockedPropertyOk) {
             assertExistingAppointmentUpdateApplied(0);
           }
           const updates = {
@@ -22649,8 +22704,10 @@ function validateRecurringSlotPaymentPreference({
   return 'Choose pay per application or annual prepay before booking this recurring plan';
 }
 
+// A hold has a timestamp and no customer. A visit staff booked can keep its old
+// hold timestamp, but it is a booking: it is adopted, never committed as a hold.
 function isReservationHeldAppointment(row = {}) {
-  return !!row?.reservation_expires_at;
+  return !!row?.reservation_expires_at && row.customer_id == null;
 }
 
 function assertExistingAppointmentUpdateApplied(updatedCount) {

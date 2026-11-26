@@ -8357,6 +8357,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         body: JSON.stringify({
           slotId: existingAppointment ? undefined : selectedSlotId,
           existingAppointmentId: existingAppointment?.id,
+          // What this tab showed: a hold, or a booked visit. If staff book the
+          // hold before this request lands, the server sends the customer back
+          // to re-read it instead of adopting a visit they never saw.
+          existingAppointmentWasHold: existingAppointment ? !!existingAppointment.isHold : undefined,
           paymentMethodPreference: paymentPreference,
           // Attests which card-hold fee-policy copy THIS TAB RENDERED —
           // render-bound, never a constant: sent only under the same

@@ -176,6 +176,43 @@ postgres('hold grace + extend (real Postgres)', () => {
   });
 
   describe('commitReservation grace', () => {
+    // A visit that has a customer is a booking, not a hold, whatever its old
+    // hold timestamp says. Checkout must neither take it nor rewrite it.
+    test.each(['live', 'lapsed', 'cleared'])('another customer cannot take or replay a staff-booked visit (%s timestamp)', async (stamp) => {
+      await withHold({ committed: true, expiresInSeconds: stamp === 'live' ? 60 : -30 }, async ({ trx, holdId, customerId }) => {
+        if (stamp === 'cleared') await trx('scheduled_services').where({ id: holdId }).update({ reservation_expires_at: null });
+        const rival = randomUUID();
+        await trx('customers').insert({ id: rival, first_name: 'Synthetic', last_name: 'Rival', phone: '+19415550113' });
+        await trx('scheduled_services').where({ id: holdId }).update({ estimated_price: 73 });
+        await expect(slotReservation.commitReservation({ scheduledServiceId: holdId, customerId: rival, estimatedPrice: 1, trx }))
+          .rejects.toMatchObject({ code: 'RESERVATION_NOT_FOUND' });
+        const booked = await trx('scheduled_services').where({ id: holdId }).first('customer_id', 'estimated_price');
+        expect(booked.customer_id).toBe(customerId);
+        expect(Number(booked.estimated_price)).toBe(73);
+      });
+    });
+
+    test.each(['live', 'lapsed', 'cleared'])('the booked customer\'s own stale checkout keeps the staff price and visit (%s timestamp)', async (stamp) => {
+      await withHold({ committed: true, expiresInSeconds: stamp === 'live' ? 60 : -30 }, async ({ trx, holdId, customerId }) => {
+        if (stamp === 'cleared') await trx('scheduled_services').where({ id: holdId }).update({ reservation_expires_at: null });
+        await trx('scheduled_services').where({ id: holdId }).update({ estimated_price: 73, service_type: 'Lawn Care' });
+        const before = await trx('scheduled_services').where({ id: holdId }).first();
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: holdId, customerId, estimatedPrice: 1, durationMinutes: 30, trx,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'reservation_already_booked' });
+        expect(await trx('scheduled_services').where({ id: holdId }).first()).toEqual(before);
+      });
+    });
+
+    test('control: an unclaimed hold still graduates for the customer who checks out', async () => {
+      await withHold({}, async ({ trx, holdId, customerId }) => {
+        await slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, estimatedPrice: 55, trx });
+        const row = await holdRow(trx, holdId);
+        expect(row.customer_id).toBe(customerId);
+        expect(row.reservation_expires_at).toBeNull();
+      });
+    });
+
     test('graduates a hold that expired 30 s ago (the owner case: 34 s late)', async () => {
       process.env.RESERVATION_COMMIT_GRACE_MINUTES = '10';
       await withHold({ expiresInSeconds: -30 }, async ({ trx, holdId, customerId }) => {

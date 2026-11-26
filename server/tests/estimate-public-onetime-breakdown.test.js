@@ -8257,6 +8257,8 @@ describe('public estimate one-time breakdown', () => {
     expect(isReservationHeldAppointment({ reservation_expires_at: '2026-06-06T12:15:00.000Z' })).toBe(true);
     expect(isReservationHeldAppointment({ reservation_expires_at: null })).toBe(false);
     expect(isReservationHeldAppointment({})).toBe(false);
+    // Staff-booked visit that kept its old hold timestamp: a booking, not a hold.
+    expect(isReservationHeldAppointment({ customer_id: 'customer-1', reservation_expires_at: '2026-06-06T12:15:00.000Z' })).toBe(false);
   });
 
   test('acceptance visit pricing uses displayed per-application totals before cadence fallback', () => {
