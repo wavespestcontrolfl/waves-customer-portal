@@ -2972,6 +2972,20 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(dispatchWithFallback).not.toHaveBeenCalled();
     });
 
+    test('a staff call back already ringing when the text came is answered by it, judged by when it ended', async () => {
+      const after = await callbackAsk();
+      const ringing = await outboundCall(new Date(message.created_at.getTime() - 20000), { source: 'admin-callback',
+        metadata: { ended_at: new Date(message.created_at.getTime() + 160000).toISOString(), customer_leg: { status: 'completed', duration_seconds: 163 } } });
+      // One that was over before the text is not.
+      await outboundCall(new Date(message.created_at.getTime() - 300000), { source: 'admin-callback',
+        metadata: { ended_at: new Date(message.created_at.getTime() - 60000).toISOString(), customer_leg: { status: 'completed', duration_seconds: 163 } } });
+      expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(after.getTime() + 300000) })).toMatchObject({ fulfilled: 1 });
+      const { fulfillment } = await mockPg('call_commitments').first();
+      expect(fulfillment).toMatchObject({ basis: 'person_reply', record_type: 'call', record_id: ringing.id });
+      expect(new Date(fulfillment.matched_at).getTime()).toBe(message.created_at.getTime() + 160000);
+      expect(dispatchWithFallback).not.toHaveBeenCalled();
+    });
+
     test('a call back that a cached "open" verdict judged is closed now, with no model call', async () => {
       const after = await callbackAsk();
       await outboundCall(after, { source: 'admin-callback', metadata: { customer_leg: { status: 'completed', duration_seconds: 163 } } });
