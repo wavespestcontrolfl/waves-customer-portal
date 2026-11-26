@@ -327,8 +327,12 @@ const CUSTOMER = {
   phone: '9415550101',
 };
 
+// The held send's invoice claim token (crypto.randomUUID is pinned to it below): a row read at a handoff carries this
+// send's claim unless a test says otherwise.
+const INVOICE_CLAIM = '00000000-0000-4000-8000-00000000c1a1';
 function invoiceRow(overrides = {}) {
   return {
+    send_claim_token: INVOICE_CLAIM,
     id: 'inv-1',
     customer_id: 'customer-1',
     invoice_number: 'WPC-1001',
@@ -396,6 +400,7 @@ function mockTables({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.spyOn(require('crypto'), 'randomUUID').mockReturnValue(INVOICE_CLAIM);
   db.fn.now.mockReturnValue('NOW');
   db.raw.mockImplementation((sql, bindings) => ({ sql, bindings }));
   mockGates.hold = true;
@@ -2346,29 +2351,64 @@ describe('audit fixes', () => {
       expect(source).toContain("if (!project || project.project_type !== 'wdo_inspection' || heldReportUnreleased(project)) {");
     });
 
-    test('P0: a link kept after an unknown-outcome email never carries a changed filing or address', async () => {
-      // the unknown outcome records which filing and recipient the kept link went out with
-      ProjectEmail.sendProjectReportReady.mockResolvedValueOnce({ ok: false, error: 'email send held by provider_retry_ambiguous' });
-      let { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: null }), invoice: invoiceRow({ status: 'paid' }) });
-      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
-      const mark = (updates.projects || []).find((u) => String(u.delivery_channels?.sql || '').includes('release_link_binding'));
-      const binding = mark.delivery_channels.bindings[0];
-      expect(binding).toMatch(/^[0-9a-f]{8}:[0-9a-f]{12}$/);
-      // the same filing and address: the retry goes out on the same link
-      ProjectEmail.sendProjectReportReady.mockClear();
-      mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: 'k'.repeat(32), delivery_channels: { release_email_unknown: true, release_link_binding: binding } }), invoice: invoiceRow({ status: 'paid' }) });
-      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+    test('P0: a held link is bound to its filing and recipient before the email, and never carries a changed one', async () => {
+      const K = 'k'.repeat(32);
+      const linkPart = require('crypto').createHash('sha1').update(K).digest('hex').slice(0, 8);
       const releaseEmails = () => ProjectEmail.sendProjectReportReady.mock.calls.filter(([a]) => String(a.idempotencyKey || '').includes(':hold_release:'));
-      expect(releaseEmails()).toHaveLength(1);
-      // staff corrected the address (or re-signed an edit): nothing goes out on the old link, which is taken back
+      // the binding is written under the claim BEFORE the email is handed to the provider (a crash after the
+      // provider accepts it still leaves the binding)
+      let { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: K }), invoice: invoiceRow({ status: 'paid' }) });
+      let boundAtDispatch = null;
+      ProjectEmail.sendProjectReportReady.mockImplementationOnce(async () => {
+        const w = (updates.projects || []).find((u) => String(u.delivery_channels?.sql || '').includes('release_link_binding'));
+        boundAtDispatch = w ? w.delivery_channels.bindings[0] : null;
+        return { ok: false, error: 'email send held by provider_retry_ambiguous' };
+      });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(boundAtDispatch).toMatch(new RegExp(`^${linkPart}:[0-9a-f]{8}:[0-9a-f]{12}$`));
+      // the same link, filing and address: the retry goes out on the same link
       ProjectEmail.sendProjectReportReady.mockClear();
-      ({ updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: 'k'.repeat(32), delivery_channels: { release_email_unknown: true, release_link_binding: 'deadbeef:000000000000' } }), invoice: invoiceRow({ status: 'paid' }) }));
+      mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: K, delivery_channels: { release_email_unknown: true, release_link_binding: boundAtDispatch } }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(releaseEmails()).toHaveLength(1);
+      // staff corrected the address (or re-signed an edit): nothing goes out on that link, which is taken back
+      ProjectEmail.sendProjectReportReady.mockClear();
+      ({ updates } = mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: K, delivery_channels: { release_link_binding: `${linkPart}:deadbeef:000000000000` } }), invoice: invoiceRow({ status: 'paid' }) }));
       await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
       expect(releaseEmails()).toHaveLength(0);
       const revert = (updates.projects || []).find((u) => u.report_hold_status === 'held');
       expect(revert).toEqual(expect.objectContaining({ report_token: null }));
-      expect(revert.delivery_channels.sql).toContain("- 'release_link_binding'");
       expect(revert).not.toHaveProperty('report_hold_last_error');
+      // a binding left from a link already taken back binds nothing: the new link is bound and sent
+      ProjectEmail.sendProjectReportReady.mockClear();
+      mockTables({ project: wdoProject({ report_hold_status: 'held', report_token: K, delivery_channels: { release_link_binding: 'ffffffff:deadbeef:000000000000' } }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      expect(releaseEmails()).toHaveLength(1);
+    });
+
+    test('a held report sent another way takes back its link in the same write', () => {
+      const fields = projectsRouter._private.heldReleaseFieldsInSql
+        ? projectsRouter._private.heldReleaseFieldsInSql('sent_outside')
+        : null;
+      const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
+      expect(source).toContain("report_token: whenHeld('report_token', 'NULL'),");
+      if (fields) expect(fields.report_token.sql).toBe("CASE WHEN report_hold_status = 'held' THEN NULL ELSE report_token END");
+    });
+
+    test('both invoice handoffs refuse once this send no longer owns the invoice claim', async () => {
+      const { updates } = mockTables();
+      await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
+      const token = (updates.projects || []).find((u) => u.delivery_status === 'sending').delivery_claim_token;
+      await ProjectEmail.sendProjectInvoiceBeforeReport.mock.calls[0][0].withProviderHandoff(jest.fn());
+      const opts = require('../services/billing-channel-email-authority').dispatchUnderBillingEmailAuthority.mock.calls.at(-1)[0];
+      const sms = sendCustomerMessage.mock.calls.find(([a]) => a.entryPoint === 'admin_project_report_with_invoice')[0];
+      const world = () => mockTables({ project: wdoProject({ report_hold_status: 'held', delivery_claim_token: token, report_token: null }), invoice: invoiceRow({ status: 'sending', send_claim_token: '00000000-0000-4000-8000-0000000000ff' }) });
+      world();
+      expect(await opts.preSendCheck({ database: db })).toMatchObject({ ok: false, code: 'HELD_SEND_SUPERSEDED' });
+      world();
+      const dispatch = jest.fn();
+      expect(await sms.withSmsHandoff(dispatch)).toEqual(expect.objectContaining({ ok: false }));
+      expect(dispatch).not.toHaveBeenCalled();
     });
 
     test('a plain Send report confirmed as a first send refuses a report sent meanwhile', async () => {
@@ -2389,7 +2429,7 @@ describe('audit fixes', () => {
       const { updates } = mockTables();
       await withServer(async (baseUrl) => { expect((await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).status).toBe(200); });
       const claim = (updates.invoices || []).find((u) => u.status === 'sending');
-      expect(claim.send_claim_token).toMatch(/^[0-9a-f]{24}$/);
+      expect(claim.send_claim_token).toBe(INVOICE_CLAIM);
       expect(InvoiceService.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({ claimToken: claim.send_claim_token }));
       const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-projects.js'), 'utf8');
       expect(source).toContain("await db('invoices').where(invoiceClaimWhere(invoice.id, claimToken)).update({ ...update, updated_at: db.fn.now() })");
