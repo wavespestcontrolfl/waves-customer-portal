@@ -141,6 +141,35 @@ describe('IssueWarrantyDialog', () => {
     expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeEnabled();
   });
 
+  it('a notice signed after the cutoff: shows its date and the cutoff, not "none on file", and keeps Preview off', async () => {
+    mockApi({ notices: [{ ...PAPER_NOTICE, signedOn: '09/15/2026' }] });
+    render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
+    fillOfficeFields();
+    await screen.findByText(/was signed 09\/15\/2026\. It must be signed on or before 09\/01\/2026/);
+    expect(screen.queryByText(/No signed FDACS-13692 is on file/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
+  });
+
+  it('the notice list fails to load: says why Preview is off, and Try again loads it', async () => {
+    let fail = true;
+    adminFetch.mockImplementation(async (path) => {
+      if (isNoticeList(path)) {
+        if (fail) return { ok: false, json: async () => ({ error: 'boom' }) };
+        return { ok: true, json: async () => ({ notices: [PAPER_NOTICE] }) };
+      }
+      return undefined;
+    });
+    render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);
+    fillOfficeFields();
+    await screen.findByText(/Could not load the FDACS-13692 notices/);
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeDisabled();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByText(/FDACS-13692 on file: paper, signed 08\/20\/2026/);
+    expect(screen.queryByText(/Could not load the FDACS-13692 notices/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Preview warranty' })).toBeEnabled();
+  });
+
   it('keeps Preview disabled while the contract basis date is after treatment', () => {
     mockApi();
     render(<IssueWarrantyDialog open onClose={() => {}} project={project} findings={findings} />);

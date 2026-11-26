@@ -11,6 +11,8 @@ import {
   pretreatWarrantyValues,
   sentCertificate,
   consumerNoticeOnFile,
+  consumerNoticeCutoff,
+  lateConsumerNotice,
   daysSinceTreatment,
   warrantyEligible,
   warrantyIssueReadiness,
@@ -74,7 +76,7 @@ function IssueFooter({ stage, canPreview, canCreate, busy, onClose, onBack, onPr
 
 // The FDACS-13692 consumer notice (Rule 5E-14.105(1)): the one on file, or
 // a paper-scan upload.
-function ConsumerNoticePanel({ customerId, onFile, onUploaded }) {
+function ConsumerNoticePanel({ customerId, onFile, late, cutoff, onUploaded }) {
   const [file, setFile] = useState(null);
   const [signedOn, setSignedOn] = useState("");
   const [busy, setBusy] = useState(false);
@@ -126,10 +128,17 @@ function ConsumerNoticePanel({ customerId, onFile, onUploaded }) {
   }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
-        No signed FDACS-13692 is on file for this customer. The warranty cannot be issued without one: send it from
-        Document Requests, or upload the paper form.
-      </div>
+      {late ? (
+        <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+          The FDACS-13692 on file was signed {late.signedOn}. It must be signed on or before {cutoff || "the treatment date"}, so
+          it cannot be used. A new signature cannot qualify either: find the form signed on or before that date and upload it.
+        </div>
+      ) : (
+        <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+          No signed FDACS-13692 is on file for this customer. The warranty cannot be issued without one: send it from
+          Document Requests, or upload the paper form.
+        </div>
+      )}
       <Field id="warranty-notice-file" label="Upload paper FDACS-13692 (JPG, PNG or PDF, up to 10 MB)">
         <input id="warranty-notice-file" type="file" accept="image/jpeg,image/png,application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} style={fieldStyle} />
       </Field>
@@ -144,20 +153,43 @@ function ConsumerNoticePanel({ customerId, onFile, onUploaded }) {
   );
 }
 
-// The customer's consumer-notices list. null = not loaded.
+// The customer's consumer-notices list. null = not loaded; loadFailed = the
+// last request failed (Preview stays off until a retry loads it).
 function useConsumerNotices(customerId, open) {
   const [noticeList, setNoticeList] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const loadNotices = useCallback(async () => {
+    setLoadFailed(false);
     try {
       const response = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/consumer-notices`);
       const data = response.ok ? await response.json().catch(() => null) : null;
       setNoticeList(data?.notices ? data : null);
+      setLoadFailed(!data?.notices);
     } catch {
       setNoticeList(null);
+      setLoadFailed(true);
     }
   }, [customerId]);
   useEffect(() => { if (open) loadNotices(); }, [open, loadNotices]);
-  return { noticeList, loadNotices };
+  return { noticeList, loadFailed, loadNotices };
+}
+
+// Shown when the notices list did not load: why Preview is off, and a retry.
+function NoticeLoadProblem({ onRetry }) {
+  return (
+    <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14, color: "#B91C1C" }}>
+      Could not load the FDACS-13692 notices for this customer, so Preview stays off.
+      <div><Button variant="secondary" onClick={onRetry}>Try again</Button></div>
+    </div>
+  );
+}
+
+// The notice part of the form: a load problem with a retry, or the panel.
+function NoticeSection({ customerId, noticeList, loadFailed, onFile, cutoff, onReload }) {
+  if (loadFailed) return <NoticeLoadProblem onRetry={onReload} />;
+  if (!noticeList) return null;
+  const late = onFile ? null : lateConsumerNotice(noticeList.notices);
+  return <ConsumerNoticePanel customerId={customerId} onFile={onFile} late={late} cutoff={cutoff} onUploaded={onReload} />;
 }
 
 function Field({ id, label, children }) {
@@ -186,7 +218,7 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [created, setCreated] = useState(false);
   const [preview, setPreview] = useState(null);
   const [reviewed, setReviewed] = useState(false);
-  const { noticeList, loadNotices } = useConsumerNotices(project.customer_id, open);
+  const { noticeList, loadFailed, loadNotices } = useConsumerNotices(project.customer_id, open);
 
   const noticeOnFile = noticeList ? consumerNoticeOnFile(noticeList.notices, base.treatment.initial_date, basisDate) : null;
   const { basisProblem, ready } = warrantyIssueReadiness(base, {
@@ -292,7 +324,14 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
                 <input id="warranty-basis-date" value={basisDate} onChange={(e) => setBasisDate(e.target.value)} style={fieldStyle} />
               </Field>
               {basisProblem && <div style={{ fontSize: 14, color: "#B91C1C" }}>{basisProblem}</div>}
-              {noticeList && <ConsumerNoticePanel customerId={project.customer_id} onFile={noticeOnFile} onUploaded={loadNotices} />}
+              <NoticeSection
+                customerId={project.customer_id}
+                noticeList={noticeList}
+                loadFailed={loadFailed}
+                onFile={noticeOnFile}
+                cutoff={consumerNoticeCutoff(base.treatment.initial_date, basisDate)}
+                onReload={loadNotices}
+              />
               <Field id="warranty-notice-location" label="Treatment notice posted at (F.S. 482.226(5))">
                 <input id="warranty-notice-location" value={noticeLocation} onChange={(e) => setNoticeLocation(e.target.value)} placeholder="e.g. on the wall beside the electric panel in the garage" style={fieldStyle} />
               </Field>

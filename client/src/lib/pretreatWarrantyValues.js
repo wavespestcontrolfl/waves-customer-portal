@@ -216,14 +216,27 @@ export function daysSinceTreatment(initialDate, issueDate) {
 // and the contract basis date (Rule 5E-14.105(1)); the server picks the same
 // one. `notices` is the consumer-notices list (signedOn MM/DD/YYYY, newest
 // first). Without a real basis date yet, only the treatment date limits it.
+// The latest day a qualifying notice may be signed: the earlier of the
+// treatment date and the contract basis date (MM/DD/YYYY), or '' when neither is set.
+export function consumerNoticeCutoff(initialDate, basisDate) {
+  const days = [parseUsDate(initialDate), parseUsDate(basisDate)].filter(Boolean);
+  if (!days.length) return '';
+  return formatUs(days.reduce((a, b) => (dateKey(b) < dateKey(a) ? b : a)));
+}
+
 export function consumerNoticeOnFile(notices, initialDate, basisDate) {
-  const limits = [parseUsDate(initialDate), parseUsDate(basisDate)].filter(Boolean).map(dateKey);
-  if (!limits.length) return null;
-  const limit = Math.min(...limits);
+  const cutoff = parseUsDate(consumerNoticeCutoff(initialDate, basisDate));
+  if (!cutoff) return null;
+  const limit = dateKey(cutoff);
   return (notices || []).find((notice) => {
     const day = notice.usable && parseUsDate(notice.signedOn);
     return day && dateKey(day) <= limit;
   }) || null;
+}
+
+// A signed notice on file that is dated after the cutoff (it cannot qualify).
+export function lateConsumerNotice(notices) {
+  return (notices || []).find((notice) => notice.usable && parseUsDate(notice.signedOn)) || null;
 }
 
 // What blocks Create in the issue dialog: every office field filled, the
