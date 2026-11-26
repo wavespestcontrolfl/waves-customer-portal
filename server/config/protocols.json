@@ -3075,7 +3075,8 @@
             "labelRatePerGallon": {
               "amount": 0.66,
               "unit": "fl_oz",
-              "use": "fleas, in the shared tank at 1 gallon per 1,000 sq ft",
+              "ceiling": 1,
+              "use": "fleas, in the shared tank at 1 gallon per 1,000 sq ft; the label mix is 1 fl oz per gallon at 1 gallon per 1,500 sq ft",
               "epa": "53883-335"
             }
           },

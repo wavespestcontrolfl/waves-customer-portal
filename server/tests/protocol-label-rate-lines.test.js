@@ -42,6 +42,16 @@ function labelRateLines() {
 describe('card lines that carry a label rate for their own pest', () => {
   test('every such line is on the reviewed list', () => {
     expect(labelRateLines()).toEqual(REVIEWED);
+    // Only the flea Tekko Pro line names a review ceiling above its card rate (the label's own dilution, 1 fl oz per gallon).
+    const ceilings = [];
+    for (const [programKey, program] of Object.entries(protocols)) {
+      for (const visit of program?.visits || []) {
+        for (const meta of Object.values(visit.lineMeta || {})) {
+          if (meta?.labelRatePerGallon?.ceiling != null) ceilings.push([programKey, visit.visit, meta.labelRatePerGallon.amount, meta.labelRatePerGallon.ceiling]);
+        }
+      }
+    }
+    expect(ceilings).toEqual([['flea', 1, 0.66, 1]]);
   });
 
   test('the cockroach line governs the Tekko Pro tank rate above the catalog band; a plain declared rate never does', () => {
@@ -138,10 +148,14 @@ describe('the completion form gets the cockroach label rate', () => {
     expect((await run({ ...TEKKO, default_unit: 'fl_oz/1000sqft' }, 'German Roach Cleanout', 'german_roach')).defaultRate).toBe('1');
     // The flea card prefills and reviews Tekko Pro at its own shared-tank rate: never the cockroach 2, and never the catalog 1
     // (1 fl oz per gallon at the card's gallon per 1,000 sq ft is 1.5 times the flea label amount).
-    // The band's low end is the prefill (0.66) and its top stays the catalog's label dilution (1): recording 1 fl oz per gallon,
-    // the label mix sprayed at 1 gallon per 1,500 sq ft, is not reviewed as above label.
+    // The band's low end is the prefill (0.66) and its top is the line's own ceiling, the label dilution (1): recording 1 fl oz per
+    // gallon, the label mix sprayed at 1 gallon per 1,500 sq ft, is not reviewed as above label. A wider catalog band changes nothing.
     expect(await run(TEKKO, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66-1', labelUseRate: true });
-    expect(await run({ ...TEKKO, default_rate: '0.5-1.5' }, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66-1.5', labelUseRate: true });
+    expect(await run({ ...TEKKO, default_rate: '0.5-1.5' }, 'Flea Treatment', 'flea_tick')).toMatchObject({ defaultRate: '0.66-1', labelUseRate: true });
+    // Every other label-rate line keeps its card rate as the ceiling: PolyZone on the mosquito card is 1.1, though its catalog band
+    // reaches 1.5.
+    const polyzone = { id: 't', name: 'Suspend Polyzone', active: true, default_rate: '0.25-1.5', default_unit: 'fl_oz/gal', epa_reg_number: '101563-143' };
+    expect(await run(polyzone, 'Mosquito Barrier Treatment', 'mosquito_barrier')).toMatchObject({ defaultRate: '1.1', labelUseRate: true });
     expect((await run({ ...TEKKO, epa_reg_number: '53883-444' }, 'Flea Treatment', 'flea_tick')).defaultRate).toBe('1');
     // A booked cockroach add-on lists Tekko Pro at 2: the flea rate starts blank too.
     expect(await run(TEKKO, 'Flea Treatment', 'flea_tick', [{ service_name: 'German Roach Cleanout', service_key: 'german_roach' }])).toMatchObject({ defaultRate: '', labelUseRate: true });
