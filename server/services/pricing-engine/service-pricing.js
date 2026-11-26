@@ -6382,13 +6382,13 @@ function priceOneTimePest(property, options = {}) {
     isRecurringCustomer = false,
     recurringPestPerApp = null,
     roachType: requestedRoachTypeInput = 'none',
-    smallJob = false,
+    smallJobBasePrice = null,
   } = options;
 
   const roachMeta = normalizeRoachType(requestedRoachTypeInput);
   // GATE_ONE_TIME_PEST_SMALL_JOB: the engine decides (gate, replay stamp, roach, config price).
-  if (smallJob === true) {
-    return priceOneTimePestSmallJob({ urgency, afterHours, isRecurringCustomer, roachMeta });
+  if (Number(smallJobBasePrice) > 0) {
+    return priceOneTimePestSmallJob({ urgency, afterHours, isRecurringCustomer, roachMeta, flatPrice: Number(smallJobBasePrice) });
   }
   const footprintResolution = resolvePestFootprint(property);
   const warnings = [...roachMeta.roachWarnings, ...footprintResolution.warnings];
@@ -6485,8 +6485,7 @@ function priceOneTimePest(property, options = {}) {
 // discount as the full one-time price. No $199 floor and no recurring-incentive clamp: the flat price
 // is the price (the job is one spot, not a visit a plan could replace). Stamped `smallJob: true` so a
 // saved estimate replays at the price it was sold on.
-function priceOneTimePestSmallJob({ urgency, afterHours, isRecurringCustomer, roachMeta }) {
-  const flatPrice = Number(ONE_TIME.pest.smallJobPrice);
+function priceOneTimePestSmallJob({ urgency, afterHours, isRecurringCustomer, roachMeta, flatPrice }) {
   const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
   const discountBase = flatPrice * urgencyMultiplier;
   const discounted = applyOneTimeRecurringCustomerDiscount(discountBase, { isRecurringCustomer });
@@ -6495,6 +6494,8 @@ function priceOneTimePestSmallJob({ urgency, afterHours, isRecurringCustomer, ro
     service: 'one_time_pest',
     name: 'One-Time Pest Control (small job: one spot)',
     smallJob: true,
+    // The flat price this line was sold on: a saved estimate replays on it, never on today's config.
+    smallJobBasePrice: flatPrice,
     price,
     urgency,
     afterHours,

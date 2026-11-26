@@ -302,9 +302,14 @@ describe('pricing engine DB bridge', () => {
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
   });
 
-  test('overlays smallJobPrice from the onetime_pest row when the key is present', async () => {
+  test('overlays smallJobPrice from the onetime_pest row, and a removed key restores the default on the next sync', async () => {
     try {
       const db = pricingConfigDb([{ config_key: 'onetime_pest', data: { floor: 199, multiplier: 2.2, smallJobPrice: 140 } }]);
+      await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+      expect(constants.ONE_TIME.pest.smallJobPrice).toBe(140);
+      const without = pricingConfigDb([{ config_key: 'onetime_pest', data: { floor: 199, multiplier: 2.2 } }]);
+      await expect(syncConstantsFromDB(without)).resolves.toBe(true);
+      expect(constants.ONE_TIME.pest.smallJobPrice).toBe(150);
       await expect(syncConstantsFromDB(db)).resolves.toBe(true);
       expect(constants.ONE_TIME.pest.smallJobPrice).toBe(140);
     } finally {

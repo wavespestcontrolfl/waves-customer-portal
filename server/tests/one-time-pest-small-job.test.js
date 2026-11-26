@@ -14,8 +14,9 @@ const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitratio
 const { generateEstimate } = require('../services/pricing-engine');
 const { ONE_TIME } = require('../services/pricing-engine/constants');
 const {
-  oneTimePestSmallJobReplaySignal, oneTimePestIsSmallJob, smallJobPrice,
+  oneTimePestSmallJobReplaySignal, oneTimePestSmallJobBasePrice, smallJobPrice,
 } = require('../services/pricing-engine/one-time-pest-small-job');
+const { oneTimeChoiceAmountForEstimate, acceptedOneTimeChoiceListForEstimate } = require('../routes/estimate-public');
 const { CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity-fields');
 
 const GATE = 'GATE_ONE_TIME_PEST_SMALL_JOB';
@@ -91,14 +92,14 @@ describe('one-time pest small job', () => {
   test('a saved small-job line replays at the flat price with the gate off; an unstamped one never gets it', () => {
     process.env[GATE] = 'true';
     const sold = generateEstimate(inputFor(SMALL));
-    expect(oneTimePestSmallJobReplaySignal({ engineResult: sold })).toBe(true);
+    expect(oneTimePestSmallJobReplaySignal({ engineResult: sold })).toBe(150);
     delete process.env[GATE];
-    const replay = generateEstimate(inputFor(SMALL, { savedEstimateReplay: true, oneTimePestSmallJobReplay: true }));
+    const replay = generateEstimate(inputFor(SMALL, { savedEstimateReplay: true, oneTimePestSmallJobReplay: 150 }));
     expect(otLine(replay).price).toBe(150);
     expect(otLine(replay).smallJob).toBe(true);
     // Sold at the full price, gate on later: the replay keeps the full price.
     const soldFull = generateEstimate(inputFor(SMALL));
-    expect(oneTimePestSmallJobReplaySignal({ engineResult: soldFull })).toBe(false);
+    expect(oneTimePestSmallJobReplaySignal({ engineResult: soldFull })).toBeNull();
     process.env[GATE] = 'true';
     const replayFull = generateEstimate(inputFor(SMALL, { savedEstimateReplay: true }));
     expect(otLine(replayFull).price).toBe(otLine(soldFull).price);
@@ -119,11 +120,53 @@ describe('one-time pest small job', () => {
       ONE_TIME.pest.smallJobPrice = saved;
     }
     process.env[GATE] = 'true';
-    expect(oneTimePestIsSmallJob({}, { smallJob: true })).toBe(true);
-    expect(oneTimePestIsSmallJob({}, { smallJob: true, roachType: 'german' })).toBe(false);
-    expect(oneTimePestIsSmallJob({}, {})).toBe(false);
-    // A replay ignores the live flag and gate.
-    expect(oneTimePestIsSmallJob({ savedEstimateReplay: true }, { smallJob: true })).toBe(false);
-    expect(oneTimePestIsSmallJob({ savedEstimateReplay: true, oneTimePestSmallJobReplay: true }, {})).toBe(true);
+    expect(oneTimePestSmallJobBasePrice({}, { smallJob: true })).toBe(150);
+    expect(oneTimePestSmallJobBasePrice({}, { smallJob: true, roachType: 'german' })).toBeNull();
+    expect(oneTimePestSmallJobBasePrice({}, {})).toBeNull();
+    // A replay ignores the live flag and gate, and returns the saved price.
+    expect(oneTimePestSmallJobBasePrice({ savedEstimateReplay: true }, { smallJob: true })).toBeNull();
+    expect(oneTimePestSmallJobBasePrice({ savedEstimateReplay: true, oneTimePestSmallJobReplay: 150 }, {})).toBe(150);
+    expect(oneTimePestSmallJobBasePrice({ savedEstimateReplay: true, oneTimePestSmallJobReplay: 150 }, { roachType: 'german' })).toBeNull();
+  });
+
+  test('a saved small-job quote keeps its sold flat price when the configured price changes', () => {
+    process.env[GATE] = 'true';
+    const sold = generateEstimate(inputFor({ ...SMALL, urgency: 'SOON' }));
+    expect(otLine(sold).smallJobBasePrice).toBe(150);
+    const saved = ONE_TIME.pest.smallJobPrice;
+    try {
+      ONE_TIME.pest.smallJobPrice = 175;
+      const signal = oneTimePestSmallJobReplaySignal({ engineResult: sold });
+      expect(signal).toBe(150);
+      const replay = generateEstimate(inputFor({ ...SMALL, urgency: 'SOON' }, { savedEstimateReplay: true, oneTimePestSmallJobReplay: signal }));
+      expect(otLine(replay).price).toBe(otLine(sold).price);
+      expect(otLine(replay).smallJobBasePrice).toBe(150);
+      // A live quote today uses the new price.
+      expect(otLine(generateEstimate(inputFor(SMALL))).price).toBe(175);
+    } finally {
+      ONE_TIME.pest.smallJobPrice = saved;
+    }
+  });
+
+  test('the estimate page one-time choice beside a plan is the small-job line, labelled one spot', () => {
+    process.env[GATE] = 'true';
+    const withPlan = (oneTimePest) => ({
+      ...inputFor(oneTimePest),
+      services: { pest: { frequency: 'quarterly' }, oneTimePest },
+    });
+    const SHOWN = { show_one_time_option: true };
+    const small = generateEstimate(withPlan(SMALL));
+    const full = generateEstimate(withPlan({}));
+    expect(otLine(small).price).toBe(150);
+    expect(oneTimeChoiceAmountForEstimate(SHOWN, { engineResult: small })).toBe(150);
+    // Same estimate shown with the gate off later: the saved line still decides.
+    delete process.env[GATE];
+    expect(oneTimeChoiceAmountForEstimate(SHOWN, { engineResult: small })).toBe(150);
+    const accepted = acceptedOneTimeChoiceListForEstimate(SHOWN, { engineResult: small });
+    expect(accepted[0]).toEqual(expect.objectContaining({ service: 'one_time_pest', price: 150 }));
+    expect(accepted[0].label).toMatch(/small job/i);
+    // An estimate with the full one-time line is unchanged.
+    expect(oneTimeChoiceAmountForEstimate(SHOWN, { engineResult: full })).toBe(otLine(full).price);
+    expect(otLine(full).price).toBeGreaterThanOrEqual(ONE_TIME.pest.floor);
   });
 });

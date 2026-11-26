@@ -42,6 +42,9 @@ const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
 // Dead Rodent Removal & Odor Treatment: the pristine prices and minutes, so a deleted or
 // malformed pricing_config row restores them on the next sync instead of pinning an old edit.
 const DEAD_ANIMAL_REMOVAL_DEFAULTS = JSON.parse(JSON.stringify(constants.RODENT.deadAnimalRemoval));
+// One-time pest small-job flat price: the pristine default, so a deleted `smallJobPrice` key restores it on the
+// next sync instead of leaving a running server on an old override (GATE_ONE_TIME_PEST_SMALL_JOB).
+const SMALL_JOB_PRICE_DEFAULT = constants.ONE_TIME.pest.smallJobPrice;
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
@@ -2120,6 +2123,8 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         constants.WAVEGUARD.recurringCustomerOneTimePerk = 1 - Number(config.onetime_recurring_discount.multiplier);
       }
     }
+    // Flat small-job price (GATE_ONE_TIME_PEST_SMALL_JOB): rebased on EVERY sync, then the row's key applied.
+    constants.ONE_TIME.pest.smallJobPrice = SMALL_JOB_PRICE_DEFAULT;
     if (config.onetime_pest) {
       const ot = config.onetime_pest;
       if (ot.floor != null) constants.ONE_TIME.pest.floor = r(Number(ot.floor));
@@ -2132,7 +2137,6 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       if (ot.multiplier != null) {
         constants.ONE_TIME.pest.multiplier = Number(ot.multiplier);
       }
-      // Flat small-job price (GATE_ONE_TIME_PEST_SMALL_JOB); a row without the key keeps the code default.
       if (ot.smallJobPrice != null) constants.ONE_TIME.pest.smallJobPrice = r(Number(ot.smallJobPrice));
     }
     if (config.onetime_lawn) {

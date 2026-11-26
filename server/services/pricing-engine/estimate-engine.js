@@ -249,7 +249,7 @@ const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
 const { trustedUnitBand } = require('./unit-band-pricing');
 const { oneTimePestNoHomeAgeLive, quarterlyPerAppWithoutHomeAge } = require('./one-time-pest-home-age');
-const { oneTimePestIsSmallJob } = require('./one-time-pest-small-job');
+const { oneTimePestSmallJobBasePrice } = require('./one-time-pest-small-job');
 
 // GATE_ONE_TIME_PEST_NO_HOME_AGE (owner 2026-11-26): whether this pricing run
 // keeps the home-age adjustment out of one-time pest prices. A stored estimate
@@ -2011,7 +2011,7 @@ function generateEstimate(input) {
         recurringPestPerApp: services.pest ? (planPestLine?.oneTimeAnchorPerApp ?? planPestLine?.basePrice) : null,
         roachType: services.oneTimePest.roachType || 'none',
         // GATE_ONE_TIME_PEST_SMALL_JOB: flat small-job price; a replay follows the saved line's stamp, not the gate.
-        smallJob: oneTimePestIsSmallJob(input, services.oneTimePest),
+        smallJobBasePrice: oneTimePestSmallJobBasePrice(input, services.oneTimePest),
       });
       lineItems.push(result);
     }

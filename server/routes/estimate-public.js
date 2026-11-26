@@ -99,7 +99,7 @@ const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, areaAddOnConfig } = require('../services/pricing-engine/constants');
 const { storedOneTimeAnchorPerApp, oneTimePestNoHomeAgeReplaySignal } = require('../services/pricing-engine/one-time-pest-home-age');
-const { oneTimePestSmallJobReplaySignal } = require('../services/pricing-engine/one-time-pest-small-job');
+const { oneTimePestSmallJobReplaySignal, storedSmallJobChoice } = require('../services/pricing-engine/one-time-pest-small-job');
 const { isRetiredTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
@@ -21355,7 +21355,10 @@ function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricing
   // saved the quarterly rate with no home-age adjustment. The one-time choice is
   // built from that saved rate, so it shows and charges the same amount whatever
   // the gate says later. No saved rate = the amount derived as before.
-  return oneTimePestChoiceAmountFromPerApp(storedOneTimeAnchorPerApp(estData))
+  // GATE_ONE_TIME_PEST_SMALL_JOB: a saved small-job one-time line is the one-time choice's price
+  // (one price basis: the engine's stamped line, never 2.2 x the plan's visit).
+  return storedSmallJobChoice(estData)?.price
+    || oneTimePestChoiceAmountFromPerApp(storedOneTimeAnchorPerApp(estData))
     || oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies)
     || oneTimePestChoiceAmountFromResultStats(estData)
     || oneTimePestChoiceAmountFromRecurringServices(
@@ -21489,10 +21492,12 @@ function acceptedOneTimeChoiceListForEstimate(estimate = {}, estData = {}, prici
   const pestChoiceAmount = oneTimePestChoiceAmountForEstimate(estimate, estData, pricingBundle);
   const amount = Number(pestChoiceAmount || choicePrice);
   if (!Number.isFinite(amount) || amount <= 0) return null;
+  // A saved small-job line keeps its one-spot label on the accepted row.
+  const rowLabel = storedSmallJobChoice(estData)?.label || 'One-Time Pest Control';
   return [{
     service: 'one_time_pest',
-    name: 'One-Time Pest Control',
-    label: 'One-Time Pest Control',
+    name: rowLabel,
+    label: rowLabel,
     price: Math.round(amount * 100) / 100,
   }, ...preservedOneTimeAddOnRowsFromBreakdown(breakdown, manualDiscountForChoiceBreakdown(breakdown, estData))];
 }

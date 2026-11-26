@@ -30,27 +30,52 @@ function smallJobPrice() {
   return Number.isFinite(price) && price > 0 ? price : null;
 }
 
-// Saved-estimate replay signal: a quote keeps the rule it was priced on.
-// True when the saved one-time pest line carries the small-job stamp.
-function oneTimePestSmallJobReplaySignal(estData) {
+// The saved one-time pest line that carries the small-job stamp, or null.
+function storedSmallJobLine(estData) {
   return [estData?.engineResult, estData?.result, estData]
     .flatMap((source) => (Array.isArray(source?.lineItems) ? source.lineItems : []))
-    .some((l) => l?.service === 'one_time_pest' && l?.smallJob === true);
+    .find((l) => l?.service === 'one_time_pest' && l?.smallJob === true) || null;
+}
+
+// The flat price the saved line was priced on (before urgency and discount), or null.
+function storedSmallJobBasePrice(estData) {
+  const line = storedSmallJobLine(estData);
+  const base = Number(line?.smallJobBasePrice ?? line?.basePrice);
+  return line && Number.isFinite(base) && base > 0 ? base : null;
+}
+
+// Saved-estimate replay signal: a quote keeps the rule AND the flat price it was priced on.
+// The saved base price when the saved one-time pest line carries the small-job stamp, else null.
+function oneTimePestSmallJobReplaySignal(estData) {
+  return storedSmallJobBasePrice(estData);
+}
+
+// The amount of the saved small-job line, for the estimate page's one-time choice, or null.
+function storedSmallJobChoice(estData) {
+  const line = storedSmallJobLine(estData);
+  const price = Number(line?.price);
+  return line && Number.isFinite(price) && price > 0
+    ? { price, label: line.name || 'One-Time Pest Control (small job: one spot)' }
+    : null;
 }
 
 // Whether this pricing run prices the one-time pest request as a small job.
-// A stored estimate replayed as sold follows its saved stamp alone; a live run needs
-// the staff's flag and the gate. A roach request is never a small job.
-function oneTimePestIsSmallJob(input, request) {
-  if (String(request?.roachType || 'none').toLowerCase() !== 'none') return false;
-  if (smallJobPrice() === null) return false;
-  if (input?.savedEstimateReplay === true) return input.oneTimePestSmallJobReplay === true;
-  return request?.smallJob === true && oneTimePestSmallJobLive();
+// A stored estimate replayed as sold follows its saved stamp alone and returns the saved
+// flat price; a live run needs the staff's flag and the gate and returns the configured price.
+// Returns the flat base price, or null when this is not a small job. A roach request never is.
+function oneTimePestSmallJobBasePrice(input, request) {
+  if (String(request?.roachType || 'none').toLowerCase() !== 'none') return null;
+  if (input?.savedEstimateReplay === true) {
+    const saved = Number(input.oneTimePestSmallJobReplay);
+    return Number.isFinite(saved) && saved > 0 ? saved : null;
+  }
+  return request?.smallJob === true && oneTimePestSmallJobLive() ? smallJobPrice() : null;
 }
 
 module.exports = {
   oneTimePestSmallJobLive,
   smallJobPrice,
   oneTimePestSmallJobReplaySignal,
-  oneTimePestIsSmallJob,
+  oneTimePestSmallJobBasePrice,
+  storedSmallJobChoice,
 };
