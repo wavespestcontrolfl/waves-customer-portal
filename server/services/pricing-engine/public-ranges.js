@@ -99,6 +99,11 @@ function recurringLawnTracks() {
   return Object.keys(constants.LAWN_BRACKETS).filter((track) => !bahiaHasNoProgram(track));
 }
 
+// Every price in the WDO size table (all tiers, all construction columns).
+function wdoTableValues() {
+  return constants.SPECIALTY.wdo.sizeTable.tiers.flatMap((tier) => [tier.block, tier.frame, tier.crawl]);
+}
+
 function buildRows() {
   const rows = [];
   const errors = [];
@@ -494,9 +499,9 @@ function buildRows() {
     key: 'wdo_inspection',
     name: 'WDO Inspection',
     unit: 'per inspection',
-    // Owner ruling 2026-11-26: $150 to $275 by home size and construction (SPECIALTY.wdo.sizeTable). The live table's own
-    // floor and ceiling anchor the range, and the sweep widens it if a value ever falls outside.
-    values: [150, 275].concat(sweepValues(
+    // Owner ruling 2026-11-26: $150 to $275 by home size and construction. The range is the min and max over every cell of the
+    // code table (SPECIALTY.wdo.sizeTable), so a table edit moves it; the typical-home sweep can only widen it.
+    values: wdoTableValues().concat(sweepValues(
       TYPICAL_HOMES.flatMap((homeSqFt) => [{ constructionMaterial: 'CBS' }, { constructionMaterial: 'WOOD_FRAME' }, { constructionMaterial: 'CBS', foundationType: 'CRAWLSPACE' }]
         .map((construction) => ({ homeSqFt, ...construction }))),
       (property) => sp.priceWDO(property),

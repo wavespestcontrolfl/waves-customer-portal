@@ -76,7 +76,7 @@ const {
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { hasStructuredCommercialAiSignal } = require('../services/property-lookup/commercial-ai-signal');
-const { lookupPalmCountIsTrustworthy, structuralFactIsRecordBacked } = require('../services/lookup-confidence');
+const { lookupPalmCountIsTrustworthy, structuralFactIsRecordBacked, structuralTrustVerdicts } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
@@ -6352,8 +6352,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     yearBuilt: p.yearBuilt,
     constructionMaterial: p.constructionMaterial,
     foundationType: p.foundationType,
-    constructionTrusted: p.constructionTrusted === false ? false : undefined,
-    foundationTrusted: p.foundationTrusted === false ? false : undefined,
+    // The trust verdicts the WDO price reads: the posted flag, or (a saved older profile) its fieldVerify evidence.
+    constructionTrusted: structuralTrustVerdicts(p).constructionTrusted,
+    foundationTrusted: structuralTrustVerdicts(p).foundationTrusted,
     roofType: p.roofType,
     nearWater: p.nearWater,
     waterDistance: p.waterDistance,

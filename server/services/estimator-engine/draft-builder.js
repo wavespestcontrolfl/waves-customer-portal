@@ -182,7 +182,7 @@ function knownEnrichedValue(value) {
 // Trust predicate lives in one place — the customer-facing pricing
 // assistant applies the same rule (services/lookup-confidence.js).
 const {
-  lookupBedAreaIsTrustworthy, lookupPalmCountIsTrustworthy, lookupTurfEstimateIsTrustworthy, hasGlobalVerifyFlag,
+  lookupBedAreaIsTrustworthy, lookupPalmCountIsTrustworthy, lookupTurfEstimateIsTrustworthy, hasGlobalVerifyFlag, structuralTrustVerdicts,
 } = require('../lookup-confidence');
 
 function lookupFeatureModifiers(enriched) {
@@ -482,8 +482,7 @@ function buildEngineInput({
       ? { foundationType: lookupEnriched.foundationType }
       : {}),
     // The lookup's weak-evidence verdict on those two (only the WDO price reads it): false prices the construction as unknown.
-    ...(!isCommercial && lookupEnriched?.constructionTrusted === false ? { constructionTrusted: false } : {}),
-    ...(!isCommercial && lookupEnriched?.foundationTrusted === false ? { foundationTrusted: false } : {}),
+    ...(!isCommercial ? structuralTrustVerdicts(lookupEnriched) : {}),
     ...(!isCommercial && knownEnrichedValue(lookupEnriched?.roofType)
       ? { roofType: lookupEnriched.roofType }
       : {}),

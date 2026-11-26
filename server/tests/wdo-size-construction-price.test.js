@@ -392,3 +392,78 @@ describe('public price list', () => {
     expect(row.notes).not.toMatch(/\b6x\b/);
   });
 });
+
+describe('a saved profile with field evidence but no trust flag', () => {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
+  const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
+  const profile = (extra = {}) => ({ homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St', constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', ...extra });
+  const priceOf = (input) => wdoLine(generateEstimate(input));
+  const translate = (p) => translateV2CallToV1Input(p, ['WDO'], { urgency: 'ROUTINE' });
+
+  test('the translator derives the verdicts from fieldVerify evidence', () => {
+    // Trusted (no evidence, or evidence without fieldVerify): disputed-free wood frame prices as frame ($200), no note.
+    for (const fieldEvidence of [undefined, {}, { constructionMaterial: { fieldVerify: false } }]) {
+      const trusted = priceOf(translate(profile({ fieldEvidence })));
+      expect(trusted.price).toBe(200);
+      expect(staffNote(trusted)).toBeUndefined();
+    }
+    // Disputed walls: block price plus the note.
+    const disputed = priceOf(translate(profile({ fieldEvidence: { constructionMaterial: { fieldVerify: true } } })));
+    expect(disputed.price).toBe(175);
+    expect(staffNote(disputed)).toBeTruthy();
+    // Disputed crawl-space read on trusted walls: frame on a slab plus the note.
+    const crawl = priceOf(translate(profile({ foundationType: 'CRAWLSPACE', fieldEvidence: { foundationType: { fieldVerify: true } } })));
+    expect(crawl.price).toBe(200);
+    expect(staffNote(crawl)).toBeTruthy();
+    // Both disputed.
+    const both = priceOf(translate(profile({ foundationType: 'CRAWLSPACE', fieldEvidence: { constructionMaterial: { fieldVerify: true }, foundationType: { fieldVerify: true } } })));
+    expect(both.price).toBe(175);
+    // An explicit posted flag still wins.
+    expect(translate(profile({ constructionTrusted: false })).constructionTrusted).toBe(false);
+  });
+
+  test('the estimator builder (call pipeline and revision path) carries the same verdicts', () => {
+    const facts = { home: { value: 3000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] }, lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] }, newConstruction: false, tenant: false };
+    const intent = { decision: 'draft', category: 'RESIDENTIAL', is_commercial: false, services: { wdo: {} }, address: '1 Test St' };
+    const build = (lookupEnriched) => buildEngineInput({ intent, propertyFacts: facts, context: {}, lookupEnriched });
+    const trusted = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', fieldEvidence: {} });
+    expect(trusted.constructionTrusted).toBeUndefined();
+    expect(priceOf(trusted).price).toBe(200);
+    const disputed = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'SLAB', fieldEvidence: { constructionMaterial: { fieldVerify: true } } });
+    expect(disputed.constructionTrusted).toBe(false);
+    expect(priceOf(disputed).price).toBe(175);
+    expect(staffNote(priceOf(disputed))).toBeTruthy();
+    const crawl = build({ constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE', fieldEvidence: { foundationType: { fieldVerify: true } } });
+    expect(crawl.foundationTrusted).toBe(false);
+    expect(priceOf(crawl).price).toBe(200);
+  });
+});
+
+describe('a tech-verified construction reaches the WDO line', () => {
+  const normalizeVerifiedValue = require('../services/property-lookup/lookup-cache').sanitizeVerifiedValue;
+
+  test.each([
+    ['mixed', 'MIXED'], ['Mixed block and wood', 'MIXED'], ['CBS first floor, wood frame second', 'MIXED'], ['block with wood frame addition', 'MIXED'],
+    ['concrete block', 'CBS'], ['stucco', 'CBS'], ['wood frame', 'WOOD_FRAME'], ['brick', 'BRICK'],
+  ])('verified %j -> %s', (text, expected) => {
+    expect(normalizeVerifiedValue('constructionMaterial', text)).toBe(expected);
+  });
+
+  test('a MIXED verified value prices as frame on the WDO line, not block', () => {
+    expect(price({ homeSqFt: 3000, constructionMaterial: normalizeVerifiedValue('constructionMaterial', 'mixed') })).toBe(200);
+    expect(price({ homeSqFt: 3000, constructionMaterial: normalizeVerifiedValue('constructionMaterial', 'block and wood frame') })).toBe(200);
+    expect(price({ homeSqFt: 3000, constructionMaterial: normalizeVerifiedValue('constructionMaterial', 'concrete block') })).toBe(175);
+  });
+});
+
+describe('public price list range comes from the table', () => {
+  test('low and high are the min and max over every table cell', () => {
+    const { tiers } = SPECIALTY.wdo.sizeTable;
+    const cells = tiers.flatMap((t) => [t.block, t.frame, t.crawl]);
+    const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
+    const row = computePublicPricingRanges({ refresh: true }).services.find((r) => r.key === 'wdo_inspection');
+    expect(row.low).toBe(Math.min(...cells));
+    expect(row.high).toBe(Math.max(...cells));
+  });
+});

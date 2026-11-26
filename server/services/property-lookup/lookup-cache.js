@@ -99,8 +99,13 @@ function intInRange(value, min, max) {
 // values are DROPPED rather than stored as UNKNOWN.
 function normalizeVerifiedConstruction(raw) {
   const s = String(raw || '').toUpperCase();
-  if (/CONCRETE|CBS|BLOCK|MASONRY|STUCCO/.test(s)) return 'CBS';
-  if (/WOOD|FRAME|TIMBER/.test(s)) return 'WOOD_FRAME';
+  // Mixed first: a tech's "mixed" entry, or text that names both a wood/frame and a block/concrete wall, is MIXED (priced as wood
+  // frame by the WDO table), never collapsed to whichever pattern matched first.
+  const block = /CONCRETE|CBS|BLOCK|MASONRY|STUCCO/.test(s);
+  const frame = /WOOD|FRAME|TIMBER/.test(s);
+  if (/MIXED/.test(s) || (block && frame)) return 'MIXED';
+  if (block) return 'CBS';
+  if (frame) return 'WOOD_FRAME';
   if (/METAL|STEEL|PREFAB/.test(s)) return 'METAL';
   if (/BRICK/.test(s)) return 'BRICK';
   return undefined;

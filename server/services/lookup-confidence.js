@@ -340,6 +340,25 @@ function structuralFactIsRecordBacked({ record, field }) {
   return known && structuralFactIsTrustworthy({ record, field });
 }
 
+// The trust verdict the WDO price reads for one structural field of a PROFILE (the enriched lookup profile the estimator posts back,
+// or a saved older one). false = distrusted: the profile's own verdict flag says so, or its field evidence carries fieldVerify (a
+// saved profile from before the verdict flag still has the evidence). Anything else reads as trusted.
+function profileStructuralFactIsTrusted(profile, { field, flag }) {
+  if (profile?.[flag] === false) return false;
+  return !profile?.fieldEvidence?.[field]?.fieldVerify && !profile?._fieldEvidence?.[field]?.fieldVerify;
+}
+const WDO_STRUCTURAL_FIELDS = Object.freeze({
+  construction: { field: 'constructionMaterial', flag: 'constructionTrusted' },
+  foundation: { field: 'foundationType', flag: 'foundationTrusted' },
+});
+// { constructionTrusted?: false, foundationTrusted?: false }: only a false verdict is carried to the pricer.
+function structuralTrustVerdicts(profile) {
+  return {
+    ...(profileStructuralFactIsTrusted(profile, WDO_STRUCTURAL_FIELDS.construction) ? {} : { constructionTrusted: false }),
+    ...(profileStructuralFactIsTrusted(profile, WDO_STRUCTURAL_FIELDS.foundation) ? {} : { foundationTrusted: false }),
+  };
+}
+
 // 'address' alone marks a WRONG-PREMISE lookup: the geocoder snapped to a
 // different parcel, so the record's dimensions describe the neighbor. 'all'
 // is deliberately excluded here — its MEDIUM form marks an AI-web-search
@@ -421,5 +440,6 @@ module.exports = {
   lookupPalmCountIsTrustworthy,
   structuralFactIsTrustworthy,
   structuralFactIsRecordBacked,
+  structuralTrustVerdicts,
   hasWrongPremiseFlag,
 };
