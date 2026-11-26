@@ -12,24 +12,22 @@ const ev = (id, region_zone, extra = {}) => ({
 describe('refillWithinCaps', () => {
   test('a lost local pick is not replaced by a third Tampa Bay event', () => {
     const lineupEvents = [ev('a', 'tampa'), ev('b', 'pinellas'), ev('c', 'sarasota'), ev('d', 'manatee'), ev('e', 'south_sarasota')];
-    const lineupAlternates = [ev('alt-away', 'pinellas'), ev('alt-local', 'manatee')];
+    const refillPool = [ev('alt-away', 'pinellas'), ev('alt-away-2', 'tampa'), ev('pool-local', 'manatee')];
     const ids = refillWithinCaps({
       safeEventIds: ['a', 'b', 'c', 'd'],
-      refillCandidates: ['alt-away', 'alt-local'],
-      refillExisting: new Set(['alt-away', 'alt-local']),
+      refillPool,
+      refillExisting: new Set(['alt-away', 'alt-away-2', 'pool-local']),
       lineupEvents,
-      lineupAlternates,
     });
-    expect(ids).toEqual(['a', 'b', 'c', 'd', 'alt-local']);
+    expect(ids).toEqual(['a', 'b', 'c', 'd', 'pool-local']);
   });
 
   test('an alternate whose row is gone is skipped', () => {
     const ids = refillWithinCaps({
       safeEventIds: ['c'],
-      refillCandidates: ['x'],
+      refillPool: [ev('x', 'manatee')],
       refillExisting: new Set(),
       lineupEvents: [ev('c', 'sarasota')],
-      lineupAlternates: [ev('x', 'manatee')],
     });
     expect(ids).toEqual(['c']);
   });

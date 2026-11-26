@@ -55,7 +55,7 @@ const AWAY_CAP = 2;
 // A city string can carry punctuation ("St. Petersburg") or name a beach town
 // the zone map does not list ("St. Pete Beach"), so the away check also reads
 // the punctuation-free city against the Tampa Bay place words.
-const AWAY_CITY_RX = /\b(?:st pete|st petersburg|saint petersburg|clearwater|largo|dunedin|gulfport|palm harbor|oldsmar|pinellas park|belleair|kenneth city|redington|madeira beach|treasure island|indian rocks|seminole|pinellas|safety harbor|tarpon springs|tampa|ybor|brandon|riverview|hillsborough)\b/;
+const AWAY_CITY_RX = /\b(?:st pete|st petersburg|saint petersburg|clearwater|largo|dunedin|gulfport|palm harbor|oldsmar|pinellas park|belleair|kenneth city|redington|madeira beach|treasure island|indian rocks|indian shores|belleair beach|st pete beach|temple terrace|plant city|lutz|wesley chapel|apollo beach|ruskin|seminole|pinellas|safety harbor|tarpon springs|tampa|ybor|brandon|riverview|hillsborough)\b/;
 function awayZoneOf(event) {
   const zone = norm(event?.region_zone);
   if (zone) return zone;

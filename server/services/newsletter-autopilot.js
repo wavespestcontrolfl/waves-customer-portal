@@ -341,19 +341,18 @@ function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
  * @returns {{ skipped: boolean, reason?: string, sendId?: number, eventCount?: number }}
  */
 /**
- * Refill a thinned lineup from the ranked alternates. Each refill must respect
+ * Refill a thinned lineup from a best-first pool of floor-passing events. Each refill must respect
  * the portfolio caps against the SURVIVING lineup (the local-first away cap
  * included): an alternate ranked as a replacement for one pick can otherwise
  * land beside both away picks.
  */
-function refillWithinCaps({ safeEventIds, refillCandidates, refillExisting, lineupEvents, lineupAlternates }) {
+function refillWithinCaps({ safeEventIds, refillPool, refillExisting, lineupEvents }) {
   const ids = [...safeEventIds];
-  const altById = new Map(lineupAlternates.map((ev) => [String(ev.id), ev]));
   const survivors = lineupEvents.filter((ev) => ids.includes(String(ev.id)));
-  for (const id of refillCandidates) {
+  for (const alt of refillPool) {
     if (ids.length >= MAX_PORTFOLIO) break;
-    const alt = altById.get(id);
-    if (!refillExisting.has(id) || !alt || !capsAllow(survivors, alt)) continue;
+    const id = String(alt.id);
+    if (ids.includes(id) || !refillExisting.has(id) || !capsAllow(survivors, alt)) continue;
     ids.push(id);
     survivors.push(alt);
   }
@@ -595,18 +594,27 @@ async function autoDraftFlagship() {
     logger.info(`[newsletter-autopilot] Dropped ${staleCount} stale locked event id(s)`);
   }
   if (safeEventIds.length < 5 && lineupAlternates.length > 0) {
-    const refillCandidates = lineupAlternates
-      .map((ev) => String(ev.id))
-      .filter((id) => uuidRe.test(id) && !safeEventIds.includes(id));
-    if (refillCandidates.length) {
+    // Refill from the WHOLE floor-passing pool, best first, checked against
+    // the survivors: the stored alternates are only the top replacements for
+    // the original lineup, and under the local-first away cap they can all be
+    // away events while a lower-ranked local event would restore the minimum.
+    const refillPool = [...lineupAlternates, ...scored.filter(floorPassed)]
+      .filter((ev) => ev && uuidRe.test(String(ev.id)) && !safeEventIds.includes(String(ev.id)))
+      .filter((ev, i, arr) => arr.findIndex((o) => String(o.id) === String(ev.id)) === i);
+    if (refillPool.length) {
       const refillExisting = new Set(
-        (await db('events_raw').whereIn('id', refillCandidates).pluck('id')).map(String),
+        (await db('events_raw').whereIn('id', refillPool.map((ev) => String(ev.id))).pluck('id')).map(String),
       );
       safeEventIds = refillWithinCaps({
-        safeEventIds, refillCandidates, refillExisting, lineupEvents, lineupAlternates,
+        safeEventIds, refillPool, refillExisting, lineupEvents,
       });
-      logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from ranked alternates`);
+      logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from the ranked pool`);
     }
+    // Recheck BEFORE the paid draft call: a refill the caps held short must
+    // skip the week here, not after generation.
+    const poolById = new Map([...lineupEvents, ...refillPool].map((ev) => [String(ev.id), ev]));
+    const refilledPreflight = preflightDigest(safeEventIds.map((id) => poolById.get(String(id))).filter(Boolean), reqs);
+    if (!refilledPreflight.pass) return skipWeek(refilledPreflight);
   }
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
