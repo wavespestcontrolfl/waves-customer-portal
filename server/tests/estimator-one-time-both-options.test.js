@@ -1,14 +1,15 @@
 /**
  * Owner ruling 2026-11-23: a one-time pest ask shows BOTH options on the
  * estimate (the plan and the one-time price).
- * Behavior: on a call, a one-time-only pest intent gains the quarterly plan
- * before pricing; the one-time price stays the price of a one-time-only
- * draft and equals the amount the estimate page shows for the choice.
- * Regressions it guards: the plan handing the caller the plan-member
- * discount on the one-time price, and the plan being added on a text
- * thread, next to other services, or on a bedroom-band unit.
+ * Behavior: on a call, a one-time-only pest intent is priced as the
+ * quarterly plan, and the priced result passes the estimate page's own rule
+ * for the [Recurring | One-time] choice with no one-time row stored.
+ * Regressions it guards: a second stored one-time price (it disagreed with
+ * the page's amount for members, older homes and band units), and the swap
+ * on a text thread, next to other services, for a current customer, or on
+ * a bedroom-band unit.
  */
-const { addRecurringPestForOneTimeAsk } = require('../services/estimator-engine/one-time-pest-both-options');
+const { offerPlanWithOneTimeChoice } = require('../services/estimator-engine/one-time-pest-both-options');
 const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
 const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
 const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
@@ -26,10 +27,11 @@ const facts = {
 
 describe('one-time pest ask: both options', () => {
   const onCall = { channel: 'call' };
-  test('a one-time-only ask gains the quarterly plan', () => {
+
+  test('a one-time-only ask on a call is priced as the quarterly plan', () => {
     const intent = intentWith({ oneTimePest: {} });
-    expect(addRecurringPestForOneTimeAsk(intent, onCall)).toBe(true);
-    expect(intent.services).toEqual({ oneTimePest: {}, pest: { frequency: 'quarterly' } });
+    expect(offerPlanWithOneTimeChoice(intent, onCall)).toBe(true);
+    expect(intent.services).toEqual({ pest: { frequency: 'quarterly' } });
   });
 
   test.each([
@@ -40,37 +42,19 @@ describe('one-time pest ask: both options', () => {
     ['a skipped intent', intentWith({ oneTimePest: {} }, { decision: 'skip' })],
     ['a text thread, not a call', intentWith({ oneTimePest: {} }), { channel: 'sms_thread' }],
     ['a bedroom-band unit', intentWith({ oneTimePest: {} }), { channel: 'call', unitBandPricing: { eligible: true } }],
-  ])('adds nothing when %s', (_label, intent, where = onCall) => {
+    ['a current customer', intentWith({ oneTimePest: {} }), { channel: 'call', currentCustomer: true }],
+  ])('leaves the ask alone when %s', (_label, intent, where = onCall) => {
     const before = JSON.stringify(intent.services);
-    expect(addRecurringPestForOneTimeAsk(intent, where)).toBe(false);
+    expect(offerPlanWithOneTimeChoice(intent, where)).toBe(false);
     expect(JSON.stringify(intent.services)).toBe(before);
   });
 
-  const price = (services, context = {}) => {
-    const engineInputs = buildEngineInput({ intent: intentWith(services), propertyFacts: facts, context });
+  test('the priced plan passes the estimate page rule for the one-time choice, with no one-time row', () => {
+    const intent = intentWith({ oneTimePest: {} });
+    offerPlanWithOneTimeChoice(intent, onCall);
+    const engineInputs = buildEngineInput({ intent, propertyFacts: facts, context: {} });
     const engineResult = generateEstimate(engineInputs);
-    const line = (service) => engineResult.lineItems.find((l) => l.service === service) || {};
-    return { engineInputs, engineResult, oneTime: line('one_time_pest').price, perApp: line('pest_control').perApp };
-  };
-  const ruleContext = { ownerRuleServices: ['pest'] };
-  const both = { oneTimePest: {}, pest: { frequency: 'quarterly' } };
-
-  test('offering the plan keeps the one-time price of a one-time-only draft', () => {
-    const alone = price({ oneTimePest: {} });
-    expect(alone.oneTime).toBeGreaterThan(0);
-    expect(price(both, ruleContext).oneTime).toBe(alone.oneTime);
-    // Without the rule's marker the engine reads the pair as a plan member.
-    expect(price(both).oneTime).toBeLessThan(alone.oneTime);
-  });
-
-  test('the stored one-time price is the amount the estimate page shows', () => {
-    const { ONE_TIME } = require('../services/pricing-engine/constants');
-    const priced = price(both, ruleContext);
-    expect(priced.oneTime).toBe(Math.max(ONE_TIME.pest.floor, Math.round(priced.perApp * ONE_TIME.pest.multiplier)));
-  });
-
-  test('the priced result passes the estimate page rule for the one-time choice', () => {
-    const { engineInputs, engineResult } = price(both, ruleContext);
+    expect(engineResult.lineItems.map((l) => l.service)).toEqual(['pest_control']);
     expect(validateEstimateDeliveryOptions({ showOneTimeOption: true, estimateData: { engineInputs, engineResult } })).toBeNull();
   });
 });

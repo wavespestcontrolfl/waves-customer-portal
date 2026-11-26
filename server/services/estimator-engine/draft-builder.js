@@ -375,11 +375,6 @@ function buildEngineInput({
     // caller already has, so an add-on quote gets the combined tier discount
     // and recurring-customer perks (same key the admin save path feeds).
     ...(priorQualifyingServices.length ? { priorQualifyingServices } : {}),
-    // The owner's both-options rule added the plan as a CHOICE; the caller
-    // is not a plan member, so the one-time price stays the price a
-    // one-time-only draft carries (no recurring-customer perk). Prior
-    // qualifying services still force the perk for a real member.
-    ...(context?.ownerRuleServices?.includes('pest') ? { recurringCustomer: false } : {}),
     commercialRiskType: intent.commercial_risk_type || null,
     commercialSubtype: intent.commercial_subtype || null,
     ...(homeSqFt ? { homeSqFt } : {}),
@@ -962,9 +957,7 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   }
   if (intent.confidence !== 'high') reasons.push(`composer confidence ${intent.confidence}`);
   if ((intent.uncertainties || []).length) reasons.push(`open questions: ${intent.uncertainties.join(' | ')}`);
-  // A service the owner's rule added (not the caller) has no quote to cite.
-  const callerServiceCount = Object.keys(intent.services || {}).length - (context?.ownerRuleServices?.length || 0);
-  if ((intent.evidence || []).length < callerServiceCount) {
+  if ((intent.evidence || []).length < Object.keys(intent.services || {}).length) {
     reasons.push('evidence quotes do not cover every selected service');
   }
   const evidenceCheck = verifyEvidenceQuotes(intent, context);
@@ -1088,11 +1081,14 @@ function callAutoSendShadowStamp({ origin, intent, propertyFacts, context, prior
   }
 }
 
-// The estimate shows the [Recurring | One-time] choice only when the plan
-// was added by the owner's both-options rule (one-time-pest-both-options.js) AND the page's own rule for that choice
-// passes on what was actually priced (validateEstimateDeliveryOptions).
+// The estimate shows the [Recurring | One-time] choice when the owner's
+// both-options rule priced the caller's one-time ask as the plan
+// (one-time-pest-both-options.js) AND the estimate page's own rule for that
+// choice passes on what was priced. The page computes the one-time amount
+// from the plan's per-visit price, the same way it does for a staff estimate
+// with "Offer one-time option" on, so no second price is stored here.
 function showsOneTimeChoice({ context, totals, engineInputs, engineResult }) {
-  if (!context?.ownerRuleServices?.includes('pest')) return false;
+  if (!context?.oneTimeAskBothOptions) return false;
   const refusal = validateEstimateDeliveryOptions({
     showOneTimeOption: true,
     onetimeTotal: totals?.oneTime,

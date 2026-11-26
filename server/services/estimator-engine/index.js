@@ -76,7 +76,7 @@ const {
   classifyLane,
   createDraftEstimate,
 } = require('./draft-builder');
-const { addRecurringPestForOneTimeAsk } = require('./one-time-pest-both-options');
+const { offerPlanWithOneTimeChoice } = require('./one-time-pest-both-options');
 const { flagLookupPalmCountForReview } = require('./lookup-palm-review');
 
 
@@ -2885,9 +2885,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     result.unitBandPricing = unitBandPricing;
     // Owner ruling 2026-11-23: a one-time pest ask on a call shows both
     // options (the rule and its limits: one-time-pest-both-options.js).
-    if (addRecurringPestForOneTimeAsk(intent, { channel: origin?.channel, unitBandPricing })) {
-      context.ownerRuleServices = ['pest'];
-    }
+    context.oneTimeAskBothOptions = offerPlanWithOneTimeChoice(intent, {
+      channel: origin?.channel,
+      unitBandPricing,
+      currentCustomer: context.isExistingCustomer === true || priorQualifyingServices.length > 0,
+    });
 
     let engineResult = null;
     let engineInput = null;
