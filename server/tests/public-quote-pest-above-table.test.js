@@ -137,6 +137,26 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
     expect(json.message).not.toMatch(/A home this size is priced by our team/);
   });
 
+  test('a junk finite home size (1e300) is parked and bounded at 200,000 sq ft: it never reaches the price arithmetic or a size column', async () => {
+    const { status, json } = await calculate(1e300, 1, { pest: { frequency: 'quarterly' }, exclusion: { stories: 1 } });
+    expect(status).toBeLessThan(300);
+    expect(json.quote_required).toBe(true);
+    expect(json.reason).toBe('home_size_above_public_limit');
+    const estimateRow = db.__recorded.find((w) => w.table === 'estimates' && w.op === 'insert');
+    const estimateData = typeof estimateRow.row.estimate_data === 'string' ? JSON.parse(estimateRow.row.estimate_data) : estimateRow.row.estimate_data;
+    expect(estimateData.engineInput.homeSqFt).toBe(200000);
+    expect(estimateData.engineInput.services.exclusion.homeSqFt).toBe(200000);
+    // Nothing the request wrote holds the junk number, and no stored price overflowed to null (JSON has no Infinity).
+    const written = JSON.stringify(db.__recorded);
+    expect(written).not.toMatch(/1e\+?300/i);
+    const prices = (estimateData.result?.lineItems || estimateData.engineResult?.lineItems || []).flatMap((line) => [line.price, line.annual, line.monthly]);
+    expect(prices.filter((value) => value !== undefined && value !== null).every((value) => Number.isFinite(value))).toBe(true);
+    const sizes = db.__recorded.filter((w) => w.table === 'leads' && w.row && w.row.extracted_data)
+      .map((w) => (typeof w.row.extracted_data === 'string' ? JSON.parse(w.row.extracted_data) : w.row.extracted_data).homeSqFt)
+      .filter((v) => v !== undefined);
+    expect(sizes.every((v) => v === 200000)).toBe(true);
+  });
+
   test.each(['Infinity', '-Infinity', 'NaN', 'abc', '1,800'])('an unparseable or infinite home size (%s) takes main\'s fallback: priced as the 2,000 sq ft default, never clamped, parked or stored as null', async (bad) => {
     const baseline = await calculate(2000, 1);
     const { status, json } = await calculate(bad, 1);

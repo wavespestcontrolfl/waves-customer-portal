@@ -2000,6 +2000,21 @@ function pestRowsSignature(estimateData) {
   return [unstamped(results.pest) ?? null, results.pestTiers ?? null, oneTime.map(unstamped)];
 }
 
+// The inputs that decide the pest footprint (resolvePestFootprint: an explicit footprint, else living area over stories), from every
+// carrier the replay and the editor read. Above 5,500 sq ft the browser's pest rows do not move with the home size (it prices the
+// flat top of the table), so equal rows alone cannot show that a stored price is still right: the size must be unchanged too.
+const PEST_FOOTPRINT_INPUT_KEY = /^(footprint|homeSqFt$|stories$|buildingSqFt$|livingAreaSqFt$)/i;
+function pestFootprintInputsSignature(estimateData) {
+  const data = estimateData && typeof estimateData === 'object' ? estimateData : {};
+  const container = (() => { try { return require('./estimate-result-container').storedEstimateContainer(data) || null; } catch { return null; } })();
+  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
+  // A carrier that is absent and one that holds no size key say the same thing (no size), so both read as {}.
+  const pick = (carrier) => Object.fromEntries(Object.entries(carrier && typeof carrier === 'object' ? carrier : {})
+    .filter(([key]) => PEST_FOOTPRINT_INPUT_KEY.test(key)));
+  return [data.inputs, data.engineInputs, data.engineInput, container && container.inputs,
+    request && request.profile, request && request.options, request && request.inputs].map(pick);
+}
+
 // Identical pest rows are the stored estimate's own: they keep the stored rule, never the browser's (an older browser sends no stamp,
 // a forged one could send false). The estimate-wide stamp and each pest row's stamp are copied from the trusted stored row.
 function copyStoredPestRuleStamps(estimateData, storedEstimateData) {
@@ -2072,7 +2087,10 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
   // not a new pest price: it saves unchanged. Only newly priced pest rows need the stamp (the new rule's multiple, buffer and floor are
   // code constants shared by the browser and the server, so no price check is needed beside it).
   // Key-order independent (a re-serialized stored row can reorder keys), array order kept.
-  if (storedEstimateData && isDeepStrictEqual(pestRowsSignature(estimateData), pestRowsSignature(storedEstimateData))) {
+  // The home size must be unchanged as well (pestFootprintInputsSignature): a 5,500 sq ft quote corrected to 10,000 sq ft keeps the
+  // same browser rows, and it is a new price ($164, not $128), so it takes the stamp checks below and the server prices it.
+  if (storedEstimateData && isDeepStrictEqual(pestRowsSignature(estimateData), pestRowsSignature(storedEstimateData))
+    && isDeepStrictEqual(pestFootprintInputsSignature(estimateData), pestFootprintInputsSignature(storedEstimateData))) {
     copyStoredPestRuleStamps(estimateData, storedEstimateData);
     return;
   }

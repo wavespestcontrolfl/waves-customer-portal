@@ -1480,7 +1480,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const homeSizeAbovePublicLimit = !commercialDetected && Number(homeSqFt) > HOME_CAP
       && !!(services && (services.pest || services.oneTimePest));
     // ONE resolved size for everything this quote stores or prices from: the engine input, the exclusion line and the lead's extracted data.
-    const resolvedHomeSqFt = homeSizeAbovePublicLimit ? Number(homeSqFt) : sqft;
+    // The size kept for the team is bounded at ten times the public ceiling (200,000 sq ft): a junk value such as 1e300 is finite, so
+    // without the bound it would reach the price arithmetic (prices that overflow and store as null) and the integer size columns.
+    const resolvedHomeSqFt = homeSizeAbovePublicLimit ? Math.min(Number(homeSqFt), HOME_CAP * 10) : sqft;
     // Resolve the TRUSTED lot once (lookup-measured or customer-confirmed) and use
     // it for BOTH the measured flag AND the lot fed to the engine — otherwise we
     // could mark the lot measured off enriched.lotSqFt while still pricing off the

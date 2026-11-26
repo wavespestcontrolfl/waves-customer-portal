@@ -295,6 +295,33 @@ describe('the fallback save: the new-rule stamp (admin-estimate-persistence)', (
     expect(() => save(forged, { storedEstimateData: legacyStored })).not.toThrow();
     expect(forged.result.pricingMetadata.legacyPestAboveTable).toBe(true);
   });
+
+  test('equal rows are not enough: a home-size edit that leaves the browser rows unchanged is a new price and takes the stamp check', () => {
+    // 5,500 sq ft priced under the rule ($128, premium zero). Staff correct the size to 10,000 sq ft: the browser still prices the flat
+    // $128 and leaves the stamp off above 5,500, so the save is refused and the server prices it ($164).
+    const refused = (data, stored) => {
+      let error;
+      try { save(data, { storedEstimateData: stored }); } catch (e) { error = e; }
+      expect(error && error.statusCode).toBe(409);
+    };
+    const sized = (pricingMetadata, carriers) => ({ ...payload(128, pricingMetadata), ...carriers });
+    const stored = sized(meta({ legacyPestAboveTable: false }), { inputs: { homeSqFt: 5500, stories: '1' } });
+    refused(sized(meta(), { inputs: { homeSqFt: 10000, stories: '1' } }), stored);
+    // A story-count edit moves the footprint too, and every carrier of the size is compared.
+    refused(sized(meta(), { inputs: { homeSqFt: 5500, stories: '2' } }), sized(meta({ legacyPestAboveTable: false }), { inputs: { homeSqFt: 5500, stories: '1' } }));
+    for (const carrier of ['engineInputs', 'engineInput']) {
+      refused(sized(meta(), { [carrier]: { homeSqFt: 10000, stories: 1 } }), sized(meta({ legacyPestAboveTable: false }), { [carrier]: { homeSqFt: 5500, stories: 1 } }));
+    }
+    refused(sized(meta(), { engineRequest: { profile: { footprint: 10000 } } }),
+      sized(meta({ legacyPestAboveTable: false }), { engineRequest: { profile: { footprint: 5500 } } }));
+    // The same rows with the same size are still the stored estimate's own: the stored stamp is copied, as before.
+    const same = sized(meta(), { inputs: { homeSqFt: 5500, stories: '1' } });
+    expect(() => save(same, { storedEstimateData: stored })).not.toThrow();
+    expect(same.result.pricingMetadata.legacyPestAboveTable).toBe(false);
+    // A legacy quote resized through the fallback is not kept flat either: it reloads and the server re-prices it on current rules.
+    const legacyStored = sized(meta(), { inputs: { homeSqFt: 10000, stories: '1', svcPest: true }, engineInputs: { homeSqFt: 10000, services: { pest: {} } } });
+    refused(sized(meta(), { inputs: { homeSqFt: 12000, stories: '1', svcPest: true }, engineInputs: { homeSqFt: 12000, services: { pest: {} } } }), legacyStored);
+  });
 });
 
 describe('staff revisions re-price on current rules; customer replays keep the sent price', () => {
