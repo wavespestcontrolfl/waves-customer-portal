@@ -24,12 +24,12 @@ const ContextAggregator = require('../services/context-aggregator');
 // A chainable fake knex that records every builder call per table. modify() runs its callback on
 // the chain so the call_log bounds (applied inside modify) are recorded too.
 let queries;
-function recordingQuery(table) {
+function recordingQuery(table, rows = []) {
   const calls = [];
   queries.push({ table, calls });
   const proxy = new Proxy(function () {}, {
     get(_target, prop) {
-      if (prop === 'then') return (res, rej) => Promise.resolve([]).then(res, rej);
+      if (prop === 'then') return (res, rej) => Promise.resolve(rows).then(res, rej);
       if (prop === 'catch') return (rej) => Promise.resolve([]).then(undefined, rej);
       if (prop === 'first') return () => Promise.resolve(null);
       if (prop === 'count') return () => ({ first: async () => ({ count: '0', c: '0' }) });
@@ -170,5 +170,24 @@ describe('getContextForCustomer texting AI staff facts', () => {
     expect(staffFacts.loadEstimateFacts).not.toHaveBeenCalled();
     staffFacts.loadPrepGuideFacts.mockResolvedValueOnce(null);
     expect((await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true })).prepGuide).toBeNull();
+  });
+
+  test('the guide fallback is handed the completed services of the latest service day, and none when that day fills the history page', async () => {
+    const withHistory = (rows) => db.mockImplementation((table) => recordingQuery(table, table === 'service_records' ? rows : []));
+    const record = (id, day) => ({ id, service_date: day, service_type: 'Pest Control', scheduled_service_id: `ss-${id}`, status: 'completed' });
+    const handed = async (rows) => {
+      staffFacts.loadPrepGuideFacts.mockClear();
+      withHistory(rows);
+      await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true });
+      return staffFacts.loadPrepGuideFacts.mock.calls[0][1];
+    };
+    // two services of the latest day, an older one: the two of the latest day
+    expect((await handed([record('a', '2026-11-20'), record('b', '2026-11-20'), record('c', '2026-11-01')])).map((r) => r.id)).toEqual(['a', 'b']);
+    // no history: none
+    expect(await handed([])).toEqual([]);
+    // five rows all on one day: the day may run past the page, so no completed service is named
+    expect(await handed(['a', 'b', 'c', 'd', 'e'].map((id) => record(id, '2026-11-20')))).toBeNull();
+    // five rows over two days: the latest day is complete
+    expect((await handed([record('a', '2026-11-20'), record('b', '2026-11-20'), record('c', '2026-11-20'), record('d', '2026-11-20'), record('e', '2026-11-01')])).length).toBe(4);
   });
 });

@@ -111,6 +111,7 @@ describe('loadPrepGuideFacts', () => {
     expect(await run(async () => sameGuide(PEST), records)).toMatchObject({ source: 'last', key: 'prep.interior_pest' }); // the same guide twice: it
     expect(await run(async ({ scheduledServiceId }) => (scheduledServiceId === 's1' ? sameGuide(PEST) : { pestType: null, config: null }), records)).toEqual({ sections: [] }); // one with none
     expect(await run(async () => sameGuide(PEST), [])).toEqual({ sections: [] }); // no completed service at all
+    expect(await run(async () => sameGuide(PEST), null)).toEqual({ sections: [] }); // the latest day may run past the history page
   });
 
   test('a booked visit with no nameable guide gets none: the last service\'s guide is never put in its place', async () => {
