@@ -1776,7 +1776,7 @@ describe('service-worker slow page loads', () => {
     const network = gatedNetwork();
     worker.setFetch(network.serve);
     // dispatchFetch resolves when the page's response does: track it.
-    const load = (pathname = '/dashboard', options = {}) => {
+    const load = (pathname = '/', options = {}) => {
       const state = { done: false };
       state.promise = worker.dispatchFetch(pathname, { mode: 'navigate', settle: false, ...options })
         .then(result => { state.done = true; return result; });
@@ -1848,6 +1848,38 @@ describe('service-worker slow page loads', () => {
     expect(nav.done).toBe(false);
     network.release();
     expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it.each(['/login', '/?tab=billing'])('serves the saved copy at 3 s for the customer screen %s', async (path) => {
+    const { load } = await start();
+    const nav = load(path);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(bodyOf(await nav.promise)).toBe(savedHtml);
+  });
+
+  it.each([
+    '/dashboard',
+    `/pay/${'c'.repeat(32)}`,
+    `/estimate/${'d'.repeat(32)}`,
+    `/report/${'e'.repeat(32)}`,
+    '/admin/dispatch',
+    '/tech',
+  ])('waits for the network on %s, which is not a customer app screen, and keeps the flag', async (path) => {
+    const { worker, network, load } = await start();
+    worker.dispatchMessage({ type: 'waves:network-next-navigation' });
+    const nav = load(path);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    network.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+    // The flag is still set: the next customer-screen load waits too.
+    const next = gatedNetwork();
+    worker.setFetch(next.serve);
+    const home = load('/');
+    expect(vi.getTimerCount()).toBe(0);
+    next.release();
+    await home.promise;
   });
 
   it('leaves an offer link to the browser, with no timer', async () => {

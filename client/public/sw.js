@@ -699,6 +699,16 @@ const NETWORK_NEXT_ACK = 'waves:network-next-ack';
 const NETWORK_NEXT_MS = 30000;
 let networkNextUntil = 0;
 
+// The customer app's own screens: the home page (every tab is a ?tab= on
+// it) and the login page. The server sends each the plain app page. Every
+// other page is left out of the slow-network rule: a link page (estimate,
+// pay, report, offer) can carry its own privacy headers, its own link
+// preview, or a page the server builds itself, and a staff page has its
+// own manifest and title, so the saved copy would not be the same page.
+function isSavedCopyPath(pathname) {
+  return pathname === '/' || pathname === '/login' || pathname === '/login/';
+}
+
 function takeNetworkNext() {
   const active = Date.now() < networkNextUntil;
   networkNextUntil = 0;
@@ -815,10 +825,12 @@ self.addEventListener('fetch', event => {
     // after a later request answered by the newer one.
     const navSeq = ++navigationSeq;
     const startedAt = Date.now();
-    // Only a GET page load may be answered from the saved copy when the
-    // network is slow, and one that follows a reload for a missing chunk
-    // (NETWORK_NEXT_MESSAGE) never is. A form POST leaves the flag unread.
-    const mayServeSaved = event.request.method === 'GET' && !takeNetworkNext();
+    // Only a GET load of the customer app's own screens may be answered from
+    // the saved copy when the network is slow (isSavedCopyPath), and one that
+    // follows a reload for a missing chunk (NETWORK_NEXT_MESSAGE) never is.
+    // Any other page load (a form POST, a link page, a staff page) leaves the
+    // flag unread.
+    const mayServeSaved = event.request.method === 'GET' && isSavedCopyPath(url.pathname) && !takeNetworkNext();
     const attempt = startNavigationFetch(event.request);
     let decide;
     const choice = new Promise(resolve => { decide = resolve; });
