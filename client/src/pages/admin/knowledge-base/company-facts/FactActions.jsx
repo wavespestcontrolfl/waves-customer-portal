@@ -70,6 +70,8 @@ export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing })
   const [fresh, setFresh] = useState(null);
   // What the card showed when Discard was opened: the delete carries it, so a newer version saved meanwhile is never deleted.
   const [discardBase, setDiscardBase] = useState(null);
+  // Names the open Discard dialog: a refusal that arrives late closes only the dialog that asked, never a newer one or an editor opened since.
+  const discardDialog = useRef(0);
   const { busy, error, run } = useAction(onDone, onStale);
   const blocks = fact.check_result?.blocks || [];
   const freshWarnings = fresh && fresh.text === fact.fact_text ? fresh.warnings : null;
@@ -111,16 +113,21 @@ export function DraftActions({ fact, ownerActions, onDone, onStale, onEditing })
       {mode === "discard" && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-ui-body">Discard this draft for good?</span>
-          <Button variant="danger" loading={busy} onClick={() => run(() => send(`/${fact.id}`, "DELETE", discardBase), "Draft discarded.", undefined, () => setMode("view"))}>Discard</Button>
-          <Button variant="secondary" onClick={() => setMode("view")}>Keep</Button>
+          <Button variant="danger" loading={busy} onClick={() => {
+            const mine = discardDialog.current;
+            run(() => send(`/${fact.id}`, "DELETE", discardBase), "Draft discarded.", undefined, () => {
+              if (discardDialog.current === mine) setMode((now) => (now === "discard" ? "view" : now));
+            });
+          }}>Discard</Button>
+          <Button variant="secondary" onClick={() => { discardDialog.current += 1; setMode("view"); }}>Keep</Button>
         </div>
       )}
       {mode === "view" && (
         <div className="flex flex-wrap gap-2">
           {ownerActions && <Button loading={busy} disabled={!canApprove} onClick={approve}>Approve</Button>}
-          <Button variant="secondary" onClick={() => setMode("edit")}>Edit</Button>
+          <Button variant="secondary" onClick={() => { discardDialog.current += 1; setMode("edit"); }}>Edit</Button>
           <Button variant="secondary" loading={busy} onClick={checkAgain}>Check again</Button>
-          <Button variant="secondary" onClick={() => { setDiscardBase({ baseTextSha256: fact.text_sha256, baseUpdatedAt: fact.updated_at }); setMode("discard"); }}>Discard</Button>
+          <Button variant="secondary" onClick={() => { discardDialog.current += 1; setDiscardBase({ baseTextSha256: fact.text_sha256, baseUpdatedAt: fact.updated_at }); setMode("discard"); }}>Discard</Button>
         </div>
       )}
       {!ownerActions && <p className="text-ui-caption text-ink-secondary">Only the owner account can approve.</p>}

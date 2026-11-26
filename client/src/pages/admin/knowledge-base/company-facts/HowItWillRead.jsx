@@ -39,8 +39,14 @@ export default function HowItWillRead({ facts }) {
         {preview && preview.lines && (
           <pre aria-label="How the approved facts will read" className="m-0 overflow-x-auto whitespace-pre-wrap break-words rounded-xs bg-zinc-50 p-3 text-ui-body text-ink-primary">{preview.lines}</pre>
         )}
-        {preview && !preview.lines && <p className="text-ui-body text-ink-secondary">No approved facts yet.</p>}
-        {leftOut.length > 0 && (
+        {/* An empty list is "no approved facts" only when the read found none; approved facts that all failed the checks say so. */}
+        {preview && !preview.lines && leftOut.length === 0 && <p className="text-ui-body text-ink-secondary">No approved facts yet.</p>}
+        {leftOut.length > 0 && !preview?.lines && (
+          <ActionFeedback error>
+            {leftOut.length === 1 ? "1 approved fact is" : `${leftOut.length} approved facts are`} not served because {leftOut.length === 1 ? "it no longer passes" : "they no longer pass"} the checks ({leftOut.map((id) => topicOf(id) || "another fact").join(", ")}). Voice calls and email drafts get no facts from the bank right now. Retire {leftOut.length === 1 ? "it" : "them"}, or edit {leftOut.length === 1 ? "it" : "each"} as a new draft.
+          </ActionFeedback>
+        )}
+        {leftOut.length > 0 && preview?.lines && (
           <ActionFeedback error>
             {leftOut.length === 1 ? "1 approved fact is" : `${leftOut.length} approved facts are`} not in this list ({leftOut.map((id) => topicOf(id) || "another fact").join(", ")}). It no longer passes the checks, so it will not go to the agents. Retire it, or edit it as a new draft.
           </ActionFeedback>
