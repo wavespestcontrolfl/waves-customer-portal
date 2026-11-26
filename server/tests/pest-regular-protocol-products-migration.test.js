@@ -160,12 +160,14 @@ describe('pest regular protocol products migration: names', () => {
     for (const list of Object.values(migration.NEW_DEFAULTS)) expect(list).toEqual(FULL);
   });
 
-  test('the amounts match the close-out house mix the client carries (Taurus 1.6, Crosscheck 4, surfactant 0.25)', () => {
+  // Crosscheck: the close-out mix went to 2.5 fl oz a tank (label cap, owner 2026-11-25 D21, client/src/lib/pest-default-mix.js). The
+  // usage rows this migration wrote still cost 4 fl oz a visit; they move with the catalog cost step, so the cost shown stays the higher one.
+  test('the Taurus and surfactant amounts match the close-out house mix the client carries; its Crosscheck is the lower label-cap amount', () => {
     const fs = require('fs');
     const path = require('path');
     const mix = fs.readFileSync(path.join(__dirname, '../../client/src/lib/pest-default-mix.js'), 'utf8');
     // The client module is ESM, so the totals are read from its source.
-    expect([...mix.matchAll(/pattern: (\/[^,]+\/i), totalAmount: ([\d.]+)/g)].map((m) => Number(m[2]))).toEqual([1.6, 4, 0.25]);
+    expect([...mix.matchAll(/pattern: (\/[^,]+\/i), totalAmount: ([\d.]+)/g)].map((m) => Number(m[2]))).toEqual([1.6, 2.5, 0.25]);
   });
 });
 
@@ -521,15 +523,18 @@ describe('pest regular protocol products: the protocol hints', () => {
     expect(hints('Applied repellent solution with surfactant to perimeter')).toEqual(['LESCO Crosscheck Plus']);
     // No Taurus hint: a hint would select Taurus on the pre-visit Job Card with the catalog dilution and no yearly
     // limit. The close-out house mix, which reads the home's yearly count, is the only thing that adds it.
-    expect(hints('Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice')).toBeUndefined();
+    expect(hints('Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice')).toBeUndefined();
   });
 
-  test('the Taurus SC line says what its label allows (1 ft up + 1 ft out; 18-in band at openings), in the checklist and the lineMeta key alike', () => {
+  // The tank is shared: Taurus SC allows an 18-in band at doors and windows, but the Crosscheck Plus in the same tank allows
+  // "a band not to exceed one inch" there (owner 2026-11-25, protocols page D21). The line states the tighter one.
+  test('the foundation line states the band both products in the shared tank allow (1 ft up + 1 ft out; 1-in pin stream at openings), in the checklist and the lineMeta key alike', () => {
     const visit = protocols.pest.visits[0];
-    const line = 'Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice';
+    const line = 'Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice';
     expect(visit.primary.split('\n')).toContain(line);
     expect(Object.keys(visit.lineMeta)).toContain(line);
     expect(JSON.stringify(protocols)).not.toMatch(/6-ft/);
+    expect(JSON.stringify(protocols.pest)).not.toMatch(/18-in band/);
   });
 
   test('the interior crack and crevice line stays on Atticus Antapex WSG (roach activity on a regular visit is an open owner question)', () => {
