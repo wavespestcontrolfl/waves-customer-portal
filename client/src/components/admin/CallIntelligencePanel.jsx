@@ -101,7 +101,9 @@ const SOUND_SKIP_LABEL = {
 // transcript cannot show. The intelligence route is admin-only. Notes, never a verdict.
 export function SoundCheckRows({ check }) {
   if (!check) return null;
-  if (check.status === "started") return <Row label="Sound check">listening now</Row>;
+  // A claim is saved before the model is asked. A job that stops mid-call leaves it for good (one attempt per
+  // recording), so this never claims the check is still running.
+  if (check.status === "started") return <Row label="Sound check">{["check started", fmtWhen(check.at), "no result saved"].filter(Boolean).join(" · ")}</Row>;
   if (check.status === "failed") return <Row label="Sound check">could not check this call</Row>;
   if (check.status === "skipped") return <Row label="Sound check">{`not checked: ${SOUND_SKIP_LABEL[check.reason] || humanize(check.reason) || "skipped"}`}</Row>;
   if (check.no_conversation) return <Row label="Sound check">no conversation heard</Row>;

@@ -163,6 +163,8 @@ describe("CallIntelligencePanel", () => {
     expect(container).toBeEmptyDOMElement();
     rerender(<SoundCheckRows check={{ status: "skipped", reason: "too_long" }} />);
     expect(screen.getByText("not checked: recording too long")).toBeInTheDocument();
+    rerender(<SoundCheckRows check={{ status: "started", at: null }} />);
+    expect(screen.getByText("check started · no result saved")).toBeInTheDocument();
     rerender(<SoundCheckRows check={{ status: "failed", reason: "timeout" }} />);
     expect(screen.getByText("could not check this call")).toBeInTheDocument();
     rerender(<SoundCheckRows check={{ status: "done", no_conversation: true }} />);
