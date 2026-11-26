@@ -10,6 +10,7 @@ function fakeKnex(rows) {
     let hit = rows;
     const q = {
       where: (cond) => { hit = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
+      forUpdate: () => q,
       then: (resolve) => resolve(hit),
       update: async (patch) => { hit.forEach((r) => Object.assign(r, patch)); return hit.length; },
     };
@@ -29,6 +30,7 @@ describe('upsell_termite script migration', () => {
     const text = `${mig.NEW_SCRIPT} ${mig.NEW_TONE}`;
     expect(text).not.toMatch(/\$|\d+\s?K\b|guarantee/i);
     expect(text).toMatch(/do not repair termite damage/i);
+    expect(text).toMatch(/covered subterranean termite activity .* no additional charge/i);
     expect(text).not.toMatch(/damage (repair )?guarantee|repair guarantee/i);
   });
 
@@ -36,8 +38,11 @@ describe('upsell_termite script migration', () => {
     const rows = [{ id: 'a', scenario: 'upsell_termite', script: mig.OLD_SCRIPT, tone_notes: mig.OLD_TONE }];
     await mig.up(fakeKnex(rows));
     expect(rows[0]).toMatchObject({ script: mig.NEW_SCRIPT, tone_notes: mig.NEW_TONE });
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     await mig.up(fakeKnex(rows));
     expect(rows[0]).toMatchObject({ script: mig.NEW_SCRIPT, tone_notes: mig.NEW_TONE });
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   test('an edited script is kept and logged; the untouched tone is still rewritten', async () => {

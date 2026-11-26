@@ -18,21 +18,23 @@
 
 const SCENARIO = 'upsell_termite';
 const OLD_SCRIPT = 'Trigger: mud tubes, swarmers, or damaged wood. "I noticed [finding]. Recommend full inspection — 45 min, free for WaveGuard members. Protection comes with $500K damage repair guarantee, transfers with home sale."';
-const NEW_SCRIPT = 'Trigger: mud tubes, swarmers, or damaged wood. "I noticed [finding]. Recommend full inspection — 45 min, free for WaveGuard members. If termites are active, we treat and re-treat at no charge if they return during the term. We do not repair termite damage. The coverage transfers with a home sale after a re-inspection."';
+const NEW_SCRIPT = 'Trigger: mud tubes, swarmers, or damaged wood. "I noticed [finding]. Recommend full inspection — 45 min, free for WaveGuard members. If covered subterranean termite activity is found during the active term, we re-treat the affected areas at no additional charge. We do not repair termite damage. The coverage transfers with a home sale after a re-inspection."';
 const OLD_TONE = 'Educational, not alarmist. Damage guarantee is the closer.';
 const NEW_TONE = 'Educational, not alarmist. Never promise damage repair or quote a dollar amount. Coverage is retreatment only: follow the signed agreement.';
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('communication_scripts'))) return;
-  const rows = await knex('communication_scripts').where({ scenario: SCENARIO });
+  const rows = await knex('communication_scripts').where({ scenario: SCENARIO }).forUpdate();
   for (const row of rows) {
-    const update = {};
-    if (row.script === OLD_SCRIPT) update.script = NEW_SCRIPT;
-    if (row.tone_notes === OLD_TONE) update.tone_notes = NEW_TONE;
-    if (Object.keys(update).length) {
-      await knex('communication_scripts').where({ id: row.id }).update(update);
+    // Each column is rewritten only while it still holds the seeded text (the predicate repeats the check).
+    if (row.script === OLD_SCRIPT) {
+      await knex('communication_scripts').where({ id: row.id, script: OLD_SCRIPT }).update({ script: NEW_SCRIPT });
     }
-    // Only text the migration did not write itself: an admin-edited script or tone that still promises repair.
+    if (row.tone_notes === OLD_TONE) {
+      await knex('communication_scripts').where({ id: row.id, tone_notes: OLD_TONE }).update({ tone_notes: NEW_TONE });
+    }
+    const update = { script: row.script === OLD_SCRIPT || row.script === NEW_SCRIPT, tone_notes: row.tone_notes === OLD_TONE || row.tone_notes === NEW_TONE };
+    // Only text that is neither the seed nor this migration's own: an admin-edited script or tone that still promises repair.
     const kept = [update.script ? '' : row.script, update.tone_notes ? '' : row.tone_notes].join(' ');
     if (/repair|\$\s?\d+\s?k|guarantee/i.test(kept)) {
       console.warn(`[upsell-termite-script] row ${row.id} was edited and still mentions repair, a guarantee or a dollar cap; left as is. Review it in the tech protocols script list.`);
