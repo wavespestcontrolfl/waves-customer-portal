@@ -102,4 +102,25 @@ describe('signedInSafe and AccountHomeLink', () => {
     fireEvent.click(screen.getByText('My account'));
     expect(screen.getByText('Account home')).toBeInTheDocument();
   });
+  it('keeps a modified click as a normal link (no router navigation)', async () => {
+    const { AccountHomeLink } = await import('./BackToAccount');
+    render(
+      <MemoryRouter initialEntries={['/receipt/t1']}>
+        <Routes>
+          <Route path="/receipt/:t" element={<AccountHomeLink>My account</AccountHomeLink>} />
+          <Route path="/" element={<div>Account home</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText('My account'), { metaKey: true });
+    expect(screen.queryByText('Account home')).not.toBeInTheDocument();
+  });
+  it('the header control survives blocked storage', async () => {
+    env.native = true; env.storageBlocked = true;
+    const { HeaderBackToAccount } = await import('./BackToAccount');
+    render(<MemoryRouter><HeaderBackToAccount /><div>Page content</div></MemoryRouter>);
+    expect(screen.getByText('Page content')).toBeInTheDocument();
+    expect(screen.queryByTestId('back-to-account')).not.toBeInTheDocument();
+    env.native = false;
+  });
 });

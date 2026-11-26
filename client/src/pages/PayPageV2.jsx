@@ -95,7 +95,7 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
-import { signedInSafe } from '../components/brand/BackToAccount';
+import { AccountHomeLink, signedInSafe } from '../components/brand/BackToAccount';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import PayPromoCode from '../components/billing/PayPromoCode';
@@ -3177,7 +3177,9 @@ export default function PayPageV2() {
                     <SummaryRow label="Previous balance" value={fmtCurrency(prev.total)} />
                     <SummaryRow label="Total due today" value={fmtCurrency(prev.combinedTotal)} strong />
                     <div style={{ marginTop: SP.sm, fontSize: FS.body, color: DOC.muted, fontFamily: DOC_FONT }}>
-                      See every invoice in detail in your <a href={signedInSafe() ? '/' : '/login'} style={{ color: DOC.ink, fontWeight: FW.semibold }}>customer portal</a> or the Waves app.
+                      See every invoice in detail in your {signedInSafe()
+                        ? <AccountHomeLink style={{ color: DOC.ink, fontWeight: FW.semibold }}>customer portal</AccountHomeLink>
+                        : <a href="/login" style={{ color: DOC.ink, fontWeight: FW.semibold }}>customer portal</a>} or the Waves app.
                     </div>
                   </>
                 );

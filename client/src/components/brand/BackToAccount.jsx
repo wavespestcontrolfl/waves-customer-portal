@@ -14,11 +14,13 @@ import { useWavesShell } from './WavesShellContext';
 // owner's phone must not leave the page).
 export function useShowBackToAccount() {
   const { locked } = useWavesShell();
-  return !locked && isNativeApp() && hasSessionToken();
+  return !locked && isNativeApp() && signedInSafe();
 }
 
 function goHome(navigate, event) {
-  if (navigate) {
+  // A modified or non-primary click (new tab, new window) keeps the browser's own behavior.
+  const plain = event.button === 0 && !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+  if (navigate && plain) {
     event.preventDefault();
     navigate('/');
   }
