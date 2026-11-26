@@ -139,6 +139,18 @@ jest.setTimeout(120000);
       expect((await row(next.id)).status).toBe('draft');
     });
 
+    test('approve hashes the LOCKED text: a draft reworded by SQL with its hash left alone is refused, and nothing is retired', async () => {
+      const a = await live();
+      const next = await Bank.editFact(a.id, { factText: line(' replacement') }, admin, opts());
+      const shown = next.text_sha256; // what the page showed, and what is stored
+      await root('company_fact_bank').where({ id: next.id }).update({ fact_text: 'We service a different zone entirely.' }); // hash column untouched
+      await expect(approve(next.id, { textSha256: shown })).rejects.toMatchObject({ code: 'STALE_TEXT', status: 409 });
+      // Reviewed hash matches the locked text, but the stored hash does not: also refused.
+      await expect(approve(next.id, { textSha256: Bank._test.sha256('We service a different zone entirely.') })).rejects.toMatchObject({ code: 'HASH_MISMATCH', status: 409 });
+      expect((await row(a.id)).status).toBe('approved');
+      expect((await row(next.id)).status).toBe('draft');
+    });
+
     test('a non-owner cannot approve: the draft stays a draft', async () => {
       const d = await draft();
       await expect(approve(d.id, {}, admin)).rejects.toMatchObject({ code: 'OWNER_ONLY' });
@@ -303,6 +315,15 @@ jest.setTimeout(120000);
       await root('company_fact_bank').where({ id: d.id }).update({ fact_text: line(' edited') });
     });
 
+    test('editing a replacement draft is checked like its approval: the line it replaces is not a duplicate', async () => {
+      const a = await live();
+      const next = await Bank.editFact(a.id, { factText: a.fact_text.replace(/\.$/, '!') }, admin, opts()); // same words, other punctuation
+      expect(next.check_result.blocks).not.toContain('duplicate_bank_line');
+      const again = await Bank.editFact(next.id, { topic: 'Areas 3' }, admin, opts());
+      expect(again.check_result.blocks).not.toContain('duplicate_bank_line');
+      await expect(approve(next.id)).resolves.toMatchObject({ status: 'approved' });
+    });
+
     test('an in-place edit of a draft updates it, clears the acknowledgement and logs one event', async () => {
       const d = await draft('We can reschedule a visit from the customer portal.');
       const edited = await Bank.editFact(d.id, { factText: line(' plainly'), topic: 'Areas 2' }, admin, opts());
@@ -387,6 +408,19 @@ jest.setTimeout(120000);
       await expect(draft(text)).rejects.toMatchObject({ code: 'DUPLICATE', status: 409 });
       await Bank.discardDraft(d.id, admin, opts());
       await expect(draft(text)).resolves.toMatchObject({ status: 'draft' });
+    });
+
+    test('history is in the order the events were written, even inside one transaction', async () => {
+      const d = await draft();
+      await Bank.editFact(d.id, { topic: 'Areas 2' }, admin, opts());
+      await approve(d.id);
+      await Bank.retireFact(d.id, { reason: 'not needed' }, admin, opts());
+      const history = await Bank.factHistory(d.id, opts());
+      expect(history.map((e) => e.action)).toEqual(['drafted', 'edited', 'approved', 'retired']);
+      // Each event carries its own insert time: no two share the transaction's start time.
+      for (let i = 1; i < history.length; i += 1) expect(new Date(history[i].at).getTime()).toBeGreaterThanOrEqual(new Date(history[i - 1].at).getTime());
+      const distinct = await root.raw('SELECT count(DISTINCT at)::int AS n FROM company_fact_bank_events WHERE fact_id = ?', [d.id]);
+      expect(distinct.rows[0].n).toBe(4);
     });
 
     test('history is append-only', async () => {

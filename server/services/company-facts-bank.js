@@ -295,7 +295,9 @@ function cleanFields(input, { requireAll }) {
 const mapWriteError = (err) => (err && err.code === '23505' ? new FactError('DUPLICATE', 409) : err);
 
 async function addEvent(trx, factId, action, actor, detail = {}) {
-  await trx('company_fact_bank_events').insert({ fact_id: factId, action, actor_id: actor.id || null, detail });
+  // `at` is the moment of THIS insert (clock_timestamp), not the transaction's start: events of one transaction, and of transactions that
+  // waited on each other's locks, then sort in the order they were written.
+  await trx('company_fact_bank_events').insert({ fact_id: factId, action, actor_id: actor.id || null, detail, at: trx.raw('clock_timestamp()') });
 }
 
 async function lockFact(trx, id) {
@@ -333,7 +335,8 @@ async function createDraft(input, actor, { dbi = db } = {}) {
 
 async function editDraftRow(trx, row, f, actor) {
   const text = 'factText' in f ? f.factText : row.fact_text;
-  const check = checkFactText(text, await loadCheckContext(trx, { excludeIds: [row.id] }));
+  // Same exclusions as the approve check: the line this draft replaces is not a duplicate of it.
+  const check = checkFactText(text, await loadCheckContext(trx, { excludeIds: [row.id, row.supersedes_id] }));
   const patch = { fact_text: text, text_sha256: sha256(text), check_result: checkResult(check), warnings_acknowledged: false, updated_at: trx.fn.now() };
   if ('topic' in f) patch.topic = f.topic;
   if ('question' in f) patch.question = f.question;
@@ -461,7 +464,11 @@ async function approveFact(id, input, actor, { dbi = db } = {}) {
     const row = await lockFact(trx, id);
     if (row.status !== 'draft') throw new FactError('NOT_A_DRAFT', 409);
     // The owner approves the wording the page showed: an edit since then is refused, never approved under his name.
-    if (row.text_sha256 !== reviewedSha) throw new FactError('STALE_TEXT', 409);
+    // `row` is the row as locked (FOR UPDATE) in this transaction. The hash is computed from its text here, never taken from a stored
+    // column: the reviewed hash, the stored hash and the locked text must all agree before anything is retired or approved.
+    const lockedSha = sha256(String(row.fact_text || '').trim());
+    if (lockedSha !== reviewedSha) throw new FactError('STALE_TEXT', 409);
+    if (row.text_sha256 !== lockedSha) throw new FactError('HASH_MISMATCH', 409);
     const check = await approveChecks(trx, row, { acknowledgeWarnings });
     const supersededId = await retireSuperseded(trx, row, actor);
     const [updated] = await trx('company_fact_bank').where({ id }).update({
@@ -554,7 +561,7 @@ async function getFact(id, { dbi = db } = {}) {
 
 /** Every event of one fact, oldest first. Also answers for a discarded draft (events outlive the row). */
 async function factHistory(id, { dbi = db } = {}) {
-  return dbi('company_fact_bank_events').where({ fact_id: id }).orderBy('at', 'asc').select('*');
+  return dbi('company_fact_bank_events').where({ fact_id: id }).orderBy([{ column: 'at', order: 'asc' }, { column: 'id', order: 'asc' }]).select('*');
 }
 
 /* ── Snapshot ─────────────────────────────────────────────────────────── */
