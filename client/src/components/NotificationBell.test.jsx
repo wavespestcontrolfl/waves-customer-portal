@@ -395,7 +395,7 @@ describe('NotificationBell panel', () => {
     rerender(<NotificationBell type="customer" />);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
     expect(native.request).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('button', { name: 'Turn on alerts' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Allow on this phone' })).toBeNull();
   });
 
   it.each(['prompt', 'prompt-with-rationale'])('never raises the system popup by itself when permission is %s; it asks only after the customer taps', async (permission) => {
@@ -408,12 +408,12 @@ describe('NotificationBell panel', () => {
     expect(native.request).not.toHaveBeenCalled();
 
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
-    const turnOn = await screen.findByRole('button', { name: 'Turn on alerts' });
+    const turnOn = await screen.findByRole('button', { name: 'Allow on this phone' });
     expect(native.request).not.toHaveBeenCalled();
 
     await act(async () => { fireEvent.click(turnOn); });
     expect(native.request).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole('button', { name: 'Turn on alerts' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Allow on this phone' })).toBeNull();
   });
 
   it('does not raise the popup by itself after a saved denial', async () => {
@@ -462,9 +462,9 @@ describe('NotificationBell panel', () => {
     render(<NotificationBell type="customer" />);
     await act(async () => {});
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
-    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Turn on alerts' })); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: 'Allow on this phone' })); });
     expect(screen.getByText('Notifications are off. Enable them for Waves in your device Settings, then try again.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Turn on alerts' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Allow on this phone' })).toBeEnabled();
     expect(native.request).toHaveBeenCalledTimes(1);
   });
 
@@ -2280,9 +2280,9 @@ describe('NotificationBell customer alerts strip, tabs and link taps', () => {
     native.connection.mockResolvedValue('prompt');
     render(<NotificationBell type="customer" />);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
-    const button = await screen.findByRole('button', { name: 'Turn on alerts' });
+    const button = await screen.findByRole('button', { name: 'Allow on this phone' });
     const strip = button.parentElement;
-    expect(strip).toHaveTextContent('Get an alert when your tech is on the way, your report is ready, or your schedule changes.');
+    expect(strip).toHaveTextContent('Lets Waves show your account alerts on this phone. Which alerts you get follows your notification settings.');
     expect(strip.textContent).not.toMatch(STAFF_WORDS);
     expect(strip).toHaveStyle({ color: CUSTOMER_SURFACE.text });
   });

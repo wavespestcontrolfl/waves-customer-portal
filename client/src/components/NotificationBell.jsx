@@ -794,7 +794,7 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
   // This bell mounts inside the authenticated customer portal. After Face ID
   // unlock it only reconnects a device that already allowed notifications (a
   // silent re-register, no popup). A device that has not been asked yet gets
-  // Apple's permission popup only after the customer taps "Turn on alerts" in
+  // Apple's permission popup only after the customer taps "Allow on this phone" in
   // the drawer, so the popup never arrives cold. This ref avoids overlapping
   // attempts when lock/foreground changes happen during the same mount.
   useEffect(() => {
@@ -1770,9 +1770,9 @@ export default function NotificationBell({ type = 'admin', customerId, sessionRe
 // staff words stay on the admin bell only.
 const STRIP_COPY = {
   customer: {
-    title: 'Turn on app alerts',
-    body: 'Get an alert when your tech is on the way, your report is ready, or your schedule changes.',
-    button: 'Turn on alerts',
+    title: 'Allow alerts on this phone',
+    body: 'Lets Waves show your account alerts on this phone. Which alerts you get follows your notification settings.',
+    button: 'Allow on this phone',
     busy: 'Turning on…',
   },
   staff: {
