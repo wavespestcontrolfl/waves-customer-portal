@@ -336,10 +336,11 @@ function violationsColumn(cells) {
 // "High Priority - - From initial inspection : ... - From follow-up inspection 2026-09-03: ...".
 // A word that names a later visit, in any case, starting a word ("before inspection" is not one): the cell text has
 // its inline tags and invisible characters out already (htmlText), so a break inside the word cannot hide it.
-// A space may split it anywhere ("fol<br>low-up" reads "fol low-up"), but it must start a word.
-const spaced = (word) => word.split('').join('\\s*');
+// A space or a character a browser draws as nothing may split it anywhere ("fol<br>low-up", "fol&zwj;low-up"), but
+// it must start a word.
+const spaced = (word) => word.split('').join('[\\s\\p{Default_Ignorable_Code_Point}]*');
 const LATER_VISIT_WORD_RE = new RegExp(`\\b(?:${spaced('follow')}\\W{0,3}${spaced('up')}|${spaced('call')}\\W{0,3}${spaced('back')}`
-  + `|${spaced('re')}\\W{0,3}${spaced('inspect')})`, 'i');
+  + `|${spaced('re')}\\W{0,3}${spaced('inspect')})`, 'iu');
 const VISIT_NOTE_RE = /(?:-\s*)?From (?:initial inspection|follow-up inspection (\d{4}-\d\d-\d\d))\s*:/g;
 // Any mention of a visit label, read by VISIT_NOTE_RE or not: any case, and any separator inside "follow-up",
 // "call back" or "re-inspection" (a dash of another kind). It reads the row's text compact, so a line break or a

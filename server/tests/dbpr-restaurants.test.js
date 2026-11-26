@@ -307,6 +307,7 @@ describe('parseInspectionReport', () => {
     expect(parse(reportPage(`${flies}<tr><td>22-01-4</td><td>Seen at Call-Back.</td></tr>`), { violation35: 1 })).toBeNull();
     // A break inside the word cannot hide it.
     expect(parse(reportPage('<tr><td>35A-02-8</td><td>From fol<br>low-up: Live flies.</td></tr>'), { violation35: 1 })).toBeNull();
+    expect(parse(reportPage('<tr><td>35A-02-8</td><td>From fol&zwj;low-up: Live flies.</td></tr>'), { violation35: 1 })).toBeNull();
     // On a labelled page too, a later-visit label that does not read gives no answer.
     expect(parse(reportPage('<tr><td>35A-02-8</td><td>From initial inspection: - From follow-up: Live flies.</td></tr>'), { violation35: 1 })).toBeNull();
     // A follow-up dated on a day that does not exist cannot be placed after the visit.
