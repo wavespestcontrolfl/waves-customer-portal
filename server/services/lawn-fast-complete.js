@@ -608,7 +608,7 @@ async function loadChinch({ loaded, sheet, svc, knex, readFailures }) {
 // already on the sheet. Pure; no limit read.
 function guidedProductIds(loaded, sheet, holds = {}) {
   // `holds`: fungicideHolds for the visit, or the Group 11 pass-over alone as a boolean (the older call).
-  const { takeAllMapped = false, successiveHeld = [] } = typeof holds === 'boolean' ? { takeAllMapped: holds } : (holds || {});
+  const { takeAllMapped = false, successiveHeld = [], heldProductIds = [] } = typeof holds === 'boolean' ? { takeAllMapped: holds } : (holds || {});
   if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
   const guide = require('./lawn-treatment-guide');
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
@@ -619,7 +619,7 @@ function guidedProductIds(loaded, sheet, holds = {}) {
     // Every take-all fungicide of the month (a pick or not): the sheet never lists it with the plain add-ons. The large patch Artavia row the
     // pick passed over (Group 11 stacking on a take-all lawn) is held the same way.
     // A row at its label limit on applications in a row (Velista, two) is held the same way.
-    takeAllProductIds: [...new Set([...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped }), ...guide.successiveHeldAddOns(candidates, rows, { successiveHeld })].map((candidate) => candidate.item.productId))],
+    takeAllProductIds: [...new Set([...[...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped }), ...guide.successiveHeldAddOns(candidates, rows, { successiveHeld })].map((candidate) => candidate.item.productId), ...heldProductIds])],
   };
 }
 
@@ -633,12 +633,12 @@ function guidedProductIds(loaded, sheet, holds = {}) {
 async function group11HeldContext({ loaded, sheet, svc, knex, holds = null }) {
   try {
     if (featureGates.lawnV13Live?.() !== true) return {};
-    const { takeAllMapped, successiveHeld } = holds || await fungicideHolds({ svc, knex });
+    const { takeAllMapped, successiveHeld, heldProductIds = [] } = holds || await fungicideHolds({ svc, knex });
     if (!takeAllMapped && !successiveHeld.length) return {};
     const guide = require('./lawn-treatment-guide');
     const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
     const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-    const held = [...new Set([...guide.group11HeldAddOns(candidates, rows, { takeAllMapped }), ...guide.successiveHeldAddOns(candidates, rows, { successiveHeld })].map((candidate) => candidate.item.productId))];
+    const held = [...new Set([...[...guide.group11HeldAddOns(candidates, rows, { takeAllMapped }), ...guide.successiveHeldAddOns(candidates, rows, { successiveHeld })].map((candidate) => candidate.item.productId), ...heldProductIds])];
     return held.length ? { group11HeldProductIds: held } : {};
   } catch (err) {
     logger.warn(`[lawn-fast] Group 11 held rows unavailable for ${loaded?.plan ? 'a visit' : 'no plan'}: ${err?.code || err?.name || 'Error'}`);
@@ -1190,27 +1190,47 @@ async function group11PassOver({ svc, knex }) {
   return GROUP11_MONTHS.includes(visitMonthOf(svc)) && takeAllMappedOn({ svc, knex });
 }
 
-// The fungicide rows the guide and the sheet pass over on this visit, as `{ takeAllMapped, successiveHeld }`:
+// The fungicide rows the guide and the sheet pass over on this visit, as `{ takeAllMapped, successiveHeld, heldProductIds }`:
 //   - successiveHeld: the label limits on applications in a row that this lawn has reached (Velista: two; the approval
-//     engine's own history read, SUCCESSIVE_USE_LIMITS). The product's row is passed over and the next fungicide is offered;
-//   - takeAllMapped: the Group 11 pass-over above, EXCEPT when such a limit is reached and the lawn's latest fungicide
-//     application carried no Group 11 product. That is the December case of the card: Artavia in September, Headway in
-//     October, Velista in October and November. November's Velista ended the Group 11 run, so December's Artavia row is the
-//     one offered. When the latest application did carry Group 11, both rows stay passed over.
-// A history read that fails holds nothing for a run nobody read, and leaves the Group 11 pass-over as it was.
+//     engine's own history read, SUCCESSIVE_USE_LIMITS, at the visit's property or the one its address resolves to). The
+//     product's row is passed over and the next fungicide is offered;
+//   - heldProductIds: every catalog row of those products, so the search holds one that this month's rows do not list;
+//   - takeAllMapped: the Group 11 pass-over above, EXCEPT when such a limit is reached and a record at this property
+//     ended the Group 11 run: the lawn's latest fungicide application is placed here, each product of it has a group on
+//     file and none is Group 11. That is the December case of the card: Artavia in September, Headway in October, Velista
+//     in October and November. November's Velista ended the run, so December's Artavia row is the one offered. In
+//     every other case both rows stay passed over.
+// A history read that fails holds every listed product (nobody read its run) and leaves the Group 11 pass-over as it
+// was, the way an unread take-all status counts as mapped.
 async function fungicideHolds({ svc, knex }) {
   const group11 = await group11PassOver({ svc, knex });
+  const engine = require('./waveguard-approval-engine');
+  let takeAllMapped = group11;
+  let successiveHeld;
   try {
-    const engine = require('./waveguard-approval-engine');
-    const { reached, rowsByCategory } = await engine.successiveLimitsReached(knex, {
-      customerId: svc.customer_id, propertyId: svc.property_id || null, serviceDate: svc.scheduled_date, serviceId: svc.id || null, strict: true,
+    const { reached, rowsByCategory, propertyId } = await engine.successiveLimitsReached(knex, {
+      customerId: svc.customer_id, propertyId: svc.property_id || null, visit: svc, serviceDate: svc.scheduled_date, serviceId: svc.id || null, strict: true,
     });
-    const successiveHeld = reached.map((entry) => entry.limit);
-    const group11RunEnded = successiveHeld.length > 0 && engine.latestApplicationCarries(rowsByCategory.get('fungicide'), '11') === false;
-    return { takeAllMapped: group11 && !group11RunEnded, successiveHeld };
+    successiveHeld = reached.map((entry) => entry.limit);
+    if (successiveHeld.length && engine.latestApplicationEndsGroup(rowsByCategory.get('fungicide'), '11', { propertyId })) takeAllMapped = false;
   } catch (err) {
     logger.warn(`[lawn-fast] fungicide history unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return { takeAllMapped: group11, successiveHeld: [] };
+    successiveHeld = [...engine.SUCCESSIVE_USE_LIMITS];
+  }
+  return { takeAllMapped, successiveHeld, heldProductIds: await limitedCatalogIds({ svc, knex, limits: successiveHeld }) };
+}
+
+// The catalog ids of the held products, by registration number or name (the engine's isLimitedProduct). A failed read
+// leaves the month's own rows held (lawn-treatment-guide.js successiveHeldAddOns), and says so in the log.
+async function limitedCatalogIds({ svc, knex, limits }) {
+  if (!limits.length) return [];
+  try {
+    const { isLimitedProduct } = require('./waveguard-approval-engine');
+    const catalog = await knex('products_catalog').select('id', 'name', 'epa_reg_number');
+    return (catalog || []).filter((row) => limits.some((limit) => isLimitedProduct(limit, { epa: row.epa_reg_number, name: row.name }))).map((row) => String(row.id));
+  } catch (err) {
+    logger.warn(`[lawn-fast] held fungicide catalog rows unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return [];
   }
 }
 
@@ -1260,7 +1280,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
   // loadWeedMix catches a defect into readFailures for the context's sake; here that would read as "no weed group".
   if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-  const { takeAllMapped, successiveHeld } = await fungicideHolds({ svc, knex });
+  const { takeAllMapped, successiveHeld, heldProductIds } = await fungicideHolds({ svc, knex });
   const [offers, chinch] = await Promise.all([
     guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex), takeAllMapped, successiveHeld }),
     loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex, places: await limitPlaces(svc, knex) }) : null,
@@ -1276,7 +1296,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
     weeds: guide.weedOffer(weedMix, sheet.addOns),
     // GATE_LAWN_TROUBLE_AREAS: the lawn's take-all areas on file (server-confirmed, active).
     troubleAreas: await takeAllAreasOn({ svc, knex }),
-  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), limitWarned: guide.limitWarnedProducts({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: [...new Set([...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped }), ...guide.successiveHeldAddOns(candidates, rows, { successiveHeld })].map((candidate) => candidate.item.productId))], placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
+  }), weedMix, chinch, { blocked: [...new Set([...guide.blockedProductIds({ offers, chinch, weedMix }), ...heldProductIds])], limitWarned: guide.limitWarnedProducts({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: [...new Set([...[...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped }), ...guide.successiveHeldAddOns(candidates, rows, { successiveHeld })].map((candidate) => candidate.item.productId), ...heldProductIds])], placeBlocked: searched.blocked, placeBlockedTypes: searched.types });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────

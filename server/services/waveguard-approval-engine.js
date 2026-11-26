@@ -406,7 +406,8 @@ async function categoryHistory(knex, { customerId, propertyId, category, service
     .orderBy([{ column: 'sr.service_date', order: 'desc' }, { column: 'sr.created_at', order: 'desc' }])
     .select(
       'sr.id as service_record_id', 'sr.service_date', 'sr.created_at as recorded_at', 'sp.product_name', 'sp.moa_group',
-      'pc.epa_reg_number as catalog_epa', 'pc.frac_group as catalog_group', 'pc.moa_group as catalog_moa_group',
+      // The registration the close-out stored with the application: the catalog row of that name may since be renamed or replaced.
+      'sp.epa_reg_number as recorded_epa', 'pc.epa_reg_number as catalog_epa', 'pc.frac_group as catalog_group', 'pc.moa_group as catalog_moa_group',
       k.raw('COALESCE(pah_scope.property_id, ss.property_id) as treated_property_id'),
     ))
     .catch((err) => { if (strict) throw err; return []; });
@@ -431,38 +432,58 @@ function successiveRun(limit, rows, { propertyId = null } = {}) {
   const here = (row) => String(row.treated_property_id ?? '') === String(propertyId ?? '');
   const run = [];
   for (const application of applicationsOf(rows)) {
-    if (application.rows.some((row) => isLimitedProduct(limit, { epa: row.catalog_epa, name: row.product_name }))) run.push(application.day);
+    if (application.rows.some((row) => isLimitedProduct(limit, { epa: row.recorded_epa || row.catalog_epa, name: row.product_name }))) run.push(application.day);
     else if (application.rows.some((row) => here(row) && rowGroups(row).some((group) => group !== limit.group))) break;
   }
   return run;
 }
 
-// Does the lawn's latest application of the category carry this group? (Fast Complete: whether the Group 11 run is
-// still open after a Velista run.) Null when there is no application.
-function latestApplicationCarries(rows, group) {
+// Did a record at this property end the group's run? (Fast Complete: whether the Group 11 run is closed after a
+// Velista run, so the Group 11 row may be offered.) True only when the lawn's latest application of the category is
+// placed at `propertyId`, every product of it has a group on file, and none carries `group`. An application that names
+// no property, a product with no group on file, no history and a visit with no property all read as not ended.
+function latestApplicationEndsGroup(rows, group, { propertyId = null } = {}) {
   const [latest] = applicationsOf(rows);
-  return latest ? latest.rows.some((row) => rowGroups(row).includes(String(group))) : null;
+  if (!latest || !propertyId) return false;
+  return latest.rows.every((row) => String(row.treated_property_id ?? '') === String(propertyId)
+    && rowGroups(row).length > 0 && !rowGroups(row).includes(String(group)));
+}
+
+// The property a visit's history is judged at: the visit's own, else the one its address resolves to (the resolver
+// the lawn areas use: 17 of 423 upcoming lawn visits carried no property on 2026-11-26). Null when none resolves.
+// A failed read throws when strict, else reads as none.
+async function visitPropertyFor(knex, visit, { strict = false } = {}) {
+  if (visit?.property_id) return visit.property_id;
+  if (!visit?.customer_id) return null;
+  try {
+    return await savepointRead(knex, (k) => require('./property-service-areas').resolveVisitPropertyId(visit, k)) || null;
+  } catch (err) {
+    if (strict) throw err;
+    return null;
+  }
 }
 
 // Every listed product whose run is full before this visit, as `[{ limit, dates }]`, with the history rows read
-// (`rowsByCategory`, for a caller that asks more of them). A visit with no readable date reads as none.
-async function successiveLimitsReached(knex, { customerId, propertyId = null, serviceDate, serviceId = null, strict = false, limits = SUCCESSIVE_USE_LIMITS }) {
+// (`rowsByCategory`, for a caller that asks more of them) and the property they were judged at. `visit`: the booked
+// visit, to resolve a property it does not carry. A visit with no readable date reads as none.
+async function successiveLimitsReached(knex, { customerId, propertyId: given = null, visit = null, serviceDate, serviceId = null, strict = false, limits = SUCCESSIVE_USE_LIMITS }) {
   const day = dateOnlyString(serviceDate);
   const reached = [];
   const rowsByCategory = new Map();
-  if (!day) return { reached, rowsByCategory };
+  if (!day) return { reached, rowsByCategory, propertyId: given };
+  const propertyId = given || await visitPropertyFor(knex, visit ? { ...visit, customer_id: visit.customer_id || customerId } : null, { strict });
   for (const limit of limits) {
     if (!rowsByCategory.has(limit.category)) rowsByCategory.set(limit.category, await categoryHistory(knex, { customerId, propertyId, category: limit.category, serviceDate: day, serviceId, strict }));
     const run = successiveRun(limit, rowsByCategory.get(limit.category), { propertyId });
     if (run.length >= limit.max) reached.push({ limit, dates: run.slice(0, limit.max) });
   }
-  return { reached, rowsByCategory };
+  return { reached, rowsByCategory, propertyId };
 }
 
-async function successiveUseFindings(knex, { customerId, propertyId, product, serviceDate, serviceId, strict }) {
+async function successiveUseFindings(knex, { customerId, propertyId, visit, product, serviceDate, serviceId, strict }) {
   const limit = successiveLimitFor(product);
   if (!limit) return [];
-  const { reached } = await successiveLimitsReached(knex, { customerId, propertyId, serviceDate, serviceId, strict, limits: [limit] });
+  const { reached } = await successiveLimitsReached(knex, { customerId, propertyId, visit, serviceDate, serviceId, strict, limits: [limit] });
   return reached.map(({ dates }) => ({
     code: SUCCESSIVE_USE_CODE,
     severity: 'block',
@@ -593,7 +614,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
     }
 
     blocks.push(...await repeatGroupFindings(knex, { customerId, propertyId: service?.property_id || null, product, input, plan, serviceDate, strict }));
-    blocks.push(...await successiveUseFindings(knex, { customerId, propertyId: service?.property_id || null, product, serviceDate, serviceId: service?.id || null, strict }));
+    blocks.push(...await successiveUseFindings(knex, { customerId, propertyId: service?.property_id || null, visit: service || null, product, serviceDate, serviceId: service?.id || null, strict }));
   }
 
   const turfProfile = await savepointRead(knex, (k) => k('customer_turf_profiles')
@@ -655,7 +676,8 @@ module.exports = {
   rowNamesTakeAll,
   successiveRun,
   successiveLimitsReached,
-  latestApplicationCarries,
+  latestApplicationEndsGroup,
+  visitPropertyFor,
   isLimitedProduct,
   SUCCESSIVE_USE_LIMITS,
   SUCCESSIVE_USE_CODE,
