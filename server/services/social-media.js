@@ -164,12 +164,12 @@ function sitesAlreadyPosted(platformsPosted) {
 }
 
 // Never throws: a progress-row failure falls back to the old end-of-run write.
-async function findShareProgressRow(column, value) {
+async function findShareProgressRow(column, value, statuses) {
   if (!value) return null;
   return db('social_media_posts')
     .where(column, value)
     .whereIn('source_type', shareProgressSources())
-    .whereIn('status', [SHARE_PROGRESS_STATUS, 'failed', 'dry_run'])
+    .whereIn('status', statuses)
     .orderBy('created_at', 'desc')
     .first('id', 'status', 'platforms_posted');
 }
@@ -177,17 +177,26 @@ async function findShareProgressRow(column, value) {
 async function openShareProgress({ title, description, normalizedLink, guid, source }) {
   try {
     // By URL, then by feed GUID (the RSS dedupe knows a post by either).
-    const earlier = (await findShareProgressRow('source_url', normalizedLink))
-      || (guid && guid !== normalizedLink ? await findShareProgressRow('source_guid', guid) : null);
+    // A cut-off live row first (by URL, then GUID), before any reusable
+    // failed or dry-run row, so a newer dry run never hides a live attempt.
+    const byGuid = guid && guid !== normalizedLink;
+    let earlier = null;
+    for (const statuses of [[SHARE_PROGRESS_STATUS], ['failed', 'dry_run']]) {
+      earlier = (await findShareProgressRow('source_url', normalizedLink, statuses))
+        || (byGuid ? await findShareProgressRow('source_guid', guid, statuses) : null);
+      if (earlier) break;
+    }
     if (earlier) {
-      const done = earlier.status === SHARE_PROGRESS_STATUS ? sitesAlreadyPosted(earlier.platforms_posted) : new Map();
+      // A failed row keeps its in-flight marks too (a site cut off mid-post
+      // on an attempt that then failed elsewhere may still be live).
+      const done = earlier.status === 'dry_run' ? new Map() : sitesAlreadyPosted(earlier.platforms_posted);
       // Also takes the current URL, so a share found by its feed GUID after
       // a permalink change is recorded under the URL later lookups use.
       await db('social_media_posts').where('id', earlier.id).update({
         status: SHARE_PROGRESS_STATUS,
         source_url: normalizedLink,
         ...(guid ? { source_guid: guid } : {}),
-        ...(earlier.status === SHARE_PROGRESS_STATUS ? {} : { platforms_posted: JSON.stringify([]) }),
+        ...(earlier.status === 'dry_run' ? { platforms_posted: JSON.stringify([]) } : {}),
       });
       if (done.size) logger.warn(`[social] resuming a cut-off share of ${normalizedLink}: already on ${[...done.keys()].join(', ')}`);
       return { rowId: earlier.id, done };
@@ -221,11 +230,22 @@ async function recordShareProgress(progress, platformResults, posting = null) {
     .filter((earlier) => !platformResults.some((r) => sameSite(r, earlier)));
   const mark = posting ? [{ ...posting, inFlight: true }] : [];
   try {
-    await db('social_media_posts').where('id', progress.rowId)
+    const n = await db('social_media_posts').where('id', progress.rowId)
       .update({ platforms_posted: JSON.stringify([...notReachedYet, ...platformResults, ...mark]) });
+    return n === 1;
   } catch (err) {
     logger.warn(`[social] share progress update failed: ${err.message}`);
+    return false;
   }
+}
+
+// Saves the in-flight mark; false = not saved, so the site is skipped this run
+// (a post with no mark could be posted again after a restart).
+async function markSitePosting(progress, platformResults, posting) {
+  if (!progress.rowId) return true;
+  if (await recordShareProgress(progress, platformResults, posting)) return true;
+  platformResults.push({ ...posting, success: false, error: 'Share record not saved; this site retries next run' });
+  return false;
 }
 
 // Kill switch: SOCIAL_AUTOSHARE_DAILY_CAP=0 disables the cap entirely.
@@ -2655,7 +2675,7 @@ const SocialMediaService = {
         continue;
       }
 
-      await recordShareProgress(progress, platformResults, { platform: p.key });
+      if (!(await markSitePosting(progress, platformResults, { platform: p.key }))) continue;
       try {
         const content = customContent?.[p.key] || await generateContent(p.key, { title, description, link, source });
 
@@ -2858,7 +2878,7 @@ const SocialMediaService = {
       logger.info(`[social] auto-share GBP narrowed to ${gbpLocations[0].name} (rotation)`);
     }
     for (const loc of gbpLocations) {
-      await recordShareProgress(progress, platformResults, { platform: 'gbp', location: loc.id });
+      if (!(await markSitePosting(progress, platformResults, { platform: 'gbp', location: loc.id }))) continue;
       try {
         const gbpCustom = customContent?.gbp;
         const gbpContent =

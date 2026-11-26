@@ -192,6 +192,36 @@ describe('cut-off blog share resumes without posting twice', () => {
     expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
   });
 
+  test('an in-flight site on a row that then FAILED is still skipped on the next try', async () => {
+    mockRows.push({ id: 'row-old', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'failed',
+      platforms_posted: JSON.stringify([{ platform: 'facebook', inFlight: true }, { platform: 'twitter', success: false, error: 'x down' }]) });
+    await share();
+    expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
+    expect(xSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('a cut-off live row wins over a newer dry-run row', async () => {
+    mockRows.push({ id: 'row-live', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'publishing', created_at: new Date(1),
+      platforms_posted: JSON.stringify([{ platform: 'facebook', postId: 'fb-early', success: true }]) });
+    mockRows.push({ id: 'row-dry', source_url: social.normalizeUrl(LINK), source_type: 'blog', status: 'dry_run', created_at: new Date(2), platforms_posted: '[]' });
+    await share();
+    expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
+    expect(mockRows.find((r) => r.id === 'row-live').status).toBe('published');
+  });
+
+  test('a mark that cannot be saved skips that site this run', async () => {
+    const db = require('../models/db');
+    const realImpl = db.getMockImplementation();
+    db.mockImplementation((t) => { const b = realImpl(t); const up = b.update; b.update = async (cols) => (cols.platforms_posted && !cols.status && cols.platforms_posted.includes('inFlight') ? 0 : up(cols)); return b; });
+    try {
+      await share();
+    } finally {
+      db.mockImplementation(realImpl);
+    }
+    expect(global.fetch.mock.calls.some(([u]) => String(u).includes('/page-1/feed'))).toBe(false);
+    expect(xSpy).not.toHaveBeenCalled();
+  });
+
   test('the admin Share button source (blog) resumes too', async () => {
     mockRows.push({ id: 'row-old', source_url: social.normalizeUrl(LINK), source_type: 'rss', status: 'publishing',
       platforms_posted: JSON.stringify([{ platform: 'facebook', postId: 'fb-early', success: true }]) });
