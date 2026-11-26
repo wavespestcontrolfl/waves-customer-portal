@@ -66,21 +66,33 @@ function invalidBarrelEaveFtError() {
   return err;
 }
 
+// Is this exclusion pick a barrel tile roof with no eave footage entered?
+const unmeasuredBarrel = (roofStyle, eaveFt) => roofStyle === 'barrel_tile' && !(parseBarrelEaveFt(eaveFt) > 0);
+
 // Does this stored estimate pick a barrel tile roof for an exclusion with no eave footage entered? The send guard reads
 // it for a draft NEVER issued, so a draft saved before the barrel hold existed (no quote-required flag on its rows) is
-// held like a new one until the footage is entered. Reads every stored input carrier plus the rows' own marker.
+// held like a new one until the footage is entered. Evidence: the current stored inputs, the admin editor's saved request
+// (engineRequest.options.exclRoofStyle / exclBarrelEaveFt with EXCLUSION selected), and the rows of the AUTHORITATIVE
+// priced container only (a revision can keep a stale engineResult; its rows never hold a corrected draft).
 function estimateHasUnmeasuredBarrelExclusion(estData) {
   const root = estData && typeof estData === 'object' ? estData : null;
   if (!root) return false;
-  const carriers = [root.engineInputs, root.inputs, root.engineInput, root.result?.inputs, root.engineResult?.inputs];
+  const container = require('./estimate-result-container').storedEstimateContainer(root);
+  const carriers = [root.engineInputs, root.inputs, root.engineInput, container && container.inputs];
   for (const carrier of carriers) {
     const services = carrier && typeof carrier === 'object' ? carrier.services : null;
     const exclusion = services && typeof services === 'object' ? (services.exclusion || services.rodentExclusion) : null;
-    if (exclusion && typeof exclusion === 'object' && exclusion.roofStyle === 'barrel_tile'
-      && !(parseBarrelEaveFt(exclusion.barrelEaveFt) > 0)) return true;
+    if (exclusion && typeof exclusion === 'object' && unmeasuredBarrel(exclusion.roofStyle, exclusion.barrelEaveFt)) return true;
   }
-  const rows = [root.result?.lineItems, root.engineResult?.lineItems, root.lineItems].filter(Array.isArray).flat();
-  return rows.some((row) => row && row.barrelClosureNeedsMeasurement === true);
+  const request = root.engineRequest && typeof root.engineRequest === 'object' ? root.engineRequest : null;
+  const options = request && request.options && typeof request.options === 'object' ? request.options : null;
+  if (options && Array.isArray(request.selectedServices)
+    && request.selectedServices.some((key) => String(key || '').toUpperCase() === 'EXCLUSION')
+    && unmeasuredBarrel(options.exclRoofStyle, options.exclBarrelEaveFt)) return true;
+  const rows = require('./estimate-result-container').storedRodentExclusionRows(root);
+  if (rows.some((row) => row.barrelClosureNeedsMeasurement === true)) return true;
+  // A row priced before the hold carries the barrel pick but no marker: with no closure row priced, it is unmeasured.
+  return rows.some((row) => row.roofStyle === 'barrel_tile') && !rows.some((row) => row.component === 'barrel_eave_closure');
 }
 
 module.exports = {

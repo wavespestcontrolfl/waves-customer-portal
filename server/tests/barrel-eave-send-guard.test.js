@@ -45,3 +45,32 @@ test('a stored row marker holds a never-issued draft too', () => {
   expect(estimateHasUnmeasuredBarrelExclusion({ result: { lineItems: [{ service: 'rodent_exclusion' }] } })).toBe(false);
   expect(estimateHasUnmeasuredBarrelExclusion(null)).toBe(false);
 });
+
+// The admin editor (Estimate Tool V2) saves the roof pick in its request, not in the engine inputs, and its rows priced
+// before the hold carry the barrel roof style but no marker. Both hold a never-issued draft.
+test('the admin editor\'s saved request holds a never-issued draft with no eave footage', () => {
+  const request = (options, services = ['EXCLUSION']) => ({ engineRequest: { profile: {}, selectedServices: services, options } });
+  expect(estimateHasUnmeasuredBarrelExclusion(request({ exclRoofStyle: 'barrel_tile' }))).toBe(true);
+  expect(estimateHasUnmeasuredBarrelExclusion(request({ exclRoofStyle: 'barrel_tile', exclBarrelEaveFt: 0 }))).toBe(true);
+  expect(estimateHasUnmeasuredBarrelExclusion(request({ exclRoofStyle: 'barrel_tile', exclBarrelEaveFt: 60 }))).toBe(false);
+  expect(estimateHasUnmeasuredBarrelExclusion(request({ exclRoofStyle: 'barrel_tile' }, ['PEST']))).toBe(false);
+  expect(() => router._internals.assertEstimateSendable({
+    id: 'e1', token: 'tok', monthly_total: 0, onetime_total: 900, ...NEVER, estimate_data: request({ exclRoofStyle: 'barrel_tile' }),
+  })).toThrow(/eave footage/);
+});
+
+test('a pre-hold V2 row with the barrel pick and no closure row is held; a priced closure row sends', () => {
+  const main = { service: 'rodent_exclusion', name: 'Rodent Exclusion', price: 900, roofStyle: 'barrel_tile' };
+  const closure = { service: 'rodent_exclusion', component: 'barrel_eave_closure', price: 480 };
+  expect(estimateHasUnmeasuredBarrelExclusion({ result: { lineItems: [main] } })).toBe(true);
+  expect(estimateHasUnmeasuredBarrelExclusion({ result: { lineItems: [main, closure] } })).toBe(false);
+});
+
+test('a measured revision is not held by a stale unmeasured engineResult', () => {
+  const current = { lineItems: [
+    { service: 'rodent_exclusion', name: 'Rodent Exclusion', price: 900, roofStyle: 'barrel_tile' },
+    { service: 'rodent_exclusion', component: 'barrel_eave_closure', price: 480 },
+  ] };
+  const stale = { lineItems: [{ service: 'rodent_exclusion', name: 'Rodent Exclusion', price: 900, roofStyle: 'barrel_tile', barrelClosureNeedsMeasurement: true }] };
+  expect(estimateHasUnmeasuredBarrelExclusion({ result: current, engineResult: stale, pricingAuthorityAtLock: 'SERVER' })).toBe(false);
+});
