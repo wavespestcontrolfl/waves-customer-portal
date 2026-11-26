@@ -6,7 +6,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/short-url', () => ({ resolveShortCode: jest.fn() }));
 
-const { planRows, parseTechArgs } = require('../../ops/agents/ensure-review-count-codes');
+const { planRows, parseTechArgs, unusableReason } = require('../../ops/agents/ensure-review-count-codes');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const {
   TECH_SLUG_RE, REVIEW_GEO_FALLBACK_OFFICE_ID, reviewShortCodeForOffice, reviewShortCodeForTech,
@@ -55,5 +55,20 @@ describe('parseTechArgs', () => {
 
   test.each([[['--tech']], [['--tech', '--execute']]])('a --tech with no value is an error: %j', (argv) => {
     expect(() => parseTechArgs(argv)).toThrow(/needs a value/);
+  });
+});
+
+describe('unusableReason', () => {
+  const now = Date.parse('2026-11-25T12:00:00Z');
+  test('a live row aimed at a review form is ready', () => {
+    expect(unusableReason({ expires_at: null, target_url: 'https://g.page/r/x/review' }, now)).toBeNull();
+    expect(unusableReason({ expires_at: '2027-01-01T00:00:00Z', target_url: 'https://g.page/r/x/review' }, now)).toBeNull();
+  });
+  test('an expired row cannot count', () => {
+    expect(unusableReason({ expires_at: '2026-11-01T00:00:00Z', target_url: 'https://g.page/r/x/review' }, now)).toBe('expired');
+  });
+  test('a row aimed at /rv would double count through /l', () => {
+    expect(unusableReason({ target_url: 'https://portal.wavespestcontrol.com/rv/adam' }, now)).toBe('target loops into /rv');
+    expect(unusableReason({ target_url: 'https://portal.wavespestcontrol.com/rv' }, now)).toBe('target loops into /rv');
   });
 });

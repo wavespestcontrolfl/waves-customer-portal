@@ -44,6 +44,13 @@ function planRows({ offices, techs, techSlugRe, fallbackOfficeId }) {
   return wanted;
 }
 
+// Why an existing row cannot count a scan, or null when it can.
+function unusableReason(row, now = Date.now()) {
+  if (row.expires_at && new Date(row.expires_at).getTime() < now) return 'expired';
+  if (/\/rv(\/|$|\?)/i.test(String(row.target_url || ''))) return 'target loops into /rv';
+  return null;
+}
+
 // --tech <slug> and --tech=<slug>, repeatable, plus --execute. A flag with no value or any other argument is an error.
 function parseTechArgs(argv) {
   const techs = [];
@@ -86,13 +93,21 @@ async function main() {
 
   const db = require(server('models/db'));
   try {
-    const existing = await db('short_codes').whereIn('code', wanted.map((w) => w.code)).select('code', 'click_count');
-    const have = new Map(existing.map((r) => [r.code, r.click_count]));
+    const existing = await db('short_codes').whereIn('code', wanted.map((w) => w.code))
+      .select('code', 'click_count', 'expires_at', 'target_url');
+    const have = new Map(existing.map((r) => [r.code, r]));
     const missing = wanted.filter((w) => !have.has(w.code));
+    // An existing row is only "ready" when it can count: resolveShortCode skips an expired row, and a row aimed at
+    // /rv would loop the /l alias back into /rv. Such rows are reported, never changed (this script never updates).
+    const unusable = existing.filter((r) => unusableReason(r));
     for (const w of wanted) {
-      console.log(have.has(w.code) ? `  have    ${w.code} (${have.get(w.code)} clicks)` : `  missing ${w.code}`);
+      const row = have.get(w.code);
+      if (!row) console.log(`  missing ${w.code}`);
+      else if (unusableReason(row)) console.log(`  UNUSABLE ${w.code}: ${unusableReason(row)}`);
+      else console.log(`  ready   ${w.code} (${row.click_count} clicks)`);
     }
-    console.log(`Wanted ${wanted.length}: ${wanted.length - missing.length} exist, ${missing.length} missing.`);
+    console.log(`Wanted ${wanted.length}: ${existing.length - unusable.length} ready, ${unusable.length} unusable, ${missing.length} missing.`);
+    if (unusable.length) process.exitCode = 1;
     if (!EXECUTE) { console.log('Dry run: nothing written. Pass --execute to insert the missing rows.'); return; }
     let inserted = 0;
     for (const w of missing) {
@@ -103,7 +118,7 @@ async function main() {
         .returning('code');
       if (rows.length) { inserted += 1; console.log(`  inserted ${w.code}`); }
     }
-    console.log(`Inserted ${inserted} of ${missing.length} missing.`);
+    console.log(`Inserted ${inserted} of ${missing.length} missing.${unusable.length ? ` ${unusable.length} unusable row(s) left for a person to fix.` : ''}`);
   } finally {
     await db.destroy();
   }
@@ -117,4 +132,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { planRows, parseTechArgs };
+module.exports = { planRows, parseTechArgs, unusableReason };
