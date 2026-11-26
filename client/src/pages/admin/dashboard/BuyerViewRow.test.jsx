@@ -61,7 +61,7 @@ describe("BuyerViewRow", () => {
     render(<BuyerViewRow data={data} />);
     expect(screen.getByText(/growth needs 24 stored months · 5 of 12 months/)).toBeInTheDocument();
     expect(screen.getByText(/no plan revenue yet/)).toBeInTheDocument();
-    expect(screen.getByText(/needs plan members over 24 months old/)).toBeInTheDocument();
+    expect(screen.getByText(/needs plan customers over 24 months old/)).toBeInTheDocument();
     expect(screen.getByText(/SDE — · 0 of 12 months · owner field wage not counted/)).toBeInTheDocument();
     expect(screen.queryByText("$0.00")).not.toBeInTheDocument();
     expect(screen.queryByText("0%")).not.toBeInTheDocument();
