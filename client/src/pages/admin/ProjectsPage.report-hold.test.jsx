@@ -164,8 +164,8 @@ describe("WDO report hold on the project page", () => {
     expect(await screen.findByText(/Report held until the invoice is paid/)).toBeInTheDocument();
   });
 
-  it("a held project whose paid release failed shows the reason", async () => {
-    stubProject({ ...baseProject, report_hold_status: "held", report_hold_invoice_status: "paid", report_hold_last_error: "Licensee signature required, re-sign to release the paid report" });
+  it.each(["paid", "prepaid"])("a held project whose %s release failed shows the reason", async (invoiceStatus) => {
+    stubProject({ ...baseProject, report_hold_status: "held", report_hold_invoice_status: invoiceStatus, report_hold_last_error: "Licensee signature required, re-sign to release the paid report" });
     expect(await screen.findByText(/The invoice is paid, but the report did not send: Licensee signature required/)).toBeInTheDocument();
   });
 

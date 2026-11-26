@@ -85,23 +85,40 @@ describe('findAttentionItems — reports marked sent another way', () => {
 });
 
 describe('findAttentionItems — held reports that nobody is releasing', () => {
-  test('the stuck-hold query also picks a hold whose invoice is gone or can no longer settle', async () => {
-    const ors = [];
-    const holds = chain({ select: jest.fn().mockResolvedValue([]) });
-    holds.where = jest.fn((...args) => {
-      if (typeof args[0] === 'function') {
-        const inner = { where: jest.fn(() => inner), orWhereNull: jest.fn((c) => { ors.push(['null', c]); return inner; }), orWhereIn: jest.fn((c, v) => { ors.push(['in', c, v]); return inner; }) };
-        args[0](inner);
-      }
-      return holds;
+  // Records every condition the stuck-hold query builds, nested groups included, as [method, ...args].
+  function recorder(log, result) {
+    const node = new Proxy({}, {
+      get(_t, method) {
+        if (method === 'then') return result ? (res, rej) => Promise.resolve(result).then(res, rej) : undefined;
+        if (method === 'select') return jest.fn(async () => []);
+        return (...args) => {
+          log.push([method, ...args.map((a) => (typeof a === 'function' ? 'fn' : a))]);
+          args.filter((a) => typeof a === 'function').forEach((fn) => fn(recorder(log)));
+          return node;
+        };
+      },
     });
-    db.mockImplementation((table) => (table === 'projects as p' ? holds : chain()));
+    return node;
+  }
+
+  test('the stuck-hold query picks every hold nobody is releasing', async () => {
+    const log = [];
+    db.mockImplementation((table) => (table === 'projects as p' ? recorder(log) : chain()));
     await _private.findAttentionItems(new Date('2026-11-02T12:00:00Z'));
-    expect(holds.leftJoin).toHaveBeenCalledWith('invoices as i', 'i.id', 'p.invoice_id');
-    expect(ors).toEqual([
-      ['null', 'i.id'],
-      ['in', 'i.status', ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible']],
-    ]);
+    const has = (...entry) => log.some((l) => JSON.stringify(l) === JSON.stringify(entry));
+    expect(has('leftJoin', 'invoices as i', 'i.id', 'p.invoice_id')).toBe(true);
+    // failing over and over, invoice gone, or one that can no longer settle
+    expect(has('where', 'p.report_hold_attempts', '>=', 5)).toBe(true);
+    expect(has('orWhereNull', 'i.id')).toBe(true);
+    expect(has('orWhereIn', 'i.status', ['void', 'refunded', 'canceled', 'cancelled', 'uncollectible'])).toBe(true);
+    // an invoice still in draft a day later (the customer has nothing to pay)
+    expect(has('where', 'i.status', 'draft')).toBe(true);
+    expect(log.find((l) => l[0] === 'where' && l[1] === 'i.updated_at')[3]).toEqual(new Date('2026-11-01T12:00:00Z'));
+    // an unpaid invoice that bills nothing
+    expect(has('where', 'i.total', '<=', 0)).toBe(true);
+    // a release stuck past the stale-claim recovery
+    expect(has('where', 'p.report_hold_status', 'releasing')).toBe(true);
+    expect(log.find((l) => l[1] === 'p.report_hold_locked_at')[3]).toEqual(new Date('2026-11-02T11:00:00Z'));
   });
 });
 

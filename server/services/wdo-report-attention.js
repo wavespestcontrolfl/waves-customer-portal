@@ -97,14 +97,24 @@ async function findAttentionItems(now = new Date()) {
   // A held report nobody is releasing: the release keeps failing (it retries forever by design, so after enough
   // attempts a person reads report_hold_last_error), or its invoice can no longer settle (voided, refunded,
   // cancelled, uncollectible, or gone): the sweep never selects it, so its attempt count stays at zero.
+  // Also: a hold whose invoice never left draft for a day (the customer has no bill to pay), an unpaid invoice that bills
+  // nothing (it can never settle), and a release stuck 'releasing' well past the 10-minute stale-claim recovery.
+  const dayAgo = new Date(now.getTime() - 24 * 3600e3);
   const stuckHolds = await db('projects as p')
     .leftJoin('invoices as i', 'i.id', 'p.invoice_id')
     .whereIn('p.project_type', ['wdo_inspection'])
-    .where('p.report_hold_status', 'held')
     .where((q) => q
-      .where('p.report_hold_attempts', '>=', HOLD_ATTENTION_ATTEMPTS)
-      .orWhereNull('i.id')
-      .orWhereIn('i.status', UNSETTLEABLE_INVOICE_STATUSES))
+      .where((held) => held
+        .where('p.report_hold_status', 'held')
+        .where((stuck) => stuck
+          .where('p.report_hold_attempts', '>=', HOLD_ATTENTION_ATTEMPTS)
+          .orWhereNull('i.id')
+          .orWhereIn('i.status', UNSETTLEABLE_INVOICE_STATUSES)
+          .orWhere((draft) => draft.where('i.status', 'draft').where('i.updated_at', '<', dayAgo))
+          .orWhere((free) => free.whereNotIn('i.status', ['paid', 'prepaid']).where('i.total', '<=', 0))))
+      .orWhere((releasing) => releasing
+        .where('p.report_hold_status', 'releasing')
+        .where('p.report_hold_locked_at', '<', new Date(now.getTime() - 60 * 60e3))))
     .select('p.id', 'p.report_hold_attempts', 'p.report_hold_last_error');
 
   return { signedUnsent, stuckAppts, stuckHolds };

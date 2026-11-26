@@ -122,6 +122,7 @@ jest.mock('../services/payer', () => ({
   payerRecipient: jest.fn(() => null),
   resolveForInvoice: jest.fn(async () => null),
   freezeApEmail: jest.fn(async () => {}),
+  isNetPaymentTerm: jest.fn((t) => ['net15', 'net30', 'net60'].includes(t)),
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
@@ -606,9 +607,9 @@ describe('send-with-invoice hold_report_until_paid', () => {
       code: 'wdo_no_charge',
     }));
 
-    test('a would-be statement-accrued invoice is refused BEFORE it is created', async () => {
+    test.each(['net30', 'net60'])('a would-be statement-accrued invoice (%s) is refused BEFORE it is created', async (terms) => {
       mockGates.payerStatements = true;
-      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1', paymentTerms: 'net30', snapshot: { company_name: 'ABC Title' } });
+      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1', paymentTerms: terms, snapshot: { company_name: 'ABC Title' } });
       mockTables({ project: wdoProject({ invoice_id: null }) });
       await withServer(async (baseUrl) => {
         const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true, hold_report_until_paid: true });
@@ -1670,6 +1671,8 @@ describe('audit fixes', () => {
       ['the invoice was voided', { invoice: { status: 'void' } }, 'HELD_INVOICE_NOT_SENDABLE'],
       ['a part payment landed', { invoice: { amount_paid: 50 } }, 'HELD_INVOICE_CHANGED'],
       ['the amount changed', { invoice: { total: 250 } }, 'HELD_INVOICE_CHANGED'],
+      ['the title changed', { invoice: { title: 'Termite treatment' } }, 'HELD_INVOICE_CHANGED'],
+      ['the due date changed', { invoice: { due_date: '2026-12-31' } }, 'HELD_INVOICE_CHANGED'],
       ['it became a payer bill', { invoice: { payer_id: 'payer-1' } }, 'INVOICE_PAYER_BILLED'],
       ['the invoice moved to another customer (a merge)', { invoice: { customer_id: 'customer-2' } }, 'INVOICE_CUSTOMER_MISMATCH'],
       ['the project moved to another customer', { project: { customer_id: 'customer-2' } }, 'INVOICE_CUSTOMER_MISMATCH'],
@@ -2097,6 +2100,40 @@ describe('audit fixes', () => {
       ({ updates } = mockTables());
       await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor()); });
       expect((updates.projects || []).some((u) => u.report_hold_status === null)).toBe(false);
+    });
+
+    test('an invoice lookup for a project that moved to another customer since the read refuses (no old-customer invoice reused)', async () => {
+      mockTables({ project: wdoProject() });
+      const base = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const c = base(table);
+        if (table === 'projects' && c.forUpdate) {
+          const fu = c.forUpdate;
+          c.forUpdate = jest.fn((...a) => { const r = fu.apply(c, a); const first = r.first; r.first = jest.fn(async (...b) => { const row = await first.apply(r, b); return row ? { ...row, customer_id: 'customer-2' } : row; }); return r; });
+        }
+        return c;
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, SEND_WITH_INVOICE(), { dry_run: true });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('project_customer_changed');
+      });
+    });
+
+    test('an unknown-outcome invoice bell raised after the release already ran is closed at once', async () => {
+      const holdService = require('../services/project-report-hold');
+      const raise = jest.spyOn(holdService, 'raiseInvoiceEmailUncertainBell').mockImplementation(async () => {
+        // the customer paid and the release committed (and closed its bells) while this bell was being raised
+        mockTables({ project: wdoProject({ report_hold_status: 'released' }) });
+      });
+      const close = jest.spyOn(holdService, 'closeInvoiceEmailBell').mockResolvedValue();
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, error: 'timeout', deliveryOutcome: 'uncertain' });
+      mockTables();
+      await withServer(async (baseUrl) => { await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor()); });
+      expect(raise).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledWith('project-1');
+      raise.mockRestore();
+      close.mockRestore();
     });
 
     test('a held send never reprices the confirmed draft, even when the fee changed since the preview', async () => {

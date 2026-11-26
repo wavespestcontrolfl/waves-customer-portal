@@ -3173,7 +3173,7 @@ async function assertHoldMintable(project, holdRequested, { database = db, linke
     throwOnError: true,
   });
   if (!payer?.payerId) return;
-  if (['net15', 'net30'].includes(String(payer.paymentTerms || '')) && isEnabled('payerStatements')) {
+  if (require('../services/payer').isNetPaymentTerm(String(payer.paymentTerms || '')) && isEnabled('payerStatements')) {
     throw holdRefusal(422, 'hold_statement_accrued', 'This service bills on the payer\'s monthly statement, so the report cannot wait for payment. Send the report and invoice normally.');
   }
   throw holdRefusal(422, 'hold_payer_billed', 'This service is billed to a third party, so the report cannot wait for payment. Send the report and invoice normally.');
@@ -3267,6 +3267,11 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
   // and reuse the same invoice. The lock is released on commit.
   return db.transaction(async (trx) => {
     const locked = await trx('projects').where({ id: project.id }).forUpdate().first();
+    // Every reuse below reads the customer this request read: a project moved to another customer since (a merge)
+    // refuses rather than bill the old one.
+    if (locked && String(locked.customer_id) !== String(project.customer_id)) {
+      throw Object.assign(new Error('This project moved to another customer while it was being sent. Refresh and try again.'), { code: 'project_customer_changed', status: 409 });
+    }
     const linkedInvoiceId = (locked && locked.invoice_id) || project.invoice_id;
 
     // 1. Reuse the invoice already recorded on the project (covers ad-hoc
@@ -5192,6 +5197,8 @@ function billingFingerprint(inv) {
   return JSON.stringify([
     require('../services/invoice-helpers').approvedInvoiceVersionDigest(inv),
     money(inv.subtotal), money(inv.discount_amount), money(inv.tax_amount), Number(inv.tax_rate) || 0,
+    // ...and the title and due date the email and PDF print.
+    String(inv.title || ''), inv.due_date ? require('../utils/date-only').dateOnlyString(inv.due_date) : null,
   ]);
 }
 
@@ -5450,10 +5457,13 @@ async function ringUncertainInvoiceEmailBell({ hold, delivered, channels, projec
   if (hold.active && channels.email?.ok) await reportHold.closeInvoiceEmailBell(project.id);
   if (!(hold.active && delivered && channels.email?.uncertain)) return;
   await reportHold.raiseInvoiceEmailUncertainBell({ project, customer, reason: channels.email.error });
+  // A release that committed before the raise closed its bells before this one existed: the report is out, so this
+  // bell is stale. (A release after this read closes it itself.)
+  const now = await db('projects').where({ id: project.id }).first('report_hold_status').catch(() => null);
+  if (now && now.report_hold_status !== 'held') await reportHold.closeInvoiceEmailBell(project.id);
 }
 
-// Only an accepted email stamps email_sent_at. An unknown outcome on a held send still promotes the invoice to sent
-// (it stays payable, so the hold can settle) but records no email delivery.
+// Only an accepted email stamps email_sent_at. (An unknown outcome on a held send parks the invoice instead.)
 function invoiceEmailReached({ isPayerInvoice, channels }) {
   return Boolean(isPayerInvoice ? channels.payer_email?.ok : channels.email?.ok);
 }
@@ -6364,7 +6374,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // No-charge WDO ($0 fee): nothing to bill — the operator sends the
     // report by itself instead. Same shape on dry-run and send, so the UI
     // shows the actionable message in the confirm flow.
-    if (err?.code === 'wdo_no_charge') {
+    if (err?.code === 'wdo_no_charge' || err?.code === 'project_customer_changed') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
     next(err);

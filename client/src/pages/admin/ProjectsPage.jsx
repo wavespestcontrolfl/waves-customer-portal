@@ -3864,7 +3864,7 @@ function ReportHoldBanner({ project }) {
   if (!["held", "releasing"].includes(project.report_hold_status)) return null;
   const failure = project.report_hold_last_error;
   // "Paid" only when the linked invoice's status says paid (not processing, partial or open).
-  const paid = project.report_hold_invoice_status === "paid";
+  const paid = ["paid", "prepaid"].includes(project.report_hold_invoice_status);
   return (
     <Alert tone={failure ? "error" : "success"}>
       {failure
