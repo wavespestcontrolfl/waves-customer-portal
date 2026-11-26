@@ -905,7 +905,6 @@ describe('a changed set is planned again before the second attempt (R3-3)', () =
 });
 
 describe('a definite non-send recorded by the email library is recovered too (R4-3)', () => {
-  const logger = require('../services/logger');
   const emailOnly = () => { prefs = { invoice_channels: ['email'] }; };
   // The library durably records the outcome; the worker then dies before recordLegOutcome resolves the reservation
   // (the ledger stamp is lost), leaving it neither retryable nor resolved.
@@ -1026,15 +1025,7 @@ describe('ledger claim verdict (R5-2)', () => {
 });
 
 describe('progress is selected by the CURRENT touch key after the stage is planned again (R6)', () => {
-  const logger = require('../services/logger');
-  const day30 = `customer-dunning:s-open:1:d30_final`;
-  // a schedule still at Day 30 whose oldest invoice is 65 days old: the stage catches up to Day 60
-  const catchUp = () => {
-    memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 65, 3);
-    live = makeSet(['inv-a', 'inv-b', 'inv-c']);
-  };
-
-      test('LIVE re-plan Day 30 -> 60: when the post-send progress read fails, the fallback is the Day 60 touch\'s event, never the Day 30 one delivered earlier', async () => {
+  test('LIVE re-plan Day 30 -> 60: when the post-send progress read fails, the fallback is the Day 60 touch\'s event, never the Day 30 one delivered earlier', async () => {
     setup({ stepIndex: 3, sentDaysAgo: 30 });
     prefs = { invoice_channels: ['email', 'sms'] };
     memberSeqRows = [...rowsFor(['inv-a'], 65, 3), ...rowsFor(['inv-b'], 30, 3), ...rowsFor(['inv-c'], 29, 3)];
@@ -1142,7 +1133,6 @@ describe('the text is re-checked at the FINAL provider hook, after provider prep
 });
 
 describe('a cleared balance closes the schedule before the autopay guard; autopay holds are revisited (R8)', () => {
-  const logger = require('../services/logger');
   const empty = () => ({ kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 });
 
   test('every invoice paid / voided and the customer still on autopay: the schedule CLOSES (balance_cleared), it is not parked as autopay_hold', async () => {
@@ -2256,7 +2246,6 @@ describe('runCustomerSchedules: time spent before the call counts toward the cla
 });
 
 describe('delivery evidence is recovered before an unreachable customer is paused (R10-2)', () => {
-  const logger = require('../services/logger');
   // the customer asked for texts only, then lost their number: no reachable channel today
   const unreachable = () => { prefs = { invoice_channels: ['sms'] }; customer.phone = null; };
   const reserve = (stepId, metadata = {}) => mockLedger.push({
@@ -2482,7 +2471,6 @@ describe('every admin alert the engine raises passes the real composeAdminAlert 
 });
 
 describe('collections hold (dispute / wrong-party): a WAIT everywhere, as in the per-invoice ladder', () => {
-  const logger = require('../services/logger');
   const Hold = require('../services/collections/collection-hold');
   const landDuringRender = (kind = 'dispute') => mockShorten.mockImplementationOnce(async (url) => {
     mockHold = { kind }; // the hold commits while the pay link is being minted / the message rendered
