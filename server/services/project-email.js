@@ -415,6 +415,9 @@ async function sendProjectReportReady({
   // Explicit recipient override (third-party report copies). Default
   // resolution (service contact → primary) stays the customer recipient.
   recipient = null,
+  // The caller's own provider handoff (a held report's release re-checks its recipient under the customer's lock).
+  withProviderHandoff = undefined,
+  handoffState = null,
 } = {}) {
   const resolvedRecipient = await reportRecipient(customer, recipient);
   const payload = buildProjectPayload({ project, customer, reportUrl, recipient: resolvedRecipient });
@@ -430,6 +433,8 @@ async function sendProjectReportReady({
     idempotencyKey: idempotencyKey || `project.report_ready:${project?.id || 'unknown'}:${suffix}`,
     attachments,
     recipient: resolvedRecipient,
+    withProviderHandoff,
+    handoffState,
   });
 }
 

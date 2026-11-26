@@ -4448,6 +4448,24 @@ async function sendHeldReport({ link, customer, invoice, wdoPdf, wdoFiling, ownC
   return { channels };
 }
 
+// The held report email's provider handoff: under the customer's communications lock, the account holder and the
+// send-time recipient are read again, and the email goes only if the address is still the one it was prepared for (a
+// corrected email during the PDF work refuses; the release retries with the new one). Fails closed on a failed read.
+function heldReportRecipientHandoff({ customerId, expectedEmail, state }) {
+  const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
+  const norm = (email) => String(email || '').trim().toLowerCase();
+  return (dispatch) => withCustomerCommsLock(db, customerId, async (trx) => {
+    const fresh = await loadProjectCustomer(customerId, { strict: true }).catch(() => null);
+    const now = fresh ? await ProjectEmail.resolveProjectEmailRecipientForSend(fresh, { applyReportRule: true }).catch(() => null) : null;
+    if (!now?.email || norm(now.email) !== norm(expectedEmail)) {
+      state.boundaryBlock = { code: 'REPORT_RECIPIENT_CHANGED' };
+      return { ok: false };
+    }
+    await dispatch(trx);
+    return { ok: true };
+  });
+}
+
 // A held report's email and requestor copies, the same for the automatic release and a manual Send report: one
 // send-time recipient, one key per invoice + filing + recipient, and only that recipient left out of the copies.
 async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, wdoFiling, ownClaim }) {
@@ -4467,12 +4485,15 @@ async function sendHeldReportEmailAndCopies({ link, customer, invoice, wdoPdf, w
     // uncertain sends keep their key, so a retry after a crash never repeats an email.
     const stored = typeof refreshed.delivery_channels === 'string' ? safeJsonParse(refreshed.delivery_channels) : refreshed.delivery_channels;
     const blocks = Number(stored?.release_email_blocks) || 0;
+    const handoffState = { boundaryBlock: null };
     const result = await ProjectEmail.sendProjectReportReady({
       project: refreshed,
       customer,
       reportUrl,
       isResend: false,
       recipient: emailRecipient,
+      handoffState,
+      withProviderHandoff: heldReportRecipientHandoff({ customerId: customer.id, expectedEmail: emailRecipient.email, state: handoffState }),
       attachments: wdoPdf ? [wdoPdf.attachment] : [],
       idempotencyKey: `project.report_ready:${refreshed.id}:hold_release:${String(invoice.id).replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40)}:${filingKeyPart(wdoFiling)}:${recipientHash}${blocks ? `:b${blocks}` : ''}`,
     });
@@ -4981,12 +5002,14 @@ function assertHoldArmable({ locked, lockedInvoice, intendedCustomerIds }) {
   if (refusal) throw holdRefusal(refusal.status, refusal.code, refusal.error);
 }
 
-// What an invoice bills, as one comparable string: every amount and line the email, the PDF and the pay link show.
+// What an invoice bills and says, as one comparable string: the shared invoice approval digest (total, credit, amount
+// due, lines, the operator's message and the notes the PDF prints) plus the subtotal, discount and tax the PDF shows.
 function billingFingerprint(inv) {
-  let items = inv.line_items;
-  if (typeof items === 'string') { try { items = JSON.parse(items); } catch { /* compared as the raw text */ } }
   const money = (v) => Math.round((Number(v) || 0) * 100);
-  return JSON.stringify([money(inv.subtotal), money(inv.discount_amount), money(inv.tax_amount), Number(inv.tax_rate) || 0, money(inv.total), money(inv.credit_applied), items ?? null]);
+  return JSON.stringify([
+    require('../services/invoice-helpers').approvedInvoiceVersionDigest(inv),
+    money(inv.subtotal), money(inv.discount_amount), money(inv.tax_amount), Number(inv.tax_rate) || 0,
+  ]);
 }
 
 // The short form of the fingerprint the preview hands the drawer and the send hands back.
@@ -5247,11 +5270,13 @@ const SEND_OUTCOMES = {
   plain_failed: { action: 'project_report_with_invoice_failed', text: (t) => `Report + invoice delivery failed: ${t}` },
   held_ok: { action: 'project_invoice_sent_report_held', text: (t, inv) => `Invoice sent, report held until paid: ${t} (${inv})` },
   held_failed: { action: 'project_invoice_report_hold_failed', text: (t) => `Invoice delivery failed (report hold not armed): ${t}` },
+  // A resend on a report that was already held: the failed resend leaves the earlier hold as it was.
+  held_resend_failed: { action: 'project_invoice_report_hold_resend_failed', text: (t) => `Invoice resend failed; the report stays held until paid: ${t}` },
 };
 
 // The activity row of a send: action, text and the hold keys of its metadata.
 function sendActivityEntry({ hold, delivered, typeLabel, invoice, token }) {
-  const outcome = SEND_OUTCOMES[`${hold.active ? 'held' : 'plain'}_${delivered ? 'ok' : 'failed'}`];
+  const outcome = SEND_OUTCOMES[`${hold.active ? 'held' : 'plain'}_${delivered ? 'ok' : `${hold.active && hold.wasHeld ? 'resend_' : ''}failed`}`];
   return {
     action: outcome.action,
     description: outcome.text(typeLabel, invoice.invoice_number),
@@ -5263,7 +5288,8 @@ function sendActivityEntry({ hold, delivered, typeLabel, invoice, token }) {
 function sendResponseHoldKeys({ hold, reportPath, token, delivered }) {
   return {
     report_url: hold.active ? null : (reportPath || `/report/project/${token}`),
-    ...(hold.requested ? { report_held: delivered && hold.active } : {}),
+    // A failed resend leaves an earlier hold in place: the report is still held.
+    ...(hold.requested ? { report_held: hold.active && (delivered || Boolean(hold.wasHeld)) } : {}),
   };
 }
 

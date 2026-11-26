@@ -182,7 +182,7 @@ async function raiseInvoiceEmailUncertainBell({ project, customer, reason }) {
       who: 'person',
     }, {
       bell: true,
-      dedupeKey: `wdo-report-hold-invoice-email:${project.id}`,
+      dedupeKey: invoiceEmailBellKey(project.id),
       detail: `The invoice email for this held WDO report ended with an error that may have come after the provider took it: ${String(reason || '').slice(0, 300)}. The report hold stays. Check that the customer got the invoice, and resend it if not.`,
       metadata: { projectId: String(project.id) },
     });
@@ -226,11 +226,17 @@ async function raiseReleaseFailedBell({ project, customer, reason }) {
   }
 }
 
-// The report went out: close the bell row, if any. Best-effort.
+// The uncertain-invoice-email bell's key: one per project.
+function invoiceEmailBellKey(projectId) {
+  return `wdo-report-hold-invoice-email:${projectId}`;
+}
+
+// The report went out: close both of this project's hold bells (a failed release, an invoice email of unknown
+// outcome: once the report is sent nobody needs to check the invoice email any more). Best-effort.
 async function closeReleaseFailedBell(projectId) {
   try {
     const episodes = require('./admin-alert-episodes');
-    await episodes.closeAdminAlertKeys(db, [bellKey(projectId)], 'wdo_report_released', {
+    await episodes.closeAdminAlertKeys(db, [bellKey(projectId), invoiceEmailBellKey(projectId)], 'wdo_report_released', {
       resolution: 'The WDO report was sent.',
     });
   } catch (err) {

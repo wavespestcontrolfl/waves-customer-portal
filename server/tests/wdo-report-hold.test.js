@@ -698,7 +698,8 @@ describe('releaseHeldProjectReport', () => {
     expect(sendCustomerMessage.mock.calls[0][0].body).toContain('/report/project/');
     // No bell for a good release; any earlier failure bell is closed.
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(db, ['wdo-report-hold-release:project-1'], 'wdo_report_released', expect.any(Object));
+    // ...and the uncertain-invoice-email bell too: once the report is out nobody needs to check the invoice email
+    expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(db, ['wdo-report-hold-release:project-1', 'wdo-report-hold-invoice-email:project-1'], 'wdo_report_released', expect.any(Object));
     const activity = activityRows.find((row) => row.action === 'project_report_released_after_payment');
     expect(activity.metadata.report_token).toBeUndefined();
   });
@@ -1858,6 +1859,37 @@ describe('audit fixes', () => {
       expect(srWrites).toHaveLength(1);
       expect(srWrites[0].structured_notes.sql).toMatch(/jsonb_set\(structured_notes, '\{projectReport\}'/);
       expect(srWrites[0].structured_notes.bindings[0]).toBe('tok-1');
+    });
+  });
+
+  describe('round 19: report recipient at handoff, notes in the fingerprint, failed resend', () => {
+    test('the release email re-reads its recipient under the customer lock: a corrected address refuses the old one', async () => {
+      mockTables({ project: wdoProject({ report_hold_status: 'held' }), invoice: invoiceRow({ status: 'paid' }) });
+      await releaseHeldProjectReport('project-1', { source: 'payment_sweep' });
+      const args = ProjectEmail.sendProjectReportReady.mock.calls[0][0];
+      expect(typeof args.withProviderHandoff).toBe('function');
+      const dispatch = jest.fn();
+      // unchanged: it dispatches
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: true });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      // staff corrected the email during the PDF work: refused, nothing dispatched
+      ProjectEmail.resolveProjectEmailRecipientForSend.mockResolvedValueOnce({ email: 'corrected@example.com', name: '', role: 'primary' });
+      expect(await args.withProviderHandoff(dispatch)).toEqual({ ok: false });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(args.handoffState.boundaryBlock).toEqual({ code: 'REPORT_RECIPIENT_CHANGED' });
+    });
+
+    test('the confirmed fingerprint covers the notes the invoice PDF prints', () => {
+      const { billingFingerprintHash } = projectsRouter._private;
+      expect(billingFingerprintHash(invoiceRow({ notes: 'Thanks!' }))).not.toBe(billingFingerprintHash(invoiceRow({ notes: 'Pay by Friday' })));
+    });
+
+    test('a failed resend on a report that was already held says the report is still held', async () => {
+      ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, blocked: true, reason: 'handoff_refused' });
+      const { activityRows } = mockTables({ project: wdoProject({ report_hold_status: 'held', invoice_id: 'inv-1' }) });
+      const body = await withServer(async (baseUrl) => (await post(baseUrl, SEND_WITH_INVOICE(), holdBodyFor())).json());
+      expect(body.report_held).toBe(true);
+      expect(activityRows.map((r) => r.action)).toContain('project_invoice_report_hold_resend_failed');
     });
   });
 

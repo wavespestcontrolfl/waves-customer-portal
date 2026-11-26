@@ -2180,6 +2180,11 @@ export function ProjectDetail({
       // a distinct billing contact gets a copy, and which third parties from
       // the FDACS "Report sent to" line get a report-only copy (no invoice).
       const routing = pv.email_routing || {};
+      if (holdReport && routing.recipient_refused) {
+        setError("This invoice cannot be emailed: there is no billing email address that accepts email. Add one, or send the report with the invoice.");
+        setSaving(false);
+        return;
+      }
       const routingLines = [
         routing.recipient ? `Email to: ${routing.recipient}` : null,
         routing.recipient_refused ? "No invoice email: there is no billing email address that accepts email." : null,
@@ -3431,6 +3436,7 @@ const PROJECT_ACTIVITY_LABELS = {
   project_report_with_invoice_failed: "Report + invoice failed",
   project_invoice_sent_report_held: "Invoice sent, report held",
   project_invoice_report_hold_failed: "Invoice failed, report not held",
+  project_invoice_report_hold_resend_failed: "Invoice resend failed, report still held",
   project_report_released_after_payment: "Report sent after payment",
   project_report_release_blocked: "Paid report not sent",
   project_prep_guide_sent: "Prep guide sent",
@@ -3941,7 +3947,8 @@ async function fetchSendWithInvoicePreview({ projectId, holdReport, overrideReas
   }), "Could not prepare invoice");
   const dryRun = { dry_run: true, ...holdBody(holdReport) };
   const pv = await call(dryRun);
-  if (!(holdReport && pv.invoice && !pv.invoice.id)) return pv;
+  // No draft is prepared for a held send that cannot email its invoice: the caller stops on the refusal.
+  if (!(holdReport && pv.invoice && !pv.invoice.id) || pv.email_routing?.recipient_refused) return pv;
   await call({ prepare_invoice: true });
   return call(dryRun);
 }
