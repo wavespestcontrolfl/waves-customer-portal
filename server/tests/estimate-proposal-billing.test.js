@@ -464,6 +464,16 @@ describe('rethrow: a failed lookup is an error, not a fail-soft answer', () => {
     mockBuildPricingBundle.mockResolvedValue(null);
     await expect(resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }, { rethrow: true })).rejects.toThrow('pricing bundle unavailable');
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' })).toEqual({ billsPerApplication: true, livePricing: { unresolved: true } });
+    // strict membership: asked strictly in rethrow mode, an unsuccessful result is a failure; the default call is unchanged
+    mockBuildPricingBundle.mockResolvedValue({ frequencies: [], source: 'live_rebuild' });
+    mockReconcileMembership.mockClear();
+    mockReconcileMembership.mockResolvedValue({ ok: false, error: 'membership_lookup_failed' });
+    await expect(resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }, { rethrow: true })).rejects.toThrow('membership snapshot unverified: membership_lookup_failed');
+    expect(mockReconcileMembership).toHaveBeenLastCalledWith(expect.anything(), { strictMembership: true });
+    mockReconcileMembership.mockClear();
+    await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' });
+    expect(mockReconcileMembership).toHaveBeenLastCalledWith(expect.anything(), undefined);
+    mockReconcileMembership.mockReset();
   });
 });
 

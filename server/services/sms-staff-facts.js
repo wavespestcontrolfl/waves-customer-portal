@@ -40,8 +40,8 @@ const toCents = (value) => {
  * year of the per-application average model, the SAME model the estimate page and the delivery email read (estimate-monthly-average: it
  * reconciles each line against the stored plan total, so a line that does not add up is withheld). Only a price LISTED on the estimate, never
  * a total: the prepay invoice total, the setup fee and the one-time lines each have their own authority and stay with staff.
- * { perApplication: [] } when there is no estimate, it is not on the customer's own page (or depends on a call or move: see above), or it lists
- * none (a successful read of nothing); null when the read failed. Never throws.
+ * { perApplication: [] } when there is no estimate, it is not on the customer's own page (or depends on a call or move: see above), the customer
+ * has more than one open estimate, or it lists none (a successful read of nothing); null when the read failed. Never throws.
  */
 async function loadEstimateFacts(estimate, { db } = {}) {
   const none = { perApplication: [] };
@@ -49,6 +49,10 @@ async function loadEstimateFacts(estimate, { db } = {}) {
   if (!db) return null;
   try {
     if (!estimateOnCustomerSurface(estimate)) return none;
+    // Which estimate does the customer mean? The context names the newest open one; with two or more open (two properties, two quotes for one
+    // service) a price could be the wrong quote's, so a person answers.
+    const open = await db('estimates').where({ customer_id: estimate.customer_id }).whereIn('status', ['sent', 'viewed']).whereNull('archived_at').limit(2).select('id');
+    if (open.length > 1) return none;
     const average = await require('./estimate-monthly-average').perApplicationAverageFor(estimate, { rethrow: true });
     const perApplication = [];
     for (const service of average?.model?.services || []) {

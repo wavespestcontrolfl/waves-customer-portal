@@ -463,7 +463,10 @@ async function resolveLivePricing(estimate, { rethrow = false } = {}) {
     } = require('../routes/estimate-public');
     if (typeof buildPricingBundle !== 'function') throw new Error('buildPricingBundle unavailable');
     if (typeof reconcileFrozenMembershipSnapshot === 'function') {
-      await reconcileFrozenMembershipSnapshot(estimate);
+      // a reader that must not report a price from an unverified member snapshot (rethrow: the texting AI's price facts, the intelligence bar's
+      // get_estimate_detail) asks strictly and treats an unsuccessful result as a failure
+      const reconciled = await reconcileFrozenMembershipSnapshot(estimate, rethrow ? { strictMembership: true } : undefined);
+      if (rethrow && reconciled?.ok === false) throw new Error(`membership snapshot unverified: ${reconciled.error}`);
     }
     const bundle = await buildPricingBundle(estimate);
     if (!bundle || typeof bundle !== 'object') throw new Error('pricing bundle unavailable');

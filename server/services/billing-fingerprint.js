@@ -26,7 +26,7 @@ const BILLING_FINGERPRINT_SQL = `SELECT md5(concat_ws('#',
   (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM scheduled_services t
    WHERE t.customer_id = ? AND (t.prepaid_amount > 0 OR t.annual_prepay_term_id IS NOT NULL OR t.prepaid_method = 'annual_prepay_invoice' OR COALESCE(t.recurring_parent_id, t.id) IN
      (SELECT COALESCE(s.recurring_parent_id, s.id) FROM scheduled_services s WHERE s.customer_id = ? AND (s.prepaid_amount > 0 OR s.annual_prepay_term_id IS NOT NULL OR s.prepaid_method = 'annual_prepay_invoice')))),
-  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM estimates t WHERE t.customer_id = ? AND t.status IN ('sent', 'viewed') AND t.archived_at IS NULL),
+  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM estimates t WHERE t.customer_id = ? AND t.status IN ('sent', 'viewed') AND t.archived_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > now())),
   (SELECT string_agg(md5(p::text), ',' ORDER BY p.id) FROM payers p
    WHERE p.id IN (SELECT payer_id FROM customers WHERE id = ? UNION SELECT payer_id FROM scheduled_services WHERE customer_id = ?)),
   (SELECT string_agg(md5(d::text), ',' ORDER BY d.id) FROM estimate_deposits d

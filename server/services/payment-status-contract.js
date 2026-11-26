@@ -669,6 +669,8 @@ function planServiceOffTarget(sentence, inbound) {
 // ...nor a question about what is owed, an invoice or a past charge, unless it also names the estimate.
 const OWED_ASK_RE = /\b(?:owe|owed|balance|invoices?|bills?|billed|paid|payments?|refunds?|charged|past due|overdue)\b/i;
 const NAMES_ESTIMATE_RE = /\b(?:estimate|quote|quoted|proposal)\b/i;
+// ...nor a question about a charge the application line does not carry (the setup fee, a prepay price, a total, a deposit): those amounts stay with staff.
+const OTHER_CHARGE_ASK_RE = /\b(?:set-?up|start-?up|initial|one-time|enrollment|activation|sign-?up)\s+fees?\b|\bpre-?pa(?:y|id|yment)\b|\bprepay\w*\b|\b(?:annual|yearly|monthly|total|full)\s+(?:total|price|cost|amount)\b|\btotal\b|\bdeposit\b|\bdown payment\b/i;
 const ESTIMATE_ASK_RE = /\b(?:price|prices|pricing|priced|cost|costs|how much|estimate|quote|quoted|charge|charged|rate|per (?:visit|application|treatment))\b/i;
 function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
@@ -699,7 +701,7 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   return copied.some((sentence) => {
     const t = String(sentence);
     if (SHAPES.prepaid_visits_left.test(t)) return planServiceOffTarget(t, inbound);
-    if (SHAPES.estimate_application_price.test(t)) return !ESTIMATE_ASK_RE.test(inbound) || (OWED_ASK_RE.test(inbound) && !NAMES_ESTIMATE_RE.test(inbound)) || planServiceOffTarget(t, inbound);
+    if (SHAPES.estimate_application_price.test(t)) return !ESTIMATE_ASK_RE.test(inbound) || (OWED_ASK_RE.test(inbound) && !NAMES_ESTIMATE_RE.test(inbound)) || OTHER_CHARGE_ASK_RE.test(inbound) || planServiceOffTarget(t, inbound);
     // a Zelle offer / unavailability line answers a question about Zelle, or a GENERIC how-to-pay question - never a receipt question
     // (round 75) or a question about another way to pay ("Can I pay by check?", round 78)
     if (isZelleTenderLine(t) && (statusAsked || !(ZELLE_WORD_RE.test(inbound) || inboundIsGenericHowToPay(inbound)))) return true;

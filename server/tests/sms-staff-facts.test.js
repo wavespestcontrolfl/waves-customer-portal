@@ -71,6 +71,8 @@ describe('the open estimate\'s price (payment-status contract)', () => {
     expect(check(PRICE, 'Did you receive my payment?')).toBe(false);
     // not an invoice, balance or past-charge question unless it also names the estimate
     expect(check(PRICE, 'How much do I owe on my invoice?')).toBe(false);
+    // the application line is not the setup fee, a prepay price or a total
+    for (const q of ['How much is the setup fee on my estimate?', 'How much to prepay my estimate?', 'What is the total on the quote?', 'How much is the deposit for the estimate?']) expect({ q, ok: check(PRICE, q) }).toEqual({ q, ok: false });
     expect(check(PRICE, 'How much was I charged last month?')).toBe(false);
     expect(check(PRICE, 'How much is the estimate, and what do I owe on my invoice?')).toBe(true);
     expect(check(PRICE, 'How many visits do I have left?')).toBe(false);
@@ -92,7 +94,10 @@ describe('the open estimate\'s price (payment-status contract)', () => {
 describe('loadEstimateFacts', () => {
   afterEach(() => { jest.dontMock('../services/estimate-monthly-average'); jest.dontMock('../utils/estimate-claim-sql'); jest.resetModules(); });
   const perApplicationAverageFor = jest.fn();
-  const load = async (estimate, { average, offSurface = false, db = {} } = {}) => {
+  // the customer's open estimates (sent or viewed, not archived): one by default
+  const dbWithOpen = (rows) => () => { const q = { where: () => q, whereIn: () => q, whereNull: () => q, limit: () => q, select: async () => { if (rows instanceof Error) throw rows; return rows; } }; return q; };
+  const oneOpen = dbWithOpen([{ id: 'e1' }]);
+  const load = async (estimate, { average, offSurface = false, db = oneOpen } = {}) => {
     jest.resetModules();
     jest.doMock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
     perApplicationAverageFor.mockReset().mockImplementation(async () => { if (average instanceof Error) throw average; return average; });
@@ -122,6 +127,9 @@ describe('loadEstimateFacts', () => {
     expect(await load(est, { average: new Error('boom') })).toBeNull();
     expect(await load(est, { average, offSurface: new Error('boom') })).toBeNull();
     expect(await load(est, { average, db: null })).toBeNull();
+    expect(await load(est, { average, db: dbWithOpen(new Error('boom')) })).toBeNull();
+    // two open estimates (two properties, two quotes for one service): which one does the customer mean? a person answers
+    expect(await load(est, { average, db: dbWithOpen([{ id: 'e1' }, { id: 'e2' }]) })).toEqual({ perApplication: [] });
   });
 });
 
