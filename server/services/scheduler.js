@@ -5525,6 +5525,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN (offset 1) — Alert clear-up agent, SHADOW ONLY (owner 2026-11-26, PR 1 of 2; GATE_ALERT_CLEAR_AGENT=shadow):
+  // decides for each open admin alert about a customer text, email, voicemail or missed call whether the work is done and writes
+  // the verdict to alert_clear_verdicts. Closes, edits and rings no notification; texts no one. Paid model reads are capped per
+  // day. Gate off = no lock, no query. runExclusive: overlapping deploy instances would pay for the same read twice.
+  cron.schedule('5,15,25,35,45,55 * * * *', async () => {
+    // Read at tick time (a flip needs no restart); off = no lock and no job-health row.
+    if (require('../config/feature-gates').alertClearAgentMode() !== 'shadow') return;
+    try {
+      await runExclusive('alert-clear-agent', async () => {
+        const result = await require('./alert-clear-agent').runAlertClearAgent();
+        if (result && !result.skipped && result.alerts) logger.info(`[alert-clear-agent] sweep: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[alert-clear-agent] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips

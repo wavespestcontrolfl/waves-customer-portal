@@ -484,6 +484,7 @@
  *   GATE_MAIL_HOME_PAGE=true (owner 2026-11-22, mailer step 2c: the page of one new home on the county deed list, GET /api/public/home/:token, opened from the QR code on a later postcard. It answers with the home's address and its stored quarterly pest plan price, and counts a real open. Off = every request, a real token too, gets the same 404 as an unknown token. It is a new public link page. Read at call time via mailHomePageLive(), strict 'true', dark by default. Nothing is sent. Kill = unset.)
  *   GATE_PAYROLL_PRODUCTION_SHARE=true (owner 2026-11-24, technician production share PR 2 (Technician Terms v3, "Production share"): a pay run adds a "Production share" earning line to the check of a W-2 technician who has production share settings in force for the pay week: the rate times the credited production above the bar, from production-share.js shareForWeek, paid on the Friday check for its own pay week. It is taxable wages and counts in the federal regular rate for its own week (the half-time premium on the share, share / hours worked x 1/2 x overtime hours, rides on the same check through payroll-regular-rate.js). The check stores production_share_cents and a frozen snapshot of the credit (calc_snapshot.productionShare); a stop marked needs review pays $0 and the draft says how many stops need review. The pay stub, run table, run CSV, run totals, the Tech Rewards pay dating, the yearly statement and the tax package W-2 CSV carry it. Needs GATE_PAYROLL; works with GATE_PAYROLL_PAY_LINES on or off. Named risk: it adds money to technician checks. Read at call time via payrollProductionShareLive(), strict 'true', dark by default; off = no share is worked out and every pay run output is byte for byte today's for checks drafted with it off; a check drafted with it on keeps showing what it stored; rollback = unset. Pays, sends and files nothing; the owner finalizes every run and makes every payment himself.)
  *   GATE_MAIL_HOME_TEXT_BOOK=true (owner 2026-11-23, mailer step 2d-3: the new-home postcard prints "Text 101 EXAMPLE to (941) 297-2817". A text to one of the four office lines (Lakewood Ranch, Parrish, Sarasota, Venice) whose body is the house number and street name of a live home on the new-home mail list (a street type and a ZIP are accepted) gets one auto-reply from the same line with that home's short link, https://portal.wavespestcontrol.com/nh/<slug>, once per sender and home per 24 hours. It texts a person, so the flip is the owner's. Also needs GATE_MAIL_HOME_PAGE (the page the link opens). Off = the text is handled as any other inbound text. Read at call time via mailHomeTextBookLive(), strict 'true', dark by default. Kill = unset.)
+ *   GATE_ALERT_CLEAR_AGENT=shadow (owner 2026-11-26, alert clear-up agent PR 1: every 10 minutes an agent reads each open admin bell alert about a customer text, email, voicemail or missed call (category inbound_sms, inbound_email, voicemail_callback or missed_call, not Claude-queue rows) with what happened after it, and records in alert_clear_verdicts whether the work is done: answered, nothing_to_answer or still_owed. Plain rules go first; a staff text, a sent staff email or a human-answered call after the alert is the answer, and an alert that says we owe a quote, callback or promise is never closed by the model. Anything else is one paid Claude Sonnet read, capped per day (ALERT_CLEAR_AGENT_DAILY_CAP, default 150); code checks the record the model names as proof. SHADOW ONLY: it closes, edits and rings no notification and texts, emails and calls no one. It has a gate because each read is a paid API call. Off unless the value is exactly `shadow`; any other value is off and no query runs. Read at call time via alertClearAgentMode(). Kill: unset.)
  */
 
 const isProd = process.env.NODE_ENV === 'production';
@@ -2488,6 +2489,8 @@ const gates = {
   sameQuestionCheck: process.env.GATE_SAME_QUESTION_CHECK === 'true',
   // GATE_ROUTE_ENGINE_SUMMARY (engine summary block on the admin Day Scorecard, read-only, dark). Boot-log entry only; the call-time reader is routeEngineSummaryLive().
   routeEngineSummary: process.env.GATE_ROUTE_ENGINE_SUMMARY === 'true',
+  // GATE_ALERT_CLEAR_AGENT (alert clear-up agent, shadow only; exactly 'shadow'). Boot-log entry; the call-time reader is alertClearAgentMode().
+  alertClearAgent: process.env.GATE_ALERT_CLEAR_AGENT === 'shadow',
   // Shared-writer cancellation notice (job-status.js): when a visit whose
   // reminders already went out is cancelled through ANY path (cascade,
   // track, IB, raw transition), text the customer the existing
@@ -9427,6 +9430,15 @@ function voiceGptLiveToolsLive() {
 }
 // GATE_VOICE_GPT_LIVE_TOOLS reader, on its own line so gate PRs never conflict.
 module.exports.voiceGptLiveToolsLive = voiceGptLiveToolsLive;
+
+// GATE_ALERT_CLEAR_AGENT read at CALL time: 'shadow' (exactly) or 'off' (owner 2026-11-26). It has a gate because each read is a
+// paid Claude call. Shadow writes alert_clear_verdicts rows and nothing else; there is no live mode in this build, so any other
+// value is off: no query, no model call. Kill = unset.
+function alertClearAgentMode() {
+  return process.env.GATE_ALERT_CLEAR_AGENT === 'shadow' ? 'shadow' : 'off';
+}
+// GATE_ALERT_CLEAR_AGENT reader, on its own line so gate PRs never conflict.
+module.exports.alertClearAgentMode = alertClearAgentMode;
 
 // GATE_WDO_REPORT_HOLD read at CALL time (so a flip needs no redeploy), strict `=== 'true'`, dark by default.
 // Owner 2026-11-24: Send with invoice on a WDO inspection may hold the FDACS report until the invoice is paid
