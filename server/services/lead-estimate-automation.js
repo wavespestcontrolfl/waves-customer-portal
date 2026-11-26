@@ -344,6 +344,12 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   const homeSizeAboveLimit = !!statedHomeSqFt && statedHomeSqFt > LEAD_HOME_SQFT_LIMIT;
   const homeSqFt = (homeSizeAboveLimit ? Math.min(statedHomeSqFt, LEAD_HOME_SQFT_LIMIT * 10) : statedHomeSqFt) || county?.homeSqFt || null;
   const lotSqFt = statedLotSqFt || county?.lotSqFt || null;
+  // The story count: the lead's or the customer row's, else the county record's own count when that record gave the home size (a
+  // county count is never mixed with a stated size). Pest prices on the footprint (living area over the stories). Above the 5,500
+  // sq ft table that sets the price, so a big home with no known count is not priced as one floor: storiesSource 'default' puts the
+  // engine's own stories_estimated review on the line and the draft waits for a person (the phone price tool asks the caller).
+  const stories = numberOrNull(body.stories, customer.stories) || (county ? numberOrNull(county.stories) : null);
+  const storiesUnknownAboveTable = !stories && (homeSqFt || 0) > Number(require('./pricing-engine/constants').PEST.aboveTableStartSqFt);
   const review = [];
   if (!homeSqFt || !lotSqFt) review.push(DEFAULTED_REVIEW);
   if (homeSizeAboveLimit) review.push(HOME_SIZE_ABOVE_LIMIT_REASON);
@@ -390,7 +396,8 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       // bed shrunk by an inflated homeSqFt (Codex #6398 security r15; same
       // contract as the public quote).
       treeShrubFootprintTrusted: false,
-      stories: numberOrNull(body.stories, customer.stories) || 1,
+      stories: stories || 1,
+      ...(storiesUnknownAboveTable ? { storiesSource: 'default' } : {}),
       propertyType: resolvedPropertyType || (unitScopeGuardrailsEnabled() ? 'unknown' : 'Single Family'),
       category: body.category || null,
       isCommercial: false,
@@ -608,7 +615,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
   // size instead, so staff never read "default size" on a real one.
   let gateRecord = readiness;
   if (engineInput.sizeSource === MEASUREMENTS_SOURCE) {
-    automation.measurements = { source: MEASUREMENTS_SOURCE, homeSqFt: county.homeSqFt, lotSqFt: county.lotSqFt };
+    automation.measurements = {
+      source: MEASUREMENTS_SOURCE, homeSqFt: county.homeSqFt, lotSqFt: county.lotSqFt, ...(county.stories ? { stories: county.stories } : {}),
+    };
     gateRecord = {
       ...readiness,
       review: [...new Set((readiness.review || []).map((reason) => (reason === DEFAULTED_REVIEW ? FROM_COUNTY_REVIEW : reason)))],
@@ -675,8 +684,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
           + Number(estimate?.summary?.specialtyTotal || 0),
       };
     }
-    automation.quoteRequiredReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
-      || (engineInput.homeSizeAboveLimit ? HOME_SIZE_ABOVE_LIMIT_REASON : null)
+    // The size bound names the hold first: a line's own review reason on that draft (an unknown story count) is the lesser fact.
+    automation.quoteRequiredReason = (engineInput.homeSizeAboveLimit ? HOME_SIZE_ABOVE_LIMIT_REASON : null)
+      || manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
       || (typeUnresolved ? 'property_type_unresolved' : null)
       || (fieldVerifyRequired ? parkingFieldVerifyFlags[0] : null);
 

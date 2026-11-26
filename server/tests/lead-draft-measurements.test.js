@@ -77,6 +77,25 @@ describe('county sizes a lead draft may use', () => {
     expect(countyMeasurements(lookup)).toBeNull();
   });
 
+  test('the county record\'s own story count rides with its home size; an estimated count does not', () => {
+    // A count with no AI-fallback evidence is a looked-up fact (the estimator's own grader, storiesSourceForPricing).
+    expect(countyMeasurements(lookupOf(countyRecord({ squareFootage: 8000, stories: 2 }))))
+      .toEqual({ homeSqFt: 8000, lotSqFt: 9200, stories: 2, source: 'county_assessed' });
+    // The AI fallback's estimate (an inference, low confidence, or no source page) is not carried.
+    for (const evidence of [
+      { basis: 'inferred', confidence: 'high', sourceUrl: 'https://example.com/listing', sourceType: 'listing' },
+      { basis: 'direct', confidence: 'low', sourceUrl: 'https://example.com/listing', sourceType: 'listing' },
+      { basis: 'direct', confidence: 'high', sourceUrl: 'the county site', sourceType: 'county' },
+    ]) {
+      expect(countyMeasurements(lookupOf(countyRecord({ squareFootage: 8000, stories: 2, _storiesEvidence: evidence }))))
+        .toEqual({ homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' });
+    }
+    // A direct, attributable answer is.
+    expect(countyMeasurements(lookupOf(countyRecord({
+      squareFootage: 8000, stories: 2, _storiesEvidence: { basis: 'direct', confidence: 'high', sourceUrl: 'https://example.com/parcel', sourceType: 'county' },
+    })))).toMatchObject({ stories: 2 });
+  });
+
   test('only an address with no unit, in any position, describes one house', () => {
     expect(wholeHomeAddress(ADDRESS)).toBe(true);
     for (const unit of [
@@ -186,11 +205,42 @@ describe('the draft builder\'s cache read', () => {
       expect(draft.automation.engineInput.homeSqFt).toBeLessThanOrEqual(200000);
       expect(draft.automation.provisionalTotals.annual).toBeLessThan(100000);
     }
-    // At the bound and under it the draft prices as entered: 20,000 sq ft on one floor is $128 + $8 x 14.5.
-    const atLimit = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 20000, lotSqFt: 9000 } }));
+    // At the bound and under it the draft prices as entered (with its story count): 20,000 sq ft on one floor is $128 + $8 x 14.5.
+    const atLimit = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 20000, lotSqFt: 9000, stories: 1 } }));
     expect(atLimit.automation).toMatchObject({ quoteRequired: false, quoteRequiredReason: null });
     expect(atLimit.automation.review).not.toContain('home_size_above_public_limit');
     expect(atLimit.estimateData.engineResult.lineItems.find((l) => l.service === 'pest_control').perApp).toBe(244);
+  });
+
+  test('a big home is priced on its footprint: the county count is used, and with no known count the pest price waits for a person', async () => {
+    const pest = (draft) => draft.estimateData.engineResult.lineItems.find((l) => l.service === 'pest_control');
+    const county = (stories) => ({ homeSqFt: 8000, lotSqFt: 12000, ...(stories ? { stories } : {}), source: 'county_assessed' });
+    // County size + county count: 8,000 sq ft on two floors is a 4,000 sq ft footprint, $122, not $148 for an 8,000 sq ft footprint.
+    const twoStory = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: county(2) });
+    expect(twoStory.automation.engineInput).toMatchObject({ homeSqFt: 8000, stories: 2 });
+    expect(twoStory.automation.engineInput).not.toHaveProperty('storiesSource');
+    expect(twoStory.automation.measurements).toEqual({ source: 'county_assessed', homeSqFt: 8000, lotSqFt: 12000, stories: 2 });
+    expect(pest(twoStory).perApp).toBe(122);
+    expect(twoStory.quoteRequired).toBe(false);
+    // County size, no count: the footprint is not known, so the engine's own stories_estimated review holds the draft.
+    const noCount = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: county() });
+    expect(noCount.automation.engineInput).toMatchObject({ homeSqFt: 8000, stories: 1, storiesSource: 'default' });
+    expect(noCount.automation).toMatchObject({ status: 'manual_review_required', generated: false, quoteRequired: true, quoteRequiredReason: 'stories_estimated' });
+    expect([noCount.monthly, noCount.annual]).toEqual([0, 0]);
+    // A size the lead states: its own count is used; with none the same hold applies.
+    const stated = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 8000, lotSqFt: 12000, stories: 2 } }));
+    expect(pest(stated).perApp).toBe(122);
+    expect(stated.quoteRequired).toBe(false);
+    const statedNoCount = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 8000, lotSqFt: 12000 } }));
+    expect(statedNoCount.automation).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'stories_estimated' });
+    // A county count is never mixed with a size the lead stated.
+    const mixed = await buildAutomatedLeadDraftEstimate({ ...readyLead({ body: { homeSqFt: 8000, lotSqFt: 12000 } }), measurements: county(2) });
+    expect(mixed.automation.engineInput).toMatchObject({ stories: 1, storiesSource: 'default' });
+    // At or under 5,500 sq ft nothing changes: one floor is assumed with no count and the draft prices as before.
+    const small = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 5500, lotSqFt: 12000 } }));
+    expect(small.automation.engineInput).not.toHaveProperty('storiesSource');
+    expect(small.quoteRequired).toBe(false);
+    expect(pest(small).perApp).toBe(128);
   });
 
   test('measurements passed in (the background lookup) skip the cache read', async () => {
