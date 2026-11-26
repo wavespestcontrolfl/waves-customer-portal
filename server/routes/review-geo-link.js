@@ -4,7 +4,9 @@
  * of the nearest Waves office, with no page and no tap in between (owner
  * 2026-11-21: "less clicks to give reviews is always better").
  *
- *   GET /rv   → 302 to that office's Google review form
+ *   GET /rv        → 302 to that office's Google review form
+ *   GET /rv/<tech> → the same 302, and one more count for that technician
+ *                    (the QR on a technician's own badge, e.g. /rv/adam)
  *
  * The office comes from Cloudflare's visitor-location request headers
  * (cf-ipcountry, cf-iplatitude, cf-iplongitude: an IP-based estimate; zone
@@ -16,6 +18,16 @@
  * hash and no user agent. (The app-wide access log writes its usual line for
  * this request as for any other; that line has no location header and no
  * redirect target.)
+ *
+ * The tech link changes nothing the visitor sees: same office pick, same
+ * redirect, same headers. It only adds a second fire-and-forget count on the
+ * reserved `review-tech-<slug>` short code (a staff first name, not customer
+ * data), under the same bot filter and with the same no-IP, no-user-agent
+ * rule. The slug is read from the RAW original path segment, lowercased, and must match
+ * ^[a-z][a-z0-9-]{1,30}$: a bad shape, an encoded character or a nested path
+ * (/rv/adam/x) still redirects exactly like /rv and counts no technician. A
+ * printed badge must never land on an error page, so every GET/HEAD under /rv
+ * redirects. Nothing from the slug reaches the redirect target.
  *
  * Fails open: anything that goes wrong still answers 302 to the fallback
  * office's review form. The redirect target ALWAYS comes from
@@ -84,6 +96,30 @@ function reviewShortCodeForOffice(officeId) {
   return `review-${officeId}`;
 }
 
+// A technician slug: a lowercase first name or handle. Anything else is "no tech".
+const TECH_SLUG_RE = /^[a-z][a-z0-9-]{1,30}$/;
+
+/**
+ * The technician slug named by the request path (relative to the /rv mount),
+ * or null. Reads the RAW path, so an encoded character (/rv/ad%61m) never
+ * decodes into a valid slug. Accepts /<slug> and /<slug>/ only; the slug is
+ * lowercased first.
+ */
+function techSlugFromPath(rawPath) {
+  if (typeof rawPath !== 'string') return null;
+  const match = /^\/([^/]+)\/?$/.exec(rawPath);
+  if (!match) return null;
+  const slug = match[1].toLowerCase();
+  return TECH_SLUG_RE.test(slug) ? slug : null;
+}
+
+// The reserved short code that counts scans of one technician's badge. Rows
+// are created per technician by ops/agents/ensure-review-count-codes.js; a
+// missing row is a silent no-op.
+function reviewShortCodeForTech(slug) {
+  return `review-tech-${slug}`;
+}
+
 function reviewUrlForOffice(officeId) {
   const office = OFFICE_BY_ID.get(officeId) || OFFICE_BY_ID.get(REVIEW_GEO_FALLBACK_OFFICE_ID);
   return office.googleReviewUrl;
@@ -114,7 +150,31 @@ const reviewGeoLimiter = require('express-rate-limit')({
 });
 router.use(reviewGeoLimiter);
 
-router.get('/', (req, res) => {
+// Fire-and-forget count on one reserved code. Counting never blocks or changes
+// the redirect, but a failed lookup (database down) must not pass in silence:
+// scans would go uncounted. A missing row resolves to null and is not an error.
+// Neither the IP nor the user agent is passed on: the counter would store them
+// (last_click_ip / last_click_ua, and ip_hash / user_agent on the click row),
+// and only the pick may be recorded.
+function countScan(code, label, req) {
+  Promise.resolve()
+    .then(() => resolveShortCode(code, { recordClick: shouldRecord(req) }))
+    .catch((err) => logger.warn(`[review-geo-link] ${label} count failed: ${err.message}`));
+}
+
+// The path under the /rv mount, read from the ORIGINAL url. req.path cannot be
+// used: Express collapses the extra slash in /rv//adam when it strips the mount,
+// which would credit a technician for a malformed path.
+function pathUnderMount(originalUrl) {
+  const match = /^\/rv(\/[^?#]*)?(?:[?#]|$)/i.exec(typeof originalUrl === 'string' ? originalUrl : '');
+  return match ? (match[1] || '') : null;
+}
+
+// A capture-free pattern so /rv, /rv/, /rv/<tech>, /rv/<tech>/ and any longer
+// path all redirect. A string '*' would capture a param that Express
+// decodes, and a malformed escape (/rv/%E0%A4%A) would then error before the
+// handler instead of redirecting.
+router.get(/.*/, (req, res) => {
   let officeId = REVIEW_GEO_FALLBACK_OFFICE_ID;
   try {
     officeId = pickReviewOfficeId({
@@ -123,21 +183,14 @@ router.get('/', (req, res) => {
       longitude: req.get('cf-iplongitude'),
     });
 
-    // Count the pick fire-and-forget. Bots and unfurlers (the QR is also
-    // pasted into chats) are filtered HERE and not counted, staff previews
-    // bump the aggregate only (recordClick), and nothing here can change the
-    // redirect. Neither the IP nor the user agent is passed on: the counter
-    // would store them (last_click_ip / last_click_ua, and ip_hash /
-    // user_agent on the click row), and only the office pick may be recorded.
+    // Count fire-and-forget. Bots and unfurlers (the QR is also pasted into
+    // chats) are filtered HERE and not counted, HEAD never counts, staff
+    // previews bump the aggregate only (recordClick), and nothing here can
+    // change the redirect.
     if (req.method === 'GET' && !isBotUserAgent(req.headers['user-agent'])) {
-      Promise.resolve()
-        .then(() => resolveShortCode(reviewShortCodeForOffice(officeId), {
-          recordClick: shouldRecord(req),
-        }))
-        // Counting never blocks or changes the redirect, but a failed lookup
-        // (database down) must not pass in silence: scans would go uncounted.
-        // A missing row resolves to null and is not an error.
-        .catch((err) => logger.warn(`[review-geo-link] office count failed: ${err.message}`));
+      countScan(reviewShortCodeForOffice(officeId), 'office', req);
+      const techSlug = techSlugFromPath(pathUnderMount(req.originalUrl));
+      if (techSlug) countScan(reviewShortCodeForTech(techSlug), 'tech', req);
     }
   } catch (err) {
     logger.error(`[review-geo-link] pick failed: ${err.message}`);
@@ -149,5 +202,9 @@ router.get('/', (req, res) => {
 module.exports = router;
 module.exports.pickReviewOfficeId = pickReviewOfficeId;
 module.exports.reviewShortCodeForOffice = reviewShortCodeForOffice;
+module.exports.reviewShortCodeForTech = reviewShortCodeForTech;
+module.exports.techSlugFromPath = techSlugFromPath;
+module.exports.pathUnderMount = pathUnderMount;
+module.exports.TECH_SLUG_RE = TECH_SLUG_RE;
 module.exports.REVIEW_GEO_MAX_MILES = REVIEW_GEO_MAX_MILES;
 module.exports.REVIEW_GEO_FALLBACK_OFFICE_ID = REVIEW_GEO_FALLBACK_OFFICE_ID;

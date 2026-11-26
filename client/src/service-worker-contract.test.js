@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -114,6 +114,10 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
     Headers,
     URL,
     fetch: async (request) => fakeResponse(`asset:${request.url}`),
+    // Looked up when called, so a test's fake timers (installed before the
+    // worker loads or after) drive the slow-network timer.
+    setTimeout: (...args) => setTimeout(...args),
+    clearTimeout: (timer) => clearTimeout(timer),
     clients: workerClients,
     console,
   };
@@ -121,11 +125,11 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
   vm.runInContext(`${source}\n;this.__exports = { cacheCompleteShellResponse, pruneStaleAssets, buildIdOf, shellAssetUrls };`, sandbox);
   // Simulate the page requesting a URL: returns the handler's response after
   // its extend-lifetime work has settled (unless the caller wants to hold it).
-  async function dispatchFetch(pathname, { mode = 'no-cors', settle = true } = {}) {
+  async function dispatchFetch(pathname, { mode = 'no-cors', settle = true, method = 'GET' } = {}) {
     const pending = [];
     let responded;
     listeners.fetch({
-      request: { url: `https://portal.test${pathname}`, mode, destination: mode === 'navigate' ? 'document' : 'script' },
+      request: { url: `https://portal.test${pathname}`, method, mode, destination: mode === 'navigate' ? 'document' : 'script' },
       respondWith(promise) { responded = promise; },
       waitUntil(promise) { pending.push(promise); },
     });
@@ -553,7 +557,7 @@ describe('service-worker private link pages', () => {
     await worker.dispatchFetch('/manifest.json', { mode: 'cors' });
     await tick();
     const keys = [...cache.store.keys()].map(url => url.replace('https://portal.test', ''));
-    expect(keys.filter(key => !/^\/assets\/index-\d\.js$/.test(key)).sort()).toEqual(['/', '/manifest.json']);
+    expect(keys.filter(key => !/^\/assets\/index-\d\.js$/.test(key)).sort()).toEqual(['/', '/__waves/customer-shell', '/manifest.json']);
     expect([...cache.store.values()].map(response => response.url).filter(Boolean)).toEqual([]);
   });
 
@@ -1667,6 +1671,89 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']); // B's batch rolled back
   });
 
+  it('rolls the customer copy back too when the install marker cannot be stored', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchInstall, setFetch } = loadWorker(cache);
+    const shell000 = shellHtml(['/assets/index-000.js']);
+    await cacheCompleteShellResponse(fakeResponse(shell000), undefined, { customerShell: true });
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(shell000);
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    cache.failPut = (url) => url === 'https://portal.test/__waves/install-commit';
+
+    await expect(dispatchInstall()).rejects.toThrow(/Quota/);
+
+    // The customer copy never names B, whose assets the rollback deleted.
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(shell000);
+    expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']);
+  });
+
+  it('publishes the customer copy only after the install marker is stored', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchInstall, setFetch } = loadWorker(cache);
+    const shell000 = shellHtml(['/assets/index-000.js']);
+    await cacheCompleteShellResponse(fakeResponse(shell000), undefined, { customerShell: true });
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    let release;
+    const parked = new Promise(resolve => { release = resolve; });
+    let reached;
+    const atMarker = new Promise(resolve => { reached = resolve; });
+    cache.putGate = (url) => (url === 'https://portal.test/__waves/install-commit' ? (reached(), parked) : null);
+    const install = dispatchInstall();
+    await atMarker;
+    // Mid-commit: '/' moved, but a slow customer load still reads the old copy.
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(shell000);
+    release();
+    await install;
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(shellHtml(['/assets/index-BBB.js']));
+  });
+
+  it('takes its install marker back when the customer copy write fails', async () => {
+    const cache = fakeCache();
+    const { dispatchInstall, setFetch } = loadWorker(cache);
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    cache.failPut = (url) => url === 'https://portal.test/__waves/customer-shell';
+    await expect(dispatchInstall()).rejects.toThrow(/Quota/);
+    expect(await cache.match('/__waves/install-commit')).toBeUndefined();
+    expect(await cache.match('/')).toBeUndefined();
+  });
+
+  it('removes a first customer copy when its generation rolls back', async () => {
+    const cache = fakeCache();
+    const { dispatchInstall, setFetch } = loadWorker(cache);
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    cache.failPut = (url) => url === 'https://portal.test/__waves/install-commit';
+    await expect(dispatchInstall()).rejects.toThrow(/Quota/);
+    expect(await cache.match('/__waves/customer-shell')).toBeUndefined();
+  });
+
+  it('removes a first root shell too when its generation rolls back', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse } = loadWorker(cache);
+    cache.failPut = (url) => url === 'https://portal.test/__waves/customer-shell';
+    await expect(cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js'])), undefined, { customerShell: true }))
+      .rejects.toThrow(/Quota/);
+    expect(await cache.match('/')).toBeUndefined();
+    expect(await cachedAssets(cache)).toEqual([]);
+  });
+
+  it('keeps the customer copy\'s files by path after they lose its build tag', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse } = loadWorker(cache);
+    const customer = shellHtml(['/assets/index-000.js', '/assets/shared.css']);
+    await cacheCompleteShellResponse(fakeResponse(customer), undefined, { customerShell: true });
+    // Staff builds that share the stylesheet push the customer build's tag
+    // off the cap, then stop using it.
+    for (const build of ['AAA', 'BBB', 'CCC', 'DDD']) {
+      await cacheCompleteShellResponse(fakeResponse(shellHtml([`/assets/index-${build}.js`, '/assets/shared.css'])));
+    }
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-EEE.js'])));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-FFF.js'])));
+    expect(await (await cache.match('/__waves/customer-shell')).text()).toBe(customer);
+    const left = await cachedAssets(cache);
+    expect(left).toContain('/assets/index-000.js');
+    expect(left).toContain('/assets/shared.css');
+  });
+
   it('skips a superseded refresh: an earlier navigation whose response lands after a newer one', async () => {
     // Codex #4335 P1: navigation A begins before a deploy but its response is
     // slow; navigation B begins later, is answered by the new build and its
@@ -1735,5 +1822,323 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(tags).toContain(buildIdOf(['/assets/index-CCC.js', '/assets/Shared-XYZ.js']));
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-DDD.js'])));
     expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-CCC.js', '/assets/index-DDD.js']);
+  });
+});
+
+// On weak cell signal a page load hangs instead of failing, so the worker
+// answers it from the saved app copy after SLOW_NAV_MS, while the fetch runs on.
+describe('service-worker slow page loads', () => {
+  const OLD = ['/assets/index-OLD.js'];
+  const NEW = ['/assets/index-NEW.js'];
+  const savedHtml = shellHtml(OLD);
+  const networkHtml = shellHtml(NEW);
+  afterEach(() => { vi.useRealTimers(); });
+
+  // The network answers a page load only once the test releases `gate`.
+  function gatedNetwork() {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const serve = async (request) => {
+      if (request.mode === 'navigate') { await gate; return fakeResponse(networkHtml); }
+      if (request.url.includes('/build-assets.json')) return fakeResponse('[]', false);
+      return fakeResponse(`asset:${request.url}`);
+    };
+    return { release, serve };
+  }
+  // Stored shells as the worker writes them: '/' holds the last page's HTML,
+  // and the customer app's own copy sits apart. `saved: 'other'` stores only
+  // another page's HTML at '/'.
+  const CUSTOMER_SHELL_URL = '/__waves/customer-shell';
+  async function start({ saved = true } = {}) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const cache = fakeCache();
+    if (saved) await cache.put('/', fakeResponse(savedHtml));
+    if (saved && saved !== 'other') await cache.put(CUSTOMER_SHELL_URL, fakeResponse(savedHtml));
+    const worker = loadWorker(cache);
+    const network = gatedNetwork();
+    worker.setFetch(network.serve);
+    // dispatchFetch resolves when the page's response does: track it.
+    const load = (pathname = '/', options = {}) => {
+      const state = { done: false };
+      state.promise = worker.dispatchFetch(pathname, { mode: 'navigate', settle: false, ...options })
+        .then(result => { state.done = true; return result; });
+      return state;
+    };
+    return { cache, worker, network, load };
+  }
+  const bodyOf = (result) => result.response.body;
+
+  it('serves the saved copy at 3 s, and the late network page still refreshes the saved copy', async () => {
+    const { cache, network, load } = await start();
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(nav.done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    expect(await (await cache.match('/')).text()).toBe(savedHtml);
+    network.release();
+    await result.settled();
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+  });
+
+  it('does not move the live build to the late response the page never ran', async () => {
+    const { cache, worker, network, load } = await start();
+    // The new build's entry file 404s, so its refresh cannot commit and only
+    // an advance from the late response could move the live build.
+    const serve = network.serve;
+    worker.setFetch(async (request) => (request.url.includes('index-NEW.js') ? fakeResponse('gone', false) : serve(request)));
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await nav.promise;
+    network.release();
+    await result.settled();
+    await worker.dispatchFetch('/assets/Lazy-XYZ.js');
+    const lead = (await cache.match('/assets/Lazy-XYZ.js')).headers.get('x-waves-build').split(',')[0].replace(/^~/, '');
+    expect(lead).toBe(worker.buildIdOf(OLD));
+  });
+
+  it('waits for the network when no saved copy exists, and returns its page', async () => {
+    const { network, load } = await start({ saved: false });
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    network.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it('answers a fast network at once, as before, and leaves no timer behind', async () => {
+    const { cache, network, load } = await start();
+    network.release();
+    const result = await load().promise;
+    expect(bodyOf(result)).toBe(networkHtml);
+    await result.settled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+  });
+
+  it('still falls back to the saved copy when the network fails outright', async () => {
+    const { worker, load } = await start();
+    worker.setFetch(async () => { throw new TypeError('Failed to fetch'); });
+    expect(bodyOf(await load().promise)).toBe(savedHtml);
+  });
+
+  it('starts no timer for a non-GET page load, and never saves its answer as the customer copy', async () => {
+    const { cache, network, load } = await start();
+    const nav = load('/', { method: 'POST' });
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    network.release();
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(networkHtml);
+    await result.settled();
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(savedHtml);
+  });
+
+  it.each(['/login', '/?tab=billing'])('serves the saved copy at 3 s for the customer screen %s', async (path) => {
+    const { load } = await start();
+    const nav = load(path);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(bodyOf(await nav.promise)).toBe(savedHtml);
+  });
+
+  it.each([
+    '/dashboard',
+    `/pay/${'c'.repeat(32)}`,
+    `/estimate/${'d'.repeat(32)}`,
+    `/report/${'e'.repeat(32)}`,
+    '/admin/dispatch',
+    '/tech',
+  ])('waits for the network on %s, which is not a customer app screen', async (path) => {
+    const { network, load } = await start();
+    const nav = load(path);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    network.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it('serves the saved copy when the HTML body breaks off before 3 s', async () => {
+    const { worker, load } = await start();
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? gatedResponse(networkHtml, Promise.reject(new TypeError('network connection was lost')))
+      : fakeResponse(`asset:${request.url}`)));
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(nav.done).toBe(true);
+    expect(bodyOf(await nav.promise)).toBe(savedHtml);
+  });
+
+  it('shows the reconnect page when the HTML body breaks off and no saved copy exists', async () => {
+    const { worker, load } = await start({ saved: false });
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? gatedResponse(networkHtml, Promise.reject(new TypeError('network connection was lost')))
+      : fakeResponse(`asset:${request.url}`)));
+    const result = await load().promise;
+    expect(String(bodyOf(result))).toContain('Reconnecting');
+  });
+
+  it('serves the saved copy when the headers land fast but the HTML body stalls', async () => {
+    const { worker, load } = await start();
+    let releaseBody;
+    const bodyGate = new Promise(resolve => { releaseBody = resolve; });
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? gatedResponse(networkHtml, bodyGate)
+      : fakeResponse(`asset:${request.url}`)));
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    releaseBody();
+    await result.settled();
+  });
+
+  it('never answers a failed home load with a shell another page stored', async () => {
+    const { worker, load } = await start({ saved: 'other' });
+    worker.setFetch(async () => { throw new TypeError('Failed to fetch'); });
+    expect(String(bodyOf(await load('/').promise))).toContain('Reconnecting');
+  });
+
+  it('never answers a slow home load with a shell another page stored', async () => {
+    const { network, load } = await start({ saved: 'other' });
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(nav.done).toBe(false);
+    network.release();
+    expect(bodyOf(await nav.promise)).toBe(networkHtml);
+  });
+
+  it('keeps the customer copy, and its assets, when a report page moves the shell', async () => {
+    const { cache, worker, network, load } = await start();
+    const oldEntry = fakeResponse('old entry');
+    oldEntry.headers.set('x-waves-build', worker.buildIdOf(OLD));
+    await cache.put('/assets/index-OLD.js', oldEntry);
+    network.release();
+    // A report page of a new build stores its HTML at '/' and prunes.
+    await (await load(`/report/${'f'.repeat(32)}`).promise).settled();
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(savedHtml);
+    expect(await cache.match('/assets/index-OLD.js')).toBeTruthy();
+  });
+
+  it('rolls the customer copy back with its generation when its write fails', async () => {
+    const { cache, network, load } = await start();
+    cache.failPut = (url) => url.endsWith(CUSTOMER_SHELL_URL);
+    network.release();
+    await (await load('/').promise).settled();
+    // Quota on both tries: the generation is not committed, '/' and the
+    // customer copy keep the old build, and the new entry file is gone.
+    expect(await (await cache.match('/')).text()).toBe(savedHtml);
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(savedHtml);
+    expect(await cache.match('/assets/index-NEW.js')).toBeUndefined();
+  });
+
+  it('takes no shell-refresh turn for a body that stalls after the saved copy answered', async () => {
+    const { cache, worker, load } = await start();
+    const stalled = new Promise(() => {});
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? gatedResponse(networkHtml, stalled)
+      : fakeResponse(`asset:${request.url}`)));
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(bodyOf(await nav.promise)).toBe(savedHtml);
+    // A healthy load right after still refreshes the shell: no lock is held.
+    worker.setFetch(async (request) => (request.mode === 'navigate'
+      ? fakeResponse(networkHtml)
+      : fakeResponse(`asset:${request.url}`)));
+    await (await load('/').promise).settled();
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+  });
+
+  it('keeps the files of the copy it served through the late refresh\'s prune', async () => {
+    const { cache, network, load } = await start();
+    // The served build's entry file lost its own tag (shared, capped).
+    const entry = fakeResponse('old entry');
+    entry.headers.set('x-waves-build', 'zzzzzzzzzzzzzzzz');
+    await cache.put('/assets/index-OLD.js', entry);
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await nav.promise;
+    expect(bodyOf(result)).toBe(savedHtml);
+    network.release();
+    await result.settled();
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(networkHtml);
+    expect(await cache.match('/assets/index-OLD.js')).toBeTruthy();
+  });
+
+  it('a customer screen load refreshes the customer copy', async () => {
+    const { cache, network, load } = await start();
+    network.release();
+    await (await load('/').promise).settled();
+    expect(await (await cache.match(CUSTOMER_SHELL_URL)).text()).toBe(networkHtml);
+  });
+
+  it('answers a failed home load offline with the customer copy after a report page moved the shell', async () => {
+    const { cache, worker, network, load } = await start();
+    network.release();
+    await (await load(`/report/${'f'.repeat(32)}`).promise).settled();
+    worker.setFetch(async () => { throw new TypeError('Failed to fetch'); });
+    expect(bodyOf(await load('/').promise)).toBe(savedHtml);
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+  });
+
+  it('keeps the saved build live after the late refresh commits the new one', async () => {
+    const { cache, worker, network, load } = await start();
+    const nav = load();
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await nav.promise;
+    network.release();
+    await result.settled();
+    // The refresh committed: the saved copy is now the new build.
+    expect(await (await cache.match('/')).text()).toBe(networkHtml);
+    await worker.dispatchFetch('/assets/Lazy-XYZ.js');
+    const tags = (await cache.match('/assets/Lazy-XYZ.js')).headers.get('x-waves-build').split(',').map(t => t.replace(/^~/, ''));
+    expect(tags).toContain(worker.buildIdOf(OLD));
+  });
+
+  it('leaves an offer link to the browser, with no timer', async () => {
+    const { load } = await start();
+    const result = await load(`/careers/offer/${'a'.repeat(64)}`).promise;
+    expect(result.response).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  describe('the network-only mark', () => {
+    it('makes a marked customer-screen load wait for the network', async () => {
+      const { network, load } = await start();
+      const nav = load('/?tab=visits&waves-network=1');
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(nav.done).toBe(false);
+      network.release();
+      expect(bodyOf(await nav.promise)).toBe(networkHtml);
+    });
+
+    it('shows the reconnect page, never the saved copy, when a marked load fails outright', async () => {
+      const { worker, load } = await start();
+      worker.setFetch(async () => { throw new TypeError('Failed to fetch'); });
+      expect(String(bodyOf(await load('/?waves-network=1').promise))).toContain('Reconnecting');
+    });
+
+    it('shows the reconnect page when a marked load breaks off mid-page', async () => {
+      const { worker, load } = await start();
+      worker.setFetch(async (request) => (request.mode === 'navigate'
+        ? gatedResponse(networkHtml, Promise.reject(new TypeError('network connection was lost')))
+        : fakeResponse(`asset:${request.url}`)));
+      expect(String(bodyOf(await load('/?waves-network=1').promise))).toContain('Reconnecting');
+    });
+
+    it('rides on its own load only: the next unmarked load gets the saved copy again', async () => {
+      const { worker, network, load } = await start();
+      network.release();
+      await (await load('/?waves-network=1').promise).settled();
+      const next = gatedNetwork();
+      worker.setFetch(next.serve);
+      const nav = load('/');
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(bodyOf(await nav.promise)).toBe(networkHtml); // the marked load refreshed the saved copy
+      next.release();
+    });
   });
 });

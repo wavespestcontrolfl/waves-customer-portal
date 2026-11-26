@@ -95,6 +95,28 @@ const COMPANY_FACTS = Object.freeze([
   'A WDO (termite) inspection report is emailed after the licensed inspector signs it, normally the same business day as the inspection. The office can check on a late report.',
   'We do not tent for termites. For drywood termites in wood we can reach, we treat the infested wood directly with spot treatment, a borate wood treatment or injected foam. When the activity is widespread or in wood we cannot reach, we refer the customer to a fumigation company.',
   'Product labels: the office can tell a customer which products were applied at a visit and can email a product label or Safety Data Sheet on request.',
+  // Standing answers the owner approved (2026-11-23 "yes we do" and the ant-label answer; 2026-11-25 "all rec" for the tube line), appended
+  // in this order, each the owner's words with no dollar amount, fixed dry time or "safe" claim. The sms-label-facts reply guard reads
+  // these lines too, so each one is worded to stay clear of its timing patterns (a vague time word such as "overnight", "stay out").
+  // NOT here, on purpose: (1) "we text you when the technician is on the way": the text does not go out on every visit (the customer's own
+  // text switch, one text for several same-day visits); (2) "you can go in after an inside treatment" and the flea "keep people and pets
+  // out" answer: they are re-entry claims, which only a LABEL FACTS sentence may make (the facts block carries no "keep people and pets"
+  // text when no label is on file, sms-label-facts.test.js r18), so the texting agent hands those questions to the office.
+  'Yes, we offer emergency service day or night.',
+  'The ant products we use inside are labeled for indoor ant treatment, including kitchens and pantries.',
+  'We don\'t service in-wall tube systems, and that\'s on purpose. They push spray into the walls inside your home. We\'d rather treat the outside of the house thoroughly and fix the moisture problems that draw pests in, without spraying inside your walls.',
+  // Owner rulings 2026-11-25 (texting AI fix, step 2: feed the facts staff know), appended in this order. Each line follows the company
+  // facts bank's own text rules (company-facts-bank checkFactText: at most three sentences, no digit or number word, no product name, no
+  // "safe" claim), which sms-company-facts.test.js runs over these lines. The width of the perimeter band is left out on purpose: a
+  // number word is banned, so the line says "a band around the home" and no other line carries the width. NOT here: a return-visit offer
+  // (a pest report before a visit moves that visit; the FREE RE-SERVICE fact owns return visits, so no line uses its words).
+  'The perimeter treatment is applied as a band around the home.',
+  'Lawn insect control is part of the lawn care plan, not the pest plan. The pest plan still treats the shrubs, ornamentals and bed areas around the home.',
+  'When a customer on a recurring plan reports pests before their next scheduled visit, we can move that visit earlier, and the later visits in the plan move up with it.',
+  'When rain forces a move and the customer is notified, we send our standard moved-visit text with the new day or a link to choose a day.',
+  'New sod and plugs get the same watering instructions as any other lawn: follow the water district\'s watering days and times.',
+  'For a wasp nest, we can explain how the nest is removed, and we suggest turning the outdoor lights off.',
+  'We never tell a customer that ants may stay. The ant products we use are non-repellents: ants carry them back to the colony, so results build over time.',
 ]);
 
 // The fixed money policy lines (paying, prepay refund): the payment-status contract treats a verbatim copy of one of their
@@ -157,6 +179,15 @@ function renderCompanyFactsLines(count, { retired = false, olderRetired = [] } =
 // (hasExactCompanyFacts): an old item must never grade the new identity. Any change to the
 // render also moves both prompt version numbers in sms-shadow-drafter.
 const PRIOR_COMPANY_FACTS_RENDERS = Object.freeze([
+  // 2026-11-25 owner rulings (texting AI fix, step 2): seven lines APPENDED (perimeter band, lawn insect control, pest report before a
+  // visit, rain moves, new sod, wasp nests, ants). The 29-line render live 2026-11-25 (prompts 45 to 52) has today's wording for every
+  // one of its lines, so it is the first 29 lines of today's list and needs no `retired` entry. No line was reworded.
+  { lines: 29, sha256: 'f22377899d74db87a65fcd13745316b89ff3e6b672216d88dd236774aaa5baa2' },
+  // 2026-11-25 standing answers (owner 2026-11-23 / 2026-11-25 "all rec"): three lines APPENDED (emergency service, ants near a
+  // pantry, in-wall tube systems). The 26-line render live 2026-11-24 to
+  // 2026-11-25 (prompts 41 to 44) has today's wording for every one of its lines, so it is the first 26 lines of today's list and
+  // needs no `retired` entry. No line was reworded, so the retired-facts send guard does not move.
+  { lines: 26, sha256: 'c1280281fafe73f1447b09f7bc92d3a20d3e7b2150b2b7835d110d5b180d8138' },
   // 2026-11-24 holidays line 6 (owner: closed on six holidays): the 26-line render live 2026-10-22 to 2026-11-23 (prompts 25 to 28)
   // and again until this change (prompts 37 to 40, the service area served again), with the old holidays line 6 only.
   { lines: 26, retired: [6], sha256: 'f58c532ee993a9b46b3af4505b5ab82f000c68e3a3209b0f65c51397804f02f0' },
@@ -285,8 +316,14 @@ function priorRenderForBlock(factsBlock) {
   const before = textBeforeFirstBilling(factsBlock);
   if (before === null) return null;
   const renders = knownCompanyFactsRenders().slice(1);
+  // A render whose lines are all still today's lines is a PREFIX of today's render, so a plain substring test would also match a
+  // block drafted under today's render. The block's own render ends where the LABEL FACTS section (or the end of the text) starts.
+  const { LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
+  const tailOk = new RegExp(`^(?:\\n${LABEL_SECTION_REGEX_SRC})?$`);
   for (let i = 0; i < renders.length; i += 1) {
-    if (before.includes(`\n${renders[i].replace(/\n$/, '')}`)) return PRIOR_COMPANY_FACTS_RENDERS[i];
+    const needle = `\n${renders[i].replace(/\n$/, '')}`;
+    const at = before.lastIndexOf(needle);
+    if (at >= 0 && tailOk.test(before.slice(at + needle.length))) return PRIOR_COMPANY_FACTS_RENDERS[i];
   }
   return null;
 }

@@ -68,6 +68,50 @@ const isSiblingFilter = (c) => c[0] === 'whereRaw'
   && /sib\.scheduled_service_id|^COALESCE\(service_records\.status, 'completed'\) = 'completed'$/.test(String(c[1]));
 const propertyPredicates = (calls) => calls.filter((c) => (c[0] === 'where(fn)' && JSON.stringify(c[1]).includes('property_id')) || (c[0] === 'whereRaw' && !isSiblingFilter(c)));
 
+describe('explicit Completed history filter', () => {
+  const id = '22222222-2222-4222-8222-222222222222';
+  const priorGate = process.env.GATE_APP_PROPERTY_SCOPE;
+  test('rejects contradictory all-properties and selected-property filters before reading visits', async () => {
+    const res = await fetch(`${base}/services?historyProperty=all&propertyScoped=1`);
+    expect(res.status).toBe(400);
+    expect(recordChains()).toEqual([]);
+  });
+
+  beforeEach(() => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    global.__SCOPE__ = { ...PRIMARY, property: { ...PRIMARY.property, id } };
+  });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_APP_PROPERTY_SCOPE;
+    else process.env.GATE_APP_PROPERTY_SCOPE = priorGate;
+  });
+  test('matches even the primary by stamped id in both the list and the total', async () => {
+    const res = await fetch(`${base}/services?historyProperty=${id}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ historyProperty: id, historyCustomerId: 'cust-1' });
+    for (const calls of recordChains()) {
+      expect(calls).toContainEqual(['where', 'scheduled_services.property_id', id]);
+      expect(calls).toContainEqual(['where', 'scheduled_services.customer_id', 'cust-1']);
+    }
+  });
+  test('refuses a stale house and keeps the account view available after retirement', async () => {
+    global.__SCOPE__ = CLOSED;
+    expect((await fetch(`${base}/services?historyProperty=${id}`)).status).toBe(409);
+    const res = await fetch(`${base}/services?historyProperty=all`);
+    expect(await res.json()).toMatchObject({ historyProperty: 'all', services: [] });
+    expect(recordChains().flatMap(propertyPredicates)).toEqual([]);
+  });
+  test('a rolled-back property model does not serve a labeled list', async () => {
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
+    const res = await fetch(`${base}/services?historyProperty=${id}`);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: 'Property history is unavailable for this session.',
+      code: 'PROPERTY_HISTORY_UNAVAILABLE',
+    });
+  });
+});
+
 describe('GET /services?propertyScoped=1 — the selected house\'s last visit', () => {
   test('without the flag: today\'s customer-wide query, no scope resolution at all', async () => {
     global.__SCOPE__ = SECONDARY;

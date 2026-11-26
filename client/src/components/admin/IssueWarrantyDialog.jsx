@@ -1,8 +1,7 @@
 // Issue the New Construction Termite Warranty (Rule 5E-14.105(3)) from a
 // pre-treat certificate. The certificate fills every job value; the office
-// adds the contract basis, prices, the FDACS-13692 date and the issuer. With
-// GATE_WARRANTY_13692_CHECK on, a signed FDACS-13692 on file (e-signed, or an
-// uploaded paper scan) supplies that date.
+// adds the contract basis, prices and the issuer. A signed FDACS-13692 on file
+// (e-signed, or an uploaded paper scan) is required and supplies its date.
 // Saves a draft only: nothing is sent to the customer here.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Dialog, DialogBody, DialogFooter } from "../ui";
@@ -12,6 +11,9 @@ import {
   pretreatWarrantyValues,
   sentCertificate,
   consumerNoticeOnFile,
+  consumerNoticeCutoff,
+  lateConsumerNotice,
+  noticeCutoffPassed,
   daysSinceTreatment,
   warrantyEligible,
   warrantyIssueReadiness,
@@ -29,12 +31,6 @@ const fieldStyle = {
 };
 const labelStyle = { display: "block", fontSize: 14, fontWeight: 500, color: "#18181B", marginBottom: 4 };
 const mutedStyle = { fontSize: 14, color: "#71717A" };
-
-// YYYY-MM-DD → MM/DD/YYYY for the grace end the server names.
-const usDay = (iso) => {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
-  return m ? `${m[2]}/${m[3]}/${m[1]}` : "";
-};
 
 // The server's error, naming any certificate field it found empty.
 function issueError(data, fallback) {
@@ -80,8 +76,8 @@ function IssueFooter({ stage, canPreview, canCreate, busy, onClose, onBack, onPr
 }
 
 // The FDACS-13692 consumer notice (Rule 5E-14.105(1)): the one on file, or
-// the grace-period warning with a paper-scan upload.
-function ConsumerNoticePanel({ customerId, onFile, graceEnd, onUploaded }) {
+// a paper-scan upload.
+function ConsumerNoticePanel({ customerId, onFile, late, cutoff, onUploaded }) {
   const [file, setFile] = useState(null);
   const [signedOn, setSignedOn] = useState("");
   const [busy, setBusy] = useState(false);
@@ -133,10 +129,22 @@ function ConsumerNoticePanel({ customerId, onFile, graceEnd, onUploaded }) {
   }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
-        No signed FDACS-13692 is on file for this customer. Until {graceEnd || "the grace end"} you can type the date it was signed.
-        After that, the warranty cannot be issued without one: send it from Document Requests, or upload the paper form.
-      </div>
+      {late ? (
+        <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+          The FDACS-13692 on file was signed {late.signedOn}. It must be signed on or before {cutoff || "the treatment date"}, so
+          it cannot be used. A new signature cannot qualify either: find the form signed on or before that date and upload it.
+        </div>
+      ) : noticeCutoffPassed(cutoff) ? (
+        <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+          No signed FDACS-13692 is on file for this customer. The warranty cannot be issued without one signed on or
+          before {cutoff}, so a new signature cannot qualify: upload the paper form signed by then.
+        </div>
+      ) : (
+        <div role="status" style={{ fontSize: 14, color: "#18181B" }}>
+          No signed FDACS-13692 is on file for this customer. The warranty cannot be issued without one: send it from
+          Document Requests, or upload the paper form.
+        </div>
+      )}
       <Field id="warranty-notice-file" label="Upload paper FDACS-13692 (JPG, PNG or PDF, up to 10 MB)">
         <input id="warranty-notice-file" type="file" accept="image/jpeg,image/png,application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} style={fieldStyle} />
       </Field>
@@ -151,39 +159,43 @@ function ConsumerNoticePanel({ customerId, onFile, graceEnd, onUploaded }) {
   );
 }
 
-// The FDACS-13692 section of the form: the notice panel when the check is on,
-// and the typed date unless a notice on file supplies it.
-function ConsumerNoticeFields({ customerId, noticeList, onFile, noticeDate, onNoticeDate, noticeProblem, onUploaded }) {
-  return (
-    <>
-      {noticeList && <ConsumerNoticePanel customerId={customerId} onFile={onFile} graceEnd={usDay(noticeList.graceEnd)} onUploaded={onUploaded} />}
-      {!onFile && (
-        <>
-          <Field id="warranty-notice-date" label="FDACS-13692 consumer notice signed on (MM/DD/YYYY)">
-            <input id="warranty-notice-date" value={noticeDate} onChange={(e) => onNoticeDate(e.target.value)} style={fieldStyle} />
-          </Field>
-          {noticeProblem && <div style={{ fontSize: 14, color: "#B91C1C" }}>{noticeProblem}</div>}
-        </>
-      )}
-    </>
-  );
-}
-
-// The customer's consumer-notices list. null = the check is off (the route
-// answers 404) or not loaded: the typed date, as before.
+// The customer's consumer-notices list. null = not loaded; loadFailed = the
+// last request failed (Preview stays off until a retry loads it).
 function useConsumerNotices(customerId, open) {
   const [noticeList, setNoticeList] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const loadNotices = useCallback(async () => {
+    setLoadFailed(false);
     try {
       const response = await adminFetch(`/admin/customers/${encodeURIComponent(customerId)}/consumer-notices`);
       const data = response.ok ? await response.json().catch(() => null) : null;
-      setNoticeList(data?.enabled ? data : null);
+      setNoticeList(data?.notices ? data : null);
+      setLoadFailed(!data?.notices);
     } catch {
       setNoticeList(null);
+      setLoadFailed(true);
     }
   }, [customerId]);
   useEffect(() => { if (open) loadNotices(); }, [open, loadNotices]);
-  return { noticeList, loadNotices };
+  return { noticeList, loadFailed, loadNotices };
+}
+
+// Shown when the notices list did not load: why Preview is off, and a retry.
+function NoticeLoadProblem({ onRetry }) {
+  return (
+    <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14, color: "#B91C1C" }}>
+      Could not load the FDACS-13692 notices for this customer, so Preview stays off.
+      <div><Button variant="secondary" onClick={onRetry}>Try again</Button></div>
+    </div>
+  );
+}
+
+// The notice part of the form: a load problem with a retry, or the panel.
+function NoticeSection({ customerId, noticeList, loadFailed, onFile, cutoff, onReload }) {
+  if (loadFailed) return <NoticeLoadProblem onRetry={onReload} />;
+  if (!noticeList) return null;
+  const late = onFile ? null : lateConsumerNotice(noticeList.notices);
+  return <ConsumerNoticePanel customerId={customerId} onFile={onFile} late={late} cutoff={cutoff} onUploaded={onReload} />;
 }
 
 function Field({ id, label, children }) {
@@ -202,7 +214,6 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [treatmentPrice, setTreatmentPrice] = useState("");
   const [planPrice, setPlanPrice] = useState(base.warranty.plan_price);
   const [renewalFee, setRenewalFee] = useState("");
-  const [noticeDate, setNoticeDate] = useState("");
   const [issuerName, setIssuerName] = useState("");
   const [issuerTitle, setIssuerTitle] = useState("");
   const [structures, setStructures] = useState(base.warranty.structures);
@@ -213,11 +224,11 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
   const [created, setCreated] = useState(false);
   const [preview, setPreview] = useState(null);
   const [reviewed, setReviewed] = useState(false);
-  const { noticeList, loadNotices } = useConsumerNotices(project.customer_id, open);
+  const { noticeList, loadFailed, loadNotices } = useConsumerNotices(project.customer_id, open);
 
   const noticeOnFile = noticeList ? consumerNoticeOnFile(noticeList.notices, base.treatment.initial_date, basisDate) : null;
-  const { basisProblem, noticeProblem, ready } = warrantyIssueReadiness(base, {
-    basisDate, noticeDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures, noticeLocation, payer,
+  const { basisProblem, ready } = warrantyIssueReadiness(base, {
+    basisDate, treatmentPrice, planPrice, renewalFee, issuerName, issuerTitle, structures, noticeLocation, payer,
   }, { noticeOnFile: Boolean(noticeOnFile) });
   const lateDays = daysSinceTreatment(base.warranty.start_date, base.warranty.issue_date);
 
@@ -232,8 +243,6 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
           treatment_price: treatmentPrice.trim(),
           plan_price: planPrice.trim(),
           renewal_fee: renewalFee.trim(),
-          // A notice on file prints its own date; the server ignores this one.
-          ...(noticeOnFile ? {} : { consumer_notice_date: noticeDate.trim() }),
         },
         basis: { kind: basisKind, date: basisDate.trim() },
         issuer: { name: issuerName.trim(), title: issuerTitle.trim() },
@@ -321,14 +330,13 @@ export default function IssueWarrantyDialog({ open, onClose, project, findings }
                 <input id="warranty-basis-date" value={basisDate} onChange={(e) => setBasisDate(e.target.value)} style={fieldStyle} />
               </Field>
               {basisProblem && <div style={{ fontSize: 14, color: "#B91C1C" }}>{basisProblem}</div>}
-              <ConsumerNoticeFields
+              <NoticeSection
                 customerId={project.customer_id}
                 noticeList={noticeList}
+                loadFailed={loadFailed}
                 onFile={noticeOnFile}
-                noticeDate={noticeDate}
-                onNoticeDate={setNoticeDate}
-                noticeProblem={noticeProblem}
-                onUploaded={loadNotices}
+                cutoff={consumerNoticeCutoff(base.treatment.initial_date, basisDate)}
+                onReload={loadNotices}
               />
               <Field id="warranty-notice-location" label="Treatment notice posted at (F.S. 482.226(5))">
                 <input id="warranty-notice-location" value={noticeLocation} onChange={(e) => setNoticeLocation(e.target.value)} placeholder="e.g. on the wall beside the electric panel in the garage" style={fieldStyle} />

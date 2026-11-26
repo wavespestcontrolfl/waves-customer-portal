@@ -22,10 +22,14 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   ...jest.requireActual('../services/messaging/send-customer-message'),
   sendCustomerMessage: jest.fn(),
 }));
-// A service contact's own text choices need the contact-login tables; pass through, with a hook to force a decline.
+// A service contact's own text choices need the contact-login tables; pass through (the module reads the person's choices
+// row directly: getContactPrefRow + contactAllows, whatever GATE_CONTACT_LOGIN says), with a hook to force a decline.
 jest.mock('../services/contact-notification-prefs', () => {
   const actual = jest.requireActual('../services/contact-notification-prefs');
-  return { ...actual, contactPhoneDeclinesText: jest.fn((...args) => actual.contactPhoneDeclinesText(...args)) };
+  return {
+    ...actual,
+    getContactPrefRow: jest.fn((...args) => actual.getContactPrefRow(...args)),
+  };
 });
 
 const GATE = 'GATE_CALL_GIVEN_VISIT_TEXTS';
@@ -135,6 +139,80 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       const after = await rows();
       expect(after.map((row) => row.phone_key).sort()).toEqual([BOB.slice(-10), phone(99).slice(-10)]);
       expect(after.find((row) => row.phone_key === BOB.slice(-10)).id).toBe(stored[0].id);
+    });
+
+    test('a fresh call for the same visit and number REPLACES an ineligible row by delete-and-insert (a NEW id), and leaves an eligible one exactly as it is', async () => {
+      await record({}, entry({ first_name: 'Bob', role: 'spouse_partner' }));
+      const [first] = await rows();
+      const claim = { 'confirmation:2031-01-01T09:00': 'token-1' };
+      await db('visit_text_recipients').where({ id: first.id }).update({ track_token: `vr_${'d'.repeat(48)}`, deliveries: claim });
+      // (1) already bound to the visit's customer: nothing changes, nothing is reported as created
+      const same = await record({}, entry({ first_name: 'Robert', role: 'friend' }));
+      expect(same.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: false }]);
+      const kept = (await rows())[0];
+      expect(kept).toMatchObject({ id: first.id, first_name: 'Bob', role: 'spouse_partner', customer_id: customerId, track_token: `vr_${'d'.repeat(48)}` });
+      expect(kept.deliveries).toEqual(claim);
+      // (2) never bound (customer_id null): the old row is gone and a fresh one (new id) stands, with no token and no claims
+      await db('visit_text_recipients').where({ id: first.id }).update({ customer_id: null });
+      const [{ id: secondCall }] = await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE }).returning('id');
+      try {
+        const replaced = await record({ callLogId: secondCall }, entry({ first_name: 'Robert', role: 'friend' }));
+        expect(replaced.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
+        const after = await rows();
+        expect(after).toHaveLength(1);
+        expect(after[0].id).not.toBe(first.id);
+        expect(after[0]).toMatchObject({ customer_id: customerId, call_log_id: secondCall, first_name: 'Robert', role: 'friend', track_token: null });
+        expect(after[0].deliveries).toEqual({});
+        expect(await db('visit_text_recipients').where({ id: first.id }).first()).toBeUndefined();
+        // (3) bound to a customer the visit has since left: replaced the same way, with yet another id
+        const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(41) }).returning('id');
+        try {
+          await db('visit_text_recipients').where({ id: after[0].id }).update({ customer_id: otherCustomerId, track_token: `vr_${'e'.repeat(48)}`, deliveries: claim });
+          const again = await record({ callLogId: secondCall }, entry({ first_name: 'Rob' }));
+          expect(again.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
+          const final = await rows();
+          expect(final).toHaveLength(1);
+          expect(final[0].id).not.toBe(after[0].id);
+          expect(final[0]).toMatchObject({ customer_id: customerId, first_name: 'Rob', track_token: null });
+          expect(final[0].deliveries).toEqual({});
+        } finally {
+          await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+          await db('customers').where({ id: otherCustomerId }).del();
+        }
+      } finally {
+        await db('call_log').where({ id: secondCall }).del();
+      }
+    });
+
+    test('concurrent authorizations from two customers for one visit: the visit\'s current customer\'s survives, never the stale one', async () => {
+      const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(42) }).returning('id');
+      try {
+        // the visit now belongs to the OTHER customer (reassigned); calls from both customers race to record the same number
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: otherCustomerId });
+        const results = await Promise.all([
+          record({ customerId }, entry({ first_name: 'Stale' })),
+          record({ customerId: otherCustomerId }, entry({ first_name: 'Fresh' })),
+          record({ customerId }, entry({ first_name: 'Stale2' })),
+        ]);
+        expect(results[0].skipped).toEqual([{ reason: 'customer_mismatch' }]);
+        expect(results[2].skipped).toEqual([{ reason: 'customer_mismatch' }]);
+        const stored = await rows();
+        expect(stored).toHaveLength(1);
+        expect(stored[0]).toMatchObject({ customer_id: otherCustomerId, first_name: 'Fresh' });
+        // and the other order: a row recorded for the old customer is replaced when the visit's new customer records
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: customerId });
+        await record({ customerId }, entry({ first_name: 'Old' }));
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: otherCustomerId });
+        await Promise.all([record({ customerId: otherCustomerId }, entry({ first_name: 'Fresh' })), record({ customerId }, entry({ first_name: 'Stale' }))]);
+        const settled = await rows();
+        expect(settled).toHaveLength(1);
+        expect(settled[0]).toMatchObject({ customer_id: otherCustomerId, first_name: 'Fresh' });
+      } finally {
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: customerId });
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+        await db('customers').where({ id: otherCustomerId }).del();
+      }
     });
 
     test('a retry never resets a delivery claim', async () => {
@@ -268,7 +346,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
 
   describe('notifyVisitRecipients (real database, stubbed provider)', () => {
     let sendCustomerMessage;
-    let contactPhoneDeclinesText;
+    let getContactPrefRow;
     const HELD = {
       sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', deferred: true, retryable: true, nextAllowedAt: `${VISIT_DATE}T12:00:00.000Z`,
     };
@@ -279,7 +357,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     beforeEach(async () => {
       process.env[GATE] = 'true';
       ({ sendCustomerMessage } = require('../services/messaging/send-customer-message'));
-      ({ contactPhoneDeclinesText } = require('../services/contact-notification-prefs'));
+      ({ getContactPrefRow } = require('../services/contact-notification-prefs'));
       sendCustomerMessage.mockReset();
       sendCustomerMessage.mockResolvedValue({ sent: true });
       await record();
@@ -302,14 +380,109 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(input.body).not.toMatch(/https?:|www\.|reschedule|track/i);
     });
 
-    test('each kind is its own text; the reminder purposes and the en-route text carry no link either', async () => {
+    // the visit as it is when the en-route text goes: en route by status AND tracker, with its start on record
+    const EN_ROUTE_NOW = () => ({ status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 60 * 1000) });
+
+    test('each kind is its own text; the reminders carry no link and the en-route text carries only Bob\'s OWN tracker link', async () => {
+      const HOLDER_TOKEN = 'a'.repeat(64);
+      await db('scheduled_services').where({ id: visitId }).update({ track_view_token: HOLDER_TOKEN, track_token_expires_at: new Date(Date.now() + 86400000), ...EN_ROUTE_NOW() });
       for (const kind of ['confirmation', 'reminder_72h', 'reminder_24h']) await notify(kind);
-      await notify('en_route', { context: { techName: 'Pat', etaMinutes: 12, trackUrl: 'https://x.test/track/abc' } });
+      await notify('en_route', { context: { techName: 'Pat', etaMinutes: 12, trackUrlFor: async (token) => `https://x.test/track/${token}` } });
       expect(sendCustomerMessage.mock.calls.map(([i]) => i.purpose)).toEqual([
         'appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h', 'tech_en_route',
       ]);
-      for (const [input] of sendCustomerMessage.mock.calls) expect(input.body).not.toMatch(/https?:|track|reschedule/i);
-      expect(sendCustomerMessage.mock.calls[3][0].body).toContain('Pat is on the way, about 12 minutes away.');
+      for (const [input] of sendCustomerMessage.mock.calls.slice(0, 3)) expect(input.body).not.toMatch(/https?:|track|reschedule/i);
+      const [{ track_token: bobToken }] = await rows();
+      expect(bobToken).toMatch(/^vr_[a-f0-9]{48}$/);
+      expect(bobToken).not.toBe(HOLDER_TOKEN);
+      const enRouteBody = sendCustomerMessage.mock.calls[3][0].body;
+      expect(enRouteBody).toContain(`Pat is on the way, about 12 minutes away. Track live: https://x.test/track/${bobToken}`);
+      expect(enRouteBody).not.toContain(HOLDER_TOKEN);
+      expect(enRouteBody).not.toMatch(/reschedule/i);
+    });
+
+    test('a sender that passes the holder\'s link in the context still gets no holder link into the text', async () => {
+      await notify('en_route', { context: { techName: 'Pat', trackUrl: 'https://x.test/track/HOLDERLINK' } });
+      expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('HOLDERLINK');
+      expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
+      expect((await rows())[0].track_token).toBeNull();
+    });
+
+    test('a visit whose own link has no live expiry gets the text without a link, and no token is minted', async () => {
+      const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
+      for (const expiry of [null, new Date(Date.now() - 1000)]) {
+        sendCustomerMessage.mockClear();
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ deliveries: '{}' });
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: expiry });
+        await notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
+        expect((await rows())[0].track_token).toBeNull();
+      }
+      expect(builder).not.toHaveBeenCalled();
+    });
+
+    test('a visit the tracker route would NOT open (not en route / on site / just completed, parked, a stale start) gets the text without a link, and no token is minted', async () => {
+      const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
+      const live = new Date(Date.now() + 86400000);
+      const HOUR = 60 * 60 * 1000;
+      const states = [
+        { status: 'confirmed', track_state: 'scheduled' },
+        { status: 'cancelled', track_state: 'cancelled' },
+        { status: 'en_route', track_state: 'en_route', en_route_at: null },
+        { status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 4 * HOUR) },
+        { status: 'en_route', track_state: 'scheduled', en_route_at: new Date(Date.now() - 60000) },
+        { ...EN_ROUTE_NOW(), customer_pick_by: new Date(Date.now() + HOUR), window_start: null },
+      ];
+      for (const state of states) {
+        sendCustomerMessage.mockClear();
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ deliveries: '{}' });
+        await db('scheduled_services').where({ id: visitId }).update({ status: 'confirmed', track_state: 'scheduled', en_route_at: null, customer_pick_by: null, window_start: '09:00', track_token_expires_at: live, ...state });
+        await notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+        if (state.status === 'cancelled') { expect(sendCustomerMessage).not.toHaveBeenCalled(); continue; }
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
+        expect((await rows())[0].track_token).toBeNull();
+      }
+      expect(builder).not.toHaveBeenCalled();
+      // control: the same visit en route now gets its link
+      sendCustomerMessage.mockClear();
+      await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ deliveries: '{}' });
+      await db('scheduled_services').where({ id: visitId }).update({ ...EN_ROUTE_NOW(), customer_pick_by: null, window_start: '09:00' });
+      await notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Track live');
+      expect((await rows())[0].track_token).toMatch(/^vr_[a-f0-9]{48}$/);
+    });
+
+    test('the link is made only after the slot claim is won: repeated or concurrent attempts mint one link and one token, a skipped attempt mints nothing', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), ...EN_ROUTE_NOW() });
+      const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
+      const attempt = () => notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+      await Promise.all([attempt(), attempt(), attempt()]);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(builder).toHaveBeenCalledTimes(1);
+      await attempt();
+      await attempt();
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(builder).toHaveBeenCalledTimes(1);
+      expect((await rows())[0].track_token).toMatch(/^vr_[a-f0-9]{48}$/);
+    });
+
+    test('a skipped attempt mints no token: with the slot already claimed, no token and no link are made', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), ...EN_ROUTE_NOW() });
+      await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ deliveries: JSON.stringify({ [`en_route:${VISIT_DATE}T09:00`]: 'claimed-elsewhere' }) });
+      const builder = jest.fn(async (token) => `https://x.test/track/${token}`);
+      await notify('en_route', { context: { techName: 'Pat', trackUrlFor: builder } });
+      expect(builder).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await rows())[0].track_token).toBeNull();
+    });
+
+    test('a link builder that fails sends the text without a link', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), ...EN_ROUTE_NOW() });
+      await notify('en_route', { context: { techName: 'Pat', trackUrlFor: async () => { throw new Error('shortener down'); } } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
     });
 
     test('Bob gets nothing for another visit on the account, a cancelled visit, or when the sender already texts his number', async () => {
@@ -328,9 +501,9 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       await suppress(BOB);
       await notify('reminder_72h');
       await db('messaging_suppression').where({ phone: BOB }).del();
-      contactPhoneDeclinesText.mockResolvedValueOnce(true);
+      getContactPrefRow.mockResolvedValueOnce({ tech_en_route: false });
       await notify('en_route');
-      expect(contactPhoneDeclinesText).toHaveBeenCalledWith(customerId, BOB, 'tech_en_route', expect.any(Object));
+      expect(getContactPrefRow).toHaveBeenCalledWith(customerId, BOB, expect.any(Object));
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       // A pending Reply-YES ask is NOT a decline: this is the permission that does not wait for the YES.
       await db('recipient_optin').insert({ ...optinRow, status: 'pending' });
@@ -376,6 +549,47 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       process.env[GATE] = 'true';
       await db('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
       expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false });
+    });
+
+    test('a queued replay carrying the OLD row id is dropped once the number is rebound to a new row; the new confirmation is sent once', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      // the send carried the row id AND its customer binding
+      expect(meta.recipient_customer_id).toBe(customerId);
+      expect(meta.visit_recipient_id).toBeTruthy();
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toEqual({ eligible: true });
+      // a replay that names no customer binding is not owed either
+      const { recipient_customer_id: _unbound, ...withoutBinding } = meta;
+      expect(await recheckDeferredReplay('visit_text_recipient_deferred', withoutBinding)).toMatchObject({ eligible: false, reason: 'recipient-not-owed' });
+      // the visit is reassigned to another customer, whose call records the same number: delete-and-insert, a NEW row id
+      const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(43) }).returning('id');
+      try {
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: otherCustomerId });
+        await VisitRecipient.recordForVisit({ scheduledServiceId: visitId, customerId: otherCustomerId, callLogId, v2Extraction: extraction(entry()), excludePhones: [] });
+        const [fresh] = await rows();
+        expect(fresh.id).not.toBe(meta.visit_recipient_id);
+        expect(fresh.customer_id).toBe(otherCustomerId);
+        // the OLD queued replay (old id, old binding) finds no row and drops, at the replay recheck and at the provider handoff
+        expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false, reason: 'recipient-not-owed' });
+        expect(await VisitRecipient.providerCheck({ ...meta, replay: true })).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_NOT_OWED' });
+        // the new row's confirmation goes out once
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        await notify('confirmation');
+        await notify('confirmation');
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        // and that send's own recheck (its row id and binding) passes at the handoff
+        const handoff = await sendCustomerMessage.mock.calls[0][0].providerPreSendCheck();
+        expect(handoff).toEqual({ ok: true });
+      } finally {
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: customerId });
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+        await db('sms_log').where({ customer_id: otherCustomerId }).del();
+        await db('customers').where({ id: otherCustomerId }).del();
+      }
     });
 
     test('a replay that ends without a send gives the claim back, so a later sender still owes the text', async () => {
@@ -473,6 +687,31 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(await input.providerPreSendCheck({ channel: 'sms' })).toMatchObject({ ok: false, code: 'VISIT_TEXT_GATE_OFF' });
     });
 
+    test('the replay recheck\'s failure carries a code only: the registry\'s fail-closed log holds no phone, and the row is held for a retry', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      const holds = require('../services/disclaimed-number-holds');
+      const logger = require('../services/logger');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [queuedRow] = await queued();
+      const meta = { ...queuedRow.metadata, to_phone: BOB, customer_id: customerId };
+      const spy = jest.spyOn(holds, 'disclaimedNumberHeld').mockRejectedValue(Object.assign(new Error(`select from holds where phone_e164 = '${BOB}' - connection terminated`), { code: '57P01' }));
+      try {
+        const verdict = await recheckDeferredReplay('visit_text_recipient_deferred', meta);
+        expect(verdict).toMatchObject({ eligible: false, retryable: true });
+        const logged = JSON.stringify([logger.warn.mock.calls, logger.error.mock.calls]);
+        expect(logged).toContain('holding for retry');
+        expect(logged).not.toContain(BOB.slice(-10));
+        // the claim release at a terminal replay is code-only too
+        const failingConn = Object.assign(() => { throw Object.assign(new Error(`update visit_text_recipients set deliveries ... '${BOB}'`), { code: '57P01' }); }, { raw: db.raw.bind(db) });
+        const releaseErr = await VisitRecipient.releaseDeferredClaim({ visit_recipient_id: 'r-1', claim_key: 'k', claim_token: 't' }, { conn: failingConn }).catch((e) => e);
+        expect(releaseErr.code).toBe('57P01');
+        expect(`${releaseErr.message} ${releaseErr.stack}`).not.toContain(BOB.slice(-10));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     test('a queued window text is pinned to the arrival it quoted AND the slot; a same-day time change keeps a still-valid day-only text', async () => {
       const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
       sendCustomerMessage.mockResolvedValueOnce(HELD);
@@ -529,7 +768,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       // A failed release is thrown to the worker, which retries the hook.
       const failing = jest.fn(() => { const q = { where: () => q, whereRaw: () => q, update: () => Promise.reject(new Error('db down')) }; return q; });
       failing.raw = db.raw.bind(db);
-      await expect(VisitRecipient.releaseDeferredClaim(meta, { conn: failing })).rejects.toThrow('db down');
+      await expect(VisitRecipient.releaseDeferredClaim(meta, { conn: failing })).rejects.toMatchObject({ message: 'visit-only replay release failed' });
     });
 
     test('a failed callback-hold read is retried, never read as a hold: the handoff check says retry and the replay holds the row', async () => {
@@ -544,6 +783,72 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(await VisitRecipient.providerCheck(meta)).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', retryable: true });
         expect(await recheckDeferredReplay('visit_text_recipient_deferred', meta)).toMatchObject({ eligible: false, retryable: true });
       } finally { spy.mockRestore(); }
+    });
+
+    test('a DEFERRED replay rings the manual-text bell only on its LAST attempt; an immediate send rings at once', async () => {
+      const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('../services/messaging/scheduled-sms-limits');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      const notifications = require('../services/notification-service');
+      const bell = jest.spyOn(notifications, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+      const spy = jest.spyOn(Holds, 'disclaimedNumberHeldForVisit').mockRejectedValue(new Error('read failed'));
+      try {
+        // earlier attempts: held for a retry, quietly
+        for (let attempt = 1; attempt < SCHEDULED_SMS_MAX_ATTEMPTS; attempt += 1) {
+          expect(await VisitRecipient.providerCheck({ ...meta, replay: true, scheduled_sms_attempts: attempt })).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', retryable: true });
+        }
+        expect(await VisitRecipient.providerCheck({ ...meta, replay: true })).toMatchObject({ retryable: true });
+        expect(bell).not.toHaveBeenCalled();
+        // the last attempt ends undelivered: the bell rings, naming the person by first name and last 4 only
+        expect(await VisitRecipient.providerCheck({ ...meta, replay: true, scheduled_sms_attempts: SCHEDULED_SMS_MAX_ATTEMPTS })).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED' });
+        expect(bell).toHaveBeenCalledTimes(1);
+        expect(bell.mock.calls[0][3].detail).toContain(`Bob, ending ${BOB.slice(-4)}`);
+        // an immediate send is never retried: it rings on its first failed check
+        bell.mockClear();
+        await VisitRecipient.providerCheck({ ...meta, replay: false, scheduled_sms_attempts: undefined });
+        expect(bell).toHaveBeenCalledTimes(1);
+      } finally { spy.mockRestore(); bell.mockRestore(); }
+    });
+
+    test('a permission read failing on EVERY replay attempt: no bell on the earlier attempts, ONE deduped bell on the last (through the replay registry)', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('../services/messaging/scheduled-sms-limits');
+      sendCustomerMessage.mockResolvedValueOnce(HELD);
+      await notify('confirmation');
+      const [row] = await queued();
+      const meta = { ...row.metadata, to_phone: BOB, customer_id: customerId };
+      const notifications = require('../services/notification-service');
+      const bell = jest.spyOn(notifications, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+      const spy = jest.spyOn(Holds, 'disclaimedNumberHeldForVisit').mockRejectedValue(Object.assign(new Error(`select where phone '${BOB}'`), { code: '57P01' }));
+      try {
+        for (let attempt = 1; attempt < SCHEDULED_SMS_MAX_ATTEMPTS; attempt += 1) {
+          expect(await recheckDeferredReplay('visit_text_recipient_deferred', { ...meta, scheduled_sms_attempts: attempt })).toMatchObject({ eligible: false, retryable: true });
+        }
+        expect(bell).not.toHaveBeenCalled();
+        // the last attempt: held for nothing more, so staff are told, once, with the recipient named by first name and last 4 only
+        expect(await recheckDeferredReplay('visit_text_recipient_deferred', { ...meta, scheduled_sms_attempts: SCHEDULED_SMS_MAX_ATTEMPTS })).toMatchObject({ eligible: false, retryable: true });
+        expect(bell).toHaveBeenCalledTimes(1);
+        const opts = bell.mock.calls[0][3];
+        expect(opts.detail).toContain(`Bob, ending ${BOB.slice(-4)}`);
+        expect(JSON.stringify(bell.mock.calls)).not.toContain(BOB.slice(-10));
+        // a repeat carries the same dedupe key (the bell store keeps one row)
+        await recheckDeferredReplay('visit_text_recipient_deferred', { ...meta, scheduled_sms_attempts: SCHEDULED_SMS_MAX_ATTEMPTS });
+        expect(bell.mock.calls.map((c) => c[3].dedupeKey)).toEqual([opts.dedupeKey, opts.dedupeKey]);
+        // the module's own throw carries the code only
+        const thrown = await VisitRecipient.recipientStillOwedDeferred({ ...meta, scheduled_sms_attempts: 1 }).catch((e) => e);
+        expect(thrown.code).toBe('57P01');
+        expect(`${thrown.message} ${thrown.stack}`).not.toContain(BOB.slice(-10));
+      } finally { spy.mockRestore(); bell.mockRestore(); }
+    });
+
+    test('call_log_v1_phone is IMMUTABLE and PARALLEL UNSAFE (its exception block opens a subtransaction)', async () => {
+      const { rows } = await db.raw("SELECT provolatile, proparallel FROM pg_proc WHERE proname = 'call_log_v1_phone'");
+      expect(rows).toEqual([{ provolatile: 'i', proparallel: 'u' }]);
+      // 20261124195000 set call_log parallel_workers = 0 for the index builds, 20261124220000 reset it once the function was UNSAFE
+      const { rows: opts } = await db.raw("SELECT reloptions FROM pg_class WHERE relname = 'call_log'");
+      expect(opts[0].reloptions || []).not.toContain('parallel_workers=0');
     });
 
     test('a queued day-only text is revalidated at the replay handoff (the 24 h reminder switched off, a later promise delivered); a fresh send is not asked again', async () => {
@@ -597,6 +902,547 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       delete process.env[GATE];
       await expect(notify('confirmation')).resolves.toBe(true);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the recipient\'s own tracker token', () => {
+    const TOKEN_FORMAT = /^vr_[a-f0-9]{48}$/;
+    let getContactPrefRow;
+    beforeEach(async () => {
+      process.env[GATE] = 'true';
+      ({ getContactPrefRow } = require('../services/contact-notification-prefs'));
+      await record();
+      // The link's lifetime: en route (or on site, or just completed). The tests below move the visit through the others.
+      await db('scheduled_services').where({ id: visitId }).update({ status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+    });
+    afterEach(() => { delete process.env[GATE]; });
+
+    test('a token of any other shape (an old 64-hex one) is replaced once by the recognizable vr_ shape, then stays', async () => {
+      const [{ id }] = await rows();
+      await db('visit_text_recipients').where({ id }).update({ track_token: 'c'.repeat(64) });
+      const minted = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(minted).toMatch(TOKEN_FORMAT);
+      expect(minted.length).toBeLessThanOrEqual(64);
+      expect(await VisitRecipient.ensureTrackToken(id, customerId)).toBe(minted);
+      // the old shape no longer opens anything
+      expect(await VisitRecipient.visitForTrackToken('c'.repeat(64))).toBeNull();
+    });
+
+    test('minted once on first use, the same value after, never the holder\'s; two racing mints agree', async () => {
+      const [{ id }] = await rows();
+      expect((await rows())[0].track_token).toBeNull();
+      const minted = await Promise.all([VisitRecipient.ensureTrackToken(id, customerId), VisitRecipient.ensureTrackToken(id, customerId), VisitRecipient.ensureTrackToken(id, customerId)]);
+      expect(minted[0]).toMatch(TOKEN_FORMAT);
+      expect(new Set(minted).size).toBe(1);
+      expect((await rows())[0].track_token).toBe(minted[0]);
+    });
+
+    test('the token opens exactly its own visit while the gate is on, and is unique per row', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).toEqual({ visitId, recipientId: id, customerId });
+      const [other] = await db('visit_text_recipients').insert({
+        scheduled_service_id: otherVisitId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x', track_token: token === 'f'.repeat(64) ? 'e'.repeat(64) : 'f'.repeat(64),
+      }).returning('id');
+      await expect(db('visit_text_recipients').where({ id: other.id }).update({ track_token: token })).rejects.toMatchObject({ code: '23505' });
+    });
+
+    test('a callback-number hold added after the text was sent closes the link (the same check as the send)', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await db('disclaimed_number_holds').insert({ phone_e164: HOLDER, customer_id: customerId, source_call_log_id: callLogId, held_at: new Date() });
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await db('disclaimed_number_holds').where({ source_call_log_id: callLogId }).del();
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+    });
+
+    test('a callback-number hold on the recipient\'s OWN number closes the link', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await db('disclaimed_number_holds').insert({ phone_e164: BOB, customer_id: null, source_call_log_id: callLogId, held_at: new Date() });
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await db('disclaimed_number_holds').where({ source_call_log_id: callLogId }).del();
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+    });
+
+    describe('an already-issued link closes on a revocation recorded after it was sent', () => {
+      let token;
+      beforeEach(async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+        const [{ id }] = await rows();
+        token = await VisitRecipient.ensureTrackToken(id, customerId);
+        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      });
+      const noMoreLink = async () => expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+
+      test('a do-not-contact request on a call with Bob\'s number (V2 shape, then the legacy shape)', async () => {
+        const [{ id: dncCall }] = await db('call_log').insert({
+          direction: 'inbound', from_phone: BOB, to_phone: OUR_LINE,
+          ai_extraction_enriched: JSON.stringify({ consent: { do_not_contact_request: true } }),
+        }).returning('id');
+        try {
+          await noMoreLink();
+          await db('call_log').where({ id: dncCall }).update({ ai_extraction_enriched: null, ai_extraction: '{"do_not_contact_request": true}' });
+          await noMoreLink();
+          await db('call_log').where({ id: dncCall }).update({ ai_extraction: '{"do_not_contact_request": false}' });
+          expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+        } finally {
+          await db('call_log').where({ id: dncCall }).del();
+        }
+      });
+
+      test('an explicit "no texts" on a call with Bob\'s number, and on a call that SPOKE his number as the callback', async () => {
+        const [{ id: noTexts }] = await db('call_log').insert({
+          direction: 'inbound', from_phone: BOB, to_phone: OUR_LINE, v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }),
+        }).returning('id');
+        try {
+          await noMoreLink();
+          await db('call_log').where({ id: noTexts }).update({
+            from_phone: ANI, ai_extraction_enriched: JSON.stringify({ caller: { phone_e164: BOB }, consent: { sms_declined: true } }),
+          });
+          await noMoreLink();
+        } finally {
+          await db('call_log').where({ id: noTexts }).del();
+        }
+      });
+
+      test('a do-not-contact request on a call that SPOKE Bob\'s number as the callback, with "no texts" unset', async () => {
+        const holds = require('../services/messaging/auto-text-holds');
+        const [{ id: spokenDnc }] = await db('call_log').insert({
+          direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE,
+          ai_extraction_enriched: JSON.stringify({ caller: { phone_e164: BOB }, consent: { do_not_contact_request: true } }),
+        }).returning('id');
+        try {
+          await noMoreLink();
+          // the first-touch lane's own reach is unchanged: without the option the spoken number is not matched
+          expect(await holds.askedNotToBeContactedOnAnyCall(BOB)).toBe(false);
+          expect(await holds.askedNotToBeContactedOnAnyCall(BOB, { includeSpokenNumber: true })).toBe(true);
+        } finally {
+          await db('call_log').where({ id: spokenDnc }).del();
+        }
+      });
+
+      test('every place a spoken number lives, for BOTH vetoes: V1-only (no V2 extraction at all), V2 callback, V2 text number', async () => {
+        const insertCall = async (row) => (await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE, ...row }).returning('id'))[0].id;
+        const made = [];
+        try {
+          // legacy V1 only: ai_extraction_enriched is NULL, the number sits in ai_extraction.phone, do-not-contact in the flat field
+          made.push(await insertCall({ ai_extraction: JSON.stringify({ phone: BOB, do_not_contact_request: true }) }));
+          await noMoreLink();
+          await db('call_log').whereIn('id', made).del(); made.length = 0;
+          expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+          // V1 number, V2 "no texts" (sms_declined is a V2-only field; the spoken number is found in the V1 text)
+          made.push(await insertCall({ v2_extraction_status: 'valid', ai_extraction: JSON.stringify({ phone: BOB }), ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }) }));
+          await noMoreLink();
+          await db('call_log').whereIn('id', made).del(); made.length = 0;
+          // V2 text number
+          made.push(await insertCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ caller: { text_phone_e164: BOB }, consent: { sms_declined: true } }) }));
+          await noMoreLink();
+          await db('call_log').whereIn('id', made).del(); made.length = 0;
+          // a formatted legacy number still matches on its last 10 digits
+          made.push(await insertCall({ ai_extraction: JSON.stringify({ phone: `(${BOB.slice(2, 5)}) ${BOB.slice(5, 8)}-${BOB.slice(8)}`, do_not_contact_request: true }) }));
+          await noMoreLink();
+        } finally {
+          if (made.length) await db('call_log').whereIn('id', made).del();
+        }
+        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      });
+
+      test('the legacy V1 phone is the TOP-LEVEL key only, and malformed extraction text is safe', async () => {
+        const insertCall = async (row) => (await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE, ...row }).returning('id'))[0].id;
+        const made = [];
+        try {
+          // a malformed extraction text in the log must not fail the read (the function answers NULL), whatever else is in it
+          made.push(await insertCall({ ai_extraction: `not json {{{ "phone": "${BOB}" do_not_contact_request true` }));
+          made.push(await insertCall({ ai_extraction: '[1,2' }));
+          made.push(await insertCall({ ai_extraction: '"just a string"' }));
+          made.push(await insertCall({ ai_extraction: '' }));
+          expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+          // top-level phone null, a secondary contact's phone is Bob's: Bob's number is NOT the caller's, so no match
+          made.push(await insertCall({ ai_extraction: JSON.stringify({ phone: null, do_not_contact_request: true, secondary_contact: { first_name: 'Bob', phone: BOB } }) }));
+          expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+          // a nested object with a phone BEFORE the caller's own top-level phone: the top-level one is what matches
+          made.push(await insertCall({ ai_extraction: `{"secondary_contact":{"phone":"+19415550999"},"phone":"${BOB}","do_not_contact_request":true}` }));
+          await noMoreLink();
+        } finally {
+          await db('call_log').whereIn('id', made).del();
+        }
+        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      });
+
+      test('ONE call_log query per open-link request, covering both vetoes, and its plan uses the call_log last-10 indexes', async () => {
+        const seen = [];
+        const counting = Object.assign((table) => { if (table === 'call_log') seen.push(table); return db(table); }, { raw: db.raw.bind(db), fn: db.fn });
+        expect(await VisitRecipient.visitForTrackToken(token, { conn: counting })).not.toBeNull();
+        expect(seen).toEqual(['call_log']);
+        // the plan: with sequential scans off, every number branch is answered by an index of migration 20261124200000
+        const holds = require('../services/messaging/auto-text-holds');
+        const { sql, bindings } = holds._callVetoQuery(db, BOB.slice(-10)).toSQL();
+        const plan = await db.transaction(async (trx) => {
+          await trx.raw('SET LOCAL enable_seqscan = off');
+          const res = await trx.raw(`EXPLAIN ${sql}`, bindings);
+          return res.rows.map((r) => r['QUERY PLAN']).join('\n');
+        });
+        for (const index of ['call_log_from_phone_last10_index', 'call_log_to_phone_last10_index', 'call_log_spoken_phone_last10_index', 'call_log_spoken_text_phone_last10_index', 'call_log_v1_phone_last10_index']) {
+          expect(plan).toContain(index);
+        }
+      });
+
+      test('a staff do-not-contact on Bob\'s number', async () => {
+        await suppress(BOB);
+        await db('messaging_suppression').where({ phone: BOB }).update({ reason: 'manual_dnc' });
+        await noMoreLink();
+      });
+    });
+
+    test('an unreadable veto read at the provider handoff holds the text and raises the one deduped bell (the initial lookup was fine)', async () => {
+      const notifications = require('../services/notification-service');
+      const bell = jest.spyOn(notifications, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+      try {
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        // call_log is readable for the initial lookup (which does not touch it) and fails at the handoff recheck
+        const failingAtHandoff = Object.assign((table) => {
+          if (table === 'call_log') throw Object.assign(new Error(`select from call_log where phone '${BOB}' - connection terminated`), { code: '57P01' });
+          return db(table);
+        }, { raw: db.raw.bind(db), fn: db.fn });
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER], conn: failingAtHandoff });
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        const input = sendCustomerMessage.mock.calls[0][0];
+        const verdict = await input.providerPreSendCheck({ channel: 'sms' });
+        expect(verdict).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', retryable: true });
+        expect(bell).toHaveBeenCalledTimes(1);
+        const [category, title, , opts] = bell.mock.calls[0];
+        expect(category).toBe('appointment');
+        expect(title).toBe('Schedule — check the person named on the call before texting');
+        expect(opts.dedupeKey).toBe(`visit-recipient-text-unsent:${visitId}:confirmation`);
+        // the recipient is known on this path: first name and the LAST 4 digits only, never the full number
+        expect(opts.detail).toContain(`Bob, ending ${BOB.slice(-4)}`);
+        expect(opts.detail).toMatch(/still on the visit, the visit time, and that they may be texted/);
+        expect(JSON.stringify(bell.mock.calls)).not.toContain(BOB.slice(-10));
+        // the bell opens the visit on its own day (the dispatch page\'s date and appointment parameters)
+        expect(opts.link).toBe(`/admin/dispatch?tab=schedule&date=${VISIT_DATE}&appointment=${visitId}`);
+        expect(JSON.stringify(bell.mock.calls)).not.toContain(BOB.slice(-10));
+        // a second recheck of the same notice carries the same key (the bell store keeps one row)
+        await input.providerPreSendCheck({ channel: 'sms' });
+        expect(bell.mock.calls.map((c) => c[3].dedupeKey)).toEqual([opts.dedupeKey, opts.dedupeKey]);
+      } finally {
+        bell.mockRestore();
+      }
+    });
+
+    test('a decline SAVED in the choices table binds the link and the text with GATE_CONTACT_LOGIN off (the default)', async () => {
+      expect(process.env.GATE_CONTACT_LOGIN).toBeUndefined();
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await db('service_contact_notification_prefs').insert({ customer_id: customerId, phone_key: BOB.slice(-10), tech_en_route: false });
+      try {
+        expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        await db('visit_text_recipients').where({ id }).update({ deliveries: '{}' });
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER] });
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        // another notice the person did not turn off still goes (the row is per notice)
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER] });
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        await db('service_contact_notification_prefs').where({ customer_id: customerId }).del();
+      }
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+    });
+
+    test('a missing choices table denies: the link errors and a text is held, never read as "no choices"', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      // The same database, except that the per-contact choices table does not exist (Postgres 42P01).
+      const { TABLE } = jest.requireActual('../services/contact-notification-prefs');
+      const withoutChoicesTable = Object.assign((table) => {
+        if (table !== TABLE) return db(table);
+        const missing = Object.assign(new Error(`relation "${TABLE}" does not exist`), { code: '42P01' });
+        const q = { where: () => q, select: async () => { throw missing; } };
+        return q;
+      }, { raw: db.raw.bind(db), fn: db.fn });
+      // after the token lookup, an error answers as an unknown token (null), never an error
+      expect(await VisitRecipient.visitForTrackToken(token, { conn: withoutChoicesTable })).toBeNull();
+      // control: the same text goes out when the table can be read
+      sendCustomerMessage.mockReset();
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+      await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER] });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      sendCustomerMessage.mockClear();
+      await db('visit_text_recipients').where({ id }).update({ deliveries: '{}' });
+      await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER], conn: withoutChoicesTable });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+    });
+
+    test('a MISSING disclaimed-number table (42P01) is never read as "no hold": the link answers like an unknown token and the text is held', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      const holdsTable = 'disclaimed_number_holds';
+      // the REAL helpers, over a database where only that table does not exist
+      const withoutHoldsTable = Object.assign((table) => {
+        if (table !== holdsTable) return db(table);
+        const missing = Object.assign(new Error(`relation "${holdsTable}" does not exist for '${BOB}'`), { code: '42P01' });
+        const q = { where: () => q, whereNull: () => q, first: async () => { throw missing; } };
+        return q;
+      }, { raw: db.raw.bind(db), fn: db.fn });
+      // the strict option itself: a code-only throw where the default read says "no hold"
+      const thrown = await Holds.disclaimedNumberHeld(BOB, withoutHoldsTable, { strict: true }).catch((e) => e);
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown.code).toBe('42P01');
+      expect(`${thrown.message} ${thrown.stack}`).not.toContain(BOB.slice(-10));
+      expect(await Holds.disclaimedNumberHeld(BOB, withoutHoldsTable)).toBe(false); // the other callers keep the old reading
+      // the recipient's two checks (the visit's holder number, and the person's own number) both go through it
+      expect(await VisitRecipient.visitForTrackToken(token, { conn: withoutHoldsTable })).toBeNull();
+      await db('visit_text_recipients').where({ id }).update({ deliveries: '{}' });
+      sendCustomerMessage.mockReset();
+      sendCustomerMessage.mockResolvedValue({ sent: true });
+      const notifications = require('../services/notification-service');
+      const bell = jest.spyOn(notifications, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+      try {
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER], conn: withoutHoldsTable });
+        // the text reaches the provider boundary only to be HELD there: the handoff recheck says retry, never "no hold"
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        const handoff = await sendCustomerMessage.mock.calls[0][0].providerPreSendCheck();
+        expect(handoff).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_CHECK_FAILED', retryable: true });
+      } finally { bell.mockRestore(); }
+      sendCustomerMessage.mockClear();
+      await db('visit_text_recipients').where({ id }).update({ deliveries: '{}' });
+      // control: with the table readable, the link opens and the text goes
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [HOLDER] });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    describe('the row is bound to the customer whose call authorized it', () => {
+      let otherCustomerId;
+      beforeEach(async () => {
+        [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(40) }).returning('id');
+      });
+      afterEach(async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ customer_id: customerId });
+        await db('customers').where({ id: otherCustomerId }).del();
+      });
+      const reassign = (to) => db('scheduled_services').where({ id: visitId }).update({ customer_id: to });
+
+      test('recording writes the visit\'s customer, and a call from another customer records nothing', async () => {
+        expect((await record()).recorded).toHaveLength(1);
+        expect((await rows())[0].customer_id).toBe(customerId);
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+        const mismatch = await record({ customerId: otherCustomerId });
+        expect(mismatch.recorded).toEqual([]);
+        expect(mismatch.skipped).toEqual([{ reason: 'customer_mismatch' }]);
+        expect(await rows()).toHaveLength(0);
+      });
+
+      test('a visit reassigned to another customer: no text, no claim, and the link answers like an unknown token', async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+        await record();
+        const [{ id }] = await rows();
+        const token = await VisitRecipient.ensureTrackToken(id, customerId);
+        expect(await VisitRecipient.visitForTrackToken(token)).toMatchObject({ visitId, customerId });
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        await reassign(otherCustomerId);
+        expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [] });
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect((await rows())[0].deliveries).toEqual({});
+        // the replay and handoff rechecks say the same, and a token is not minted for the reassigned visit
+        expect(await VisitRecipient.recipientStillOwed({ scheduled_service_id: visitId, kind: 'en_route', visit_recipient_id: id, claim_key: `en_route:${VISIT_DATE}T09:00` })).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_NOT_OWED' });
+        expect(await VisitRecipient.ensureTrackToken(id, otherCustomerId)).toBeNull();
+        // it comes back when the visit does
+        await reassign(customerId);
+        expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      });
+
+      test('a row with NO customer_id (never bound) is ineligible: no text, no link', async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+        await record();
+        const [{ id }] = await rows();
+        const token = await VisitRecipient.ensureTrackToken(id, customerId);
+        await db('visit_text_recipients').where({ id }).update({ customer_id: null });
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        sendCustomerMessage.mockReset();
+        sendCustomerMessage.mockResolvedValue({ sent: true });
+        expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'en_route', excludePhones: [] });
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+
+      test('the mint itself requires the visit\'s CURRENT customer: a visit reassigned after the contacts were read mints nothing', async () => {
+        await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+        await record();
+        const [{ id }] = await rows();
+        // the sender read its contacts (the row bound to customerId), then the visit moved to another customer before the write
+        await reassign(otherCustomerId);
+        expect(await VisitRecipient.ensureTrackToken(id, customerId)).toBeNull();
+        expect((await rows())[0].track_token).toBeNull();
+        // control: back on the row's customer, the same call mints
+        await reassign(customerId);
+        expect(await VisitRecipient.ensureTrackToken(id, customerId)).toMatch(/^vr_[a-f0-9]{48}$/);
+      });
+
+      describe('the route\'s FINAL read joins the recipient row as it stands now (all three routes)', () => {
+        const trackPublicRouter = require('../routes/track-public');
+        const find = (path, method) => trackPublicRouter.stack.find((l) => l.route?.path === path && l.route.methods[method]).route.stack[0].handle;
+        const ROUTES = [['/:token', 'get'], ['/:token/stops-ahead', 'post'], ['/:token/view', 'post']];
+        const hit = async (path, method, token) => {
+          const res = { statusCode: 200, body: undefined, headers: {}, set: jest.fn((h) => { Object.assign(res.headers, h); return res; }), status: jest.fn((c) => { res.statusCode = c; return res; }), json: jest.fn((b) => { res.body = b; return res; }), end: jest.fn(() => res) };
+          const next = jest.fn();
+          await find(path, method)({ params: { token }, headers: {}, get: () => null }, res, next);
+          return { statusCode: res.statusCode, body: res.body, headers: res.headers, nextCalled: next.mock.calls.length };
+        };
+        const fresh = async () => {
+          await db('visit_text_recipients').whereIn('scheduled_service_id', [visitId, otherVisitId]).del();
+          await record();
+          const [{ id }] = await rows();
+          return { id, token: await VisitRecipient.ensureTrackToken(id, customerId) };
+        };
+        // Between the module's permission check and the route's final read: each change the module already passed.
+        const CHANGES = {
+          'the row deleted': ({ id }) => db('visit_text_recipients').where({ id }).del(),
+          'the row replaced (deleted, then re-inserted with the same token, visit and customer)': async ({ id, token }) => {
+            const old = await db('visit_text_recipients').where({ id }).first();
+            await db('visit_text_recipients').where({ id }).del();
+            const { id: _drop, created_at: _c, updated_at: _u, ...copy } = old;
+            await db('visit_text_recipients').insert({ ...copy, track_token: token });
+          },
+          'the row given a new token': ({ id }) => db('visit_text_recipients').where({ id }).update({ track_token: `vr_${'9'.repeat(48)}` }),
+          'the row rebound to another customer': ({ id }) => db('visit_text_recipients').where({ id }).update({ customer_id: otherCustomerId }),
+          'the row moved to another visit': ({ id }) => db('visit_text_recipients').where({ id }).update({ scheduled_service_id: otherVisitId }),
+        };
+        let spy;
+        beforeEach(async () => {
+          await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+        });
+        afterEach(() => { if (spy) spy.mockRestore(); spy = null; });
+
+        test.each(ROUTES)('%s (%s): control, an unchanged row is served', async (path, method) => {
+          const { token } = await fresh();
+          expect((await hit(path, method, token)).statusCode).not.toBe(404);
+        });
+
+        test.each(ROUTES)('%s (%s): a row changed after the permission check answers exactly as an unknown token', async (path, method) => {
+          const unknown = await hit(path, method, `vr_${'7'.repeat(48)}`);
+          expect(unknown.statusCode).toBe(404);
+          for (const [label, change] of Object.entries(CHANGES)) {
+            const made = await fresh();
+            const real = VisitRecipient.visitForTrackToken;
+            spy = jest.spyOn(VisitRecipient, 'visitForTrackToken').mockImplementation(async (...args) => {
+              const answer = await real(...args);
+              await change(made);
+              return answer;
+            });
+            const answer = await hit(path, method, made.token);
+            spy.mockRestore();
+            spy = null;
+            expect({ label, ...answer }).toEqual({ label, ...unknown });
+          }
+        });
+      });
+
+      test('the migration backfills ONLY from the call the number was given on (and only when that call\'s customer is the visit\'s current one); everything else stays NULL, and other rows are untouched', async () => {
+        const migration = require('../models/migrations/20261124230000_visit_text_recipients_customer_id');
+        await record();
+        const [{ id: provedId }] = await rows();
+        await db('call_log').where({ id: callLogId }).update({ customer_id: customerId });
+        await db('visit_text_recipients').where({ id: provedId }).update({ customer_id: null });
+        // four DISTINCT fixed numbers (unique to this run); the key is always the last 10 digits of the E.164
+        const numbers = [phone(50), phone(51), phone(52), phone(53)];
+        const base = (n, over) => ({ phone_e164: numbers[n], phone_key: numbers[n].slice(-10), consent_version: 'test', ...over });
+        // the whole run is one transaction that is ROLLED BACK: the assertions read inside it, nothing else is ever touched
+        const rollback = new Error('rollback');
+        let seen;
+        await db.transaction(async (trx) => {
+          const [{ id: otherCallId }] = await trx('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE, customer_id: otherCustomerId }).returning('id');
+          const [{ id: noCustomerCallId }] = await trx('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE }).returning('id');
+          const make = async (n, over) => (await trx('visit_text_recipients').insert(base(n, { scheduled_service_id: otherVisitId, ...over })).returning('id'))[0].id;
+          const conflicting = await make(0, { call_log_id: otherCallId });         // the call was another customer's
+          const callWithoutCustomer = await make(1, { call_log_id: noCustomerCallId });
+          const noCall = await make(2, {});                                           // no call on record
+          const alreadyBound = await make(3, { call_log_id: callLogId, customer_id: otherCustomerId }); // bound elsewhere: never overwritten
+          await migration.up(trx);
+          const customerOf = async (rowId) => (await trx('visit_text_recipients').where({ id: rowId }).first('customer_id')).customer_id;
+          seen = {
+            proved: await customerOf(provedId),
+            conflicting: await customerOf(conflicting),
+            callWithoutCustomer: await customerOf(callWithoutCustomer),
+            noCall: await customerOf(noCall),
+            alreadyBound: await customerOf(alreadyBound),
+          };
+          throw rollback;
+        }).catch((err) => { if (err !== rollback) throw err; });
+        expect(seen).toEqual({ proved: customerId, conflicting: null, callWithoutCustomer: null, noCall: null, alreadyBound: otherCustomerId });
+        // after the rollback nothing the migration did persists, and the scratch rows are gone
+        expect((await rows())[0].customer_id).toBeNull();
+        expect(await db('visit_text_recipients').where({ scheduled_service_id: otherVisitId }).count('* as n').first()).toMatchObject({ n: '0' });
+      });
+    });
+
+    test('the lifetime: en route and on site open; completed opens for 2 hours; scheduled, cancelled, skipped, rebooking and older completions do not', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      const setVisit = (patch) => db('scheduled_services').where({ id: visitId }).update(patch);
+      const open = async () => (await VisitRecipient.visitForTrackToken(token)) !== null;
+      await setVisit({ status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
+      expect(await open()).toBe(true);
+      await setVisit({ status: 'on_site', track_state: 'on_property', arrived_at: new Date(Date.now() - 5 * 60 * 1000) });
+      expect(await open()).toBe(true);
+      await setVisit({ status: 'completed', track_state: 'complete', completed_at: new Date(Date.now() - 60 * 60 * 1000) });
+      expect(await open()).toBe(true);
+      await setVisit({ completed_at: new Date(Date.now() - 3 * 60 * 60 * 1000) });
+      expect(await open()).toBe(false);
+      for (const patch of [
+        { status: 'confirmed', track_state: 'scheduled', completed_at: null },
+        { status: 'cancelled', track_state: 'cancelled' },
+        { status: 'skipped', track_state: 'scheduled' },
+        { status: 'rescheduled', track_state: 'scheduled' },
+      ]) {
+        await setVisit(patch);
+        expect(await open()).toBe(false);
+      }
+    });
+
+    test('404 cases: gate off, a wrong token, a declined person, the visit gone, no live expiry', async () => {
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken('c'.repeat(64))).toBeNull();
+      getContactPrefRow.mockResolvedValueOnce({ tech_en_route: false });
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await suppress(BOB);
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await db('messaging_suppression').where({ phone: BOB }).update({ active: false });
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: null });
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000) });
+      delete process.env[GATE];
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      process.env[GATE] = 'true';
+      await db('scheduled_services').where({ id: visitId }).del();
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
     });
   });
 

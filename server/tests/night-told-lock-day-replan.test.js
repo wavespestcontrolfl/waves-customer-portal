@@ -394,6 +394,48 @@ describe('2-hour told shift: a stop told an hour may start up to 2 hours later t
     expect(entries[4]).toMatchObject({ why: null, pref: null }); // never told an hour: unchanged
   });
 
+  // Owner 2026-11-25 *cap 2* (row 62): the 2 hours run from the EARLIEST hour told for the date, so 9 -> 11 -> 1 PM
+  // cannot happen. A told 9 moved and re-told at 11 stays at 11.
+  test('cap 2: told 9 then 11, the stop may start at 11 only; never 1 PM', () => {
+    const ctx = base({ toldStart: new Map([['s1', 11 * 60]]), toldCap: new Map([['s1', 9 * 60]]) });
+    expect(_internals.fixedReason(stop('11:00:00'), ctx)).toBeNull();
+    expect(_internals.fixedReason(stop('11:01:00'), ctx)).toBe('time_told');
+    expect(_internals.fixedReason(stop('13:00:00'), ctx)).toBe('time_told');
+    expect(_internals.fixedReason(stop('10:00:00'), ctx)).toBe('time_told'); // never earlier than the latest told slot
+    // Told 9 then 10: up to 11.
+    const ten = base({ toldStart: new Map([['s1', 10 * 60]]), toldCap: new Map([['s1', 9 * 60]]) });
+    expect(_internals.fixedReason(stop('11:00:00'), ten)).toBeNull();
+    expect(_internals.fixedReason(stop('11:30:00'), ten)).toBe('time_told');
+    // A later cap entry than the told slot never widens the band past told + 2 hours.
+    const late = base({ toldStart: new Map([['s1', 9 * 60]]), toldCap: new Map([['s1', 10 * 60]]) });
+    expect(_internals.fixedReason(stop('11:00:00'), late)).toBeNull();
+    expect(_internals.fixedReason(stop('11:30:00'), late)).toBe('time_told');
+  });
+
+  test('cap 2: limitToldShift narrows the band to the earliest told hour + 2 hours; an empty band is time_told', () => {
+    const entries = [
+      { row: { id: 'a' }, why: null, pref: null },
+      { row: { id: 'b' }, why: null, pref: null },
+      { row: { id: 'c' }, why: null, pref: null },
+    ];
+    const starts = new Map([['a', 11 * 60], ['b', 10 * 60], ['c', 12 * 60]]);
+    const caps = new Map([['a', 9 * 60], ['b', 9 * 60], ['c', 9 * 60]]);
+    _internals.limitToldShift(entries, starts, caps);
+    expect(entries[0]).toMatchObject({ why: null, pref: { startMin: 11 * 60, endMin: 11 * 60 + 1 } });
+    expect(entries[1]).toMatchObject({ why: null, pref: { startMin: 10 * 60, endMin: 11 * 60 + 1 } });
+    expect(entries[2].why).toBe('time_told'); // told 12 after a first 9: already past the cap, so it stays put
+  });
+
+  test('cap 2: toldFactsOf maps firstStart to toldCap; a fact without it caps at its own start', () => {
+    const facts = new Map([
+      ['a', { level: 'hour', start: new Date('2026-11-04T16:00:00Z'), firstStart: new Date('2026-11-04T14:00:00Z') }],
+      ['b', { level: 'hour', start: new Date('2026-11-04T15:00:00Z') }],
+    ]);
+    const out = _internals.toldFactsOf(facts, ['a', 'b'], TOMORROW);
+    expect([...out.toldStart]).toEqual([['a', 11 * 60], ['b', 10 * 60]]);
+    expect([...out.toldCap]).toEqual([['a', 9 * 60], ['b', 10 * 60]]);
+  });
+
   test('toldStartsOnDate: ET minutes, and a slot told for another date anchors nothing', () => {
     const starts = new Map([
       ['a', new Date('2026-11-04T14:00:00Z')], // 9:00 AM ET on Nov 4

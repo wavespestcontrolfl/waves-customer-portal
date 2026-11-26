@@ -260,7 +260,8 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
         positioning: trench[key].positioning,
         container_cost: trench[key].containerCost,
         container_oz: trench[key].containerOz,
-        warnings: trench[key].warnings,
+        // The pushed migration wrote the pre-2026-11-25 wording; constants and db-bridge now say retreatment only.
+        warnings: trench[key].warnings.map((w) => w.replace('long retreatment warranty', 'long repair-and-retreat warranty')),
       });
     }
     expect(constants.MOSQUITO.productCosts.bifenthrinOz).toBeCloseTo(30.9 / 128, 10);

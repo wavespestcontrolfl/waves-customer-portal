@@ -26,6 +26,33 @@ import { DOC, DOC_EYEBROW, FS, FW, LH, SP, docHeading } from '../theme-doc';
 // separate API origin (VITE_API_URL) would be refused by the browser.
 const API_BASE = '/api';
 
+// What the booking answer made lower than the page showed: { annual } and/or { setupFee } (dollars), or null.
+function lowerTermsOf(bookedPrice, shownPrice) {
+  if (!bookedPrice) return null;
+  const annual = Number(bookedPrice.annual);
+  const fee = Number(bookedPrice.setupFee);
+  const lower = {};
+  if (annual > 0 && annual < Number(shownPrice.annual)) lower.annual = annual;
+  if (Number.isFinite(fee) && fee >= 0 && fee < (Number(shownPrice.setupFee) || 0)) lower.setupFee = fee;
+  return Object.keys(lower).length ? lower : null;
+}
+
+// The price the card shows: none after a price_changed answer; the booked price when a booking of THIS home (token)
+// was made lower (a late answer of another link's booking never changes this card); else the page's price.
+function cardPriceOf(price, priceStale, bookedPrice, token) {
+  if (priceStale || !price) return null;
+  const bookedHere = bookedPrice && bookedPrice.token === token ? bookedPrice.price : null;
+  return bookedHere ? { ...price, ...bookedHere } : price;
+}
+
+// The booked screen's state from the booking answer. A lower booked price also goes to the price card above (through
+// onBookedLower), so the card agrees with this screen.
+function bookedStateOf(body, picked, price, onBookedLower) {
+  const lower = lowerTermsOf(body.price, price);
+  if (lower && onBookedLower) onBookedLower(body.price);
+  return { date: body.date || picked.date, window: body.window || {}, lower };
+}
+
 // Cents only when the amount is not whole: $37 a month, $37.50 a month.
 function formatMoney(value) {
   const n = Number(value);
@@ -168,9 +195,28 @@ function CheckMark() {
   );
 }
 
+// The lines of the booked screen that say what the booking made lower than the page showed (lowerTermsOf).
+function BookedTerms({ lower }) {
+  if (!lower) return null;
+  return (
+    <>
+      {lower.annual ? (
+        <p data-testid="booked-price" style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
+          Your price is now {formatMoney(perApplication(lower.annual))} per application.
+        </p>
+      ) : null}
+      {lower.setupFee != null ? (
+        <p data-testid="booked-setup" style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
+          {lower.setupFee > 0 ? `Your one-time setup is now ${formatMoney(lower.setupFee)}.` : 'No setup fee.'}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 // Shown for a home that has a price. onNeedCall(true) tells the page this card carries the call button, so the page
 // does not show a second one.
-function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged }) {
+function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged, onBookedLower }) {
   const [times, setTimes] = useState({ status: 'loading', offers: [] }); // loading | ready | call
   const [day, setDay] = useState(null);
   const [picked, setPicked] = useState(null);
@@ -254,7 +300,9 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged })
       });
       const body = await r.json().catch(() => ({}));
       if (r.ok && body.booked) {
-        setBooked({ date: body.date || picked.date, window: body.window || {} });
+        // The price the booking was made on, kept only when it is lower than the one this page showed (the card's price
+        // is held 60 days and never goes up; when ours went down the booking takes the lower one).
+        setBooked(bookedStateOf(body, picked, price, onBookedLower));
       } else if (body.error === 'slot_taken' || body.error === 'invalid_offer') {
         setPicked(null);
         setNotice('That time was just taken. Pick another time.');
@@ -297,6 +345,7 @@ function FirstVisitPicker({ token, price, address, onNeedCall, onPriceChanged })
             {city}
           </p>
         ) : null}
+        <BookedTerms lower={booked.lower} />
         <p style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
           Your confirmation is on its way.
         </p>
@@ -409,12 +458,15 @@ export default function MailHomePage() {
   const [status, setStatus] = useState('loading'); // loading | ready | unavailable
   const [pickerHasCall, setPickerHasCall] = useState(false);
   const [priceStale, setPriceStale] = useState(false);
+  // The price a booking was made on when it is lower than the page's (a held postcard price that went down).
+  const [bookedPrice, setBookedPrice] = useState(null);
   useGlassSurface(true);
 
   useEffect(() => {
     let alive = true;
     setStatus('loading');
     setPriceStale(false); // a price_changed answer belongs to the home it was for, not the next link
+    setBookedPrice(null);
     fetch(`${API_BASE}/public/home/${encodeURIComponent(token)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((json) => {
@@ -440,7 +492,7 @@ export default function MailHomePage() {
   const city = addressCase(data.address.city) || null;
   const price = data.price;
   // The price card shows no price once a booking answered price_changed; the picker keeps the price it was opened with.
-  const cardPrice = priceStale ? null : price;
+  const cardPrice = cardPriceOf(price, priceStale, bookedPrice, token);
   const setupFee = cardPrice && Number(cardPrice.setupFee) > 0 ? Number(cardPrice.setupFee) : null;
 
   return (
@@ -490,7 +542,7 @@ export default function MailHomePage() {
         )}
       </BrandCard>
 
-      {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} onPriceChanged={() => setPriceStale(true)} /> : null}
+      {price ? <FirstVisitPicker token={token} price={price} address={data.address} onNeedCall={setPickerHasCall} onPriceChanged={() => setPriceStale(true)} onBookedLower={(booked) => setBookedPrice({ token, price: booked })} /> : null}
 
       <BrandCard style={{ marginTop: SP.md }}>
         <h2 style={{ ...docHeading(3), marginBottom: SP.sm }}>What the plan includes</h2>

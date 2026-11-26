@@ -1727,17 +1727,21 @@ const REGISTRY = {
   // not declined since. An unreadable answer holds the row for a retry. A replay that ends without a send gives the
   // delivery claim back. The marker keeps a worker that predates this entry from sending the frozen body unchecked.
   visit_text_recipient_deferred: {
-    async recheck(meta) {
-      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'visit-recipient', slotPinFor(meta));
-      if (visit.eligible === false) return visit;
-      try {
-        const owed = await require('../call-visit-recipient').recipientStillOwedDeferred(meta);
-        if (!owed) return { eligible: false, reason: 'recipient-not-owed' };
-      } catch (err) {
-        return failClosed('visit-recipient', meta.scheduled_service_id, err);
-      }
-      // A queued day-only body is only true while the day promise still stands (the same recheck as the holder's).
-      return meta.promise_level === 'day' ? dayPromiseStillValid(meta) : { eligible: true };
+    // The WHOLE recheck runs inside the module's exhausted-replay guard: a read that fails at ANY step (the visit, the
+    // person, the day promise) on the last attempt raises the staff bell once; earlier attempts just hold for a retry.
+    recheck(meta) {
+      return require('../call-visit-recipient').deferredReplayRecheck(meta, async () => {
+        const visit = await visitStillUpcoming(meta.scheduled_service_id, 'visit-recipient', slotPinFor(meta));
+        if (visit.eligible === false) return visit;
+        try {
+          const owed = await require('../call-visit-recipient').recipientStillOwedDeferred(meta);
+          if (!owed) return { eligible: false, reason: 'recipient-not-owed' };
+        } catch (err) {
+          return failClosed('visit-recipient', meta.scheduled_service_id, err);
+        }
+        // A queued day-only body is only true while the day promise still stands (the same recheck as the holder's).
+        return meta.promise_level === 'day' ? dayPromiseStillValid(meta) : { eligible: true };
+      });
     },
     dispatch(meta, defaultDispatch) {
       return defaultDispatch();

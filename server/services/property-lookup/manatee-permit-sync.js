@@ -443,6 +443,50 @@ async function syncPoolPermits({ timeoutMs } = {}) {
   return { windows: windows.length, fetched, written };
 }
 
+// ── Parcel number forms ──
+//
+// Manatee parcel numbers have 9 or 10 digits, and the estimator carries them
+// as the county writes them. The permit tables store a 10-digit pin: a
+// 9-digit parcel number is stored with a trailing 0 (513309059 is stored as
+// 5133090590). A padded pin can also be another parcel's own 10-digit number
+// (5 such pairs county-wide, measured 2026-11-22), so a hit by the padded pin
+// counts only when the permit names the same loose address key too.
+function paddedPermitPin(parcelPin) {
+  const pin = String(parcelPin ?? '').trim();
+  return /^[0-9]{9}$/.test(pin) ? `${pin}0` : null;
+}
+
+/**
+ * The parcel tiers of a permit read, strongest first: the pin as given, then
+ * (for a 9-digit parcel number with a loose key) the padded pin that also
+ * names the loose key. Each tier is a function that narrows a query.
+ */
+function parcelTiers(parcelPin, looseKey) {
+  if (!parcelPin) return [];
+  const pin = String(parcelPin);
+  const tiers = [(query) => query.where('parcel_pin', pin)];
+  const padded = paddedPermitPin(pin);
+  if (padded && looseKey) tiers.push((query) => query.where('parcel_pin', padded).where('address_loose_key', looseKey));
+  return tiers;
+}
+
+/**
+ * Address-tier guard: with a known parcel, a loose-key row that asserts a
+ * DIFFERENT clean pin is another property (the loose key drops the street
+ * suffix). The parcel's own pin in either form, a pin-less row and an
+ * odd-format pin may pass.
+ */
+function guardAddressTier(query, parcelPin) {
+  if (!parcelPin) return query;
+  const pin = String(parcelPin);
+  const padded = paddedPermitPin(pin);
+  return query.where((b) => {
+    b.whereNull('parcel_pin').orWhere('parcel_pin', pin);
+    if (padded) b.orWhere('parcel_pin', padded);
+    b.orWhereRaw("parcel_pin !~ '^[0-9]{10}$'");
+  });
+}
+
 /**
  * Newest non-Canceled synced Pool-Spa permit for a parcel/address, or null.
  * Read path for county-permits.js — must stay cheap and fail-open (callers
@@ -455,28 +499,21 @@ async function findSyncedPoolPermit({ parcelPin, addrKey, looseKey } = {}) {
   // shares the loose key (same house number + street word + zip) outrank
   // it and fabricate pool evidence. Address keys are consulted only when
   // the parcel finds nothing.
+  // Address-tier guard (guardAddressTier): the loose key drops the street
+  // SUFFIX ("101 Main St" and "101 Main Ave" collide), so when the caller
+  // KNOWS the parcel, an address-tier row asserting a DIFFERENT clean parcel
+  // is another property — only pin-less/odd-format rows may rescue a pin miss.
   const tiers = [
-    parcelPin ? ['parcel_pin', String(parcelPin)] : null,
-    addrKey ? ['address_key', addrKey] : null,
-    looseKey ? ['address_loose_key', looseKey] : null,
+    ...parcelTiers(parcelPin, looseKey),
+    addrKey ? (query) => guardAddressTier(query.where('address_key', addrKey), parcelPin) : null,
+    looseKey ? (query) => guardAddressTier(query.where('address_loose_key', looseKey), parcelPin) : null,
   ].filter(Boolean);
   let row = null;
-  for (const [col, val] of tiers) {
-    const query = db('pool_permit_records')
+  for (const narrow of tiers) {
+    row = await narrow(db('pool_permit_records')
       .whereNot('record_status', 'Canceled')
-      .where(col, val)
-      .orderBy('issued_date', 'desc')
+      .orderBy('issued_date', 'desc'))
       .first();
-    // Address-tier guard: the loose key drops the street SUFFIX ("101 Main
-    // St" and "101 Main Ave" collide), so when the caller KNOWS the parcel,
-    // an address-tier row asserting a DIFFERENT clean parcel is another
-    // property — only pin-less/odd-format rows may rescue a pin miss.
-    if (col !== 'parcel_pin' && parcelPin) {
-      query.where((b) => b.whereNull('parcel_pin')
-        .orWhere('parcel_pin', String(parcelPin))
-        .orWhereRaw("parcel_pin !~ '^[0-9]{10}$'"));
-    }
-    row = await query;
     if (row) break;
   }
   if (!row) return null;
@@ -709,36 +746,24 @@ const toIso = (v) => (v ? new Date(v).toISOString().slice(0, 10) : null);
  * would let a neighbor's permit fabricate evidence).
  */
 async function findConstructionActivity({ parcelPin, looseKey } = {}) {
+  // Same tiers and address-tier parcel guard as findSyncedPoolPermit.
   const tiers = [
-    parcelPin ? ['parcel_pin', String(parcelPin)] : null,
-    looseKey ? ['address_loose_key', looseKey] : null,
+    ...parcelTiers(parcelPin, looseKey),
+    looseKey ? (query) => guardAddressTier(query.where('address_loose_key', looseKey), parcelPin) : null,
   ].filter(Boolean);
   if (!tiers.length) return null;
   const activeFloor = monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS);
   const coFloor = monthsAgoIso(NEW_BUILD_CO_MONTHS);
   const seenAfter = new Date(Date.now() - ACTIVE_SEEN_WITHIN_DAYS * 24 * 60 * 60 * 1000);
-  for (const [col, val] of tiers) {
-    // Same address-tier parcel guard as findSyncedPoolPermit: with a known
-    // parcel, a loose-key row asserting a DIFFERENT clean pin is another
-    // property (the loose key drops street suffixes).
-    const parcelGuard = (query) => {
-      if (col !== 'parcel_pin' && parcelPin) {
-        query.where((b) => b.whereNull('parcel_pin')
-          .orWhere('parcel_pin', String(parcelPin))
-          .orWhereRaw("parcel_pin !~ '^[0-9]{10}$'"));
-      }
-      return query;
-    };
-    const ucRow = await parcelGuard(db('construction_permit_records')
-      .where(col, val)
+  for (const narrow of tiers) {
+    const ucRow = await narrow(db('construction_permit_records')
       .whereNull('co_date')
       .where('issued_date', '>=', activeFloor)
       .where('last_seen_at', '>=', seenAfter)
       .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('closed', 'canceled', 'withdrawn')")
       .orderBy('issued_date', 'desc'))
       .first();
-    const nbRow = await parcelGuard(db('construction_permit_records')
-      .where(col, val)
+    const nbRow = await narrow(db('construction_permit_records')
       .whereNotNull('co_date')
       .where('co_date', '>=', coFloor)
       .whereRaw("type_of_work ILIKE 'new%'")
@@ -775,6 +800,10 @@ module.exports = {
   findConstructionActivity,
   looseAddressKey,
   looseKeyFromFreeform,
+  // The permit tables' pin forms, shared with manatee-permit-detail.js (one definition).
+  paddedPermitPin,
+  parcelTiers,
+  guardAddressTier,
   // The "permit is still open" rule, shared with services/mail/prospect-store.js (one definition).
   monthsAgoIso,
   CONSTRUCTION_ACTIVE_MONTHS,

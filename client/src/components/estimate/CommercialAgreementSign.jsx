@@ -19,11 +19,11 @@ export const SIGN_BUTTON_LABEL = 'Accept & sign agreement';
  * Commercial Pest Service Agreement and returns its signing URL; this page
  * then hands the customer to that existing signing page. Signing is not
  * acceptance: the copy says Waves follows up to schedule, and promises no
- * payment, visit or start date. With GATE_COMMERCIAL_FIRST_VISIT on and an
+ * payment, visit or start date. With an
  * eligible proposal, the customer picks the first visit after signing
  * instead (CommercialFirstVisitPicker); booking it is the acceptance.
  */
-// `firstVisit` is /data's cta.commercialFirstVisit (GATE_COMMERCIAL_FIRST_VISIT), absent with the gate off: 'pick' turns
+// `firstVisit` is /data's cta.commercialFirstVisit (absent for an ineligible proposal): 'pick' turns
 // the signed state into the first-visit picker, 'booked' shows the booked visit, and 'after_signing' tells an unsigned
 // customer they pick the visit next.
 export default function CommercialAgreementSign({ token, commercialAgreement, firstVisit = null, onFirstVisitBooked = null }) {

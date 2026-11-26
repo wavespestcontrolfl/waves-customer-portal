@@ -28,7 +28,7 @@ const MAX_REPLY_CHARS = 2000;
 const MAX_INBOUND_CHARS = 1000;
 
 const SECTION_HEADER = '- Payment status sentences (the ONLY way to state a payment, invoice, refund or balance status, ANY dollar amount, or anything about Zelle is to copy one of these word for word, as a whole sentence, and only one that answers what the customer asked):';
-const SECTION_NONE = '- Payment status sentences: none on file right now - state no payment, invoice, refund or balance status, no dollar amount and nothing about Zelle; say a teammate will confirm';
+const SECTION_NONE = '- Payment status sentences: none on file right now - state no payment, invoice, refund or balance status, no dollar amount and nothing about Zelle; promise no confirmation (answer what the facts do cover, or return ABSTAIN)';
 const SENTENCE_BULLET = '  - ';
 
 // ---- Rendering -------------------------------------------------------------

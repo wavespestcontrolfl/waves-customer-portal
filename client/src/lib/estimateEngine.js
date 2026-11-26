@@ -1515,7 +1515,7 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     standardOzPerGal: 1.0,
     highOzPerGal: 2.0,
     labelHalfVolumeOzPerGal: 2.0, // mirrors SPECIALTY.trenching: the label's 0.12% (2 fl oz a gallon) only at half the 0.06% volume
-    warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long repair-and-retreat warranty without admin approval.',
+    warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long retreatment warranty without admin approval.',
   },
   talstar_p: {
     label: 'Crosscheck Plus - Bifenthrin',
@@ -1528,7 +1528,7 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
     standardOzPerGal: 1.0,
     highOzPerGal: 2.0,
     labelHalfVolumeOzPerGal: 2.0, // mirrors SPECIALTY.trenching: the label's 0.12% (2 fl oz a gallon) only at half the 0.06% volume
-    warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long repair-and-retreat warranty without admin approval.',
+    warning: 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Do not attach long retreatment warranty without admin approval.',
   },
 };
 

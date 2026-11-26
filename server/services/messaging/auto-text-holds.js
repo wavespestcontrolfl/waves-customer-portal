@@ -48,7 +48,7 @@ const db = require('../../models/db');
 const { excludeUnresolvedSendReservations } = require('./review-ask-reservation');
 const { applyOpenLeadPredicate } = require('../lead-statuses');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
-const { whereCallDoNotContact } = require('../../utils/call-dnc');
+const { whereCallDoNotContact, V2_SQL: DNC_V2_SQL, LEGACY_SQL: DNC_LEGACY_SQL } = require('../../utils/call-dnc');
 
 const RECENT_CONVERSATION_MS = 7 * 24 * 60 * 60 * 1000;
 // An estimate reached them when it carries delivery evidence (sent_at or
@@ -88,14 +88,37 @@ function deliveredTexts(dbi = db) {
         .where((st) => st.whereNull('status').orWhereNotIn('status', UNSENT_STATUSES))));
 }
 
+// EVERY place a number the caller SPOKE lives on a call_log row, in ONE list (the call pipeline reads the caller's spoken
+// phone from these: resolveCallContactPhone(call, extracted.phone) on the legacy V1 extraction, whose V2 merge copies a spoken
+// callback into caller.phone_e164, plus the number the caller said to TEXT). Every predicate that asks "did a call speak this
+// number" goes through this list, so a new place is added once. The expressions are what the call_log expression indexes of
+// migration 20261124200000 say, byte for byte.
+const SPOKEN_NUMBER_EXPRS = Object.freeze({
+  v2Phone: "(ai_extraction_enriched->'caller'->>'phone_e164')",
+  v2TextPhone: "(ai_extraction_enriched->'caller'->>'text_phone_e164')",
+  // The legacy V1 extraction's phone: the TOP-LEVEL "phone" key of its JSON text (a nested secondary contact's phone is another
+  // person's), read by call_log_v1_phone() (migration 20261124200000), which answers NULL for malformed text (ai_extraction is
+  // a text column) instead of failing the query.
+  v1Phone: 'call_log_v1_phone(ai_extraction)',
+});
+const ALL_SPOKEN_NUMBER_EXPRS = Object.freeze(Object.values(SPOKEN_NUMBER_EXPRS));
+
+// The index-friendly form of "this column or expression ends in these 10 digits" (the shape the call_log last-10 indexes carry).
+function indexedMatch(expr, digits) {
+  return [`RIGHT(regexp_replace(${expr}, '\\D', '', 'g'), 10) = ?`, [digits]];
+}
+
 // Every call with this number, either direction, plus the call setting the
 // text off by its id (a reprocess after a deferral can re-judge it, and its
 // text may go to a number its row does not carry) — never a Sandy sandbox
 // test call, whose extraction says nothing about the real caller.
-function callsWith(dbi, digits, originCallId) {
+// `spoken`: also a call whose caller SPOKE this number as their own ("call me at ..."), the extraction's caller.phone_e164
+// (saidNoTextsOnAnyCall matches it for the same reason). Off by default: the first-touch holds keep their own reach.
+function callsWith(dbi, digits, originCallId, { spoken = false } = {}) {
   return dbi('call_log')
     .modify((q) => whereNotSandboxCall(q))
     .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits))
+      .modify((either) => { if (spoken) ALL_SPOKEN_NUMBER_EXPRS.forEach((expr) => either.orWhereRaw(...matches(expr, digits))); })
       .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }));
 }
 
@@ -110,18 +133,55 @@ function callsWith(dbi, digits, originCallId) {
 // Exported on its own for the automated call texts that honour ONLY this
 // hold, not the whole first-touch set above (owner 2026-09-30): the
 // dropped-call address request and the outbound-voicemail missed-you text.
-async function saidNoTextsOnAnyCall(phone, { originCallId = null, dbi = db } = {}) {
+// `includeAllSpokenNumbers`: every place a spoken number lives (SPOKEN_NUMBER_EXPRS), not only the V2 caller phone.
+async function saidNoTextsOnAnyCall(phone, { originCallId = null, dbi = db, includeAllSpokenNumbers = false } = {}) {
   const digits = phoneDigits(phone);
   if (!digits) return false;
   const row = await dbi('call_log')
     .modify((q) => whereNotSandboxCall(q))
     .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits))
-      .orWhereRaw(...matches("(ai_extraction_enriched->'caller'->>'phone_e164')", digits))
+      .modify((either) => { (includeAllSpokenNumbers ? ALL_SPOKEN_NUMBER_EXPRS : [SPOKEN_NUMBER_EXPRS.v2Phone]).forEach((expr) => either.orWhereRaw(...matches(expr, digits))); })
       .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }))
     .where('v2_extraction_status', 'valid')
     .whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
     .first('id');
   return !!row;
+}
+
+// A do-not-contact request on any call with this number (either direction, the call setting a text off included), in
+// either stored shape. Exported on its own for senders that honour this one veto (the visit-only recipient's text and
+// tracker link). Both DNC shapes: the V2 consent object, and the legacy extraction's flat field (a call processed
+// with V2 off, unavailable or schema-failed); read from ANY stored extraction, valid or not.
+// `includeSpokenNumber`: also a call that spoke the number as the caller's callback (the visit-only recipient's veto).
+async function askedNotToBeContactedOnAnyCall(phone, { originCallId = null, dbi = db, includeSpokenNumber = false } = {}) {
+  const digits = phoneDigits(phone);
+  if (!digits) return false;
+  const row = await whereCallDoNotContact(callsWith(dbi, digits, originCallId, { spoken: includeSpokenNumber })).first('id');
+  return !!row;
+}
+
+// The visit-only recipient's two vetoes in ONE read of call_log (their link is re-read on every poll): did any call with this
+// number (a leg, or any spoken place) record a do-not-contact request, or an explicit "no texts" from a valid V2 extraction?
+// Every number place is matched in the index-friendly form, so each branch of the OR uses the call_log last-10 index of
+// migration 20261124200000 and revocation stays immediate. No logging; throws on a read error (the caller fails closed).
+function callVetoQuery(dbi, digits) {
+  const doNotContact = `(${DNC_V2_SQL} OR ${DNC_LEGACY_SQL})`;
+  const smsDeclined = "(v2_extraction_status = 'valid' AND ai_extraction_enriched->'consent'->>'sms_declined' = 'true')";
+  return dbi('call_log')
+    .modify((q) => whereNotSandboxCall(q))
+    .where((q) => {
+      q.whereRaw(...indexedMatch('from_phone', digits)).orWhereRaw(...indexedMatch('to_phone', digits));
+      ALL_SPOKEN_NUMBER_EXPRS.forEach((expr) => q.orWhereRaw(...indexedMatch(expr, digits)));
+    })
+    .whereRaw(`(${doNotContact} OR ${smsDeclined})`)
+    .select(dbi.raw(`COALESCE(bool_or(${doNotContact}), false) AS do_not_contact`), dbi.raw(`COALESCE(bool_or(${smsDeclined}), false) AS sms_declined`));
+}
+
+async function callVetoesForNumber(phone, { dbi = db } = {}) {
+  const digits = phoneDigits(phone);
+  if (!digits) return { doNotContact: false, smsDeclined: false };
+  const row = await callVetoQuery(dbi, digits).first();
+  return { doNotContact: row?.do_not_contact === true, smsDeclined: row?.sms_declined === true };
 }
 
 /**
@@ -160,9 +220,7 @@ async function autoTextHoldReason(phone, {
   // field (a call processed with V2 off, unavailable or schema-failed). Read
   // from ANY stored extraction, valid or not, and from the call setting this
   // text off too: an opt-out is honoured wherever it was heard.
-  const doNotContact = await whereCallDoNotContact(callsWith(dbi, digits, originCallId))
-    .first('id');
-  if (doNotContact) return 'asked_not_to_be_contacted';
+  if (await askedNotToBeContactedOnAnyCall(phone, { originCallId, dbi })) return 'asked_not_to_be_contacted';
 
   if (await saidNoTextsOnAnyCall(phone, { originCallId, dbi })) return 'said_no_texts';
 
@@ -225,6 +283,10 @@ async function autoTextHoldReason(phone, {
 module.exports = {
   autoTextHoldReason,
   saidNoTextsOnAnyCall,
+  askedNotToBeContactedOnAnyCall,
+  callVetoesForNumber,
+  SPOKEN_NUMBER_EXPRS,
+  _callVetoQuery: callVetoQuery,
   deliveredTexts,
   RECENT_CONVERSATION_MS,
   NOT_A_PROSPECT_NATURES,

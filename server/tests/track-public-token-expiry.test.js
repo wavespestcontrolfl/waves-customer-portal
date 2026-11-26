@@ -63,6 +63,41 @@ describe('public track token expiry', () => {
     expect(isTrackTokenLive('2026-05-05T12:01:00.000Z')).toBe(true);
   });
 
+  test('a visit text recipient\'s link: en route / on site, or 2 h after completion, with a live finite expiry', () => {
+    const { recipientTrackLinkOpen, isTrackTokenLiveWithExpiry } = require('../services/track-token-expiry');
+    const live = '2026-05-06T12:00:00.000Z';
+    const ago = (ms) => new Date(Date.now() - ms).toISOString();
+    expect(isTrackTokenLiveWithExpiry(null)).toBe(false);
+    expect(isTrackTokenLiveWithExpiry('not-a-date')).toBe(false);
+    expect(isTrackTokenLiveWithExpiry('2026-05-05T11:59:59.999Z')).toBe(false);
+    expect(recipientTrackLinkOpen({ status: 'en_route', track_state: 'en_route', en_route_at: ago(10 * 60 * 1000), track_token_expires_at: live })).toBe(true);
+    expect(recipientTrackLinkOpen({ status: 'on_site', track_state: 'on_property', arrived_at: ago(10 * 60 * 1000), track_token_expires_at: live })).toBe(true);
+    // the live-state CAPS: en route within 3 h of en_route_at, on site within 4 h of arrived_at (or en_route_at when none)
+    const HOUR = 60 * 60 * 1000;
+    const enRoute = (en_route_at) => ({ status: 'en_route', track_state: 'en_route', en_route_at, track_token_expires_at: live });
+    expect(recipientTrackLinkOpen(enRoute(ago(3 * HOUR)))).toBe(true);
+    expect(recipientTrackLinkOpen(enRoute(ago(3 * HOUR + 1)))).toBe(false);
+    expect(recipientTrackLinkOpen(enRoute(null))).toBe(false);
+    expect(recipientTrackLinkOpen(enRoute('not-a-date'))).toBe(false);
+    const onSite = (extra) => ({ status: 'on_site', track_state: 'on_property', track_token_expires_at: live, ...extra });
+    expect(recipientTrackLinkOpen(onSite({ arrived_at: ago(4 * HOUR) }))).toBe(true);
+    expect(recipientTrackLinkOpen(onSite({ arrived_at: ago(4 * HOUR + 1) }))).toBe(false);
+    expect(recipientTrackLinkOpen(onSite({ arrived_at: null, en_route_at: ago(2 * HOUR) }))).toBe(true);
+    expect(recipientTrackLinkOpen(onSite({ arrived_at: null, en_route_at: ago(5 * HOUR) }))).toBe(false);
+    expect(recipientTrackLinkOpen(onSite({ arrived_at: null, en_route_at: null }))).toBe(false);
+    // an en route time well in the future is not proof either
+    expect(recipientTrackLinkOpen(enRoute(ago(-HOUR)))).toBe(false);
+    expect(recipientTrackLinkOpen({ status: 'en_route', track_state: 'en_route', track_token_expires_at: null })).toBe(false);
+    // a mixed pair is a stale row: no link
+    expect(recipientTrackLinkOpen({ status: 'on_site', track_state: 'en_route', en_route_at: ago(60000), arrived_at: ago(60000), track_token_expires_at: live })).toBe(false);
+    expect(recipientTrackLinkOpen({ status: 'en_route', track_state: 'on_property', en_route_at: ago(60000), arrived_at: ago(60000), track_token_expires_at: live })).toBe(false);
+    expect(recipientTrackLinkOpen({ status: 'confirmed', track_state: 'scheduled', track_token_expires_at: live })).toBe(false);
+    expect(recipientTrackLinkOpen({ status: 'completed', completed_at: ago(2 * 60 * 60 * 1000), track_token_expires_at: live })).toBe(true);
+    expect(recipientTrackLinkOpen({ status: 'completed', completed_at: ago(2 * 60 * 60 * 1000 + 1), track_token_expires_at: live })).toBe(false);
+    expect(recipientTrackLinkOpen({ status: 'completed', completed_at: null, track_token_expires_at: live })).toBe(false);
+    expect(recipientTrackLinkOpen(null)).toBe(false);
+  });
+
   test('fails closed for expired or malformed expirations', () => {
     expect(isTrackTokenLive('2026-05-05T11:59:59.999Z')).toBe(false);
     expect(isTrackTokenLive('not-a-date')).toBe(false);

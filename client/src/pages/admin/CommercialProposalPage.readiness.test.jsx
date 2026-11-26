@@ -6,8 +6,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import CommercialProposalPage from './CommercialProposalPage';
 
-// Proposal readiness (owner 2026-11-01): GET /admin/estimates/:id/proposal carries `firstVisit` only with
-// GATE_COMMERCIAL_FIRST_VISIT on and `commercialAgreement` only with GATE_COMMERCIAL_PROPOSAL_SIGN on. The builder's
+// Proposal readiness (owner 2026-11-01): GET /admin/estimates/:id/proposal carries `firstVisit`, and `commercialAgreement` only with GATE_COMMERCIAL_PROPOSAL_SIGN on. The builder's
 // Readiness card says what online signing and the first visit will do for this proposal, and why not; with neither
 // key there is no card. Staff copy only: the customer page is unchanged.
 const makeFixture = ({ commercialAgreement, firstVisit } = {}) => ({

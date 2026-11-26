@@ -19,6 +19,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
+const { RE_SERVICE_SERVICE_KEYS } = require('./re-service');
+const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require('./no-cost-visit-types');
 
 const ASSESSMENT_DISPLAY_NAME = 'Waves Assessment';
 const ASSESSMENT_NAME_RE = /^waves assessment$/i;
@@ -76,6 +79,43 @@ function excludeAssessmentBookings(query, bookingAlias = 'scheduled_services', s
       `${bookingAlias}.service_type`, ASSESSMENT_DISPLAY_NAME.toLowerCase(),
     ],
   );
+}
+
+// The paid visit that starts coverage for an estimate: the ONE rule the accept-time overlap check (public and manual)
+// and the converter share, so the date the check guards is the date the term is created on. A visit counts when it is
+// linked to this estimate and to the estimate's own customer, and is paid. A free Waves Assessment, a callback, a
+// re-service (including one completed before the callback flag existed) and retained history (cancelled, skipped,
+// no_show, rescheduled) never anchor a paid term. Returns the query ordered earliest first; same-day visits tie-break
+// on start time then id, as the public appointment lookup does, so every caller takes the same first visit. Rows with
+// a hold stamp (reservation_expires_at) stay out, as the converter's reservation path has always read them; a claimed
+// booking that keeps an old stamp is a separate rule.
+function paidEstimateVisitsQuery(database, { estimateId, customerId }) {
+  const query = database('scheduled_services')
+    .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+    .where({
+      'scheduled_services.source_estimate_id': estimateId,
+      'scheduled_services.customer_id': customerId,
+    })
+    .whereNull('scheduled_services.reservation_expires_at')
+    .whereRaw('scheduled_services.is_callback IS NOT TRUE')
+    // An included follow-up keeps its parent's paid name, so the flag decides; billing's always-free labels
+    // (re-service, follow-up, re-visit, appointment, estimate) are free whatever the catalog says.
+    .whereRaw('scheduled_services.followup_included IS NOT TRUE')
+    .whereRaw("COALESCE(scheduled_services.service_type, '') !~* ?", [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX])
+    // Same classifier as annual-prepay-renewals: catalog key, the key stored on the visit (a legacy visit with no
+    // catalog link keeps only that), then the re-service label.
+    .whereRaw(
+      `NOT (COALESCE(services.service_key, '') = ANY(?)
+        OR COALESCE(scheduled_services.service_key_snapshot, '') = ANY(?)
+        OR (COALESCE(services.name, '') || ' ' || COALESCE(scheduled_services.service_type, '')) ~* ?)`,
+      [Array.from(RE_SERVICE_SERVICE_KEYS), Array.from(RE_SERVICE_SERVICE_KEYS), '\\mre-?service\\M'],
+    )
+    .whereNotIn('scheduled_services.status', RETAINED_HISTORY_STATUSES);
+  return excludeAssessmentBookings(query)
+    .orderBy('scheduled_services.scheduled_date', 'asc')
+    .orderBy('scheduled_services.window_start', 'asc')
+    .orderBy('scheduled_services.id', 'asc')
+    .select('scheduled_services.*');
 }
 
 // Drops assessment visits from loaded scheduled_services rows (no catalog
@@ -150,6 +190,7 @@ module.exports = {
   isAssessmentServiceType,
   isAssessmentServiceRow,
   isAssessmentVisit,
+  paidEstimateVisitsQuery,
   withoutAssessmentVisits,
   excludeAssessmentBookings,
   scopeToAssessmentBookings,

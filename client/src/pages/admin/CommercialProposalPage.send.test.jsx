@@ -442,7 +442,7 @@ it('shows no Bid tools switch and no bid sections when the gate is off', async (
   expect(screen.queryByText(COST_SHEET_TITLE)).toBeNull();
 });
 
-// GATE_COMMERCIAL_FIRST_VISIT: a program's visit length sizes the first visit the customer books online. It saves as a
+// A program's visit length sizes the first visit the customer books online. It saves as a
 // number when typed and stays off the payload when blank, so the server keeps no key for it.
 it('saves a program visit length when typed and leaves it off when blank', async () => {
   saved.proposal = {

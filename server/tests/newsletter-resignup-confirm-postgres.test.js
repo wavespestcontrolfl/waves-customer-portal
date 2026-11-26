@@ -351,4 +351,61 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect(await reload(wiped.id)).toBeUndefined();
     expect((await reload(fresh.id)).status).toBe('pending');
   });
+
+  // Migration 20261125200000 (owner 2026-11-25, "YES THEY DID"): the Beehiiv import rows that still
+  // hold their sign-up get the reader proof; a source label alone, or any opt-out, sunset or
+  // comeback stamp, does not.
+  test('the Beehiiv sign-up step writes the proof only on rows of the import run nobody wrote since, with the sign-up intact', async () => {
+    const migration = require('../models/migrations/20261125200000_newsletter_beehiiv_signup_proof');
+    const day = new Date('2026-04-19T11:42:00Z');
+    const confirmed = new Date('2026-04-19T11:42:01Z');
+    // Everything runs in one transaction that always rolls back: the step updates every
+    // matching row of the database, not only these fixtures.
+    const trx = await db.transaction();
+    try {
+      const bee = async (over = {}) => {
+        const [r] = await trx('newsletter_subscribers').insert({
+          email: addr(), source: 'beehiiv_migration', status: 'active', subscribed_at: new Date('2025-06-01T12:00:00Z'), created_at: day, updated_at: day, confirmed_at: confirmed, ...over,
+        }).returning('*');
+        return r;
+      };
+      const rows = {
+        kept: await bee(),
+        orphan: await bee({ source: 'beehiiv_migration_orphan' }),
+        upper: await bee({ email: `UPPER-${addr()}`.toUpperCase() }),
+        written: await bee({ updated_at: new Date('2026-08-01T12:00:00Z') }),
+        // An address corrected 30 minutes after the import: the move stamps updated_at.
+        corrected: await bee({ updated_at: new Date(day.getTime() + 30 * MIN) }),
+        // The edges of the run: its first and last rows are inside, the exclusive end is not.
+        first: await bee({ created_at: new Date('2026-04-19T11:41:06.249Z'), updated_at: new Date('2026-04-19T11:41:06.249Z') }),
+        last: await bee({ created_at: new Date('2026-04-19T11:44:55.258Z'), updated_at: new Date('2026-04-19T11:44:55.258Z') }),
+        atEnd: await bee({ created_at: new Date('2026-04-19T11:44:56Z'), updated_at: new Date('2026-04-19T11:44:56Z') }),
+        // A web sign-up inside the run that carried a Beehiiv label: its sign-up date is the insert time.
+        webInRun: await bee({ subscribed_at: day }),
+        // A Beehiiv-labelled row from a public sign-up later the same day: outside the run.
+        sameDay: await bee({ created_at: new Date('2026-04-19T16:00:00Z'), updated_at: new Date('2026-04-19T16:00:00Z') }),
+        lateLabel: await bee({ created_at: new Date('2026-06-01T12:00:00Z'), updated_at: new Date('2026-06-01T12:00:00Z') }),
+        website: await bee({ source: 'newsletter_footer' }),
+        optedOut: await bee({ status: 'unsubscribed', unsubscribed_at: day }),
+        unsubStamp: await bee({ unsubscribed_at: day }),
+        sunset: await bee({ deactivated_at: day }),
+        cameBack: await bee({ resubscribed_at: day }),
+        noConfirm: await bee({ confirmed_at: null }),
+        clicked: await bee({ reader_confirmed_at: new Date('2026-11-24T12:00:00Z'), reader_confirmed_email: 'clicked@example.com' }),
+      };
+      await migration.up(trx);
+      await migration.up(trx);
+      const after = {};
+      for (const [name, r] of Object.entries(rows)) after[name] = await trx('newsletter_subscribers').where({ id: r.id }).first();
+      const proofed = Object.keys(rows).filter((name) => after[name].reader_confirmed_at !== null);
+      expect(proofed.sort()).toEqual(['clicked', 'first', 'kept', 'last', 'orphan', 'upper']);
+      expect(after.kept.reader_confirmed_at.getTime()).toBe(confirmed.getTime());
+      expect(after.kept.reader_confirmed_email).toBe(rows.kept.email.toLowerCase());
+      expect(after.upper.reader_confirmed_email).toBe(rows.upper.email.toLowerCase());
+      // A reader's own earlier click is left as it was.
+      expect(after.clicked.reader_confirmed_email).toBe('clicked@example.com');
+    } finally {
+      await trx.rollback();
+    }
+  });
 });

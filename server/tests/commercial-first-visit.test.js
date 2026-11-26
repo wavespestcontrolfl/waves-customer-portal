@@ -1,5 +1,5 @@
-// "Pick your first visit" after a commercial agreement is signed (GATE_COMMERCIAL_FIRST_VISIT,
-// services/commercial-first-visit.js). The /book engine, the booking commit, the accept and the
+// "Pick your first visit" after a commercial agreement is signed
+// (services/commercial-first-visit.js). The /book engine, the booking commit, the accept and the
 // seeder are stubbed at their seams; the alert goes through the REAL composeAdminAlert, which
 // throws under test on any rule break. Invariants: only an eligible plan books; the commit is a
 // PAID internal visit at the per-visit price with the one-visit-per-estimate guard; the accept
@@ -86,9 +86,7 @@ function chain(table) {
   return c;
 }
 
-const ORIGINAL_GATE = process.env.GATE_COMMERCIAL_FIRST_VISIT;
 beforeEach(() => {
-  process.env.GATE_COMMERCIAL_FIRST_VISIT = 'true';
   rows = {
     scheduled_services: undefined,
     customers: {
@@ -123,10 +121,6 @@ beforeEach(() => {
   mockNotifyAdmin.mockReset().mockResolvedValue({ id: 'n1' });
   mockPreview.mockReset().mockImplementation(async ({ amount }) => ({ tax_amount: Math.round(amount * 0.07 * 100) / 100 }));
   mockBlockedUnderLock.mockReset().mockResolvedValue(false);
-});
-afterAll(() => {
-  if (ORIGINAL_GATE === undefined) delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
-  else process.env.GATE_COMMERCIAL_FIRST_VISIT = ORIGINAL_GATE;
 });
 
 describe('firstVisitPlan', () => {
@@ -199,12 +193,6 @@ function firstVisitVisitPlan(options) {
 }
 
 describe('firstVisitCtaFor (/data)', () => {
-  test('gate off: nothing, and no read', async () => {
-    delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
-    expect(await firstVisit.firstVisitCtaFor(proposalEstimate(), { open: true, picker: true })).toBeNull();
-    expect(db).not.toHaveBeenCalled();
-  });
-
   test('signed and open where the customer can tap: the picker with the visit length', async () => {
     expect(await firstVisit.firstVisitCtaFor(proposalEstimate(), { open: true, picker: true })).toEqual({ state: 'pick', durationMinutes: 55 });
   });
@@ -473,14 +461,6 @@ describe('the in-transaction estimate guard', () => {
     expect(mockBlockedUnderLock).toHaveBeenCalledWith(trx, expect.objectContaining({ id: ESTIMATE_ID }));
   });
 
-  // Pre-push audit P0: the gate is read after the guard's last lock wait (the call-side locks, the customer row), so a
-  // flip during any of them books nothing.
-  test('the gate turned off during the guard\'s own lock waits: ineligible, and no accept pin', async () => {
-    const g = guard();
-    mockBlockedUnderLock.mockImplementationOnce(async () => { delete process.env.GATE_COMMERCIAL_FIRST_VISIT; return false; });
-    expect(await g.revalidate(trxWith({ scheduled_services: undefined, estimates: proposalEstimate() }))).toBe('ineligible');
-    expect(g.acceptPin).toBeNull();
-  });
 });
 
 // Codex #6869 P1: the completion mint bills the visit price at the customer's own tax setup, so only a quote taxed the
@@ -623,12 +603,9 @@ describe('firstVisitReadiness (the builder Readiness card, owner 2026-11-01)', (
 });
 
 describe('firstVisitOnlineFor (the signed-agreement alert copy)', () => {
-  test('true for an eligible estimate with no visit; false with the gate off or a visit booked', async () => {
+  test('true for an eligible estimate with no visit; false once a visit is booked', async () => {
     expect(await firstVisit.firstVisitOnlineFor(ESTIMATE_ID)).toBe(true);
     rows.scheduled_services = { id: VISIT_ID };
-    expect(await firstVisit.firstVisitOnlineFor(ESTIMATE_ID)).toBe(false);
-    rows.scheduled_services = undefined;
-    delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
     expect(await firstVisit.firstVisitOnlineFor(ESTIMATE_ID)).toBe(false);
   });
 });

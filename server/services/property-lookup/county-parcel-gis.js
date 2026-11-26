@@ -1116,9 +1116,29 @@ async function querySitusLike(county, layerUrl, fields, likeBody, timeoutMs, dia
 // recorded subdivision are the best sourceable size signal. Positive-only,
 // fail-open: any miss returns null and the caller falls to its next source.
 // Charlotte's ownership layer carries no living-area figure — unsupported.
+// The base-plat name match: the base itself, or the base and a space, so
+// "FOO PH I" never absorbs "FOO PH II" (Codex r6 P2). `serverBase` asks it of
+// the layer in one WHERE. Manatee cannot: its firewall answers an HTML
+// "Request Rejected" page for two UPPER() calls joined by AND or OR
+// (measured 2026-11-22). So Manatee asks ONE prefix test (`prefixBase`), and
+// `baseNameKeeps` applies the delimiter rule to the names it returns.
+// Sarasota keeps the server-side form, so a longer plat that only shares the
+// prefix never uses up its page cap.
+// Each match is { clause(field, upper), keeps(name, upper) }: the WHERE part
+// and the check on a returned row's name.
+const keepEvery = () => true;
+const EXACT_NAME = { clause: (field, upper) => `UPPER(${field}) = '${upper}'`, keeps: keepEvery };
+const SERVER_BASE = { clause: (field, upper) => `(UPPER(${field}) = '${upper}' OR UPPER(${field}) LIKE '${upper} %')`, keeps: keepEvery };
+const PREFIX_BASE = {
+  clause: (field, upper) => `UPPER(${field}) LIKE '${upper}%'`,
+  keeps: (name, upper) => {
+    const n = String(name ?? '').toUpperCase();
+    return n === upper || n.startsWith(`${upper} `);
+  },
+};
 const SUBDIVISION_MEDIAN_FIELDS = {
-  Manatee: { nameField: 'PAR_SUBDIV_NAME', livingField: 'BLDGS_SQFT_LIVING', lotField: 'LAND_SQFT_CAMA' },
-  Sarasota: { nameField: 'subd', livingField: 'living', lotField: 'lsqft' },
+  Manatee: { nameField: 'PAR_SUBDIV_NAME', livingField: 'BLDGS_SQFT_LIVING', lotField: 'LAND_SQFT_CAMA', base: PREFIX_BASE },
+  Sarasota: { nameField: 'subd', livingField: 'living', lotField: 'lsqft', base: SERVER_BASE },
 };
 const SUBDIVISION_MEDIAN_MIN_SAMPLES = 8;
 // Plats mix lot series (40'/52'/62' frontages), each with its own plans, so
@@ -1158,9 +1178,10 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs, { exact
   const safe = String(whereName || '').replace(/'/g, '').trim();
   if (!cfg || !safe) return null;
   const upper = safe.toUpperCase();
-  const nameClause = exact
-    ? `UPPER(${cfg.nameField}) = '${upper}'`
-    : `(UPPER(${cfg.nameField}) = '${upper}' OR UPPER(${cfg.nameField}) LIKE '${upper} %')`;
+  // The base-plat form and its name check are the county's own (see
+  // SUBDIVISION_MEDIAN_FIELDS); the exact phase is one comparison everywhere.
+  const match = exact ? EXACT_NAME : cfg.base;
+  const nameClause = match.clause(cfg.nameField, upper);
   const values = [];
   // Offset advances by the rows the server actually RETURNED (a cut-off
   // page can be shorter than the page size), never by the page size.
@@ -1169,7 +1190,7 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs, { exact
     const params = new URLSearchParams({
       f: 'json',
       where: `${nameClause} AND ${cfg.livingField} > 0`,
-      outFields: [cfg.livingField, cfg.lotField].filter(Boolean).join(','),
+      outFields: [cfg.livingField, cfg.lotField, cfg.nameField].filter(Boolean).join(','),
       returnGeometry: 'false',
       resultRecordCount: String(SUBDIVISION_PAGE_SIZE),
       // A stable sort makes resultOffset pages disjoint (ArcGIS gives no
@@ -1195,7 +1216,7 @@ async function querySubdivisionLivingSqft(county, whereName, deadlineMs, { exact
     for (const f of features) {
       const attrs = ciAttr(f?.attributes || {});
       const living = positiveOrNull(attrs(cfg.livingField));
-      if (living) values.push({ living, lot: cfg.lotField ? positiveOrNull(attrs(cfg.lotField)) : null });
+      if (living && match.keeps(attrs(cfg.nameField), upper)) values.push({ living, lot: cfg.lotField ? positiveOrNull(attrs(cfg.lotField)) : null });
     }
     // No rows with the limit flag set would loop on the same offset forever.
     if (data?.exceededTransferLimit !== true || features.length === 0) return values.sort((a, b) => a.living - b.living);

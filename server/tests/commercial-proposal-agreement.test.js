@@ -619,7 +619,7 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY), Net 30 or Net 6
     });
   });
 
-  // GATE_COMMERCIAL_FIRST_VISIT books the first visit only under the quote the customer signed.
+  // The commercial first visit books only under the quote the customer signed.
   describe('signedQuoteMatches: the quote now is the quote the customer signed', () => {
     async function signedFor(estimate) {
       const made = makeDb({ estimate });
@@ -665,7 +665,7 @@ describe('payment paragraph: Auto Pay (GATE_COMMERCIAL_AUTOPAY), Net 30 or Net 6
     });
   });
 
-  // GATE_COMMERCIAL_FIRST_VISIT: when the signer can book the first visit online, the office watches for that booking
+  // When the signer can book the first visit online, the office watches for that booking
   // (its own alert) instead of booking by phone beside it.
   describe('the office alert when the customer books the first visit online', () => {
     afterEach(() => jest.restoreAllMocks());

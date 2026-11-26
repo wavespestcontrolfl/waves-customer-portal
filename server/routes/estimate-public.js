@@ -23,7 +23,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
-const { isAssessmentVisit, excludeAssessmentBookings, hadCompletedAssessmentLook } = require('../services/assessment-booking');
+const { isAssessmentVisit, excludeAssessmentBookings, hadCompletedAssessmentLook, paidEstimateVisitsQuery } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -13759,34 +13759,35 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // where createTermForAnnualPrepay defaults the start). Guarding with
         // bare "today" 409'd a legitimate next-term renewal whose current
         // term ends before the booked first visit.
-        const reservedStartRow = await trx('scheduled_services')
-          .where({ source_estimate_id: estimate.id })
-          .whereNotNull('customer_id')
-          .whereNull('reservation_expires_at')
-          .orderBy('scheduled_date', 'asc')
-          .first('scheduled_date');
+        const reservedStartRow = await paidEstimateVisitsQuery(trx, {
+          estimateId: estimate.id,
+          customerId,
+        }).first('scheduled_services.scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
-        try {
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx,
-            customerId,
-            overlapTermStart,
-            false,
-            'Customer already has an annual prepay term through',
-            estimate.id,
-          );
-        } catch (overlapErr) {
-          if (overlapErr && overlapErr.annualPrepayOverlap) {
-            const conflict = estimateAcceptError(
-              'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
-              409,
+        const assertAnnualPrepayStart = async (termStart) => {
+          try {
+            await lockAndAssertNoAnnualPrepayOverlap(
+              trx,
+              customerId,
+              termStart,
+              false,
+              'Customer already has an annual prepay term through',
+              estimate.id,
             );
-            conflict.code = 'ANNUAL_PREPAY_OVERLAP';
-            throw conflict;
+          } catch (overlapErr) {
+            if (overlapErr && overlapErr.annualPrepayOverlap) {
+              const conflict = estimateAcceptError(
+                'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
+                409,
+              );
+              conflict.code = 'ANNUAL_PREPAY_OVERLAP';
+              throw conflict;
+            }
+            throw overlapErr;
           }
-          throw overlapErr;
-        }
+        };
+        await assertAnnualPrepayStart(overlapTermStart);
         // Quote revalidation INSIDE the accept transaction (Codex r15):
         // the acknowledged total projected the balance + inspection offer +
         // deposit credit as of the 402 round-trip — credit consumed by
@@ -13862,6 +13863,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
           autoSendInvoice: false,
+          // The converter re-reads the paid visits. If dispatch cancels or
+          // moves the anchor after the check above, verify the exact
+          // normalized start the term is about to be written on while this
+          // transaction still holds the same customer overlap lock.
+          verifyAnnualPrepayTermStart: async (normalizedStart) => {
+            if (dateOnly(normalizedStart) === overlapTermStart) return;
+            await assertAnnualPrepayStart(dateOnly(normalizedStart));
+          },
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
           // Genuinely ADOPTED pre-existing appointment (not a reservation
@@ -19772,16 +19781,14 @@ router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req,
   }
 });
 
-// "Pick your first visit" after a commercial agreement is signed (GATE_COMMERCIAL_FIRST_VISIT, owner 2026-10-26: decision
-// page choice 1B). services/commercial-first-visit.js owns the plan, the times and the booking; these routes decide only
-// that the token names an open estimate the customer is viewing. Gate-aware limiters: a dark gate answers the generic 404
-// on every probe, never a 429.
+// "Pick your first visit" after a commercial agreement is signed (owner 2026-10-26: decision page choice 1B).
+// services/commercial-first-visit.js owns the plan, the times and the booking; these routes decide only that the token
+// names an open estimate the customer is viewing.
 const firstVisitAvailabilityLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 15,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => !featureGates.commercialFirstVisitLive(),
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   message: { error: 'Too many searches. Please try again in a minute.' },
 });
@@ -19790,18 +19797,16 @@ const firstVisitBookLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => !featureGates.commercialFirstVisitLive(),
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   message: { error: 'Too many booking attempts. Please try again in a minute.' },
 });
 
 // Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like commercialAgreementPreGuard: the
-// privacy headers and the dark gate's generic 404 land ahead of any limiter. POST only.
+// privacy headers land ahead of any limiter. POST only.
 const FIRST_VISIT_PATH_RE = /^\/[^/]+\/first-visit(?:\/availability)?\/?$/i;
 function commercialFirstVisitPreGuard(req, res, next) {
   if (req.method !== 'POST' || !FIRST_VISIT_PATH_RE.test(req.path || '')) return next();
   stampCommercialAgreementHeaders(res);
-  if (!featureGates.commercialFirstVisitLive()) return res.status(404).json({ error: 'Estimate not found' });
   return next();
 }
 
@@ -19818,10 +19823,10 @@ function estimateClosedOnline(row) {
   return !UNPUBLISHED_ESTIMATE_STATUSES.includes(row.status) && !firstVisitOpenFor(row);
 }
 
-// The estimate a first-visit request may act on, or null (the generic 404): gate on, not a staff preview tap, a real
+// The estimate a first-visit request may act on, or null (the generic 404): not a staff preview tap, a real
 // token, the durable call-side verdict, and an open, customer-viewable estimate.
 async function firstVisitEstimate(req) {
-  if (!featureGates.commercialFirstVisitLive() || req.query.adminPreview === '1') return null;
+  if (req.query.adminPreview === '1') return null;
   const estimate = await db('estimates').where({ token: req.params.token }).first();
   if (!estimate) return null;
   if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) return null;
@@ -32399,13 +32404,13 @@ async function composeEstimateDataPayload(estimate, {
       && isEstimateAcceptActive(estimate)
       ? await require('../services/commercial-proposal-agreement').agreementCtaFor(estimate)
       : null;
-    // "Pick your first visit" after the agreement is signed (GATE_COMMERCIAL_FIRST_VISIT): nothing is read or added with
-    // the gate off. The booked visit shows on any view (an accepted proposal reads its date from it). `open` is the
-    // agreement card's own condition above, so the next-step copy says the customer picks the visit on the page and in
-    // the PDF alike; the picker itself only where the customer can tap it (never the document render).
+    // "Pick your first visit" after the agreement is signed. The booked visit shows on any view (an accepted proposal
+    // reads its date from it). `open` is the agreement card's own condition above, so the next-step copy says the
+    // customer picks the visit on the page and in the PDF alike; the picker itself only where the customer can tap it
+    // (never the document render).
     const commercialFirstVisitOpen = terminalState === null && (isPdfRenderPass || !verifiedStaffPreview)
       && isEstimateAcceptActive(estimate);
-    const commercialFirstVisitCta = featureGates.commercialFirstVisitLive() && !adminDraftPreview
+    const commercialFirstVisitCta = !adminDraftPreview
       ? await require('../services/commercial-first-visit').firstVisitCtaFor(estimate, {
         open: commercialFirstVisitOpen,
         picker: commercialFirstVisitOpen && !isPdfRenderPass,

@@ -112,6 +112,18 @@ function isTokenLikePathSegment(segment, previousSegment) {
   return false;
 }
 
+// A short link (/l/<code>, services/short-url.js) fronts a bearer-token URL (a tracker, reschedule or pay link), and its
+// code is only 10-11 characters: below every length rule above, so the code itself is the credential. Redacted by
+// position: every segment after a root-level "l", in a path (/l/<code>) or a full URL (a Referer header:
+// https://host/l/<code>). Case-insensitive: Express matches the /l mount without regard to case (/L/<code> reaches the
+// same router, and the router lowercases the code), so /L/<code> is the same credential.
+function isShortLinkCodeSegment(segments, i) {
+  if (!segments[i]) return false;
+  const isMount = (segment) => String(segment || '').toLowerCase() === 'l';
+  return (i >= 2 && segments[0] === '' && isMount(segments[1]))
+    || (i >= 4 && /^https?:$/i.test(segments[0]) && segments[1] === '' && isMount(segments[3]));
+}
+
 /**
  * Redact token-like path segments, preserving original encoding. Public
  * bearer tokens ride the PATH on this app (/api/pay/<token>, …), so a
@@ -129,7 +141,7 @@ function redactRequestPath(rawPath) {
     // redacted. Case-insensitive: Express routes /OG/ here too.
     const underOg = segments[0] === '' && String(segments[1] || '').toLowerCase() === 'og';
     const ogFile = underOg && (i >= 3 || (i === 2 && !/^[a-z-]{1,20}(\.jpg)?$/i.test(segments[i] || '')));
-    if (segments[i] && (ogFile || isTokenLikePathSegment(segments[i], segments[i - 1]))) {
+    if (segments[i] && (ogFile || isShortLinkCodeSegment(segments, i) || isTokenLikePathSegment(segments[i], segments[i - 1]))) {
       segments[i] = REDACTED;
     }
   }

@@ -142,6 +142,15 @@ describe("technician knowledge base is read-only", () => {
     expect(screen.getByRole("button", { name: "Create" })).toHaveAttribute("aria-current", "page");
   });
 
+  it("keeps Company facts admin-only: hidden from a technician, deep link resolves to Browse", () => {
+    renderKnowledgeBase("/admin/knowledge?area=base&kbTab=company-facts", "technician");
+    expect(screen.queryByRole("button", { name: "Company facts" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Browse" })).toHaveAttribute("aria-current", "page");
+    cleanup();
+    renderKnowledgeBase("/admin/knowledge?area=base&kbTab=company-facts", "admin");
+    expect(screen.getByRole("button", { name: "Company facts" })).toHaveAttribute("aria-current", "page");
+  });
+
   async function openEntry(role) {
     renderKnowledgeBase("/admin/knowledge?area=base", role);
     fireEvent.click(await screen.findByRole("button", { name: /Synthetic protocol entry/ }));

@@ -52,7 +52,6 @@ test('a notice issued from the estimate page is marked fromEstimate, with no est
 
 test.each([
   ['a notice staff issued by hand', { issuer: { name: 'Pat Office' } }],
-  ['a commercial agreement that carries its own estimate marker', { estimate: { id: 'est-2', source: 'commercial_proposal_sign' } }],
   ['a contract with no snapshot', null],
 ])('%s has no fromEstimate key', async (_label, snapshot) => {
   mockRow = row(snapshot);
@@ -61,19 +60,11 @@ test.each([
   expect(res.body.contract).not.toHaveProperty('fromEstimate');
 });
 
-// GATE_COMMERCIAL_FIRST_VISIT: the first visit is picked back on the proposal page, so a commercial agreement issued
-// from it offers the way back while the gate is on (off, it is the "no fromEstimate key" case above).
-test('a commercial agreement issued from the proposal page is marked fromEstimate while the first-visit gate is on', async () => {
-  const saved = process.env.GATE_COMMERCIAL_FIRST_VISIT;
-  process.env.GATE_COMMERCIAL_FIRST_VISIT = 'true';
-  try {
-    mockRow = { ...row({ estimate: { id: 'est-3', source: 'commercial_proposal_sign' } }), document_template_key: 'service_agreement.commercial_pest' };
-    const res = await get();
-    expect(res.status).toBe(200);
-    expect(res.body.contract).toMatchObject({ documentTemplateKey: 'service_agreement.commercial_pest', fromEstimate: true });
-    expect(JSON.stringify(res.body)).not.toContain('est-3');
-  } finally {
-    if (saved === undefined) delete process.env.GATE_COMMERCIAL_FIRST_VISIT;
-    else process.env.GATE_COMMERCIAL_FIRST_VISIT = saved;
-  }
+// The first visit is picked back on the proposal page, so a commercial agreement issued from it offers the way back.
+test('a commercial agreement issued from the proposal page is marked fromEstimate', async () => {
+  mockRow = { ...row({ estimate: { id: 'est-3', source: 'commercial_proposal_sign' } }), document_template_key: 'service_agreement.commercial_pest' };
+  const res = await get();
+  expect(res.status).toBe(200);
+  expect(res.body.contract).toMatchObject({ documentTemplateKey: 'service_agreement.commercial_pest', fromEstimate: true });
+  expect(JSON.stringify(res.body)).not.toContain('est-3');
 });

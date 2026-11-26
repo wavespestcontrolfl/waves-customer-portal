@@ -173,7 +173,7 @@ test('arrivalGrace: true is only ever passed by the estimate picker', () => {
 test('bookArrivalGrace is only ever passed by the /book surfaces whose commit is createSelfBooking', () => {
   const ALLOWED = new Set([
     'routes/booking.js', 'routes/reservice-public.js', 'routes/inspection-public.js',
-    // The commercial first visit (GATE_COMMERCIAL_FIRST_VISIT) commits through createSelfBooking too.
+    // The commercial first visit commits through createSelfBooking too.
     'services/commercial-first-visit.js',
   ]);
   const hits = [];

@@ -36,6 +36,7 @@ const { parsePackSize, parsePackCount, countUnitsCompatible } = require('../prod
 const { baseQuantityUnit, convertInventoryQuantity, isValidRateUnit, normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
 const inventoryOperations = require('../inventory-operations');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
+const { REQUEST_HELD } = require('./siteone-request-close');
 const {
   classifyItem, logQueuedLine, findPossibleDuplicateMovement, lockShipment, shipmentHandedOff, SOURCES,
   TITLE_SIZE_RE, sizeClaimMatches, sizeUnit, parseSizeNumber, sizesAgree, round4,
@@ -2139,6 +2140,9 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
       else if (outcome.status === 'agent_ignored' || outcome.status === 'skipped') totals.ignored += 1;
       else totals.held += 1;
     } catch (err) {
+      // A robot restock request held by another action (siteone-request-close.js): nothing was
+      // written, the line stays pending and the next run retries it without spending an attempt.
+      if (err?.code === REQUEST_HELD) { logger.warn(`[inventory-agent] line ${line.id} waits: ${err.message}`); totals.stillPending += 1; continue; }
       logger.error(`[inventory-agent] line ${line.id} ("${line.raw_title}") failed: ${err.message}`);
       try {
         const failure = await recordAttemptFailure(conn, line.id, notify, err.message);

@@ -1,7 +1,7 @@
 // GATE_LAWN_COST_PLUS_LIST (owner 2026-10-09): residential recurring lawn care
 // is listed at cost / (1 - 0.45), never below the market table (its $55 list
-// minimum was retired 2026-11-06 for the $55-after-discount minimum,
-// GATE_LAWN_MIN_AFTER_DISCOUNT; a basis stamped with it still replays it). Discounts apply in full; the 35% collected-margin floor is a review
+// minimum was retired 2026-11-06 for the $55-after-discount minimum; a basis
+// stamped with it still replays it). Discounts apply in full; the 35% collected-margin floor is a review
 // line (owner 2026-11-02, "remove this"). Ships OFF: off must
 // price exactly as before, and a saved estimate replays as it was priced.
 const {
@@ -86,8 +86,10 @@ describe('gate OFF: nothing moves', () => {
 
   test('generateEstimate output is identical to an explicit false (floors still disarmed)', () => {
     const services = fourServices();
-    const followed = generateEstimate(estimateInput(services));
-    const explicit = generateEstimate(estimateInput(fourServices({ costPlusList: false })));
+    // The $55 minimum after discounts is its own rule (0 here pins the market table).
+    const noMin = { lawnMinimumPerVisitAfterDiscount: 0 };
+    const followed = generateEstimate(estimateInput(services, noMin));
+    const explicit = generateEstimate(estimateInput(fourServices({ costPlusList: false }), noMin));
     expect(explicit.lineItems).toEqual(followed.lineItems);
     expect(explicit.summary).toEqual(followed.summary);
     expect(lawnLine(followed).annual).toBe(576);
@@ -300,7 +302,7 @@ describe('discounts apply in full; the 35% margin floor is a review line (owner 
   test('a manual discount on the lawn line applies in full and warns below the floor', () => {
     const estimate = generateEstimate(estimateInput(
       { lawn: lawnService({ costPlusList: true }) },
-      { manualDiscount: { type: 'PERCENT', value: 50 } },
+      { manualDiscount: { type: 'PERCENT', value: 50 }, lawnMinimumPerVisitAfterDiscount: 0 },
     ));
     expect(estimate.summary.recurringAnnualAfterDiscount).toBeCloseTo(346.5, 2);
     expect(estimate.summary.manualDiscount).toEqual(expect.objectContaining({ capped: false }));

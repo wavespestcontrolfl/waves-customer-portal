@@ -1051,6 +1051,10 @@ function initScheduledJobs() {
   // or observe to 'true' reaches this process too.
   require('./sms-prompt-patch').startPatchRefresh();
 
+  // Company facts bank (owner 2026-11-25): the approved-lines snapshot loads here too, before the cronJobs return below, so a process with
+  // crons disabled never serves a retired line past the 5-minute stale rule. Nothing reads the bank yet; an empty bank changes nothing.
+  require('./company-facts-bank').startBankRefresh();
+
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.
   if (!isEnabled('cronJobs')) {
@@ -4480,6 +4484,45 @@ function initScheduledJobs() {
       await runExclusive('call-research-miner', () => mineCallResearch({ limit: 150 }));
     } catch (err) {
       logger.error(`Call-research miner failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 4:05AM ET — Lead "why" filler (no LLM). Fills leads.previous_company /
+  // switch_reason / not_booked_reason from call_research_chunks with fixed
+  // keyword rules; the job owns the fields and recomputes them (it replaces or
+  // clears a stale value). Runs an hour
+  // after the 3:05 call-research miner. Kill switch: LEAD_WHY_FILL=off (not a gate).
+  // =========================================================================
+  cron.schedule('5 4 * * *', async () => {
+    if (process.env.LEAD_WHY_FILL === 'off') return;
+    logger.info('Running: Lead why filler');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { fillLeadWhy } = require('./lead-why-fill');
+      await runExclusive('lead-why-fill', () => fillLeadWhy());
+    } catch (err) {
+      logger.error(`Lead why filler failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // MONDAYS 8:15AM ET — "Why we win and lose" weekly bell (owner ruling 2026-11-25). ONE needs-you
+  // row for the Monday-to-Sunday week that ended: wins vs not booked, top switch reasons, top rivals,
+  // top not-booked reasons, and leads with a promised quote or callback still owed. Key = the ET
+  // Monday reported, so a rerun writes nothing; a week with no leads raises nothing. Sends nothing to
+  // a customer, no paid API. Kill switch: LEAD_WHY_WEEKLY=off (not a gate).
+  // =========================================================================
+  cron.schedule('15 8 * * 1', async () => {
+    if (process.env.LEAD_WHY_WEEKLY === 'off') return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('lead-why-weekly', async () => {
+        const result = await require('./lead-why-weekly').runLeadWhyWeekly();
+        logger.info(`Lead why weekly: ${result.leads} lead(s) (${result.outcome})`);
+      });
+    } catch (err) {
+      logger.error(`Lead why weekly failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

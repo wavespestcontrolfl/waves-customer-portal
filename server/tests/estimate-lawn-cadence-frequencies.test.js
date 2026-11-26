@@ -1282,13 +1282,6 @@ describe('sectionTierEligibleFromKeys — per-section badge (single source of tr
 });
 
 describe('lawn $55 minimum after discounts renders the full discount on the price card (owner 2026-11-06)', () => {
-  const GATE = 'GATE_LAWN_MIN_AFTER_DISCOUNT';
-  let priorGate;
-  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
-  afterEach(() => {
-    if (priorGate === undefined) delete process.env[GATE];
-    else process.env[GATE] = priorGate;
-  });
   // The customer price card (client PriceCard.jsx) strikes through
   // frequency.perVisit, else monthlyBase x 12 / visits, and labels the gap
   // "WaveGuard <tier> Discount" only when the gap equals the tier % of that

@@ -167,6 +167,46 @@ function estimateDiscountContext(estimate) {
   };
 }
 
+// The discount context of an invoice's breakdown (acceptedVisitBreakdown) and of the check that audits it
+// (invoice-tier-line-check.js): the estimate's context plus the engine's line items, which give a row that saved only
+// its net its list price (engineListBasis). Only the invoice reads them: the Complete Service card prices from
+// estimateDiscountContext alone, so a recovered list price never becomes a price a proposal could cut to.
+function invoiceDiscountContext(estimate) {
+  if (!estimate) return {};
+  return { ...estimateDiscountContext(estimate), engineLineItems: pricingRecords(object(estimate.estimate_data)).lineItems };
+}
+
+// The saved result the estimate's lines come from (estimate-public.js acceptanceServiceLists: result, else engineResult)
+// with its recurring block, and the engine's line items for that result: its own when the engine result was saved whole,
+// else the engine result saved beside the mapped one.
+function pricingRecords(data) {
+  const source = object(data.result || data.engineResult || data);
+  const lineItems = Array.isArray(source.lineItems) ? source.lineItems : object(data.engineResult).lineItems;
+  return { block: object(source.recurring), lineItems: (Array.isArray(lineItems) ? lineItems : []).filter((item) => item && typeof item === 'object') };
+}
+
+// The engine's recurring lines of one service: each becomes a recurring row on its own (estimate-public.js
+// recurringServicesWithSupplements; a one-time line such as a plan's first-visit fee does not).
+function serviceEngineLines(lineItems, serviceKey) {
+  const { recurringServiceKey: rowServiceKey, recurringServicesWithSupplements } = require('../routes/estimate-public');
+  return lineItems.filter((item) => rowServiceKey(item) === serviceKey && recurringServicesWithSupplements({ lineItems: [item] }).length > 0);
+}
+
+// The tier and rate the engine applied to one service of the estimate: exactly one recurring engine line of that
+// service, whose only discount is the WaveGuard tier, at one rate. Else null.
+function engineTierRecord(lineItems, serviceKey) {
+  const items = serviceEngineLines(lineItems, serviceKey);
+  if (items.length !== 1) return null;
+  const applied = object(items[0].discount).appliedDiscounts;
+  const priced = (Array.isArray(applied) ? applied : []).filter((d) => Number(d?.amount) > 0);
+  const [rate, ...otherRates] = [...new Set(priced.map((d) => Number(d.amount)))];
+  if (otherRates.length || !(rate > 0 && rate <= 1) || priced.some((d) => d.type !== 'waveguard')) return null;
+  // The engine names the tier on the applied discount (discount-engine.js getEffectiveDiscount); records that name
+  // different tiers name none.
+  if (new Set(priced.map((d) => tierWord(d.tier))).size !== 1) return null;
+  return { rate, tier: tierWord(priced[0].tier) };
+}
+
 function tierSavingsOn(base, rate) {
   return rate > 0 && rate <= 1 ? money(base - applyDiscount(base, 'percentage', rate * 100)) : null;
 }
@@ -191,17 +231,20 @@ function tierNetCents(listCents, rate) {
 // tier's annual on the annual list price, and the billed net its per-visit share. The annual list price is list price
 // x visits, or the row's own saved annual list when the list price is its rounded per-visit share (the engine prices
 // lawn and tree programs from the annual). A row with neither proves nothing.
+const visitCount = (row) => [row.visitsPerYear, row.visits, row.appsPerYear, row.frequency].map(Number).find((count) => count > 0);
+
 function tierPricedRow(raw, base, savings, rate) {
   if (!(rate > 0 && rate <= 1)) return false;
   const baseCents = Math.round(base * 100);
   const netCents = Math.round((base - savings) * 100);
   const ownNet = money(raw.priceAfterDiscount);
   if (ownNet !== null) return Math.round(ownNet * 100) === netCents && tierNetCents(baseCents, rate).includes(netCents);
-  const visits = [raw.visitsPerYear, raw.visits, raw.appsPerYear, raw.frequency].map(Number).find((count) => count > 0);
+  const visits = visitCount(raw);
   const annual = money(raw.annualAfterDiscount);
   if (!visits || !(annual > 0) || Math.round((annual / visits) * 100) !== netCents) return false;
   const savedLists = [raw.annualBeforeDiscount, raw.annual].map(money)
-    .filter((list) => list !== null && Math.round((list / visits) * 100) === baseCents);
+    // At an exact half cent the share rounds either way (a float divide or whole cents), as tierNetCents allows.
+    .filter((list) => list !== null && [Math.round((list / visits) * 100), Math.round(Math.round(list * 100) / visits)].includes(baseCents));
   return [baseCents * visits, ...savedLists.map((list) => Math.round(list * 100))]
     .some((listCents) => tierNetCents(listCents, rate).includes(Math.round(annual * 100)));
 }
@@ -267,6 +310,66 @@ function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDisco
   return rows;
 }
 
+// A net-only recurring row (owner 2026-11-25, "all rec": lawn and tree-and-shrub rows print the tier line too). The
+// mapped lawn and tree-and-shrub rows save only the accepted net: per visit, per year and per month, with the tier's
+// rate on the row and no list price. The engine's own line for that service, saved beside the row, keeps the list
+// annual and the tier record. That line is the row's list price only when every figure agrees: the engine applied
+// only the estimate's own tier at the estimate's own rate (engineTierRecord, savedEstimateTier), the row and the line
+// count the same visits, the row's net annual is the line's, and the list annual's per-visit share at that rate is the
+// visit's net to the cent. The list price is then that per-visit share, and the row carries the list annual
+// (annualBeforeDiscount); that list price is taken only when the tier proof every list-price row passes
+// (acceptedDiscountRows: namingTier, tierPricedRow and each row rule) names the whole saving as the tier, and nothing
+// else. A row with a WaveGuard record of its own is not this shape. Any other row, or a disagreement, returns null:
+// the row keeps its own net as its base, no saving, and one invoice line.
+// The net-only shape: no net or list figure of its own beside the base, and no applied discount record of its own (a
+// WaveGuard record names its own tier, another discount is not the tier's, and a record that is not a list is
+// malformed): the row keeps its own net.
+function netOnlyRow(raw) {
+  const applied = object(raw.discount).appliedDiscounts;
+  return money(raw.priceAfterDiscount) === null && money(raw.annualBeforeDiscount) === null
+    && (applied == null || (Array.isArray(applied) && applied.length === 0));
+}
+
+function engineListBasis(raw, line, amount, ownBase, context = {}) {
+  const { estimateTier = null, engineLineItems = null } = context;
+  if (!estimateTier || !Array.isArray(engineLineItems) || amount === null || money(ownBase) !== amount || !netOnlyRow(raw)) return null;
+  const { recurringServiceKey: rowServiceKey } = require('../routes/estimate-public');
+  const serviceKey = rowServiceKey({ ...raw, service: raw.service || line.serviceKey || undefined });
+  const record = engineTierRecord(engineLineItems, serviceKey);
+  const rate = Number(estimateTier.amount);
+  if (!record || record.tier !== estimateTier.tier || Math.abs(record.rate - rate) > 1e-9) return null;
+  const [item] = serviceEngineLines(engineLineItems, serviceKey);
+  const listCents = engineListCents(raw, item, rate, amount);
+  if (listCents === null) return null;
+  const basis = { base: listCents / 100, row: { ...raw, annualBeforeDiscount: money(item.annualBeforeDiscount) } };
+  const rows = acceptedDiscountRows(basis.row, basis.base, money(basis.base - amount), { ...context, serviceKey: line.serviceKey });
+  return rows.length === 1 && rows[0].named && rows[0].percent !== undefined ? basis : null;
+}
+
+// The engine line's list price for one visit, in cents, when its figures are the row's and the tier's: the same visit
+// count, the same net annual, and that net annual is the tier rate on the list annual (in whole cents). Else null.
+function engineListCents(raw, item, rate, amount) {
+  const visits = visitCount(raw);
+  const listAnnual = money(item.annualBeforeDiscount);
+  const netAnnual = money(item.annualAfterDiscount);
+  // A staff change saved on the engine line (manualFinalAnnual other than its tier annual) is part of the saving.
+  if (!visits || visitCount(item) !== visits || !(listAnnual > 0) || netAnnual === null || staffAdjustedRow(item)) return null;
+  const cents = (value) => Math.round(value * 100);
+  // The per-visit list price the engine saved (perApp, or perVisit on a mosquito line), when each saved one is the
+  // annual's share under either rounding at a half cent; with none saved, the share in whole cents. A saved figure
+  // that is neither conflicts: one line.
+  const shares = [Math.round((listAnnual / visits) * 100), Math.round(cents(listAnnual) / visits)];
+  const saved = [item.perApp, item.perVisit].map(money).filter((figure) => figure !== null).map(cents);
+  if (saved.some((figure) => !shares.includes(figure)) || new Set(saved).size > 1) return null;
+  const listCents = saved.length ? saved[0] : shares[1];
+  // The visit's net is the net annual's share: tierPricedRow proves that, and the tier on the list annual, as for every
+  // list-price row (the engine discounts the annual, so the share can sit a cent off the rate on the list share).
+  // Every annual the row saved is that net (a row that saved another annual is not net-only).
+  const agrees = [raw.annualAfterDiscount, raw.annual ?? netAnnual].every((figure) => money(figure) === netAnnual)
+    && tierNetCents(cents(listAnnual), rate).includes(cents(netAnnual));
+  return agrees && listCents >= cents(amount) ? listCents : null;
+}
+
 function acceptedPricing(line, discountContext = {}) {
   const raw = line.sourceLine || {};
   const recurring = line.source === 'recurring';
@@ -277,14 +380,17 @@ function acceptedPricing(line, discountContext = {}) {
   };
   const bases = { month: null, application: firstMoney(raw.perTreatment, raw.perApp, raw.perVisit),
     one_time: firstMoney(raw.priceBeforeDiscount, raw.price, raw.amount) };
-  const amount = amounts[unit]; const base = bases[unit];
+  const amount = amounts[unit];
+  const engine = unit === 'application' ? engineListBasis(raw, line, amount, bases.application, discountContext) : null;
+  const base = engine ? engine.base : bases[unit];
   const discount = object(raw.discount);
   const complete = amount !== null && base !== null && base >= amount;
   const savings = complete ? money(base - amount) : null;
   return {
     amount, unit, base, savings, breakdownAvailable: complete,
     // The staff discount is named only on recurring applications, the work it reaches.
-    discounts: acceptedDiscountRows(raw, base, savings, unit === 'application' ? { ...discountContext, serviceKey: line.serviceKey } : {}),
+    discounts: acceptedDiscountRows(engine ? engine.row : raw, base, savings,
+      unit === 'application' ? { ...discountContext, serviceKey: line.serviceKey } : {}),
     // A bare list figure cannot justify another percentage on a legacy net.
     provenUndiscounted: complete && savings === 0 && !line.parentRecurringDiscounted
       && money(raw.manualFinalAnnual) === null
@@ -576,7 +682,7 @@ function visitPriceDecisionRecorded(service) {
 // `firstApplication`: the first bill at acceptance, which also bills the first visits a multi-program accept leaves
 // unpriced (the bill covers them) at the accepted price, and a visit with no saving at its own price (discounts: []),
 // so one undiscounted program does not keep a bundle's discounts off that bill; that caller reconciles its total.
-// A breakdown, and reasons no_breakdown and discount_unnamed, also carry `estimate` (the accepted estimate row read
+// A breakdown, and reasons no_breakdown, no_discount and discount_unnamed, also carry `estimate` (the accepted estimate row read
 // here) and `line` (the schedule line the visit matched, by service id or key: its saved row is `line.sourceLine`, the
 // key it matched `line.serviceKey`), so a check of the estimate's own records prices the same line
 // (invoice-tier-line-check.js).
@@ -592,15 +698,18 @@ async function acceptedVisitBreakdown(service, { database = db, firstApplication
   const match = matchServiceLine(service, await estimateScheduleLines(database, source.estimate));
   if (match.status !== 'matched') return none(`line_${match.status}`);
   const matched = { estimate: source.estimate, line: match.line };
-  const quote = acceptedPricing(match.line, estimateDiscountContext(source.estimate));
+  const quote = acceptedPricing(match.line, invoiceDiscountContext(source.estimate));
   if (quote.unit !== 'application') return none('not_per_application');
   if (!quote.breakdownAvailable) return { ...none('no_breakdown'), ...matched };
-  if (!(quote.savings > 0) && !firstApplication) return none('no_discount');
   if (!unpricedFirst && !sameMoney(service.estimated_price, quote.amount)) return none('price_changed');
+  // A line with no saving, that the visit bills at its accepted price, carries the match too, so the nightly check can
+  // ask whether the engine's tier record names a saving this reading missed (invoice-tier-line-check.js).
+  if (!(quote.savings > 0) && !firstApplication) return { ...none('no_discount'), ...matched };
   if (!quote.discounts.every((row) => row.named)) return { ...none('discount_unnamed'), ...matched };
   return { breakdown: { base: quote.base, amount: quote.amount, discounts: quote.discounts.map(({ name, dollars }) => ({ name, dollars })) }, ...matched };
 }
 
 module.exports = { MONEY_FIELDS, visitPriceDecisionRecorded, loadCompletionPricing, prepareCompletionPricingReview, lockCompletionPricingEstimate,
   commitCompletionPricingReview, lockCompletionPricingParent, committedCompletionPrice, acceptedPricing, acceptedVisitBreakdown,
-  matchServiceLine, propertyMatches, money, sameMoney, estimateDiscountContext, staffDiscountOnRecurring };
+  matchServiceLine, propertyMatches, money, sameMoney, estimateDiscountContext, invoiceDiscountContext, staffDiscountOnRecurring,
+  pricingRecords, serviceEngineLines, engineTierRecord };

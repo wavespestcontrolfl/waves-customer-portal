@@ -129,11 +129,23 @@ describe('density/cluster term (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
     const heavy = scoreAppointmentPlacement(placement({ stops_that_day: 3, route_minutes: 540 }), NEUTRAL_PREFS, {});
     const overfull = scoreAppointmentPlacement(placement({ stops_that_day: 3, route_minutes: 650 }), NEUTRAL_PREFS, {});
     expect(light.workload_score).toBe(5);
-    expect(heavy.workload_score).toBeCloseTo(5 * (1 - (540 - 360) / 240), 2);
+    expect(heavy.workload_score).toBeCloseTo(5 * (1 - (540 - 480) / 90), 2);
     expect(overfull.workload_score).toBe(0);
     delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
     const legacy = scoreAppointmentPlacement(placement({ stops_that_day: 3, route_minutes: 650 }), NEUTRAL_PREFS, {});
     expect(legacy.workload_score).toBe(5); // 3 stops: full legacy credit
+  });
+
+  // Owner 2026-11-24 *all rec*: a full day is 12 stops (owner 11-22). The old 360-minute bound
+  // took workload points off any day past about 6 stops, which pushed visits off busy days.
+  test('gate on: a 12-stop day (480 route minutes) keeps full workload credit; credit ends at the 570-minute day', () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const twelve = scoreAppointmentPlacement(placement({ stops_that_day: 12, route_minutes: 480 }), NEUTRAL_PREFS, {});
+    const sevenStops = scoreAppointmentPlacement(placement({ stops_that_day: 7, route_minutes: 400 }), NEUTRAL_PREFS, {});
+    const dayEnd = scoreAppointmentPlacement(placement({ stops_that_day: 14, route_minutes: 570 }), NEUTRAL_PREFS, {});
+    expect(twelve.workload_score).toBe(5);
+    expect(sevenStops.workload_score).toBe(5);
+    expect(dayEnd.workload_score).toBe(0);
   });
 
   test('total weights are unchanged (cluster term still worth exactly 10 of 100)', () => {

@@ -3,7 +3,9 @@
  * stops a "rest of route" move would land outside the route technician's shift
  * (services/rain-out.js, routeShiftRows), on REAL Postgres rows: the DATE and TIME
  * columns as pg reads them back, the real reader of the rest of the route, the real
- * readers of the hours and of the work days.
+ * readers of the hours and of the work days. The same rows prove the office's shift
+ * line for a picked hour (pickedShiftLines): the tapped stop's own hour on that sheet
+ * (checkTarget), and a picked slot on the pickers' check (checkSlots).
  *
  * Runs in the DB-gated CI step (DATABASE_URL on the migrated waves_test database) or a
  * local scratch Postgres; it skips without one. Fixtures are fictitious. Every row it
@@ -154,6 +156,166 @@ postgres('the stops a rest-of-route move would land outside the shift (real Post
     expect(await check(anchor, laterDay, '09:00', '10:00')).not.toHaveProperty('routeShiftConflicts');
     await db('technicians').where({ id: technicianId }).update({ work_days: [weekday] });
     expect((await check(anchor, laterDay, '09:00', '10:00')).routeShiftConflicts).toHaveLength(2);
+  });
+
+  // The office's shift line for the hour it picked, asked before the save (pickedShiftLines).
+  describe('the office\'s shift line for a picked hour', () => {
+    const lineOf = async (technicianId, end = '5:00 PM') => {
+      const { name } = await db('technicians').where({ id: technicianId }).first('name');
+      return `${name}'s shift is 8:00 AM to ${end}. This visit is outside those hours.`;
+    };
+    // The pickers' check. The overlap answer reads every technician's visits on the day, so only the line is read here.
+    const slotLines = async (targets) => (await RainOut.checkSlots({ targets, caller: { isAdmin: true, technicianId: null } }))
+      .results.map((result) => result.shiftWarning ?? null);
+    const weekdayOf = (date) => new Date(`${date}T12:00:00Z`).getUTCDay();
+    const allDaysBut = (weekday) => [0, 1, 2, 3, 4, 5, 6].filter((day) => day !== weekday);
+
+    test('the tapped stop: the hour the office picks, with the visit\'s stored length, on the target\'s day', async () => {
+      const technicianId = await makeTech();
+      const line = await lineOf(technicianId);
+      const anchor = await makeStop(technicianId, '09:00', '10:00');
+      // A visit may start at the shift's start and end at its end.
+      expect(await check(anchor, laterDay, '08:00', '09:00')).not.toHaveProperty('shiftWarning');
+      expect(await check(anchor, laterDay, '16:00', '17:00')).not.toHaveProperty('shiftWarning');
+      expect((await check(anchor, laterDay, '16:30', '17:30')).shiftWarning).toBe(line);
+      expect((await check(anchor, laterDay, '07:30', '08:30')).shiftWarning).toBe(line);
+      // A later hour today is the same question.
+      expect((await check(anchor, today, '16:30', '17:30')).shiftWarning).toBe(line);
+      // A stop already outside the shift that keeps its day and its hours: no line, as the mover states none.
+      const late = await makeStop(technicianId, '17:00', '18:00');
+      expect(await check(late, today, '17:00', '18:00')).not.toHaveProperty('shiftWarning');
+      expect((await check(late, today, '17:30', '18:30')).shiftWarning).toBe(line);
+      expect((await check(late, laterDay, '17:00', '18:00')).shiftWarning).toBe(line);
+      // The picked window ends in the hours; the visit's stored ninety minutes do not.
+      await db('scheduled_services').where({ id: anchor }).update({ estimated_duration_minutes: 90 });
+      expect((await check(anchor, laterDay, '16:00', '16:30')).shiftWarning).toBe(line);
+      expect(await check(anchor, laterDay, '15:00', '15:30')).not.toHaveProperty('shiftWarning');
+    });
+
+    test('the tapped stop: a recurring visit\'s day move is judged on the hour the commit books', async () => {
+      const technicianId = await makeTech();
+      const line = await lineOf(technicianId);
+      const anchor = await makeStop(technicianId, '09:00', '10:00', { is_recurring: true });
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      try {
+        // The commit books 16:30 on another day as 16:00 to 17:00, which the shift holds; 17:30 as 17:00 to 18:00.
+        expect(await check(anchor, laterDay, '16:30', '17:30')).not.toHaveProperty('shiftWarning');
+        expect((await check(anchor, laterDay, '17:30', '18:30')).shiftWarning).toBe(line);
+        // A later hour today is no day move: the picked window books as it is.
+        expect((await check(anchor, today, '16:30', '17:30')).shiftWarning).toBe(line);
+        // A visit that is not recurring books the picked window.
+        await db('scheduled_services').where({ id: anchor }).update({ is_recurring: false });
+        expect((await check(anchor, laterDay, '16:30', '17:30')).shiftWarning).toBe(line);
+      } finally {
+        delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+      }
+    });
+
+    test('the tapped stop: no line on a day the technician does not work, with no set hours, or with the gate off', async () => {
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      const weekday = weekdayOf(laterDay);
+      const technicianId = await makeTech({ work_days: allDaysBut(weekday) });
+      const line = await lineOf(technicianId);
+      const anchor = await makeStop(technicianId, '09:00', '10:00');
+      const late = () => check(anchor, laterDay, '16:30', '17:30');
+      // The shift is not an off day's: the move itself is told the day-off line.
+      expect(await late()).not.toHaveProperty('shiftWarning');
+      await db('technicians').where({ id: technicianId }).update({ work_days: [weekday] });
+      expect((await late()).shiftWarning).toBe(line);
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(await late()).not.toHaveProperty('shiftWarning');
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      await db('technicians').where({ id: technicianId }).update({ shift_start: null, shift_end: null });
+      expect(await late()).not.toHaveProperty('shiftWarning');
+    });
+
+    test('a picked slot: each slot that names a technician gets that technician\'s line, on the picked window and the length sent', async () => {
+      const technicianId = await makeTech({ shift_end: '12:00' });
+      const noHours = await makeTech({ shift_start: null, shift_end: null });
+      const line = await lineOf(technicianId, '12:00 PM');
+      const slot = (start, end, extra) => ({ date: laterDay, window: { start, end }, technicianId, ...extra });
+      expect(await slotLines([
+        slot('11:00', '12:00'), // ends at the shift's end
+        slot('11:30', '12:30'),
+        slot('07:30', '08:30'),
+        slot('11:00', '11:30', { durationMinutes: 90 }), // the window ends in the hours; the length does not
+        slot('11:00', '11:30', { durationMinutes: 30 }),
+        slot('11:30', '12:30', { technicianId: undefined }), // no technician chosen
+        slot('11:30', '12:30', { technicianId: noHours }),
+        slot('11:30', '12:30', { technicianId: randomUUID() }), // no such technician
+      ])).toEqual([null, line, line, line, null, null, null, null]);
+    });
+
+    test('a picked slot: a moved visit is judged on its stored length, not on the span the calendar sends', async () => {
+      const technicianId = await makeTech();
+      const line = await lineOf(technicianId);
+      // Ninety minutes of work in a one-hour window, and a visit of sixty.
+      const long = await makeStop(technicianId, '09:00', '10:00', { estimated_duration_minutes: 90 });
+      const short = await makeStop(technicianId, '11:00', '12:00');
+      const noLength = await makeStop(technicianId, '13:00', '14:00', { estimated_duration_minutes: null });
+      const last = (extra) => ({ date: laterDay, window: { start: '16:00', end: '17:00' }, technicianId, durationMinutes: 60, ...extra });
+      expect(await slotLines([
+        last({ serviceId: long }), // the save keeps the ninety minutes: done at 17:30
+        last({ serviceId: short }),
+        last({ serviceId: long, durationEdit: true }), // an edit of the length: the save writes the sixty minutes sent
+        last({ serviceId: short, durationMinutes: 90, durationEdit: true }),
+        last({ serviceId: `{${long}}` }),
+        last({ serviceId: noLength, durationMinutes: 120 }), // no stored length: the window alone, as the save judges it
+        last({ serviceId: randomUUID(), durationMinutes: 90 }), // no such visit: the length sent
+        last({ durationMinutes: 90 }), // a new appointment: the length sent
+        last({}),
+      ])).toEqual([line, null, null, line, line, null, line, line, null]);
+    });
+
+    test('a picked slot: a technician caller is judged on the stored length of its own visit only', async () => {
+      const technicianId = await makeTech();
+      const other = await makeTech();
+      const line = await lineOf(technicianId);
+      // Ninety minutes of work in a one-hour window, one visit of each technician.
+      const own = await makeStop(technicianId, '09:00', '10:00', { estimated_duration_minutes: 90 });
+      const others = await makeStop(other, '09:00', '10:00', { estimated_duration_minutes: 90 });
+      const lineFor = async (caller, serviceId) => (await RainOut.checkSlots({
+        targets: [{ date: laterDay, window: { start: '16:00', end: '17:00' }, technicianId, durationMinutes: 60, serviceId }], caller,
+      })).results[0].shiftWarning ?? null;
+      expect(await lineFor({ isAdmin: false, technicianId }, own)).toBe(line);
+      expect(await lineFor({ isAdmin: false, technicianId }, others)).toBeNull();
+      expect(await lineFor({ isAdmin: true, technicianId: null }, others)).toBe(line);
+    });
+
+    test('a picked slot: a technician caller is answered about itself only, and an id in another spelling is the same technician', async () => {
+      const technicianId = await makeTech({ shift_end: '12:00' });
+      const other = await makeTech();
+      const line = await lineOf(technicianId, '12:00 PM');
+      const lineFor = async (caller, id) => (await RainOut.checkSlots({
+        targets: [{ date: laterDay, window: { start: '11:30', end: '12:30' }, technicianId: id }], caller,
+      })).results[0].shiftWarning ?? null;
+      expect(await lineFor({ isAdmin: false, technicianId }, technicianId)).toBe(line);
+      expect(await lineFor({ isAdmin: false, technicianId: other }, technicianId)).toBeNull();
+      expect(await lineFor(null, technicianId)).toBeNull();
+      // Its own id in another spelling is still its own, and another technician's is not.
+      expect(await lineFor({ isAdmin: false, technicianId }, `{${technicianId}}`)).toBe(line);
+      expect(await lineFor({ isAdmin: false, technicianId }, technicianId.replace(/-/g, ''))).toBe(line);
+      expect(await lineFor({ isAdmin: false, technicianId: other }, `{${technicianId}}`)).toBeNull();
+      // The check takes a uuid in braces, with no hyphens, or in capitals, and so does PostgreSQL.
+      const admin = { isAdmin: true, technicianId: null };
+      expect(await lineFor(admin, `{${technicianId}}`)).toBe(line);
+      expect(await lineFor(admin, technicianId.replace(/-/g, ''))).toBe(line);
+      expect(await lineFor(admin, technicianId.toUpperCase())).toBe(line);
+    });
+
+    test('a picked slot: no line on a day the technician does not work, and none with the gate off', async () => {
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      const weekday = weekdayOf(laterDay);
+      const technicianId = await makeTech({ shift_end: '12:00', work_days: allDaysBut(weekday) });
+      const line = await lineOf(technicianId, '12:00 PM');
+      const late = () => slotLines([{ date: laterDay, window: { start: '11:30', end: '12:30' }, technicianId }]);
+      expect(await late()).toEqual([null]);
+      // With the work-days gate off every day is a work day.
+      delete process.env.GATE_TECH_WORK_DAYS;
+      expect(await late()).toEqual([line]);
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(await late()).toEqual([null]);
+    });
   });
 
   test('no set hours, and GATE_TECH_SHIFT_HOURS off: no key', async () => {

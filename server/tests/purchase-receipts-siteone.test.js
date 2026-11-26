@@ -93,6 +93,20 @@ describe('readSiteOneInvoice', () => {
     expect(invoice.lines.map(({ quantity, lineNo }) => [quantity, lineNo])).toEqual([[1, 1], [1, 2], [1, 3], [-1, 4]]);
   });
 
+  test.each([
+    ['a printed PO, trimmed', ' WAVES-AB12CD34 ', 'WAVES-AB12CD34'],
+    ['no PO printed (null)', null, null],
+    ['a blank PO', '   ', null],
+    ['a PO that is not text', 12345, null],
+  ])('the invoice\'s purchase order: %s', async (_label, printed, expected) => {
+    const invoice = await readSiteOneInvoice(storeEmail, now, conn({ ...extracted(), purchase_order: printed }));
+    expect(invoice.purchaseOrder).toBe(expected);
+  });
+
+  test('an extraction from before the field existed has no PO', async () => {
+    expect((await readSiteOneInvoice(storeEmail, now, conn(extracted()))).purchaseOrder).toBeNull();
+  });
+
   test('each line\'s unit of measure: the extracted field, else a "UOM:EA" in its description, else null', async () => {
     const data = extracted();
     data.line_items[1].uom = 'cs';

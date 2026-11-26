@@ -76,7 +76,7 @@ async function recordReceiptSmsDelivery(input, outcome) {
   } catch (err) {
     // The provider already accepted. A missing fact keeps Quick Links
     // closed; it must never turn this delivery into a retry/double text.
-    logger.warn(`[messaging] receipt SMS evidence failed for invoice ${input.invoiceId}: ${err.message}`);
+    logger.warn(`[messaging] receipt SMS evidence failed for invoice ${input.invoiceId}: (code=${err?.code || 'none'})`);
   }
 }
 
@@ -833,7 +833,7 @@ async function sendCustomerMessageCore(input) {
       // on whatever body reaches it and fails CLOSED (refuses) on its own
       // lookup error, so a rewrite-lookup hiccup degrades to "refused this
       // one time", never to "sent the raw withheld link".
-      logger.warn(`[send_customer_message] withheld-link rewrite failed for purpose=${sendInput.purpose}: ${err.message}`);
+      logger.warn(`[send_customer_message] withheld-link rewrite failed for purpose=${sendInput.purpose}: (code=${err?.code || 'none'})`);
     }
   }
 
@@ -1741,7 +1741,7 @@ async function recordSmsOfferAfterSend(input, sendInput, providerOutcome, preSen
       preSendVisitSnapshot,
     });
   } catch (err) {
-    logger.warn(`[send-customer-message] sms offer ledger skipped: ${err.message}`);
+    logger.warn(`[send-customer-message] sms offer ledger skipped: (code=${err?.code || 'none'})`);
   }
 }
 

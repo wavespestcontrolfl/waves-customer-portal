@@ -189,7 +189,7 @@ async function promiseLevelFacts(trx, deps, { id, dateStr }) {
   try {
     return deps.toldFactsOf(await deps.loadPromiseFacts(trx, [id], deps.now()), [id], dateStr);
   } catch (_) {
-    return { told: new Set([id]), dayTold: new Set(), toldStart: new Map() };
+    return { told: new Set([id]), dayTold: new Set(), toldStart: new Map(), toldCap: new Map() };
   }
 }
 

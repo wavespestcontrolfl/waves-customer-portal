@@ -1,10 +1,12 @@
 /**
  * restaurant_prospects against live Postgres (services/prospects/dbpr-restaurants.js): the (kind, source_key) key,
  * the upsert that refreshes last_seen_at and nothing else and writes a repeated key once, the report read that never overwrites a pest_evidence
- * answer, the pending query (NULL answer, under 3 attempts, inside the date window, newest first), and the read
- * measure, judged and saved under a lock (settleRead). It refuses
+ * answer, the pending query (NULL answer, under 3 attempts, inside the date window, newest first), the read
+ * measure, judged and saved under a lock (settleRead), and the weekly job's report reads with its own store. It refuses
  * any database but a private QA one or CI's, and its rows carry a per-run business marker so cleanup touches only them.
  */
+const fs = require('fs');
+const path = require('path');
 const { randomUUID } = require('crypto');
 
 const SKIP = !process.env.DATABASE_URL;
@@ -237,6 +239,17 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect((await rows().whereIn('source_key', [60, 61, 62, 63, 64].map(key))).map((r) => r.pest_evidence)).toEqual([null, null, null, null, null]);
   });
 
+  test('a pending row and the answer the parser gives for its page save as they are', async () => {
+    await svc.upsertRecords([rec(70, { event_date: '2026-10-21', detail: FIRST })]);
+    const [read] = await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100, keys: [key(70)] });
+    const page = fs.readFileSync(path.join(__dirname, 'fixtures', 'dbpr-restaurants', 'report-35b.html'), 'utf8');
+    const report = svc.parseInspectionReport(page, read);
+    expect(report).toEqual({ inspectionType: 'Routine - Food', pestEvidence: false, findings: [] });
+    expect(await svc.saveReport(read, report)).toBe(true);
+    const [saved] = await rows().where({ source_key: key(70) });
+    expect([saved.pest_evidence, saved.detail.findings]).toEqual([false, []]);
+  });
+
   test('saveReport does not overwrite an answer already written', async () => {
     await svc.upsertRecords([rec(3, { detail: FIRST })]);
     const [row] = await rows().where({ source_key: key(3) });
@@ -278,6 +291,10 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(mine.map((p) => p.id)).toEqual([id(11), id(10)]);
     // The file's count and visit number ride along with the visit's date.
     expect(mine.map((p) => [p.violation35, p.visitNumber, p.visitDate])).toEqual([[2, 1, '2026-11-15'], [1, 1, '2026-10-21']]);
+    // A pending row is the parser's input as it is: the 35B-only page of 10/21/2026 (one 35 row) answers "no pests".
+    const page = fs.readFileSync(path.join(__dirname, 'fixtures', 'dbpr-restaurants', 'report-35b.html'), 'utf8');
+    expect(svc.parseInspectionReport(page, mine[1])).toEqual({ inspectionType: 'Routine - Food', pestEvidence: false, findings: [] });
+    expect(svc.parseInspectionReport(page, { ...mine[1], violation35: 2 })).toBeNull();
     // The old row becomes eligible once a re-read of the file fills its visit number.
     await svc.upsertRecords([rec(16, { event_date: '2026-11-19', detail: first(1) })]);
     expect((await pending()).map((p) => p.id)).toEqual([id(16), id(11), id(10)]);
@@ -289,5 +306,51 @@ maybeDescribe('restaurant_prospects (live Postgres)', () => {
     expect(await pending([])).toEqual([]);
     expect(await svc.pendingInspections({ cutoff: '2026-10-05', limit: 100 })).toEqual([]);
     expect((await rows().where({ id: id(10) }))[0].detail_attempts).toBe(1);
+  });
+
+  // The inspection file's layout, as the unit tests build it: leading-space headers, 58 violation columns.
+  const csvLine = (cells) => cells.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',');
+  const INSP_HEAD = [
+    'District', 'County Number', 'County Name', ' License Type Code', ' License Number', 'Business (DBA-Does Business As) Name',
+    'Location Address', 'Location City', ' Location Zip Code', 'Inspection Number', 'Visit Number', 'Inspection Class',
+    'Inspection Type', 'Inspection Disposition', 'Inspection Date', 'Number of High Priority Violations',
+    ...Array.from({ length: 58 }, (_, i) => `Violation ${String(i + 1).padStart(2, '0')}`),
+    'License ID', 'Inspection Visit ID',
+  ];
+  // A cited first visit (one violation-35 citation) in Bradenton.
+  const inspLine = (visit, date) => csvLine(['D7', '41', 'Manatee', '2010', 'SEA0000001', 'SAMPLE DINER', '200 SAMPLE TRL', 'BRADENTON',
+    '34208', '1', '1', 'Food', 'Routine - Food', 'Warning Issued', date, '2', ...Array.from({ length: 58 }, (_, i) => (i === 34 ? '1' : '0')),
+    '5001', visit]);
+
+  test('the weekly job, with its own store, reads the page of each cited first visit its read lists and saves the answer', async () => {
+    // Visit ids of this run only (digits, as the file gives them), so cleanup touches only these rows.
+    const base = String(parseInt(RUN.slice(0, 8), 16) % 1e9).padStart(9, '0');
+    const visits = [`${base}1`, `${base}2`];
+    const csv = `${csvLine(INSP_HEAD)}\n${inspLine(visits[0], '10/20/2026')}\n${inspLine(visits[1], '11/16/2026')}\n`;
+    const page = fs.readFileSync(path.join(__dirname, 'fixtures', 'dbpr-restaurants', 'report-35a.html'), 'utf8');
+    // The first visit's page is the 35A page of Oct 20. The second visit's page fails, and so do the two license files,
+    // which this test leaves out.
+    const fetchText = async (url) => {
+      if (url.endsWith('/7fdinspi.csv')) return csv;
+      if (url.includes(`InspVisitID=${visits[0]}&`)) return page;
+      throw new Error('HTTP 503');
+    };
+    // The job keeps its read measure under this key: start without one, and put back what was there.
+    const settingKey = 'restaurant_prospects_read_inspection';
+    const before = await db('system_settings').where({ key: settingKey }).first();
+    await db('system_settings').where({ key: settingKey }).del();
+    try {
+      const result = await svc.syncRestaurantProspects({ fetchText, sleep: async () => {}, now: new Date('2026-11-19T15:36:00Z') });
+      expect(result.files).toMatchObject({ inspection: { kept: 2, upserted: 2 }, new_license: { failed: true }, owner_change: { failed: true } });
+      expect(result).toMatchObject({ failures: 2, reportsRead: 1, reportsFailed: 1, reportsLeft: 0, pestFound: 1 });
+      const saved = await db('restaurant_prospects').where({ kind: 'inspection' }).whereIn('source_key', visits).orderBy('source_key')
+        .select('pest_evidence', 'detail_attempts', db.raw("detail->'findings' AS findings"));
+      expect(saved.map((row) => [row.pest_evidence, row.detail_attempts])).toEqual([[true, 0], [null, 1]]);
+      expect(saved[0].findings.map((finding) => finding.code)).toEqual(['35A-02-8', '35A-01-8']);
+    } finally {
+      await db('restaurant_prospects').where({ kind: 'inspection' }).whereIn('source_key', visits).del();
+      await db('system_settings').where({ key: settingKey }).del();
+      if (before) await db('system_settings').insert(before);
+    }
   });
 });

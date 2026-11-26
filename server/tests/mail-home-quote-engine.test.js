@@ -82,4 +82,23 @@ describe('the real engine input and the real dry run of the estimate save, with 
     pricingEngine.syncConstantsFromDB.mockResolvedValue(false);
     expect(await priceHome(row, facts, realDeps().deps)).toEqual({ status: 'failed', reason: 'engine', ...facts });
   });
+
+  // home-book.js holds a mailed postcard's printed price with this adjustment: it must take the exact dollar amount off
+  // the annual price, leave the setup fee alone, and still read as a clean server price of one pest line.
+  test('a fixed operatorPriceAdjustment lowers the annual price by exactly that amount and stays a clean price', async () => {
+    const quote = require('../services/mail/home-quote');
+    const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
+    const { createOrReuseAdminEstimate } = require('../services/admin-estimate-persistence');
+    const priced = async (adjustment) => {
+      const body = quote.estimateBody(row, facts, quote.engineInputFor(facts, buildEngineInput));
+      if (adjustment) body.estimateData.operatorPriceAdjustment = adjustment;
+      const prepared = await createOrReuseAdminEstimate({ database: db, body, technicianId: null, technician: null, dryRun: true, requireLivePricing: true });
+      return quote.judge(prepared);
+    };
+    const plain = await priced(null);
+    const held = await priced({ type: 'FIXED', value: 20.5, label: 'Postcard price held', internalReason: 'test' });
+    expect(plain.price.annual).toBeGreaterThan(20.5);
+    expect(Math.round(held.price.annual * 100)).toBe(Math.round(plain.price.annual * 100) - 2050);
+    expect(held.price.setupFee).toBe(plain.price.setupFee);
+  });
 });

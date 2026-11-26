@@ -18,11 +18,9 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 let mockSignLive = true;
-let mockVisitLive = true;
 jest.mock('../config/feature-gates', () => ({
   ...jest.requireActual('../config/feature-gates'),
   commercialProposalSignLive: () => mockSignLive,
-  commercialFirstVisitLive: () => mockVisitLive,
 }));
 
 const mockClosed = jest.fn(() => false);
@@ -74,7 +72,6 @@ const run = (input = {}) => executeEstimateTool('list_commercial_proposals', inp
 beforeEach(() => {
   n = 0;
   mockSignLive = true;
-  mockVisitLive = true;
   db.__queries.length = 0;
   db.__rows = () => [];
   mockClosed.mockReset().mockReturnValue(false);
@@ -175,15 +172,12 @@ describe('the rows', () => {
     expect((await run({})).proposals[0].signing).toEqual({ state: 'signed', blocked: null });
   });
 
-  test('signing and first_visit are null while their gates are off, and never asked', async () => {
+  test('signing is null while its gate is off, and never asked', async () => {
     db.__rows = () => [row()];
     mockSignLive = false;
-    mockVisitLive = false;
     const [item] = (await run({})).proposals;
     expect(item.signing).toBeNull();
-    expect(item.first_visit).toBeNull();
     expect(mockAgreement).not.toHaveBeenCalled();
-    expect(mockReadiness).not.toHaveBeenCalled();
   });
 
   test('a throw reads as closed, signing unknown and first visit unknown; the rest of the list survives', async () => {
