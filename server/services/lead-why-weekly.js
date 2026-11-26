@@ -33,6 +33,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { scopeToProspects } = require('./lead-statuses');
 const { bookedLeadIds } = require('./lead-why-fill');
+const { isEnabled } = require('../config/feature-gates');
+const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { raiseAdminAlert, cutAtWord, MAX_WHY_CHARS, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const {
   etWeekStart, etDateString, addETDays, parseETDateTime, formatETDayDate,
@@ -221,6 +223,8 @@ async function loadWeekLeads(conn, week) {
  * fails (fail open).
  */
 async function loadOwedLeads(conn, leads) {
+  // With promise tracking off nothing new is recorded, so "none" would be a false all-clear.
+  if (!isEnabled('callCommitments')) return null;
   const { listOpenCommitments } = require('./call-commitments');
   const owed = [];
   try {
@@ -229,7 +233,7 @@ async function loadOwedLeads(conn, leads) {
       // must not hide an owed promise on the next.
       for (let offset = 0; ; offset += OWED_PAGE) {
         const rows = await listOpenCommitments(conn, { leadId: lead.id, party: 'waves', kinds: PROMISE_KINDS, limit: OWED_PAGE, offset });
-        if (rows.some((r) => r.overdue && !r.quiet_call)) { owed.push({ id: lead.id, created_at: lead.created_at }); break; }
+        if (rows.some((r) => r.overdue && !r.quiet_call && !isInternalTestCustomerId(r.customer_id))) { owed.push({ id: lead.id, created_at: lead.created_at }); break; }
         if (rows.length < OWED_PAGE) break;
       }
     }

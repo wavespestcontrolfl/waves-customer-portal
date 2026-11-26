@@ -9,11 +9,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(), _private: {}, safeErrorSummary: jest.fn(() => 'err') }));
 jest.mock('../services/admin-alert-episodes', () => ({ openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn() }));
 jest.mock('../services/call-commitments', () => ({ listOpenCommitments: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ ...jest.requireActual('../config/feature-gates'), isEnabled: jest.fn(() => true) }));
+jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn((id) => id === 'demo-cust') }));
 jest.mock('../services/lead-why-fill', () => ({ ...jest.requireActual('../services/lead-why-fill'), bookedLeadIds: jest.fn(async () => new Set()) }));
 
 const { notifyAdmin } = require('../services/notification-service');
 const episodes = require('../services/admin-alert-episodes');
 const { listOpenCommitments } = require('../services/call-commitments');
+const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const { SWITCH_REASONS, NOT_BOOKED_REASONS } = require('../services/lead-why-fill');
@@ -145,6 +148,15 @@ describe('loadOwedLeads: the Owed queue read, per lead', () => {
     const owed = await loadOwedLeads({}, [lead('Q')]);
     expect(owed.map((l) => l.id)).toEqual(['Q']);
     expect(listOpenCommitments).toHaveBeenCalledWith({}, expect.objectContaining({ offset: 20 }));
+  });
+  test('a demo-account promise is not real follow-up work', async () => {
+    listOpenCommitments.mockResolvedValue([{ overdue: true, quiet_call: false, customer_id: 'demo-cust' }]);
+    expect(await loadOwedLeads({}, [lead('D')])).toEqual([]);
+  });
+  test('with promise tracking off the line is left out, never "none"', async () => {
+    isEnabled.mockReturnValueOnce(false);
+    expect(await loadOwedLeads({}, [lead('X')])).toBeNull();
+    expect(listOpenCommitments).not.toHaveBeenCalled();
   });
   test('fails open: a broken read gives null and a warning', async () => {
     listOpenCommitments.mockRejectedValue(new Error('boom'));
