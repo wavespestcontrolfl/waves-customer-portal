@@ -55,7 +55,10 @@ jest.mock('../services/auto-dispatch/audit', () => ({
 }));
 
 // The rain term's forecast read (GATE_AUTO_DISPATCH_RAIN_TERM) and its run-summary audit row: faked, never the network.
-jest.mock('../services/weather-forecast', () => ({ getNwsHourlyRain: jest.fn(async () => null) }));
+jest.mock('../services/weather-forecast', () => ({
+  getNwsHourlyRain: jest.fn(async () => null),
+  getNwsHourlyRainPatient: (...args) => jest.requireActual('../services/weather-forecast').getNwsHourlyRainPatient(...args),
+}));
 jest.mock('../services/audit-log', () => ({ ...jest.requireActual('../services/audit-log'), recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/auto-dispatch/check-down-notice', () => ({ noteRun: jest.fn(async () => ({ action: 'none' })) }));
 // The van's departure (GATE_AUTO_DISPATCH_DAY_RULES): read only when the run's day rules are on.

@@ -12,7 +12,7 @@
  * byte-identical: no forecast call, no extra read, no extra audit field.
  *
  * Once per run (start): the free NWS hourly forecast is read once per forecast
- * area (scheduling/forecast-zones.js ZONE_COORDS) with getNwsHourlyRain: 10 s
+ * area (scheduling/forecast-zones.js ZONE_COORDS) with getNwsHourlyRainPatient: 10 s
  * wait and one retry per area, never the paid Open-Meteo backup. An area NWS
  * does not answer is unread, and visits there get no rain term.
  *
@@ -47,7 +47,7 @@ const { daysBetween, MIN_DESTINATION_DAYS_OUT } = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const { DAY_OPEN, DAY_CLOSE } = require('./candidate-slots');
 const { ZONE_COORDS, stopForecastZone } = require('../scheduling/forecast-zones');
-const { getNwsHourlyRain } = require('../weather-forecast');
+const { getNwsHourlyRain, getNwsHourlyRainPatient } = require('../weather-forecast');
 
 const MODE_SHADOW = 'shadow';
 // Days out of the forecast window the rain term looks at, and how far each lead is trusted.
@@ -65,7 +65,6 @@ const POP_DRY = 30;
 const POP_SPAN = 50;
 // The owner's pending landing floor: the visit may land 73 hours or more from now.
 const FLOOR_HOURS_PENDING = 73;
-const NWS_WAIT_MS = 10000;
 // At most this many drier-date searches per run: each is a read-only slot search.
 const MAX_SEARCHES_PER_RUN = 60;
 const HOUR_MIN = 60;
@@ -121,11 +120,9 @@ function dayWetness(hours, day) {
 // and a wet reading is never read as drier than it says.
 const expectedWetness = (wetness, lead) => Math.max(wetness, trustFor(lead) * wetness + (1 - trustFor(lead)) * PRIOR_WETNESS);
 
+// The patient NWS read shared with the rain records (long wait, one retry, NWS only).
 async function readArea(zone, read) {
-  const ask = () => Promise.resolve()
-    .then(() => read(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng, { fetchTimeoutMs: NWS_WAIT_MS }))
-    .catch(() => null);
-  const hours = (await ask()) || (await ask());
+  const hours = await getNwsHourlyRainPatient(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng, { read });
   return Array.isArray(hours) && hours.length ? hours : null;
 }
 
