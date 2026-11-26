@@ -366,6 +366,12 @@ async function sendAccountUpdated({
   propertyLabel: explicitPropertyLabel = '',
   changedAt = new Date(),
   idempotencyKey,
+  // Send to this contact ({ email, name }) instead of the customer's current
+  // primary one: the profile edit notifies the address a customer just left.
+  contactOverride = null,
+  // Send even when the actor is the recipient. Set only for an identity change
+  // (name or email edited in the portal), where the notice is the takeover alarm.
+  alwaysNotify = false,
 } = {}) {
   // The account.updated template is a security-style "was this you?" notice.
   // Skip it when the recipient is the same person who made the change — a
@@ -374,6 +380,7 @@ async function sendAccountUpdated({
   // notice is still sent when a different actor (e.g. staff) changed the
   // recipient's settings, or when the actor is unknown (fail toward notifying).
   if (
+    !alwaysNotify &&
     actorCustomerId != null &&
     recipientCustomerId != null &&
     String(actorCustomerId) === String(recipientCustomerId)
@@ -395,6 +402,7 @@ async function sendAccountUpdated({
     recipientCustomerId,
     templateKey: 'account.updated',
     eventType: 'account.updated',
+    contactOverride,
     payload: {
       account_section: accountSection,
       change_summary: summary,

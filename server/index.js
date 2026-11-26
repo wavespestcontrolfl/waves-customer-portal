@@ -933,6 +933,8 @@ app.use('/api/push', require('./routes/push'));
 app.use('/api/customer/activity', require('./routes/customer-activity'));
 // Store rating pop-up claim for the customer app (GATE_APP_RATING_PROMPT, dark) — authenticated.
 app.use('/api/customer/app-rating', require('./routes/customer-app-rating'));
+// Customer edits own name and email (GATE_CUSTOMER_PROFILE_EDIT, dark) — authenticated holder only.
+app.use('/api/customer/profile', require('./routes/customer-profile'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);

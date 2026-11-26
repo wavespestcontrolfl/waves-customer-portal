@@ -662,6 +662,8 @@ router.get('/me', authenticate, async (req, res, next) => {
     // Portal slider (owner ruling 2026-08-28): automatic credit application
     // is the customer's choice; default OFF.
     autoApplyAccountCredit: customer.auto_apply_account_credit === true,
+    // Edit-profile control (GATE_CUSTOMER_PROFILE_EDIT): the app shows it only while this is true.
+    profileEdit: require('../config/feature-gates').customerProfileEditLive(),
     credits,
     annualPrepay,
     // C4: the cancelled state the portal renders read-only. cancelledAt is

@@ -438,6 +438,14 @@ export class ApiClient {
     });
   }
 
+  // The signed-in holder edits their own name and email (GATE_CUSTOMER_PROFILE_EDIT).
+  updateCustomerProfile({ firstName, lastName, email }) {
+    return this.request('/customer/profile', {
+      method: 'PUT',
+      body: JSON.stringify({ firstName, lastName, email }),
+    });
+  }
+
   // `scope: 'saved'` asks for the saved-property list (GATE_APP_PROPERTY_SCOPE);
   // while the gate is off the server answers the profile list regardless.
   getAuthProperties({ scope } = {}) {
