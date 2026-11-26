@@ -519,7 +519,7 @@ describe('bookHome', () => {
   });
 
   test('an identical retry of a booking that committed (the customer has moved past the pre-customer stage) goes to createSelfBooking for its replay', async () => {
-    findCommittedBookingCustomer.mockResolvedValue('cust-1');
+    findCommittedBookingCustomer.mockResolvedValue({ customerId: 'cust-1', estimateId: draftIdFor('prospect-1', validContact(INPUT()), SHOWN) });
     findOwnCustomer.mockResolvedValue(null); // the promoted row is no longer a pre-customer row
     findExistingCustomer.mockResolvedValue({ id: 'cust-1' }); // and the matcher finds it as a customer
     quote.priceHome.mockResolvedValue({ status: 'not_clean', reason: 'member_address' }); // a member at the address now
@@ -539,7 +539,7 @@ describe('bookHome', () => {
   });
 
   test('a committed booking whose draft is gone falls back to the normal path', async () => {
-    findCommittedBookingCustomer.mockResolvedValue('cust-1');
+    findCommittedBookingCustomer.mockResolvedValue({ customerId: 'cust-1', estimateId: draftIdFor('prospect-1', validContact(INPUT()), SHOWN) });
     mockEstimateRow = undefined;
     await bookHome(TOKEN, INPUT(), deps);
     expect(findOwnCustomer).toHaveBeenCalled();

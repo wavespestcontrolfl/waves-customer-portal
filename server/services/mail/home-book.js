@@ -574,9 +574,7 @@ async function recoverCommitted(home, contact, offer, shown, deps) {
   const shownKey = draftIdFor(home.row.id, contact, shown);
   const found = await (deps.findCommittedBookingCustomer || findCommittedBookingCustomer)(home, contact, offer, shownKey, deps);
   if (!found) return null;
-  // A test double may answer with the customer id alone: then the draft is the shown-price one.
-  const customerId = typeof found === 'object' ? found.customerId : found;
-  const estimateId = (typeof found === 'object' && found.estimateId) || shownKey;
+  const { customerId, estimateId } = found;
   const draft = await (deps.db || db)('estimates').where({ id: estimateId }).first('id', 'estimate_data');
   const estimateToken = draft && (deps.handoffToken || REAL.handoffToken())(estimateId);
   if (!estimateToken) return null;
