@@ -23,7 +23,7 @@ const phone = (n) => `+1555${String(Math.abs(parseInt(tag, 16) % 9000) + 1000)}$
 postgres('alert clear-up agent: readers on a real schema', () => {
   let db;
   let agent;
-  const made = { notifications: [], customers: [], smsLog: [], calls: [], emails: [], visits: [], estimates: [] };
+  const made = { notifications: [], customers: [], smsLog: [], calls: [], emails: [], visits: [], estimates: [], conversations: [] };
 
   const customer = async (extra = {}) => {
     const [row] = await db('customers').insert({ first_name: `Test${tag}`, phone: phone(Math.floor(Math.random() * 900)), ...extra }).returning('id');
@@ -58,8 +58,9 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     await db('emails').whereIn('id', made.emails).del();
     await db('scheduled_services').whereIn('id', made.visits).del();
     await db('estimates').whereIn('id', made.estimates).del();
+    await db('messages').whereIn('conversation_id', made.conversations).del();
+    await db('conversations').whereIn('id', made.conversations).del();
     await db('customers').whereIn('id', made.customers).del();
-    await db('system_settings').where({ key: 'alert_clear_agent_cursor' }).del();
     await db.destroy();
   });
 
@@ -166,6 +167,100 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(human[0].at).toEqual(at(22));
   });
 
+  test('an email alert with no customer and no number reads no phone-less rows (a call with a null number, a text with a blank one)', async () => {
+    const emailRow = async (row) => {
+      const [r] = await db('emails').insert({ gmail_id: `g-${randomUUID()}`, cc_address: '', bcc_address: '', ...row }).returning('id');
+      made.emails.push(r.id);
+      return r.id;
+    };
+    const mail = await emailRow({ gmail_thread_id: `th-${tag}-x`, from_address: `stranger${tag}@example.test`, to_address: 'contact@wavespestcontrol.com', subject: 'Hi', body_text: 'hello', received_at: T0, label_ids: JSON.stringify(['INBOX']) });
+    const [nullPhoneCall] = await db('call_log').insert({ direction: 'outbound', status: 'completed', from_phone: null, to_phone: null, created_at: at(10), duration_seconds: 70, source: 'admin-click', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: 'false' } }), metadata: JSON.stringify({ ended_at: at(12).toISOString() }) }).returning('id');
+    made.calls.push(nullPhoneCall.id);
+    await sms({ direction: 'outbound', from_phone: '', to_phone: '', message_type: 'manual', status: 'delivered', message_body: 'blank number text', created_at: at(15), metadata: { human_authored: 'true' } });
+    const row = await alert('inbound_email', 'Email from a stranger', '/admin/communications#tab=email', { payload: { emailId: mail } });
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.complete).toBe(true);
+    expect(timeline.events.filter((e) => e.type === 'call' || e.type === 'sms')).toEqual([]);
+    expect(proofs(timeline)).toEqual([]);
+  });
+
+  test('the triggering text is carried from the canonical message, and the offer before it makes a bare yes a reply pair', async () => {
+    const cid = await customer();
+    const sid = `SM${tag}f`;
+    const [conv] = await db('conversations').insert({ channel: 'sms', customer_id: cid, contact_phone: phone(31) }).returning('id');
+    made.conversations.push(conv.id);
+    await db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'Yes', twilio_sid: sid, created_at: T0 });
+    await sms({ customer_id: cid, direction: 'outbound', message_type: 'manual', status: 'delivered', message_body: 'We could come Friday at 10 am. Does that work?', created_at: at(-30), metadata: { human_authored: 'true' } });
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.complete).toBe(true);
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?' });
+    expect(timeline.ctx[timeline.ctx.length - 1]).toMatch(/the text this alert is about\): Yes/);
+  });
+
+  test('an email "yes" is paired with the Waves offer before it, a draft is not mail', async () => {
+    const address = `r${tag}@example.test`;
+    const cid = await customer({ email: address });
+    const mailRow = async (row) => {
+      const [r] = await db('emails').insert({ gmail_id: `g-${randomUUID()}`, cc_address: '', bcc_address: '', ...row }).returning('id');
+      made.emails.push(r.id);
+      return r.id;
+    };
+    const thread = `th-${tag}-y`;
+    await mailRow({ gmail_thread_id: thread, from_address: 'contact@wavespestcontrol.com', to_address: address, subject: 'Friday', body_text: 'Can we come Friday at 10 am?', received_at: at(-60), label_ids: JSON.stringify(['SENT']) });
+    await mailRow({ gmail_thread_id: thread, from_address: 'contact@wavespestcontrol.com', to_address: address, subject: 'Friday', body_text: 'draft that was never sent', received_at: at(-30), label_ids: JSON.stringify(['DRAFT']) });
+    const yes = await mailRow({ gmail_thread_id: thread, from_address: address, to_address: 'contact@wavespestcontrol.com', subject: 'Re: Friday', body_text: 'Yes\n\nOn Tue someone wrote:\n> Can we come', received_at: T0, label_ids: JSON.stringify(['INBOX']), customer_id: cid });
+    const row = await alert('inbound_email', 'Email from Test', '/admin/communications#tab=email', { payload: { emailId: yes } });
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.reply.lastBody.trim()).toBe('Yes');
+    expect(timeline.reply.prevOutbound).toBe('Can we come Friday at 10 am?');
+  });
+
+  test('a hold voicemail bell: top-level call id, fragment link, judged from the bell\'s own time (a call during the hold answers nothing)', async () => {
+    const cid = await customer();
+    const call = async (row) => {
+      const [r] = await db('call_log').insert({ customer_id: cid, from_phone: '+15550004444', to_phone: '+15550003333', ...row }).returning('id');
+      made.calls.push(r.id);
+      return r.id;
+    };
+    const held = await call({ direction: 'inbound', status: 'completed', created_at: at(-10), duration_seconds: 300, answered_by: 'human', metadata: JSON.stringify({ ended_at: at(-4).toISOString() }) });
+    const during = await call({ direction: 'outbound', status: 'completed', created_at: at(-8), duration_seconds: 80, source: 'admin-click', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: 'false' } }), metadata: JSON.stringify({ ended_at: at(-6).toISOString() }) });
+    const afterBell = await call({ direction: 'outbound', status: 'completed', created_at: at(20), duration_seconds: 80, source: 'admin-click', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: 'false' } }), metadata: JSON.stringify({ ended_at: at(22).toISOString() }) });
+    const row = await alert('voicemail_callback', 'Call back an unknown caller', `/admin/communications#tab=calls&call=${held}`, {
+      dedupeKey: 'call-hold-voicemail:CA' + tag, callLogId: held, reason: 'timeout', payload: { customerId: cid, phone: '+15550004444' },
+    });
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.complete).toBe(true);
+    expect(timeline.unreadable).toBeUndefined();
+    expect(timeline.alertAt).toEqual(T0);
+    const ids = timeline.events.filter((e) => e.proof === 'human_call').map((e) => e.id);
+    expect(ids).toEqual([String(afterBell)]);
+    expect(ids).not.toContain(String(during));
+    expect(ids).not.toContain(String(held));
+  });
+
+  test('a call whose transcript arrives later gets a new fingerprint', async () => {
+    const [c] = await db('call_log').insert({ from_phone: '+15550006666', to_phone: '+15550003333', direction: 'inbound', status: 'completed', created_at: at(-3), duration_seconds: 20, metadata: JSON.stringify({}) }).returning('id');
+    made.calls.push(c.id);
+    const row = await alert('voicemail_callback', 'Voicemail', `/admin/communications#tab=calls&call=${c.id}`, { payload: { callLogId: c.id } });
+    const before = agent.fingerprintOf(row, await agent.buildTimeline(row), new Date());
+    await db('call_log').where({ id: c.id }).update({ transcription: 'please call me about the wasps' });
+    const after = agent.fingerprintOf(row, await agent.buildTimeline(row), new Date());
+    expect(after).not.toBe(before);
+  });
+
+  test('a reader that fills its row cap makes the timeline incomplete (a capped timeline is never trusted)', async () => {
+    const cid = await customer();
+    const sid = `SM${tag}g`;
+    await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'hi', created_at: T0, status: 'received' });
+    const rows = Array.from({ length: 300 }, (_x, i) => ({ customer_id: cid, direction: 'outbound', from_phone: '+15550000001', to_phone: '+15550000002', message_type: 'reminder', status: 'delivered', message_body: `auto ${i}`, created_at: at(1 + (i % 100)) }));
+    const inserted = await db('sms_log').insert(rows).returning('id');
+    inserted.forEach((x) => made.smsLog.push(x.id));
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.complete).toBe(false);
+  });
+
   test('the open alerts are paged from a cursor and wrap around', async () => {
     const ids = [];
     for (let i = 0; i < 3; i += 1) ids.push((await alert('inbound_sms', `Paging ${i}`, '/x')).id);
@@ -187,12 +282,16 @@ postgres('alert clear-up agent: readers on a real schema', () => {
       return { outcome: 'still_owed', why: 'no reply yet', proof: null, model: 'stub-model' };
     });
     const only = { candidates: async () => [row], judge, canCall: () => true };
-    const first = await agent.runAlertClearAgent({ deps: { ...only, cursor: realDeps.cursor, saveCursor: realDeps.saveCursor } });
+    // Test-owned cursor storage: the shared sweep cursor in system_settings is never read, written or deleted here.
+    let testCursor = null;
+    const cursorDeps = { cursor: async () => testCursor, saveCursor: async (id) => { testCursor = id; } };
+    const first = await agent.runAlertClearAgent({ deps: { ...only, ...cursorDeps } });
     expect(first.ai_still_owed).toBe(1);
     expect(seen[0]).toEqual([{ rule: 'ai_reserved', source: 'ai', outcome: 'still_owed' }]);
     const after = await db('alert_clear_verdicts').where({ notification_id: row.id }).select('rule', 'source', 'outcome', 'model', 'why');
     expect(after).toEqual([{ rule: null, source: 'ai', outcome: 'still_owed', model: 'stub-model', why: 'no reply yet' }]);
-    const second = await agent.runAlertClearAgent({ deps: { ...only, cursor: realDeps.cursor, saveCursor: realDeps.saveCursor } });
+    const second = await agent.runAlertClearAgent({ deps: { ...only, ...cursorDeps } });
+    expect(testCursor).toBeNull();
     expect(second.unchanged).toBe(1);
     expect(judge).toHaveBeenCalledTimes(1);
     expect(await realDeps.aiCountToday(new Date())).toBeGreaterThanOrEqual(1);

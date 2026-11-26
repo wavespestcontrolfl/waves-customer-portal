@@ -289,10 +289,14 @@ describe('errors fail safe', () => {
     expect(deps.save).not.toHaveBeenCalled();
   });
 
-  test('an incomplete timeline that already holds a staff text still answers', async () => {
+  test('an incomplete timeline is skipped before any rule: even one holding a staff text writes no verdict, and it is logged', async () => {
+    const logger = require('../services/logger');
     const deps = makeDeps({ timeline: async () => timelineOf([staffText()], { complete: false }) });
-    await agent.runAlertClearAgent({ now: NOW, deps });
-    expect(saved(deps)[0].outcome).toBe('answered');
+    const out = await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(out.incomplete).toBe(1);
+    expect(deps.save).not.toHaveBeenCalled();
+    expect(deps.reserve).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/incomplete timeline/));
   });
 
   test('an alert that does not link to a record is still_owed by rule', async () => {
@@ -554,5 +558,56 @@ describe('the model tier is selectable in the switchboard', () => {
     const selector = SELECTORS.find((x) => x.key === 'ALERT_CLEAR');
     expect(selector.accepts).toMatchObject({ providers: ['anthropic'], cap: 'text', deep: true });
     expect(MODELS.MODEL_CATALOG[MODELS.ALERT_CLEAR]).toMatchObject({ provider: 'anthropic', requires: 'deep' });
+  });
+});
+
+describe('an empty contact matches nothing', () => {
+  const recorder = () => {
+    const calls = [];
+    const q = { where(...a) { calls.push(['where', ...a]); if (typeof a[0] === 'function') a[0]({ orWhereRaw: (...b) => calls.push(['orWhereRaw', ...b]) }); return q; }, whereRaw(...a) { calls.push(['whereRaw', ...a]); return q; } };
+    return { q, calls };
+  };
+  const scope = { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone', 'os.from_phone'] };
+
+  test.each([
+    ['a null phone and no customer', { customerId: null, phone: null }],
+    ['an empty phone', { customerId: '', phone: '' }],
+    ['a blank phone and a blank customer id', { customerId: '   ', phone: '   ' }],
+    ['a phone with no digits', { customerId: null, phone: '+' }],
+    ['no key at all', undefined],
+  ])('%s: the query is made to return no rows, with no phone clause', (_n, key) => {
+    const { q, calls } = recorder();
+    agent.scopeToContact(q, key, scope);
+    expect(calls).toEqual([['whereRaw', '1 = 0']]);
+  });
+
+  test('a customer id wins, and a real phone scopes by phone identity', () => {
+    const byCustomer = recorder();
+    agent.scopeToContact(byCustomer.q, { customerId: ' cust-1 ', phone: '+19415550100' }, scope);
+    expect(byCustomer.calls).toEqual([['where', 'os.customer_id', 'cust-1']]);
+    const byPhone = recorder();
+    agent.scopeToContact(byPhone.q, { customerId: null, phone: '+19415550100' }, scope);
+    expect(byPhone.calls.filter((c) => c[0] === 'orWhereRaw')).toHaveLength(2);
+    expect(byPhone.calls.some((c) => c[0] === 'whereRaw')).toBe(false);
+  });
+});
+
+describe('fingerprint: late evidence re-judges', () => {
+  test('a transcript or customer link that arrives after the first look changes the fingerprint', () => {
+    const call = (hasVoicemail, customerId, ctx) => timelineOf([], { trigger: `call:C1:vm${hasVoicemail ? 1 : 0}:c${customerId || ''}`, ctx });
+    const alert = alertRow({ category: 'voicemail_callback' });
+    const first = agent.fingerprintOf(alert, call(false, null, ['CALLER: x. No voicemail left.']), NOW);
+    expect(agent.fingerprintOf(alert, call(true, null, ['CALLER: x. No voicemail left.']), NOW)).not.toBe(first);
+    expect(agent.fingerprintOf(alert, call(false, 'cust-1', ['CALLER: x. No voicemail left.']), NOW)).not.toBe(first);
+    expect(agent.fingerprintOf(alert, call(false, null, ['CALLER: x. Voicemail or call text: please call me']), NOW)).not.toBe(first);
+  });
+});
+
+describe('a bare yes by email is held like one by text', () => {
+  test('the email reply pair (the sent offer and the "yes") feeds the same booking guard', async () => {
+    const reply = { lastBody: 'Yes', prevOutbound: 'Could we come Friday at 10 am?' };
+    const deps = makeDeps({ timeline: async () => timelineOf([staffText()], { reply, trigger: 'email:E1' }), candidates: async () => [alertRow({ category: 'inbound_email' })] });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(saved(deps)[0]).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
   });
 });

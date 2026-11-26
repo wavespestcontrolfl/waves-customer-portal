@@ -111,7 +111,10 @@ const parseMeta = (raw) => {
 };
 const uuidOrNull = (value) => (UUID_RE.test(String(value || '')) ? String(value).toLowerCase() : null);
 const linkParam = (link, name) => {
-  try { return new URL(String(link || ''), 'http://alert.local').searchParams.get(name) || null; } catch { return null; }
+  try {
+    const url = new URL(String(link || ''), 'http://alert.local');
+    return url.searchParams.get(name) || new URLSearchParams(url.hash.replace(/^#/, '')).get(name) || null;
+  } catch { return null; }
 };
 // Free text on its way to the model: bearer links, tokens and credentials out (signed-link-redaction.js), card numbers masked, one
 // line, cut. Redaction runs BEFORE the cut so a token is never half-kept.
@@ -198,7 +201,13 @@ function makeReader(conn) {
   const state = { complete: true };
   const read = async (label, fn) => {
     try {
-      return (await fn()) || [];
+      const rows = (await fn()) || [];
+      // A reader that filled its cap may have left rows behind: a capped timeline is never trusted.
+      if (Array.isArray(rows) && rows.length >= ROW_CAP) {
+        state.complete = false;
+        logger.warn(`[alert-clear-agent] read ${label} hit its row cap; alert skipped`);
+      }
+      return rows;
     } catch (err) {
       state.complete = false;
       logger.warn(`[alert-clear-agent] read ${label} failed: ${err?.code || err?.name || 'error'}`);
@@ -209,6 +218,17 @@ function makeReader(conn) {
 }
 
 
+// The one place a contact becomes a WHERE. An empty, null or blank customer id or phone matches NOTHING: never the rows whose phone
+// identity is '' (a call with no number, a text with a blank one).
+function scopeToContact(q, key, { customerColumn, phoneColumns }) {
+  const customerId = typeof key?.customerId === 'string' ? key.customerId.trim() : '';
+  if (customerId) return q.where(customerColumn, customerId);
+  const peer = phoneIdentityKey(key?.phone);
+  if (!peer) return q.whereRaw('1 = 0');
+  return q.where((b) => phoneColumns.forEach((col) => b.orWhereRaw(`${phoneIdentitySql(col)} = ?`, [peer])));
+}
+const SMS_SCOPE = { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone', 'os.from_phone'] };
+
 const SMS_COLUMNS = ['os.id', 'os.created_at', 'os.direction', 'os.message_type', 'os.status'];
 const smsBase = (conn) => excludeRecruitingSmsLog(excludeUnresolvedSendReservations(conn('sms_log as os'), 'os'), 'os.message_type');
 
@@ -216,9 +236,7 @@ const smsBase = (conn) => excludeRecruitingSmsLog(excludeUnresolvedSendReservati
 function smsAfter(conn, anchor, key) {
   const q = smsBase(conn).where('os.created_at', '>', anchor).orderBy('os.created_at', 'asc').limit(ROW_CAP)
     .select(...SMS_COLUMNS, conn.raw('left(os.message_body, 1500) as message_body'));
-  if (key.customerId) return q.where('os.customer_id', key.customerId);
-  const peer = phoneIdentityKey(key.phone) || '';
-  return q.where((b) => b.whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [peer]).orWhereRaw(`${phoneIdentitySql('os.from_phone')} = ?`, [peer]));
+  return scopeToContact(q, key, SMS_SCOPE);
 }
 
 // The ids among them a PERSON sent and that reached the customer: the repo's operator + delivery predicates, minus a proactive draft.
@@ -226,8 +244,7 @@ function staffTextIds(conn, anchor, key) {
   const { withoutProactiveDraft } = require('./call-commitments');
   const q = smsBase(conn).where('os.direction', 'outbound').where('os.created_at', '>', anchor)
     .whereRaw(operatorReplySql('os')).whereRaw(smsDeliveredSql('os')).modify(withoutProactiveDraft).limit(ROW_CAP).select('os.id');
-  if (key.customerId) return q.where('os.customer_id', key.customerId);
-  return q.whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [phoneIdentityKey(key.phone) || '']);
+  return scopeToContact(q, key, { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone'] });
 }
 
 function callsAfter(conn, anchor, key, ownCallId) {
@@ -240,9 +257,7 @@ function callsAfter(conn, anchor, key, ownCallId) {
       conn.raw(`(cl.direction = 'outbound' AND cl.status = 'completed' AND ${personCallBackSql('cl')}) as person_back`),
       conn.raw("(cl.direction = 'inbound' AND cl.status = 'completed' AND cl.answered_by = 'human') as human_in"));
   if (ownCallId) q.whereNot('cl.id', ownCallId);
-  if (key.customerId) return q.where('cl.customer_id', key.customerId);
-  const peer = phoneIdentityKey(key.phone) || '';
-  return q.where((b) => b.whereRaw(`${phoneIdentitySql('cl.from_phone')} = ?`, [peer]).orWhereRaw(`${phoneIdentitySql('cl.to_phone')} = ?`, [peer]));
+  return scopeToContact(q, key, { customerColumn: 'cl.customer_id', phoneColumns: ['cl.from_phone', 'cl.to_phone'] });
 }
 
 // Emails a person sent that provably reached THIS customer (emailCustomerLink), or, for a sender with no customer record, that
@@ -329,29 +344,30 @@ async function resolveInboundText(r, sid) {
   const { conn, read } = r;
   const canonical = await read('trigger-message', () => conn('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')
     .where('m.channel', 'sms').where('m.direction', 'inbound').where('m.twilio_sid', sid)
-    .select('m.created_at', 'c.customer_id', conn.raw("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, '')) as phone")));
+    .select('m.created_at', 'c.customer_id', conn.raw('left(m.body, 1500) as body'), conn.raw("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, '')) as phone")));
   const legacy = await read('trigger-sms', () => excludeUnresolvedSendReservations(conn('sms_log as os').where('os.direction', 'inbound').where('os.twilio_sid', sid), 'os')
-    .select('os.created_at', 'os.customer_id', conn.raw('os.from_phone as phone')));
+    .select('os.created_at', 'os.customer_id', conn.raw('left(os.message_body, 1500) as body'), conn.raw('os.from_phone as phone')));
   const found = [...canonical, ...legacy].filter((x) => x.created_at);
   if (!found.length) return null;
   const first = found.sort((a, b) => toDate(a.created_at) - toDate(b.created_at))[0];
-  return { at: toDate(first.created_at), customerId: uuidOrNull(first.customer_id) || uuidOrNull(found.find((x) => x.customer_id)?.customer_id), phone: found.find((x) => x.phone)?.phone || null };
+  return { at: toDate(first.created_at), customerId: uuidOrNull(first.customer_id) || uuidOrNull(found.find((x) => x.customer_id)?.customer_id), phone: found.find((x) => x.phone)?.phone || null, body: first.body ?? found.find((x) => x.body)?.body ?? null };
 }
 
-async function smsContext(r, anchor, key) {
-  const peer = phoneIdentityKey(key.phone) || '';
-  const rows = await r.read('texts-before', () => smsBase(r.conn)
-    .where((b) => (key.customerId ? b.where('os.customer_id', key.customerId)
-      : b.whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [peer]).orWhereRaw(`${phoneIdentitySql('os.from_phone')} = ?`, [peer])))
+// What came before the text, and the pair a bare "yes" is judged on: the triggering text (carried from the canonical message the SID
+// resolved to, never re-read by time) and the latest Waves text before it.
+async function smsContext(r, anchor, key, trigger) {
+  const rows = await r.read('texts-before', () => scopeToContact(smsBase(r.conn), key, SMS_SCOPE)
     .where('os.created_at', '<=', anchor).where('os.created_at', '>=', new Date(anchor.getTime() - 3 * DAY_MS))
     .orderBy('os.created_at', 'desc').limit(MODEL_CONTEXT_LINES).select(...SMS_COLUMNS, r.conn.raw('left(os.message_body, 1500) as message_body')));
   const ordered = rows.slice().reverse();
-  const lastIn = [...ordered].reverse().find((x) => x.direction === 'inbound');
-  const before = lastIn ? ordered.slice(0, ordered.indexOf(lastIn)).reverse().find((x) => x.direction !== 'inbound') : null;
-  return {
-    ctx: ordered.map((x) => smsEvent(x, false).line),
-    reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: before ? String(before.message_body || '') : '' } : null,
-  };
+  const hasTrigger = typeof trigger?.body === 'string';
+  const shown = hasTrigger ? ordered.filter((x) => !(x.direction === 'inbound' && toDate(x.created_at).getTime() === anchor.getTime())) : ordered;
+  const ctx = shown.map((x) => smsEvent(x, false).line);
+  const lastIn = hasTrigger ? { message_body: trigger.body, created_at: anchor } : [...ordered].reverse().find((x) => x.direction === 'inbound');
+  if (hasTrigger) ctx.push(`CUSTOMER TEXT (the text this alert is about): ${clean(trigger.body)}`);
+  const lastAt = lastIn ? toDate(lastIn.created_at) : null;
+  const before = lastAt ? ordered.filter((x) => x.direction !== 'inbound' && toDate(x.created_at) < lastAt).pop() : null;
+  return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: before ? String(before.message_body || '') : '' } : null };
 }
 
 // What every timeline carries. `trigger` names the record the bell is about and when the bell last rang, so a re-ring is a new look.
@@ -371,7 +387,7 @@ async function smsTimeline(r, alert, bellAt) {
   const anchor = text?.at || bellAt;
   const contact = customerId ? { customerId } : (text?.phone ? { customerId: null, phone: text.phone } : null);
   if (!contact) return unreadable(anchor, bellAt);
-  const { ctx, reply } = await smsContext(r, anchor, contact);
+  const { ctx, reply } = await smsContext(r, anchor, contact, text);
   const events = await eventsAfter(r, anchor, contact, { replyTo: null });
   return timelineOf(anchor, bellAt, `sms:${sid || 'none'}`, { customerKnown: !!customerId, ctx, events, reply });
 }
@@ -380,42 +396,68 @@ async function emailTimeline(r, alert, bellAt) {
   const meta = parseMeta(alert.metadata);
   const emailId = uuidOrNull(parseMeta(meta.payload).emailId || linkParam(alert.link, 'id'));
   const mail = emailId ? (await r.read('email', () => r.conn('emails').where('id', emailId)
-    .select('gmail_thread_id', 'customer_id', 'received_at', 'subject', 'from_address')))[0] : null;
+    .select('gmail_thread_id', 'customer_id', 'received_at', 'subject', 'from_address', 'body_text')))[0] : null;
   if (!mail) return unreadable(bellAt, bellAt);
   const anchor = toDate(mail.received_at);
   const before = await r.read('thread-before', () => r.conn('emails as er').where('er.gmail_thread_id', mail.gmail_thread_id)
-    .where('er.received_at', '<=', anchor).orderBy('er.received_at', 'desc').limit(4)
+    .where('er.received_at', '<=', anchor).whereRaw("NOT jsonb_exists(er.label_ids::jsonb, 'DRAFT')").orderBy('er.received_at', 'desc').limit(4)
     .select('er.from_address', r.conn.raw('left(er.body_text, 600) as b'), r.conn.raw('NOT (' + personSentFilter('er') + ') as inbound')));
   const ctx = before.slice().reverse().map((x) => `${x.inbound ? 'CUSTOMER' : 'WAVES'} (${clean(mail.subject, 80)}): ${clean(String(x.b || '').split(/On .{5,60} wrote:/)[0], 500)}`);
   const customerId = uuidOrNull(mail.customer_id) || uuidOrNull(parseMeta(meta.payload).customerId);
   const replyTo = extractEmailAddresses(mail.from_address)[0] || null;
   const events = await eventsAfter(r, anchor, customerId ? { customerId } : { customerId: null, phone: null }, { threadId: mail.gmail_thread_id, replyTo });
-  return timelineOf(anchor, bellAt, `email:${emailId}`, { customerKnown: !!customerId, ctx, events });
+  const offer = before.find((x) => !x.inbound);
+  const reply = { lastBody: String(mail.body_text || '').split(/On .{5,60} wrote:/)[0].slice(0, 600), prevOutbound: offer ? String(offer.b || '') : '' };
+  return timelineOf(anchor, bellAt, `email:${emailId}`, { customerKnown: !!customerId, ctx, events, reply });
+}
+
+async function loadCall(r, callId) {
+  const rows = await r.read('call', () => r.conn('call_log').where('id', callId)
+    .select('id', 'from_phone', 'to_phone', 'direction', 'created_at', 'duration_seconds', 'transcription', 'call_summary', 'ai_summary',
+      'customer_id', 'metadata', r.conn.raw("metadata->>'voicemail_transcription' AS vt")));
+  return rows[0] || null;
+}
+
+// The missed-call text-back (sent to this number at or after the call): the rule-1 fact.
+async function textBackWasSent(r, phone, anchor) {
+  const sent = await r.read('text-back', () => scopeToContact(smsBase(r.conn).where('os.direction', 'outbound').where('os.message_type', 'missed_call_text_back')
+    .whereIn('os.status', ['sent', 'delivered', 'read']), { customerId: null, phone }, { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone'] })
+    .where('os.created_at', '>=', new Date(anchor.getTime() - 60 * 1000)).limit(1).select('os.id'));
+  return sent.length > 0;
+}
+
+// The call a bell is about, from the bell's own fields: payload, the top-level id a hold voicemail bell carries, or the link.
+const callRefsOf = (alert) => {
+  const meta = parseMeta(alert.metadata);
+  const payload = parseMeta(meta.payload);
+  return {
+    payload,
+    hold: String(meta.dedupeKey || '').startsWith('call-hold-voicemail:'),
+    callId: uuidOrNull(payload.callLogId || meta.callLogId || linkParam(alert.link, 'call')),
+  };
+};
+// Who rang: the call's customer (else the bell's), and the caller's number (the other party of an outbound call).
+function callerOf(call, payload) {
+  const number = call.direction === 'outbound' ? call.to_phone : call.from_phone;
+  return { phone: number || payload.phone || null, customerId: uuidOrNull(call.customer_id) || uuidOrNull(payload.customerId) };
 }
 
 async function callTimeline(r, alert, bellAt) {
-  const meta = parseMeta(alert.metadata);
-  const payload = parseMeta(meta.payload);
-  const callId = uuidOrNull(payload.callLogId || linkParam(alert.link, 'call'));
-  const call = callId ? (await r.read('call', () => r.conn('call_log').where('id', callId)
-    .select('id', 'from_phone', 'to_phone', 'direction', 'created_at', 'duration_seconds', 'transcription', 'call_summary', 'ai_summary',
-      'customer_id', 'metadata', r.conn.raw("metadata->>'voicemail_transcription' AS vt"))))[0] : null;
-  const phone = call ? (call.direction === 'outbound' ? call.to_phone : call.from_phone) : null;
-  const customerId = uuidOrNull(call?.customer_id) || uuidOrNull(payload.customerId);
+  const { payload, hold, callId } = callRefsOf(alert);
+  const call = callId ? await loadCall(r, callId) : null;
+  const { phone, customerId } = call ? callerOf(call, payload) : {};
   if (!call || (!customerId && !phone)) return unreadable(bellAt, bellAt);
-  const anchor = callStartedAt(call) || toDate(call.created_at);
+  // A hold voicemail bell rings when the hold ended, not when the call began: a person who spoke with the caller on hold
+  // never answered it. It is judged from its own time, and its own call is left out.
+  const anchor = hold ? bellAt : (callStartedAt(call) || toDate(call.created_at));
   const voicemail = clean(call.transcription || call.vt || call.ai_summary || call.call_summary, 600);
   const ctx = [`CALLER: ${clean(alert.title, 120)}. Rang ${call.duration_seconds || 0} sec. ${voicemail ? `Voicemail or call text: ${voicemail}` : 'No voicemail left.'}`];
-  const contact = customerId ? { customerId } : { customerId: null, phone };
-  const events = await eventsAfter(r, anchor, contact, { ownCallId: call.id });
-  let textBackSent = false;
-  if (alert.category === 'missed_call' && !customerId) {
-    const sent = await r.read('text-back', () => smsBase(r.conn).where('os.direction', 'outbound').where('os.message_type', 'missed_call_text_back')
-      .whereIn('os.status', ['sent', 'delivered', 'read']).whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [phoneIdentityKey(phone) || ''])
-      .where('os.created_at', '>=', new Date(anchor.getTime() - 60 * 1000)).limit(1).select('os.id'));
-    textBackSent = sent.length > 0;
-  }
-  return timelineOf(anchor, bellAt, `call:${callId}`, { customerKnown: !!customerId, ctx, events, call: { customerId, hasVoicemail: !!(call.transcription || call.vt), textBackSent } });
+  const events = await eventsAfter(r, anchor, customerId ? { customerId } : { customerId: null, phone }, { ownCallId: call.id });
+  const textBackSent = alert.category === 'missed_call' && !customerId && await textBackWasSent(r, phone, anchor);
+  const hasVoicemail = !!(call.transcription || call.vt);
+  // The trigger carries the call's voicemail evidence and customer link: a late transcript or a late link is a new look.
+  const trigger = `call:${callId}:vm${hasVoicemail ? 1 : 0}:c${customerId || ''}`;
+  return timelineOf(anchor, bellAt, trigger, { customerKnown: !!customerId, ctx, events, call: { customerId, hasVoicemail, textBackSent } });
 }
 
 // The timeline of one alert (everything after it, with the proof kind of every event set in code).
@@ -452,7 +494,8 @@ function computeFacts(timeline) {
 // A hash of the triggering record, the bell's last ring, the anchor and every after-event with its state. For a missed call it also
 // carries whether 24 hours have passed, so the "nothing from that number in 24 hours" rule gets one fresh look.
 function fingerprintOf(alert, timeline, now) {
-  const parts = [timeline.trigger || '', timeline.bellAt ? toDate(timeline.bellAt).toISOString() : '', toDate(timeline.alertAt).toISOString(),
+  const contextHash = crypto.createHash('sha1').update((timeline.ctx || []).join('\n')).digest('hex');
+  const parts = [timeline.trigger || '', timeline.bellAt ? toDate(timeline.bellAt).toISOString() : '', toDate(timeline.alertAt).toISOString(), contextHash,
     ...(timeline.unreadable ? [] : timeline.events.map((e) => e.key).sort())];
   if (alert.category === 'missed_call') parts.push(now - timeline.alertAt >= DAY_MS ? 'q24' : 'q0');
   return crypto.createHash('sha1').update(parts.join('|')).digest('hex');
@@ -686,6 +729,11 @@ async function aiVerdict(alert, timeline, fingerprint, { deps, budget }) {
 
 async function processAlert(alert, { now, deps, last, budget }) {
   const timeline = await deps.timeline(alert, now);
+  // A timeline with a failed or capped read is never trusted, not even for a rule: no verdict, one log line.
+  if (!timeline.complete) {
+    logger.warn('[alert-clear-agent] incomplete timeline; alert skipped');
+    return 'incomplete';
+  }
   const fingerprint = fingerprintOf(alert, timeline, now);
   if (unchanged(last.get(String(alert.id)), fingerprint, now)) return 'unchanged';
   const ruled = ruleVerdict(alert, timeline, isOwedAlert(alert), now);
@@ -734,6 +782,6 @@ async function runAlertClearAgent({ now = new Date(), deps: override = {} } = {}
 module.exports = {
   runAlertClearAgent,
   // exported for tests
-  defaultDeps, buildTimeline, computeFacts, fingerprintOf, ruleVerdict, settleAiReply, parseJudgeReply, judgeInput, isOwedAlert, guardBareYes,
+  defaultDeps, scopeToContact, buildTimeline, computeFacts, fingerprintOf, ruleVerdict, settleAiReply, parseJudgeReply, judgeInput, isOwedAlert, guardBareYes,
   makeBudget, unchanged, smsEvent, callEvent, callModel, NoKeyError, clean, MAX_ALERTS, SYSTEM_PROMPT,
 };
