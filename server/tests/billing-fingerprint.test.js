@@ -20,16 +20,18 @@ describe('billingFingerprint', () => {
     for (const t of ['FROM payments t WHERE t.customer_id = ?', 'FROM invoices t WHERE t.customer_id = ?',
       'FROM stripe_invoice_charge_attempts a JOIN invoices i ON i.id = a.invoice_id WHERE i.customer_id = ?', 'FROM payment_plans t WHERE t.customer_id = ?',
       'FROM scheduled_services t', 'self_pay_override IS TRUE', 'FROM payers p', 'FROM estimate_deposits d', 'FROM customers c WHERE c.id = ?',
-      'FROM payment_methods t WHERE t.customer_id = ?', 'FROM annual_prepay_terms t WHERE t.customer_id = ?']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
+      'FROM payment_methods t WHERE t.customer_id = ?', 'FROM annual_prepay_terms t WHERE t.customer_id = ?',
+      // the visits of a prepaid plan (the "visits left" sentence): the stamped rows and their whole series
+      't.prepaid_amount > 0', 't.annual_prepay_term_id IS NOT NULL', "t.prepaid_method = 'annual_prepay_invoice'", 'COALESCE(t.recurring_parent_id, t.id) IN']) expect(BILLING_FINGERPRINT_SQL).toContain(t);
     // every fragment hashes the row itself (md5(<alias>::text)), never a hand-picked column list
     expect(BILLING_FINGERPRINT_SQL).not.toMatch(/concat_ws\('\|'/);
-    expect((BILLING_FINGERPRINT_SQL.match(/md5\((?:t|a|p|d|c)::text\)/g) || []).length).toBe(10);
-    expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(12);
+    expect((BILLING_FINGERPRINT_SQL.match(/md5\((?:t|a|p|d|c)::text\)/g) || []).length).toBe(11);
+    expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(14);
   });
   test('reads through the given connection; null on no customer, a failed read, or no row', async () => {
     const dbh = { raw: jest.fn(async () => ({ rows: [{ fingerprint: 'abc' }] })) };
     expect(await billingFingerprint('c1', dbh)).toBe(FP);
-    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(12).fill('c1'));
+    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(14).fill('c1'));
     expect(await billingFingerprint(null, dbh)).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => { throw new Error('down'); } })).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => ({ rows: [] }) })).toBeNull();

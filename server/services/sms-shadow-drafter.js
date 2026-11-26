@@ -229,7 +229,10 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // STAFF FACTS (owner 2026-11-25, texting AI fix step 2): seven lines are appended to COMPANY FACTS (perimeter band, lawn insect control, a pest
 // report before a visit, rain moves, new sod, wasp nests, ants). The exact render changed, so the numbers move to "53" / "54" (here) and
 // "55" / "56" (B1). The 49-52 render is a known earlier render (sms-company-facts.js) with no retired line.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}53_n`;
+// STAFF FACTS (owner 2026-11-25, texting AI fix step 2): the customer's prepaid visits left become a rendered Payment status sentence. A new sentence
+// family appears in the facts, so the numbers move once more, to "57" / "58" (here) and "59" / "60" (B1). The company facts text is unchanged, so no
+// line is retired.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}57_n`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
 // scheduling text from a customer whose upcoming visits are ONE recurring series gets
 // OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
@@ -239,16 +242,16 @@ const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}53_n`;
 // stamps REAL_ANSWERS_PROMPT_VERSION. The two differ ONLY by that rule, and the two
 // behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
 // gate moves. A prompt or facts revision moves BOTH numbers.
-const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}54_n`;
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}58_n`;
 // PROMPT B1 (owner 2026-10-24 "go b1" / "yes all", GATE_SMS_PROMPT_B1): the drafter stops stalling (a missed visit and a covered pest
 // re-service text get real times to offer) and stops false promises (no claimed sends, no promised office actions, the follow-up
 // wording promises only a reply, no name greeting mid-thread), and the latest finished visit's customer-safe notes and findings
 // reach the facts. A prompt AND facts revision, so both bases move once more: "27" (scheduler gate off) / "28" (on). Same
-// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers56_n'
+// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers60_n'
 // is 32 chars, 39 with the six tags b c e l m v (+ separator), under PROMPT_VERSION_COLUMN_MAX (40) - pinned by a test. The
 // effective version follows the gate (realAnswersBaseVersion), so B1 drafts never pool with the 25/26 cohorts.
-const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}55_n`;
-const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}56_n`;
+const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}59_n`;
+const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}60_n`;
 const SHADOW_STATUS = 'shadow';
 
 // ── DRAFT KINDS (owner 2026-11-25) ──
@@ -6678,9 +6681,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const liveEtaForcedOff = liveEta === false;
     const includeLiveEta = !liveEtaForcedOff && gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
     const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
+    // the staff facts (prepaid visits left) are for a real-answers draft only; gate off adds no key, so the call stays byte-identical
+    const staffFactsOption = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? { includeSmsStaffFacts: true } : {};
     const loadContext = (withLiveEta) => (customer
-      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...(asOfDate ? { asOf: asOfDate } : {}) })
-      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...(asOfDate ? { asOf: asOfDate } : {}) }));
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(asOfDate ? { asOf: asOfDate } : {}) })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(asOfDate ? { asOf: asOfDate } : {}) }));
     // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
     // a fingerprint of this customer's facts that a delayed send re-derives
     // and compares (sms-unanswered-reply.factsFingerprintFor). Taken BEFORE
