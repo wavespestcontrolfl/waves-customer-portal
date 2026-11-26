@@ -895,6 +895,16 @@ rules), link `/admin/knowledge`, done-when `gaps_reviewed`, who `either`. The to
 `detail`. dedupeKey `knowledge-gaps-weekly:<ET date of the report week's end>`, with neither `dedupeOpenOnly` nor `refreshOnDedupe`, so the
 catch-up ticks dedupe onto the week's row and a person's Done stays done. The 72-hour quiet policy retires an old week's row.
 
+**Bad calls by lead source, weekly** (owner 2026-11-26, "ok build"; `server/services/call-bad-call-count.js`, Mondays 7:58 AM ET plus a 1:58 PM
+catch-up, no gate: it sends nothing to a customer). One Leads row a week for the last Monday-to-Sunday week, raised under category `system` with
+`bell: true`, headline "Leads — review last week's bad calls by lead source", why "<n> of <n> inbound calls were not a real prospect, across <n>
+sources.", link `/admin/leads`, done-when `report_read`, who `person`. `detail` has one line per source: inbound calls, answered by a person, voicemail,
+each bad-call reason and the median answer time in seconds. No customer name or phone number. dedupeKey `bad-call-count-weekly:<ET date of the report
+week's end>`, so the catch-up dedupes onto the week's row. A week with no inbound calls writes nothing. The counts read `call_log.invalid_reason`
+(stamped by `server/services/call-invalid-reason.js`), `call_log.source` (the dialed number's lead source, filled when the inbound row is created) and
+`call_log.answer_seconds` (stamped when a person presses 1); a row older than those columns is judged at read time from the same number registry and the
+row's own signals.
+
 ## 7. How to raise one
 
 `composeAdminAlert(spec)` is pure. It validates the eight parts and returns

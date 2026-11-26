@@ -6060,7 +6060,8 @@ const AppointmentReminders = {
         return { skippedStale: true };
       }
       // GATE_DAY_ONLY_PROMISE part B2/B3: the customer's choice for the new slot is NOT written here: the move that set the slot
-      // writes it in its own UPDATE (rebooker.js moveIntentColumns: a customer surface records "asked for this time"), so it
+      // writes it in its own UPDATE (rebooker.js moveIntentColumns: a customer surface records "asked for this time" on a Waves
+      // Assessment only since owner 2026-11-26; any other customer pick is read from the move record), so it
       // cannot land over a later move's intent. options.timePromise only decides THIS notice.
 
       // Repair-release for a retained unit-move hold (codex #3609 uncapped

@@ -10,7 +10,8 @@ const {
   unmetConstraints,
 } = require('../services/newsletter-portfolio');
 
-// Week of Tue 2026-08-04 → Mon 2026-08-10 (EDT). Times chosen mid-day ET.
+// Days of 2026-08-04 (Tue) → 2026-08-09 (Sun) (EDT). Times chosen mid-day ET. The issue window is
+// Thursday-Sunday (owner 2026-11-26); the Tue/Wed entries are for tests that mix in out-of-window days.
 const DAY = {
   tue: '2026-08-04T18:00:00Z',
   wed: '2026-08-05T18:00:00Z',
@@ -82,6 +83,68 @@ describe('caps', () => {
     const zoneCount = result.selected.filter((e) => e.region_zone === 'tampa').length;
     expect(venueCount).toBeLessThanOrEqual(2);
     expect(zoneCount).toBeLessThanOrEqual(3);
+  });
+});
+
+describe('local first (owner 2026-11-26)', () => {
+  test('Tampa and Pinellas together fill at most AWAY_CAP slots, even when they outscore local events', () => {
+    const { AWAY_CAP } = require('../services/newsletter-portfolio');
+    const away = [1, 2, 3, 4, 5, 6].map((i) => ev({
+      region_zone: i % 2 ? 'tampa' : 'pinellas', editorial_score: 98 - i, source_id: `a-${i}`, start_at: i % 2 ? DAY.sat : DAY.fri,
+    }));
+    const local = ['manatee', 'sarasota', 'south_sarasota', 'manatee', 'sarasota', 'south_sarasota'].map((z, i) => ev({
+      region_zone: z, editorial_score: 80 - i, source_id: `l-${i}`, start_at: i % 2 ? DAY.sun : DAY.sat,
+    }));
+    const result = selectPortfolio([...away, ...local]);
+    const awayCount = result.selected.filter((e) => ['tampa', 'pinellas'].includes(e.region_zone)).length;
+    expect(AWAY_CAP).toBe(2);
+    expect(awayCount).toBeLessThanOrEqual(AWAY_CAP);
+    expect(result.selected.length - awayCount).toBeGreaterThanOrEqual(5);
+  });
+
+  test('an away event with no region_zone counts by its city', () => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'tampa', editorial_score: 96 - i, source_id: `t-${i}` }));
+    const untagged = ev({ region_zone: null, city: 'clearwater', editorial_score: 93, source_id: 'u-1' });
+    const local = ['manatee', 'sarasota', 'south_sarasota', 'manatee', 'sarasota'].map((z, i) => ev({
+      region_zone: z, editorial_score: 80 - i, source_id: `l-${i}`, start_at: i % 2 ? DAY.sun : DAY.sat,
+    }));
+    const result = selectPortfolio([...tagged, untagged, ...local]);
+    expect(result.selected.map((e) => e.id)).not.toContain(untagged.id);
+  });
+
+  test.each(['St. Petersburg', 'St. Pete Beach', 'Clearwater Beach', 'Palm Harbor', 'Indian Shores', 'Temple Terrace', 'Tierra Verde', 'Sun City Center', 'Palmetto Bay', '', 'Tampa'])('untagged %s counts as away', (city) => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'pinellas', editorial_score: 96 - i, source_id: `p-${i}` }));
+    const untagged = ev({ region_zone: null, city, editorial_score: 93, source_id: 'u-1' });
+    const result = selectPortfolio([...tagged, untagged]);
+    expect(result.selected.map((e) => e.id)).not.toContain(untagged.id);
+  });
+
+  test('capsAllow refuses a third away event against a surviving lineup', () => {
+    const { capsAllow } = require('../services/newsletter-portfolio');
+    const survivors = [ev({ region_zone: 'tampa', source_id: 'x1' }), ev({ region_zone: 'pinellas', source_id: 'x2' }), ev({ region_zone: 'sarasota', source_id: 'x3' })];
+    expect(capsAllow(survivors, ev({ region_zone: 'pinellas', source_id: 'x4' }))).toBe(false);
+    expect(capsAllow(survivors, ev({ region_zone: 'manatee', source_id: 'x5' }))).toBe(true);
+  });
+
+  test.each(['Holmes Beach', 'Myakka City', 'Venice'])('untagged local %s is not counted as away', (city) => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'tampa', editorial_score: 96 - i, source_id: `t-${i}` }));
+    const local = ev({ region_zone: null, city, editorial_score: 93, source_id: 'u-3' });
+    expect(selectPortfolio([...tagged, local]).selected.map((e) => e.id)).toContain(local.id);
+  });
+
+  test('an untagged local city is not counted as away', () => {
+    const tagged = [1, 2].map((i) => ev({ region_zone: 'tampa', editorial_score: 96 - i, source_id: `t-${i}` }));
+    const local = ev({ region_zone: null, city: 'Lakewood Ranch', editorial_score: 93, source_id: 'u-2' });
+    const result = selectPortfolio([...tagged, local]);
+    expect(result.selected.map((e) => e.id)).toContain(local.id);
+  });
+
+  test('a thin local week selects fewer events (below the minimum the issue skips) instead of a third Tampa Bay event', () => {
+    const away = [1, 2, 3, 4].map((i) => ev({ region_zone: 'pinellas', editorial_score: 95 - i, source_id: `p-${i}`, venue_name: `PV ${i}` }));
+    const local = [ev({ region_zone: 'sarasota', editorial_score: 82, source_id: 'l-1' })];
+    const result = selectPortfolio([...away, ...local]);
+    expect(result.selected.filter((e) => e.region_zone === 'pinellas').length).toBe(2);
+    expect(result.selected.length).toBe(3);
   });
 });
 
@@ -158,6 +221,30 @@ describe('portfolio coverage', () => {
     expect(result.selected.length).toBeLessThan(5);
     expect(result.unmet.length).toBeGreaterThan(0);
     expect(result.selected.every((e) => effectiveScore(e) >= 75)).toBe(true);
+  });
+});
+
+describe('a Thursday-to-Sunday issue window (owner 2026-11-26)', () => {
+  // Only Thu, Fri, Sat, Sun exist: three of four days are weekend days, so the 4-event and
+  // 2-distinct-day weekend minimums stay reachable, and Thursday is the only weekday slot.
+  const windowPool = () => [
+    ev({ editorial_score: 95, start_at: DAY.thu, region_zone: 'tampa' }),
+    ev({ editorial_score: 94, start_at: DAY.thu, region_zone: 'pinellas' }),
+    ev({ editorial_score: 93, start_at: DAY.thu, region_zone: 'manatee' }),
+    ev({ editorial_score: 92, start_at: DAY.thu, region_zone: 'sarasota' }),
+    ev({ editorial_score: 80, start_at: DAY.fri, region_zone: 'sarasota' }),
+    ev({ editorial_score: 79, start_at: DAY.sat, region_zone: 'manatee' }),
+    ev({ editorial_score: 78, start_at: DAY.sun, region_zone: 'tampa' }),
+    ev({ editorial_score: 77, start_at: DAY.sat, region_zone: 'pinellas' }),
+    ev({ editorial_score: 76, start_at: DAY.fri, region_zone: 'manatee' }),
+  ];
+
+  test('Thursday events do not count as weekend events, and the minimums still hold on a Thursday-heavy pool', () => {
+    expect(isWeekend(ev({ start_at: DAY.thu }))).toBe(false);
+    const result = selectPortfolio(windowPool());
+    expect(result.stats.weekendCount).toBeGreaterThanOrEqual(4);
+    expect(result.stats.weekendDays.length).toBeGreaterThanOrEqual(2);
+    expect(result.unmet.filter((label) => /weekend/i.test(label))).toEqual([]);
   });
 });
 

@@ -1,0 +1,194 @@
+/**
+ * Flea package on the public website quote (owner ruling 2026-11-26 "whole home"): with no home size posted the route used to
+ * price the synthetic 2,000 sq ft default. When the SERVER-SIDE lookup measured a residential home (footprint x trusted
+ * stories), that whole home is the size. Drives POST /api/public/quote/calculate.
+ */
+jest.mock('../models/db', () => {
+  const recorded = [];
+  let seq = 0;
+  const makeBuilder = (table) => {
+    const state = { table };
+    const builder = new Proxy(function builderTarget() {}, {
+      get(_t, prop) {
+        if (prop === 'then') {
+          return (resolve, reject) => Promise.resolve(state.result !== undefined ? state.result : []).then(resolve, reject);
+        }
+        if (prop === 'catch') return (reject) => Promise.resolve(state.result !== undefined ? state.result : []).catch(reject);
+        if (prop === 'first') return async () => null;
+        if (prop === 'insert') {
+          return (data) => {
+            const rows = Array.isArray(data) ? data : [data];
+            rows.forEach((row) => recorded.push({ op: 'insert', table, row }));
+            state.result = rows.map(() => ({ id: `id-${seq += 1}` }));
+            return builder;
+          };
+        }
+        if (prop === 'update') {
+          return (data) => { recorded.push({ op: 'update', table, row: data }); state.result = 1; return builder; };
+        }
+        if (prop === 'del' || prop === 'delete') return async () => 0;
+        if (prop === 'count') return () => { state.result = [{ count: '0' }]; return builder; };
+        if (prop === 'returning') return () => builder;
+        return () => builder;
+      },
+      apply() { return builder; },
+    });
+    return builder;
+  };
+  const db = jest.fn((table) => makeBuilder(table));
+  db.raw = jest.fn((sql) => ({ toSQL: () => sql, sql }));
+  db.fn = { now: () => new Date(), uuid: () => 'uuid' };
+  db.transaction = jest.fn(async (cb) => cb(db));
+  db.schema = { hasTable: async () => true, hasColumn: async () => true };
+  db.__recorded = recorded;
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: false })) }));
+jest.mock('../services/sendgrid-mail', () => ({
+  isConfigured: jest.fn(() => false), sendOne: jest.fn(async () => ({})), newsletterGroupId: () => null, serviceGroupId: () => null,
+}));
+jest.mock('../services/newsletter-subscribers', () => ({ subscribeOrResubscribe: jest.fn(async () => ({ action: 'noop' })) }));
+jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn(async () => ({ enrolled: false })) }));
+jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
+
+// The route allows 10 quotes an hour per address; this suite sends more.
+jest.mock('express-rate-limit', () => () => (req, res, next) => next());
+
+// The route's own cache-only server re-read. A test sets what it answers.
+let mockServerLookup = null;
+jest.mock('../routes/property-lookup-v2', () => ({
+  ...jest.requireActual('../routes/property-lookup-v2'),
+  performPropertyLookup: jest.fn(async () => mockServerLookup),
+}));
+
+const express = require('express');
+
+jest.setTimeout(30000);
+
+describe('POST /api/public/quote/calculate: flea size from the server lookup when no home size is posted', () => {
+  let server;
+  let base;
+
+  beforeAll((done) => {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/public/quote', require('../routes/public-quote'));
+    app.use((err, req, res, next) => res.status(500).json({ error: 'boom' }));
+    server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}/api/public/quote`; done(); });
+  });
+  afterAll((done) => { server.closeAllConnections(); server.close(done); });
+  beforeEach(() => { mockServerLookup = null; });
+
+  const quote = async (extra = {}) => {
+    const res = await fetch(`${base}/calculate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        firstName: 'Test', lastName: 'Quoter', email: 'flea.size@example.com', phone: '9415550143',
+        address: '123 Sample St, Parrish, FL 34219', city: 'Parrish', zip: '34219',
+        lotSqFt: 7500, stories: 1, services: { flea: {} }, ...extra,
+      }),
+    });
+    expect(res.status).toBeLessThan(300);
+    return res.json();
+  };
+
+  const LOOKUP = { enriched: { storiesSource: 'verified', stories: 2, footprint: 1500, homeSqFt: 3000 }, propertyRecord: null };
+
+  test('no home size posted + a server-measured 1,500 sq ft footprint on two stories prices the whole home ($390)', async () => {
+    mockServerLookup = LOOKUP;
+    expect((await quote()).one_time_total).toBe(390);
+  });
+
+  test('a footprint-only lookup (no living area) on two stories prices the whole home; a permit-sourced story count does not double the area', async () => {
+    mockServerLookup = { enriched: { storiesSource: 'verified', stories: 2, footprint: 1500 }, propertyRecord: null };
+    expect((await quote()).one_time_total).toBe(390);
+    mockServerLookup = { enriched: { storiesSource: 'permit', stories: 2, footprint: 2000, homeSqFt: 2000 }, propertyRecord: null };
+    expect((await quote()).one_time_total).toBe(350);
+  });
+
+  test('a reliable lookup living area prices the whole home even when the story count is unknown', async () => {
+    mockServerLookup = { enriched: { storiesSource: 'default', stories: 1, homeSqFt: 3000 }, propertyRecord: null };
+    expect((await quote()).one_time_total).toBe(390);
+    // An aggregate whose summed living area is not one home never sizes the flea package.
+    mockServerLookup = { enriched: { storiesSource: 'default', stories: 1, homeSqFt: 48000, footprintUnknown: true }, propertyRecord: null };
+    expect((await quote()).one_time_total).toBe(350);
+  });
+
+  test('the wizard\'s untouched 2,000 sq ft placeholder uses the server measurement; a confirmed 2,000 sq ft home does not', async () => {
+    mockServerLookup = LOOKUP;
+    // The wizard posts its enriched profile with the confirm step; a direct API caller posts none, so its explicit size is genuine.
+    expect((await quote({ homeSqFt: 2000, buildingSizeConfirmed: false, enriched: {} })).one_time_total).toBe(390);
+    expect((await quote({ homeSqFt: 2000, enriched: {} })).one_time_total).toBe(390);
+    expect((await quote({ homeSqFt: 2000, buildingSizeConfirmed: true, enriched: {} })).one_time_total).toBe(350);
+    expect((await quote({ homeSqFt: 2000, buildingSizeConfirmed: false })).one_time_total).toBe(350);
+    expect((await quote({ homeSqFt: 2000 })).one_time_total).toBe(350);
+    // A different posted size (a lookup-seeded or hand-entered value) is never replaced.
+    const with1800 = (await quote({ homeSqFt: 1800, buildingSizeConfirmed: false, enriched: {} })).one_time_total;
+    mockServerLookup = null;
+    expect(with1800).toBe((await quote({ homeSqFt: 1800, buildingSizeConfirmed: false, enriched: {} })).one_time_total);
+  });
+
+  test('no measured footprint: unchanged, the 2,000 sq ft default and an instant price ($350)', async () => {
+    mockServerLookup = null;
+    expect((await quote()).one_time_total).toBe(350);
+    // A footprint whose story count is only a default is not a trusted footprint (no living area to fall back on).
+    mockServerLookup = { enriched: { storiesSource: 'default', stories: 1, footprint: 1500 }, propertyRecord: null };
+    expect((await quote()).one_time_total).toBe(350);
+    // A lookup the verify flags mark unreliable never sizes the package.
+    mockServerLookup = { enriched: { ...LOOKUP.enriched, fieldVerifyFlags: [{ field: 'squareFootage', reason: 'conflicting evidence', priority: 'HIGH' }] }, propertyRecord: null };
+    expect((await quote()).one_time_total).toBe(350);
+  });
+
+  test('a confirmed posted home size still wins over the lookup', async () => {
+    mockServerLookup = LOOKUP;
+    const posted = await quote({ homeSqFt: 2000, buildingSizeConfirmed: true });
+    mockServerLookup = null;
+    expect(posted.one_time_total).toBe((await quote({ homeSqFt: 2000, buildingSizeConfirmed: true })).one_time_total);
+  });
+
+  test('a client-supplied enriched profile never sizes the flea package (only the server lookup does)', async () => {
+    mockServerLookup = null;
+    const client = await quote({ enriched: { storiesSource: 'verified', stories: 2, footprint: 1500, homeSqFt: 3000, footprintSqFt: 400 } });
+    expect(client.one_time_total).toBe(350);
+  });
+
+  test('a pest line in the same request is unchanged by the lookup', async () => {
+    const withPest = (extra) => quote({ services: { pest: { frequency: 'quarterly' }, flea: {} }, ...extra });
+    mockServerLookup = null;
+    const base = await withPest();
+    mockServerLookup = LOOKUP;
+    const looked = await withPest();
+    expect(looked.monthly_total).toBe(base.monthly_total);
+    expect(looked.annual_total).toBe(base.annual_total);
+    expect(looked.one_time_total).toBeGreaterThan(base.one_time_total);
+    // And a pest-only quote is identical with and without the lookup.
+    mockServerLookup = null;
+    const pestOnly = await quote({ services: { pest: { frequency: 'quarterly' } } });
+    mockServerLookup = LOOKUP;
+    expect((await quote({ services: { pest: { frequency: 'quarterly' } } })).monthly_total).toBe(pestOnly.monthly_total);
+  });
+
+  test('a multi-unit parcel never sizes the flea package (its lookup area can be the sum of every unit)', async () => {
+    mockServerLookup = { enriched: { ...LOOKUP.enriched, unitCount: 12 }, propertyRecord: null };
+    expect((await quote()).one_time_total).toBe(350);
+    mockServerLookup = { enriched: { ...LOOKUP.enriched, parcel: { residentialUnits: 2 } }, propertyRecord: null };
+    expect((await quote()).one_time_total).toBe(350);
+  });
+
+  test('trustedFleaHomeSqFt is the trusted footprint x the trusted stories, or null', () => {
+    const { trustedFleaHomeSqFt } = require('../routes/public-quote')._internals;
+    expect(trustedFleaHomeSqFt(LOOKUP.enriched, null)).toBe(3000);
+    // A footprint alone (no living area) is scaled by the trusted stories.
+    expect(trustedFleaHomeSqFt({ storiesSource: 'verified', stories: 2, footprint: 1500 }, null)).toBe(3000);
+    // A permit-sourced story count beside a footprint that is the living area / 1 must not count the floor area twice.
+    expect(trustedFleaHomeSqFt({ storiesSource: 'permit', stories: 2, footprint: 2000, homeSqFt: 2000 }, null)).toBe(2000);
+    expect(trustedFleaHomeSqFt({ storiesSource: 'permit', stories: 2, footprint: 2000, livingAreaSqFt: 2000 }, null)).toBe(2000);
+    expect(trustedFleaHomeSqFt({ storiesSource: 'verified', stories: 1, footprint: 1500 }, null)).toBe(1500);
+    expect(trustedFleaHomeSqFt({ storiesSource: 'default', stories: 2, footprint: 1500 }, null)).toBeNull();
+    expect(trustedFleaHomeSqFt({ storiesSource: 'verified', stories: 2, footprint: 0, footprintUnknown: true, homeSqFt: 48000 }, null)).toBeNull();
+    expect(trustedFleaHomeSqFt(null, null)).toBeNull();
+  });
+});

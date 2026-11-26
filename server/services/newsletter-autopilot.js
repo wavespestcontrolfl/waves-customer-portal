@@ -1,14 +1,16 @@
 /**
  * Newsletter Autopilot — guarded auto-draft for the weekly digest.
  *
- * Called by the Monday 7 AM ET cron in scheduler.js. Creates the week's
+ * Called by the Wednesday 7:15 AM ET cron in scheduler.js. Creates the week's
  * draft in newsletter_sends and hands it to the proof step: with
  * GATE_NEWSLETTER_AUTO_SEND on, a draft that passes every check queues
- * itself for Tuesday 6:00 AM ET (owner 2026-10-30, option A); off, it waits
- * for the owner's APPROVED reply to the proof.
+ * itself for Thursday 6:00 AM ET (owner 2026-10-30, option A; day moved from
+ * Tuesday 2026-11-26); off, it waits for the owner's APPROVED reply to the
+ * proof. The first weekly issues go only to warm readers (see
+ * newsletter-weekly-audience.js).
  *
  * Flow:
- *   1. Compute the upcoming issue Tuesday
+ *   1. Compute the upcoming issue Thursday
  *   2. Check newsletter_calendar for a pre-planned entry
  *   3. Skip if calendar row already has a send_id or terminal status
  *   4. Generate a digest plan from approved events (same query pattern
@@ -30,12 +32,12 @@ const {
   excludeRepeatedDateIdentities,
   dedupeDigestEvents,
   excludeRoutineRecurringFromQuery,
-  getActiveNewsletterTuesday,
+  getActiveNewsletterIssueDay,
+  getNewsletterIssueWindow,
   defaultTargetSendAt,
   getNewsletterDraftWindowStart,
   weekLockKey,
 } = require('./event-freshness');
-const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 const { createNewsletterDraft, persistNewsletterDraft } = require('./newsletter-draft');
 const {
   filterPreviouslyFeaturedIdentities,
@@ -48,6 +50,7 @@ const {
 } = require('./newsletter-portfolio');
 const { featureScoreFloor } = require('./event-scoring');
 const { getFlagshipType } = require('../config/newsletter-types');
+const { recordFlagshipAudience } = require('./newsletter-weekly-audience');
 
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
 
@@ -179,9 +182,9 @@ const LINEUP_CAP = 12;
  * in admin-newsletter.js, but without the HTTP layer.
  */
 async function buildDigestPlan({ reference = new Date() } = {}) {
-  const weekOf = getActiveNewsletterTuesday(reference);
-  const startDate = parseETDateTime(`${weekOf}T00:00:00`);
-  const endDate = parseETDateTime(`${etDateString(addETDays(startDate, 6))}T23:59:59`);
+  const weekOf = getActiveNewsletterIssueDay(reference);
+  // Thursday 00:00 through Sunday 23:59 ET.
+  const { start: startDate, end: endDate } = getNewsletterIssueWindow(weekOf);
 
   const query = db('events_raw as e')
     .leftJoin('event_sources as s', 's.id', 'e.source_id')
@@ -329,7 +332,7 @@ function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
     for (const l of sourceHealthLines) lines.push(l);
   }
   lines.push('', 'Next actions:');
-  lines.push('- Approve more pending events for this Tue–Mon window');
+  lines.push('- Approve more pending events for this Thu–Sun window');
   lines.push('- Check failing ingestion sources (Events → Sources health)');
   lines.push('- Add/repair event URLs where missing');
   return lines.join('\n');
@@ -340,11 +343,29 @@ function formatPreflightReport(report, weekOf, sourceHealthLines = []) {
  *
  * @returns {{ skipped: boolean, reason?: string, sendId?: number, eventCount?: number }}
  */
+/**
+ * Refill a thinned lineup from a best-first pool of floor-passing events. Each refill must respect
+ * the portfolio caps against the SURVIVING lineup (the local-first away cap
+ * included): an alternate ranked as a replacement for one pick can otherwise
+ * land beside both away picks.
+ */
+function refillWithinCaps({ safeEventIds, refillPool, refillExisting, lineupEvents }) {
+  // The portfolio selector with the survivors seeded: its cardinality repair
+  // finds a fuller lineup when a greedy refill would strand one (two caps
+  // competing for the last slots).
+  const ids = safeEventIds.map(String);
+  const survivors = lineupEvents.filter((ev) => ids.includes(String(ev.id)));
+  const pool = refillPool.filter((ev) => refillExisting.has(String(ev.id)) && !ids.includes(String(ev.id)));
+  const { selected } = selectPortfolio(pool, { seeded: survivors, maxCount: MAX_PORTFOLIO });
+  const added = selected.map((ev) => String(ev.id)).filter((id) => !ids.includes(id));
+  return [...ids, ...added];
+}
+
 async function autoDraftFlagship() {
   logger.info('[newsletter-autopilot] Starting weekly auto-draft');
 
-  // 1. Compute the active issue Tuesday (Monday drafts target tomorrow)
-  const weekOf = getActiveNewsletterTuesday();
+  // 1. Compute the active issue Thursday (Wednesday drafts target tomorrow)
+  const weekOf = getActiveNewsletterIssueDay();
   logger.info(`[newsletter-autopilot] Week of: ${weekOf}`);
 
   // 2. Check the calendar for existing entry — skip if already handled
@@ -574,20 +595,33 @@ async function autoDraftFlagship() {
   if (staleCount > 0) {
     logger.info(`[newsletter-autopilot] Dropped ${staleCount} stale locked event id(s)`);
   }
-  if (safeEventIds.length < 5 && lineupAlternates.length > 0) {
-    const refillCandidates = lineupAlternates
-      .map((ev) => String(ev.id))
-      .filter((id) => uuidRe.test(id) && !safeEventIds.includes(id));
-    if (refillCandidates.length) {
+  // Operator-full slates (5+ calendar picks) are the operator's intent: no
+  // automatic refill. Automatic slates refill from the WHOLE floor-passing
+  // pool, best first by effective score, checked against the survivors: the
+  // stored alternates are only top one-for-one replacements and under the
+  // local-first away cap they can all be away events.
+  let refillPool = [];
+  if (safeEventIds.length < 5 && eligiblePreferred.length < 5) {
+    refillPool = [...lineupAlternates, ...scored.filter(floorPassed)]
+      .filter((ev) => ev && uuidRe.test(String(ev.id)) && !safeEventIds.includes(String(ev.id)))
+      .filter((ev, i, arr) => arr.findIndex((o) => String(o.id) === String(ev.id)) === i)
+      .sort((x, y) => effectiveScore(y) - effectiveScore(x));
+    if (refillPool.length) {
       const refillExisting = new Set(
-        (await db('events_raw').whereIn('id', refillCandidates).pluck('id')).map(String),
+        (await db('events_raw').whereIn('id', refillPool.map((ev) => String(ev.id))).pluck('id')).map(String),
       );
-      for (const id of refillCandidates) {
-        if (safeEventIds.length >= MAX_PORTFOLIO) break;
-        if (refillExisting.has(id)) safeEventIds.push(id);
-      }
-      logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from ranked alternates`);
+      safeEventIds = refillWithinCaps({
+        safeEventIds, refillPool, refillExisting, lineupEvents,
+      });
+      logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from the ranked pool`);
     }
+  }
+  // Recheck BEFORE the paid draft call whenever stale rows were dropped: a
+  // thinned lineup the refill could not restore skips the week here.
+  if (staleCount > 0 || refillPool.length) {
+    const poolById = new Map([...lineupEvents, ...refillPool].map((ev) => [String(ev.id), ev]));
+    const refilledPreflight = preflightDigest(safeEventIds.map((id) => poolById.get(String(id))).filter(Boolean), reqs);
+    if (!refilledPreflight.pass) return skipWeek(refilledPreflight);
   }
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
@@ -714,8 +748,8 @@ async function autoDraftFlagship() {
     const existing = await trx('newsletter_sends')
       .where({ newsletter_type: NEWSLETTER_TYPE, status: 'draft' })
       .whereNull('created_by')
-      // Drafting moved to Monday while the issue/event window starts Tuesday.
-      // Include that Monday or the serialized runner cannot see its own first
+      // Drafting happens Wednesday while the issue/event window starts Thursday.
+      // Include that Wednesday or the serialized runner cannot see its own first
       // draft and a catch-up/concurrent run creates a second campaign + proof.
       .where('created_at', '>=', getNewsletterDraftWindowStart(weekOf))
       // Bound the window to THIS issue and exclude drafts already claimed by
@@ -832,8 +866,13 @@ async function autoDraftFlagship() {
 
   logger.info(`[newsletter-autopilot] Draft created: sendId=${send.id}, events=${actualLineup.length}`);
 
+  // First-readers step (owner 2026-11-26): the draft records which audience phase it uses,
+  // warm readers only for the first weekly issues, then everyone. A failure never kills the
+  // draft: the proof step records the phase too, and the sender refuses an issue with none.
+  await recordFlagshipAudience(send);
+
   // 10. Proof-approval flow (gated OFF by default): email the owner a proof
-  //     copy; replying "approved" queues Tuesday's 6 AM send. Under
+  //     copy; replying "approved" queues Thursday's 6 AM send. Under
   //     GATE_NEWSLETTER_AUTO_SEND the proof step queues it itself and the
   //     copy is FYI. A proof failure never kills the draft.
   let proof = null;
@@ -866,6 +905,7 @@ async function autoDraftFlagship() {
 }
 
 module.exports = {
+  refillWithinCaps,
   autoDraftFlagship,
   buildDigestPlan,
   preflightDigest,

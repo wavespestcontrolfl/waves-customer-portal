@@ -539,16 +539,18 @@ describe('pest regular protocol products: the protocol hints', () => {
   test('the roach settings name the live gel (the old gel row is inactive) and the house bifenthrin', () => {
     const roach1 = protocols.cockroach.visits.find((v) => v.visit === 1);
     const roach2 = protocols.cockroach.visits.find((v) => v.visit === 2);
-    expect(roach1.completionDefaultProducts).toEqual(['Atticus Antapex WSG', 'Gentrol Complete EC3', 'Advion Evolution Cockroach Gel Bait']);
+    // Tekko Pro replaced Gentrol Complete EC3 on the home cockroach card (owner 2026-11-25; migration 20261126130000 moves the service library).
+    expect(roach1.completionDefaultProducts).toEqual(['Atticus Antapex WSG', 'Tekko Pro IGR', 'Advion Evolution Cockroach Gel Bait']);
     expect(roach1.lineMeta['Apply cockroach gel bait in targeted placements']).toMatchObject({ catalogProductHints: ['Advion Evolution Cockroach Gel Bait'], completionApplicationMethod: 'bait_placement' });
     expect(roach2.lineMeta['Treat exterior perimeter, cracks, crevices, and harborage zones where label allows'].catalogProductHints).toEqual(['LESCO Crosscheck Plus', 'Atticus Antapex WSG']);
     expect(JSON.stringify(protocols)).not.toMatch(/Advion Cockroach Gel Bait|Talstar P/);
   });
 
-  test('visits 2 to 6 keep their hints', () => {
+  // The pest program's visit 2 (a copy of the cockroach cleanout) is retired; the remaining visits are 3 to 6.
+  test('visits 3 to 6 keep their hints', () => {
+    expect(protocols.pest.visits.map((visit) => visit.visit)).toEqual([1, 3, 4, 5, 6]);
     const hintsByVisit = protocols.pest.visits.slice(1).map((visit) => Object.values(visit.lineMeta || {}).map((m) => m.catalogProductHints || null));
     expect(hintsByVisit).toEqual([
-      [['Advion Evolution Cockroach Gel Bait'], ['Atticus Antapex WSG'], ['Gentrol Complete EC3']],
       [['Advion Ant Gel'], ['Atticus Antapex WSG'], null],
       [],
       [['Contrac Blox']],

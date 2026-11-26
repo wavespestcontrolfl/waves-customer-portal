@@ -14,6 +14,7 @@ import React, {
 import {
   applyServerRodentBaitBracketsPricingConfig,
   applyServerRodentSetupFeePricingConfig,
+  applyServerPalmPricingConfig,
   applyServerRodentWaveguardPricingConfig,
   collectMarginReviewNotes,
   fmt,
@@ -3940,6 +3941,8 @@ export default function EstimateToolViewV2({
         fetchRow("rodent_waveguard"),
       ]);
       if (!active) return;
+      // The palm minimum is independent of the rodent rows: a failed load keeps the $75 default.
+      fetchRow("palm_pricing").then((palmRow) => { if (active && palmRow.ok) applyServerPalmPricingConfig(palmRow.data); });
       setExclusionWholeHomeAvailable(waveguardRow.wholeHome === true);
       setRoofReadAvailable(waveguardRow.roofRead === true);
       setExclusionRoofStyleAvailable(waveguardRow.roofStyle === true);
@@ -4793,6 +4796,8 @@ export default function EstimateToolViewV2({
         ...(moveRequestId ? { moveId: moveRequestId } : {}),
         // A reopened new-home estimate: the server waives the setup fee for the stored link.
         ...(editMoveEstimate ? { moveEstimateId: editMoveEstimate.estimateId } : {}),
+        // The estimate being revised: the server previews a retained flea line of a delivered quote the way the save will price it.
+        ...(editMode?.id ? { reviseEstimateId: editMode.id } : {}),
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
         // Availability gates only the CHECKBOX (new selections); a selection
         // already in the form — e.g. seeded from a saved estimate's inputs

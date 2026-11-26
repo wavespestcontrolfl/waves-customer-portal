@@ -245,6 +245,7 @@ function commercialAssessmentRoutingOptions(call, makeBookable, gates = {}, v1Vi
 }
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
+const { stampInvalidReason } = require('./call-invalid-reason');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, mapServiceCategoryToLegacy, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { flagCallBookingRain } = require('./call-booking-rain-flag');
@@ -9211,6 +9212,32 @@ function verifyRecordingBuffer(buffer, expectedSeconds, contentLength) {
   return { ok: true, bytes };
 }
 
+// A download stopped at opts.maxBytes: the file is larger than the caller can take.
+const RECORDING_TOO_LARGE = 'RECORDING_TOO_LARGE';
+
+// The body, read no further than maxBytes: an oversized file never sits whole in memory.
+async function readBodyCapped(res, maxBytes) {
+  const tooLarge = () => Object.assign(new Error(`Recording over ${maxBytes} bytes`), { code: RECORDING_TOO_LARGE });
+  if (Number(res.headers?.get?.('content-length')) > maxBytes) {
+    await res.body?.cancel?.().catch(() => {});
+    throw tooLarge();
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw tooLarge();
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total);
+}
+
 async function downloadRecording(mp3Url, opts = {}) {
   const twilioAuth = Buffer.from(
     `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
@@ -9229,7 +9256,7 @@ async function downloadRecording(mp3Url, opts = {}) {
     if (res.status === 404 && opts.expectedSeconds) err.code = RECORDING_NOT_READY;
     throw err;
   }
-  const buffer = Buffer.from(await res.arrayBuffer());
+  const buffer = opts.maxBytes ? await readBodyCapped(res, opts.maxBytes) : Buffer.from(await res.arrayBuffer());
   if (opts.expectedSeconds) {
     const verdict = verifyRecordingBuffer(buffer, opts.expectedSeconds, res.headers.get('content-length'));
     if (!verdict.ok) {
@@ -11164,6 +11191,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
   try {
     const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
     let spamVerdictResult = null;
+    let decidedDisposition = null;
     if (isEnabled('callSpamClassifier')) {
       const lineTypeRow = await db('phone_line_types')
         .where({ phone: contactPhone }).first().catch(() => null);
@@ -11203,6 +11231,7 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         },
         thirdPartyNatureDefault: callApplicantHandlingLive(),
       });
+      decidedDisposition = disposition;
       const written = await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
       await keepComplaintCallAlert({ written, disposition, call, callSid, customerId, v2Extraction: v2ForDisposition, procGeneration });
       // ...and once more after the write: a confirm that landed between the read
@@ -11217,6 +11246,8 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         }
       }
     }
+    // One bad-call reason per call (call_log.invalid_reason), read from the signals above. Fail soft.
+    await stampInvalidReason(db, call.id, { legacy: extracted, v2: v2ForDisposition, spamVerdict: spamVerdictResult, disposition: decidedDisposition });
     if (customerId) {
       await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at, callerPhone: clarifyAskTargetPhone(call) });
     }
@@ -15490,6 +15521,8 @@ const CallRecordingProcessor = {
         // this pass finished nothing. See the note on the rejection path.
         return { success: false, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
+      // The veto path ends here without the zero-triage layers: record the bad-call reason now.
+      await stampInvalidReason(db, call.id, { legacy: extracted, v2Result, outOfAreaHold: v2OutOfAreaOnlyHold });
       // An office callback's verdict settles (spam) or gives back (anything
       // else) its parent voicemail (settleParentForCallbackVerdict, dark
       // GATE_CALLBACK_SPAM_CLOSES_PARENT).
@@ -27284,6 +27317,10 @@ CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
 // Read by csr-coach (lazy require): a spoken callback within 1-2 digits of the ANI is a
 // mistranscription, not a replacement number. One rule, not a second copy.
 CallRecordingProcessor.phoneNearMissOfAni = phoneNearMissOfAni;
+// Read by call-sound-check (lazy require): the one authenticated recording download and the pipeline's MP3 length
+// estimate, so that lane fetches a call's audio exactly as the pipeline does. Both lived only under `_test`.
+CallRecordingProcessor.downloadRecording = downloadRecording;
+CallRecordingProcessor.estimateMp3DurationSeconds = estimateMp3DurationSeconds;
 // Read by call-family-name-link (lazy require) for the callback_spoken_number basis.
 CallRecordingProcessor.findCustomerViaCallbackSpokenNumber = findCustomerViaCallbackSpokenNumber;
 CallRecordingProcessor.findCustomerForCallContact = findCustomerForCallContact;

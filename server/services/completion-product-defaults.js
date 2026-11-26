@@ -90,9 +90,10 @@
  * with no products prefilled.
  */
 
-const { matchServiceProtocol, MATCH_RULES } = require('./protocol-matcher');
+const { matchServiceProtocol, followupVisitMatch } = require('./protocol-matcher');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
+const { completionRateFields } = require('../utils/protocol-label-rate');
 
 // -- name parsing / dedupe (pure) --------------------------------------
 
@@ -168,53 +169,68 @@ function resolveCatalogProductForName(name, catalogRows = [], { exactOnly = fals
 // completionApplicationMethod) — a name can appear in more than one
 // line's hints (rare), so the FIRST line naming it wins, matching
 // dedupeEntries' own first-seen rule.
-function completionApplicationMethodForName(visit, name) {
+function lineMetaForName(visit, name) {
   const lineMeta = visit?.lineMeta;
   if (!lineMeta || typeof lineMeta !== 'object') return null;
   const target = normalizeName(name);
   if (!target) return null;
   for (const meta of Object.values(lineMeta)) {
     if (!meta || !Array.isArray(meta.catalogProductHints)) continue;
-    if (!meta.catalogProductHints.some((hint) => normalizeName(hint) === target)) continue;
-    return typeof meta.completionApplicationMethod === 'string' && meta.completionApplicationMethod
-      ? meta.completionApplicationMethod
-      : null;
+    if (meta.catalogProductHints.some((hint) => normalizeName(hint) === target)) return meta;
   }
   return null;
 }
 
+function completionApplicationMethodForName(visit, name) {
+  const meta = lineMetaForName(visit, name);
+  return typeof meta?.completionApplicationMethod === 'string' && meta.completionApplicationMethod
+    ? meta.completionApplicationMethod
+    : null;
+}
+
+// Each name's protocol application method (methodsByName) and the lineMeta of a line that carries its label's rate for this pest
+// (labelRateMetaByName, checked against the resolved row's EPA number at shaping), both keyed lower-case.
+function lineFactsByName(visit, names) {
+  const methodsByName = {};
+  const labelRateMetaByName = {};
+  for (const name of names) {
+    const method = completionApplicationMethodForName(visit, name);
+    if (method) methodsByName[name.toLowerCase()] = method;
+    const meta = lineMetaForName(visit, name);
+    if (meta?.labelRatePerGallon) labelRateMetaByName[name.toLowerCase()] = meta;
+  }
+  return { methodsByName, labelRateMetaByName };
+}
+
+// The catalog product hints the cards of a visit's booked add-ons list, lower-case; null when the add-ons could not be read.
+async function addonCardHints(db, serviceId, protocols) {
+  try {
+    const rows = await db('scheduled_service_addons as a')
+      .leftJoin('services as s', 'a.service_id', 's.id')
+      .where({ 'a.scheduled_service_id': serviceId })
+      .select('a.service_name', db.raw('COALESCE(a.service_key_snapshot, s.service_key) as service_key'));
+    const hints = new Set();
+    for (const row of rows) {
+      const card = matchServiceProtocol(protocols, String(row.service_name || ''), { serviceKey: row.service_key || null })?.matchedVisit;
+      for (const meta of Object.values(card?.lineMeta || {})) {
+        for (const hint of meta?.catalogProductHints || []) hints.add(String(hint).toLowerCase());
+      }
+    }
+    return hints;
+  } catch {
+    return null;
+  }
+}
+
+// A line's meta, marked sharedRate when a booked add-on's card lists one of its products (that card may mix it at another rate)
+// or the add-ons are unknown: completionRateFields then starts its rate blank. A line with no label rate passes through.
+function labelRateFor(meta, hints) {
+  if (!meta?.labelRatePerGallon) return meta;
+  const shared = !hints || (meta.catalogProductHints || []).some((hint) => hints.has(String(hint).toLowerCase()));
+  return shared ? { ...meta, sharedRate: true } : meta;
+}
+
 // -- visit resolution + precedence (pure) ------------------------------
-
-// The program's own follow-up rule, resolved from protocol-matcher's rule
-// table rather than a hard-coded visit number (Codex r3 P1, PR #5049):
-// MATCH_RULES carries exactly one `_followup`-reasoned rule for a program
-// that has a follow-up stage today (bed_bug_followup, cockroach_followup,
-// rodent_followup, palm_followup) — a program with none (pest, mosquito,
-// termite, tree & shrub) returns null and the caller's normal text-matched
-// visit stands. Tracks protocols.json/protocol-matcher.js as programs and
-// visit numbers change, instead of hard-coding "cockroach visit 3".
-function followupRuleForProgram(programKey) {
-  if (!programKey) return null;
-  return MATCH_RULES.find((rule) => rule.programKey === programKey && /_followup$/.test(rule.reason || '')) || null;
-}
-
-function findVisitByNumber(program, visitNumber) {
-  return (program?.visits || []).find((visit) => Number(visit.visit) === Number(visitNumber)) || null;
-}
-
-// Applies the isFollowup override (see resolveCompletionDefaultProductNames'
-// own doc above) to a raw matchServiceProtocol result, isolated from the
-// precedence logic below so each stays independently readable.
-function resolveEffectiveVisit(match, programKey, isFollowup) {
-  const visit = match?.matchedVisit || null;
-  const matchReason = match?.reason || null;
-  const matched = !!match?.matched;
-  if (!isFollowup || !programKey || !match?.program) return { visit, matchReason, matched };
-  const rule = followupRuleForProgram(programKey);
-  const followupVisit = rule ? findVisitByNumber(match.program, rule.visit) : null;
-  if (!followupVisit) return { visit, matchReason, matched };
-  return { visit: followupVisit, matchReason: rule.reason, matched: true };
-}
 
 // Resolves which protocol visit a service maps to and, from it, the
 // ordered product NAMES to prefill (before any catalog lookup), plus each
@@ -229,7 +245,7 @@ function resolveEffectiveVisit(match, programKey, isFollowup) {
 // SOURCE visit (a booked follow-up to "Cockroach Control Service" matches
 // visit 1's own terms, never visit 3's "roach follow"/"roach recheck"
 // wording, since its service_type carries neither). When true, and the
-// matched program has its own follow-up visit (followupRuleForProgram),
+// matched program has its own follow-up visit (protocol-matcher's followupVisitMatch),
 // this overrides the resolved visit to THAT visit instead — today that is
 // cockroach visit 3, which carries no completionDefaultProducts, so it
 // resolves to source 'none' (a deliberate "nothing curated for a
@@ -244,8 +260,9 @@ function resolveCompletionDefaultProductNames({
     match = null;
   }
   const programKey = match?.programKey || null;
-  const { visit, matchReason, matched } = resolveEffectiveVisit(match, programKey, isFollowup);
-  const matchedVisit = { visit: visit?.visit ?? null, reason: matchReason, matched };
+  const effective = followupVisitMatch(match, isFollowup);
+  const visit = effective?.matchedVisit || null;
+  const matchedVisit = { visit: visit?.visit ?? null, reason: effective?.reason || null, matched: !!effective?.matched };
 
   // Lawn already has its own governed completion-defaults mechanism
   // (lawn-completion-defaults.js) — this resolver must never seed a
@@ -257,12 +274,7 @@ function resolveCompletionDefaultProductNames({
   const entries = dedupeEntries(visit?.completionDefaultProducts);
   const protocolNames = entries.map(entry => entry.name);
   if (protocolNames.length) {
-    const methodsByName = {};
-    for (const name of protocolNames) {
-      const method = completionApplicationMethodForName(visit, name);
-      if (method) methodsByName[name.toLowerCase()] = method;
-    }
-    return { programKey, matchedVisit, source: 'protocol_visit', entries, names: protocolNames, methodsByName };
+    return { programKey, matchedVisit, source: 'protocol_visit', entries, names: protocolNames, ...lineFactsByName(visit, protocolNames) };
   }
 
   return { programKey, matchedVisit, source: 'none', entries: [], names: [], methodsByName: {} };
@@ -280,6 +292,8 @@ function shapeCompletionProductLine(row, resolved, name) {
     rateUnit: row.rate_unit || null,
     defaultRate: row.default_rate ?? null,
     defaultUnit: row.default_unit || null,
+    // The prefill and the review ceiling for a line that carries its label's rate for this pest (protocol-label-rate.js).
+    ...completionRateFields(resolved.labelRateMetaByName?.[String(name || '').toLowerCase()], row),
     applicationMethod: row.application_method || null,
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work -> 'spot_treatment') — overrides the client's
@@ -389,11 +403,12 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     // Month selects the visit in month-keyed programs such as T&S.
     const month = monthFromDateColumn(scheduled.scheduled_date);
 
+    // Lazy require keeps this module free of a hard load-time dependency
+    // on the config file for callers that pass their own (e.g. tests
+    // with synthetic protocols).
+    const protocolSet = protocols || require('../config/protocols.json');
     const resolved = resolveCompletionDefaultProductNames({
-      // Lazy require keeps this module free of a hard load-time dependency
-      // on the config file for callers that pass their own (e.g. tests
-      // with synthetic protocols).
-      protocols: protocols || require('../config/protocols.json'),
+      protocols: protocolSet,
       serviceType: scheduled.service_type,
       serviceKey: scheduled.service_key_snapshot || null,
       month,
@@ -418,6 +433,12 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
         source: resolved.source, products: [], unresolved: [], holds,
       };
     }
+
+    // A booked add-on whose own card lists the same product may mix it at another rate (a cockroach cleanout with a flea add-on:
+    // Tekko Pro at 2 and at 0.66 fl oz per gallon): that product's rate starts blank (labelRateFor). An add-on that never uses it
+    // keeps the card rate.
+    const hints = await addonCardHints(db, serviceId, protocolSet);
+    resolved.labelRateMetaByName = Object.fromEntries(Object.entries(resolved.labelRateMetaByName || {}).map(([name, meta]) => [name, labelRateFor(meta, hints)]));
 
     const catalogRows = await loadActiveCatalogWithAliases(db);
     const products = [];
@@ -445,6 +466,8 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
 }
 
 module.exports = {
+  addonCardHints,
+  labelRateFor,
   resolveCompletionDefaultProductNames,
   resolveCatalogProductForName,
   resolveCompletionProductDefaults,

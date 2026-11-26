@@ -655,6 +655,34 @@ describe('deprecated client estimator pricing drift guards', () => {
     }
   });
 
+  test('flea interior package mirrors the server on total living area (owner ruling 2026-11-26 "whole home")', () => {
+    const { generateEstimate } = require('../services/pricing-engine');
+    const clientFlea = (homeSqFt, stories) => {
+      const estimate = calculateEstimate({
+        homeSqFt, stories, lotSqFt: 7500, propertyType: 'single_family',
+        svcFlea: true, urgency: 'NONE', isAfterHours: false, isRecurringCustomer: false,
+      });
+      expect(estimate.error).toBeUndefined();
+      const item = [...(estimate.oneTime.items || []), ...(estimate.oneTime.specItems || [])].find((row) => /^Flea/.test(row.name || ''));
+      expect(item).toBeDefined();
+      return item.price;
+    };
+    const serverFlea = (homeSqFt, stories) => generateEstimate({
+      homeSqFt, stories, lotSqFt: 7500, propertyType: 'single_family', services: { flea: {} },
+    }).lineItems.find((line) => line.service === 'flea_package').total;
+    // What this change moved is the SIZE BASIS: both engines now step on total living area, so a second story
+    // adds nothing. The client's step function (a bracket floor, no interpolation) and its lot-size step
+    // already differ from the server's interpolated package, so absolute client prices are not compared here.
+    const cases = [[1200, 1, 325], [2000, 1, 350], [3000, 1, 390], [4000, 1, 415], [3000, 2, 390], [4500, 2, 415]];
+    for (const [homeSqFt, stories, expected] of cases) {
+      expect(serverFlea(homeSqFt, stories)).toBe(expected);
+    }
+    for (const [homeSqFt, stories] of [[2400, 2], [3000, 2], [3600, 3], [4500, 2]]) {
+      expect(clientFlea(homeSqFt, stories)).toBe(clientFlea(homeSqFt, 1));
+      expect(serverFlea(homeSqFt, stories)).toBe(serverFlea(homeSqFt, 1));
+    }
+  });
+
   test('keeps Top Dressing tier labels stable for the admin estimate UI', () => {
     const estimate = buildClientTopDressingEstimate(calculateEstimate, {
       lawnSqFt: 7500,

@@ -76,6 +76,7 @@ const {
   classifyLane,
   createDraftEstimate,
 } = require('./draft-builder');
+const { offerPlanWithOneTimeChoice, planCanShowOneTimeChoice, callerIsPlanMember } = require('./one-time-pest-both-options');
 const { flagLookupPalmCountForReview } = require('./lookup-palm-review');
 
 
@@ -2882,44 +2883,74 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       unitBandPricing = null;
     }
     result.unitBandPricing = unitBandPricing;
+    // One place for the engine input of this draft: the pricing below and
+    // the both-options trial read the same arguments.
+    const engineInputArgs = () => ({
+      intent,
+      // A home pest program starts at quarterly visits on this draft
+      // (owner 2026-11-17); classifyLane names the count that was discussed.
+      quarterlyPestStart: true,
+      // Gate ON: a true property switch must not PRICE the quoted
+      // property with the original property's type either — scopeFacts
+      // fences it, so an unresolved type reaches the pricer as 'unknown'
+      // (neutral default) and the stamp below parks the draft instead of
+      // green-laning on a type that describes another address (codex r26
+      // P1). Same object as propertyFacts on every other path.
+      // Built HERE, not from the pre-mutation scopeFacts clone: the V2 and
+      // unit-scope applies REPLACE home/lot on propertyFacts (clearing a
+      // master-parcel lot, for one), and pricing from a stale clone would
+      // charge for a lot the lane review shows as cleared (codex r27 P1).
+      propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled()
+        && crossPropertyRegather)
+        ? fenceCrossPropertyFacts(propertyFacts)
+        : propertyFacts,
+      context,
+      priorQualifyingServices,
+      profileDescribesQuotedProperty,
+      profileMeasurementUnitExact,
+      // Feature modifiers resolved by the lookup of the QUOTED address
+      // (effectiveSignals tracks the re-gather) — pool/cage, landscaping,
+      // water adjacency feed real pricing adjustments.
+      // GATE_CAGE_START_MEDIUM: the office cage start for THIS draft only
+      // (a county cage of 601-2,000 sq ft starts at Medium; a cage with no
+      // decided pool is dropped, as the estimate tool does). Gate off =
+      // the same object.
+      lookupEnriched: require('../property-lookup/office-cage-start').agentDraftCageProfile(effectiveSignals.enriched),
+      unitBandPricing,
+    });
+    // Owner ruling 2026-11-23: a one-time pest ask on a call shows both
+    // options (the rule and its limits: one-time-pest-both-options.js). The
+    // swap stays only when the plan it prices can show the one-time choice
+    // on the estimate page; otherwise the caller's one-time ask is priced.
+    // A plan member keeps the plain one-time draft (the page's choice does not
+    // carry the member one-time perk). Membership is read from the plan record
+    // itself, not only the pipeline stage; an unreadable record counts as a member.
+    // Only the trusted customer is read: an ambiguous shared phone links nobody.
+    const callerIsMember = origin?.channel === 'call' && intent.services?.oneTimePest
+      ? await callerIsPlanMember({
+        isExistingCustomer: context.isExistingCustomer,
+        priorQualifyingServices,
+        trustedCustomerId: trustedCustomer?.id,
+        readActivePlan: (id) => require('../waveguard-existing-services').isActivePlanCustomer(db, id, { strict: true }),
+        onReadError: (err) => logger.warn(`[estimator-engine] both-options member check failed: ${err.message}`),
+      })
+      : context.isExistingCustomer === true || priorQualifyingServices.length > 0;
+    context.oneTimeAskBothOptions = offerPlanWithOneTimeChoice(intent, {
+      channel: origin?.channel,
+      unitBandPricing,
+      currentCustomer: callerIsMember,
+      planShowsOneTimeChoice: () => {
+        const trialInput = buildEngineInput(engineInputArgs());
+        const trialResult = generateEstimateSafely(trialInput);
+        return planCanShowOneTimeChoice({ engineInputs: trialInput, engineResult: trialResult, totals: deriveTotals(trialResult) });
+      },
+    });
 
     let engineResult = null;
     let engineInput = null;
     let totals = { monthly: 0, annual: 0, oneTime: 0 };
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
-      engineInput = buildEngineInput({
-        intent,
-        // A home pest program starts at quarterly visits on this draft
-        // (owner 2026-11-17); classifyLane names the count that was discussed.
-        quarterlyPestStart: true,
-        // Gate ON: a true property switch must not PRICE the quoted
-        // property with the original property's type either — scopeFacts
-        // fences it, so an unresolved type reaches the pricer as 'unknown'
-        // (neutral default) and the stamp below parks the draft instead of
-        // green-laning on a type that describes another address (codex r26
-        // P1). Same object as propertyFacts on every other path.
-        // Built HERE, not from the pre-mutation scopeFacts clone: the V2 and
-        // unit-scope applies REPLACE home/lot on propertyFacts (clearing a
-        // master-parcel lot, for one), and pricing from a stale clone would
-        // charge for a lot the lane review shows as cleared (codex r27 P1).
-        propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled()
-          && crossPropertyRegather)
-          ? fenceCrossPropertyFacts(propertyFacts)
-          : propertyFacts,
-        context,
-        priorQualifyingServices,
-        profileDescribesQuotedProperty,
-        profileMeasurementUnitExact,
-        // Feature modifiers resolved by the lookup of the QUOTED address
-        // (effectiveSignals tracks the re-gather) — pool/cage, landscaping,
-        // water adjacency feed real pricing adjustments.
-        // GATE_CAGE_START_MEDIUM: the office cage start for THIS draft only
-        // (a county cage of 601-2,000 sq ft starts at Medium; a cage with no
-        // decided pool is dropped, as the estimate tool does). Gate off =
-        // the same object.
-        lookupEnriched: require('../property-lookup/office-cage-start').agentDraftCageProfile(effectiveSignals.enriched),
-        unitBandPricing,
-      });
+      engineInput = buildEngineInput(engineInputArgs());
       // Stamp what ACTUALLY fed pricing (gate ON only — the kill switch
       // must restore the previous lane behavior exactly, codex r1 P2): a
       // residential draft parks for review when the type that reached the
@@ -3016,6 +3047,34 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       : { lane: LANES.RED, reasons: ['pricing engine failed for the selected services'] };
     result.lane = lane;
     result.reasons = reasons;
+
+    // Returning-customer setup fee rule (owner 2026-11-24 and 2026-11-25, GATE_RETURNING_SETUP_FEE_GAP). A lane
+    // that drafts decides as a staff save does: on the plan the engine priced, from the visits of the customer
+    // the draft links (trustedCustomer: an ambiguous phone match links nobody). A waiver marks the engine result
+    // the draft stores (mapWithReturningWaiver) and rides the draft as the operator waiver, so the page, the
+    // accept and a later staff save read one answer.
+    //  - Decided once, here, before the dry-run return: a replay prices what the live draft stores, and a
+    //    second pass over a marked result would find no fee to waive.
+    //  - Decided on a copy, which replaces the priced result only when the decision finished: a result is never
+    //    left marked with no waiver to explain it.
+    //  - Gate off, no linked customer or an active member = no history, no copy, no change. A failed read or
+    //    map keeps the result as priced, fee included: this step never costs a draft.
+    let returningSetupFeeWaiver = null;
+    if (lane !== LANES.RED) {
+      try {
+        const Returning = require('../returning-setup-fee-waiver');
+        const history = await Returning.loadReturningVisitHistory(db, { customerId: trustedCustomer?.id });
+        if (history) {
+          const decided = structuredClone(engineResult);
+          ({ waiver: returningSetupFeeWaiver } = Returning.mapWithReturningWaiver(
+            decided, require('../pricing-engine/v1-legacy-mapper').mapV1ToLegacyShape, { history },
+          ));
+          engineResult = decided;
+        }
+      } catch (err) {
+        logger.warn(`[estimator-engine] returning setup fee rule skipped: ${err.message}`);
+      }
+    }
     result.engineResult = dryRun ? engineResult : undefined;
 
     if (dryRun) return result;
@@ -3219,7 +3278,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     let draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
       propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
-      membershipSnapshot, priorQualifyingServices, origin,
+      membershipSnapshot, priorQualifyingServices, origin, returningSetupFeeWaiver,
     });
 
     if (draft.blocked && UNIT_FENCE_QUIET_REASONS.includes(draft.duplicateBlock?.reason)) {
@@ -3271,7 +3330,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           draft = await createDraftEstimate({
             intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
             propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
-            membershipSnapshot, priorQualifyingServices, origin,
+            membershipSnapshot, priorQualifyingServices, origin, returningSetupFeeWaiver,
           });
         }
       }

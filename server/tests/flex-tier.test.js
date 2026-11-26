@@ -449,8 +449,9 @@ function seriesDbStub(rowsByParent, calls = [], locks = []) {
 describe('loadSeriesNeighbors', () => {
   test('no eligible services (no recurring_parent_id) is a clean no-op, no query', async () => {
     const db = jest.fn();
+    // A one-time visit (owner 2026-11-26) gets its no-neighbor entry without a read.
     const map = await loadSeriesNeighbors(db, [{ id: 's1', recurring_parent_id: null }]);
-    expect(map.size).toBe(0);
+    expect(map.get('s1')).toEqual({ prev: null, next: null });
     expect(db).not.toHaveBeenCalled();
   });
 

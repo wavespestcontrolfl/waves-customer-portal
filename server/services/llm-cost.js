@@ -22,8 +22,12 @@
  * weekly pull replaces the table, so a model the feed dropped is unpriced. Per-request fees that are not tokens (web search, image
  * inputs) are not recorded in the ledger and are not included. Rows the ledger has no
  * usage for, and models the feed does not list, are counted as unpriced —
- * never guessed. Image, video, audio and embedding calls write no ledger
- * row, so they are not in these totals. Nothing here is customer-facing.
+ * never guessed. Image, video and embedding calls write no ledger row, so
+ * they are not in these totals. An audio call sent through llm/call.js does
+ * write one, and the ledger does not say which of its tokens were audio. A
+ * lane that sends audio (AUDIO_INPUT_LANES) has every input token priced at
+ * the dearer of the model's text and audio input rate; any other lane prices
+ * input at the text rate. Nothing here is customer-facing.
  */
 
 const db = require('../models/db');
@@ -95,7 +99,7 @@ function aliasKeyOf(key) {
   return key.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, '');
 }
 
-const RATE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning'];
+const RATE_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning', 'audioInput'];
 const sameRates = (a, b) => RATE_KEYS.every((k) => a[k] === b[k]);
 const samePrice = (a, b) => sameRates(a, b)
   && (a.tiers || []).length === (b.tiers || []).length
@@ -164,6 +168,7 @@ function parseTiers(overrides) {
       cache_read_per_mtok: perMillion(o.input_cache_read),
       cache_write_per_mtok: cacheWriteRate(o),
       reasoning_per_mtok: perMillion(o.internal_reasoning),
+      audio_input_per_mtok: perMillion(o.audio),
     });
   }
   return tiers.sort((a, b) => a.min_prompt_tokens - b.min_prompt_tokens);
@@ -194,9 +199,10 @@ function parseFeed(body, fetchedAt) {
     // ":free" / ":thinking" variants are not what the APIs bill
     if (!provider || id.includes(':')) continue;
     const key = normalizeModelId(id);
-    const input = perMillion(m.pricing?.prompt);
-    const output = perMillion(m.pricing?.completion);
-    const tiers = parseTiers(m.pricing?.overrides);
+    const pricing = m.pricing || {};
+    const input = perMillion(pricing.prompt);
+    const output = perMillion(pricing.completion);
+    const tiers = parseTiers(pricing.overrides);
     if (!key || input == null || output == null || tiers == null) continue;
     const row = {
       model_key: key,
@@ -205,9 +211,10 @@ function parseFeed(body, fetchedAt) {
       source_model_id: id.slice(0, 200),
       input_per_mtok: input,
       output_per_mtok: output,
-      cache_read_per_mtok: perMillion(m.pricing?.input_cache_read),
-      cache_write_per_mtok: cacheWriteRate(m.pricing),
-      reasoning_per_mtok: perMillion(m.pricing?.internal_reasoning),
+      cache_read_per_mtok: perMillion(pricing.input_cache_read),
+      cache_write_per_mtok: cacheWriteRate(pricing),
+      reasoning_per_mtok: perMillion(pricing.internal_reasoning),
+      audio_input_per_mtok: perMillion(pricing.audio),
       pricing_tiers: tiers.length ? JSON.stringify(tiers) : null,
       fetched_at: fetchedAt,
     };
@@ -243,7 +250,7 @@ async function pullPrices({ conn = db, fetchImpl = fetch, now = new Date() } = {
 const num = (v) => (v == null ? null : Number(v));
 
 async function loadPrices(conn = db) {
-  const rows = await conn(PRICES).select('model_key', 'input_per_mtok', 'output_per_mtok', 'cache_read_per_mtok', 'cache_write_per_mtok', 'reasoning_per_mtok', 'pricing_tiers', 'fetched_at');
+  const rows = await conn(PRICES).select('model_key', 'input_per_mtok', 'output_per_mtok', 'cache_read_per_mtok', 'cache_write_per_mtok', 'reasoning_per_mtok', 'audio_input_per_mtok', 'pricing_tiers', 'fetched_at');
   const map = new Map();
   let oldest = null;
   // the lowest tier threshold of any model: every call below it bills at
@@ -256,6 +263,7 @@ async function loadPrices(conn = db) {
       cacheRead: num(x.cache_read_per_mtok),
       cacheWrite: num(x.cache_write_per_mtok),
       reasoning: num(x.reasoning_per_mtok),
+      audioInput: num(x.audio_input_per_mtok),
     });
     const stored = typeof r.pricing_tiers === 'string' ? JSON.parse(r.pricing_tiers) : r.pricing_tiers;
     const tiers = (Array.isArray(stored) ? stored : []).map((t) => ({ minPromptTokens: Number(t.min_prompt_tokens), ...rates(t) }));
@@ -295,6 +303,18 @@ function ratesForCall(p, prompt) {
  * rate (an overestimate, never an underestimate); cache writes with no
  * listed write rate, or an unknown provider → null (unpriced).
  */
+// Lanes whose calls send audio. Their totals price input with audioInputRates.
+const AUDIO_INPUT_LANES = new Set(['call_sound_check']);
+
+// The rates of a call whose input may be audio. Its input count has no audio share in it, so every input token
+// is priced at the dearer of the text and the audio input rate (a model with no listed audio rate bills audio as
+// text), and a cache read as plain input: the feed lists no cached-audio rate. The figure may read high, never low.
+function audioInputRates(rates) {
+  if (!rates || rates.input == null) return rates;
+  const input = Math.max(rates.input, rates.audioInput ?? rates.input);
+  return { ...rates, input, cacheRead: input };
+}
+
 function costUsd(provider, t, p) {
   if (!p || p.input == null || p.output == null) return null;
   const n = (v) => Math.max(0, Number(v) || 0);
@@ -393,6 +413,7 @@ function foldLaneCosts(rows, prices) {
     let rates = price && r.per_call ? ratesForCall(price, promptTokens(r.provider, r)) : price;
     // a session turn that reached a tier may be several shorter calls: unknown which rate applies
     if (r.row_kind === 'session_turn' && rates !== price) rates = null;
+    if (AUDIO_INPUT_LANES.has(r.lane_id)) rates = audioInputRates(rates);
     const cost = costUsd(r.provider, r, rates);
     if (cost == null) lane.unpricedCalls += calls;
     else {
@@ -465,9 +486,12 @@ async function closeSpikeItems(conn, now, reason, keep) {
 }
 
 async function refreshPricesIfStale({ conn, fetchImpl, now }) {
-  const newest = await conn(PRICES).max('fetched_at as at').first();
+  // `audio` counts the rows that hold an audio input rate. A table last pulled before that rate was stored holds
+  // none, so it is pulled again now instead of a week after its last pull.
+  const newest = await conn(PRICES).max('fetched_at as at').count('audio_input_per_mtok as audio').first();
   const at = newest?.at ? new Date(newest.at) : null;
-  if (at && now.getTime() - at.getTime() < PRICE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000) return { refreshed: false };
+  const fresh = at && now.getTime() - at.getTime() < PRICE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+  if (fresh && Number(newest.audio) > 0) return { refreshed: false };
   try {
     return { refreshed: true, ...(await pullPrices({ conn, fetchImpl, now })) };
   } catch (err) {
@@ -542,6 +566,8 @@ async function runLlmCostCheck({ now = new Date(), conn = db, fetchImpl = fetch 
 }
 
 module.exports = {
+  audioInputRates,
+  AUDIO_INPUT_LANES,
   pullPrices,
   loadPrices,
   laneCosts,

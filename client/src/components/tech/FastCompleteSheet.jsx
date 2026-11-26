@@ -73,6 +73,7 @@ import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../../lib/pest-default-mix';
 import { HOUSE_FL_OZ_PER_GAL, applyTaurusYearlyLimit, isFlOzPerGal, isHouseTaurusAmount, isTaurusProduct, taurusYearlyNote, taurusYearlyOf } from '../../lib/taurus-yearly-limit';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
+import { withLabelUseRates } from '../../lib/protocol-completion-defaults';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
   amountText, categoryLabel, hasAmount, productUnits, seededAmount, stockHolds,
@@ -493,17 +494,19 @@ function useFastCompleteContext({
     let active = true;
     (async () => {
       try {
-        const [data, ratingContract] = await Promise.all([
+        const [data, ratingContract, cardDefaults] = await Promise.all([
           // The picker's most-used list is asked for here only; the recap
           // modal and the stock re-read below never run that aggregate.
           request(`${base}/pest-recap/context?include=common_products`),
           // A failed read keeps the rating off: never send a rating the
           // server may drop, or show a scale it may not use.
           request(`${base}/tech-rating-allowed`).catch(() => null),
+          // The visit card's own label rates (Tekko Pro at 2 fl oz per gallon on a cockroach job): a failed read keeps the catalog's.
+          request(`${base}/default-products`).catch(() => null),
         ]);
         if (!active) return;
         const visit = data?.service || {};
-        const products = Array.isArray(data?.products) ? data.products : [];
+        const products = withLabelUseRates(Array.isArray(data?.products) ? data.products : [], cardDefaults);
         // This service line's most-used products (newer servers only): the
         // picker's first list, and each product's usual unit.
         const commonProducts = Array.isArray(data?.commonProducts)

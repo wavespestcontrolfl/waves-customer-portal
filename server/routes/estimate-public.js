@@ -98,6 +98,7 @@ const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
 const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, areaAddOnConfig } = require('../services/pricing-engine/constants');
+const { storedOneTimeAnchorPerApp, oneTimePestNoHomeAgeReplaySignal } = require('../services/pricing-engine/one-time-pest-home-age');
 const { isRetiredTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
@@ -20846,6 +20847,9 @@ function savedFloorReplayOverrides(estData) {
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
   // Area add-on price knobs (pricing_config area_addon_pricing): a sent add-on keeps the price it was quoted at.
   Object.assign(overrides, require('../services/estimate-area-addon-knob-replay').areaAddOnReplayOverrides(estData));
+  // Flea interior size basis (owner ruling 2026-11-26 "whole home"): a sent flea package quoted on the ground-floor footprint keeps it.
+  // Set even when empty, so a copy inside the stored inputs never prices.
+  Object.assign(overrides, require('../services/estimate-flea-size-replay').fleaSizeReplayOverrides(estData));
   // Termite station-cost snapshot (plan 2026-09-03 §A1) — same home, same
   // tri-state: stamped replays verbatim, unstamped termite replays the
   // pre-stamp constant, no termite line injects nothing.
@@ -20869,6 +20873,8 @@ function savedFloorReplayOverrides(estData) {
   overrides.wholeHomeSealReplay = require('../services/estimate-whole-home-replay').wholeHomeSealReplaySignal(estData) || undefined;
   // Roof style quote-time multiplier and per-foot terms (GATE_EXCLUSION_ROOF_STYLE_PRICING): same contract, set even when empty.
   overrides.roofStyleReplay = require('../services/estimate-roof-style-replay').roofStyleReplaySignal(estData) || undefined;
+  // One-time pest home-age rule (GATE_ONE_TIME_PEST_NO_HOME_AGE): same contract, set even when empty.
+  overrides.oneTimePestNoHomeAgeReplay = oneTimePestNoHomeAgeReplaySignal(estData) || undefined;
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.
@@ -21342,7 +21348,12 @@ function oneTimePestChoiceAmountFromRecurringServices(recurringServices = []) {
 }
 
 function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricingBundle = null) {
-  return oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies)
+  // GATE_ONE_TIME_PEST_NO_HOME_AGE (owner 2026-11-26): a plan priced on that rule
+  // saved the quarterly rate with no home-age adjustment. The one-time choice is
+  // built from that saved rate, so it shows and charges the same amount whatever
+  // the gate says later. No saved rate = the amount derived as before.
+  return oneTimePestChoiceAmountFromPerApp(storedOneTimeAnchorPerApp(estData))
+    || oneTimePestChoiceAmountFromFrequencies(pricingBundle?.frequencies)
     || oneTimePestChoiceAmountFromResultStats(estData)
     || oneTimePestChoiceAmountFromRecurringServices(
       recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),

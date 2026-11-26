@@ -98,8 +98,8 @@ export default function DashboardPageV2() {
   const {
     data, kpis, compare, salesCapture, funnel, aging, mrrTrend, cohort, capAlloc,
     callsBySource, leadsBySource, channelMix, leadFunnel, channelRoi, serviceLines, mix,
-    revenueByCity, reviewTrend, today, billing, alerts, kpiHistory, ebitda, officeCost,
-    mrrBridge, revenueOverview, churnReasons, staleVisits,
+    revenueByCity, reviewTrend, today, billing, alerts, kpiHistory, ebitda, officeCost, opsMetrics,
+    mrrBridge, revenueOverview, churnReasons, staleVisits, buyerView,
   } = values;
   const kpiTargets = useMemo(() => Object.fromEntries(
     (values.kpiTargets?.targets || []).map((row) => [row.metric, row]),
@@ -204,6 +204,7 @@ export default function DashboardPageV2() {
       {sectionVisible("today") && (
         <TodaySection alerts={alerts?.alerts ?? null} alertsStale={!!errors.alerts}
           alertFailures={alerts?.failures} alertsLoading={pending.alerts && !alerts} today={today} staleVisits={staleVisits}
+          buyerView={buyerView}
           errors={errors} pending={pending} onRetry={retryFeed} {...kpiStripProps} />
       )}
 
@@ -261,6 +262,7 @@ export default function DashboardPageV2() {
           mix={mix}
           ebitda={ebitda}
           officeCost={officeCost}
+          opsMetrics={opsMetrics}
           revenueOverview={revenueOverview}
           isMobile={isMobile}
           {...kpiStripProps}

@@ -3589,3 +3589,23 @@ Owner 2026-11-22 ("portal text", then "ok do your rec" on the portal-answers-by-
 **Reasoning:** The text carries the answer itself, so the customer does not need to sign in to read it. A reply to the text lands in Communications like any text. Only the staff press texts, at any hour, as a staff text does (2026-11-05: a night answer sends at once). The 10-minute sweep that finishes a stopped notice sends the email, never a text, so no automatic step texts a customer. The number is the one on file when the answer is saved, re-checked under a lock at the send, so a number corrected after the save gets no text. An answer that carries a Waves link is not texted: the SMS composer checks who owns such a link before it texts one, and this text does not. A text whose outcome is unknown counts as sent: a second text is worse than a missing email. The way (text or push) is set when the answer is saved, so a flip never sends one answer both an app push and a text, and no later try needs to read what an earlier push did. Before Send, the reply form tells staff the answer goes by text, at any hour. The text uses purpose `support_resolution` (as a request update's text), not the SMS-thread reply interlock, because it answers a portal item, not the SMS thread's waiting question. A Waves AI answer gets no text, so a model's words never reach a phone.
 
 **Revisit if:** customers reply to the answer texts in a way the office cannot follow, or the email fallback stops being needed.
+
+## 2026-11-26 — The weekly events email is short and scannable (feat/weekly-short-format)
+
+Owner 2026-11-26 ("ok go" on the plan page). **Decision.** The Waves Newsletter (`local-weekly-fresh-events`) drops the long comedic per-event format for a short one. The top has three "This weekend" points and a "Forwarded this? Subscribe free" line. Events sit under day headers (Thursday, Friday, Saturday, Sunday, any later day by its own name) in start-time order. Each event is a bold "Name · Town" heading, one fixed line ("Fri, Nov 27 • 5:00 PM • Free · Venue", price only when the database has it), ONE plain sentence on why to go, and the tracked details link. No joke headline, no GIF or photo, no bullets, no pro tip, no closing line, no checklist, no P.S. At most one joke in the subject and one in the opening line. The fixed line "Dates can change. Check before you go." sits near the end.
+
+**This supersedes** the 2026-07-28 reversal above ("put back the old comedic devices ... do NOT re-propose the compact format") for the weekly email. That reversal's note not to re-propose a compact format is overridden by this explicit owner approval. Code now renders the structure (day grouping, the fixed line); the model supplies only the subject, the opening line, three points and one sentence per event.
+
+**What does not change.** The factual lock (name, town, date, time, venue, price and link come from `events_raw`), the `{{evclick:...}}` tracking token, the poll token, the feedback token, the footer and unsubscribe, the claim validator and every send gate. `assembleWavesNewsletter` (the 2026-07-28 compact assembler) stays, unused.
+
+**Revisit if:** click rates per event fall after the change, or readers ask for photos back.
+
+## 2026-11-25 — A model listens to each new call recording (notes only)
+
+Owner 2026-11-25 ("both", on the Neon call archive lane's two asks). **Decision.** With `GATE_CALL_SOUND_CHECK` on, the recording of each newly processed call goes to Gemini 4 Neon (`MODEL_GEMINI_CALL_SOUND_CHECK`), which listens and notes the customer's mood, talk-over, rushed answers and risky claims. The note is saved on the call (`call_log.metadata.sound_check`). No bell, no text, nothing customer-facing.
+
+**Context:** The call pipeline judges a call from its transcript. A transcript does not show how the customer sounded or who talked over whom. The owner's archive run on old calls showed that a model that hears the audio finds these.
+
+**Reasoning:** It is the first lane that sends audio through `llm/call.js`, on a single Gemini leg (no other leg takes audio). Each listen is a paid call, so the spend rules are code constants: $0.83 a day at most (the top of the approved $0.33 to $0.83), a claim with the worst-case cost before every call, one attempt a call, and no call without a price row.
+
+**Revisit if:** the first week's Google bill differs from the stored estimates, the notes prove wrong on calls the owner checks, or staff want a bell for an upset customer (that would be a new decision: this one is notes only).

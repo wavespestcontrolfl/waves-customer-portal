@@ -37,7 +37,7 @@ const contextAggregator = require('./context-aggregator');
 const { awayWatchCardLines } = require('./away-watch');
 
 const { redactAccessCodes } = contextAggregator;
-const { matchServiceProtocol, monthVisit } = require('./protocol-matcher');
+const { matchServiceProtocol, followupVisitMatch, monthVisit } = require('./protocol-matcher');
 const { stripPriceTokensFromText } = require('./protocol-reader');
 const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = require('../utils/mosquito-misting-system');
 const {
@@ -55,6 +55,7 @@ const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } = require('./area-addon-governed-rate');
+const { labelUseRate } = require('../utils/protocol-label-rate');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -472,7 +473,7 @@ const ADDON_PROGRAMS = Object.freeze({
   // work. The web sweep applies no product (nonChemical); the five chemical
   // add-ons route to the `area_addon` protocol program by key, whatever
   // their category (lawn_care `keys` below; protocols.json area_addon).
-  pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest', nonChemical: ['area_addon_web_sweep'] },
+  pest_control: { any: ['pest', 'cockroach', 'flea', 'bed_bug', 'termite'], fallback: 'pest', nonChemical: ['area_addon_web_sweep'] },
   lawn_care: {
     any: ['lawn'],
     fallback: 'lawn',
@@ -507,7 +508,8 @@ const ADDON_PROGRAMS = Object.freeze({
     ],
   },
   tree_shrub: { any: ['tree_shrub', 'palm_injection'], fallback: 'tree_shrub' },
-  specialty: { any: ['bed_bug'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'pest', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
+  // flea_tick is the flea service ("Flea Control Service"): its own program since 2026-11-25. Ticks stay on the pest tick card.
+  specialty: { any: ['bed_bug', 'flea'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'flea', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
 });
 function addonProgramKey(category, name, protocols, serviceKey = null) {
   const rule = ADDON_PROGRAMS[category];
@@ -547,7 +549,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     .leftJoin('services as s', 'ss.service_id', 's.id')
     .where('ss.id', serviceId)
     .select(
-      'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes', 'ss.technician_id',
+      'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes', 'ss.technician_id', 'ss.followup_source_service_id',
       // The primary line's catalog identity (booking snapshot, else the live
       // row); null on legacy rows booked before the catalog link existed.
       dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
@@ -607,6 +609,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}, { displayContext
     serviceType: svc.service_type,
     serviceCategory: svc.service_category || null,
     serviceKey: svc.service_key || null,
+    // Booked as a follow-up of a finished visit: the card is the program's follow-up card, not the first visit's.
+    isFollowup: svc.followup_source_service_id != null,
     // What the estimate sold for an area add-on that IS this visit (null for any other visit).
     areaAddOnScope: soldScopeOf(svc.area_addon_scope),
     serviceLine,
@@ -1393,7 +1397,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       bermudaRequired: requiredNotes(planned.filter((item) => item.bermudaStep)),
     };
   }
-  return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey: identityKey || null, serviceKey: facts.serviceKey || null }), blocks: [] };
+  return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey: identityKey || null, serviceKey: facts.serviceKey || null, isFollowup: facts.isFollowup === true }), blocks: [] };
 }
 
 /**
@@ -1404,14 +1408,17 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
  * the booking's catalog service key — a matcher rule that claims it fixes
  * the visit regardless of the display name.
  */
-// The misting program's safety rules as a procedure field ({ safety: [...] }), or {} for any other program (they keep their procedure).
+// The safety rules of the misting, flea and bed bug programs as a procedure field ({ safety: [...] }), or {} for any other program (they
+// keep their procedure). Flea and bed bug are indoor sprays: people and pets out until dry, fish tanks covered, nothing fogged.
+const SAFETY_ON_CARD_PROGRAMS = ['mosquito_misting', 'flea', 'bed_bug'];
 function mistingSafetyField(program, effectiveProgramKey) {
-  if (effectiveProgramKey !== 'mosquito_misting' || !program?.safety_rules?.length) return {};
+  if (!SAFETY_ON_CARD_PROGRAMS.includes(effectiveProgramKey) || !program?.safety_rules?.length) return {};
   return { safety: program.safety_rules.map((rule) => String(rule)) };
 }
 
-function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { programKey = null, serviceKey = null } = {}) {
-  const match = matchServiceProtocol(protocols, serviceType, { serviceKey });
+// isFollowup: the visit was booked as a follow-up of a finished visit (it carries that visit's name), so it gets the program's follow-up card.
+function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { programKey = null, serviceKey = null, isFollowup } = {}) {
+  const match = followupVisitMatch(matchServiceProtocol(protocols, serviceType, { serviceKey }), isFollowup);
   const program = programKey ? (protocols?.[programKey] || null) : match?.program;
   const ruleVisit = !programKey || match?.programKey === programKey ? match?.matchedVisit : null;
   const visit = seasonalVisit(program, scheduledDate) || ruleVisit || program?.visits?.[0] || null;
@@ -1545,6 +1552,25 @@ function seasonalVisit(program, scheduledDate) {
  * comes from where the line sits — a secondary line is the visit's
  * "if needed", never selected base work.
  */
+// A card line may declare its tank rate (lineMeta.tankRatePerGallon: { amount, unit }) when its text cannot be read as one rate: grams, or
+// two products on one line. Only a line that names one product carries it. { declaredRate } or {}.
+// lineMeta.labelRatePerGallon is the product label's own rate for THIS pest, where the catalog row holds the label's rate for another
+// (Tekko Pro: 1 fl oz per gallon for fleas and flying insects in the catalog, 2 for cockroaches). It may sit above the catalog band, so
+// only this card's jobs get it and every other job keeps the catalog rate. protocol-label-rate-lines.test.js pins each line that has one.
+// The label rate applies only to the registered product it names (protocol-label-rate.js checks the EPA number); a
+// line whose hint resolved to another formulation falls back to its own text and the catalog band.
+function declaredTankRate(meta, hints, product) {
+  if (hints.length !== 1) return {};
+  const labelUse = labelUseRate(meta, product);
+  if (labelUse) return { declaredRate: { lo: labelUse.amount, hi: labelUse.amount, unit: labelUse.unit }, labelUseRate: true };
+  // The line names a label rate for another registration: its text states that rate too, so no rate is read from it (rateOf below
+  // honors this) and the resolved product keeps its catalog band.
+  if (meta?.labelRatePerGallon) return { labelRateRefused: true };
+  const amount = Number(meta?.tankRatePerGallon?.amount);
+  if (!(amount > 0)) return {};
+  return { declaredRate: { lo: amount, hi: amount, unit: String(meta.tankRatePerGallon.unit) } };
+}
+
 function linesFromLineMeta(visit, catalog) {
   const secondary = String(visit?.secondary || '');
   const lines = [];
@@ -1560,7 +1586,7 @@ function linesFromLineMeta(visit, catalog) {
       // Conditional when the line sits in the visit's secondary text OR is
       // phrased as a condition (isConditionalLine).
       const conditional = Boolean(raw && (secondary.includes(raw) || isConditionalLine(raw)));
-      lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
+      lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional, ...declaredTankRate(meta, meta.catalogProductHints, product) });
     }
   }
   return lines;
@@ -2127,6 +2153,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
         .where('ss.id', serviceId)
         .select(
           'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
+          'ss.followup_source_service_id',
           // The primary line's catalog identity, by the card's own rule.
           dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
           dbh.raw('COALESCE(ss.service_key_snapshot, s.service_key) as service_key'),
@@ -2192,7 +2219,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // Distance IGR: 6-8 fl oz/100 gal on the protocol, 0.06-0.12 fl oz/gal on
   // the label → 0.06-0.08). A band outside the label, or on another unit,
   // leaves the label band standing.
-  const protocolPerGallon = labelPerGallon && protocolLine?.rate ? narrowBand(labelPerGallon, protocolLine.rate) : null;
+  const protocolPerGallon = protocolBand(labelPerGallon, protocolLine);
   const perGallon = protocolPerGallon || labelPerGallon;
   // Plan-wide blocks first; then THIS product through the same guards the
   // closeout applies (manager approvals: off-protocol, unselected
@@ -2264,6 +2291,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     [!tankMixable, 'Not a tank mix — apply as labeled'],
     [!product.label_verified_at, 'Label rate not yet verified'],
     [sprayCheck.verdict === 'hold', `Spray check: ${sprayCheck.reason}`],
+    // Two services on this visit name the product at different rates: the hold names each rate, so it comes only once the
+    // label and spray checks pass and a mixing instruction may be given.
+    [Boolean(lineFacts.conflictLines), conflictText(product, labelPerGallon, lineFacts.conflictLines)],
   ].find(([applies]) => applies);
   const mix = withheld
     ? { amount: null, unit: rateUnit || null, reason: withheld[1] }
@@ -2328,7 +2358,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   const lawnAddon = addons.find((a) => a.programKey === 'lawn')?.addon || null;
   const found = (line, owners = []) => ({ line, treatment, primaryIsLawn, lawnAddon, owners });
   const candidates = [
-    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null }] : []),
+    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null, isFollowup: svc.followup_source_service_id != null }] : []),
     ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),
   ];
   if (!candidates.length) return found(null);
@@ -2340,13 +2370,50 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // Every candidate whose lines name the product owns its rain rule (`owners`); the
   // first selected line governs the dose, else the first "if needed" one.
   const hits = candidates
-    .map((c) => ({ c, hit: resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null }).lines.find((l) => l.product.id === product.id) }))
+    .map((c) => ({ c, hit: resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null, isFollowup: c.isFollowup === true }).lines.find((l) => l.product.id === product.id) }))
     .filter(({ hit }) => hit);
   const owners = hits.map(({ c }) => ({ name: c.name, serviceKey: c.serviceKey || null }));
-  const selected = hits.find(({ hit }) => hit.selected !== false);
-  if (selected) return found({ addon: selected.c.addon, selected: true, rate: lineRate(selected.hit.raw), governed: Boolean(selected.hit.governed) }, owners);
+  const selectedHits = hits.filter(({ hit }) => hit.selected !== false);
+  const [selected] = selectedHits;
+  if (selected) {
+    const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw));
+    // Two booked services can select the same product at different rates (a home cockroach visit with Tekko Pro at its label's
+    // 2 fl oz per gallon, plus a flea add-on at 0.66 in the shared tank). The request names only the product, so no one rate is the
+    // right one: the dose is withheld. Each service's line goes along (conflictLines) so the hold can name the rates that pass the
+    // same label check a single dose does (conflictText).
+    const lineOf = (h) => ({ rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate) });
+    const rates = new Set(selectedHits.map((h) => JSON.stringify(rateOf(h))));
+    // Only a card that carries its label's rate (labelUseRate) can disagree: another product's lines keep the first card's rate
+    // narrowed by the label band, as before.
+    const ratesDisagree = rates.size > 1 && selectedHits.some((h) => h.hit.labelUseRate) ? { conflictLines: selectedHits.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
+    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...ratesDisagree }, owners);
+  }
   const [conditional] = hits;
   return found(conditional ? { addon: conditional.c.addon, selected: false, rate: null, ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}) } : null, owners);
+}
+
+// The per-gallon band the matched card line gives the mix, or null (the label band stands). A rate read from the line's text is clipped
+// to the label band. A rate the card DECLARES governs when it is on the label's unit and not above the label band's top: a card may mix
+// weaker than the label (the flea growth regulator shares a tank sprayed at a higher volume), never stronger.
+function protocolBand(label, protocolLine) {
+  if (!label || !protocolLine?.rate) return null;
+  if (!protocolLine.declared) return narrowBand(label, protocolLine.rate);
+  const sameUnit = String(label.unit).toLowerCase() === String(protocolLine.rate.unit).toLowerCase();
+  // The label's own rate for this card's pest stands in for the catalog band (see declaredTankRate).
+  if (protocolLine.labelUse) return sameUnit ? protocolLine.rate : null;
+  return sameUnit && protocolLine.rate.hi <= label.hi ? protocolLine.rate : null;
+}
+
+// The hold for a product two services on one visit select at different rates: each service's rate where it passes protocolBand
+// against the verified label band (the check a single dose gets), else "see its card".
+function conflictText(product, label, conflictLines) {
+  if (!conflictLines) return null;
+  const rateText = (rate) => `${rate.lo === rate.hi ? rate.lo : `${rate.lo}-${rate.hi}`} ${String(rate.unit).replace('_', ' ')} per gallon`;
+  const each = conflictLines.map((line) => {
+    const band = protocolBand(label, line);
+    return `${line.name} ${band ? rateText(band) : 'see its card'}`;
+  });
+  return `${product.name} has a different rate on each service on this visit: ${each.join('; ')}. Mix a separate tank for each`;
 }
 
 // The protocol band clipped to the verified label band, on one unit.
@@ -2428,5 +2495,5 @@ module.exports = {
   resolveVisitLines,
   describeLine,
   ALTERNATE_ADDRESS_BLOCK,
-  _test: { mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { protocolBand, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

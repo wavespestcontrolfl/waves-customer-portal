@@ -240,7 +240,7 @@ function validateNewsletterDraft(send, opts = {}) {
   if (isFlagshipType(send.newsletter_type)) {
     if (send.html_body) {
       const bodyText = send.html_body.replace(/<[^>]+>/g, ' ').toLowerCase();
-      if (!['schedule service', 'book', 'call us', 'reply to this email', 'wavespestcontrol.com'].some((s) => bodyText.includes(s))) {
+      if (!['schedule service', 'book', 'call us', 'reply to this email', 'wavespestcontrol.com', 'subscribe free'].some((s) => bodyText.includes(s))) {
         warnings.push('No Waves CTA detected');
       }
       if (!send.html_body.includes('<h2') && !send.html_body.includes('<strong>')) {

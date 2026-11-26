@@ -26,7 +26,7 @@
  *   (reminder_24h_off: the customer turned it off, or the answer is unknown or unreadable; it is the only notice of a new hour).
  * A night tool never changes a time the customer was already told (owner 2026-11-05, "D1 a"), so three more kinds of
  * stop are fixed, checked after the rules above: first_or_one_time (not a recurring visit with a parent series),
- * person_placed (the customer picked or asked for the date or time; the auto-dispatch rule
+ * person_placed (the customer asked for the time, or a Waves Assessment; the auto-dispatch rule
  * eligibility.isPersonPlacedVisit, and an unreadable history keeps the stop fixed) and time_told (the customer has a
  * known time from a delivered text, email, call or booking, by the no-show detector's promise reader). A stop held only by
  * first_or_one_time or time_told may still start up to 2 hours LATER than the slot the customer was told
@@ -266,8 +266,8 @@ async function loadSetTime(conn, rows, now) {
 
 /**
  * Ids of stops the customer holds on their current date or time, or staff locked, by the auto-dispatch rule
- * (eligibility.isPersonPlacedVisit: the customer asked for the time, or the customer's own move or date edit is the
- * newest placement; a staff placement alone no longer counts, owner 2026-11-22). A day holds a handful of rows, so one
+ * (eligibility.isPersonPlacedVisit: the customer asked for the time, or a Waves Assessment; a staff placement no longer
+ * counts, owner 2026-11-22, nor the customer's own move, owner 2026-11-26). A day holds a handful of rows, so one
  * bounded read per row. isPersonPlacedVisit fails CLOSED: a read failure counts as placed, so the stop stays fixed.
  */
 async function loadPersonPlaced(conn, rows) {

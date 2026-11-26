@@ -28,13 +28,13 @@ const {
   isRecurringFirstOfYearExempt,
 } = require('../services/newsletter-event-selection');
 
-const REFERENCE = new Date('2026-07-20T12:00:00Z'); // Monday — issue Tuesday is 2026-07-21
+const REFERENCE = new Date('2026-07-22T12:00:00Z'); // Wednesday — issue Thursday is 2026-07-23
 
 function weeklyTrivia(id, overrides = {}) {
   return {
     id,
     title: 'Weekly Trivia Night',
-    description: 'Trivia every Tuesday night.',
+    description: 'Trivia every Thursday night.',
     admin_status: 'approved',
     event_url: `https://events.example/trivia/${id}`,
     event_type: 'recurring_series',
@@ -50,9 +50,9 @@ function weeklyTrivia(id, overrides = {}) {
 }
 
 describe('planning and final validation agree on a continuity-proven recurring first-of-year occurrence', () => {
-  const priorYear = weeklyTrivia('prior-2025', { start_at: '2025-01-08T23:00:00Z' });
-  const candidate = weeklyTrivia('33333333-3333-4333-8333-333333333333', { start_at: '2026-07-21T22:00:00Z' });
-  const laterSibling = weeklyTrivia('later-2026', { start_at: '2026-07-28T22:00:00Z' });
+  const priorYear = weeklyTrivia('prior-2025', { start_at: '2025-01-09T23:00:00Z' });
+  const candidate = weeklyTrivia('33333333-3333-4333-8333-333333333333', { start_at: '2026-07-23T22:00:00Z' });
+  const laterSibling = weeklyTrivia('later-2026', { start_at: '2026-07-30T22:00:00Z' });
 
   // The routine ±90-day pool used for repeatedDateTitleKeys: candidate and
   // laterSibling share a normalized title on TWO distinct dates in it, which
@@ -109,9 +109,9 @@ describe('the repeated-title rejection still applies to a genuinely non-recurrin
     merged_into: null,
     venue_name: 'Main Street',
     city: 'venice',
-    start_at: '2026-07-21T22:00:00Z',
+    start_at: '2026-07-23T22:00:00Z',
   };
-  const oneTimeB = { ...oneTimeA, id: '55555555-5555-4555-8555-555555555555', start_at: '2026-07-28T22:00:00Z' };
+  const oneTimeB = { ...oneTimeA, id: '55555555-5555-4555-8555-555555555555', start_at: '2026-07-30T22:00:00Z' };
   const pool = [oneTimeA, oneTimeB];
 
   test('planning drops the earlier one-time row too — it is not a recurring identity, so no exemption applies', async () => {

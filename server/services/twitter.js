@@ -17,8 +17,11 @@
  *      affect reads. The four TWITTER_* OAuth 1.0a write vars are retired.)
  *
  * Tweets go out as text + article URL: X wraps every URL to a fixed-length
- * t.co link (23 chars against the 280 limit) and renders the link card from
- * the page's og:image, so no media upload is needed for blog shares.
+ * t.co link (23 chars against the 280 limit). When the caller has the post's
+ * picture (the blog hero copy the other platforms get), it rides along as a
+ * Zernio media item. X's own link card is NOT enough: X reads the page once,
+ * on its own clock, and 6 of 30 blog shares 2026-10-27..11-26 got no card at
+ * all (no picture), with no way to make X read the page again.
  */
 
 const logger = require('./logger');
@@ -214,36 +217,36 @@ class TwitterService {
     return last;
   }
 
-  async createPost({ text, link } = {}) {
+  async createPost({ text, link, imageUrl } = {}) {
     if (!this.configured) {
       throw new Error('X (Twitter) posting not configured (ZERNIO_API_KEY)');
     }
     const status = this.composeTweet(text, link);
     if (!status) throw new Error('X post requires text');
+    // Zernio fetches the picture server-side, so only a public https URL.
+    const picture = typeof imageUrl === 'string' && /^https:\/\//i.test(imageUrl) ? imageUrl : null;
 
     const accountId = await this._resolveAccountId();
+    const body = {
+      content: status,
+      platforms: [{ platform: 'twitter', accountId }],
+      publishNow: true,
+    };
+    if (picture) body.mediaItems = [{ type: 'image', url: picture }];
     // NOT retried: like the direct create-Tweet call this replaced, publish
     // is non-idempotent — a lost response on a successful create would
-    // duplicate the tweet.
+    // duplicate the tweet. The one exception is a picture Zernio refuses at
+    // create time (a 4xx answer, so no post exists): the tweet then goes out
+    // text + link, as it did before pictures, rather than not at all.
     let created;
     try {
-      created = await this._zernio('posts', {
-        method: 'POST',
-        body: {
-          content: status,
-          platforms: [{ platform: 'twitter', accountId }],
-          publishNow: true,
-        },
-      });
+      created = await this._createOrConverge(body);
     } catch (err) {
-      // Zernio dedupes identical content by hash: a replayed create (e.g. an
-      // operator channel-retry after a lost response) 409s with the id of the
-      // post that already exists. Converge on that post instead of recording
-      // a permanent failure the retry path could never clear.
-      const existingId = err.status === 409 ? this._parseExistingPostId(err.bodyText) : null;
-      if (!existingId) throw err;
-      logger.info(`[twitter] Zernio deduped a replayed create → existing post ${existingId}`);
-      created = { post: { _id: existingId } };
+      const refusedAtCreate = err.status >= 400 && err.status < 500 && err.status !== 409;
+      if (!picture || !refusedAtCreate) throw err;
+      logger.warn(`[twitter] Zernio refused the picture (${err.status}); posting text + link only`);
+      delete body.mediaItems;
+      created = await this._createOrConverge(body);
     }
     const zernioPostId = (created?.post || created)?._id;
     if (!zernioPostId) {
@@ -253,7 +256,24 @@ class TwitterService {
     const platformEntry = await this._waitForPlatformResult(zernioPostId);
     const postId = platformEntry?.platformPostId || zernioPostId;
     logger.info(`[twitter] tweet created via Zernio: ${postId} (zernio post ${zernioPostId})`);
-    return { platform: 'twitter', postId, success: true };
+    const result = { platform: 'twitter', postId, success: true };
+    if (body.mediaItems) result.imageUrl = picture;
+    return result;
+  }
+
+  async _createOrConverge(body) {
+    try {
+      return await this._zernio('posts', { method: 'POST', body });
+    } catch (err) {
+      // Zernio dedupes identical content by hash: a replayed create (e.g. an
+      // operator channel-retry after a lost response) 409s with the id of the
+      // post that already exists. Converge on that post instead of recording
+      // a permanent failure the retry path could never clear.
+      const existingId = err.status === 409 ? this._parseExistingPostId(err.bodyText) : null;
+      if (!existingId) throw err;
+      logger.info(`[twitter] Zernio deduped a replayed create → existing post ${existingId}`);
+      return { post: { _id: existingId } };
+    }
   }
 }
 

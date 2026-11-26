@@ -66,4 +66,49 @@ function invalidBarrelEaveFtError() {
   return err;
 }
 
-module.exports = { roofStyleReplaySignal, roofStyleRowFields, parseBarrelEaveFt, invalidBarrelEaveFtError };
+// Is this exclusion pick a barrel tile roof with no eave footage entered?
+const unmeasuredBarrel = (roofStyle, eaveFt) => roofStyle === 'barrel_tile' && !(parseBarrelEaveFt(eaveFt) > 0);
+
+// The exclusion pick of one stored input carrier ({ services: { exclusion | rodentExclusion } }), or null.
+function exclusionPickIn(carrier) {
+  const services = carrier && typeof carrier === 'object' ? carrier.services : null;
+  const exclusion = services && typeof services === 'object' ? (services.exclusion || services.rodentExclusion) : null;
+  return exclusion && typeof exclusion === 'object' ? exclusion : null;
+}
+
+// A priced barrel eave closure row, raw (component) or mapped (the mapper keeps the name, not the component).
+const isClosureRow = (row) => row.component === 'barrel_eave_closure' || /eave closure/i.test(String(row.name || row.label || ''));
+
+// Does this stored estimate pick a barrel tile roof for an exclusion with no eave footage entered? The send guard and the
+// group scheduling preflight read it for a draft NEVER issued, so a draft saved before the barrel hold existed (no
+// quote-required flag on its rows) is held like a new one until the footage is entered.
+// The inputs that price the draft decide, in the order serverRecomputeFromEstimateData uses: the admin editor's saved
+// request (engineRequest: EXCLUSION selected + options.exclRoofStyle / exclBarrelEaveFt), else engineInputs, else the
+// older carriers. Rows are read only from the authoritative container (a revision can keep a stale engineResult): the
+// engine's marker holds; with NO stored inputs at all, a barrel row with no priced closure row holds too.
+function estimateHasUnmeasuredBarrelExclusion(estData) {
+  const root = estData && typeof estData === 'object' ? estData : null;
+  if (!root) return false;
+  const Container = require('./estimate-result-container');
+  const rows = Container.storedRodentExclusionRows(root);
+  if (rows.some((row) => row.barrelClosureNeedsMeasurement === true)) return true;
+  const request = root.engineRequest && typeof root.engineRequest === 'object' && root.engineRequest.profile ? root.engineRequest : null;
+  if (request) {
+    const options = request.options && typeof request.options === 'object' ? request.options : {};
+    const selected = Array.isArray(request.selectedServices)
+      && request.selectedServices.some((key) => String(key || '').toUpperCase() === 'EXCLUSION');
+    return selected && unmeasuredBarrel(options.exclRoofStyle, options.exclBarrelEaveFt);
+  }
+  const container = Container.storedEstimateContainer(root);
+  const carrier = [root.engineInputs, root.inputs, root.engineInput, container && container.inputs]
+    .find((value) => value && typeof value === 'object');
+  if (carrier) {
+    const pick = exclusionPickIn(carrier);
+    return !!pick && unmeasuredBarrel(pick.roofStyle, pick.barrelEaveFt);
+  }
+  return rows.some((row) => row.roofStyle === 'barrel_tile') && !rows.some(isClosureRow);
+}
+
+module.exports = {
+  roofStyleReplaySignal, roofStyleRowFields, parseBarrelEaveFt, invalidBarrelEaveFtError, estimateHasUnmeasuredBarrelExclusion,
+};

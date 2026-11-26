@@ -258,8 +258,10 @@ function buildRows() {
     name: 'Flea Treatment',
     unit: 'per program',
     values: sweepValues(
-      TYPICAL_FOOTPRINTS,
-      (f) => sp.priceFlea({ footprint: f }),
+      // Interior flea is sized on total living area (owner ruling 2026-11-26), so the sweep is the home-size
+      // percentiles (median 2,150), not the ground-floor footprints it used before.
+      TYPICAL_HOMES,
+      (homeSqFt) => sp.priceFlea({ homeSqFt, stories: 1 }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.total)),
     notes: '2-visit elimination package; priced by home size. Heavier infestation severity and an optional exterior treatment area price higher.',
   }));

@@ -66,6 +66,33 @@ const MAX_RATE_PER_1000 = { snapshot: 4.6, f13013: 7.5 };
 // unit/value) is computed consistently from the start. A server product
 // with no matching CLIENT catalog row (a permissions gap, a load that
 // raced the fetch) is skipped, never guessed.
+// A card line that carries its label's rate for this pest (Tekko Pro at 2 fl oz per gallon on the home cockroach card, server
+// utils/protocol-label-rate.js) replaces the catalog band, so the prefill and the review ceiling both start from the card's rate.
+// Any other product passes through unchanged.
+export function labelUseProduct(product, item) {
+  return item?.labelUseRate ? { ...product, default_rate: item.defaultRate, defaultRate: item.defaultRate } : product;
+}
+
+// The visit card's label-rate line for this product, or null: only from a response this hook would seed.
+export function labelUseItemFor(response, productId) {
+  if (!shouldApplyProtocolCompletionDefaults(response)) return null;
+  return response.products.find((item) => item?.labelUseRate && String(item.id) === String(productId)) || null;
+}
+
+// A product about to land on the full form, with the visit card's rate and method when it is a card-rate product, however it
+// lands (the seeded row, or the tech removing it and adding it again from the picker). A method the caller names wins.
+export function cardRateRow(response, product, methodOverride) {
+  const item = labelUseItemFor(response, product.id);
+  return { product: labelUseProduct(product, item), applicationMethodOverride: methodOverride || item?.completionApplicationMethod || undefined };
+}
+
+// The visit's catalog rows with each card-rate product (labelUseProduct) set to its card's rate: the Fast Complete sheet
+// reviews a typed rate against the same ceiling the full form does. A response this hook would not seed changes nothing.
+export function withLabelUseRates(products, response) {
+  const list = Array.isArray(products) ? products : [];
+  return list.map((product) => labelUseProduct(product, labelUseItemFor(response, product.id)));
+}
+
 export function protocolCompletionDefaultSelections(response, clientProducts, buildSelectedProduct) {
   if (!shouldApplyProtocolCompletionDefaults(response) || typeof buildSelectedProduct !== 'function') return [];
   const rows = Array.isArray(clientProducts) ? clientProducts : [];
@@ -73,7 +100,8 @@ export function protocolCompletionDefaultSelections(response, clientProducts, bu
   for (const item of response.products) {
     const product = rows.find((row) => String(row.id) === String(item?.id));
     if (!product) continue;
-    const selection = buildSelectedProduct(product, { applicationMethodOverride: item?.completionApplicationMethod || undefined });
+    const source = labelUseProduct(product, item);
+    const selection = buildSelectedProduct(source, { applicationMethodOverride: item?.completionApplicationMethod || undefined });
     selections.push({
       ...selection,
       // Snapshot needs its weed rate; 13-0-13 needs the bed amount; palms need individual canopy widths.

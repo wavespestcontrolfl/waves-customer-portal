@@ -118,13 +118,11 @@ const INPUT = {
     homeSqFt: { value: 2000, source: 'county', confidence: 'high' },
     'services.pest.frequency': { value: 'quarterly', source: 'operator_confirmation', confidence: 'high' },
   },
-  protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
+  protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 5 }],
   inventoryReview: [
     { serviceKey: 'pest', productName: 'LESCO Crosscheck Plus', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Atticus Antapex WSG', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
-    { serviceKey: 'pest', productName: 'Advion Evolution Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
-    { serviceKey: 'pest', productName: 'Gentrol Complete EC3', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Ant Gel', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Contrac Blox', status: 'in_stock', onHand: 8 },
   ],
@@ -1486,6 +1484,24 @@ describe('Agent Estimate compute input boundary', () => {
     }));
   });
 
+  test('a buildingSqFt-only quote aliases it into homeSqFt with no footprint flag (flea reads it as a living area)', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      buildingSqFt: 1500, stories: 2, services: { flea: {} }, propertyType: 'Single Family',
+    });
+    expect(result.error).toBeUndefined();
+    const sent = mockGenerateEstimate.mock.calls.at(-1)[0];
+    expect(sent).toMatchObject({ homeSqFt: 1500, buildingSqFt: 1500 });
+    expect(sent.homeSqFtIsBuildingFootprint).toBeUndefined();
+  });
+
+  test('the operator sees the flea home-size review reason on the compact line', () => {
+    const { compactAgentLine } = require('../services/intelligence-bar/estimate-tools')._private;
+    const line = compactAgentLine({
+      service: 'flea_package', total: 342, requiresManualReview: true, manualReviewReasons: ['flea_home_size_source_unclear'],
+    });
+    expect(line.review_reasons).toEqual(['flea_home_size_source_unclear']);
+  });
+
   test('loads recognized-customer membership inputs server-side and selects service presentation', async () => {
     mockBuildAgentEstimateContext.mockResolvedValueOnce({
       customer_account: {
@@ -1670,6 +1686,27 @@ describe('Agent Estimate compute input boundary', () => {
     expect(_private.validateAgentEngineInput({
       homeSqFt: 2000, services: { treeShrub: {} },
     })).toBeNull();
+  });
+
+  test('the draft path drops an unverified livingAreaSqFt exactly as compute_estimate does, for pricing and the persisted inputs', async () => {
+    const draftInput = { ...INPUT.engineInputs, buildingSqFt: 1500, stories: 2, livingAreaSqFt: 3000, services: { pest: { frequency: 'quarterly' } } };
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const preview = await _private.computeAgentDraftPreview({ ...INPUT, engineInputs: draftInput });
+    expect(preview.error).toBeUndefined();
+    expect(mockGenerateEstimate.mock.calls.at(-1)[0]).toMatchObject({ buildingSqFt: 1500, stories: 2 });
+    expect(mockGenerateEstimate.mock.calls.at(-1)[0]).not.toHaveProperty('livingAreaSqFt');
+
+    // compute_estimate never emits livingAreaSqFt, so both entry points hand the engine the same measurements.
+    await executeEstimateTool('compute_estimate', { buildingSqFt: 1500, stories: 2, livingAreaSqFt: 3000, services: { pest: { frequency: 'quarterly' } }, propertyType: 'Single Family' });
+    expect(mockGenerateEstimate.mock.calls.at(-1)[0]).not.toHaveProperty('livingAreaSqFt');
+
+    // The persisted inputs are the normalized ones.
+    const result = await executeEstimateTool('create_agent_estimate_draft', { ...INPUT, engineInputs: draftInput });
+    expect(result.error).toBeUndefined();
+    expect(mockGenerateEstimate.mock.calls.at(-1)[0]).not.toHaveProperty('livingAreaSqFt');
   });
 
   test('rejects a forbidden pricing override even if create draft is called directly', async () => {

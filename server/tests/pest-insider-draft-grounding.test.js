@@ -45,6 +45,18 @@ describe('draft writer grounding', () => {
     expect(args.system.endsWith('VERIFIED FACTS — test marker')).toBe(true);
   });
 
+  test('the weekly flagship prompt asks for the short format: one sentence per event, 3 points, one joke each in subject and opening line (owner 2026-11-26)', async () => {
+    await expect(createNewsletterDraft({
+      prompt: 'Weekend events for Bradenton.',
+      newsletterType: 'local-weekly-fresh-events',
+    })).rejects.toBe(STOP);
+    const [, args] = mockDispatch.mock.calls[0];
+    expect(args.system).toContain('HUMOR BUDGET');
+    expect(args.system).toContain('"weekendPoints"');
+    expect(args.system).toContain('"why"');
+    expect(args.system).not.toMatch(/gifSearchTerm|proTip|closingChecklist|scoopLabel|P\.S\. JOKE/);
+  });
+
   test('the weekly flagship still drafts when the register is empty or unreachable — without pest facts (pre-push audit P1 on e0dd938596)', async () => {
     mockFactsBlock.mockRejectedValue(new Error('fact register is empty: no verified facts to ground the draft'));
     await expect(createNewsletterDraft({

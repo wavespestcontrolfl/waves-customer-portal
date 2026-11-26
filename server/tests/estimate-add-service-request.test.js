@@ -172,6 +172,56 @@ describe('estimate add-service request workflow', () => {
     expect(revision.draftEstimateData.inputs.services.mosquito).toEqual({ tier: 'seasonal' });
   });
 
+  test('adding a service keeps the price rules the saved estimate was priced with (a $625 urgent stinging line stays)', async () => {
+    const withStinging = (resultExtra = {}) => baseEstimate({
+      estimate_data: {
+        inputs: {
+          ...baseEstimate().estimate_data.inputs,
+          services: {
+            pest: { frequency: 'quarterly', version: 'v1', roachType: 'none' },
+            stinging: { tier: 2, removal: 'LARGE', urgency: 'URGENT' },
+          },
+        },
+        result: { oneTime: { items: [{ service: 'stinging_insect', price: 625 }] }, ...resultExtra },
+      },
+    });
+    const stingingPrice = (revision) => [].concat(revision.draftEstimateData.result.oneTime.specItems || [])
+      .find((row) => row.service === 'stinging_insect').price;
+    // Priced before the fixes (no stamp): the existing line keeps its rules, so the 15% recurring perk applies to $625.
+    expect(stingingPrice(await buildEstimateServiceRevisionDraft(withStinging(), 'Seasonal Mosquito'))).toBe(531.25);
+    // Priced under the fixes (stamp false): the urgent multiplier covers the removal ($750).
+    const fresh = await buildEstimateServiceRevisionDraft(withStinging({ pricingMetadata: { legacyPricingRules: false } }), 'Seasonal Mosquito');
+    expect(stingingPrice(fresh)).toBe(637.5);
+  });
+
+  test('adding a service keeps a sold palm minimum through a Settings edit (the saved palm row freezes it)', async () => {
+    const { PALM } = require('../services/pricing-engine/constants');
+    const withPalm = (palmRow) => baseEstimate({
+      estimate_data: {
+        priorQualifyingServices: ['pest_control', 'lawn_care'],
+        inputs: {
+          ...baseEstimate().estimate_data.inputs,
+          services: {
+            pest: { frequency: 'quarterly', version: 'v1', roachType: 'none' },
+            palmInjection: { treatmentType: 'nutrition', palmCount: 3 },
+          },
+        },
+        result: { results: { injection: palmRow }, pricingMetadata: { legacyPricingRules: false } },
+      },
+    });
+    const afterCredits = (revision) => revision.draftEstimateData.result.results.injection.annualAfterCredits;
+    const prior = PALM.minPerVisit;
+    PALM.minPerVisit = 90;
+    try {
+      // The sold row carries its $75 minimum: the existing palm line stays $75 when mosquito is added.
+      expect(afterCredits(await buildEstimateServiceRevisionDraft(withPalm({ annualRounding: 'cents', minPerVisit: 75 }), 'Seasonal Mosquito'))).toBe(75);
+      // A row with no saved minimum takes the live one.
+      expect(afterCredits(await buildEstimateServiceRevisionDraft(withPalm({ annualRounding: 'cents' }), 'Seasonal Mosquito'))).toBe(90);
+    } finally {
+      PALM.minPerVisit = prior;
+    }
+  });
+
   test('legacy mosquito CTAs still price the monthly program', async () => {
     const revision = await buildEstimateServiceRevisionDraft(baseEstimate(), 'WaveGuard Mosquito');
 
@@ -190,6 +240,30 @@ describe('estimate add-service request workflow', () => {
     // pest (this estimate) + lawn + mosquito (prior) + termite bait = 4
     // qualifying services — Platinum, not a standalone-termite Bronze.
     expect(revision.updated.tier).toBe('Platinum');
+  });
+
+  test('an add-service draft keeps an already-quoted flea package at the size rule it was sent under', async () => {
+    const fleaRow = (extra = {}) => ({ service: 'flea_package', name: 'Flea Elimination Package — 2 visits', price: 342, ...extra });
+    const fleaPrice = (revision) => [...(revision.draftEstimateData.result.oneTime.items || []), ...(revision.draftEstimateData.result.oneTime.specItems || [])]
+      .find((row) => row.service === 'flea_package').price;
+    const twoStory = (row) => {
+      const estimate = baseEstimate();
+      estimate.estimate_data.inputs = { ...estimate.estimate_data.inputs, homeSqFt: 3000, stories: 2, services: { ...estimate.estimate_data.inputs.services, flea: {} } };
+      estimate.estimate_data.result = { oneTime: { items: [row] } };
+      return estimate;
+    };
+
+    // Sent before 2026-11-26 (no stamp): the 3,000 sq ft two-story home stays on the ground-floor price.
+    const legacy = await buildEstimateServiceRevisionDraft(twoStory(fleaRow()), 'termite_bait');
+    expect(legacy.status).toBe('priced');
+    // 342 before the 15% recurring-plan discount the added pest/termite plan carries on a one-time line.
+    expect(fleaPrice(legacy)).toBe(291);
+    expect(legacy.draftEstimateData.inputs.fleaSizeBasisReplay).toBeUndefined();
+
+    // Quoted whole-home (stamped): the same home prices at the whole-home rule.
+    const current = await buildEstimateServiceRevisionDraft(twoStory(fleaRow({ price: 390, fleaSizeBasis: 'total_living_area' })), 'termite_bait');
+    expect(fleaPrice(current)).toBeGreaterThan(fleaPrice(legacy));
+    expect(fleaPrice(current)).toBe(332);
   });
 
   test('builds a draft revision without mutating the live estimate', async () => {

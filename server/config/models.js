@@ -306,6 +306,11 @@ const DEFAULTS = Object.freeze({
   // stays on Flash while the other photo lanes run Argon. Argon took 48-64 s per
   // 4-photo read against the 70 s lawn budget and timed out on 1 of 3.
   GEMINI_LAWN_ASSESSMENT: 'gemini-3.8-flash',
+  // Call sound check (owner 2026-11-25 "both"): the one lane where a model
+  // LISTENS to a call recording (caller mood, talk-over, rushed answers, risky
+  // claims). Gemini 4 Neon, the model the owner's call archive run listened
+  // with. Dark behind GATE_CALL_SOUND_CHECK.
+  GEMINI_CALL_SOUND_CHECK: 'gemini-4-neon',
   // App lawn + tree/shrub/palm Photo ID (owner 2026-10-02, "same as pest"):
   // the model for photoIdPlantV2's one Gemini read; set from the 27-photo eval.
   GEMINI_PHOTO_ID_PLANT: 'gemini-3.6-flash',
@@ -466,6 +471,10 @@ const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.
 const GEMINI_PHOTO_ID_PLANT = process.env.MODEL_GEMINI_PHOTO_ID_PLANT || DEFAULTS.GEMINI_PHOTO_ID_PLANT;
 const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
 const GEMINI_LAWN_ASSESSMENT = process.env.MODEL_GEMINI_LAWN_ASSESSMENT || DEFAULTS.GEMINI_LAWN_ASSESSMENT;
+// Call sound check (services/call-sound-check.js): its own selector, so a
+// photo-lane change never moves the one audio lane. Its daily spend cap is
+// priced from this model's llm_model_prices row; a model with no row makes no call.
+const GEMINI_CALL_SOUND_CHECK = process.env.MODEL_GEMINI_CALL_SOUND_CHECK || DEFAULTS.GEMINI_CALL_SOUND_CHECK;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
 // experimental third leg drafts with it so Gemini can be ranked against the
@@ -645,6 +654,11 @@ const ROUTES = Object.freeze({
   // beside Jev for comparison. Single-leg like typedDecision; dark behind
   // GATE_TYPED_DECISIONS_CLEF (which also needs GATE_TYPED_DECISIONS).
   typedDecisionClef: Object.freeze({ provider: PROVIDER.CLOUDFLARE, model: CLOUDFLARE_CLEF }),
+  // Call sound check (owner 2026-11-25 "both", call-sound-check.js): the model
+  // hears the call recording (the payload's `audio`). Single leg, no automatic
+  // fallback: only the Gemini leg of llm/call.js takes audio, and a miss
+  // leaves the call without a sound note. Dark behind GATE_CALL_SOUND_CHECK.
+  callSoundCheck: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_CALL_SOUND_CHECK }),
 });
 
 // Generated-text policies always cross providers. The shared LLM dispatcher
@@ -951,6 +965,7 @@ module.exports = {
   GEMINI_VISION_BEST,
   GEMINI_PHOTO_ID_PEST,
   GEMINI_LAWN_ASSESSMENT,
+  GEMINI_CALL_SOUND_CHECK,
   GEMINI_PHOTO_ID_PLANT,
   GEMINI_TEXT_BEST,
   GEMINI_VISION_FALLBACK,

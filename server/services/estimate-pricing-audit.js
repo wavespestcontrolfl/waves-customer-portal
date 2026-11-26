@@ -1,5 +1,5 @@
 const db = require('../models/db');
-const { costLineFromUsage } = require('./product-costing');
+const { costLineFromUsage, usageOncePerPackage } = require('./product-costing');
 const { matchServiceProtocol } = require('./protocol-matcher');
 const { lineFlagsBlockPercentDiscount } = require('./pricing-engine/discount-engine');
 const { resolveEstimateLines, containerPricesAnything } = require('./estimate-result-container');
@@ -736,7 +736,7 @@ function inventoryCostFromRows(serviceKey, dimensions, inventory, serviceTypesOv
     if (cost.warning) warnings.push(cost.warning);
     const multiplier = Number(serviceTypeFixedMultipliers[row.service_type] || 1);
     const lineCost = (cost.cost || 0) * multiplier;
-    const isFixed = serviceTypeFixedMultipliers[row.service_type] != null;
+    const isFixed = serviceTypeFixedMultipliers[row.service_type] != null || usageOncePerPackage(row);
     if (isFixed) fixedCost += lineCost;
     else totalPerVisit += lineCost;
     return {

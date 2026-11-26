@@ -144,6 +144,7 @@ import {
 } from "../../lib/pest-default-mix";
 import {
   protocolCompletionDefaultSelections,
+  cardRateRow,
 } from "../../lib/protocol-completion-defaults";
 import {
   applyTaurusYearlyLimit,
@@ -7906,7 +7907,8 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
           ? adminFetch(
               // An unknown date sends an empty month, which the route reads
               // as none (the rule visit).
-              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}&month=${visitMonth}`,
+              // visitId: the server reads this visit's service key and whether it was booked as a follow-up, and serves that card.
+              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}&month=${visitMonth}${service.id ? `&visitId=${encodeURIComponent(service.id)}` : ""}`,
             )
           : Promise.resolve(null),
       ]);
@@ -15360,6 +15362,8 @@ export function CompletionPanel({
       // The server reads the visit's account (bermuda removal) itself.
       if (service.id) params.set("scheduledServiceId", service.id);
     }
+    // The server reads this visit's service key and whether it was booked as a follow-up (its name is a copy of the first visit's), and serves that card.
+    if (!isLawn && service.id) params.set("visitId", service.id);
     // Lawn and month-keyed programs (tree & shrub) pick the visit for the
     // appointment's month; the server ignores it for 'Any'-month programs.
     const serviceMonth = protocolMonthForService(service);
@@ -17561,7 +17565,9 @@ export function CompletionPanel({
       && !(propertyAreaKey === "lawn" && /snapshot|landscape bed/i.test([product.name, ...(Array.isArray(product.target_pests) ? product.target_pests : [])].join(" ")));
   }
 
-  function buildSelectedProduct(product, { applicationMethodOverride } = {}) {
+  function buildSelectedProduct(catalogProduct, { applicationMethodOverride: methodOverride } = {}) {
+    // A card-rate product (Tekko Pro on the cockroach card) keeps its card's rate and method however it lands on the form.
+    const { product, applicationMethodOverride } = cardRateRow(protocolCompletionDefaults, catalogProduct, methodOverride);
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work on the German-roach protocol) wins over the
     // catalog-inferred default — Codex r2, PR #5049: Alpine WSG and

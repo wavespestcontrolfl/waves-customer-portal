@@ -1339,10 +1339,15 @@ function calculatePestProductionDiagnostics(property) {
 
 // ── Urgency multiplier helper (matches v2 applyOT — urgency only, ────
 // not recurring-customer discount which is handled by discount-engine) ─
-function applyUrgency(price, urgency = 'ROUTINE', afterHours = false) {
+// The rush multipliers here stay the fixed numbers (1.25 / 1.50 soon, 1.50 / 2.00 urgent); they do NOT read the
+// onetime_urgency Settings row, which only drives the one-time lawn and pest prices. The input is upper-cased so a
+// lower-case 'urgent' is no longer silently routine (owner 2026-11-26). legacyCase: an estimate priced before this
+// change keeps the case-sensitive match it was priced with (input.legacyPricingRules, estimate-engine.js).
+function applyUrgency(price, urgency = 'ROUTINE', afterHours = false, legacyCase = false) {
+  const key = legacyCase ? urgency : String(urgency || '').toUpperCase();
   let mult = 1.0;
-  if (urgency === 'SOON') mult = afterHours ? 1.50 : 1.25;
-  else if (urgency === 'URGENT') mult = afterHours ? 2.0 : 1.50;
+  if (key === 'SOON') mult = afterHours ? 1.50 : 1.25;
+  else if (key === 'URGENT') mult = afterHours ? 2.0 : 1.50;
   return Math.round(price * mult);
 }
 
@@ -2038,6 +2043,33 @@ function lookupLawnBracketUncapped(lawnSqFt, tierIndex, track, schedule) {
     }
   }
   return { monthly: brackets[brackets.length - 1][tierIndex + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
+}
+
+// One-time lawn anchor inside a FLAT stretch of the 6-visit market column (owner 2026-11-26, "fix all seven").
+// The recurring table repeats one 6x price across several bracket rows (St. Augustine $38 a month from 3,000
+// to 5,500 sq ft), so a one-time treatment priced off it cost the same for a 3,000 and a 5,500 sq ft lawn.
+// Inside such a stretch the one-time anchor rises linearly from the price at the start of the stretch to the
+// next higher bracket price. The price at the stretch start, at the next higher bracket and everywhere
+// outside a flat stretch stays what the table gives, and the result never goes below the table price.
+// The recurring plan table and every recurring price are untouched: only priceOneTimeLawn reads this.
+// Returns the fractional 6x monthly anchor, or null when the table price already stands.
+function oneTimeLawnPlateauMonthly(lawnSqFt, track, schedule = liveLawnMarketSchedule()) {
+  const brackets = schedule?.brackets?.[track];
+  if (!brackets || brackets.length < 3) return null;
+  const col = LAWN_TIERS.standard.index + 1;
+  if (!(lawnSqFt > brackets[0][0]) || lawnSqFt >= brackets[brackets.length - 1][0]) return null;
+  let j = 0;
+  while (j + 1 < brackets.length && brackets[j + 1][0] <= lawnSqFt) j += 1;
+  const value = brackets[j][col];
+  let start = j;
+  while (start > 0 && brackets[start - 1][col] === value) start -= 1;
+  let end = j + 1;
+  while (end < brackets.length && brackets[end][col] === value) end += 1;
+  // A stretch of one row, or one with no higher bracket after it, already follows the table.
+  if (end >= brackets.length || end - start < 2 || !(brackets[end][col] > value)) return null;
+  if (!(lawnSqFt > brackets[start][0])) return null;
+  const ratio = (lawnSqFt - brackets[start][0]) / (brackets[end][0] - brackets[start][0]);
+  return value + ratio * (brackets[end][col] - value);
 }
 
 // The tuning numbers behind one cadence's cost floor. In cost-plus mode
@@ -3426,8 +3458,26 @@ function resolveCommercialPestFootprint(property = {}) {
   const perimeter = perimeterExplicit
     ? explicitPerimeter
     : (footprint > 0 ? 4 * Math.sqrt(footprint) : 0);
+  // TOTAL interior area, every floor (owner 2026-11-26, "fix all seven"). Interior treatment walks every floor,
+  // so a two-story building is not a smaller job than a one-story building of the same square footage. Resolved
+  // on its own, not from the footprint's source: a measured total living area wins (unless the lookup refused to
+  // claim a footprint, whose summed aggregate is ambiguous), else a ground-floor footprint is multiplied by its
+  // stories. A building-area field and the defaulted fallback keep the footprint (ambiguous, so no raise).
+  const measuredTotal = property.footprintUnknown === true
+    ? null
+    : (positiveFiniteNumber(property.homeSqFt) ?? positiveFiniteNumber(property.livingAreaSqFt));
+  const explicitFootprint = ['footprint', 'footprintSqFt'].includes(res.source);
+  const stackedFootprint = explicitFootprint ? footprint * positiveStories(property.stories) : footprint;
+  // A living-area source IS the total. With an explicit footprint beside it the total is capped at footprint x
+  // stories: the profile clears footprintUnknown once a footprint is entered, so an association's summed area must
+  // not price as one building's interior. Never below the footprint, so a one-story building keeps its price.
+  const interiorArea = Math.max(
+    footprint,
+    !explicitFootprint && measuredTotal !== null ? measuredTotal : Math.min(measuredTotal ?? stackedFootprint, stackedFootprint),
+  );
   return {
     footprint,
+    interiorArea,
     perimeter,
     perimeterExplicit,
     footprintSource: res.source,
@@ -3441,7 +3491,10 @@ function resolveCommercialPestFootprint(property = {}) {
 
 function priceCommercialPest(property = {}, options = {}) {
   const cfg = COMMERCIAL_PEST;
-  const { footprint, perimeter, perimeterExplicit, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
+  const { footprint, interiorArea: totalInteriorArea, perimeter, perimeterExplicit, footprintSource, defaulted } = resolveCommercialPestFootprint(property);
+  // Interior labor and material scale with the TOTAL interior area; the exterior terms stay on the footprint and
+  // perimeter. A stored estimate replayed as sold (options.legacyInteriorFootprint) keeps the footprint basis.
+  const interiorArea = options.legacyInteriorFootprint === true ? footprint : totalInteriorArea;
   // Risk-type cadence override (office 4/yr … restaurant 12/yr); default 12.
   const visits = Number.isFinite(options.pestVisits) && options.pestVisits > 0 ? options.pestVisits : cfg.programVisits;
   // Interior service is customer-selectable (on by default, owner 2026-08-17).
@@ -3501,9 +3554,9 @@ function priceCommercialPest(property = {}, options = {}) {
   // Interior service component: footprint-driven treatment time + product.
   // No overhead/drive/admin share — those ride the exterior base.
   const intMaterialPerVisit = cfg.interior.materialPerVisitBase
-    + cfg.interior.materialPerKSqFtPerVisit * (footprint / 1000);
+    + cfg.interior.materialPerKSqFtPerVisit * (interiorArea / 1000);
   const intOnSiteMin = cfg.interior.laborMinutesBase
-    + cfg.interior.laborMinutesPerKSqFt * (footprint / 1000);
+    + cfg.interior.laborMinutesPerKSqFt * (interiorArea / 1000);
   const intLaborPerVisit = GLOBAL.LABOR_RATE * (intOnSiteMin / 60);
 
   const materialPerVisit = extMaterialPerVisit + intMaterialPerVisit;
@@ -3600,6 +3653,7 @@ function priceCommercialPest(property = {}, options = {}) {
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     footprint,
     footprintUsed: footprint,
+    interiorAreaUsed: interiorArea,
     footprintSource,
     footprintEstimated: defaulted,
     perimeter: roundMoney(perimeter),
@@ -4598,8 +4652,11 @@ function pricePalmInjection(property, options) {
     throw new Error(`Unsupported palm treatment pricing type: ${treatment.pricingType}`);
   }
 
+  // The quote-time minimum rides the saved row (minPerVisit) so a replay prices under the minimum the quote was sold
+  // with, never a later Settings edit (options.minPerVisit, input.palmMinPerVisitReplay in estimate-engine.js).
+  const minPerVisit = Number(options.minPerVisit) > 0 ? Number(options.minPerVisit) : PALM.minPerVisit;
   const rawPerVisit = roundCurrency(pricePerPalm * palmCount);
-  const perVisit = roundCurrency(Math.max(rawPerVisit, PALM.minPerVisit));
+  const perVisit = roundCurrency(Math.max(rawPerVisit, minPerVisit));
   const minimumApplied = perVisit > rawPerVisit;
   const minimumShortfallPerVisit = minimumApplied ? roundCurrency(perVisit - rawPerVisit) : 0;
   const rawAnnual = roundCurrency(rawPerVisit * appsPerYear);
@@ -4628,6 +4685,7 @@ function pricePalmInjection(property, options) {
 
     rawPerVisit,
     perVisit,
+    minPerVisit,
     minimumApplied,
     minimumShortfallPerVisit,
 
@@ -6746,7 +6804,17 @@ function priceOneTimeLawn(property, options = {}) {
     // recurring program minimum (a floor on sold PLANS) must not inflate it.
     applyProgramMinimum: false,
   });
-  const base = Math.max(ONE_TIME.lawn.floor, Math.round(lawnResult.perApp * ONE_TIME.lawn.oneTimeMultiplier));
+  // Flat-stretch rise (owner 2026-11-26): only on the plain market anchor, and never for a stored estimate
+  // replayed as sold (options.legacyOneTimePlateau), which keeps the price it was quoted at.
+  const plateauMonthly = options.legacyOneTimePlateau === true || lawnResult.pricingSource !== 'MARKET_TABLE'
+    || lawnResult.pricingBasis !== 'TABLE_INTERPOLATION' || lawnResult.bermudaSuppressionPerApp
+    ? null
+    : oneTimeLawnPlateauMonthly(lawnResult.lawnSqFt, lawnResult.track);
+  const tableMonthly = Number(lawnResult.perApp) * LAWN_TIERS.standard.freq / 12;
+  const anchorPerApp = plateauMonthly !== null && plateauMonthly > tableMonthly
+    ? plateauMonthly * 12 / LAWN_TIERS.standard.freq
+    : lawnResult.perApp;
+  const base = Math.max(ONE_TIME.lawn.floor, Math.round(anchorPerApp * ONE_TIME.lawn.oneTimeMultiplier));
 
   const treatMult = ONE_TIME.lawn.treatmentMultipliers[normalizedTreatment] || 1.0;
   const preUrgencyPrice = applyOneTimeFloor(Math.round(base * treatMult), ONE_TIME.lawn.floor);
@@ -8685,6 +8753,76 @@ function fleaOfferConfig(cfg) {
   };
 }
 
+// Flea interior size basis. 'total_living_area' is the live rule; 'ground_floor'
+// is the pre-2026-11-26 rule (living area / stories), kept ONLY so a stored
+// estimate quoted that way replays at the price it was sent at.
+const FLEA_SIZE_BASIS_TOTAL = 'total_living_area';
+const FLEA_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
+
+// The size the interior flea package steps on: the home's total living area.
+// Same result shape as resolvePestFootprint. Order: the living-area inputs
+// first (homeSqFt, livingAreaSqFt; see the provenance flags below), then a measured ground-floor footprint
+// scaled up by the story count (a footprint alone is the best evidence left
+// of the whole home; buildingSqFt is a footprint too and scales the same way).
+// footprintUnknown (an association
+// aggregate whose summed living area is not one home) keeps the pest
+// footprint rules untouched: explicit footprint only, else the 2,000 fallback
+// with manual review.
+function resolveFleaInteriorSize(property = {}) {
+  // The profile clears footprintUnknown when a measured footprint exists, so the engine also passes the original flag.
+  if (property.footprintUnknown === true || property.fleaFootprintUnknown === true) {
+    return resolvePestFootprint({ ...property, footprintUnknown: true });
+  }
+  // The public quote route substituted its 2,000 sq ft default for a missing home size and passes the server lookup's measured
+  // whole home beside it (route-set, never from a client body): the measured value is the home, the default is not.
+  if (property.fleaHomeSqFtIsDefault === true && positiveFiniteNumber(property.fleaMeasuredHomeSqFt) !== null) {
+    return {
+      footprint: Math.round(positiveFiniteNumber(property.fleaMeasuredHomeSqFt)),
+      source: 'lookup_measured_home',
+      wasDefaulted: false,
+      requiresManualReview: false,
+      manualReviewReasons: [],
+      warnings: [],
+    };
+  }
+  const stories = positiveStories(property.stories);
+  const scaled = (value) => {
+    const parsed = positiveFiniteNumber(value);
+    return parsed === null ? null : Math.max(1, Math.round(parsed * stories));
+  };
+  // homeSqFt and livingAreaSqFt are the home's total living area; a supplied footprint never beats them. The Intelligence
+  // Bar cannot tell a building footprint from a living area in buildingSqFt (its lookup credential certifies buildingSqFt
+  // from the property's home_sqft, a living area), and it aliases buildingSqFt into homeSqFt, so that alias is read as a
+  // living area: the reading that never inflates a quote. buildingSizeMeasured is not read either (the tool defaults it
+  // to false beside a real homeSqFt). Through generateEstimate only a SUPPLIED footprint counts: the profile's footprint
+  // is homeSqFt / stories when none was supplied; a direct caller's footprint fields are read as given.
+  const suppliedFootprint = Object.prototype.hasOwnProperty.call(property, 'fleaExplicitFootprint')
+    ? [['footprintSqFt', property.fleaExplicitFootprint, scaled]]
+    : [['footprint', property.footprint, scaled], ['footprintSqFt', property.footprintSqFt, scaled]];
+  // homeSqFt equal to buildingSqFt may be the Intelligence Bar's alias of a building measurement rather than a living area.
+  // An explicit livingAreaSqFt wins over it. Otherwise the supplied value prices as a living area (never inflated) and the
+  // line routes to review on a multi-story home: an unclear size never raises the price without review. A supplied footprint
+  // x stories is used only when there is no homeSqFt, livingAreaSqFt or buildingSqFt value at all (a true footprint-only input).
+  const homeIsBuildingAlias = Number(property.buildingSqFt) > 0 && Number(property.homeSqFt) === Number(property.buildingSqFt);
+  const aliases = [
+    ...(homeIsBuildingAlias ? [['livingAreaSqFt', property.livingAreaSqFt, positiveFiniteNumber]] : []),
+    ['homeSqFt', property.homeSqFt, positiveFiniteNumber],
+    ['livingAreaSqFt', property.livingAreaSqFt, positiveFiniteNumber],
+    ['buildingSqFt', property.buildingSqFt, positiveFiniteNumber],
+    ...suppliedFootprint,
+  ];
+  for (const [source, value, parser] of aliases) {
+    const parsed = parser(value);
+    if (parsed !== null) {
+      return { footprint: parsed, source, wasDefaulted: false, requiresManualReview: false, manualReviewReasons: [], warnings: [] };
+    }
+  }
+  // Nothing usable. resolvePestFootprint reads the same fields with the same
+  // positive-number test, so it reaches the same dead end and returns the
+  // shared 2,000 fallback with its review reasons.
+  return resolvePestFootprint(property);
+}
+
 function priceFlea(property = {}) {
   const cfg = SPECIALTY.flea;
   const services = property.services || {};
@@ -8699,12 +8837,24 @@ function priceFlea(property = {}) {
     property.fleaOfferKey ?? property.offerKey ?? services.fleaOfferKey ?? fleaOptions.offerKey ?? fleaOptions.fleaOfferKey ?? ''
   ).trim().toLowerCase();
   const singleVisitRequested = RETIRED_FLEA_SINGLE_KEYS.has(requestedOfferKey);
-  const footprintResolution = resolvePestFootprint({
-    ...property,
-    homeSqFt: property.homeSqFt
-      ? Math.round(Number(property.homeSqFt) / Number(property.stories || 1))
-      : property.homeSqFt,
-  });
+  // The interior package is sized on the home's TOTAL living area (owner ruling
+  // 2026-11-26 "whole home"): fleas live on every floor, so a 3,000 sq ft
+  // two-story home prices like a 3,000 sq ft one-story home. A stored estimate
+  // that was quoted on the ground-floor footprint replays with fleaSizeBasis
+  // 'ground_floor' (estimate-flea-size-replay.js) and keeps its price.
+  const fleaSizeBasis = property.fleaSizeBasis === FLEA_SIZE_BASIS_GROUND_FLOOR
+    ? FLEA_SIZE_BASIS_GROUND_FLOOR
+    : FLEA_SIZE_BASIS_TOTAL;
+  const footprintResolution = fleaSizeBasis === FLEA_SIZE_BASIS_GROUND_FLOOR
+    ? resolvePestFootprint({
+      ...property,
+      homeSqFt: property.homeSqFt
+        ? Math.round(Number(property.homeSqFt) / Number(property.stories || 1))
+        : property.homeSqFt,
+    })
+    : resolveFleaInteriorSize(property);
+  // Named `footprint` for the adjustment table (its keys keep the name), but
+  // under the whole-home basis it is the total living area, not a footprint.
   const footprint = footprintResolution.footprint;
   const lotSqFt = Number(property.lotSqFt ?? property.lotSizeSqFt ?? 7500) || 7500;
   const features = property.features || {};
@@ -8775,6 +8925,13 @@ function priceFlea(property = {}) {
     ? `Exterior flea spray — ${exterior.areaSqFt.toLocaleString()} sf${exterior.source === 'AI_ESTIMATE' ? ' AI estimate' : ''}`
     : null;
   const manualReviewReasons = [...footprintResolution.manualReviewReasons];
+  // Home size that may be the ground floor only (a buildingSqFt measurement, or the Intelligence Bar's alias of it in homeSqFt,
+  // on a multi-story home): priced as a living area, never inflated, but a person confirms the total living area before it
+  // goes out. Decided here from the inputs, so every entry point (compute_estimate, the draft path, a replay) agrees.
+  const homeSizeSourceUnclear = fleaSizeBasis === FLEA_SIZE_BASIS_TOTAL && positiveStories(property.stories) > 1
+    && (footprintResolution.source === 'buildingSqFt'
+      || (footprintResolution.source === 'homeSqFt' && Number(property.buildingSqFt) > 0 && Number(property.homeSqFt) === Number(property.buildingSqFt)));
+  if (homeSizeSourceUnclear) manualReviewReasons.push('flea_home_size_source_unclear');
   if (exteriorSelected && exterior.source === 'UNKNOWN') {
     manualReviewReasons.push('flea_exterior_area_source_unknown');
   }
@@ -8789,6 +8946,7 @@ function priceFlea(property = {}) {
   }
   const warnings = uniqueList([
     ...footprintResolution.warnings,
+    ...(homeSizeSourceUnclear ? ['Home size may be ground floor only: confirm total living area before sending.'] : []),
     ...(exteriorSelected ? (exterior.warnings || []) : []),
     ...(exteriorSourceSuspected && !exteriorSelected ? ['Exterior flea source suspected; guarantee scope is limited to treated interior areas.'] : []),
     ...(singleVisitRequested ? ['A single-visit flea knockdown was requested; flea is sold only as the two-visit Elimination Package — confirm the scope before sending.'] : []),
@@ -8846,12 +9004,20 @@ function priceFlea(property = {}) {
     reason: exterior.customQuoteReason || null,
     warning: warnings[0] || null,
     warnings,
-    requiresManualReview: footprintResolution.requiresManualReview || singleVisitRequested || !!(exteriorSelected && (exterior.needsConfirmation || exterior.requiresCustomQuote)),
+    requiresManualReview: footprintResolution.requiresManualReview || homeSizeSourceUnclear || singleVisitRequested || !!(exteriorSelected && (exterior.needsConfirmation || exterior.requiresCustomQuote)),
     manualReviewReasons: uniqueList(manualReviewReasons),
     areaSource: exterior.source,
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
+    // The size the interior package was stepped on and the rule that chose it.
+    // fleaSizeBasis rides onto the stored row: the replay reads it to keep a
+    // sent estimate on the rule it was quoted under.
+    interiorSizeSqFt: footprint,
+    fleaSizeBasis,
+    // The size the request posted when the route replaced it with the server lookup's measured home: a revision of the sent quote
+    // compares it to tell whether the operator edited the size (estimate-flea-size-replay generateWithFleaRecord).
+    ...(property.fleaHomeSqFtIsDefault === true && Number(property.homeSqFt) > 0 ? { fleaPostedHomeSqFt: Math.round(Number(property.homeSqFt)) } : {}),
     infestationComplexity,
     warrantyType: offer.warrantyType,
     warrantyLabel,
@@ -9496,7 +9662,7 @@ function pricePlugging(lawnSqFt, spacing = 12, options = {}) {
   const cost = totalPlugs * cfg.costPerPlug + (totalPlugs / cfg.laborPerPlugs) * GLOBAL.LABOR_RATE;
   // v2 parity: raw floor 250 (not r'd), raw margin 1 - 0.45 = 0.55
   let price = Math.max(250, Math.round(cost / 0.55));
-  price = applyUrgency(price, urgency, afterHours);
+  price = applyUrgency(price, urgency, afterHours, options.legacyUrgency === true);
   const perSf = Math.round(price / Math.max(1, lawnSqFt) * 100) / 100;
   return {
     service: 'plugging',
@@ -9561,7 +9727,7 @@ function priceFoamDrill(points = 5, options = {}) {
   const cost = tier.cans * cfg.canCost + tier.laborHrs * GLOBAL.LABOR_RATE + cfg.bitsCost;
   // Floor removed (owner directive 2026-06-25): true tiered cost ÷ margin.
   let price = Math.max(cfg.floor, Math.round(cost / cfg.marginDivisor));
-  price = applyUrgency(price, urgency, afterHours);
+  price = applyUrgency(price, urgency, afterHours, options.legacyUrgency === true);
   const label = foamDrillTierLabel(tier);
   return {
     service: 'foam_drill',
@@ -9664,16 +9830,25 @@ function priceWasp(property = {}, options = {}) {
     addFlat('confinedSpace', safeTierIndex + 1 >= 3 ? cfg.addons.confinedSpace[1] : cfg.addons.confinedSpace[0]);
   }
 
+  const removalKey = normalizeToken(options.removalType ?? options.removal ?? 'NONE');
+  const removalPrice = cfg.removal?.[removalKey] || 0;
+
+  // URGENT wins over same-day when both are set, and the urgent multiplier covers the base AND the removal
+  // add-on (owner 2026-11-26, "fix all seven"). Before, same-day (or SOON) took the flat fee even with URGENT
+  // set, and the multiplier ran before the removal price was added, so removal escaped the urgent increase.
+  // No quote path calls priceWasp today, so no stored price depends on the old order.
   const urgency = normalizeToken(options.urgency ?? 'ROUTINE').toUpperCase();
-  if (options.sameDay === true || urgency === 'SOON') addFlat('sameDay', cfg.addons.sameDay);
-  else if (options.urgent === true || urgency === 'URGENT') {
-    basePrice = Math.round(basePrice * cfg.addons.urgent);
+  const urgentSelected = options.urgent === true || urgency === 'URGENT';
+  const sameDaySelected = options.sameDay === true || urgency === 'SOON';
+  if (urgentSelected) {
+    // Removal rides inside the multiplied figure, then comes back out so the subtotal below still adds it once.
+    basePrice = Math.round((basePrice + removalPrice) * cfg.addons.urgent) - removalPrice;
     addOns.push({ name: 'urgent', multiplier: cfg.addons.urgent });
+  } else if (sameDaySelected) {
+    addFlat('sameDay', cfg.addons.sameDay);
   }
   if (options.afterHours === true) addFlat('afterHours', cfg.addons.afterHours);
 
-  const removalKey = normalizeToken(options.removalType ?? options.removal ?? 'NONE');
-  const removalPrice = cfg.removal?.[removalKey] || 0;
   if (removalPrice > 0) addOns.push({ name: `removal_${removalKey}`, amount: removalPrice });
 
   const hasRecurringPest = !!(options.hasRecurringPest ?? property.hasRecurringPest);
@@ -9741,16 +9916,26 @@ function priceStingingInsect(options = {}) {
     price += add; mods.push(`+$${add} confined`);
   }
 
-  if (urgency === 'SOON') { price += 75; mods.push('+$75 same-day'); }
-  else if (urgency === 'URGENT') { price = Math.round(price * 1.5); mods.push('+50% emergency'); }
-  if (afterHours) { price += 75; mods.push('+$75 after-hours'); }
-
   let removalPrice = 0, removalLabel = '';
   // v2 parity: raw removal values
   if (removal === 'SMALL') { removalPrice = 75; removalLabel = 'Small nest'; }
   else if (removal === 'LARGE') { removalPrice = 250; removalLabel = 'Large comb'; }
   else if (removal === 'HONEYCOMB') { removalPrice = 375; removalLabel = 'Honeycomb extraction'; }
   else if (removal === 'RELOCATE') { removalPrice = 450; removalLabel = 'Live bee relocation'; }
+
+  // The urgent multiplier covers the base AND the removal add-on (owner 2026-11-26). Before, it ran before the
+  // removal was added, so removal escaped the increase. options.legacyUrgentRemoval keeps an estimate priced
+  // before this change at the figure it was priced with (input.legacyPricingRules, estimate-engine.js).
+  // The urgency word is matched upper-case for a new quote; an estimate priced before this change
+  // (options.legacyUrgentRemoval, input.legacyPricingRules) keeps the case-sensitive match it was priced with.
+  const urgencyKey = options.legacyUrgentRemoval === true ? urgency : String(urgency || '').toUpperCase();
+  if (urgencyKey === 'SOON') { price += 75; mods.push('+$75 same-day'); }
+  else if (urgencyKey === 'URGENT') {
+    const covered = options.legacyUrgentRemoval === true ? 0 : removalPrice;
+    price = Math.round((price + covered) * 1.5) - covered;
+    mods.push('+50% emergency');
+  }
+  if (afterHours) { price += 75; mods.push('+$75 after-hours'); }
 
   const total = price + removalPrice;
   const highRiskRemovalSelected = removalPrice > 0 || mods.length > 0;
@@ -9837,7 +10022,7 @@ function priceExclusion(options = {}) {
   const minimumFloor = minBracket.minimum;
 
   const epSubtotal = Math.max(minimumFloor, Math.round(rawSubtotal / 10) * 10);
-  const subtotalWithUrgency = applyUrgency(epSubtotal, urgency, afterHours);
+  const subtotalWithUrgency = applyUrgency(epSubtotal, urgency, afterHours, options.legacyUrgency === true);
 
   // Inspection waiver: explicit waive, OR any-rodent-service opt-in (legacy),
   // OR approved-total over the waiver threshold.
@@ -9969,6 +10154,22 @@ function exclusionMinimumRowText(wholeHome, floor) {
   };
 }
 
+// The hold for a barrel tile roof with no eave footage: the existing quote-required flags, which the staff send and the
+// lead auto-send both refuse, and no warranty until the footage is entered. One shape for the V2 rows and the
+// legacy-shaped exclusion (estimate-engine), so no exclusion shape can send an unmeasured barrel quote.
+function barrelMeasurementHold({ legacyShape = false } = {}) {
+  return {
+    quoteRequired: true,
+    requiresCustomQuote: true,
+    customQuoteReason: 'barrel_eave_footage_required',
+    requiresManualReview: true,
+    manualReviewReasons: [legacyShape
+      ? 'Barrel tile roof: switch this quote to the per-point exclusion and enter the eave footage before it is sent.'
+      : 'Barrel tile roof: enter the eave footage before this quote is sent.'],
+    warrantyEligible: false,
+  };
+}
+
 // ============================================================
 // RODENT EXCLUSION V2 (unified mesh-point + bird-box + linear-mesh)
 // ============================================================
@@ -10034,7 +10235,7 @@ function priceRodentExclusionV2(options = {}) {
   const floor = exclusionJobFloor(cfg, wholeHome, totalLinearMeshLF);
 
   const installPrice = Math.max(floor, Math.round(rawInstall));
-  const installWithUrgency = applyUrgency(installPrice, urgency, afterHours);
+  const installWithUrgency = applyUrgency(installPrice, urgency, afterHours, options.legacyUrgency === true);
 
   const inspectionWaived =
     waiveInspection ||
@@ -10055,9 +10256,24 @@ function priceRodentExclusionV2(options = {}) {
 
   const totalItems = stdPts + advPts + stdBoxes + tileBoxes + custBoxes;
 
+  // Barrel tile picked with no eave footage: the closure has no price yet, so the quote is parked with the
+  // existing quote-required flags (the staff send and the lead auto-send both refuse them) until the footage
+  // is entered, and it carries no re-entry guarantee until then (owner 2026-11-26, "fix all seven"). A stored
+  // estimate replayed after it was sent (options.legacyBarrelUnmeasured) keeps the terms it was sent with.
+  const barrelNeedsMeasurement = !!(roof && roof.barrel && roof.eaveFt <= 0);
+  const barrelHold = barrelNeedsMeasurement && options.legacyBarrelUnmeasured !== true;
+  const barrelHoldFields = barrelHold
+    ? {
+      ...barrelMeasurementHold(),
+      // A held whole-home seal advertises no included guarantee until the footage is entered.
+      ...(wholeHome ? { includesReentryGuarantee: false, reentryGuaranteeMonths: undefined } : {}),
+    }
+    : {};
+
   const guaranteeFields = {
     ...wholeHomeGuaranteeFields(wholeHome, equivalentExclusionPoints, totalLinearMeshLF),
     ...roofStyleFields(roof),
+    ...barrelHoldFields,
   };
 
   const parts = [];
@@ -10219,7 +10435,7 @@ function priceRodentExclusionV2(options = {}) {
     exclusionCompleted: total > 0,
     ...guaranteeFields,
     // Barrel tile picked with no measured eave: no closure line, and the tool says it needs a measurement.
-    ...(roof && roof.barrel && roof.eaveFt <= 0 ? { barrelClosureNeedsMeasurement: true } : {}),
+    ...(barrelNeedsMeasurement ? { barrelClosureNeedsMeasurement: true } : {}),
   };
 }
 
@@ -10572,6 +10788,8 @@ function applyRodentBundle(componentTotal, bundle) {
 
 module.exports = {
   assertFinitePriceFields,
+  barrelMeasurementHold,
+  oneTimeLawnPlateauMonthly,
   calcBermudaRemovalAnnualCost,
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,

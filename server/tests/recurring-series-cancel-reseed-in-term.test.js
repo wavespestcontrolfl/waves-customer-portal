@@ -166,8 +166,8 @@ describe('wiring (source guards)', () => {
   test('an in-term replacement carries the add-ons of the occurrence it replaces — in the insert AND the billing check', () => {
     expect(schedule).toMatch(/const pickedAddonDate = \(pickedDate && placementAddonDate\) \? placementAddonDate : null;/);
     expect(schedule).toMatch(/blackoutDates: extendBlackoutDates, skipParent, seriesCioc, addonDate: pickedAddonDate,/);
-    expect(schedule).toMatch(/filterAddonLinesForDate\(parentAddons, parent\.scheduled_date, addonDate \|\| d, blackoutDates, skipParent\)/);
-    expect(schedule).toMatch(/const dueAddons = filterAddonLinesForDate\(parentAddons, parent\.scheduled_date, pickedAddonDate \|\| nd,/);
+    expect(schedule).toMatch(/filterAddonLinesForDate\(parentAddons, seriesBaseDate\(parent\), addonDate \|\| d, blackoutDates, skipParent\)/);
+    expect(schedule).toMatch(/const dueAddons = filterAddonLinesForDate\(parentAddons, seriesBaseDate\(parent\), pickedAddonDate \|\| nd,/);
     expect(schedule).toMatch(/placementAddonDate: placementPicker \? term\.replacedOccurrenceDate : null,/);
   });
 

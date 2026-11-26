@@ -14,6 +14,14 @@ jest.mock('../config/feature-gates', () => ({
 const mockBuildPnl = jest.fn();
 jest.mock('../services/pnl-report', () => ({ buildPnlReport: (...a) => mockBuildPnl(...a) }));
 
+// The buyer columns have their own suites (monthly-snapshot-buyer-columns.test.js and the Postgres one); here only their
+// hand-off is checked: the arguments computeMonthSnapshot gives them and that their columns land on the stored row.
+const mockBuyerColumns = jest.fn();
+jest.mock('../services/monthly-snapshot-buyer-columns', () => ({
+  ...jest.requireActual('../services/monthly-snapshot-buyer-columns'),
+  buyerColumns: (...a) => mockBuyerColumns(...a),
+}));
+
 const svc = require('../services/monthly-financial-snapshot');
 const migration = require('../models/migrations/20261126100000_monthly_financial_snapshots');
 
@@ -50,6 +58,8 @@ function makeDb(results = {}) {
 beforeEach(() => {
   mockGate.payRunWages = false;
   mockBuildPnl.mockReset();
+  mockBuyerColumns.mockReset();
+  mockBuyerColumns.mockResolvedValue({ sde: 1800, prepaid_owed: 0 });
 });
 
 describe('monthWindow and monthOffset', () => {
@@ -182,8 +192,16 @@ describe('computeMonthSnapshot', () => {
   // Four reads hit different tables here, so one fake serves all of them.
   const dbFor = ({ ledger, stops, rev, margin, fin }) => makeDb({
     expenses: { first: { total: String(ledger) } },
-    service_records: { first: { n: String(stops), revenue: String(rev), weighted_margin: margin } },
+    service_records: { first: { n: String(stops), revenue: String(rev), weighted_margin: margin, gross_profit: '5245.60' } },
     company_financials: { first: fin },
+  });
+
+  test('job profit is NULL when visits carry no costed gross profit, 0 when there are no visits, and the sum otherwise', async () => {
+    const jobs = (row) => svc.jobRevenueForWindow(makeDb({ service_records: { first: row } }), '2026-10-01', '2026-10-31');
+    expect((await jobs({ revenue: '500', weighted_margin: null, visits: 3, profit_values: 0, gross_profit: null })).grossProfit).toBeNull();
+    expect((await jobs({ revenue: '0', weighted_margin: null, visits: 0, profit_values: 0, gross_profit: null })).grossProfit).toBe(0);
+    expect((await jobs({ revenue: '1000', weighted_margin: '80', visits: 2, profit_values: 2, gross_profit: '800.004' })).grossProfit).toBe(800);
+    expect((await jobs({ revenue: '0', weighted_margin: null, visits: 1, profit_values: 1, gross_profit: '-100' })).grossProfit).toBe(-100);
   });
 
   test('office cost is the ledger plus the owner allowance, and cost per stop divides by paid stops', async () => {
@@ -194,6 +212,7 @@ describe('computeMonthSnapshot', () => {
       completed_job_revenue: 10000,
       cash_revenue: 9000,
       gross_margin_pct: 52.46,
+      job_gross_profit: 5245.6,
       office_cost: 1500,
       owner_allowance: 500,
       paid_stops: 100,
@@ -201,8 +220,15 @@ describe('computeMonthSnapshot', () => {
       net_income: 1800,
       net_margin_pct: 20,
       pnl_complete: true,
+      sde: 1800,
+      prepaid_owed: 0,
     });
     expect(mockBuildPnl).toHaveBeenCalledWith(db, '2026-10-01', '2026-10-31');
+    // The buyer columns get the month's window, the settings row in effect, the P&L, the office allowance and cash revenue.
+    expect(mockBuyerColumns).toHaveBeenCalledWith(db, expect.objectContaining({
+      startDate: '2026-10-01', endDate: '2026-10-31', officeAllowance: 500, cashRevenue: 9000,
+      financials: { owner_office_hours_per_month: '10', owner_office_hourly_rate: '50' },
+    }));
   });
 
   test('the settings row is the one in effect on the month\'s last day, not the newest', async () => {

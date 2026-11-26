@@ -436,6 +436,8 @@ function compactLineItem(item = {}) {
   return {
     service: item.service,
     name: item.name || item.label || item.displayName,
+    // Which price rules priced this line (the 2026-11-26 fixes): the saved-estimate reader replays under them.
+    ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
     annual: item.annualAfterDiscount ?? item.annual ?? null,
     monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
     price: item.priceAfterDiscount ?? item.price ?? null,
@@ -469,6 +471,8 @@ function compactLineItem(item = {}) {
     guaranteeWindowDaysAfterFollowUp: item.guaranteeWindowDaysAfterFollowUp ?? null,
     maxIncludedRetreats: item.maxIncludedRetreats ?? null,
     exteriorStatus: item.exteriorStatus ?? null,
+    // The flea size rule this row was quoted under: the replay (estimate-flea-size-replay) treats a flea row without it as quoted before 2026-11-26.
+    ...(item.fleaSizeBasis ? { fleaSizeBasis: item.fleaSizeBasis, footprintUsed: item.footprintUsed ?? null, footprintSource: item.footprintSource ?? null, ...(item.fleaPostedHomeSqFt ? { fleaPostedHomeSqFt: item.fleaPostedHomeSqFt } : {}) } : {}),
     perVisit: item.perVisit ?? null,
     appsPerYear: item.appsPerYear ?? null,
     tier: item.tier ?? null,
@@ -674,6 +678,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
         manualQuoteLines: manualQuoteLines.map(compactLineItem),
         engineResult: {
           summary: estimate?.summary || {},
+          ...(typeof estimate?.pricingMetadata?.legacyPricingRules === 'boolean'
+            ? { pricingMetadata: { legacyPricingRules: estimate.pricingMetadata.legacyPricingRules } }
+            : {}),
           lineItems: (estimate?.lineItems || []).map(compactLineItem),
           waveGuard: estimate?.waveGuard || null,
         },
@@ -839,4 +846,5 @@ module.exports = {
   hasConcreteServiceInterest,
   mapServiceInterestToEstimateServices,
   mapServiceKeyToEstimateServices,
+  compactLineItem,
 };

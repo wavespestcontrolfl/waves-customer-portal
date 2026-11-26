@@ -113,6 +113,144 @@ async function isPausedByAdmin() {
 // 'blog' share stays unthrottled and uncounted.
 const AUTOSHARE_SOURCES = new Set(['rss', 'blog_scheduled', 'autonomous_blog', 'blog_auto']);
 
+// A blog share that a restart cuts off mid-run (a deploy during the midnight
+// share) used to leave NO row, because the row was written only after every
+// site posted. The next RSS tick then posted the article again everywhere:
+// Facebook got it twice on 2026-10-24 (3 copies), 11-19 and 11-24. The two
+// locked lanes (checkAndPublish, shareUrlOnce: both hold RSS_LOCK_ID) now write
+// a 'publishing' row before the first site and add each site's result as it
+// lands. A later locked run that finds a 'publishing' row knows that attempt
+// died (the lock would still be held otherwise), so it finishes only the sites
+// that did not get the post.
+const SHARE_PROGRESS_STATUS = 'publishing';
+// Every source the locked lanes use: the cron lanes plus the admin Share
+// button ('blog') and the content agent. A function, because BLOG_HERO_SOURCES
+// is declared further down.
+function shareProgressSources() {
+  return [...new Set([...AUTOSHARE_SOURCES, ...BLOG_HERO_SOURCES])];
+}
+
+function parsePlatformsPosted(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const list = JSON.parse(value || '[]');
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+// Sites an earlier cut-off attempt reached, or was posting to when it died
+// (an inFlight mark with no result after it): platform -> those entries. An
+// in-flight site may already be live, so a resume skips it rather than risk
+// a second post; the cost is that site can miss this one article.
+function sitesAlreadyPosted(platformsPosted) {
+  const last = new Map(); // site key -> its last entry
+  for (const r of parsePlatformsPosted(platformsPosted)) {
+    if (!r || !r.platform || r.dryRun) continue;
+    last.set(`${r.platform}|${r.location || ''}`, r);
+  }
+  const done = new Map();
+  for (const r of last.values()) {
+    if (r.success !== true && !r.inFlight) continue;
+    const entry = r.inFlight && r.success !== true
+      ? { platform: r.platform, ...(r.location ? { location: r.location } : {}), success: false, inFlight: true,
+        skipped: 'A restart cut this site off mid-post; it may already be live, so it is not posted again' }
+      : r;
+    if (!done.has(r.platform)) done.set(r.platform, []);
+    done.get(r.platform).push(entry);
+  }
+  return done;
+}
+
+// Never throws: a progress-row failure falls back to the old end-of-run write.
+async function findShareProgressRow(column, value, statuses) {
+  if (!value) return null;
+  return db('social_media_posts')
+    .where(column, value)
+    .whereIn('source_type', shareProgressSources())
+    .whereIn('status', statuses)
+    .orderBy('created_at', 'desc')
+    .first('id', 'status', 'platforms_posted');
+}
+
+async function openShareProgress({ title, description, normalizedLink, guid, source }) {
+  try {
+    // By URL, then by feed GUID (the RSS dedupe knows a post by either).
+    // A cut-off live row first (by URL, then GUID), then a failed row, then a
+    // dry-run row, so a newer dry run never hides a live attempt.
+    const byGuid = !!guid;
+    let earlier = null;
+    // Failed rows before dry runs too: a failed row can hold an in-flight mark.
+    for (const statuses of [[SHARE_PROGRESS_STATUS], ['failed'], ['dry_run']]) {
+      earlier = (await findShareProgressRow('source_url', normalizedLink, statuses))
+        || (byGuid ? await findShareProgressRow('source_guid', guid, statuses) : null);
+      if (earlier) break;
+    }
+    if (earlier) {
+      // A failed row keeps its in-flight marks too (a site cut off mid-post
+      // on an attempt that then failed elsewhere may still be live).
+      const done = earlier.status === 'dry_run' ? new Map() : sitesAlreadyPosted(earlier.platforms_posted);
+      // Also takes the current URL, so a share found by its feed GUID after
+      // a permalink change is recorded under the URL later lookups use.
+      await db('social_media_posts').where('id', earlier.id).update({
+        status: SHARE_PROGRESS_STATUS,
+        source_url: normalizedLink,
+        // A URL-only caller (shareUrlOnce passes the URL as its GUID) keeps
+        // the feed's own GUID on the row.
+        ...(guid && guid !== normalizedLink ? { source_guid: guid } : {}),
+        ...(earlier.status === 'dry_run' ? { platforms_posted: JSON.stringify([]) } : {}),
+      });
+      if (done.size) logger.warn(`[social] resuming a cut-off share of ${normalizedLink}: already on ${[...done.keys()].join(', ')}`);
+      return { rowId: earlier.id, done };
+    }
+    const [row] = await db('social_media_posts').insert({
+      title,
+      description: (description || '').substring(0, 1000),
+      source_url: normalizedLink,
+      source_guid: guid,
+      source_type: source,
+      platforms_posted: JSON.stringify([]),
+      status: SHARE_PROGRESS_STATUS,
+      ai_model: MODELS.VOICE,
+    }).returning('id');
+    return { rowId: row && (row.id || row), done: new Map() };
+  } catch (err) {
+    // Without the record we cannot tell which sites already have the post,
+    // so this run does not post; the next run tries again.
+    logger.warn(`[social] share progress row failed (${err.message}); share deferred to the next run`);
+    return { rowId: null, done: new Map(), unavailable: true };
+  }
+}
+
+// Saves every result so far PLUS any earlier success this run has not reached
+// yet, so a second restart never loses a site the first attempt reached.
+// `posting` = the site about to be posted to: saved as an inFlight mark first.
+async function recordShareProgress(progress, platformResults, posting = null) {
+  if (!progress.rowId) return;
+  const sameSite = (a, b) => a.platform === b.platform && (a.location || null) === (b.location || null);
+  const notReachedYet = [...progress.done.values()].flat()
+    .filter((earlier) => !platformResults.some((r) => sameSite(r, earlier)));
+  const mark = posting ? [{ ...posting, inFlight: true }] : [];
+  try {
+    const n = await db('social_media_posts').where('id', progress.rowId)
+      .update({ platforms_posted: JSON.stringify([...notReachedYet, ...platformResults, ...mark]) });
+    return n === 1;
+  } catch (err) {
+    logger.warn(`[social] share progress update failed: ${err.message}`);
+    return false;
+  }
+}
+
+// Saves the in-flight mark; false = not saved, so the site is skipped this run
+// (a post with no mark could be posted again after a restart).
+async function markSitePosting(progress, platformResults, posting) {
+  if (!progress.rowId) return true;
+  if (await recordShareProgress(progress, platformResults, posting)) return true;
+  platformResults.push({ ...posting, success: false, error: 'Share record not saved; site skipped so it cannot post twice' });
+  return false;
+}
+
 // Kill switch: SOCIAL_AUTOSHARE_DAILY_CAP=0 disables the cap entirely.
 // Deliberately defaults ON (1/day) rather than the usual dark-ship default-OFF:
 // a default-OFF throttle would leave the spam live on deploy, which is the bug.
@@ -1484,7 +1622,7 @@ function facebookPreviewSettleMs() {
 }
 
 // Never rejects.
-async function readFacebookLinkPreview(link, token) {
+async function readFacebookLinkPreview(link, token, { settleMs } = {}) {
   try {
     const res = await fetch('https://graph.facebook.com/v25.0/', {
       method: 'POST',
@@ -1499,7 +1637,7 @@ async function readFacebookLinkPreview(link, token) {
     const data = await res.json();
     // updated_time means Facebook read the page just now; its picture fetch
     // starts after that read.
-    if (data && data.updated_time) await sleep(facebookPreviewSettleMs());
+    if (data && data.updated_time) await sleep(settleMs === undefined ? facebookPreviewSettleMs() : settleMs);
   } catch (err) {
     logger.warn(`[social] Facebook link preview refresh failed: ${err.name}`);
   }
@@ -1538,25 +1676,160 @@ async function postToFacebook(message, link, imageUrl) {
     return { platform: 'facebook', postId: data.post_id || data.id, success: true, imageUrl };
   }
 
-  const body = { message, access_token: token };
-  if (link) {
-    body.link = link;
-    await refreshFacebookLinkPreview(link, token);
+  if (!link) {
+    const id = await createFacebookFeedPost({ message, access_token: token });
+    logger.info(`[social] Facebook post created: ${id}`);
+    return { platform: 'facebook', postId: id, success: true };
   }
 
+  await refreshFacebookLinkPreview(link, token);
+  const body = { message, link, access_token: token, published: false };
+  let id = await createFacebookFeedPost(body);
+  let size = await readFacebookLinkPictureSize(id, token);
+  if (size && isSmallFacebookPicture(size)) {
+    // Facebook gave the hidden post the small side thumbnail. Nobody has seen
+    // it: delete it, ask Facebook to read the page again, wait, try once more.
+    // The first post is never published after this point, so even a delete
+    // whose answer is lost leaves at most one hidden copy nobody sees.
+    logger.warn(`[social] Facebook link picture came back ${size.width}x${size.height}; trying once more`);
+    await deleteFacebookPost(id, token);
+    await readFacebookLinkPreview(link, token, { settleMs: FACEBOOK_PICTURE_RETRY_SETTLE_MS });
+    id = await createFacebookFeedPost(body);
+    size = await readFacebookLinkPictureSize(id, token);
+    if (size && isSmallFacebookPicture(size)) {
+      logger.warn(`[social] Facebook link picture still ${size.width}x${size.height}; publishing anyway`);
+    }
+  }
+  if (!(await publishFacebookPost(id, token))) {
+    // Facebook never confirmed either way, so the post may be public. It is
+    // recorded as sent: a failed record lets the next blog run (checkAndPublish,
+    // shareUrlOnce skip only non-failed rows) make a second public post. If it
+    // stayed hidden, the share is missing on Facebook, never doubled.
+    logger.warn(`[social] Facebook post ${id}: publish not confirmed; recorded as sent so no second post is made`);
+    return { platform: 'facebook', postId: id, success: true, publishUnconfirmed: true };
+  }
+  logger.info(`[social] Facebook post created: ${id}${size ? ` (picture ${size.width}x${size.height})` : ''}`);
+  return { platform: 'facebook', postId: id, success: true };
+}
+
+// A link post Facebook draws with the small side thumbnail reports a picture of
+// about 200x200 (8 of 88 blog shares 2026-08..11-20, and 2 of 6 after the read
+// above went live). A full card reports 630 px or more.
+const FACEBOOK_SMALL_PICTURE_PX = 300;
+const FACEBOOK_PICTURE_RETRY_SETTLE_MS = 4000;
+
+function isSmallFacebookPicture({ width, height }) {
+  return Math.max(width, height) <= FACEBOOK_SMALL_PICTURE_PX;
+}
+
+async function createFacebookFeedPost(body) {
   const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/feed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`Facebook API ${res.status}: ${err}`);
   }
   const data = await res.json();
-  logger.info(`[social] Facebook post created: ${data.id}`);
-  return { platform: 'facebook', postId: data.id, success: true };
+  return data.id;
+}
+
+// The picture Facebook attached to a post, or null when it cannot be read.
+// Never rejects: a failed read publishes the post as it is.
+async function readFacebookLinkPictureSize(postId, token) {
+  try {
+    const url = `https://graph.facebook.com/v25.0/${postId}?fields=attachments{media}&access_token=${encodeURIComponent(token)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const image = data?.attachments?.data?.[0]?.media?.image;
+    const width = Number(image?.width);
+    const height = Number(image?.height);
+    return width > 0 && height > 0 ? { width, height } : null;
+  } catch (err) {
+    logger.warn(`[social] Facebook link picture read failed: ${err.name}`); // never the message: the URL carries the token
+    return null;
+  }
+}
+
+// True only when Facebook confirms the delete. The small-picture path ignores
+// the answer: that post is never published, so a lost delete leaves a hidden copy.
+async function deleteFacebookPost(postId, token) {
+  try {
+    const res = await fetch(`https://graph.facebook.com/v25.0/${postId}?access_token=${encodeURIComponent(token)}`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return data?.success === true;
+  } catch (err) {
+    logger.warn(`[social] Facebook hidden post delete failed: ${err.name}`);
+    return false;
+  }
+}
+
+// 'public', 'hidden', or 'unknown' (the read failed: the post may be public).
+async function readFacebookPostState(postId, token) {
+  try {
+    const url = `https://graph.facebook.com/v25.0/${postId}?fields=is_published&access_token=${encodeURIComponent(token)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS) });
+    if (!res.ok) return 'unknown';
+    const data = await res.json();
+    if (data?.is_published === true) return 'public';
+    if (data?.is_published === false) return 'hidden';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function requestFacebookPublish(postId, token) {
+  try {
+    const res = await fetch(`https://graph.facebook.com/v25.0/${postId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_published: true, access_token: token }),
+    });
+    if (res.ok) return null;
+    // Status + Graph error code only: the body can echo request data.
+    let code = '';
+    try { code = String((await res.json())?.error?.code ?? '').replace(/\D/g, '').slice(0, 6); } catch { /* no JSON */ }
+    const err = new Error(`Facebook publish API ${res.status}${code ? ` (code ${code})` : ''}`);
+    err.refused = res.status >= 400 && res.status < 500; // Facebook answered no (bad token, bad post)
+    return err;
+  } catch (err) {
+    return new Error(`Facebook publish failed: ${err.name}`); // never the message: it can quote the token
+  }
+}
+
+// Make the hidden post public. Publishing the same post twice is harmless, so
+// a failed publish is asked once more on the SAME post before anything else.
+// Then:
+//   public                    -> true: done (an answer was lost).
+//   Facebook said no (4xx) BOTH times -> never public: delete it (best
+//                                effort) and throw.
+//   reads hidden              -> delete it. Confirmed: throw, so a retry of
+//                                the whole post is safe. Not confirmed: false.
+//   anything else             -> false: the post may be public.
+// false = the caller records the post as sent with its id and never makes a
+// new one, so a post that did go public is never doubled; the cost is a share
+// that may stay hidden.
+async function publishFacebookPost(postId, token) {
+  const first = await requestFacebookPublish(postId, token);
+  if (!first) return true;
+  const second = await requestFacebookPublish(postId, token);
+  if (!second) return true;
+  const state = await readFacebookPostState(postId, token);
+  if (state === 'public') return true;
+  if (first.refused && second.refused) {
+    await deleteFacebookPost(postId, token);
+    throw second;
+  }
+  if (state === 'hidden' && await deleteFacebookPost(postId, token)) throw second;
+  return false;
 }
 
 function sleep(ms) {
@@ -1719,9 +1992,9 @@ async function postToLinkedIn(text, link, title, description, imageUrl) {
   return linkedin.createPost({ text, link, title, description, imageUrl });
 }
 
-async function postToTwitter(text, link) {
+async function postToTwitter(text, link, imageUrl) {
   const twitter = require('./twitter');
-  return twitter.createPost({ text, link });
+  return twitter.createPost({ text, link, imageUrl });
 }
 
 // ── GBP watermark ──
@@ -2041,7 +2314,9 @@ const SocialMediaService = {
             if (feedUrls.length) this.whereIn('source_url', feedUrls);
             if (feedGuids.length) this.orWhereIn('source_guid', feedGuids);
           })
-          .whereNotIn('status', ['dry_run', 'failed', 'rejected'])
+          // 'publishing' = an attempt a restart cut off (we hold the lock, so
+          // it is not running): resume it below, finishing only missing sites.
+          .whereNotIn('status', ['dry_run', 'failed', 'rejected', SHARE_PROGRESS_STATUS])
           .select('source_url', 'source_guid');
         takenUrls = new Set(takenRows.map((r) => r.source_url).filter(Boolean));
         takenGuids = new Set(takenRows.map((r) => r.source_guid).filter(Boolean));
@@ -2129,6 +2404,7 @@ const SocialMediaService = {
             // An admin-triggered run already bypasses the automatic RSS gates;
             // it must bypass the auto-share cap and GBP narrowing too.
             bypassAutoshareThrottle: manual,
+            trackProgress: true,
           });
           if (result?.success) autosharesLeft -= 1;
           results.push({ item: item.title, ...result });
@@ -2175,7 +2451,7 @@ const SocialMediaService = {
         // Same exclusions as the RSS path above: a REJECTED studio draft is
         // an admin killing that copy, not vetoing the URL — nothing posted,
         // so it must not block (or worse, park) an auto-share.
-        .whereNotIn('status', ['dry_run', 'failed', 'rejected'])
+        .whereNotIn('status', ['dry_run', 'failed', 'rejected', SHARE_PROGRESS_STATUS])
         .first();
       // blocking_status lets callers distinguish "definitively sent/queued"
       // (published/scheduled — safe to stamp the source row as shared) from
@@ -2188,6 +2464,7 @@ const SocialMediaService = {
         // Autonomous blog-share lane: opt into every platform incl. Twitter
         // (the omitted-channels default excludes it).
         channels: PUBLISH_PLATFORMS,
+        trackProgress: true,
       });
       return { shared: true, ...result };
     });
@@ -2245,7 +2522,7 @@ const SocialMediaService = {
   // videoUrl: a hosted MP4 (creative-engine Reel). FB posts it as a page video
   // and IG as a Reel; GBP has no video ingestion, so it keeps the image params
   // (imageUrl/gbpImageUrl are the still fallback alongside a video).
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, gbpImageBranded = false, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false, onFirstPlatformSuccess = null }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, gbpImageBranded = false, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false, onFirstPlatformSuccess = null, trackProgress = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -2286,6 +2563,14 @@ const SocialMediaService = {
     }
 
     const platformResults = [];
+    // Locked blog lanes only (see SHARE_PROGRESS_STATUS).
+    const progressLink = normalizeUrl(link);
+    const progress = trackProgress && !SOCIAL_FLAGS.dryRun && !postId && progressLink && shareProgressSources().includes(source)
+      ? await openShareProgress({ title, description, normalizedLink: progressLink, guid, source })
+      : { rowId: null, done: new Map() };
+    if (progress.unavailable) {
+      return { success: false, platforms: [{ platform: 'all', skipped: 'Share record unavailable; retried next run' }] };
+    }
     // Durable-marker hook: awaited the moment the FIRST platform reports
     // success, BEFORE any later provider call runs. The testimonial path
     // passes its first-win published stamp here — posting continues
@@ -2519,11 +2804,16 @@ const SocialMediaService = {
     ].filter((platform) => requestedPlatforms.has(platform.key));
 
     for (const p of platforms) {
+      if (progress.done.has(p.key)) {
+        platformResults.push(...progress.done.get(p.key).map((r) => ({ ...r, resumed: true })));
+        continue;
+      }
       if (!p.enabled) {
         platformResults.push({ platform: p.key, skipped: p.reason });
         continue;
       }
 
+      if (!(await markSitePosting(progress, platformResults, { platform: p.key }))) continue;
       try {
         const content = customContent?.[p.key] || await generateContent(p.key, { title, description, link, source });
 
@@ -2662,21 +2952,25 @@ const SocialMediaService = {
           const r = await postToLinkedIn(content, link, title, description, generatedImageUrl);
           platformResults.push({ ...r, content });
         } else if (p.key === 'twitter') {
-          // Text + article URL; X renders the link card from the page's
-          // og:image, so blog shares need no media upload (mirrors the FB
-          // /feed link-post approach).
+          // Text + article URL, plus the same picture Instagram and LinkedIn
+          // get (the blog hero copy) when this run has one. X's own link card
+          // missed on 6 of 30 blog shares (2026-10-27..11-26) and cannot be
+          // re-read, so the picture rides on the tweet itself. No video here:
+          // the tweet stays text + link + picture.
           // NOT wrapped in withRetry: tweet creation is non-idempotent — if X
           // accepts the create but the response is lost/times out, a retry
           // publishes a DUPLICATE tweet (same rule as the FB video and IG
           // container flows). A transient failure surfaces as an X partial
           // failure and stays retryable through the normal channels.
-          const r = await postToTwitter(content, link);
+          const xImageUrl = typeof generatedImageUrl === 'string' ? generatedImageUrl : null;
+          const r = await postToTwitter(content, link, xImageUrl);
           platformResults.push({ ...r, content });
         }
       } catch (err) {
         logger.error(`[social] ${p.key} post failed: ${err.message}`);
         platformResults.push({ platform: p.key, success: false, error: err.message });
       }
+      await recordShareProgress(progress, platformResults);
       await fireFirstPlatformSuccess();
     }
 
@@ -2691,13 +2985,17 @@ const SocialMediaService = {
     // Auto-shared blog posts go to ONE rotating city profile, not all four.
     // Only when the caller didn't pin locations — an explicit admin selection
     // (or the studio's per-city targeting) is always honored as-is.
-    if (
-      gbpLocations.length > 1
-      && !requestedGbpLocations
-      && throttledLane
-      && autoshareGbpSingleLocation()
-      && !bypassAutoshareThrottle
-    ) {
+    const gbpSingleProfile = !requestedGbpLocations && throttledLane
+      && autoshareGbpSingleLocation() && !bypassAutoshareThrottle;
+    // A resumed share skips the profiles the cut-off attempt reached; a
+    // one-profile share that reached any profile is done on Google.
+    const gbpDone = progress.done.get('gbp') || [];
+    if (gbpDone.length) {
+      platformResults.push(...gbpDone.map((r) => ({ ...r, resumed: true })));
+      const doneLocations = new Set(gbpDone.map((r) => r.location));
+      gbpLocations = gbpSingleProfile ? [] : gbpLocations.filter((loc) => !doneLocations.has(loc.id));
+    }
+    if (gbpLocations.length > 1 && gbpSingleProfile) {
       // Rotate only among profiles that can actually publish. Narrowing to one
       // profile removes the old fanout's accidental redundancy: if the day's
       // slot landed on a profile missing its OAuth credentials, postToGBP would
@@ -2718,6 +3016,7 @@ const SocialMediaService = {
       logger.info(`[social] auto-share GBP narrowed to ${gbpLocations[0].name} (rotation)`);
     }
     for (const loc of gbpLocations) {
+      if (!(await markSitePosting(progress, platformResults, { platform: 'gbp', location: loc.id }))) continue;
       try {
         const gbpCustom = customContent?.gbp;
         const gbpContent =
@@ -2765,6 +3064,7 @@ const SocialMediaService = {
       } catch (err) {
         platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: err.message });
       }
+      await recordShareProgress(progress, platformResults);
       await fireFirstPlatformSuccess();
     }
 
@@ -2825,6 +3125,11 @@ const SocialMediaService = {
             image_url: postRow.image_url,
           });
         if (!updated) await db('social_media_posts').insert(postRow);
+      } else if (progress.rowId) {
+        const updated = await db('social_media_posts')
+          .where('id', progress.rowId)
+          .update({ ...updateCols, image_url: postRow.image_url, source_type: postRow.source_type });
+        if (!updated) await db('social_media_posts').insert(postRow);
       } else if (isAutoSource) {
         const existingByUrl = normalizedLink
           ? await db('social_media_posts').where('source_url', normalizedLink).whereIn('source_type', autoSources).first()
@@ -2834,7 +3139,10 @@ const SocialMediaService = {
           : null;
         const existing = existingByUrl || existingByGuid;
 
-        if (existing) {
+        if (existing && SOCIAL_FLAGS.dryRun && [SHARE_PROGRESS_STATUS, 'failed'].includes(existing.status)) {
+          // A dry run never overwrites a live share's saved results (a failed
+          // row can still hold an in-flight mark).
+        } else if (existing) {
           await db('social_media_posts').where('id', existing.id).update(updateCols);
         } else {
           await db('social_media_posts').insert(postRow);
@@ -2925,7 +3233,7 @@ const SocialMediaService = {
     if (platform === 'instagram') return postToInstagram(text, imageUrl);
     if (platform === 'gbp') return postToGBP(locationId || 'bradenton', text, link, imageUrl);
     if (platform === 'linkedin') return postToLinkedIn(text, link, title, description, imageUrl);
-    if (platform === 'twitter') return postToTwitter(text, link);
+    if (platform === 'twitter') return postToTwitter(text, link, imageUrl);
     throw new Error(`Unknown platform: ${platform}`);
   },
 

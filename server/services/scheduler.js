@@ -1010,6 +1010,13 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`[conference] staff-end recovery tick failed: ${err.message}`);
     }
+    // And a caller nobody answered whose no-answer backstop (an in-memory timer) a restart lost: to voicemail
+    // (call-conference-path.js recoverUnansweredRings).
+    try {
+      await require('./call-conference-path').recoverUnansweredRings();
+    } catch (err) {
+      logger.error(`[conference] ring recovery tick failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -3408,6 +3415,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Call sound check (GATE_CALL_SOUND_CHECK, dark): a model listens to each newly
+  // processed call recording and saves notes on the call. Every listen is a
+  // paid Gemini call; services/call-sound-check.js holds the daily cap. Its own
+  // tick and lock, apart from the 5-minute recordings tick, so a slow model
+  // call never delays transcription. Gate off = the tick returns before any
+  // lock or query.
+  cron.schedule('30 3,8,13,18,23,28,33,38,43,48,53,58 * * * *', async () => {
+    if (!require('../config/feature-gates').callSoundCheckLive()) return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('call-sound-check', () => require('./call-sound-check').runCallSoundCheck());
+    } catch (err) {
+      logger.error(`[call-sound-check] tick failed: ${String(err.message).slice(0, 200)}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // While the follow-up pager is live, the overdue watchdog takes each
   // promise over once it ages off the pager's 24-hour list. With callback
   // cards on it already runs every 5 minutes; with cards off its cadence is
@@ -4345,7 +4368,7 @@ function initScheduledJobs() {
   // DAILY 4AM — Newsletter event ingestion (P3a). Pulls every enabled
   // RSS source from event_sources, upserts into events_raw. Daily cadence
   // (vs weekly with the newsletter draft) so events added shortly before
-  // a Tuesday issue still make it into the dashboard tiles.
+  // a Thursday issue still make it into the dashboard tiles.
   // =========================================================================
   cron.schedule('0 4 * * *', async () => {
     logger.info('Running: Newsletter event ingestion');
@@ -4980,14 +5003,15 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY MONDAY 7AM ET — Newsletter autopilot
+  // EVERY WEDNESDAY 7:15AM ET — Newsletter autopilot
   // Auto-drafts the weekly flagship digest from approved events and proofs
   // it. Under GATE_NEWSLETTER_AUTO_SEND a draft that passes every check
-  // queues itself for Tuesday 6:00 AM ET (owner 2026-10-30, option A); off,
-  // it waits for an APPROVED reply. Skips if fewer than 3 eligible events
-  // and notifies admin to approve more.
+  // queues itself for Thursday 6:00 AM ET (owner 2026-10-30, option A; the day
+  // moved from Tuesday 2026-11-26); off, it waits for an APPROVED reply. The
+  // 7:15 start keeps it off the Waves Pest Insider planner's 7:00 AM Wednesday
+  // run. Skips if fewer than 3 eligible events and notifies admin to approve more.
   // =========================================================================
-  cron.schedule('0 7 * * 1', async () => {
+  cron.schedule('15 7 * * 3', async () => {
     try {
       const { autoDraftFlagship } = require('./newsletter-autopilot');
       const result = await autoDraftFlagship();
@@ -4998,8 +5022,8 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // MONDAY 2PM + TUESDAY 4:30AM ET — Missed-tick catch-up for the Monday-7AM
-  // autopilot. The early-Tuesday recovery still leaves 90 minutes for proof
+  // WEDNESDAY 2PM + THURSDAY 4:30AM ET — Missed-tick catch-up for the Wednesday
+  // 7:15AM autopilot. The early-Thursday recovery still leaves 90 minutes for proof
   // approval before the exact 6:00AM delivery target; it approves nothing
   // itself (under GATE_NEWSLETTER_AUTO_SEND the proof step queues the issue).
   // Re-run autoDraftFlagship ONLY for a week that was NEVER ATTEMPTED (no
@@ -5013,8 +5037,8 @@ function initScheduledJobs() {
   // =========================================================================
   const runNewsletterAutopilotCatchup = async () => {
     try {
-      const { getActiveNewsletterTuesday } = require('./event-freshness');
-      const weekOf = getActiveNewsletterTuesday();
+      const { getActiveNewsletterIssueDay } = require('./event-freshness');
+      const weekOf = getActiveNewsletterIssueDay();
       const cal = await db('newsletter_calendar').where('week_of', weekOf).first();
       // Only catch up weeks that were never attempted — but a drafted week
       // may still be missing its owner proof (a transient SendGrid failure
@@ -5038,8 +5062,8 @@ function initScheduledJobs() {
       logger.error(`[newsletter-autopilot-catchup] failed: ${err.message}`);
     }
   };
-  cron.schedule('0 14 * * 1', runNewsletterAutopilotCatchup, { timezone: 'America/New_York' });
-  cron.schedule('30 4 * * 2', runNewsletterAutopilotCatchup, { timezone: 'America/New_York' });
+  cron.schedule('0 14 * * 3', runNewsletterAutopilotCatchup, { timezone: 'America/New_York' });
+  cron.schedule('30 4 * * 4', runNewsletterAutopilotCatchup, { timezone: 'America/New_York' });
 
   // =========================================================================
   // DAILY 6AM ET — Newsletter indexability decay: noindex stale event digests
@@ -5066,7 +5090,7 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 6:15AM ET — Event auto-curation. Classifies never-examined pending
   // events with Claude and approves real consumer events for the digest, so
-  // Monday's 7AM autopilot has an approved pool without a human working
+  // Wednesday's 7:15AM autopilot has an approved pool without a human working
   // the Event Inbox every week (the lane starved at 0 eligible for two weeks
   // when approval was manual-only). Runs after the 4AM ingest → 5AM
   // normalize → 5:30 expiry → 5:45 dedup chain so it judges clean, classified
@@ -6157,6 +6181,24 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Stale-rule check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // MONDAYS 7:58AM + 1:58PM — Bad inbound calls per lead source (owner 2026-11-26, "ok build"). One
+  // admin notification for the last Monday-to-Sunday week: per source, inbound calls, answered by a
+  // person, voicemail, each bad-call reason and the median answer time. The week-named dedupe key
+  // makes the 1:58PM run a no-op after a successful raise, so a failed run or a deploy over 7:58
+  // still reports that week. Read-only: sends nothing to a customer. No GATE_* (owner rule 2026-11-05).
+  // =========================================================================
+  cron.schedule('58 7,13 * * 1', async () => {
+    try {
+      await runExclusive('bad-call-count-weekly', async () => {
+        const result = await require('./call-bad-call-count').runWeeklyBadCallAlert();
+        logger.info(`Bad-call count: ${result.calls} call(s), ${result.invalid} bad (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Bad-call count failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

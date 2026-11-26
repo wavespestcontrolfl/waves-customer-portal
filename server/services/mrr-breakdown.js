@@ -272,4 +272,5 @@ async function listAtRiskMrrAccounts(dbConn, asOf = etDateString()) {
 
 module.exports = {
   computeMrrBreakdown, computeRecurringPlans, listAtRiskMrrAccounts, mrrPopulationQuery, AT_RISK_PREDICATE,
+  excludeInternalTestCustomers,
 };

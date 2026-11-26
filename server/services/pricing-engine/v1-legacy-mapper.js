@@ -321,6 +321,9 @@ function measurementMetadataFields(li = {}) {
   if (li.footprintUsed !== undefined) fields.footprintUsed = li.footprintUsed;
   if (li.footprintSource !== undefined) fields.footprintSource = li.footprintSource;
   if (li.footprintWasDefaulted !== undefined) fields.footprintWasDefaulted = !!li.footprintWasDefaulted;
+  // Flea interior size rule the row was quoted under (estimate-flea-size-replay.js reads it on replay).
+  if (li.fleaSizeBasis !== undefined) fields.fleaSizeBasis = li.fleaSizeBasis;
+  if (li.fleaPostedHomeSqFt !== undefined) fields.fleaPostedHomeSqFt = li.fleaPostedHomeSqFt;
   if (li.requiresMeasurement !== undefined) fields.requiresMeasurement = !!li.requiresMeasurement;
   if (li.quoteRequired !== undefined) fields.quoteRequired = !!li.quoteRequired;
   if (li.requiresManualReview !== undefined) fields.requiresManualReview = !!li.requiresManualReview;
@@ -726,6 +729,7 @@ function mapV1ToLegacyShape(v1Result) {
       perVisit: palmLI.perVisit,
       annualBeforeCredits: palmAnnualBeforeCredits,
       annualRounding: palmLI.annualRounding,
+      minPerVisit: palmLI.minPerVisit,
       flatCreditAnnual: palmFlatCreditAnnual,
       annualAfterCredits: palmAnnualAfterCredits,
       monthlyAfterCredits: palmMonthlyAfterCredits,

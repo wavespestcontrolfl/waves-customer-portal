@@ -789,7 +789,7 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
     const datePrices = src.slice(src.indexOf('async function seriesExtensionDateVerdicts('), src.indexOf('async function seriesExtensionUnbillable('));
     expect(datePrices).toContain('resolveSeriesExtensionPriceTemplate(conn, parent.id, parent)');
     expect(datePrices).toMatch(/storedOccurrenceFloorVerdict\(\s*gatePriceParent,[\s\S]*?parentAddons, storedDiscountScope, discountCaps,\s*\)/);
-    expect(datePrices).toContain('filterAddonLinesForDate(parentAddons, parent.scheduled_date, addonDate || d, blackoutDates, skipParent)');
+    expect(datePrices).toContain('filterAddonLinesForDate(parentAddons, seriesBaseDate(parent), addonDate || d, blackoutDates, skipParent)');
     const floorHelper = src.slice(src.indexOf('function storedOccurrenceFloorPrice('), src.indexOf('\nasync function loadStoredDiscountScope('));
     expect(floorHelper).toContain('restackStoredVisitFinancials(parent, dueAddons, discountScope, discountCaps)');
     expect(floorHelper).toContain('calculateStoredVisitFinancials(parent, dueAddons, allParentAddons, discountScope)');

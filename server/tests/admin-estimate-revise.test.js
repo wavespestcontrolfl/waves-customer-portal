@@ -1728,3 +1728,153 @@ describe('an EXPIRED row the gate refuses can be re-priced through the engine, a
     })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/no longer be edited/i) });
   });
 });
+
+describe('a revision of a delivered estimate keeps a retained flea line as sent (owner ruling 2026-11-26 "whole home")', () => {
+  const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+  const { generateEstimate } = require('../services/pricing-engine');
+  const realRecompute = (data, deps) => serverRecomputeFromEstimateData(data, { ...deps, needsSync: () => false });
+  const flea = (overrides = {}) => ({
+    homeSqFt: 3000, stories: 2, lotSqFt: 7500, propertyType: 'single_family', services: { flea: {} }, ...overrides,
+  });
+  // A $342 flea package sent before the change (unstamped row, ground-floor basis) on a two-story 3,000 sq ft home.
+  const legacyFleaRow = { service: 'flea_package', name: 'Flea Elimination Package — 2 visits', price: 342, total: 342, footprintUsed: 1500 };
+  const sentWith = (data, extra = {}) => ({ ...sentEstimate, ...extra, estimate_data: JSON.stringify(data) });
+  const sentWithFlea = sentWith({ engineInputs: flea(), engineResult: { lineItems: [legacyFleaRow] }, result: { oneTime: { items: [legacyFleaRow] } } });
+  const saveBody = (estimateData, extra = {}) => ({ ...reviseBody, notes: 'Unrelated note edit', estimateData, ...extra });
+  const run = async (estimateData, estimate, extra = {}) => {
+    const { database, updates } = makeReviseDatabase({ estimate });
+    await reviseAdminEstimate({ database, estimateId: 'est-1', technicianId: 'tech-2', recompute: realRecompute, now: fixedNow, body: saveBody(estimateData, extra) });
+    expect(updates).toHaveLength(1);
+    return updates[0];
+  };
+  const savedFleaOf = (update) => JSON.parse(update.estimate_data).engineResult.lineItems.find((line) => line.service === 'flea_package');
+  const revise = async (engineInputs, estimate = sentWithFlea) => savedFleaOf(await run({ engineInputs }, estimate));
+
+  beforeEach(() => { clearAllEstimatePricingCache(); });
+
+  test('an unrelated edit keeps the sent $342 flea price and its ground-floor stamp', async () => {
+    expect(await revise(flea())).toMatchObject({ total: 342, fleaSizeBasis: 'ground_floor' });
+  });
+
+  test('an Admin V2 round trip (profile normalized to homeSqFt) with no size change keeps $342; an explicit size change prices today\'s rule', async () => {
+    const v2 = (profile) => ({ engineRequest: { profile: { lotSqFt: 7500, propertyType: 'single_family', ...profile }, selectedServices: ['FLEA'], options: {} } });
+    const stored = sentWith({ ...v2({ squareFootage: 3000, stories: 2 }), engineResult: { lineItems: [legacyFleaRow] }, result: { oneTime: { items: [legacyFleaRow] } } });
+    // The editor drops the squareFootage alias and writes homeSqFt: the same home.
+    expect(savedFleaOf(await run(v2({ homeSqFt: 3000, stories: 2 }), stored))).toMatchObject({ total: 342, fleaSizeBasis: 'ground_floor' });
+    expect(savedFleaOf(await run(v2({ homeSqFt: 4000, stories: 2 }), stored))).toMatchObject({ footprintUsed: 4000, fleaSizeBasis: 'total_living_area' });
+    expect(savedFleaOf(await run(v2({ homeSqFt: 3000, stories: 1 }), stored))).toMatchObject({ total: 390, fleaSizeBasis: 'total_living_area' });
+  });
+
+  test('editing the home size or the story count prices the flea package on today\'s rule', async () => {
+    expect(await revise(flea({ homeSqFt: 3200 }))).toMatchObject({ fleaSizeBasis: 'total_living_area', footprintUsed: 3200 });
+    expect(await revise(flea({ stories: 1 }))).toMatchObject({ fleaSizeBasis: 'total_living_area', total: 390 });
+  });
+
+  test('a delivered request-only Admin V2 quote (no priced row, no engineInputs) keeps $342 on a notes-only revision', async () => {
+    const v2 = (profile) => ({ engineRequest: { profile: { lotSqFt: 7500, propertyType: 'single_family', ...profile }, selectedServices: ['FLEA'], options: {} } });
+    const requestOnly = sentWith(v2({ homeSqFt: 3000, stories: 2 }));
+    expect(savedFleaOf(await run(v2({ homeSqFt: 3000, stories: 2 }), requestOnly))).toMatchObject({ total: 342, fleaSizeBasis: 'ground_floor' });
+    expect(savedFleaOf(await run(v2({ homeSqFt: 3020, stories: 2 }), requestOnly))).toMatchObject({ fleaSizeBasis: 'total_living_area', footprintUsed: 3020 });
+  });
+
+  test('a compact legacy row (no footprint) compares the stored inputs: severity keeps the sizing, a 3,020 sq ft correction does not', async () => {
+    const compact = { service: 'flea_package', name: 'Flea Elimination Package — 2 visits', price: 342, total: 342 };
+    const stored = sentWith({ engineInputs: flea(), engineResult: { lineItems: [compact] }, result: { oneTime: { items: [compact] } } });
+    expect(await revise(flea({ services: { flea: { fleaComplexity: 'heavy' } } }), stored)).toMatchObject({ fleaSizeBasis: 'ground_floor', infestationComplexity: 'heavy' });
+    expect(await revise(flea({ homeSqFt: 3020 }), stored)).toMatchObject({ fleaSizeBasis: 'total_living_area', footprintUsed: 3020 });
+  });
+
+  test('a size edit that leaves the ground-floor footprint unchanged (3,000 sq ft x 2 stories to 4,500 x 3) is still a size edit', async () => {
+    expect(await revise(flea({ homeSqFt: 4500, stories: 3 }))).toMatchObject({ fleaSizeBasis: 'total_living_area', footprintUsed: 4500, total: 415 });
+  });
+
+  test('a size correction too small to move the legacy price (3,000 to 3,020 sq ft) is still a size edit', async () => {
+    expect(await revise(flea({ homeSqFt: 3020 }))).toMatchObject({ fleaSizeBasis: 'total_living_area', footprintUsed: 3020 });
+  });
+
+  test('changing the flea severity re-prices the scope on the sizing the quote was sent with', async () => {
+    const heavy = await revise(flea({ services: { flea: { fleaComplexity: 'heavy' } } }));
+    expect(heavy).toMatchObject({ fleaSizeBasis: 'ground_floor', footprintUsed: 1500, infestationComplexity: 'heavy' });
+    expect(heavy.total).toBeGreaterThan(342);
+  });
+
+  test('a delivered inputs-only legacy quote (no priced row) keeps $342 on an unrelated edit and prices today\'s rule on a size edit', async () => {
+    const inputsOnly = sentWith({ engineInputs: flea() });
+    expect(await revise(flea(), inputsOnly)).toMatchObject({ total: 342, fleaSizeBasis: 'ground_floor' });
+    expect(await revise(flea({ homeSqFt: 3020 }), inputsOnly)).toMatchObject({ fleaSizeBasis: 'total_living_area', footprintUsed: 3020 });
+  });
+
+  test('a flea line the revision newly adds prices on today\'s rule', async () => {
+    const withoutFlea = sentWith({ engineInputs: flea({ services: { pest: { frequency: 'quarterly' } } }), result: { recurring: { services: [{ service: 'pest_control', mo: 48 }] } } });
+    const row = await revise(flea({ services: { pest: { frequency: 'quarterly' }, flea: {} } }), withoutFlea);
+    expect(row).toMatchObject({ fleaSizeBasis: 'total_living_area' });
+    expect(row.footprintUsed).toBe(3000);
+  });
+
+  test('an unsent draft prices on today\'s rule', async () => {
+    const draft = sentWith({ engineInputs: flea(), engineResult: { lineItems: [legacyFleaRow] }, result: { oneTime: { items: [legacyFleaRow] } } }, { status: 'draft', sent_at: null });
+    expect(await revise(flea(), draft)).toMatchObject({ total: 390, fleaSizeBasis: 'total_living_area' });
+  });
+
+  test('a flea package quoted whole-home stays whole-home on an unrelated edit', async () => {
+    const fresh = generateEstimate(flea()).lineItems.find((line) => line.service === 'flea_package');
+    const sentFresh = sentWith({ engineInputs: flea(), engineResult: { lineItems: [fresh] }, result: { oneTime: { items: [fresh] } } });
+    expect(await revise(flea(), sentFresh)).toMatchObject({ total: 390, fleaSizeBasis: 'total_living_area' });
+  });
+
+  describe('a website quote priced off the server lookup\'s measured home', () => {
+    const website = flea({ homeSqFt: 2000, fleaMeasuredHomeSqFt: 3000, homeSqFtIsDefault: true });
+    const measuredRow = () => generateEstimate(website).lineItems.find((line) => line.service === 'flea_package');
+
+    test('the row records the measured home and the posted size it replaced', () => {
+      expect(measuredRow()).toMatchObject({ total: 390, footprintSource: 'lookup_measured_home', footprintUsed: 3000, fleaPostedHomeSqFt: 2000 });
+    });
+
+    test('a revision that changes the service address does not carry the old property\'s measurement', async () => {
+      const published = sentWith({ engineInputs: website, engineResult: { lineItems: [measuredRow()] }, result: { oneTime: { items: [measuredRow()] } } });
+      expect(savedFleaOf(await run({ engineInputs: flea({ homeSqFt: 2000 }) }, published, { address: '456 Gulf Dr' }))).toMatchObject({ footprintSource: 'lookup_measured_home' });
+      expect(savedFleaOf(await run({ engineInputs: flea({ homeSqFt: 2000 }) }, published, { address: '789 Bay Rd' }))).toMatchObject({ footprintUsed: 2000, fleaSizeBasis: 'total_living_area', footprintSource: 'homeSqFt' });
+    });
+
+    test('a revised scope (severity) prices on the measured home; an unsent draft keeps it too', async () => {
+      const published = sentWith({ engineInputs: website, engineResult: { lineItems: [measuredRow()] }, result: { oneTime: { items: [measuredRow()] } } });
+      const heavy = await revise(flea({ homeSqFt: 2000, services: { flea: { fleaComplexity: 'heavy' } } }), published);
+      expect(heavy).toMatchObject({ footprintUsed: 3000, footprintSource: 'lookup_measured_home', infestationComplexity: 'heavy' });
+      expect(heavy.total).toBeGreaterThan(390);
+      const draft = sentWith({ engineInputs: website, engineResult: { lineItems: [measuredRow()] }, result: { oneTime: { items: [measuredRow()] } } }, { status: 'draft', sent_at: null });
+      expect(await revise(flea({ homeSqFt: 2000 }), draft)).toMatchObject({ total: 390, footprintSource: 'lookup_measured_home' });
+    });
+
+    test('a notes-only revision keeps it, through two consecutive revisions; a size edit does not', async () => {
+      const published = sentWith({ engineInputs: website, engineResult: { lineItems: [measuredRow()] }, result: { oneTime: { items: [measuredRow()] } } });
+      const first = await run({ engineInputs: flea({ homeSqFt: 2000 }) }, published);
+      expect(savedFleaOf(first)).toMatchObject({ total: 390, footprintSource: 'lookup_measured_home' });
+      const second = await run({ engineInputs: flea({ homeSqFt: 2000 }) }, { ...published, estimate_data: first.estimate_data });
+      expect(savedFleaOf(second)).toMatchObject({ total: 390, footprintSource: 'lookup_measured_home' });
+      expect(savedFleaOf(await run({ engineInputs: flea({ homeSqFt: 2500 }) }, published))).toMatchObject({ footprintUsed: 2500, fleaSizeBasis: 'total_living_area' });
+    });
+
+    test('Admin V2 saves (inputs + engineRequest, no engineInputs) keep it across consecutive revisions', async () => {
+      const v2Data = { inputs: { homeSqFt: 2000, stories: 2, svcFlea: true }, engineRequest: { profile: { homeSqFt: 2000, stories: 2, lotSqFt: 7500, propertyType: 'single_family' }, selectedServices: ['FLEA'], options: {} } };
+      const published = sentWith({ ...v2Data, engineResult: { lineItems: [measuredRow()] }, result: { oneTime: { items: [measuredRow()] } } });
+      const first = await run(v2Data, published);
+      expect(savedFleaOf(first)).toMatchObject({ total: 390, footprintSource: 'lookup_measured_home' });
+      const second = await run(v2Data, { ...published, estimate_data: first.estimate_data });
+      expect(savedFleaOf(second)).toMatchObject({ total: 390, footprintSource: 'lookup_measured_home' });
+    });
+
+    test('an unpublished wizard draft (compact rows carrying the record) keeps it on revision', async () => {
+      const compact = { service: 'flea_package', name: 'Flea Elimination Package — 2 visits', total: 390, fleaSizeBasis: 'total_living_area', footprintUsed: 3000, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000 };
+      const draft = sentWith({ engineResult: { lineItems: [compact] }, result: { oneTime: { items: [{ ...compact, price: 390 }] } } }, { status: 'draft', sent_at: null });
+      expect(await revise(flea({ homeSqFt: 2000 }), draft)).toMatchObject({ total: 390, footprintSource: 'lookup_measured_home' });
+    });
+
+    test('a browser-supplied measurement in a stored input carrier never prices (only the stored row is the record)', async () => {
+      // An ordinary row priced from the posted size, beside inputs that claim a measured 5,000 sq ft home.
+      const ordinary = generateEstimate(flea({ homeSqFt: 2000 })).lineItems.find((line) => line.service === 'flea_package');
+      const forged = { homeSqFt: 2000, stories: 2, lotSqFt: 7500, propertyType: 'single_family', services: { flea: {} }, fleaMeasuredHomeSqFt: 5000, homeSqFtIsDefault: true };
+      const stored = sentWith({ engineInputs: forged, engineInput: forged, inputs: forged, engineResult: { lineItems: [ordinary] }, result: { oneTime: { items: [ordinary] } } });
+      expect(await revise(flea({ homeSqFt: 2000 }), stored)).toMatchObject({ footprintUsed: 2000, total: ordinary.total });
+    });
+  });
+});

@@ -802,7 +802,7 @@ const COMMERCIAL_TREE_SHRUB = {
 };
 // Commercial PEST (general pest control for non-residential accounts). Cost-
 // buildup split into an EXTERIOR base (perimeter barrier + monitoring —
-// always included) and an INTERIOR service component (footprint-driven —
+// always included) and an INTERIOR service component (sized on total interior area, every floor —
 // customer-selectable, ON by default; owner 2026-08-17). The component sums
 // reproduce the pre-split combined buildup exactly (4+2=6 material base,
 // 15+10=25 base labor), so a default (interior-on) quote is cent-identical
@@ -823,9 +823,9 @@ const COMMERCIAL_PEST = {
   // Interior service component — customer-selectable add-on (on by default).
   interior: {
     materialPerVisitBase: 2,          // interior baseline chemistry per visit
-    materialPerKSqFtPerVisit: 1.5,    // $/1000 sqft footprint/visit — added product for larger interiors
+    materialPerKSqFtPerVisit: 1.5,    // $/1000 sqft of total interior area/visit — added product for larger interiors
     laborMinutesBase: 10,             // interior base per visit
-    laborMinutesPerKSqFt: 6,          // interior treatment labor per 1000 sqft footprint
+    laborMinutesPerKSqFt: 6,          // interior treatment labor per 1000 sqft of total interior area
   },
   laborOverheadMinutesPerVisit: 10,   // reporting / logbook / pest-sighting documentation
   routeDriveMinutes: 15,
@@ -1337,30 +1337,9 @@ const RODENT = {
     standardPrice: r(350),
     base: r(350),
     floor: r(350),
-    ceilingBeforeCustom: r(795),
     includedFollowUps: 1,
     additionalCheckPrice: r(95),
     activeWindowDays: null,
-    homeSizeAdjustments: [
-      { maxSqFt: 1200,     adjustment: -r(25) },
-      { maxSqFt: 2500,     adjustment: 0 },
-      { maxSqFt: 4000,     adjustment: r(50) },
-      { maxSqFt: 6000,     adjustment: r(95) },
-      { maxSqFt: Infinity, adjustment: r(150), customRecommended: true },
-    ],
-    lotAdjustments: [
-      { maxLotSqFt: 10000,    adjustment: 0 },
-      { maxLotSqFt: 20000,    adjustment: r(35) },
-      { maxLotSqFt: 43560,    adjustment: r(75) },     // 1 acre
-      { maxLotSqFt: Infinity, adjustment: r(125), customRecommended: true },
-    ],
-    pressureAdjustments: {
-      light:    -r(25),
-      normal:    0,
-      moderate:  r(35),
-      heavy:     r(75),
-      severe:    r(150),
-    },
     emergencyMultiplier: 1.20,           // OR fixed surcharge, whichever is greater
     emergencyMinimumSurcharge: r(75),
     invoiceDescriptions: {

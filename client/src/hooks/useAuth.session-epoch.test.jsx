@@ -23,9 +23,11 @@ vi.mock('../utils/api', () => ({
     verifyCode: vi.fn(),
     getMe: vi.fn(),
     getAuthProperties: vi.fn(async () => ({ properties: [] })),
+    // Like the real client, publish the new access token to storage too.
     setTokens: vi.fn(function setTokens(token, refreshToken) {
       this.token = token;
       this.refreshToken = refreshToken;
+      localStorage.setItem('waves_token', token);
     }),
     adoptTokens: vi.fn(function adoptTokens(token, refreshToken) {
       this.token = token;

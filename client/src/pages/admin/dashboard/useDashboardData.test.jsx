@@ -20,6 +20,8 @@ const response = (path) => {
   if (path.endsWith('/aging')) return { path, aging: {} };
   if (path.endsWith('/review-trend')) return { path, trend: [] };
   if (path.includes('/office-cost-per-stop')) return { path, months: [] };
+  if (path.includes('/ops-buyer-metrics')) return { path, errors: {} };
+  if (path.endsWith('/buyer-view')) return { path, months: {}, revenue: {}, recurring: {}, planRevenueKept: {}, grossMargin: {}, ownerProfit: {}, officeCost: {} };
   return { path };
 };
 const settle = async () => { await act(async () => {}); };
@@ -59,20 +61,30 @@ describe('dashboard request recovery', () => {
     expect(result.current.pending.staleVisits).toBe(false);
   });
 
+  it('treats a buyer view missing any container the row reads as unavailable, never as data', async () => {
+    adminFetch.mockImplementation(async (path) => path.endsWith('/buyer-view') ? { revenue: {}, officeCost: {} } : response(path));
+    const { result } = renderHook(() => useDashboardData('today', 'period=mtd'));
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(result.current.values.buyerView).toBeNull();
+    expect(result.current.errors.buyerView).toBeTruthy();
+  });
+
   it('loads only Today and shared metrics until another mobile tab is opened', async () => {
     const { result, rerender } = renderHook(({ tab }) => useDashboardData(tab, 'period=mtd'), { initialProps: { tab: 'today' } });
     await waitFor(() => expect(result.current.refreshing).toBe(false));
     const paths = adminFetch.mock.calls.map(([path]) => path);
-    expect(paths).toHaveLength(6);
+    expect(paths).toHaveLength(7);
+    expect(paths).toContain('/admin/dashboard/buyer-view');
     expect(paths).not.toContain('/admin/dashboard/funnel');
     expect(paths).not.toContain('/admin/dashboard/ebitda-bridge');
     const retainedKpis = result.current.values.kpis;
     rerender({ tab: 'profit' });
     await waitFor(() => expect(result.current.values.ebitda).toBeTruthy());
-    expect(adminFetch.mock.calls.slice(6).map(([path]) => path)).toEqual([
+    expect(adminFetch.mock.calls.slice(7).map(([path]) => path)).toEqual([
       '/admin/dashboard/service-mix',
       '/admin/dashboard/ebitda-bridge',
       '/admin/dashboard/office-cost-per-stop?months=12',
+      '/admin/dashboard/ops-buyer-metrics',
       '/admin/revenue/overview?period=month',
     ]);
     expect(result.current.values.kpis).toBe(retainedKpis);
@@ -80,11 +92,11 @@ describe('dashboard request recovery', () => {
     expect(result.current.values.staleVisits).toBeUndefined();
     rerender({ tab: 'today' });
     expect(result.current.values.staleVisits).toEqual({ visits: [] });
-    expect(adminFetch).toHaveBeenCalledTimes(10);
+    expect(adminFetch).toHaveBeenCalledTimes(12);
     rerender({ tab: 'profit' });
     expect(result.current.values.ebitda).toBeTruthy();
     expect(result.current.values.kpis).toBe(retainedKpis);
-    expect(adminFetch).toHaveBeenCalledTimes(10);
+    expect(adminFetch).toHaveBeenCalledTimes(12);
   });
 
   it('refreshes a stale hidden section while reusing shared feeds refreshed more recently', async () => {
@@ -122,6 +134,7 @@ describe('dashboard request recovery', () => {
       '/admin/dashboard/alerts',
       '/admin/dashboard/today-completion',
       '/admin/command-center/stale-visits',
+      '/admin/dashboard/buyer-view',
     ]);
     expect(result.current.values.alerts).toEqual({ alerts: [{ id: 'new-alert' }] });
     expect(result.current.values.kpis).toBe(freshSharedKpis);
@@ -154,7 +167,7 @@ describe('dashboard request recovery', () => {
 
     await act(async () => newCycle.resolve());
     await waitFor(() => expect(result.current.refreshing).toBe(false));
-    expect(adminFetch).toHaveBeenCalledTimes(11);
+    expect(adminFetch).toHaveBeenCalledTimes(12);
     expect(result.current.values.kpis.path).toContain('period=mtd');
     expect(result.current.values.ebitda).toBeTruthy();
     expect(result.current.pending.kpis).toBe(false);
@@ -292,7 +305,7 @@ describe('dashboard request recovery', () => {
 
     await act(async () => newCycle.resolve());
     await waitFor(() => expect(result.current.refreshing).toBe(false));
-    expect(adminFetch).toHaveBeenCalledTimes(33);
+    expect(adminFetch).toHaveBeenCalledTimes(35);
     expect(adminFetch.mock.calls.slice(4, 14).map(([path]) => path)).toEqual([
       '/admin/dashboard/alerts',
       '/admin/dashboard/today-completion',
@@ -339,7 +352,7 @@ describe('dashboard request recovery', () => {
     expect(adminFetch).not.toHaveBeenCalled();
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     await act(async () => document.dispatchEvent(new Event('visibilitychange')));
-    expect(adminFetch).toHaveBeenCalledTimes(6);
+    expect(adminFetch).toHaveBeenCalledTimes(7);
   });
 
   it('refreshes a visible dashboard after one minute', async () => {
@@ -351,7 +364,7 @@ describe('dashboard request recovery', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(59999); });
     expect(adminFetch).not.toHaveBeenCalled();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(adminFetch).toHaveBeenCalledTimes(6);
+    expect(adminFetch).toHaveBeenCalledTimes(7);
     expect(result.current.refreshing).toBe(false);
   });
 

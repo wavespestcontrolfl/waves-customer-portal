@@ -21,6 +21,12 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'preSlabTermiticidePricingKnobs',
   'trenchingTermiticidePricingKnobs',
   'areaAddOnPricingKnobs',
+  // Flea interior size basis a stored estimate replays under (estimate-flea-size-replay): a posted copy would pick the retired
+  // ground-floor price.
+  'fleaSizeBasisReplay',
+  // Route-set flea inputs of the public website quote (the server lookup's measured home beside the substituted 2,000 default).
+  'fleaMeasuredHomeSqFt',
+  'homeSqFtIsDefault',
   'palmAnnualRounding',
   'commercialFloorsArmedServices',
   'commercialFloorsArmed',
@@ -28,6 +34,7 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'rodentWaveguardPostureReplay',
   'wholeHomeSealReplay',
   'roofStyleReplay',
+  'oneTimePestNoHomeAgeReplay',
   'catalogPricing',
   // The GATE_LAWN_V13 bahia review exemption: a stored estimate replayed as sold
   // (savedEstimateReplay), minus the service lines that same replay ADDS
@@ -42,6 +49,13 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   // The lawn minimum per visit after discounts a saved quote was priced with
   // (owner 2026-11-06): a posted 0 must never switch the $55 minimum off.
   'lawnMinimumPerVisitAfterDiscount',
+  // Which price rules a saved quote was priced with (the 2026-11-26 fixes): server-derived from its own stamp, so a
+  // posted false must never switch a sent quote onto the new rules, nor a posted true freeze a new one.
+  'legacyPricingRules',
+  // The per-visit palm minimum a saved quote was priced with: server-derived from its own palm row.
+  'palmMinPerVisitReplay',
+  // The services a legacy estimate priced under the current rules (added by a revision): server-derived from its stamp.
+  'currentRulesServices',
 ]);
 
 // Deletes every server-owned field from `obj` IN PLACE (plain objects only;

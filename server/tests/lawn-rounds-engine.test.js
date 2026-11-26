@@ -575,7 +575,7 @@ describe('a series move stores its round anchor, and later top-ups hop from it',
     const rebookerSrc = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
     test('every extension writer builds its options from the parent through seriesRecurrenceOptions', () => {
       // The one remaining parent-date read is inside the helper itself.
-      expect(scheduleSrc.match(/recurrenceOrdinalOptions\(parent\.scheduled_date/g)).toHaveLength(1);
+      expect(scheduleSrc.match(/recurrenceOrdinalOptions\(seriesBaseDate\(parent\)/g)).toHaveLength(1);
       expect(scheduleSrc.match(/= seriesRecurrenceOptions\(parent\);/g)).toHaveLength(6);
     });
     test('a series move, an Edit appointment cadence rewrite and make-recurring store the anchor', () => {

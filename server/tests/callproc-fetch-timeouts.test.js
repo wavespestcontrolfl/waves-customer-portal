@@ -48,3 +48,39 @@ describe('fetches carry the signal', () => {
     await expect(downloadRecording('https://api.twilio.com/rec/RE123')).rejects.toThrow(/timeout/i);
   });
 });
+
+describe('downloadRecording with maxBytes', () => {
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+  const bodyOf = (chunks) => {
+    const cancel = jest.fn(async () => {});
+    let i = 0;
+    return { cancel, getReader: () => ({ read: async () => (i < chunks.length ? { done: false, value: chunks[i++] } : { done: true }), cancel }) };
+  };
+  const respond = (body, length) => ({ ok: true, headers: { get: (h) => (h === 'content-length' ? length : null) }, body, arrayBuffer: jest.fn() });
+
+  beforeEach(() => {
+    process.env.TWILIO_ACCOUNT_SID = 'ACtest';
+    process.env.TWILIO_AUTH_TOKEN = 'test';
+  });
+
+  test('a file within the limit is read whole', async () => {
+    global.fetch = jest.fn(async () => respond(bodyOf([new Uint8Array(3), new Uint8Array(2)]), '5'));
+    const buf = await downloadRecording('https://api.twilio.com/rec/RE123', { maxBytes: 5 });
+    expect(buf.length).toBe(5);
+  });
+
+  test('a declared length over the limit is refused before any read', async () => {
+    const body = bodyOf([new Uint8Array(6)]);
+    global.fetch = jest.fn(async () => respond(body, '6'));
+    await expect(downloadRecording('https://api.twilio.com/rec/RE123', { maxBytes: 5 })).rejects.toMatchObject({ code: 'RECORDING_TOO_LARGE' });
+    expect(body.cancel).toHaveBeenCalled();
+  });
+
+  test('a body that grows past the limit stops reading at once', async () => {
+    const body = bodyOf([new Uint8Array(4), new Uint8Array(4), new Uint8Array(4)]);
+    global.fetch = jest.fn(async () => respond(body, null));
+    await expect(downloadRecording('https://api.twilio.com/rec/RE123', { maxBytes: 5 })).rejects.toMatchObject({ code: 'RECORDING_TOO_LARGE' });
+    expect(body.cancel).toHaveBeenCalled();
+  });
+});

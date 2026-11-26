@@ -510,15 +510,24 @@ function intentColumns(conn, asked) {
 // Where the CUSTOMER picks the new slot of a move (rebooker options.sourceSurface): the public rescheduler, a text reply or
 // accepted text offer, the call agent (a staff-applied call reschedule included, call-reschedule-apply.js). Such a move records
 // "the customer asked for this time" without its caller saying so.
+// Since owner 2026-11-26 ("even reservices or reschedules by customers can be moved"; "lock waves assessments, but clear
+// the rest") such a move records it only for a Waves Assessment (`assessment`, the mover's isAssessmentBooking read). Any
+// other visit the customer moves records nothing: the night run may move it, and the customer's screens and reminders
+// still show the hour they picked, because the day-only promise infers it from the move record (isCustomerPickedVisit).
 const CUSTOMER_MOVE_SURFACES = Object.freeze(['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']);
 
 /** The intent a move records for the slot it sets: an explicit boolean from the caller (options.customerAskedTime: the office
  *  box on a dispatch board move) or true for a customer surface; otherwise undefined (the move records no intent). A series
  *  move records the office box on its ANCHOR only, the occurrence the office picked the slot for (local audit 2026-11-22:
  *  a staff placement alone no longer holds a visit, so the box is what keeps the night jobs off that slot). */
-function moveIntentFor(options, { series = false, anchor = false } = {}) {
+function moveIntentFor(options, { series = false, anchor = false, assessment = false } = {}) {
   if ((!series || anchor === true) && typeof options?.customerAskedTime === 'boolean') return options.customerAskedTime;
-  return CUSTOMER_MOVE_SURFACES.includes(options?.sourceSurface) ? true : undefined;
+  return assessment === true && isCustomerMoveSurface(options) ? true : undefined;
+}
+
+/** Does this move come from a customer surface (so the mover must say whether the visit is a Waves Assessment)? */
+function isCustomerMoveSurface(options) {
+  return CUSTOMER_MOVE_SURFACES.includes(options?.sourceSurface);
 }
 
 /**
@@ -527,11 +536,12 @@ function moveIntentFor(options, { series = false, anchor = false } = {}) {
  * intent is bound to its own move, with no later write to race a newer move (customer_asked_time_at, currentIntent). {} when
  * the move records no intent, or when the move did not change the
  * slot (`slotChanged` false: a technician-only change keeps the intent of the slot it holds). `series`: a series move records
- * the intent of a CUSTOMER surface on every row, and the office box on the `anchor` row only.
+ * the intent of a CUSTOMER surface on every row, and the office box on the `anchor` row only. `assessment`: the row is a Waves
+ * Assessment (the only visit a customer surface still records "asked for this time" on, owner 2026-11-26).
  */
-function moveIntentColumns(conn, options, { slotChanged = true, series = false, anchor = false } = {}) {
+function moveIntentColumns(conn, options, { slotChanged = true, series = false, anchor = false, assessment = false } = {}) {
   if (slotChanged !== true) return {};
-  const asked = moveIntentFor(options, { series, anchor });
+  const asked = moveIntentFor(options, { series, anchor, assessment });
   return asked === undefined ? {} : intentColumns(conn, asked);
 }
 
@@ -682,6 +692,7 @@ module.exports = {
   recordCustomerAskedTime,
   moveIntentColumns,
   moveIntentFor,
+  isCustomerMoveSurface,
   CUSTOMER_MOVE_SURFACES,
   DAY_PROMISE_CUTOFF_HOURS,
   DAY_PROMISE_META,
