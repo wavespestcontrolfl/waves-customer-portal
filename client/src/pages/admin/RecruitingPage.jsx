@@ -153,6 +153,8 @@ const STAGE_LABEL = {
   application_received: "Application received",
   interview_invite: "Interview invite",
   interview_confirmation: "Interview confirmation",
+  offer_sent: "Job offer",
+  offer_reminder: "Job offer reminder",
   applicant_reply: "Applicant text",
   owner_reply: "Office text",
 };

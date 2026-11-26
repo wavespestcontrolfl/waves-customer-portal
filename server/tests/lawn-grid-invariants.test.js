@@ -26,6 +26,7 @@ function lawnTiersAt(track, sqft) {
     propertyType: 'single_family',
     measuredTurfSf: sqft,
     services: { lawn: { track, lawnFreq: 9 } },
+    lawnMinimumPerVisitAfterDiscount: 0, // pin the market table, not the $55 minimum after discounts
   });
   return est.lineItems.find((l) => l.service === 'lawn_care').tiers;
 }

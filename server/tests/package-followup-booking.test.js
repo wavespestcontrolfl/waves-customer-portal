@@ -229,8 +229,22 @@ describe('ensurePackageFollowUpVisit', () => {
     expect(insertData.confirmed_at).toBeInstanceOf(Date);
     expect(insertData.notes).toMatch(/Treatment 2 of 2/);
     expect(insertData.source_estimate_id).toBeUndefined(); // never correlates as an accept retry
-    expect(assertAssignableTechnician).toHaveBeenCalledWith('tech-1', { conn: trx, date: '2026-10-19', workDays: true });
+    // workDays and `hours` (GATE_TECH_SHIFT_HOURS): visit 2 keeps visit 1's window, 09:00 to 10:00,
+    // and its 75-minute length, which ends later.
+    expect(assertAssignableTechnician).toHaveBeenCalledWith('tech-1', { conn: trx, date: '2026-10-19', workDays: true, hours: { startMin: 540, endMin: 615 } });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  // The block is the one visit 2 will carry (buildChildInsert): visit 1's window, and the
+  // length written on the child, visit 1's or else the catalog's.
+  test.each([
+    ['its stored end when that is later than its length', { window_end: '10:30:00' }, { startMin: 540, endMin: 630 }],
+    ['visit 1\'s length when it has no stored end', { window_end: null }, { startMin: 540, endMin: 615 }],
+    ['the catalog\'s length when visit 1 has neither', { window_end: null, estimated_duration_minutes: null, service_id: null, service_key_snapshot: 'flea_tick', service_type: 'Flea Elimination Package' }, { startMin: 540, endMin: 630 }],
+  ])('GATE_TECH_SHIFT_HOURS: the technician check gets the block visit 2 will carry, from %s', async (_case, patch, hours) => {
+    const { trx } = fakeTrx();
+    await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, ...patch }, cols: COLS });
+    expect(assertAssignableTechnician).toHaveBeenCalledWith('tech-1', expect.objectContaining({ hours }));
   });
 
   test('flea by key snapshot (no service_id) uses the 14-day default and the catalog duration when the primary has none', async () => {

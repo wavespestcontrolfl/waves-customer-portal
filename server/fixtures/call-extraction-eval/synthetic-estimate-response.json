@@ -1,0 +1,94 @@
+{
+  "schemaVersion": "call-extraction-synthetic-transcripts.v1",
+  "description": "Synthetic, de-identified transcripts for the call extraction prompt v35 field service_request.estimate_response: the caller's answer to an estimate Waves already sent. Every name and address is invented (Pat Example, Sam, 100 Example Lane, Sampleton); no real call or customer is stored. The cases are the model's judgement to make, so tests pin the contract the model is given and the shape of each expected extraction. Use them as replay inputs for a model bake-off. No consumer reads the field yet.",
+  "cases": [
+    {
+      "id": "estimate-response-accepted",
+      "why": "Waves sent an estimate by text earlier; the caller says plainly they go ahead and nothing of theirs is open: accepted, pinned to the caller's sentence (prompt v35).",
+      "call_date_et": "2026-11-20",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here at 100 Example Lane in Sampleton. I looked at the estimate you sent yesterday.\nAgent: Great. That was the quarterly pest plan, ninety-five dollars each visit.\nCaller: Yes, let's do it. Go ahead and sign me up.\nAgent: Wonderful, I will get that started.",
+      "expect": {
+        "estimate_response": "accepted",
+        "estimate_response_evidence": {
+          "field_path": "/service_request/estimate_response",
+          "speaker": "caller",
+          "quote": "Yes, let's do it. Go ahead and sign me up."
+        }
+      }
+    },
+    {
+      "id": "estimate-response-accepted-with-condition",
+      "why": "The caller says yes to the estimate already sent but the day is still to be found: accepted_with_condition.",
+      "call_date_et": "2026-11-20",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here at 100 Example Lane in Sampleton. I got the estimate you sent.\nAgent: Thanks for calling back. Do you have any questions about it?\nCaller: No, I want to go ahead with it, but I have to find a day that works first. My schedule is a mess this month.\nAgent: No problem, call us when you know.",
+      "expect": {
+        "estimate_response": "accepted_with_condition",
+        "estimate_response_evidence": {
+          "field_path": "/service_request/estimate_response",
+          "speaker": "caller",
+          "quote": "No, I want to go ahead with it, but I have to find a day that works first."
+        }
+      }
+    },
+    {
+      "id": "estimate-response-undecided",
+      "why": "The sent estimate was discussed and the caller gave no yes and no no: undecided.",
+      "call_date_et": "2026-11-20",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here at 100 Example Lane in Sampleton. I have the quote you emailed me.\nAgent: Did you have a chance to look it over?\nCaller: I did. I'll think about it and let you know.\nAgent: Sounds good.",
+      "expect": {
+        "estimate_response": "undecided",
+        "estimate_response_evidence": {
+          "field_path": "/service_request/estimate_response",
+          "speaker": "caller",
+          "quote": "I did. I'll think about it and let you know."
+        }
+      }
+    },
+    {
+      "id": "estimate-response-declined",
+      "why": "The caller says they chose another company: declined.",
+      "call_date_et": "2026-11-20",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here at 100 Example Lane in Sampleton. I am calling about the estimate you sent.\nAgent: Yes, the quarterly plan. Ready to get started?\nCaller: No, thanks. We went with another company.\nAgent: Understood. Thank you for letting us know.",
+      "expect": {
+        "estimate_response": "declined",
+        "estimate_response_evidence": {
+          "field_path": "/service_request/estimate_response",
+          "speaker": "caller",
+          "quote": "No, thanks. We went with another company."
+        }
+      }
+    },
+    {
+      "id": "estimate-response-null-price-first-quoted-on-call",
+      "why": "No estimate was sent before the call; the price was first quoted on this call and the caller said yes to it. That is price.caller_response's job, so estimate_response is null.",
+      "call_date_et": "2026-11-20",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here at 100 Example Lane in Sampleton. I want the quarterly pest plan.\nAgent: That is ninety-five dollars each visit.\nCaller: Yes, that works. Let's do it.",
+      "expect": {
+        "estimate_response": null
+      }
+    },
+    {
+      "id": "estimate-response-null-only-staff-spoke",
+      "why": "Staff talk about the estimate they sent and press for a yes; the caller gives no answer about it: null.",
+      "call_date_et": "2026-11-20",
+      "transcript": "Agent: Waves Pest Control, this is Sam. I am calling Pat Example about the estimate we sent for 100 Example Lane in Sampleton.\nCaller: Hello?\nAgent: We sent the quarterly pest plan estimate on Tuesday. I recommend you go ahead with it, it is a very good price.\nCaller: Sorry, I am in a meeting. Can you call me later?\nAgent: Of course, I will try again tomorrow.",
+      "expect": {
+        "estimate_response": null
+      }
+    },
+    {
+      "id": "estimate-response-changed-mind",
+      "why": "The caller says yes to the estimate already sent, then takes it back: the final answer at hangup is undecided.",
+      "call_date_et": "2026-11-20",
+      "transcript": "Agent: Waves Pest Control, this is Sam.\nCaller: Hi, Pat Example here at 100 Example Lane in Sampleton. I have the estimate you sent.\nAgent: Great. Ready to get going?\nCaller: Yes, go ahead and sign me up.\nAgent: Perfect. Our first visit would be next week.\nCaller: Actually, let me think about it first and talk to my wife.\nAgent: Of course. Call us when you are ready.",
+      "expect": {
+        "estimate_response": "undecided",
+        "estimate_response_evidence": {
+          "field_path": "/service_request/estimate_response",
+          "speaker": "caller",
+          "quote": "Actually, let me think about it first and talk to my wife."
+        }
+      }
+    }
+  ]
+}

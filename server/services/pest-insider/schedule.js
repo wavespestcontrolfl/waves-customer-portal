@@ -24,6 +24,18 @@
  * first and stays unqueued. The issue after it looks back at an issue that mailed no one, so it
  * goes out as usual.
  *
+ * Polls (owner 2026-11-19, "not every time, but sometimes"; list PI1-PI6 approved 2026-11-20): the
+ * planner gives an issue the next poll from the owner's list when neither of the two newest issues
+ * readers got had one, so a poll shows in at most every 3rd issue and never in two in a row; none
+ * once the list is used up (newsletter-quiz.js chooseNewsletterPoll and newsletterIssuePolls, the
+ * Waves Newsletter's own rule). An unsent issue (held, queued, claimed or failed) keeps its poll while
+ * its send row exists, so the next issue never repeats it. A failed read leaves the issue without a
+ * poll; it never stops it.
+ *
+ * The issue right after a poll issue opens with that poll's result under the greeting (newsletter-quiz.js
+ * newsletterLastPoll + pollResultLine; only when the newest issue readers got held a poll, at most 45
+ * days before this issue). A failed read leaves the line out, never the issue.
+ *
  * Calendar dates here are 'YYYY-MM-DD' strings. The date math is the shared ET helpers in
  * utils/datetime-et.js (validCalendarDate, etNthWeekdayOfMonth, addETDays, etDateString);
  * this module keeps only the 1st-and-3rd-Thursday rule, which the table's CHECK also enforces.
@@ -428,8 +440,46 @@ async function retryDraft(db, existing, { issueDate, finalTick, proofStep }) {
   return result;
 }
 
-// One build: the spam-report stop, post check, history, builder, then the row (and, with the switch
-// on, the draft and the proof step). Returns the run's result plus the proof step's raw answer.
+// The issue's poll id, or null (the header's Polls paragraph).
+async function issuePoll(db) {
+  try {
+    const { chooseNewsletterPoll, newsletterIssuePolls } = require('../newsletter-quiz');
+    return chooseNewsletterPoll(await newsletterIssuePolls({ newsletterType: PEST_INSIDER_TYPE, knex: db }));
+  } catch (err) {
+    require('../logger').warn(`[pest-insider] poll choice failed (${err.message}); this issue has no poll`);
+    return null;
+  }
+}
+
+// The last poll's votes for this issue's result line ({ quizId, counts }), or null: the newest
+// issue readers got held a poll, and it is at most 45 days old (newsletter-quiz.js newsletterLastPoll).
+// A failed read leaves the issue without the line; it never stops it.
+async function lastPollResult(db, issueDate) {
+  try {
+    const { newsletterLastPoll, pollResultLine } = require('../newsletter-quiz');
+    const last = await newsletterLastPoll({ newsletterType: PEST_INSIDER_TYPE, sendDate: issueDate, knex: db });
+    return pollResultLine(last || undefined) ? last : null;
+  } catch (err) {
+    require('../logger').warn(`[pest-insider] last poll result failed (${err.message}); this issue has no result line`);
+    return null;
+  }
+}
+
+// The links of the tools whose registry row is active now (tools.js loadTools), for the planner's
+// `liveToolUrls`. No Amazon page is read: Amazon's Conditions of Use and Associates policies forbid
+// robot reads of its pages (owner decision 2026-11-22, "A"). A registry that cannot be read gives none,
+// and the issue builds with no tool.
+function activeToolUrls() {
+  try {
+    return require('./tools').loadTools().tools.map((t) => t.url);
+  } catch (err) {
+    require('../logger').warn(`[pest-insider] tool registry could not be read (${err.message}); this issue has no tool`);
+    return [];
+  }
+}
+
+// One build: the spam-report stop, post check, history, poll, builder, then the row (and, with the
+// switch on, the draft and the proof step). Returns the run's result plus the proof step's raw answer.
 async function buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImpl, proofStep }) {
   // Lazy: the builder pulls the fact bank, renderer and validator; the scheduler should not load them at boot.
   const { buildIssue } = require('./index');
@@ -444,7 +494,7 @@ async function buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImp
   if (!spamStop) {
     const livePostFactIds = await checkLivePosts({ fetchImpl: probe });
     const recent = await recentHistory(issueDate, { database: db });
-    built = buildIssue({ sendDate: issueDate, recent, recheckedFactIds: [], livePostFactIds, liveToolUrls: [] });
+    built = buildIssue({ sendDate: issueDate, recent, recheckedFactIds: [], livePostFactIds, liveToolUrls: activeToolUrls(), pollQuizId: await issuePoll(db), lastPoll: await lastPollResult(db, issueDate) });
   }
   let row = rowFor(issueDate, built, now, failures);
 
@@ -466,7 +516,7 @@ async function buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImp
 
   const notes = [
     row.reason ? `(${row.reason})` : null,
-    `fact=${row.fact_id || '-'} species=${row.species_slug || '-'}`,
+    `fact=${row.fact_id || '-'} species=${row.species_slug || '-'} poll=${built.diagnostics?.pollId || '-'}`,
     failures.length ? `post probes failed=${failures.length}` : null,
     existing ? `rebuild of a ${existing.status} row` : null,
     written ? null : '(row not written: another tick got there first)',

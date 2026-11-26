@@ -127,8 +127,32 @@ const ADAPTER_BY_CODE = { 1: 'siteone', 25: 'stickermule' };
 const ADAPTER_BY_NAME = { siteone: 'siteone', 'sticker mule': 'stickermule' };
 const VENDOR_GATE = { siteone: 'GATE_AUTO_ORDER_SITEONE', stickermule: 'GATE_AUTO_ORDER_STICKERMULE' };
 
-function loadAdapters() {
-  return { siteone: require('./adapters/siteone'), stickermule: require('./adapters/stickermule') };
+// SiteOne blocks every server-side browser (ERR_HTTP2_PROTOCOL_ERROR) and takes no email orders, so its
+// orders are placed by a job on the owner's Mac that drives his own signed-in Chrome
+// (scripts/siteone-mac-order-run.js + adapters/siteone-cdp.js). With SITEONE_ORDER_RUNNER=mac the
+// server's registry holds a marker in SiteOne's place: canAutoOrder still reads the vendor as
+// automatic (gate + marker; no stored login is needed), so the sweep stands down its manual bell, but
+// the server never claims a SiteOne request (resolveClaimVendor → remote_runner). The Mac passes its
+// own registry, so this marker is never loaded there. A request the Mac has not touched for
+// SITEONE_MAC_STALE_HOURS goes to the office (macWatchdog).
+const REMOTE_RUNNER = 'mac';
+const siteoneRunsOnMac = (env = process.env) => String(env.SITEONE_ORDER_RUNNER || '').trim().toLowerCase() === REMOTE_RUNNER;
+const MAC_RUNNER_MARKER = Object.freeze({ remoteRunner: REMOTE_RUNNER });
+// Any other non-empty value is a typo, never the server's own adapter (which can submit for real):
+// its SiteOne requests go to the office with the "order manually" bell.
+const INVALID_RUNNER_MARKER = Object.freeze({ invalidRunner: true });
+const siteoneSlot = (env) => {
+  if (siteoneRunsOnMac(env)) return MAC_RUNNER_MARKER;
+  // Only an absent or empty value keeps the server's own adapter; anything else (spaces included) is invalid.
+  if (env.SITEONE_ORDER_RUNNER != null && env.SITEONE_ORDER_RUNNER !== '') return INVALID_RUNNER_MARKER;
+  return require('./adapters/siteone');
+};
+
+function loadAdapters(env = process.env) {
+  return {
+    siteone: siteoneSlot(env),
+    stickermule: require('./adapters/stickermule'),
+  };
 }
 
 function adapterKeyFor(vendor) {
@@ -172,6 +196,7 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
   if (!row || row.active === false) return false;
   const key = adapterKeyFor(row);
   const adapter = key ? loadAdapters()[key] : null;
+  if (adapter && adapter.invalidRunner) return false; // a SITEONE_ORDER_RUNNER typo: the sweep's manual bell stays
   // An adapter without its credential must not own requests: the sweep would
   // stand down its manual bell and the dispatcher would park every claim as
   // "no prior order" — a misleading, non-reclaimable needs_review (Codex r20
@@ -590,7 +615,8 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
 }
 
 /** Re-ring every terminal ledger row whose persisted bell never landed. */
-async function reringPendingBells({ conn = db, notify = null } = {}) {
+async function reringPendingBells({ conn = db, notify = null, now = new Date() } = {}) {
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
   const rows = await conn('vendor_orders as vo')
     .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
@@ -614,16 +640,21 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
     .whereRaw("(vo.placed_at IS NOT NULL OR (prr.status = 'open' AND NOT EXISTS (SELECT 1 FROM vendor_order_emails voe WHERE voe.restock_request_id = prr.id AND voe.status IN ('sending', 'sent'))))")
     .whereRaw("jsonb_exists(vo.evidence, 'bell')")
     .whereRaw("NULLIF(vo.evidence->>'bellAt', '') IS NULL")
-    .select('vo.id', 'vo.evidence', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name');
+    .select('vo.id', 'vo.evidence', 'vo.placed_at', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name', ...FERTILIZER_COLUMNS.map((c) => `pc.${c}`));
   const rung = [];
   const pending = [];
+  const held = [];
   for (const row of rows) {
     const bell = meta(row.evidence).bell;
     if (!bell?.title) continue;
+    // June 1 - Sept 30: a pre-submit park's "order manually" for N/P
+    // fertilizer waits (unsent) for the first run after Sept 30. A dispatched
+    // order's reconciliation bell (placed_at set) still goes out.
+    if (!row.placed_at && fertilizerBlackoutHold({ name: row.product_name, ...row }, now)) { held.push(row.id); continue; }
     const ok = await deliverBell(conn, { notify, ledgerId: row.id, requestId: row.request_id, productName: row.product_name || '?', vendorName: row.vendor_name || '?', title: bell.title, body: bell.body || '', v: bell.v || null });
     (ok ? rung : pending).push(row.id);
   }
-  return { rung, pending };
+  return { rung, pending, held };
 }
 
 // The bell a park rings — persisted with the outcome (evidence.bell) so a
@@ -730,8 +761,21 @@ function claimIneligibility({ product, request, vendor }) {
  * ledger row inserted 'placing', commit. Returns { skipped[, cancelled] } or
  * the claim ({ request, vendor, adapterKey, product, ledger, pricing, order }).
  */
+// The Mac runner's two claim rules (SITEONE_ORDER_RUNNER=mac). The server's marker slot places
+// nothing: the Mac claims this vendor (no ledger row, no bell here). And a request the watchdog
+// handed to the office is never claimed by the Mac too — a person orders it now; a claim would buy
+// it twice. (Its vendor scope, onlyAdapters, is checked on the LOCKED vendor row in the caller: a
+// vendor edit after the unlocked pre-filter makes a request out of scope, never a "no adapter"
+// hand-off.)
+function macRunnerSkip(adapter, m) {
+  if (adapter.invalidRunner) return 'adapter_unconfigured';
+  if (adapter.remoteRunner) return 'remote_runner';
+  if (m.macHandedOffAt) return 'handed_to_office';
+  return null;
+}
+
 // The request's vendor must be active, have an adapter, and be gated on.
-async function resolveClaimVendor(trx, { request, registry, deadAdapters = null, login = null }) {
+async function resolveClaimVendor(trx, { request, registry, deadAdapters = null, login = null, onlyAdapters }) {
   const m = meta(request.metadata);
   if (!m.vendorId) return { skipped: 'no_vendor' };
   // Locked: a vendor edit (password rotation, account change) between the
@@ -739,12 +783,15 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null,
   // below sees the prefetch's row (Codex #3853 r15 P1).
   const vendor = await trx('vendors').where({ id: m.vendorId }).forUpdate().first('id', 'name', 'code', 'active', 'updated_at');
   const adapterKey = adapterKeyFor(vendor);
+  if (onlyAdapters && !onlyAdapters.includes(adapterKey)) return { skipped: 'out_of_scope' };
   if (!vendor || vendor.active === false || !adapterKey || !registry[adapterKey]) return { skipped: 'no_adapter' };
   if (!gateEnvValue(VENDOR_GATE[adapterKey])) return { skipped: 'vendor_gated' };
   // An adapter that already failed run-level THIS run (its DNS, browser or
   // credential store is down) gets no further claims this run — the request
   // stays open for tomorrow, no ledger row is written (Codex r8 P1).
   if (deadAdapters && deadAdapters.has(adapterKey)) return { skipped: 'adapter_down' };
+  const macSkip = macRunnerSkip(registry[adapterKey], m);
+  if (macSkip) return { skipped: macSkip };
   // The same credential check canAutoOrder makes: an adapter without its key
   // must not claim (and retire the manual bell) only to park every request as
   // "no prior order" — hand it back instead (Codex r21 P2).
@@ -914,7 +961,7 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   return { ledger, pricing, order };
 }
 
-async function claimRequest(trx, { requestId, registry, deadAdapters = null, login = null }) {
+async function claimRequest(trx, { requestId, registry, deadAdapters = null, login = null, now = new Date(), onlyAdapters = null }) {
   // The product's pricing advisory lock FIRST — the lock every
   // vendor_pricing writer holds to commit — then the request row, then the
   // product row: the sweep's order (auto-reorder.js lockProductPricing), so
@@ -936,15 +983,20 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   // (or may): never claim it for the bot as well. The email claim takes this same request
   // row lock, so the two cannot both pass.
   if (await emailOrderOutFor(trx, requestId)) return { skipped: 'email_order' };
-  const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, login });
+  const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, login, onlyAdapters });
   if (resolved.skipped) return resolved;
   const { vendor, adapterKey, m, credentials = null } = resolved;
-  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
+  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit', ...FERTILIZER_COLUMNS);
   if (!product) return { skipped: 'no_product' };
   const ineligible = claimIneligibility({ product, request, vendor });
   if (ineligible) return cancelAtClaim(trx, { request, product, m, ineligible });
   const guarded = await lockedProductGuards(trx, { request });
   if (guarded) return guarded;
+  // June 1 - Sept 30: order no N/P fertilizer. Checked after the cancel
+  // checks, so only a still-valid request waits (open, unclaimed, no hand-off
+  // bell) for the first run after Sept 30.
+  if (fertilizerBlackoutHold(product, now)) return { skipped: 'fertilizer_blackout' };
   const quantity = Number(request.requested_quantity);
   if (!Number.isFinite(quantity) || quantity <= 0) return { skipped: 'no_quantity' };
   // A manual-order bell an earlier (gated) sweep rang for this request is
@@ -1025,8 +1077,11 @@ async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
     // order that MAY exist — a replacement purchase. Attach it as a late
     // placement (marker replaced, request ordered, reconcile bell) that
     // blocks a replacement until reconciled (hook P0).
-    if (reserved.reason === 'claim_lost') return recordPlaced(conn, { ctx, placed: { externalOrderNumber: null, amountCents, response: err.body || null, evidence: err.evidence || null, ambiguous: true }, finalCents: amountCents, quoteCents });
-    return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null, placed: err.body ? { response: err.body } : null });
+    if (reserved.reason === 'claim_lost') return recordPlaced(conn, { ctx, placed: { externalOrderNumber: err.externalOrderNumber || null, amountCents, response: err.body || null, evidence: err.evidence || null, ambiguous: true }, finalCents: amountCents, quoteCents });
+    // A known vendor order number (the order exists, its total differed) rides into the ledger and
+    // the audit row, so staff can find the purchase.
+    const placed = err.body || err.externalOrderNumber ? { ...(err.body ? { response: err.body } : {}), externalOrderNumber: err.externalOrderNumber || null } : null;
+    return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null, placed });
   }
   return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
 }
@@ -1272,6 +1327,8 @@ async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
 // Stages after a committed claim: price → binding total → vendor call →
 // post-submit detector → record. Every exit is a park, a record, or a
 // run-level throw after releasing the claim.
+const poNumberFor = (ledger) => `WAVES-${String(ledger.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase()}`;
+
 async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
   const { request, vendor, adapterKey, product, ledger, pricing, order, credentials } = claim;
   const adapter = registry[adapterKey];
@@ -1292,7 +1349,9 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     }
     // `credentials` is the login the claim looked up for a login-driven
     // adapter (undefined for every other — the claim already decided which).
-    const base = { vendorSku, quantity, quoteCents, credentials };
+    // An adapter that fills a purchase-order field (the Mac's SiteOne Chrome adapter) gets one built from
+    // the ledger id: the order can be found by it after an ambiguous click.
+    const base = { vendorSku, quantity, quoteCents, credentials, ...(adapter.acceptsPoNumber ? { poNumber: poNumberFor(ledger) } : {}) };
     // An adapter with no static quote reads the vendor's total at the point of
     // sale and runs the cap reservation through beforeSubmit right before it
     // submits (the binding total is the vendor's, never a local estimate).
@@ -1362,7 +1421,7 @@ const withAdapterDown = (result, err) => (err.adapterDown ? { ...result, adapter
 // was received or cancelled since it was scanned / claimed, so no bell:
 // staff must never be told to buy a closed need (Codex r26 P2).
 const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated', 'adapter_unconfigured']);
-async function bellUndispatchable(conn, requestId, notify) {
+async function bellUndispatchable(conn, requestId, notify, now = new Date()) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first();
   if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return { requestClosed: true };
   // An automatic order already out for the product (this request's own
@@ -1372,8 +1431,11 @@ async function bellUndispatchable(conn, requestId, notify) {
   if (await findLiveAutoOrder(conn, request.product_id)) return { autoOrderLive: true };
   // The order was emailed to the vendor (sent, or sending with the outcome unknown): same stand-down.
   if (await emailOrderOutFor(conn, requestId)) return { emailOrderOut: true };
-  const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
+  const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand', ...FERTILIZER_COLUMNS);
   if (!product) return { bellLost: true };
+  // June 1 - Sept 30: no "order manually" hand-off for N/P fertilizer (owner 2026-11-24).
+  if (fertilizerBlackoutHold(product, now)) return { held: 'fertilizer_blackout' };
   // notifyAdmin resolves null when it could not persist the row: a null
   // hand-off is NOT a delivered bell (Codex r17 P2).
   const rung = await require('./auto-reorder').ringRestockBell({ notify, product, request });
@@ -1403,19 +1465,111 @@ async function bellUndispatchable(conn, requestId, notify) {
   return { belled: true };
 }
 
-async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null } = {}) {
+// The Mac runner's watchdog (server side). The Mac job runs every morning after the sweep and touches
+// each SiteOne request it sees: a claim, a dry-run park, a placed order. A request with no such touch
+// for SITEONE_MAC_STALE_HOURS (default 30: the Mac's daily run lands ~24 h apart, so a healthy dry-run
+// park is ~23.7 h old at the next 6:10 server run; 30 h means one whole Mac morning was missed) means
+// the Mac, its Chrome or its login is down. The Mac job's own failures ring at once from its wrapper;
+// this catches a Mac that never ran at all. The check runs under the claim's own lock order (pricing
+// advisory lock, ledger row, request row, vendor, product) so it cannot race a Mac claim, and it
+// re-applies the claim's eligibility check: a need that is gone is cancelled, never belled. A live
+// request is then marked macHandedOffAt — the Mac never claims it after that — and the office gets
+// the sweep's own "order manually" bell (request-id deduped, so a lost bell is re-rung next run).
+const DEFAULT_MAC_STALE_HOURS = 30;
+function macStaleMs(env = process.env) {
+  const h = Number(env.SITEONE_MAC_STALE_HOURS);
+  return (Number.isFinite(h) && h > 0 ? h : DEFAULT_MAC_STALE_HOURS) * 3600 * 1000;
+}
+const isDryRunPark = (ledger) => !!ledger && ledger.status === 'needs_review' && String(ledger.error || '').startsWith('dry_run:');
+
+// Everything the claim would refuse on, checked under the claim's locks, in its order: a gone need is
+// cancelled (its bells retired); a sibling request (a manual or forecast order of the same product),
+// an unreconciled order, a fertilizer blackout or an order already out are holds — no bell,
+// no stamp (bellUndispatchable would ring nothing for them, and a stamp would keep the Mac off the
+// request after the hold ends). Runs on every pass, a request already handed off included.
+async function macHandOffBlocker(trx, { request, m, now }) {
+  const vendor = m.vendorId ? await trx('vendors').where({ id: m.vendorId }).forUpdate().first('id', 'name', 'code', 'active', 'updated_at') : null;
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
+  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit', ...FERTILIZER_COLUMNS);
+  if (!product || !vendor) return { hold: {} };
+  const ineligible = claimIneligibility({ product, request, vendor });
+  if (ineligible) return { hold: await cancelAtClaim(trx, { request, product, m, ineligible }) };
+  const guarded = await lockedProductGuards(trx, { request });
+  if (guarded) return { hold: guarded };
+  if (fertilizerBlackoutHold(product, now)) return { hold: { held: 'fertilizer_blackout' } };
+  if (await findLiveAutoOrder(trx, request.product_id)) return { hold: { autoOrderLive: true } };
+  return null;
+}
+
+async function macWatchdogLocked(trx, requestId, now, env) {
+  const peek = await trx('product_restock_requests').where({ id: requestId }).first('product_id');
+  if (!peek) return {};
+  await require('./auto-reorder').lockProductPricing(trx, peek.product_id);
+  const ledger = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id', 'status', 'error', 'updated_at');
+  const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
+  if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return {};
+  // An order emailed to the vendor (sent, or sending) — checked right after the request lock, as
+  // claimRequest does: nothing below may cancel or hand off a request whose order may be in flight.
+  if (await emailOrderOutFor(trx, requestId)) return { result: { emailOrderOut: true } };
+  const m = meta(request.metadata);
+  let lastTouch = null;
+  if (!m.macHandedOffAt) {
+    // Any ledger row but a dry-run park = an order is out or parked with its own bell: never the office's.
+    if (ledger && !isDryRunPark(ledger)) return {};
+    lastTouch = Math.max(new Date(request.created_at).getTime(), ledger ? new Date(ledger.updated_at).getTime() : 0);
+    if (now.getTime() - lastTouch < macStaleMs(env)) return {};
+  }
+  const blocker = await macHandOffBlocker(trx, { request, m, now });
+  if (blocker) {
+    // A request already handed to the office whose hand-off is now blocked (another order for the
+    // product opened, a hold, a gone need): its standing "order manually" bell is withdrawn under the
+    // same locks, so nobody orders a second time from it. The stamp stays; a later eligible pass
+    // re-rings it through bellUndispatchable.
+    if (m.macHandedOffAt) await retireRequestBell(trx, requestId);
+    return { result: { ...blocker.hold, ...(m.macHandedOffAt ? { handOffBellWithdrawn: true } : {}) } };
+  }
+  if (m.macHandedOffAt) return { handOff: true };
+  // A stale dry-run park's own bell ("turn dry run off to order for real") and any pending copy of it
+  // are withdrawn with the hand-off: the office gets one instruction, order it by hand.
+  await settleRequestLedgerBells(trx, requestId);
+  await trx('product_restock_requests').where({ id: requestId, status: 'open' })
+    .update({ metadata: JSON.stringify({ ...m, macHandedOffAt: now.toISOString() }), updated_at: now });
+  logger.warn(`[order-dispatch] SiteOne request ${requestId} not touched by the Mac runner for ${Math.round((now.getTime() - lastTouch) / 3600000)} h — handed to the office`);
+  return { handOff: true };
+}
+
+async function macWatchdog(conn, requestId, notify, now = new Date(), env = process.env) {
+  const verdict = await conn.transaction((trx) => macWatchdogLocked(trx, requestId, now, env));
+  if (!verdict.handOff) return verdict.result || {};
+  return { macHandedOff: true, ...(await bellUndispatchable(conn, requestId, notify, now)) };
+}
+
+// The "order manually" hand-off for a request the dispatcher will not place. A request the Mac
+// watchdog already handed to the office goes back through the watchdog, so a sibling order or hold
+// that blocked its hand-off keeps the bell withdrawn even when a gate closes meanwhile.
+async function handOffBell(conn, requestId, notify, now, env) {
+  const request = await conn('product_restock_requests').where({ id: requestId }).first('metadata');
+  if (request && meta(request.metadata).macHandedOffAt) return macWatchdog(conn, requestId, notify, now, env);
+  return bellUndispatchable(conn, requestId, notify, now);
+}
+
+async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null, onlyAdapters = null } = {}) {
   // The master gate closing between the 6:10 sweep (which stood down its own
   // bell because this lane would order) and the dispatch is the same
   // hand-off as a vendor gate: the request gets the sweep's deduped bell
   // now, not after another silent day (Codex r18 P2).
-  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify)) };
+  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await handOffBell(conn, requestId, notify, now, env)) };
   const registry = adapters || loadAdapters();
   const login = await prefetchVendorLogin(conn, requestId, registry, deadAdapters);
-  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login }));
+  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login, now, onlyAdapters }));
+  // A request the watchdog handed to the office keeps going through the watchdog's locked, eligibility-
+  // checked hand-off under EITHER runner (the server after SITEONE_ORDER_RUNNER is unset, or the Mac): a
+  // hand-off bell that failed to land is re-rung, and a need that is gone is cancelled.
+  if (claim.skipped === 'remote_runner' || claim.skipped === 'handed_to_office') return { requestId, skipped: claim.skipped, ...(await macWatchdog(conn, requestId, notify, now, env)) };
   if (claim.skipped) {
     // A lost hand-off bell is reported, not swallowed: the request stays open
     // and unclaimed, so the next run re-rings it — and this run goes red.
-    const bellState = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : {};
+    const bellState = HANDOFF_SKIPS.has(claim.skipped) ? await handOffBell(conn, requestId, notify, now, env) : {};
     return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...bellState };
   }
   return dispatchClaimed(conn, claim, { registry, notify, now, env });
@@ -1476,7 +1630,16 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
 // tomorrow; a pass that finds nothing new ends. A run-level error (the
 // environment is broken for every remaining request) stops the batch with
 // its claims released — job_health records it, tomorrow retries.
-async function dispatchPasses({ conn, notify, adapters, now, env }) {
+// The vendor adapter a request would dispatch through (null = none): the Mac runner's onlyAdapters
+// filter, so a SiteOne-only registry never reaches a Sticker Mule request (it would read no_adapter
+// and hand the request to the office while the server's own run would order it).
+async function requestAdapterKey(conn, requestId) {
+  const request = await conn('product_restock_requests').where({ id: requestId }).first('metadata');
+  const vendorId = request ? meta(request.metadata).vendorId : null;
+  return vendorId ? adapterKeyFor(await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code')) : null;
+}
+
+async function dispatchPasses({ conn, notify, adapters, now, env, onlyAdapters = null }) {
   const seen = new Set();
   const results = [];
   let runLevelError = null;
@@ -1494,8 +1657,9 @@ async function dispatchPasses({ conn, notify, adapters, now, env }) {
     if (!rows.length) break;
     for (const row of rows) {
       seen.add(row.id);
+      if (onlyAdapters && !onlyAdapters.includes(await requestAdapterKey(conn, row.id))) continue;
       try {
-        const result = await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters });
+        const result = await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters, onlyAdapters });
         results.push(result);
         // Not a run-level error — the request parked with its bell — but the
         // adapter is done for this run (a rejected login: Codex #3853 r21 P1).
@@ -1532,17 +1696,20 @@ function runProblems({ results, recovered, bellsPending }) {
   return problems;
 }
 
-async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
+// onlyAdapters + reconcile:false = the Mac runner (scripts/siteone-mac-order-run.js): it dispatches
+// only its own vendor's requests and leaves reconciliation (stale claims, bells that never landed) to
+// the server's 6:10 run, which owns it for every vendor.
+async function runVendorOrderDispatch({ conn = db, notify = null, adapters = null, now = new Date(), env = process.env, onlyAdapters = null, reconcile = true } = {}) {
   // Reconciliation runs BEFORE and REGARDLESS of the gate: a 'placing' claim
   // the dispatcher died on, or a park whose bell never sent, is an order that
   // may already exist at the vendor — killing the lane must surface it, not
   // bury it (pre-push P0). Bells first: the one outcome that must not wait
   // another day. A gated run still walks the dispatchable requests: each is
   // handed off with its bell instead of ordered (Codex r18 P2).
-  const bells = await reringPendingBells({ conn, notify });
-  const recovered = await recoverStalePlacing({ conn, notify, now });
+  const bells = reconcile ? await reringPendingBells({ conn, notify, now }) : { rung: [], pending: [] };
+  const recovered = reconcile ? await recoverStalePlacing({ conn, notify, now }) : { recovered: [], unrecovered: [], bellPending: [] };
   const gated = !gateEnvValue(GATE);
-  const { results, seen, runLevelError } = await dispatchPasses({ conn, notify, adapters, now, env });
+  const { results, seen, runLevelError } = await dispatchPasses({ conn, notify, adapters, now, env, onlyAdapters });
   const bellsPending = [...bells.pending, ...recovered.bellPending, ...results.filter((r) => r.bellPending).map((r) => r.ledgerId)];
   logger.info(`[order-dispatch] ${results.filter((r) => r.status === 'placed').length} placed, ${results.filter((r) => r.status === 'needs_review').length} parked, ${results.filter((r) => r.status === 'failed').length} failed, ${results.filter((r) => r.skipped).length} skipped of ${seen.size}; ${bells.rung.length} bells re-rung, ${bellsPending.length} pending`);
   if (runLevelError) throw runLevelError;
@@ -1574,5 +1741,5 @@ module.exports = {
   emailOrderOutFor,
   orderedQuantityFor,
   AUTO_ORDER_GATE: GATE,
-  _internals: { adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },
+  _internals: { siteoneRunsOnMac, macWatchdog, macStaleMs, poNumberFor, requestAdapterKey, adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },
 };

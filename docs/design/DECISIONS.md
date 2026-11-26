@@ -1937,6 +1937,8 @@ Everything else from the day's hardening stands: image-first visuals, pair-verif
 
 **Verification.** New suites: `estimate-soft-exit-disposition` (reason map, clipping, competitor price validation, "Other" note rule), `estimate-change-request` (no-estimate-write, 404 contract, dedupe, bell category), client `EstimateViewPage.soft-exit` (three exits, one server call each, decline reload on Done). Measurement-review suite unchanged and green after the notify-core extraction.
 
+**Changed 2026-11-21 (owner, estimate page changes, change 1).** The link reads "Not ready yet? Tell us why" and shows twice: under the approve area and at the page bottom. The sheet opens as "Not ready yet?" with "Tell us where you are. Nothing here sends you a message." The tap on "I'm still deciding" still writes the one `activity_log` row; a step after it asks "What would help you decide?" (A lower price, Talking to a person first, Comparing other quotes, Not the right time yet, Something else; Send or Skip). A reason sent there is saved on the row and rings the estimate's one `estimate_stuck` bell; Skip sends nothing more. "Talking to a person first" answers "We will call you" only when the server says so (`callPromised`: the office bell was raised for the request and the estimate has a phone); otherwise the sheet gives our number. Still no message to the customer and no estimate write.
+
 ## 2026-09-01 — Lawn program calendar + referral card on the accepted estimate (feat/estimate-calendar-referral)
 
 **Why.** Two concepts from the 2026-09-01 estimate research. (1) The lawn card says "9 applications per year" as a number; TruGreen/RealGreen-style program pages show WHEN, and homeowners picture a calendar better than a count. (2) Referred customers carry 13–16% higher lifetime value in pest-control program data; the portal and the service report already run the share module, but the estimate's accepted / just-accepted screens — the warmest moment — did not.
@@ -2936,13 +2938,10 @@ nothing. The words land in `scheduled_services.customer_request` /
 primary inserted row only, never on recurring children or boosters;
 `customer_request_pests` is untouched.
 
-`GATE_RESERVICE_OFFICE_REQUEST` (registry key `reserviceOfficeRequest`, off
-unless exactly `true`, dark in every environment). Gate off: the suggestion
-route answers `{ enabled: false, suggestion: null }`, the modal shows nothing
-new, and `POST /api/admin/schedule` ignores `customerRequest` — byte-identical
-to before. The modal learns the gate from that route's `enabled` answer, the
-same probe pattern as the annual-prepay and card-link controls, and only asks
-once a re-service line is on the form. Kill switch: unset the gate.
+The box is always on. The modal only asks the suggestion route once a
+re-service line is on the form, and `POST /api/admin/schedule` saves
+`customerRequest` on a pest/lawn re-service. (It shipped behind a gate that
+was removed 2026-11-21.)
 
 Source rule (owner ruling 2026-09-26: exact words may be quoted, a call
 paraphrase is shown without quotes), decided on the SERVER and never taken
@@ -3570,3 +3569,23 @@ Owner 2026-11-13: "Use your approved texting voice for the portal AI" (asked in 
 **Reasoning:** Hunter's API terms forbid sharing a homeowner's key with a third party without Hunter's written permission, and Hunter declined. With no sanctioned route for a Hunter or a Rain Bird timer, there is nothing to build. The owner did not choose the hand pilot through a Hydrawise contractor account (2026-11-19).
 
 **Revisit if:** Hunter or Rain Bird opens API access to contractors, or the step 1 count shows many Orbit B-hyve or Rachio timers (their developer terms were not checked).
+
+## 2026-11-21 — Estimate tool shows Tree density only when a picked service can read it
+
+**Decision:** The Tree density box in the staff estimate tool (`EstimateToolViewV2.jsx`) renders only when a picked service can read tree density: Tree & Shrub, recurring mosquito, the lawn family priced from lawn area (lawn care, one-time lawn, dethatching, top dressing) and the flea exterior spray. The one rule is `pickedServiceCanReadTreeDensity(form)` in `client/src/lib/estimateEngine.js`. The box is hidden, never cleared: the lookup still fills the value, the estimate still saves it, and the engine request is the same.
+
+**Context:** An audit of 106 estimates (2026-09-08 to 2026-11-21) found the owner lowered tree density by hand on 28 homes and never raised it. On 27 of the 28, no picked service was Tree & Shrub, palm or mosquito. Tree density has not moved a pest price since 2026-07-30 (entry above).
+
+**Reasoning:** A box that cannot change the price on screen invites a correction that does nothing. The owner approved the change on 2026-11-21 (reply "1, 2" to the audit page). The rule is service-level on purpose. Whether a picked service reads the density for one estimate also depends on other inputs (a tree count, a measured lawn area, the exterior flea area, a commercial property), and three tries at mirroring those engine rules in the form each missed a case, one of which hid the box where it changed a price. So the box may still show where it changes nothing, as it did on every estimate before; it hides only when no picked service has any read of it.
+
+**Revisit if:** a new service starts to read tree density (add its form flag to the rule), or pest pricing reads tree density again.
+
+## 2026-11-22 — An office answer in the portal reaches the customer by text
+
+Owner 2026-11-22 ("portal text", then "ok do your rec" on the portal-answers-by-text page). **Decision.** With `GATE_PORTAL_ANSWER_TEXT` on, an answer the office saves with Reply in portal reaches the customer as the in-app bell plus ONE text that carries the answer: "Hi {first name}, here's our answer from Waves: {answer}". An answer longer than 3 segments sends its first part, cut at a space, and ends "… Read the rest in your portal: {link}". No app push. When no text can go (no number, an answer that carries a Waves link, STOP, no consent, a refusal or a failure), the reply email goes, as before. A Waves AI answer (night or day) gets the in-app bell only. The owner flips the gate.
+
+**Context:** The 2026-11-05 rule was the app push, else one email. The owner's 2026-11-20 ruling makes a text the default notice (the app only on the customer's own app pick).
+
+**Reasoning:** The text carries the answer itself, so the customer does not need to sign in to read it. A reply to the text lands in Communications like any text. Only the staff press texts, at any hour, as a staff text does (2026-11-05: a night answer sends at once). The 10-minute sweep that finishes a stopped notice sends the email, never a text, so no automatic step texts a customer. The number is the one on file when the answer is saved, re-checked under a lock at the send, so a number corrected after the save gets no text. An answer that carries a Waves link is not texted: the SMS composer checks who owns such a link before it texts one, and this text does not. A text whose outcome is unknown counts as sent: a second text is worse than a missing email. The way (text or push) is set when the answer is saved, so a flip never sends one answer both an app push and a text, and no later try needs to read what an earlier push did. Before Send, the reply form tells staff the answer goes by text, at any hour. The text uses purpose `support_resolution` (as a request update's text), not the SMS-thread reply interlock, because it answers a portal item, not the SMS thread's waiting question. A Waves AI answer gets no text, so a model's words never reach a phone.
+
+**Revisit if:** customers reply to the answer texts in a way the office cannot follow, or the email fallback stops being needed.

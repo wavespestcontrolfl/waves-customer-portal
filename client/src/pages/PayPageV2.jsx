@@ -99,11 +99,12 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import PayPromoCode from '../components/billing/PayPromoCode';
 import PayPlanChoice from '../components/billing/PayPlanChoice';
-import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
+import { groupInvoiceLinesByProperty, invoiceDiscountRows } from '@waves/invoice-property-groups';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE, CARD_SURCHARGE_NOTICE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from '../lib/microdeposit';
 import { getStripe } from '../lib/stripeLoader';
+import { WAVES_ADDRESS_LINE } from '../constants/business';
 import { fetchWithNetworkRetry } from '../lib/fetchRetry';
 import { consentAttestation, CONSENT_VERSION_STALE_MESSAGE, isConsentVersionStale } from '../lib/paymentMethodConsentText';
 
@@ -601,7 +602,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
   // on Zelle's find-your-bank page.
   const rowStyle = narrow ? PAY_ROW_GRID_NARROW : PAY_ROW_GRID;
   return (
-    <div data-glass="soft" className="waves-no-print" style={{ marginTop: SP.lg }}>
+    <div className="waves-no-print" style={{ marginTop: SP.lg }}>
       <button
         type="button"
         data-glass="soft"
@@ -700,7 +701,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
 }
 
 // ── Pay-page FAQ (GATE_PAY_PAGE_FAQ, 2026-09-03) ───────────────────
-// Three or four questions at the end of the pay card, below the invoice
+// The payment questions at the end of the pay card, below the invoice
 // details and above "Other ways to pay" (the card form moved above the
 // details on 2026-11-06). Every answer restates a fact this page already carries (the
 // method tiles, the consent copy, the bank-processing / verification
@@ -737,15 +738,15 @@ function PayFaqItem({ question, children }) {
     </details>
   );
 }
-function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBilled }) {
+function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBilled, bankFormReady = false }) {
   if (!enabled) return null;
   // Same derivation as PaymentForm's tile: the /setup rate when it has
   // answered, else the client mirror of the configured rate.
   const rate = Number(cardSurchargeRate);
   const pct = Number(((Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_CARD_SURCHARGE_RATE) * 100).toFixed(2)).toString();
   return (
-    <div data-glass="soft" className="waves-no-print" style={{ marginTop: SP.lg }}>
-      <div style={{ ...eyebrow, marginBottom: SP.xs }}>Common questions</div>
+    <div className="waves-no-print" style={{ marginTop: SP.lg }}>
+      <div style={{ ...eyebrow, marginBottom: SP.xs }}>Payment questions</div>
       <div data-glass="soft" role="region" aria-label="Payment questions" style={{ position: 'relative', padding: `0 ${SP.sm}px`, ...PAY_BOX }}>
         <PayFaqItem question="Why is there a card fee, and how do I avoid it?">
           Credit cards entered directly carry a surcharge of up to {pct}% — the exact surcharge and
@@ -775,12 +776,61 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
             emailing billing@wavespestcontrol.com or calling us.
           </PayFaqItem>
         )}
+        {/* Manual-entry steps only while the payment form (with its Bank
+            account tile) is on the page; a setup failure hides the form. */}
+        {bankFormReady && (
+        <PayFaqItem question="My bank won’t let me sign in. How do I pay by bank?">
+          You don’t need to sign in. Choose Bank account, then pick “Enter bank details manually”
+          in the bank window, type your routing and account number, and press Pay. Stripe sends{' '}
+          {microdepositSavedPhrases(null).deposits} to your account in 1–2 business days; follow the
+          email you get to verify your account. The payment then starts processing, and we email
+          your receipt once it clears. Bank payments have no added fee.
+        </PayFaqItem>
+        )}
+        <PayFaqItem question="The page or my bank link isn’t working. What do I do?">
+          Reload this page and try once more. If your bank still won’t connect,{' '}
+          {bankFormReady ? 'enter your bank details manually (see above), or ' : 'you can '}pay with
+          a card or a different account instead. Still stuck? Give us a call and we’ll sort it out
+          — <HelpPhoneLink tone="dark" inline />.
+        </PayFaqItem>
+        <PayFaqItem question="Will I get a receipt, and where is my invoice copy?">
+          Yes — we email your receipt once the payment goes through (a bank transfer, once it
+          settles). For a copy of this invoice, use Download PDF or Print at the top of this
+          page.
+        </PayFaqItem>
+        <PayFaqItem question="Why is this the amount? Where is my WaveGuard discount?">
+          Each service is listed above with its price. A WaveGuard membership discount shows on its
+          own line under the subtotal, and “Total due” is what you pay after it.
+        </PayFaqItem>
+        <PayFaqItem question="Can I pay by check or cash?">
+          Yes. Your technician can take a card, check or cash at the visit, and the office takes
+          checks and cash too. Mail checks to Waves Pest Control, {WAVES_ADDRESS_LINE}, with the
+          invoice number in the memo.
+        </PayFaqItem>
+        <PayFaqItem question="How do I pay from my bank automatically?">
+          Future visits can be billed to a bank account kept on file. Call or email
+          billing@wavespestcontrol.com and we’ll set it up with you.
+        </PayFaqItem>
+        <PayFaqItem question="Can I prepay for the year?">
+          Yes — a year of pest or lawn service can be paid up front. Call us to set it up. If you
+          cancel within 90 days, you’re refunded for the visits not yet done.
+        </PayFaqItem>
+        {!thirdPartyBilled && (
+          <PayFaqItem question="Someone else is paying (a closing or a property manager). How does that work?">
+            Call or email billing@wavespestcontrol.com before you pay and tell us who to bill.
+            We’ll send the invoice to them instead.
+          </PayFaqItem>
+        )}
+        <PayFaqItem question="I think this bill is wrong. Who do I contact?">
+          Don’t pay it yet. Email billing@wavespestcontrol.com or call us with the invoice number
+          and we’ll review it with you — <HelpPhoneLink tone="dark" inline />.
+        </PayFaqItem>
       </div>
     </div>
   );
 }
 
-function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card' }) {
+function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, token, cardSurchargeRate, onSuccess, onError, onBankVerificationPending, saveCard, saveCardLocked = false, onSaveCardChange, customerName, customerEmail, onPaymentIntentReplaced, onCombinedUpdate, thirdPartyBilled = false, initialMethod = 'card', onFormReadyChange }) {
   const mountRef = useRef(null);
   const expressMountRef = useRef(null);
   const elementsRef = useRef(null);
@@ -804,6 +854,12 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   // auto-retries; this surfaces a one-tap Retry once those are exhausted so the
   // customer never has to reload the whole page to recover.
   const [loadFailed, setLoadFailed] = useState(false);
+  // Tells the page whether the method tiles are actually on screen (Elements
+  // mounted, no load failure), so the FAQ's bank-entry steps only show then.
+  useEffect(() => {
+    onFormReadyChange?.(ready && !loadFailed);
+  }, [ready, loadFailed]);
+  useEffect(() => () => onFormReadyChange?.(false), []);
   const [loadNonce, setLoadNonce] = useState(0);
   // A re-mount after a tender replacement starts on the tender the fresh
   // intent was minted for (initialMethod); a first mount starts on card.
@@ -1703,20 +1759,25 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       )}
 
-      {showManualEntryHint && !isCardFamily && (
-        <div style={{
+      {/* Bank help line (owner 2026-11-24, "build it"): shown as soon as Bank
+          account is picked, not only after a failed link. A customer whose
+          bank sign-in will not work closes Stripe's window before Pay and
+          never saw the old after-failure hint. */}
+      {!isCardFamily && (
+        <div data-testid="bank-manual-entry-help" style={{
           background: 'var(--surface-subtle, rgba(0,0,0,0.03))',
-          border: `1px solid ${DOC.border}`,
+          border: `1px solid ${showManualEntryHint ? DOC.navyLiteral : DOC.border}`,
           borderRadius: RADIUS.input,
           padding: '12px 16px',
           fontSize: FS.body,
           lineHeight: LH.body,
           color: DOC.ink,
         }}>
-          <strong>Trouble linking your bank?</strong> Some banks don't support instant
-          linking. Choose <strong>“Enter bank details manually”</strong> above and type
-          your routing and account number instead — it avoids this issue, and bank
-          payments still have no added fee.
+          <strong>{showManualEntryHint ? 'Trouble linking your bank?' : 'Can’t sign in to your bank?'}</strong>{' '}
+          Some banks don't support instant linking. In the bank window, choose{' '}
+          <strong>“Enter bank details manually”</strong> and type your routing and account
+          number, then press Pay. Stripe then sends {microdepositSavedPhrases(null).deposits} in
+          1–2 business days to verify your account, and bank payments have no added fee.
         </div>
       )}
 
@@ -1918,6 +1979,7 @@ export default function PayPageV2() {
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
+  const [bankFormReady, setBankFormReady] = useState(false);
   // The promo code's outcome as /setup reports it (GATE_PAY_PROMO_CODE);
   // undefined until a setup answers with one.
   const [promoVerdict, setPromoVerdict] = useState(undefined);
@@ -2715,6 +2777,7 @@ export default function PayPageV2() {
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   // Multi-property invoice (lines at 2+ saved properties): grouped rows; else null.
   const propertyGroups = groupInvoiceLinesByProperty(invoice.lineItems);
+  const discountRows = invoiceDiscountRows(invoice.lineItems, invoice.discountAmount, invoice.discountLabel);
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   const invoiceAttachments = invoice.attachments || [];
   const annualPrepay = invoice.annualPrepay || null;
@@ -2823,6 +2886,7 @@ export default function PayPageV2() {
             {paymentState === 'ready' && stripeSetup ? (
               <PaymentForm
                 key={stripeSetup.paymentIntentId}
+                onFormReadyChange={setBankFormReady}
                 initialMethod={stripeSetup.initialMethod || 'card'}
                 publishableKey={stripeSetup.publishableKey}
                 clientSecret={stripeSetup.clientSecret}
@@ -3045,9 +3109,9 @@ export default function PayPageV2() {
               return (
             <div data-glass="soft" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
               <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
-              {invoice.discountAmount > 0 && (
-                <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
-              )}
+              {discountRows.map((row) => (
+                <SummaryRow key={row.label} label={row.label} value={`− ${fmtCurrency(row.amount)}`} />
+              ))}
               {invoice.taxAmount > 0 && customer?.isCommercial && (
                 <SummaryRow label={`Tax (${(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)`} value={fmtCurrency(invoice.taxAmount)} />
               )}
@@ -3177,6 +3241,7 @@ export default function PayPageV2() {
               zelle={!!data.manualPayOptions?.zelle?.recipient && !stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup)}
               saveRequired={!payer && saveCardRequired}
               thirdPartyBilled={!!payer}
+              bankFormReady={bankFormReady}
             />
             {/* Hidden once /setup reports a combined-balance PI (the server
                 already withholds the block when siblings preview; this

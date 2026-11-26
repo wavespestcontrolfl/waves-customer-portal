@@ -1,10 +1,10 @@
 /**
  * Pest Insider renderer: a checked issue -> { subject, preview, html_body, text_body }.
  *
- * html_body is the BODY only, the same shape the old Pest Insider stores in
- * newsletter_sends.html_body (assemblePestInsiderNewsletter): wrapNewsletter
- * adds the Waves chrome and unsubscribe footer at send time. It carries the
- * dm-* hooks the dark-mode stylesheet keys on, so bodyIsDarkAware() is true.
+ * html_body is the BODY only, the shape newsletter_sends.html_body stores:
+ * wrapNewsletter adds the Waves chrome and unsubscribe footer at send time. It
+ * carries the dm-* hooks the dark-mode stylesheet keys on, so
+ * bodyIsDarkAware() is true.
  *
  * The body is one email for every subscriber, and the public archive serves
  * it as stored. So it holds only reviewed copy (the fact's lead and title,
@@ -14,11 +14,16 @@
  * caller text and no other caller link: every round of the pre-push audit
  * (5 to 10) found another way such input could carry a code, a name, an
  * email or a merge tag into a shared email. The other blocks are added per
- * recipient, never to the shared body: "A tool we'd use" (withToolBlock,
- * opted-in readers only: its Amazon link may reach neither the archive nor
- * a reader who never opted in), and in PR 4 "Active near you" from area
- * counts and "Your home". A per-reader block goes in before the sign-off
- * (addReaderBlock).
+ * recipient, never to the shared body: "A tool we'd use" (a token in the
+ * HTML part only, below), and in PR 4 "Active near you" from area counts.
+ * "A tool we'd use" (a reviewed tool and its Amazon link, for readers who
+ * opted in) and "Your home" (a customer's own last visit and member-since
+ * month) are per reader too, but each is filled by the sender, not added: the
+ * shared body holds tokens that stand alone just before the sign-off
+ * ({{pi-tool}} in the HTML, tool-block.js; {{pi-home}} and {{pi-home-text}},
+ * home.js), and every surface without a reader strips them. The tool block is
+ * HTML only: the campaign send tracks clicks in the text part, which rewrites
+ * every text URL, and an Amazon link must reach the reader as written.
  *
  * The look follows the weekly newsletter (owner 2026-11-19: "boring, no
  * visuals, look at what we do for the local newsletter"; then "more
@@ -42,8 +47,9 @@
  *
  * No line asks the reader to forward the email: a forwarded copy carries
  * the subscriber's own unsubscribe link, and its page shows their address
- * (pre-push round 11). The plan's referral line comes in PR 4, linked to the
- * issue's web page (the send's archive link).
+ * (pre-push round 11). The referral line stands above the sign-off and links
+ * the Waves referral page. Its end is a token: the stored body never names
+ * an amount, and each surface gives the token its value (referral-line.js).
  *
  * Every piece of text is escaped.
  */
@@ -57,15 +63,22 @@ const { cardFor, sourceLine, CARD_WIDTH, CARD_HEIGHT } = require('./cards');
 const { heroFor, HERO_WIDTH, HERO_HEIGHT } = require('./heroes');
 const { partPictureForFact, partPictureForSpecies, PART_WIDTH, PART_HEIGHT } = require('./parts');
 const { SERVICE_EMOJI } = require('./claim-check');
-const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
+const { toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
+const { isPestInsiderPoll, pollResultLine } = require('../newsletter-quiz');
+const { validateNewsletterDraft } = require('../newsletter-validator');
+const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
+const { etDateString } = require('../../utils/datetime-et');
+const { HOME_TOKEN, HOME_TEXT_TOKEN, hasHomeToken, neutralizeHomeTokens } = require('./home');
+const { REFERRAL_TOKEN, REFERRAL_TEXT_TOKEN } = require('./referral-line');
+const { TOOL_TOKEN } = require('./tool-block');
+const { escapeHtml, paragraph, link, wrapBlock } = require('./markup');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on the Waves blog';
 const PHOTO_ID_TEXT = 'Send us a photo for a free ID';
 
-// The weekly newsletter's divider (newsletter-draft.js WAVES_DIVIDER_GIF):
-// the Waves mascot badge on our own CDN. Not a link, so it is no stray tap
-// target.
+// The divider: the Waves mascot badge on our own CDN. Not a link, so it is no
+// stray tap target.
 const DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif';
 
 const GREETING = 'Hey there!';
@@ -73,10 +86,12 @@ const INTRO = "Here's one thing we learned about Southwest Florida homes and yar
 const SIGNOFF_LINE = 'Catch you next time.';
 const SIGNOFF_NAME = '— The Waves Team';
 
-const SECTIONS = Object.freeze({ lead: 'Today I learned', id: "What's this?", tool: "A tool we'd use" });
+const SECTIONS = Object.freeze({ lead: 'Today I learned', id: "What's this?", tool: "A tool we'd use", poll: 'Quick poll', home: 'Your home' });
 const LEAD_EMOJI = '💡';
 const ID_EMOJI = '🔍';
 const TOOL_EMOJI = '🧰';
+const POLL_EMOJI = '🗳️';
+const HOME_EMOJI = '🏠';
 
 // The species card's tile: the species' own emoji where its category's would
 // show another animal, else its category's, else the magnifier. "Biting"
@@ -121,28 +136,23 @@ const VERDICTS = Object.freeze({
   call: Object.freeze({ label: 'Worth a pro look', background: '#FEF2F2', text: '#991B1B' }),
 });
 
-const escapeHtml = (text) => String(text ?? '')
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
 const own = (map, key) => (typeof key === 'string' && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null);
 const speciesUrl = (slug) => (/^[a-z0-9-]+$/.test(String(slug)) ? `${IDENTIFIER_URL}${slug}/` : null);
 
 // A section's head: its name as a small label, then the newsletter's band
 // (emoji, then the title in bold italics). The emoji sits on a white badge
 // that stays white in dark mode (dm-lightcard), so a dark emoji (🕷️ 🐜 🪳)
-// stays visible.
+// stays visible. With no label (the poll, whose band is its name and whose
+// box opens with the question) the band stands alone.
 function sectionHead(index, label, emoji, title) {
   const palette = newsletterPalette();
   const theme = newsletterSectionTheme(index);
   return [
-    `<p style="margin:0 0 6px 0;font-size:12px;line-height:1.4;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${theme.text};">${escapeHtml(label)}</p>`,
+    ...(label ? [`<p style="margin:0 0 6px 0;font-size:12px;line-height:1.4;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:${theme.text};">${escapeHtml(label)}</p>`] : []),
     `<h2 class="dm-chip" style="font-family:${palette.font};font-size:20px;line-height:1.35;font-weight:800;color:${theme.text};background:${theme.background};border-left:4px solid ${theme.accent};border-radius:8px;padding:10px 12px;margin:0 0 14px 0;"><span class="dm-lightcard" style="display:inline-block;background:#FFFFFF;border-radius:8px;padding:2px 6px;line-height:1.25;font-style:normal;">${emoji}</span> <strong><em>${escapeHtml(title)}</em></strong></h2>`,
   ].join('\n');
 }
 
-const paragraph = (html) => `<p style="margin:0 0 14px 0;font-size:16px;line-height:1.6;">${html}</p>`;
-const link = (href, label) => `<a class="dm-link" href="${escapeHtml(href)}" style="color:${newsletterPalette().blue};text-decoration:underline;font-weight:600;">${escapeHtml(label)}</a>`;
 // The newsletter's event box: one emoji row per line.
 const metaBox = (rows) => `<div class="dm-box" style="margin:0 0 14px 0;padding:12px 16px;background:${newsletterPalette().cardBg};border-radius:10px;font-size:15px;line-height:2;">\n${rows.join('<br/>\n')}\n</div>`;
 
@@ -153,6 +163,15 @@ const SIGNOFF_HTML = `<div class="dm-text">
 <p style="margin:0;font-size:16px;line-height:1.6;">${escapeHtml(SIGNOFF_NAME)} 🌊</p>
 </div>`;
 const SIGNOFF_TEXT = `${SIGNOFF_LINE}\n${SIGNOFF_NAME}\n`;
+
+// What closes every issue: the referral line, then the sign-off. A reader's
+// own block goes in before it. The line is a token in each part
+// (referral-line.js has its words and gives the tokens their value on every
+// surface): the stored body never names an amount, and a paused referral
+// program gets no line. Like the "Your home" tokens, each stands alone, so a
+// value of '' gives exactly the issue without the line.
+const CLOSING_HTML = `${REFERRAL_TOKEN}${SIGNOFF_HTML}`;
+const CLOSING_TEXT = `${REFERRAL_TEXT_TOKEN}${SIGNOFF_TEXT}`;
 
 // A Waves picture as wide as the column on a desktop screen (582px in
 // wrapNewsletter's card), with its size in the tag. A picture that moves
@@ -215,16 +234,23 @@ function datelineText(sendDate, minutes) {
   return ['Waves Pest Insider', date, `${minutes}-min read`].filter(Boolean).join(' · ');
 }
 
+// The last poll's result under the greeting, in the intro's own style. The
+// words are newsletter-quiz.js pollResultLine's, made here from a poll id and
+// its counts, never taken from the caller. Nothing when there is no line.
+const resultParagraph = (line) => `<p style="margin:0 0 12px 0;font-size:16px;line-height:1.6;">${escapeHtml(line)}</p>`;
+
 function openingBlock(issue, minutes) {
   const palette = newsletterPalette();
   const dateline = datelineText(issue.sendDate, minutes);
+  const result = pollResultLine(issue.lastPoll || undefined);
   const html = [
     `<p class="dm-muted" style="margin:0 0 14px 0;text-align:center;font-size:12px;line-height:1.5;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${palette.muted};">${escapeHtml(dateline)}</p>`,
     heroHtml(issue.lead),
     `<p style="margin:0 0 8px 0;font-size:22px;line-height:1.4;">👋 <strong><em>${escapeHtml(GREETING)}</em></strong></p>`,
+    result && resultParagraph(result),
     `<p style="margin:0 0 26px 0;font-size:16px;line-height:1.6;">${escapeHtml(INTRO)}</p>`,
   ].filter(Boolean).join('\n');
-  return { html, text: `${dateline}\n\n${GREETING}\n${INTRO}` };
+  return { html, text: `${dateline}\n\n${GREETING}\n${result ? `${result}\n` : ''}${INTRO}` };
 }
 
 // The lead fact, when the lead names one whose own post is the lead's post.
@@ -312,24 +338,159 @@ function identifierBlock({ idItem }) {
 }
 
 // "A tool we'd use": the reviewed tool's lines and link, and Amazon's exact
-// sentence right after the link, in both parts. Every word comes from the
-// tool list. Styling only here: Amazon's trademark rules allow no Amazon
-// logo or Amazon-styled button in email, so the link stays plain text.
+// sentence right after the link. Every word comes from the tool list. Styling
+// only here: Amazon's trademark rules allow no Amazon logo or Amazon-styled
+// button in email, so the link stays plain text. The link carries
+// `clicktracking=off` (SendGrid must not rewrite an Amazon link). The block is
+// HTML only, the value of {{pi-tool}} for one reader (tool-block.js says why
+// there is no text form): the Waves badge, the block and a newline, wrapped the
+// way homeBlock wraps its HTML value, so a value of '' leaves the issue as it
+// reads without the block.
 function toolBlock(tool) {
   const about = tool.lines.join(' ');
   const html = [
     sectionHead(2, SECTIONS.tool, TOOL_EMOJI, tool.name),
     paragraph(escapeHtml(about)),
     `<div class="dm-box" style="margin:0 0 14px 0;padding:12px 16px;background:${newsletterPalette().cardBg};border-radius:10px;">`,
-    `<p style="margin:0 0 6px 0;font-size:16px;line-height:1.6;">🔗 ${link(tool.url, toolLinkText(tool))}</p>`,
+    `<p style="margin:0 0 6px 0;font-size:16px;line-height:1.6;">🔗 ${link(tool.url, toolLinkText(tool), { untracked: true })}</p>`,
     `<p style="margin:0;font-size:16px;line-height:1.6;">${escapeHtml(AMAZON_DISCLOSURE)}</p>`,
     '</div>',
   ].join('\n');
-  const text = ["A TOOL WE'D USE", about, '', `${toolLinkText(tool)}: ${tool.url}`, AMAZON_DISCLOSURE].join('\n');
-  return { html, text };
+  return { html: `${DIVIDER_HTML}\n${wrapBlock({ html })}\n` };
 }
 
-const wrapBlock = (b) => `<div class="dm-text">\n${b.html}\n</div>`;
+/**
+ * The send validator on one reader's tool block, as it is mailed: the HTML
+ * part. The block alone has no subject or text part: the fixed subject stands
+ * in for the subject, and the text input is '' (the validator needs a body in
+ * one part, and it has one). The send check refuses affiliate material in
+ * every email (AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL), and this block is that
+ * material by design (owner 2026-11-22 "A"), so that one error is tolerated,
+ * and only when the block's links are exactly one, the tool's own link
+ * (untracked), with Amazon's sentence after it. Any other error stands.
+ * @param {{ html: string }} block  toolBlock's result
+ * @param {{ url: string }} tool  the usable tool the block was made from
+ * @returns {string[]}
+ */
+function toolBlockErrors(block, tool) {
+  const { errors } = validateNewsletterDraft({
+    subject: 'Waves Pest Insider',
+    preview_text: SECTIONS.tool,
+    html_body: block.html,
+    text_body: '',
+    newsletter_type: PEST_INSIDER_TYPE,
+  });
+  const anchors = block.html.match(/<a\b/g) || [];
+  const hrefs = [...block.html.matchAll(/\bhref="([^"]*)"/g)].map((m) => m[1]);
+  const sentenceAt = block.html.indexOf(escapeHtml(AMAZON_DISCLOSURE));
+  const ownLinkOnly = anchors.length === 1 && hrefs.length === 1 && hrefs[0] === escapeHtml(tool.url)
+    && block.html.includes('<a clicktracking=off ') && sentenceAt > block.html.indexOf('</a>');
+  if (!ownLinkOnly) return [...errors, 'the tool block must hold one untracked link, the tool\'s own, with Amazon\'s sentence after it'];
+  return errors.filter((e) => !e.startsWith('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL'));
+}
+
+// The issue's poll: a Waves Pest Insider poll's token (newsletter-quiz.js),
+// written here from the poll id, never taken from the caller. The sender
+// turns it into each reader's own vote buttons; the archive and the FYI copy
+// show its question and answers with no links. Any other id adds nothing.
+function pollBlock(pollQuizId) {
+  if (!isPestInsiderPoll(pollQuizId)) return null;
+  return {
+    html: [sectionHead(3, null, POLL_EMOJI, SECTIONS.poll), `{{quiz:${pollQuizId}}}`].join('\n'),
+    text: `${SECTIONS.poll.toUpperCase()}\n{{quiz-text:${pollQuizId}}}`,
+  };
+}
+
+// "Your home" (owner-approved plan): a customer's own last visit and the month
+// they became a member (no visit count: the Waves app's records begin in August
+// 2025, so a count would be too low for a long-time customer). It is built per reader at send time from
+// structured facts (home.js loadHomeFacts) and never enters the shared body,
+// the archive or the FYI copy. It prints fixed words and values this code
+// formats itself: never a word read from the database (a service name the
+// office typed can hold a gate code, a name or a note), so the service line
+// is a key into the fixed label map below. There is no next-visit line on
+// purpose: the night planner can still move an untold visit's day, so a day
+// named here could be wrong by the time the email is read.
+// A label names the service line of the visit, never a result: an inspection-only visit
+// is on the termite or rodent line too, so those two say "service", not "protection" or "control".
+const HOME_LINE_LABELS = Object.freeze({
+  pest: 'pest control',
+  lawn: 'lawn care',
+  mosquito: 'mosquito control',
+  termite: 'termite service',
+  rodent: 'rodent service',
+  tree_shrub: 'tree and shrub care',
+});
+
+const realDay = (value, today) => (validDateOnly(value) && value <= today ? value : null);
+
+function homeLines(home, today) {
+  const last = realDay(home?.lastVisit?.date, today);
+  // A block never stands on its "since" line alone.
+  if (!last) return [];
+  const label = own(HOME_LINE_LABELS, home.lastVisit.line);
+  // A visit from an earlier year names its year: a December visit read in November
+  // would look like a coming date without it.
+  const day = formatDateOnly(last, { month: 'long', day: 'numeric', year: last.slice(0, 4) === today.slice(0, 4) ? undefined : 'numeric' });
+  const lines = [{ emoji: '📅', text: `Last visit: ${day}${label ? ` (${label})` : ''}.` }];
+  // "Member since" (the Waves app's own date): left out when it is missing, not a real
+  // day, still to come, or after the last visit, where the two lines would contradict.
+  const since = realDay(home.sinceDate, today);
+  if (since && since <= last) {
+    lines.push({ emoji: '🌊', text: `With Waves since ${formatDateOnly(since, { month: 'long', year: 'numeric', day: undefined })}.` });
+  }
+  return lines;
+}
+
+/**
+ * One reader's "Your home" block as { html, text }, or null when no line
+ * holds. html is the whole per-reader value of {{pi-home}} (the Waves badge,
+ * then the block, and a newline); text is the value of {{pi-home-text}} (it
+ * carries its own trailing blank line, so an empty value leaves the issue as
+ * it reads without the block).
+ * @param {{ lastVisit?: { date: string, line: string|null }, sinceDate?: string|null }} home
+ * @param {Date} [now]  a visit dated after today (Eastern) drops its line
+ */
+function homeBlock(home, now = new Date()) {
+  const lines = homeLines(home, etDateString(now));
+  if (!lines.length) return null;
+  const block = {
+    html: [
+      sectionHead(4, null, HOME_EMOJI, SECTIONS.home),
+      metaBox(lines.map((l) => `${l.emoji} ${escapeHtml(l.text)}`)),
+    ].join('\n'),
+    text: [SECTIONS.home.toUpperCase(), ...lines.map((l) => l.text)].join('\n'),
+  };
+  return { html: `${DIVIDER_HTML}\n${wrapBlock(block)}\n`, text: `${block.text}\n\n` };
+}
+
+// The send validator on one reader's block, as the issue passes it
+// (pest-insider/index.js sendGateErrors). The block alone has no subject:
+// the fixed one stands in for it.
+function homeBlockErrors(block) {
+  return validateNewsletterDraft({
+    subject: 'Waves Pest Insider',
+    preview_text: 'Your home',
+    html_body: block.html,
+    text_body: block.text,
+    newsletter_type: PEST_INSIDER_TYPE,
+  }).errors;
+}
+
+/**
+ * The substitutions for {{pi-home}} and {{pi-home-text}}: always both keys
+ * (a missing key would deliver the raw token), '' for a reader with no block.
+ * { substitutions, rejected }: rejected is true when the block was built but
+ * the send check refused it (its reader gets '' like any reader with none).
+ * @param {object|null|undefined} home  a loadHomeFacts entry
+ * @param {{ now?: Date, errorsOf?: (block: object) => string[] }} [opts]
+ */
+function homeSubstitutions(home, { now = new Date(), errorsOf = homeBlockErrors } = {}) {
+  const block = home ? homeBlock(home, now) : null;
+  if (!block) return { substitutions: { [HOME_TOKEN]: '', [HOME_TEXT_TOKEN]: '' }, rejected: false };
+  if (errorsOf(block).length) return { substitutions: { [HOME_TOKEN]: '', [HOME_TEXT_TOKEN]: '' }, rejected: true };
+  return { substitutions: { [HOME_TOKEN]: block.html, [HOME_TEXT_TOKEN]: block.text }, rejected: false };
+}
 
 /**
  * @param {{ subject: string, preview: string, sendDate?: string,
@@ -339,17 +500,25 @@ const wrapBlock = (b) => `<div class="dm-text">\n${b.html}\n</div>`;
  *   lead.postUrl must be one of the reviewed POST_URLS. lead.factId names the
  *   fact whose top picture, card and sources the issue shows (only when that
  *   fact's own post is lead.postUrl) and whose service picks the band's emoji. sendDate (YYYY-MM-DD)
- *   goes in the dateline. Any other field is ignored: the shared body takes
- *   no caller text.
+ *   goes in the dateline. pollQuizId, a Waves Pest Insider poll id, adds that
+ *   poll after "What's this?" (pollBlock). lastPoll, { quizId, counts } of the
+ *   last issue's poll, puts that poll's result line (pollResultLine) under the
+ *   greeting, before the intro: one paragraph in the HTML, its own line in the
+ *   text; no line when the poll has no votes. Any other field is ignored: the shared body takes no caller text.
  */
 function renderIssue(issue) {
   const lead = leadBlock(issue);
   const id = identifierBlock(issue);
+  const poll = pollBlock(issue.pollQuizId);
   const sections = [lead.text, id.text];
   const minutes = readMinutes([GREETING, INTRO, ...sections, SIGNOFF_TEXT].join(' '));
   const opening = openingBlock(issue, minutes);
-  const html = [wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), SIGNOFF_HTML].join('\n');
-  const text = [opening.text, ...sections, SIGNOFF_TEXT].join('\n\n');
+  const pollHtml = poll ? [DIVIDER_HTML, wrapBlock(poll)] : [];
+  // The tool token (HTML only) and the "Your home" tokens stand alone, glued
+  // to the closing (the referral line, then the sign-off) by no join of their
+  // own: a reader whose value is '' gets exactly the issue without the block.
+  const html = `${[wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml].join('\n')}\n${TOOL_TOKEN}${HOME_TOKEN}${CLOSING_HTML}`;
+  const text = `${[opening.text, ...sections, ...(poll ? [poll.text] : [])].join('\n\n')}\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`;
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: text };
 }
 
@@ -369,48 +538,9 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-// Puts `block` in front of the sign-off that closes `body`; a body with no
-// sign-off (one rendered before it existed) gets the block at its end.
-function beforeSignoff(body, block, signoff) {
-  if (body.endsWith(signoff)) return `${body.slice(0, body.length - signoff.length)}${block}\n${signoff}`;
-  return `${body}\n${block}`;
-}
-
-/**
- * One reader's block ({ html, text }) after the shared sections, behind the
- * Waves badge and before the sign-off. A new object comes back; `issue` is
- * not changed.
- */
-function addReaderBlock(issue, block) {
-  return {
-    ...issue,
-    html_body: beforeSignoff(issue.html_body, `${DIVIDER_HTML}\n${wrapBlock(block)}`, SIGNOFF_HTML),
-    text_body: beforeSignoff(issue.text_body, `${block.text}\n`, SIGNOFF_TEXT),
-  };
-}
-
-/**
- * The issue as an opted-in reader gets it: the shared issue with "A tool
- * we'd use" after "What's this?". Owner 2026-11-19: Amazon links go only to
- * readers who opted in, so the shared issue (renderIssue), which the archive
- * serves to anyone, never has the tool. The send path (PR 4) adds it per
- * recipient, only for a reader with opt-in evidence, and checks that body
- * before it sends. The tool is looked up in the registry as it is now, and
- * renders only while its link is still the one that passed the live check
- * (pre-push PR 3 r4). A tool that is not usable now (paused since the build,
- * unknown, or the registry cannot be read), or whose link changed since the
- * check, is left out: the same `issue` object comes back, so the reader
- * gets the shared copy.
- * @param {{ subject: string, preview: string, html_body: string, text_body: string }} issue  renderIssue's result
- * @param {{ productId: string, url: string }|null} picked  buildIssue's `tool`: its product id and checked link
- */
-function withToolBlock(issue, picked) {
-  const tool = picked ? toolById(picked.productId) : null;
-  if (!tool || tool.url !== picked.url) return issue;
-  return addReaderBlock(issue, toolBlock(tool));
-}
-
 module.exports = {
-  renderIssue, withToolBlock, addReaderBlock, wrapIssueHtml, escapeHtml, speciesEmoji,
+  renderIssue, wrapIssueHtml, escapeHtml, speciesEmoji,
+  toolBlock, toolBlockErrors, TOOL_TOKEN, homeBlock, homeBlockErrors, homeSubstitutions, hasHomeToken, neutralizeHomeTokens, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
   IDENTIFIER_URL, POST_LINK_TEXT, PHOTO_ID_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
+  CLOSING_TEXT,
 };

@@ -22,7 +22,8 @@ function conn(failTable = null) {
     for (const m of ['join', 'leftJoin', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'distinct', 'orWhere', 'orderBy', 'where', 'whereIn', 'whereNotIn']) chain[m] = () => chain;
     chain.select = async () => {
       if (failTable === table) throw new Error(`read failed: ${table}`);
-      return [];
+      // The visits themselves exist, on the dates their rows render (the reader pins each row to its own date).
+      return table === 'scheduled_services' ? ROWS.map((r) => ({ ...r, visit_id: null, status: 'pending' })) : [];
     };
     return chain;
   };
@@ -32,9 +33,6 @@ function conn(failTable = null) {
   return c;
 }
 
-const OLD = process.env.GATE_DAY_ONLY_PROMISE;
-beforeEach(() => { process.env.GATE_DAY_ONLY_PROMISE = 'true'; });
-afterEach(() => { if (OLD === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD; });
 
 describe('a forced read failure through the real loadTimeDisplay', () => {
   test('every row is marked failed, and a screen still shows the hour', async () => {

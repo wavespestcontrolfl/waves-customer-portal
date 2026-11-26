@@ -47,9 +47,9 @@ function installFetch({ search = {}, quickAdd = () => json({ customer: CREATED }
     if (url.includes('/admin/services?')) {
       return Promise.resolve(json({ services: catalog }));
     }
-    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
+    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
     if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
-    if (url.includes('/reservice-request-suggestion')) return Promise.resolve(json({ enabled: false, suggestion: null }));
+    if (url.includes('/reservice-request-suggestion')) return Promise.resolve(json({ suggestion: null }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json(discounts));
     if (url.includes('/admin/schedule/mosquito-onetime-quote')) return Promise.resolve(json({ price: 129 }));

@@ -44,7 +44,12 @@ const logger = require('../logger');
 // matrix for buildReportCrossSell, buildPortalOffer / buildPortalPurchaseBasis
 // / resolvePortalOfferTarget, and buildOfferForFamily (photo-triage) — they
 // can never disagree about what a customer may be offered.
-const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub'];
+// Owner ruling 2026-11-21 ("let's leave tree and shrub off ... just do pest
+// control and lawn care", every pushed surface): the ladder PUSHES pest and
+// lawn only. Tree & shrub stays a family a customer may CHOOSE from the My
+// Plan list (PURCHASE_FAMILIES) and a family the photo-triage lane may name
+// (a requested target, owner-reviewed) — it is never the ladder's pick.
+const OFFER_LADDER = ['pest_control', 'lawn_care'];
 
 // What a customer may CHOOSE to add from the My Plan "Add a service" list
 // (owner 2026-11-12: "let's have the rodent bait and the mosquito also added
@@ -54,7 +59,7 @@ const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub'];
 // always has. Termite stays out: its station installation is charged at the
 // start, and a one-tap purchase charges nothing at confirm.
 const PURCHASE_ONLY_FAMILIES = ['mosquito', 'rodent_bait'];
-const PURCHASE_FAMILIES = [...OFFER_LADDER, ...PURCHASE_ONLY_FAMILIES];
+const PURCHASE_FAMILIES = [...OFFER_LADDER, 'tree_shrub', ...PURCHASE_ONLY_FAMILIES];
 
 // Guarded-ownership families for the report's recent-report ambiguity guard
 // ONLY (see guardedFamilies below) — separate from OFFER_LADDER because
@@ -66,7 +71,10 @@ const PURCHASE_FAMILIES = [...OFFER_LADDER, ...PURCHASE_ONLY_FAMILIES];
 // fail the whole report card closed rather than fall through to
 // startFamilyForIdentity and pitch a 'start pest' card to a customer who
 // may still own a termite plan.
-const GUARDED_OWNERSHIP_FAMILIES = [...OFFER_LADDER, 'termite'];
+// Tree & shrub stays guarded after leaving the ladder (2026-11-21) for the
+// same reason termite did: a recent uncorroborated T&S identity is exactly as
+// ambiguous about ownership as it was before.
+const GUARDED_OWNERSHIP_FAMILIES = [...OFFER_LADDER, 'tree_shrub', 'termite'];
 
 // Prompts routed through customer-pricing-ai's own SERVICE_MATCHERS so the
 // offer prices exactly what the portal pricing panel would price for the same
@@ -124,10 +132,9 @@ function offerVocabulary(ownedKeys = []) {
 // ONE picker shared by buildReportCrossSell, buildPortalOffer /
 // buildPortalPurchaseBasis / resolvePortalOfferTarget, and buildOfferForFamily
 // (photo-triage): they can never disagree about what a customer may be
-// offered.
-//   all three pillars (pest+lawn+T&S)      → NO card (referral fills the slot)
+// offered. Tree & shrub left the ladder 2026-11-21 (see OFFER_LADDER):
+//   pest+lawn (with or without anything)   → NO card (referral fills the slot)
 //   T&S without lawn (incl. T&S+termite)   → lawn
-//   pest+lawn                              → tree & shrub
 //   has pest                               → lawn
 //   has lawn                               → pest
 //   termite-only / rodent- / mosquito-only → pest
@@ -138,12 +145,10 @@ function pickOfferTarget(ownedKeys) {
   const pest = owned.has('pest_control');
   const lawn = owned.has('lawn_care');
   const tree = owned.has('tree_shrub');
-  // Owns all three pillars → nothing to offer (owner 2026-09-28: termite is
-  // no longer a rung on any surface; `termite` ownership still counts as
-  // "has a plan" via the final pest_control default below).
-  if (pest && lawn && tree) return null;
+  // Owns both ladder rungs → nothing to offer (termite left 2026-09-28, tree
+  // & shrub 2026-11-21; their ownership still counts as "has a plan").
+  if (pest && lawn) return null;
   if (tree && !lawn) return 'lawn_care';
-  if (pest && lawn) return 'tree_shrub';
   if (pest) return 'lawn_care';
   if (lawn) return 'pest_control';
   // termite-only, or only non-ladder evidence (rodent, mosquito): the
@@ -154,10 +159,12 @@ function pickOfferTarget(ownedKeys) {
 // Identity-start rules (owner matrix 2026-08-13): when the customer owns
 // NOTHING recurring, the offer starts the family today's report belongs to —
 // a one-time lawn visit starts recurring lawn, a one-time T&S visit starts
-// recurring T&S, and everything else (pest, roach/flea/bed-bug specialties,
+// recurring LAWN (2026-11-21: T&S is never pushed; lawn is its ladder
+// neighbour, the same answer the T&S-without-lawn ownership row gives), and
+// everything else (pest, roach/flea/bed-bug specialties,
 // rodent, termite, WDO, mosquito, unknown) starts recurring pest, the anchor.
-// T&S is matched before lawn so a combined "Lawn, Tree & Shrub" identity
-// resolves to the more specific family.
+// Both the T&S and the lawn wording start lawn; the T&S match still runs
+// after the palm veto so "Palm Tree Injections" stays with the anchor.
 function startFamilyForIdentity(row = {}) {
   const s = [row.service_key, row.service_name, row.service_type]
     .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
@@ -169,7 +176,7 @@ function startFamilyForIdentity(row = {}) {
   // Plurals matched explicitly (codex #3379 r1 P2): "Trees & Shrubs" and
   // "Ornamentals" are normal catalog wording, and \btree\b alone misses
   // them — the ownership classifier handles the same variants.
-  if (/\b(trees?|shrubs?|ornamentals?)\b/.test(s)) return 'tree_shrub';
+  if (/\b(trees?|shrubs?|ornamentals?)\b/.test(s)) return 'lawn_care';
   if (/\b(lawns?|turf)\b/.test(s)) return 'lawn_care';
   return 'pest_control';
 }
@@ -233,7 +240,7 @@ function pickOption(options = [], targetKey) {
 // authority for the property-equality proof, shared with filterRowsToStreet.
 const { scopeKeysShareLocality } = require('../estimate-property-linkage');
 const { hasPresenceValue } = require('../pricing-engine/property-calculator');
-const { hasGlobalVerifyFlag } = require('../lookup-confidence');
+const { hasGlobalVerifyFlag, hasHighPriorityDimensionFlag } = require('../lookup-confidence');
 // Moved to visit-property-scope.js (codex round-5 P1) so the upcoming-visits
 // card can share this exact single-premises proof instead of re-deriving
 // its own (a legacy no-evidence row on a multi-property account must not
@@ -245,6 +252,9 @@ const { hasGlobalVerifyFlag } = require('../lookup-confidence');
 // take — the card treats a throw/false differently (excludes the one
 // unscoped row, not the whole card).
 const { customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
+// The plan start offer's lookup (buildStartOffer). Its own file and its own
+// entry in lookup-callers.js; the module requires nothing until it is called.
+const { strictCacheOnlyPropertyLookup } = require('./start-offer-lookup');
 
 // Stable digest of every field the card RENDERS. Key order is fixed by
 // construction, so the same visible offer always hashes identically.
@@ -323,30 +333,165 @@ function positiveOrNull(value) {
 // dimensions into a DIFFERENT service's price would launder that into an
 // unqualified exact per-application figure, since the new price is graded
 // on its own inputs and knows nothing about the original's caveat.
-// Shape-tolerant on purpose: the stored blob has carried v1 and v2 result
-// shapes, and a missed marker would read as "clean" — anything that looks
-// like a verification flag demotes the offer to the quote CTA.
-function estimateRequiresFieldVerification(estData) {
+//
+// WHAT counts as a marker: a non-empty list of verify codes (fieldVerify,
+// fieldVerifyFlags, turfFlags), or the row test the
+// plan mint holds its own fresh result to (draft-builder's
+// lineNeedsReviewBeforeExactPrice: lineRequiresReview, a heuristic turf
+// grade, a LOW pricing confidence, a guessed footprint). A hand-kept subset
+// read a LOW turf confidence only, so a heuristic turf BASIS at MEDIUM
+// (plausibleMaxTurfCap), a measurement request, a list of manual-review
+// reasons or a guessed footprint read as clean (#8132 pre-push r31).
+// One engine note is a marker too (ENGINE_REVIEW_NOTE_TYPE): the engine
+// writes LAWN_CUSTOM_QUOTE into the result's notes exactly when a row carries
+// customQuoteFlag, and the mapped result keeps the note but drops that flag
+// from a one-time lawn row (pre-push r12 on this branch). No other note type
+// states a review requirement.
+// A stored row can also spell the quote-required flag in snake_case
+// (quote_required, requires_custom_quote). No writer in the code base does,
+// and on 2026-11-21 no stored estimate held either key, but the two readers
+// of stored recurring rows take both spellings (estimate-converter.js
+// recurringRowRequiresQuote, estimate-public.js), so a row they treat as
+// quote-required is not a clean seed here (pre-push r13).
+//
+// WHERE it looks: every object of the stored blob. The blob has kept its
+// rows in many places (raw lineItems, the mapped recurring.services and
+// one-time items, the selected lawn's lawnMeta, the result-level review
+// summaries), and a list of places misses the next one: on 2026-11-20, 19
+// accepted estimates held a review-marked row the old list did not read. A
+// missed marker reads as "clean", so an unknown key is read, never skipped.
+// Two parts of the blob are not markers of the price:
+//   - what was fed INTO the pricer:
+//       a. the stored requests (SEED_INPUT_KEYS), at any depth: the estimator
+//          also attaches the request to the result it saves. The lookup
+//          profile kept there lists verify flags for most properties, and
+//          reading all of them would end nearly every seeded price. ONE kind
+//          is read (owner 2026-11-22): a HIGH flag on home size, lot size,
+//          stories or the whole lookup (lookup-confidence's
+//          hasHighPriorityDimensionFlag), the lookup's own "verify before
+//          pricing" grade on a dimension a seed replays. It counts whether or
+//          not the office corrected the number afterwards: the stored request
+//          does not say, and the office prices such a home by hand. On
+//          2026-11-22, 12 of 165 production seeds read as clean and held one;
+//       b. the service picks at the root (`services` as an object keyed by
+//          service). The quote wizard stores the request body's picks there
+//          as submitted, beside the normalized engineInput, and the lead
+//          auto-draft stores its mapped picks there. A caller's option is not
+//          a priced row (pre-push r3 on this branch). Rows are kept in lists
+//          (result.recurring.services): a list under this key is read, and so
+//          is an object under it anywhere below the root.
+//   - the turf signal on a result's `property` summary (its turf grade and
+//     its turfFlags list): the engine's own lawn-size guess for the lot,
+//     which every result carries, a pest-only quote included. Whether that
+//     guess reached the quote's price is the engine's to say, and it says it
+//     in the result's fieldVerify list: the summary's flags for a quote that
+//     priced a turf service, empty for any other. That list is read like any
+//     other marker. So the summary itself counts in two cases only:
+//       1. the caller replays a lawn size (replaysLawnSize; the seed loader
+//          passes what it replays, and a caller that says nothing gets the
+//          strict reading). A replayed size is the one case where the guess
+//          could reach a new price as a supplied measurement. Without one, a
+//          new lawn price computes and grades its own turf.
+//       2. the result does not keep the engine's list, so nothing says
+//          whether the guess reached its price. It is read strictly.
+//
+// A SLIM engine result cannot show that its quote was clean, so it always
+// counts (pre-push r2 to r5 on this branch). The quote wizard and the lead
+// auto-draft store a projection under `engineResult` (public-quote.js;
+// lead-estimate-automation.js compactLineItem): they drop the engine's
+// fieldVerify list and row markers the shared row test reads. The wizard's
+// rows lose the review flag and its reasons, the turf confidence, the
+// footprint markers and the tree-count source; the auto-draft's rows keep
+// one folded quote-required flag. What is left can read as clean whatever
+// the engine said: a parcel-capped lawn quote did, and so did a Tree & Shrub
+// quote priced on a default of zero trees. The check does not rebuild the
+// engine's answer from the stored request or from the slim rows: a request
+// can be older than the result beside it, and the dropped markers are gone.
+// The missing list is
+// how it knows the projection: the engine's result and the mapped one both
+// keep it (on 2026-11-21 the 74 stored estimates with an `engineResult` and
+// no list were all wizard quotes or lead auto-drafts, none accepted). A
+// published website quote stores the full result
+// (website-quote-publication.js), so a quote the customer accepted online is
+// read as the engine graded it.
+//
+// BOTH results are read when an estimate holds a `result` and an
+// `engineResult` (pre-push r8 to r11 on this branch). A staff save stores the
+// mapped result and its raw twin from the same pricing run
+// (admin-estimate-persistence.js: "the RAW server engine result rides along
+// with its mapped twin"), and the mapped one does not carry every row marker:
+// an oversize one-time lawn row keeps its customQuoteFlag on the raw row only
+// (the mapped result keeps the engine's note for it, read above).
+// So the check does not pick one of the two as the estimate's price. Two
+// narrower readings were built and dropped: reading only the result that
+// estimate-result-container.js calls current lost that flag, and reading
+// the other one for a service priced only there needs the pricing audit's
+// line merge. The cost of reading both is on the safe side: an older
+// estimate whose `engineResult` was left behind by a revision keeps the
+// quote button for a marker on a row since corrected, as it does on main,
+// and a slim `engineResult` beside a full `result` counts. On 2026-11-21
+// no production seed's verdict depended on which of the two is read.
+const SEED_INPUT_KEYS = new Set(['inputs', 'engineInputs', 'engineInput', 'engineRequest', 'enriched']);
+const ENGINE_REVIEW_NOTE_TYPE = 'LAWN_CUSTOM_QUOTE';
+
+function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } = {}) {
   if (!estData || typeof estData !== 'object') return false;
-  const markedForReview = (c) => {
-    if (!c || typeof c !== 'object') return false;
-    if (Array.isArray(c.fieldVerify) && c.fieldVerify.length) return true;
-    if (Array.isArray(c.fieldVerifyFlags) && c.fieldVerifyFlags.length) return true;
-    if (c.requiresManualReview === true || c.customQuoteFlag === true) return true;
-    if (String(c.pricingConfidence || '').toLowerCase() === 'low') return true;
-    return String(c.turfConfidence || '').toLowerCase() === 'low';
-  };
-  const containers = [estData, estData.result, estData.estimate, estData.engineResult, estData.estimatorEngine];
-  return containers.some((c) => {
-    if (!c || typeof c !== 'object') return false;
-    if (markedForReview(c)) return true;
-    // PER-SERVICE markers live on the line items (codex #3367 PR r14): a
-    // normal engine-backed estimate records its review posture there, so a
-    // Tree & Shrub line at pricingConfidence 'low' sits under an empty
-    // top-level fieldVerify and read as clean. The engine's own quote
-    // grader reads the line first for exactly this reason.
-    return Array.isArray(c.lineItems) && c.lineItems.some(markedForReview);
-  });
+  const { lineNeedsReviewBeforeExactPrice } = require('../estimator-engine/draft-builder');
+  const listsCodes = (list) => Array.isArray(list) && list.length > 0;
+  // The row test's zero-tree marker asks for the row's service. The mapped
+  // result keeps the Tree & Shrub pricer's treeCountSource on the selected
+  // program's meta (results.tsMeta), which names no service, so a price on a
+  // default of zero trees read as clean (pre-push r6 on this branch). Only
+  // that pricer writes the field: an object that holds it and names no
+  // service is graded as the tree_shrub row it describes.
+  //
+  // The row test clears the marker when the palms priced: palms on the
+  // service line, or any palms with the reserve armed. The meta keeps the
+  // palm count, its source and the quote-time knobs, and not the row's
+  // palmReserveActive flag (pre-push r7). pricedTreeShrubPalmCount is the
+  // existing reader of that evidence on both shapes, so the meta's palms
+  // clear the marker exactly when the raw row's do.
+  const { pricedTreeShrubPalmCount } = require('../pricing-engine/tree-shrub-palm-priced');
+  const asRow = (c) => (c.treeCountSource !== undefined && c.service === undefined
+    ? { ...c, service: 'tree_shrub', palmReserveActive: pricedTreeShrubPalmCount(c) != null }
+    : c);
+  const markedForReview = (c, turfCounts) => listsCodes(c.fieldVerify) || listsCodes(c.fieldVerifyFlags)
+    || (turfCounts && listsCodes(c.turfFlags)) || c.type === ENGINE_REVIEW_NOTE_TYPE
+    || c.quote_required === true || c.requires_custom_quote === true
+    || lineNeedsReviewBeforeExactPrice(asRow(c), { turfGrade: turfCounts });
+  const turfSummaryCounts = (result) => replaysLawnSize || !Array.isArray(result.fieldVerify);
+  const isKeyed = (value) => Object.prototype.toString.call(value) === '[object Object]';
+  const servicePicks = (node, key, value) => node === estData && key === 'services' && isKeyed(value);
+  const slimResult = (key, value) => key === 'engineResult' && isKeyed(value) && !Array.isArray(value.fieldVerify);
+  // The stored JSON is a finite tree, so the walk needs no depth limit; a
+  // limit would be a place where a marker reads as clean.
+  // `request` marks a node below a stored request: only the lookup's HIGH
+  // dimension flags are read there.
+  const pending = [{ node: estData, turfCounts: true, request: false }];
+  while (pending.length) {
+    const { node, turfCounts, request } = pending.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const item of node) pending.push({ node: item, turfCounts, request });
+      continue;
+    }
+    if (request) {
+      if (hasHighPriorityDimensionFlag(node)) return true;
+      for (const child of Object.values(node)) pending.push({ node: child, turfCounts, request });
+      continue;
+    }
+    if (markedForReview(node, turfCounts)) return true;
+    for (const [childKey, child] of Object.entries(node)) {
+      if (servicePicks(node, childKey, child)) continue;
+      if (SEED_INPUT_KEYS.has(childKey)) {
+        pending.push({ node: child, turfCounts, request: true });
+        continue;
+      }
+      if (slimResult(childKey, child)) return true;
+      pending.push({ node: child, turfCounts: childKey !== 'property' || turfSummaryCounts(node), request });
+    }
+  }
+  return false;
 }
 
 // Property-dimension seed from the customer's own estimate history: the
@@ -501,10 +646,11 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     delete cleanedFeatures.treeCount;
     zeroTreeCountAmbiguous = true;
   }
+  const seedLawnSqFt = positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf);
   const seed = {
     homeSqFt: positiveOrNull(inputs.homeSqFt),
     lotSqFt: positiveOrNull(inputs.lotSqFt),
-    lawnSqFt: positiveOrNull(inputs.lawnSqFt) || positiveOrNull(inputs.turfSf),
+    lawnSqFt: seedLawnSqFt,
     bedArea: positiveOrNull(inputs.bedArea),
     bedAreaSource: cleanString(inputs.bedAreaSource),
     stories: positiveOrNull(inputs.stories),
@@ -533,7 +679,7 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
     // must not be replayed into an exact price for a different service,
     // which would be graded high-confidence on inputs that were never
     // qualified. Demotes to the quote CTA; the offer itself still renders.
-    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData),
+    requiresFieldVerification: estimateRequiresFieldVerification(pick.estData, { replaysLawnSize: seedLawnSqFt != null }),
     propertyType: cleanString(inputs.propertyType),
     yearBuilt: positiveOrNull(inputs.yearBuilt),
     constructionMaterial: cleanString(inputs.constructionMaterial),
@@ -850,13 +996,6 @@ async function buildReportCrossSell(service, database, {
     // connection succeeded milliseconds earlier.
     const ladderEvidence = [...ownedKeys, ...reportFamilies];
 
-    // Owner ruling 2026-09-28: a customer who owns all three pillars gets NO
-    // card at all — the referral card fills that slot instead.
-    {
-      const pillars = offerVocabulary(ladderEvidence);
-      if (pillars.has('pest_control') && pillars.has('lawn_care') && pillars.has('tree_shrub')) return null;
-    }
-
     // No recurring evidence at all → the identity-start branch: offer starts
     // the family today's report belongs to (owner matrix 2026-08-13). With
     // evidence, the ownership matrix decides. relationship below stays
@@ -967,11 +1106,11 @@ async function buildReportCrossSell(service, database, {
     );
 
     const option = result.ok ? pickOption(result.options, targetKey) : null;
-    // A tree & shrub offer built on a seed whose zero tree count was
-    // provenance-ambiguous never prices (codex #3367 PR r10) — the count
-    // may have been an operator-confirmed zero the fallback would
-    // contradict, or a synthetic zero the replay would price at nothing.
-    const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
+    // No zero-tree-count check here: this report path only ever targets the
+    // ladder (pest, lawn — tree & shrub left it 2026-11-21). A REQUESTED
+    // tree & shrub offer (My Plan list, photo triage) prices in
+    // composePricedOfferBasis, which keeps that guard (pinned in
+    // portal-offer.test.js).
     // A seed whose own estimate required field verification never prices
     // (codex #3367 PR r13). Conservative by design: the flag demotes even
     // when the seed only partly filled the profile, because the estimate's
@@ -980,7 +1119,7 @@ async function buildReportCrossSell(service, database, {
     // would need provenance the stored blob does not carry.
     const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
     const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
-      && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification
+      && !correctionsUnapplied && !seedRequiresVerification
       && !rodentSetupFeeUnwaived(targetKey, result.currentServiceKeys);
 
     const payload = {
@@ -1134,7 +1273,10 @@ async function composePortalOffer(customerId, database, { propertyLookup = cache
 // customer row = property). Returns { customer, primaryStreet } once the
 // customer is live, residential, and provably single-premises, or null on
 // any failure.
-async function resolvePortalOfferPremises(database, customerId) {
+// unresolvedFails (buildStartOffer alone asks for it): the strict form of the
+// single-premises proof. A visit whose link cannot be resolved might be at a
+// second home, and it then fails the proof. The cards keep the default form.
+async function resolvePortalOfferPremises(database, customerId, { unresolvedFails = false } = {}) {
   const customer = await database('customers').where({ id: customerId }).first();
   if (!customer || customer.active === false || customer.deleted_at) return null;
 
@@ -1150,7 +1292,7 @@ async function resolvePortalOfferPremises(database, customerId) {
   );
   if (!primaryStreet) return null;
   if (linkage.scopeKeyLacksLocality(primaryStreet)) return null;
-  if (!(await customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet))) {
+  if (!(await customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet, { unresolvedFails }))) {
     return null;
   }
 
@@ -1228,7 +1370,7 @@ async function resolvePortalOfferTarget(database, customerId, customer, primaryS
 // route leaves the draft pending with a 503.
 // Returns { result, propertySeed, correctionsUnapplied } to hand to the
 // outcome stage, or null for every fail-closed/refused exit this stage owns.
-async function resolvePortalOfferPricingResult({ database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError }) {
+async function resolvePortalOfferPricingResult({ database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError, strictPriceSettings = false }) {
   // Best-effort seed — a failed estimate read must not kill the card, it
   // just prices without the seed (and likely degrades to the CTA).
   let propertySeed = null;
@@ -1265,6 +1407,10 @@ async function resolvePortalOfferPricingResult({ database, customerId, customer,
     db: database,
     propertyLookup: trackedPropertyLookup,
     propertySeed,
+    // The pricer's strict option (buildStartOffer alone asks for it): the
+    // account must be free to start a plan, the price settings are loaded for
+    // this one call, and a price marked for a hand check is withheld.
+    strictPriceSettings,
   });
 
   let correctionsUnapplied = false;
@@ -1424,11 +1570,106 @@ async function buildPortalPurchaseBasis(customerId, database, opts = {}) {
   }
 }
 
+// The start offer follows ONE visit, and that visit must be this customer's.
+// Where the visit was needs no second proof: the caller then proves the
+// ACCOUNT single-premises in the strict form (resolvePortalOfferPremises,
+// unresolvedFails), and that proof reads every visit of the account. A stamp
+// or a link that names another home fails it, and so does a link that cannot
+// be resolved. The order matters: this read runs FIRST, so the proof reads
+// the account after the visit is known to be on it, and a visit that joined
+// the account a moment ago is among the rows the proof reads. A failed read
+// throws, by buildStartOffer's contract.
+async function visitIsOfCustomer(database, customerId, visitId) {
+  const visit = await database('scheduled_services').where({ id: visitId, customer_id: customerId }).first('id');
+  return Boolean(visit);
+}
+
+// The plan a start offer may price: the pricer's strict option prices pest
+// control only (the standard pest price is the one whose settings rows it
+// proves).
+const START_OFFER_FAMILIES = Object.freeze(['pest_control']);
+// The pricer's refusal of the account (PLAN_START_BLOCKED, the shared proof
+// in plan-start-eligibility.js), as the reason this function answers.
+// Each keeps its own word: the job holds a commercial or a closed account, and sends only an unproven address to
+// the office to quote by hand.
+const START_OFFER_REASON_OF_BLOCKER = Object.freeze({ has_plan: 'has_plan', commercial: 'commercial', not_live: 'not_live' });
+
+// buildStartOffer(customerId, database, targetKey, { visitId }) → { option, reason }.
+// The one-time job to plan offer's price (owner 2026-11-19): the standard
+// plan of ONE family (START_OFFER_FAMILIES) for a customer who has NO plan.
+// composePortalOffer answers null for that customer on purpose (its card ADDS
+// a service to a plan), so this runs the same stages with the pricer's strict
+// option (strictPriceSettings in customer-pricing-ai.js). The pricer then
+// asks the shared proof whether the account may start a plan, prices on
+// price settings it loads for this one call, and withholds a price that is
+// marked for a hand check. Same premises proof, estimate seed and demotions
+// as every other offer surface.
+// `option` is the full quoted option for a priced answer, else null with the
+// `reason` the app could not offer or price it:
+//   'premises'   not a live, residential account that is proven
+//                single-premises in the strict form (any visit at another
+//                home, or with a link that cannot be resolved, fails it), or
+//                the visit is not this customer's;
+//   'has_plan'   the customer already holds a plan;
+//   'commercial' the pricer's proof refused the account or the priced
+//                property as a business (a saved record, or the property
+//                lookup it resolved): no home to offer a plan to;
+//   'not_live'   the pricer's proof refused the account as not live;
+//   'not_priced' the home has no standard price the app may show alone.
+// `visitId` is the visit the offer follows, and it is REQUIRED: it must be a
+// visit of this customer (visitIsOfCustomer). The price is for the primary
+// home, and the strict account proof shows that every visit of the account
+// is there. WHICH visit earns an offer (a completed one-time pest job, its
+// age, no later visit) is the sender's rule, not this function's: it prices
+// for any visit of the customer.
+// A priced answer is always the family's STANDARD plan (PREFERRED_OPTION_IDS):
+// the offer names one plan, so pickOption's fallbacks (another cadence, the
+// first option) are 'not_priced' here, never a price under the wrong name.
+// THROWS on a failed read: the caller is a job that tries again, and an
+// outage must never read as "this home cannot be priced". That covers the
+// lookup (the default is the strict cache-only form of start-offer-lookup.js,
+// so a failed cache read is not a miss and a failed correction read is not
+// "no corrections"), the
+// staff-correction probe, the proof's reads and the price settings
+// (PRICING_CONFIG_UNAVAILABLE). One read does not throw: the pricer's read
+// of the turf profile. The pest price uses no value of it, so a failed read
+// of it cannot change the answer.
+// `database` must not be a transaction: the pricer's strict option refuses
+// one (it loads the price settings on the app's own connection).
+async function buildStartOffer(customerId, database, targetKey, { propertyLookup = strictCacheOnlyPropertyLookup, visitId = null } = {}) {
+  if (!customerId || !database || !visitId || !START_OFFER_FAMILIES.includes(targetKey)) {
+    throw new Error('buildStartOffer: a customer, a database, a start offer family and the visit the offer follows are required');
+  }
+  // The visit first, then the account proof that reads it (visitIsOfCustomer).
+  if (!(await visitIsOfCustomer(database, customerId, visitId))) return { option: null, reason: 'premises' };
+  const premises = await resolvePortalOfferPremises(database, customerId, { unresolvedFails: true });
+  if (!premises) return { option: null, reason: 'premises' };
+  const { customer, primaryStreet } = premises;
+  let pricing;
+  try {
+    pricing = await resolvePortalOfferPricingResult({
+      database, customerId, customer, targetKey, primaryStreet, propertyLookup, throwOnError: true, strictPriceSettings: true,
+    });
+  } catch (err) {
+    const reason = err?.code === 'PLAN_START_BLOCKED' ? START_OFFER_REASON_OF_BLOCKER[err.blocker] : null;
+    if (!reason) throw err;
+    return { option: null, reason };
+  }
+  if (!pricing || pricing.refusal) return { option: null, reason: 'not_priced' };
+  // A customer who reaches the price holds no plan, so nothing is owned.
+  const { option } = composePricedOfferBasis({
+    ...pricing, targetKey, ownedKeys: [], evidencedOwnedKeys: [], customer, primaryStreet,
+  });
+  const standardPlan = option && option.id === PREFERRED_OPTION_IDS[targetKey];
+  return standardPlan ? { option, reason: null } : { option: null, reason: 'not_priced' };
+}
+
 module.exports = {
   buildReportCrossSell,
   buildPortalOffer,
   buildOfferForFamily,
   buildPortalPurchaseBasis,
+  buildStartOffer,
   // The families a customer may choose to add: the My Plan "Add a service"
   // list walks it, and a one-tap purchase accepts no family outside it.
   PURCHASE_FAMILIES,

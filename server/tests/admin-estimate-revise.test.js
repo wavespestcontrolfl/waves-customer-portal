@@ -781,6 +781,27 @@ describe('reviseAdminEstimate', () => {
     expect(JSON.parse(invented.updates[0].estimate_data).assessment_exception).toBeUndefined();
   });
 
+  test('carries the website link-text receipt across a staff revision; a browser copy cannot invent, repoint or clear it', async () => {
+    const receipt = { at: '2026-10-01T12:01:00.000Z' };
+    const withReceipt = {
+      ...sentEstimate,
+      estimate_data: JSON.stringify({ ...JSON.parse(sentEstimate.estimate_data), websiteLinkText: receipt }),
+    };
+    const run = async (estimate, estimateData) => {
+      const db = makeReviseDatabase({ estimate });
+      await reviseAdminEstimate({
+        database: db.database, estimateId: 'est-1', body: { ...reviseBody, estimateData }, recompute: noRecompute, now: fixedNow,
+      });
+      return JSON.parse(db.updates[0].estimate_data).websiteLinkText;
+    };
+    // A revision that does not mention it keeps the stored receipt.
+    expect(await run(withReceipt, { ...reviseBody.estimateData })).toEqual(receipt);
+    // A browser copy carrying a fake one cannot repoint it.
+    expect(await run(withReceipt, { ...reviseBody.estimateData, websiteLinkText: { at: '2026-01-01T00:00:00.000Z' } })).toEqual(receipt);
+    // ...nor invent one on a row that has none.
+    expect(await run(sentEstimate, { ...reviseBody.estimateData, websiteLinkText: { at: '2026-01-01T00:00:00.000Z' } })).toBeUndefined();
+  });
+
   test('preserves the locked publication window and anchor routing across wholesale revisions', async () => {
     const originalData = JSON.parse(sentEstimate.estimate_data);
     const prior = { ...sentEstimate, estimate_group_id: '11111111-1111-4111-8111-111111111111', estimate_data: JSON.stringify({ ...originalData,

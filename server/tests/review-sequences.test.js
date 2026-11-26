@@ -6577,10 +6577,10 @@ describe('shared ask history foundation', () => {
     const LINK_DEPENDENT_ONLY = new Set(['recovery_review']);
     for (const t of templates.OUTREACH_TEMPLATES) {
       if (!templates.isAskTemplate(t.id)) continue; // no-link check-ins are not asks
-      const linkFreeBody = templates.renderOutreachBody(t.body, {
+      const bodyWithoutUrl = templates.renderOutreachBody(t.body, {
         first: 'Jamie', tech: 'Bob', sender: 'Bob with Waves', review_url: '',
       });
-      const detected = history.looksLikeReviewAsk(linkFreeBody);
+      const detected = history.looksLikeReviewAsk(bodyWithoutUrl);
       if (LINK_DEPENDENT_ONLY.has(t.id)) {
         expect(detected).toBe(false);
       } else {

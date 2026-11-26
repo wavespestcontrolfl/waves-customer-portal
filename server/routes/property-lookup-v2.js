@@ -20,7 +20,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, addressMayNameUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
-const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-area');
+const { isInServiceAreaBox, zipFromAddressText, namesExcludedPlace, namesSharedZipWithoutCity } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -75,6 +75,7 @@ const {
 } = require('../services/estimator-engine/property-facts-shadow');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
+const { hasStructuredCommercialAiSignal } = require('../services/property-lookup/commercial-ai-signal');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
 const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
@@ -925,6 +926,9 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   if (geo) try {
     lat = geo.lat;
     lng = geo.lng;
+    // The geocoder's own city and ZIP ride on the cached record: an AI-only record carries neither, and a cache hit
+    // must reach the same held-place verdict as this lookup (owner ruling 2026-11-23).
+    if (result.propertyRecord && (geo.city || geo.zip || geo.formattedAddress)) result.propertyRecord._geoLocality = { city: geo.city || null, zip: geo.zip || null, formattedAddress: geo.formattedAddress || null };
 
     // Validate within SWFL service area
     if (!isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })) {
@@ -977,7 +981,15 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
-        inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }),
+        // The box AND no excluded place: DeSoto, Punta Gorda and any place held until a second technician is
+        // hired (services/excluded-localities.js) sit inside served counties, so the coordinate alone cannot say no.
+        inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }), {
+          city: geo.city,
+          zip: geo.zip,
+          // the same evidence a cache hit reads (record + stored geocode): a county record naming a held town counts here too
+          places: [{ city: result.propertyRecord?.city, zip: result.propertyRecord?.zipCode }],
+          text: [geo.formattedAddress, result.propertyRecord?.formattedAddress, address],
+        }),
         _microCloseB64: microCloseB64,
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
@@ -1335,9 +1347,14 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     // changes the in-area verdict.
     satellite: buildSatelliteUrlSet(lat, lng, {
       county: record?._parcel?.county || record?.county || null,
+      city: record?.city || null,
+      places: [record?._geoLocality].filter(Boolean),
+      // The cached record's own address text names a held place the same way a fresh geocode does.
+      text: [record?.formattedAddress, record?._geoLocality?.formattedAddress, row?.normalized_address, address],
       // AI-only records carry zipCode '' — fall back to the formatted
       // address, the cache row's normalized address, then the typed one.
       zip: record?.zipCode
+        || record?._geoLocality?.zip
         || zipFromAddressText(record?.formattedAddress)
         || zipFromAddressText(row?.normalized_address)
         || zipFromAddressText(address)
@@ -1358,6 +1375,14 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
 
 // Client-facing satellite URL set (no vision base64s — cache hits skip the
 // vision pipeline entirely; the stored aiAnalysis already covers it).
+// The public lookup's area verdict: false outside the box or at an excluded place; null (unknown) when the only locality
+// evidence is a ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983) with no city anywhere; true otherwise.
+// Staff readers treat only `false` as a stop and the call lookup uses only `true`.
+function serviceAreaVerdict(inBox, evidence) {
+  if (!inBox || namesExcludedPlace(evidence)) return false;
+  return namesSharedZipWithoutCity(evidence) ? null : true;
+}
+
 function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
@@ -1371,7 +1396,7 @@ function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
     superCloseUrl: urlAtZoom(20),
     closeUrl: urlAtZoom(19),
     wideUrl: urlAtZoom(18),
-    inServiceArea: isInServiceAreaBox(lat, lng, areaEvidence),
+    inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, areaEvidence), areaEvidence),
   };
 }
 
@@ -4024,17 +4049,6 @@ function commercialSignalText(rc = {}, ai = {}) {
     .toLowerCase();
 }
 
-function hasStructuredCommercialAiSignal(ai = {}) {
-  const propertyUse = String(ai?.propertyUse || '').trim().toUpperCase();
-  const commercialUseType = String(ai?.commercialUseType || '').trim().toUpperCase();
-  const nonCommercialUseTypes = ['NONE', 'UNKNOWN', 'RESIDENTIAL', 'NO', 'FALSE', 'N/A', 'NA', 'NOT_COMMERCIAL', 'NON_COMMERCIAL'];
-  if (['COMMERCIAL', 'MIXED'].includes(propertyUse)) return true;
-  if (!commercialUseType || nonCommercialUseTypes.includes(commercialUseType)) {
-    return false;
-  }
-  return commercialUseType === 'OTHER' || normalizePricingPropertyType(commercialUseType) === 'commercial';
-}
-
 // propertyType sourceTypes that describe THIS parcel authoritatively (a county
 // roll, cadastral FDOR roll, permit, builder floorplan, or a tech-verified
 // read) — as opposed to a web/listing hit that can describe a NEIGHBORING
@@ -6107,8 +6121,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       };
     }
   }
-  // Annual rodent guarantee — gated. The engine drops the line unless all four
-  // eligibility flags are true, so the rep confirms each affirmatively; missing
+  // Annual rodent guarantee — gated. The engine drops the line unless all three
+  // eligibility flags are true (trapping, exclusion, no activity; sanitation is not required), so the rep confirms each affirmatively; missing
   // any → INELIGIBLE and no line item (fail closed). Pass the normalized
   // homeSqFt/stories/roofType so tiering (standard/complex/estate) keys off the
   // same authoritative inputs as the rest of the estimate — the engine's
@@ -6122,7 +6136,6 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       eligibility: {
         trappingCompleted: !!o.rgTrappingCompleted,
         exclusionCompleted: !!o.rgExclusionCompleted,
-        sanitationCompletedOrPhotoBaseline: !!o.rgSanitationBaseline,
         noActivityAfterFinalTrapCheck: !!o.rgNoActivityAfterFinalCheck,
       },
     };
@@ -6875,6 +6888,7 @@ module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
 module.exports.resolveCalculateQualifyingEvidence = resolveCalculateQualifyingEvidence;
 module.exports.countyCeilingStillValid = countyCeilingStillValid;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
+module.exports.buildSatelliteUrlSet = buildSatelliteUrlSet;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyCommercialSuiteSize,

@@ -15,6 +15,7 @@ const logger = require('../services/logger');
 // Real handoffs kept in deliveryState.deliveredAt (oldest dropped first).
 const DELIVERY_HISTORY_MAX = 25;
 const { shortenOrPassthrough } = require('../services/short-url');
+const { buildFollowUpText, followUpServiceNameFor, swapLongLinkForShort } = require('../services/estimate-follow-up-text');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { estimateGreetingFirstName, estimateGreetingFirstToken } = require('../utils/greeting-first-name');
@@ -30,7 +31,9 @@ const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
 const { nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem } = require('../utils/phone');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
+const { freezeRoofPointsForEstimate } = require('../services/estimate-roof-points');
 const { soldByLive, setEstimateSoldBy, listSellerCandidates, loadSoldByForList, soldByRowFields } = require('../services/estimate-sold-by');
 const {
   buildEstimatePricingAudit,
@@ -267,6 +270,8 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
 }
 
 const REVIEW_STALE_MESSAGE = 'The saved offer, its wording, its PDF copy or its monthly average changed before delivery. Review the current version; nothing was sent.';
+// For the one check that runs after the text may have gone out (the email build): it speaks of the email only.
+const REVIEWED_EMAIL_LINE_STALE_MESSAGE = 'The estimate changed after its email was reviewed, so the email was not sent. Review the current version, then send the email.';
 
 function moneySummary(estimate = {}, { allowTotals = false, average = null } = {}) {
   const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
@@ -310,11 +315,14 @@ const PROPOSAL_NEXT_STEP_SUMMARY = 'To get started, reply to this email or call 
 // preview, the verdict check and the send all use these).
 const emailPdfCopy = () => require('../services/estimate-email-pdf');
 
-function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false, pdfNote = '', average = null }) {
+function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode = false, pdfNote = '', average = null, noVisitLine: decidedNoVisitLine }) {
   const serviceSummary = inferEstimateServiceInterest({
     ...estimate,
     estimateData: estimate.estimate_data,
   });
+  // The send passes the line it decided (for a reviewed send, the reviewed one: noVisitLineForSend), and the
+  // preview passes '' to render the email without it. With no decision the row decides.
+  const noVisitLine = decidedNoVisitLine ?? require('../services/estimate-no-visit-line').noVisitLineFor(estimate, { proposalMode });
   return {
     first_name: firstName,
     estimate_url: viewUrl,
@@ -332,6 +340,10 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
     // Only present when the PDF copy rides along:
     // an absent key renders no block, so a send without it is unchanged.
     ...(pdfNote ? { estimate_pdf_note: pdfNote } : {}),
+    // "We measure your home and yard ... so most quotes need no visit." (owner 2026-11-21): a home estimate only.
+    // estimate.delivery also carries a commercial estimate that has no proposal; for it, and for a proposal, the
+    // key is absent and the template's paragraph renders nothing.
+    ...(noVisitLine ? { estimate_no_visit_line: noVisitLine } : {}),
   };
 }
 
@@ -1112,6 +1124,9 @@ async function buildEstimateSendPreview(estimate) {
   // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
   // refuse a changed one; absent = none (like pdfCopy, present only when there is one).
   const averageText = require('../services/estimate-monthly-average').averageText(average);
+  // The "no visit needed" line of this email. The review records it when it changes the email (below), and the
+  // send refuses a reviewed line that no longer fits the estimate (estimate-no-visit-line.js). Absent = none.
+  const noVisitLine = require('../services/estimate-no-visit-line').noVisitLineFor(estimate, { proposalMode });
   // GATE_ESTIMATE_UPDATED_WORDING: a corrected estimate's text and email say "updated". Each channel falls back to its
   // normal template when the updated one is off or missing, and the email carries `updated` only when it used the
   // updated template, so the send loads that same template. Gate off = the same template reads as before.
@@ -1131,15 +1146,22 @@ async function buildEstimateSendPreview(estimate) {
     // is unaffected; the messageVersion covers the previewed text, and the
     // send re-runs this same builder, so a review and its send agree.
     const pdfNote = pdfCopy ? require('../services/pdf/estimate-doc-pdf').ESTIMATE_EMAIL_PDF_NOTES.delivery : '';
-    const rendered = EmailTemplateLibrary.renderTemplate({
+    const renderWith = (line) => EmailTemplateLibrary.renderTemplate({
       template: library.template, version: library.activeVersion,
-      payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote, average }),
+      payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote, average, noVisitLine: line }),
     });
+    const rendered = renderWith(noVisitLine);
+    // The review keeps the "no visit needed" line only when the value changes this email: the same render without
+    // it reads differently in its subject, preview text, text or HTML. The updated-estimate email, a template an
+    // admin rewrote, and a row the renderer drops show nothing of it. A record there would let a later change of
+    // the estimate refuse a send whose reviewed email never had the sentence.
+    const emailParts = ({ subject, previewText, text, html }) => JSON.stringify([subject, previewText, text, html]);
+    const reviewedNoVisitLine = noVisitLine && emailParts(rendered) !== emailParts(renderWith('')) ? noVisitLine : '';
     // `pdfCopy` is the reviewed PDF decision, kept with the review (and with a
     // schedule built from it). Present only when true, so a send with no PDF
     // keeps its review byte-identical to before; a review without it means "no
     // PDF" (sendEstimateNowInner).
-    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}), ...(delivery.updated ? { updated: true } : {}) };
+    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}), ...(reviewedNoVisitLine ? { noVisitLine: reviewedNoVisitLine } : {}), ...(delivery.updated ? { updated: true } : {}) };
   } else if (smtpFallbackAllowed()) {
     const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode, updated });
     // The content hash is of the SMTP content alone (no note), so it is unchanged.
@@ -1167,7 +1189,7 @@ async function buildEstimateSendPreview(estimate) {
 
 // updated (GATE_ESTIMATE_UPDATED_WORDING): send the updated-estimate email (template estimate.updated_delivery, or the
 // SMTP copy that says "updated"). The caller sets it only when that template can send, or from the review.
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdf, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null, average = null, updated = false }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], pdf, proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null, estimateIds = null, average = null, updated = false, noVisitLine }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
   const templateKey = deliveryTemplateKey(proposalMode, updated);
   const isUpdated = templateKey === updatedWording.UPDATED_EMAIL_TEMPLATE_KEY;
@@ -1185,7 +1207,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         ...(versionId ? { versionId } : {}),
         ...(expectedContentHash ? { expectedContentHash } : {}),
         to: estimate.customer_email,
-        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote: pdfPieces.note, average }),
+        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote: pdfPieces.note, average, noVisitLine }),
         recipientType: estimate.customer_id ? 'customer' : 'lead',
         recipientId: estimate.customer_id || null,
         triggerEventId: `estimate_delivery:${estimate.id}`,
@@ -1631,7 +1653,8 @@ router.get('/:id/group', async (req, res, next) => {
 });
 
 // POST /api/admin/estimates/:id/send — send via SMS and/or email (immediate or scheduled)
-router.get('/:id/send-preview', async (req, res, next) => {
+router.get('/:id/send-preview', sendPreviewHandler);
+async function sendPreviewHandler(req, res, next) {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -1648,9 +1671,10 @@ router.get('/:id/send-preview', async (req, res, next) => {
     if (satellitePalmCount != null) preview.satellitePalmCount = satellitePalmCount;
     res.set('Cache-Control', 'private, no-store').json(preview);
   } catch (err) { next(err); }
-});
+}
 
-router.post('/:id/send', async (req, res, next) => {
+router.post('/:id/send', sendEstimateHandler);
+async function sendEstimateHandler(req, res, next) {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -1943,7 +1967,27 @@ router.post('/:id/send', async (req, res, next) => {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
-});
+}
+
+// The estimate page's Send dialog and its preview without an HTTP request: the Intelligence
+// Bar's send_estimate tool (owner 2026-11-24) runs the SAME two handlers, so the bar and the
+// dialog read the same preview and send through the same claim, attempt record, review pins and
+// pricing-authority gate. Each runs its handler with the only request fields it reads
+// (params.id, body) and resolves the reply it would send: { status, json }. An error the
+// handler passes to next() rejects. The route's own wiring above is unchanged.
+function runEstimateHandler(handler, req) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      set() { return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    handler(req, res, reject).catch(reject);
+  });
+}
+const sendEstimateFromBar = ({ estimateId, body }) => runEstimateHandler(sendEstimateHandler, { params: { id: estimateId }, body });
+const estimateSendPreviewForBar = ({ estimateId }) => runEstimateHandler(sendPreviewHandler, { params: { id: estimateId }, body: {} });
 
 // Send-time "lead with one service" (GATE_ESTIMATE_LEAD_SERVICE_SEND).
 // Scope, all deliberate: NEW residential customers only (no membership
@@ -3017,6 +3061,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // drop the file. Reviews that carry no decision mean "no PDF" and are not
       // stale (codex #6343 r6).
       if (reviewedAverageStale || reviewedWordingStale) return 'saved_offer_changed';
+      // The reviewed "no visit needed" line must still fit the row as locked here: an estimate made commercial after
+      // the review (an edit the saved offer does not cover) never gets the home-and-yard sentence. A mismatch
+      // refuses the send before any channel. A review with no line is never stale on this.
+      if (sendMethod !== 'sms') {
+        const noVisit = require('../services/estimate-no-visit-line');
+        if (noVisit.noVisitLineStale(options.reviewedMessages, noVisit.noVisitLineFor(verdictRow, { proposalMode: normalizeProposal(verdictRow).enabled }))) {
+          return 'saved_offer_changed';
+        }
+      }
       if (sendMethod !== 'sms' && emailPdfCopy().reviewedPdfDecisionStale(options.reviewedMessages, await emailPdfCopy().deliveryPdfCopyDecision(verdictRow, trx))) {
         return 'saved_offer_changed';
       }
@@ -3398,6 +3451,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           if (averageService.averageDiffersFromReview(options.reviewedMessages, average)) {
             throw Object.assign(new Error(REVIEW_STALE_MESSAGE), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
           }
+          // The "no visit needed" line, from the same fresh row. The check in the claim stops both channels; this one
+          // covers an edit that landed between it and this build. The text may have gone out by now, so the
+          // message speaks of the email only. Nothing was dispatched, so the failure is not uncertain.
+          const noVisit = require('../services/estimate-no-visit-line');
+          const noVisitNow = noVisit.noVisitLineFor(freshEstimate, { proposalMode });
+          if (noVisit.noVisitLineStale(options.reviewedMessages, noVisitNow)) throw new Error(REVIEWED_EMAIL_LINE_STALE_MESSAGE);
           // The updated email: the reviewed choice, or for an unreviewed update the updated template when it can send
           // (the SMTP copy always can). A proposal never takes it.
           const emailUpdated = options.reviewedMessages
@@ -3409,6 +3468,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             viewUrl: emailViewUrl,
             priceLine: proposalMode ? freshPriceLine : priceLine,
             average,
+            // The reviewed line for a reviewed or scheduled send; else the line of the row read just before this send.
+            noVisitLine: noVisit.noVisitLineForSend(options.reviewedMessages, noVisitNow),
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
             attachments: pdfCopy.attachment ? [pdfCopy.attachment] : proposalAttachments,
             pdf: pdfCopy,
@@ -3530,6 +3591,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   const lastDeliveredAt = stampChannels.length
     ? now().toISOString()
     : (priorDeliveryState?.lastDeliveredAt || null);
+  // Roof points (owner ruling 2026-11-20, choice 4A): the customer page shows only the points the technician confirmed, as
+  // they stood at the last send that reached the customer. Every delivered send passes here (immediate, scheduled, lead
+  // auto-send, tech send and re-sends all end in sendEstimateNow), but only a REAL provider handoff takes the copy, the
+  // same test that moves the price snapshot: a suppressed or deduplicated send must not change a link the customer
+  // already holds. The copy carries this handoff's time (the lastDeliveredAt stamped below), and the page shows a copy
+  // only while the estimate has no later handoff: if this write fails, the older copy is not shown. Each group sibling
+  // takes its copy below, once this send has published it. A re-send replaces the copy; no confirmed points now deletes
+  // it. Never throws, so it cannot fail the send.
+  if (stampChannels.length > 0) await freezeRoofPointsForEstimate(estimate, { deliveredAt: lastDeliveredAt });
   // Use one handoff-anchored ordinary expiry for the navigation promise and
   // every ordinary sibling publication/reconciliation below. Recomputing
   // seven days later in the publication loop could leave the sibling's offer
@@ -3830,6 +3900,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             }
           }
           published = true;
+          // The sibling's link went out with this real handoff: take its roof points copy now, under the same handoff
+          // time its delivery state gets below (never throws).
+          if (stampChannels.length > 0) await freezeRoofPointsForEstimate(sibling, { deliveredAt: lastDeliveredAt });
           // A sibling is a delivered row of its own after the confirmed
           // handoff — same telemetry as the anchor (a fallback sibling
           // behind a SERVER anchor was invisible before; GH codex P2 on
@@ -4457,7 +4530,7 @@ router.get('/', async (req, res, next) => {
     const soldByById = await loadSoldByForList(db, estimates);
     // Call list: the newest outbound call to each VIEWED row's phone, one batched read.
     // A failed read costs only the field (lastCalledAt stays null).
-    const { lastCalledAtByEstimateId, lastCallOutcomeByEstimateId, callTodayFields } = require('../services/estimate-call-list');
+    const { lastCalledAtByEstimateId, lastCallOutcomeByEstimateId, stillDecidingByEstimateId, callTodayFields } = require('../services/estimate-call-list');
     let lastCalledById = new Map();
     try {
       lastCalledById = await lastCalledAtByEstimateId(db, estimates);
@@ -4474,6 +4547,14 @@ router.get('/', async (req, res, next) => {
       lastCallOutcomeById = await lastCallOutcomeByEstimateId(db, estimates.map((e) => e.id));
     } catch (err) {
       logger.warn(`[estimates] call-list call outcome read failed (${err?.code || 'no code'})`);
+    }
+    // What each customer said would help them decide (the estimate page's "Not ready yet?" sheet), one batched read.
+    // A failed read costs only the field: the row then follows the plain 2h rule and shows no reason.
+    let stillDecidingById = new Map();
+    try {
+      stillDecidingById = await stillDecidingByEstimateId(db, estimates.map((e) => e.id));
+    } catch (err) {
+      logger.warn(`[estimates] call-list still-deciding read failed (${err?.code || 'no code'})`);
     }
 
     res.json({
@@ -4544,6 +4625,7 @@ router.get('/', async (req, res, next) => {
             lastCalledAt: lastCalledById.get(e.id),
             lastCallOutcome: lastCallOutcomeById?.get(e.id),
             callOutcomeUnknown: !lastCallOutcomeById,
+            stillDeciding: stillDecidingById.get(e.id),
             undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
           }),
           source: e.source || 'manual',
@@ -5395,6 +5477,9 @@ router.put('/:id/proposal', async (req, res, next) => {
       // the LOCKED row: a Pick reason saved after the pre-read must not ride into the live offer.
       ...(revivingBid && require('../services/estimate-disposition').isStaffLossRow(locked)
         ? require('../services/estimate-disposition').STAFF_LOSS_CLEARED_UPDATES : {}),
+      // A SYSTEM booked-another-way stamp (the daily reclaim's) goes too: the revived offer is live again.
+      ...(revivingBid && require('../services/estimate-disposition').isSystemBookedRow(locked)
+        ? require('../services/estimate-disposition').SYSTEM_BOOKED_CLEARED_UPDATES : {}),
       updated_at: db.fn.now(),
     });
     if (!count) return { updatedCount: 0 };
@@ -5845,8 +5930,27 @@ router.post('/:id/unarchive', async (req, res, next) => {
     if (markers.invalidatedAt) return res.status(409).json({ error: invalidatedMessage });
     if (markers.supersededAt) return res.status(409).json({ error: supersededMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
-    const [updated] = await db('estimates')
-      .where({ id: req.params.id, status: estimate.status })
+    // A customer's own plan quote (plan_restart / plan_start) that a newer
+    // quote of the same kind replaced is permanent as well (#8132 pre-push
+    // r40). The mint archives the quotes it replaces and stamps nothing else,
+    // so Unarchive put the older price, and for a restart the older
+    // cancellation scope, back beside the live quote, with its link working
+    // again. Read as a query, not a stamp: it also covers a quote the office
+    // archived before the customer minted the next one, and every quote
+    // replaced before this check existed. No other writer clears the archive
+    // stamp of such a quote (the quote wizard revives its own drafts only).
+    // An accepted quote is history, is never replaced, and is not held here.
+    // The read and the write share one transaction under the customer-comms
+    // advisory lock, which the mint takes first: a mint in flight has either
+    // committed its replacement, and this read sees it, or it waits here and
+    // then archives this row with the rest of the lineage. The lock is the
+    // pre-read owner's, so the read confirms the owner under it and the write
+    // names it: a customer merge that moved the quote gets the retry message.
+    const replacedMessage = 'Another plan quote for this customer replaced this one, so it cannot be unarchived. The customer can start a new quote from their portal.';
+    const planQuotes = require('../services/cancellation-resolution/restart');
+    const heldByLineage = planQuotes.retiresWithLineage(estimate);
+    const writeUnarchive = (dbh, owner = {}) => dbh('estimates')
+      .where({ id: req.params.id, status: estimate.status, ...owner })
       // Observed-state guard, mirroring the archive route (codex pre-push
       // P1 TOCTOU): a concurrent decline/accept that resolved the archived
       // row owns its disposition — unarchiving from a stale pre-read must
@@ -5878,11 +5982,25 @@ router.post('/:id/unarchive', async (req, res, next) => {
         } : {}),
       })
       .returning('*');
+    let updated = null;
+    let block = null;
+    if (heldByLineage) {
+      block = await db.transaction(async (trx) => {
+        await lockCustomerComms(trx, estimate.customer_id);
+        const reason = await planQuotes.lineageUnarchiveBlock(trx, estimate);
+        if (!reason) [updated] = await writeUnarchive(trx, { customer_id: estimate.customer_id });
+        return reason;
+      });
+      if (block === 'replaced') return res.status(409).json({ error: replacedMessage });
+    } else {
+      [updated] = await writeUnarchive(db);
+    }
     if (!updated) {
       // Zero rows: either a linkage marker (permanent) or a concurrent
       // writer moved the row. Re-read once to say which.
-      const fresh = await db('estimates').where({ id: req.params.id }).first('status', 'archived_at', 'disposition');
-      const changed = fresh && (fresh.status !== estimate.status || !fresh.archived_at || (fresh.disposition || null) !== (estimate.disposition || null));
+      const fresh = await db('estimates').where({ id: req.params.id }).first('status', 'archived_at', 'disposition', 'customer_id');
+      const moved = block === 'moved' || (heldByLineage && !!fresh && fresh.customer_id !== estimate.customer_id);
+      const changed = moved || (fresh && (fresh.status !== estimate.status || !fresh.archived_at || (fresh.disposition || null) !== (estimate.disposition || null)));
       return res.status(409).json({ error: changed ? 'Estimate changed while you were unarchiving it. Refresh and retry.' : invalidatedMessage });
     }
     res.json(updated);
@@ -5919,30 +6037,100 @@ router.post('/:id/call-outcome', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The refusals both follow-up routes judge before anything is sent, so the ready text (GET draft) and the send (POST)
+// never disagree. Returns { status, body } for a refusal, or null. assertEstimateSendable throws its own statusCode.
+async function followUpRefusal(estimate) {
+  if (!estimate.customer_phone) return { status: 400, body: { error: 'No phone on file' } };
+  const smsProblem = estimateSmsPhoneProblem(estimate);
+  if (smsProblem) return { status: 400, body: { error: smsProblem, code: 'INVALID_SMS_PHONE' } };
+  if (estimate.status === 'accepted') return { status: 400, body: { error: 'Already accepted' } };
+  assertEstimateSendable(estimate);
+  // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
+  // this text carries the estimate link, and the link renders every
+  // viewable sibling — a SERVER anchor beside an unverified sibling is
+  // refused like any other send while the gate is on.
+  if (!(await estimateDeliverableUnderGate(db, estimate))) {
+    return {
+      status: 409,
+      body: {
+        error: 'A property on this estimate\'s link has no engine-verified price — re-save it from the estimate tool before sending this follow-up.',
+        code: 'PRICING_AUTHORITY_NOT_SERVER',
+      },
+    };
+  }
+  return null;
+}
+
+const followUpLongUrl = (estimate) => `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+
+// Does this estimate's link open the estimate for the customer? Judged as the proposal PDF route judges it: the public
+// page's own predicate, then the call-side verdict (a pending linkage invalidation, a call-side block).
+async function followUpLinkViewable(estimate) {
+  if (!estimate.token || !isEstimateCustomerViewable(estimate)) return false;
+  const data = parseEstimateData(estimate.estimate_data);
+  return !(await callSideBlockForEstimateData(db, data, { estimateStatus: estimate.status }));
+}
+
+// The ready text says "your estimate is here: <link>": only for an open sent estimate (sent or viewed, where the Follow
+// Up button shows) whose expiry date, when it has one, is readable and still ahead. Never for a self-serve quote that
+// staff did not deliver: it gets no follow-up prompt anywhere (AGENTS.md, zero delivery), so no ready text either.
+async function followUpDraftOffersLink(estimate, now = Date.now()) {
+  if (!['sent', 'viewed'].includes(estimate.status)) return false;
+  if (estimate.expires_at && !(new Date(estimate.expires_at).getTime() > now)) return false;
+  const { isUndeliveredSelfServe } = require('../services/self-serve-estimates');
+  if (isUndeliveredSelfServe(estimate.source, parseEstimateData(estimate.estimate_data))) return false;
+  return followUpLinkViewable(estimate);
+}
+
+// The send: a text that carries this estimate's link is refused when the link no longer opens (the estimate expired or
+// was pulled while the box was open). A text without the link is not judged here. Nor is a multi-property group: the
+// public page can still open a group link whose anchor expired (it leads to a live sibling), so a group keeps today's
+// send unchanged.
+async function followUpDeadLinkRefusal(estimate, message) {
+  if (estimate.estimate_group_id) return null;
+  if (typeof message !== 'string' || !estimate.token || !message.includes(followUpLongUrl(estimate))) return null;
+  if (await followUpLinkViewable(estimate)) return null;
+  return {
+    status: 409,
+    body: {
+      error: 'The estimate link in this text no longer opens for the customer. Remove the link, or send the estimate again first.',
+      code: 'ESTIMATE_LINK_NOT_VIEWABLE',
+    },
+  };
+}
+
+// GET /api/admin/estimates/:id/follow-up-draft — the ready text for the Follow Up button. Read only: it sends nothing,
+// mints no short link and writes no row. { message: null } = the box keeps its own default words, which carry no link:
+// the send would be refused, or the link would not open the estimate for the customer (followUpDraftOffersLink).
+router.get('/:id/follow-up-draft', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    let refused;
+    try {
+      refused = !!(await followUpRefusal(estimate));
+    } catch (err) {
+      if (!err.statusCode) throw err;
+      refused = true;
+    }
+    if (refused || !(await followUpDraftOffersLink(estimate))) return res.json({ message: null });
+    const [firstName, serviceName] = await Promise.all([
+      estimateGreetingFirstName(db, estimate),
+      followUpServiceNameFor(estimate),
+    ]);
+    res.json({ message: buildFollowUpText({ firstName, serviceName, link: followUpLongUrl(estimate) }) });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/estimates/:id/follow-up — manually send a follow-up SMS
 router.post('/:id/follow-up', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
-    {
-      const smsProblem = estimateSmsPhoneProblem(estimate);
-      if (smsProblem) return res.status(400).json({ error: smsProblem, code: 'INVALID_SMS_PHONE' });
-    }
-    if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
-    assertEstimateSendable(estimate);
-    // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
-    // this text carries the estimate link, and the link renders every
-    // viewable sibling — a SERVER anchor beside an unverified sibling is
-    // refused like any other send while the gate is on.
-    if (!(await estimateDeliverableUnderGate(db, estimate))) {
-      return res.status(409).json({
-        error: 'A property on this estimate\'s link has no engine-verified price — re-save it from the estimate tool before sending this follow-up.',
-        code: 'PRICING_AUTHORITY_NOT_SERVER',
-      });
-    }
+    const refusal = (await followUpRefusal(estimate)) || (await followUpDeadLinkRefusal(estimate, req.body.message));
+    if (refusal) return res.status(refusal.status).json(refusal.body);
 
-    const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+    const longUrl = followUpLongUrl(estimate);
     const viewUrl = await shortenOrPassthrough(longUrl, {
       kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
       leadId: await leadIdForEstimate(estimate),
@@ -5950,14 +6138,17 @@ router.post('/:id/follow-up', async (req, res, next) => {
     });
     const firstName = await estimateGreetingFirstName(db, estimate);
 
-    const msg = req.body.message || await renderTemplate('estimate_followup_unviewed', {
-      first_name: firstName,
-      estimate_url: viewUrl,
-    }, {
-      workflow: 'admin_estimate_followup',
-      entity_type: 'estimate',
-      entity_id: estimate.id,
-    });
+    // The ready text carries the long link; the send swaps in the short one. A message without it goes as typed.
+    const msg = req.body.message
+      ? swapLongLinkForShort(req.body.message, longUrl, viewUrl)
+      : await renderTemplate('estimate_followup_unviewed', {
+        first_name: firstName,
+        estimate_url: viewUrl,
+      }, {
+        workflow: 'admin_estimate_followup',
+        entity_type: 'estimate',
+        entity_id: estimate.id,
+      });
     if (!msg) return res.status(422).json({ error: 'SMS template estimate_followup_unviewed is missing or inactive' });
 
     const smsResult = await sendCustomerMessage({
@@ -6647,3 +6838,6 @@ module.exports.clearGroupSiblingDeliveryClaims = clearGroupSiblingDeliveryClaims
 
 // Same handler as POST /:id/mark-accepted — see markEstimateAcceptedAsStaff above.
 module.exports.markEstimateAcceptedAsStaff = markEstimateAcceptedAsStaff;
+// Same handlers as POST /:id/send and GET /:id/send-preview — see sendEstimateFromBar above.
+module.exports.sendEstimateFromBar = sendEstimateFromBar;
+module.exports.estimateSendPreviewForBar = estimateSendPreviewForBar;

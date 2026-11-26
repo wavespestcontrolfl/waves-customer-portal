@@ -41,6 +41,11 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.string('name').notNullable();
       t.date('hire_date');
       t.boolean('active').notNullable().defaultTo(true);
+      // who gets a Tech Rewards pay line (tech-rewards-pay-lines.js recipients)
+      t.text('employment_type');
+      t.text('role');
+      t.text('employment_status');
+      t.boolean('field_dispatchable');
     });
     await s.createTable('payroll_runs', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -59,7 +64,11 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.integer('overtime_pay_cents').notNullable().defaultTo(0);
       t.decimal('overtime_minutes', 10, 2).notNullable().defaultTo(0);
       t.integer('pto_pay_cents');
+      t.decimal('pto_minutes', 10, 2).notNullable().defaultTo(0);
       t.integer('holiday_pay_cents');
+      t.integer('holiday_work_premium_cents');
+      t.integer('tech_rewards_cents');
+      t.integer('production_share_cents');
       t.jsonb('calc_snapshot').notNullable().defaultTo('{}');
     });
     await s.createTable('payroll_time_off', (t) => {
@@ -218,6 +227,22 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.stayBonus).toMatchObject({ dueDate: '2028-04-01', years: 3, estimateCents: null, earningsStart: '2027-04-01' });
   });
 
+  test('a stay bonus milestone a pay run has settled is not the next one, whatever the hire date on file says now', async () => {
+    await seed();
+    // Alpha's hire date on file puts the 1 year anniversary on Dec 1, 2026, ahead of today. An open line and a row that is not
+    // the pay run's own settle nothing.
+    const line = { technician_id: alpha, kind: 'stay_bonus', source_type: 'tech_rewards', earned_week_start: '2026-11-02', amount_cents: 5280 };
+    await db('payroll_pay_lines').insert([
+      { ...line, status: 'open', source_id: `stay_bonus:${alpha}:1` },
+      { ...line, status: 'paid', source_id: `stay_bonus:${beta}:1` },
+    ]);
+    expect((await service.getScoreboard(alpha, { now: NOW })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1 });
+    // the pay run paid the 1 year bonus (from an earlier hire date on file): the board shows the 3 year one
+    await db('payroll_pay_lines').where({ technician_id: alpha, status: 'open' }).update({ status: 'paid' });
+    expect((await service.getScoreboard(alpha, { now: NOW })).stayBonus)
+      .toMatchObject({ dueDate: '2028-12-01', years: 3, rateBps: 400, estimateCents: null, earningsStart: '2027-12-01' });
+  });
+
   test('catch-up pay: lines paid in a later week count on the day they were earned, wages by work week', async () => {
     await seed();
     const [sept] = await db('payroll_checks').where({ technician_id: alpha, week_start: '2026-09-07' }).select('id');
@@ -234,6 +259,64 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.commission).toMatchObject({ paidCents: 23600 + 8000 + 2000 });
     // the stay window holds the same wages (218500) and all three lines (11500) once each
     expect(board.stayBonus.estimateCents).toBe(Math.round(230000 * 0.02));
+  });
+
+  test('a closed season counts the checks for the pay weeks before the bonus\'s own run, and no check for a later pay week', async () => {
+    const [gam] = await db('technicians').insert({ name: 'Sample Gamma', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-09-14', pay_date: '2026-09-25' }).returning('id');
+    const [, cut, later] = await insertChecks([
+      { run_id: run.id, technician_id: gam.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 100000 },
+      // the week of Sep 7: the last pay week counted for 2026 (its run is dated Sep 18, before the bonus's pay date, Sep 25)
+      { run_id: run.id, technician_id: gam.id, status: 'finalized', week_start: '2026-09-07', gross_cents: 8000, regular_pay_cents: 0 },
+      // the week of Sep 14: the bonus's own pay week, and every week after it, is never counted
+      { run_id: run.id, technician_id: gam.id, status: 'finalized', week_start: '2026-09-14', gross_cents: 6000, regular_pay_cents: 0 },
+    ]).returning('id');
+    await db('payroll_pay_lines').insert([
+      { technician_id: gam.id, check_id: cut.id, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-09-07', covers_to: '2026-05-10', amount_cents: 8000 }, // earned May 10
+      { technician_id: gam.id, check_id: later.id, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-09-14', covers_to: '2026-05-11', amount_cents: 6000 }, // earned May 11, paid a week too late
+    ]);
+    const board = await service.getScoreboard(gam.id, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(100000 + 8000);
+  });
+
+  test('a season bonus shows as paid only for the pay run\'s own line on a finalized check of a finalized run', async () => {
+    await seed();
+    const LATER = new Date('2027-11-20T15:00:00Z'); // the 2027 season is closed
+    scores.buildSeasonScore.mockImplementation(async (id, year) => ({ complete: true, year, parts: PARTS, score: 91.5, rateBps: 400, settings: { version: 0, weights: WEIGHTS, cutLines: CUTS } }));
+    const key = (year) => ({ technician_id: alpha, kind: 'season_bonus', source_type: 'tech_rewards', source_id: `season_bonus:${alpha}:${year}`, earned_week_start: `${year}-09-13` });
+    await db('payroll_pay_lines').insert([
+      { ...key(2027), status: 'open', amount_cents: 41000 }, // on a draft run: not paid yet
+      // marked paid with the key of the 2026 season: no season before 2027 has a bonus, so it is not the pay run's line, and no check holds it
+      { ...key(2026), status: 'paid', amount_cents: 39000 },
+      { technician_id: alpha, kind: 'season_bonus', status: 'paid', earned_week_start: '2027-09-13', amount_cents: 12300 }, // hand-made: no source key
+    ]);
+    const board = async (now) => (await service.getScoreboard(alpha, { now })).seasonBonus;
+    // the 2026 season: the row keyed for it never shows as paid
+    expect(await board(NOW)).toMatchObject({ estimate: true });
+    expect(await board(NOW)).not.toHaveProperty('paidCents');
+    // the 2027 season: an open line is not paid
+    const before = await board(LATER);
+    expect(before).toMatchObject({ estimate: true });
+    expect(before).not.toHaveProperty('paidCents');
+    const own = () => db('payroll_pay_lines').where({ source_id: `season_bonus:${alpha}:2027` });
+    // marked paid with no check
+    await own().update({ status: 'paid' });
+    expect(await board(LATER)).not.toHaveProperty('paidCents');
+    // on a check that is not final, of a run that is not final
+    const [run] = await db('payroll_runs').insert({ status: 'draft', week_start: '2027-09-13', pay_date: '2027-09-24' }).returning('id');
+    const [check] = await insertChecks([{ run_id: run.id, technician_id: alpha, status: 'draft', week_start: '2027-09-13', gross_cents: 41000 }]).returning('id');
+    await own().update({ check_id: check.id });
+    expect(await board(LATER)).not.toHaveProperty('paidCents');
+    await db('payroll_checks').where({ id: check.id }).update({ status: 'finalized' });
+    expect(await board(LATER)).not.toHaveProperty('paidCents'); // the run is still a draft
+    await db('payroll_runs').where({ id: run.id }).update({ status: 'voided' });
+    expect(await board(LATER)).not.toHaveProperty('paidCents');
+    // the pay run's own line, on a finalized check of a finalized run: paid, and no estimate beside it
+    await db('payroll_runs').where({ id: run.id }).update({ status: 'finalized' });
+    expect(await board(LATER)).toEqual({ grossCents: before.grossCents, estimate: false, estimateCents: null, paidCents: 41000 });
+    // the 2026 row on that same finalized check is still not the pay run's line
+    await db('payroll_pay_lines').where({ source_id: `season_bonus:${alpha}:2026` }).update({ check_id: check.id });
+    expect(await board(NOW)).not.toHaveProperty('paidCents');
   });
 
   test('paid time off on Aug 31 and a catch-up overtime premium earned in May are dated by their own records', async () => {
@@ -257,6 +340,36 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     ]);
     const board = await service.getScoreboard(eps.id, { now: NOW });
     expect(board.seasonBonus.grossCents).toBe(10000 + 5000 + 3000);
+  });
+
+  test('paid time off of a check with a time-off bank is dated by the days the bank paid, not by every booked day', async () => {
+    const [zeta] = await db('technicians').insert({ name: 'Sample Zeta', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-09-07', pay_date: '2026-09-18' }).returning('id');
+    await insertChecks([
+      // the Aug 31 week: 8 hours booked on Aug 31 and 8 on Sep 1. The bank held 8 hours: it paid Aug 31 (10000) and left Sep 1 unpaid.
+      { run_id: run.id, technician_id: zeta.id, status: 'finalized', week_start: '2026-08-31', gross_cents: 10000, regular_pay_cents: 0, pto_pay_cents: 10000,
+        calc_snapshot: { ptoBank: { paidDays: [{ workDate: '2026-08-31', minutes: 480 }] } } },
+    ]);
+    await db('payroll_time_off').insert([
+      { technician_id: zeta.id, work_date: '2026-08-31', kind: 'pto', minutes: 480 },
+      { technician_id: zeta.id, work_date: '2026-09-01', kind: 'pto', minutes: 480 },
+    ]);
+    const board = await service.getScoreboard(zeta.id, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(10000); // all of it earned on Aug 31, inside the season; by booked days it would be 5000
+  });
+
+  test('a time-off bank payout at leaving is not dated by the paid time-off day of its week', async () => {
+    const [eta] = await db('technicians').insert({ name: 'Sample Eta', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-09-07', pay_date: '2026-09-18' }).returning('id');
+    await insertChecks([
+      // the Aug 31 week: 8 hours of paid time off taken on Aug 31 (10000) and 28 hours paid out at leaving (35000), one PTO line
+      { run_id: run.id, technician_id: eta.id, status: 'finalized', week_start: '2026-08-31', gross_cents: 45000, regular_pay_cents: 0, pto_pay_cents: 45000,
+        pto_minutes: 2160, calc_snapshot: { ptoBank: { payoutMinutes: 1680, paidDays: [{ workDate: '2026-08-31', minutes: 480 }] } } },
+    ]);
+    await db('payroll_time_off').insert([{ technician_id: eta.id, work_date: '2026-08-31', kind: 'pto', minutes: 480 }]);
+    const board = await service.getScoreboard(eta.id, { now: NOW });
+    // the day off is inside the season (10000); the payout has no day: one of its week's seven days is inside (35000 / 7)
+    expect(board.seasonBonus.grossCents).toBe(10000 + 5000); // dated by the day off it would be 45000
   });
 
   test('review asks count every delivered ask by its send day: a follow-up counts once even when stamped twice', async () => {
@@ -302,7 +415,11 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
 
   test('the stay bonus window ends the day before the anniversary and prorates a check that spans that day', async () => {
     await seed();
-    const [delta] = await db('technicians').insert({ name: 'Sample Delta', hire_date: '2025-12-01' }).returning('id');
+    const fieldTech = { employment_type: 'w2', role: 'technician', employment_status: 'active', field_dispatchable: true };
+    const [delta, office] = await db('technicians').insert([
+      { name: 'Sample Delta', hire_date: '2025-12-01', ...fieldTech },
+      { name: 'Sample Office', hire_date: '2025-12-01', ...fieldTech, role: 'admin' }, // payroll writes an office account no line
+    ]).returning('id');
     const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-11-30', pay_date: '2026-12-11' }).returning('id');
     await insertChecks([{ run_id: run.id, technician_id: delta.id, status: 'finalized', week_start: '2026-11-30', gross_cents: 70000 }]);
     await db('time_entry_daily_summary').insert([
@@ -311,6 +428,47 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     ]);
     const board = await service.getScoreboard(delta.id, { now: new Date('2026-12-01T15:00:00Z') });
     expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', earningsStart: '2025-12-01', estimateCents: Math.round(35000 * 0.02) });
+    // the anniversary day is the first day a pay run can carry the bonus, so payroll answers for it: an office account sees
+    // the milestone the day before (it is ahead, and shows for everyone) and the next one from the day itself
+    expect((await service.getScoreboard(office.id, { now: new Date('2026-11-30T15:00:00Z') })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1 });
+    expect((await service.getScoreboard(office.id, { now: new Date('2026-12-01T15:00:00Z') })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+  });
+
+  test('after the anniversary the stay bonus stays on the board until it is paid, worked out from the 12 months that ended', async () => {
+    await seed();
+    const fieldTech = { employment_type: 'w2', role: 'technician', employment_status: 'active', field_dispatchable: true };
+    const [delta, office] = await db('technicians').insert([
+      { name: 'Sample Delta', hire_date: '2025-12-01', ...fieldTech },
+      { name: 'Sample Office', hire_date: '2025-12-01', ...fieldTech, role: 'admin' }, // payroll writes an office account no line
+    ]).returning('id');
+    const [inside, after] = await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-11-16', pay_date: '2026-11-27' },
+      { status: 'finalized', week_start: '2026-12-07', pay_date: '2026-12-18' },
+    ]).returning('id');
+    await insertChecks([
+      { run_id: inside.id, technician_id: delta.id, status: 'finalized', week_start: '2026-11-16', gross_cents: 70000 }, // a week of the 12 months
+      { run_id: after.id, technician_id: delta.id, status: 'finalized', week_start: '2026-12-07', gross_cents: 90000 }, // after them: never counts
+    ]);
+    const today = new Date('2026-12-20T15:00:00Z');
+    expect((await service.getScoreboard(delta.id, { now: today })).stayBonus)
+      .toMatchObject({ dueDate: '2026-12-01', years: 1, earningsStart: '2025-12-01', earningsEnd: '2026-11-30', estimateCents: Math.round(70000 * 0.02) });
+    // the 60 days are over (Jan 31), or payroll would write this account no line: the next milestone ahead, as before
+    expect((await service.getScoreboard(delta.id, { now: new Date('2027-01-31T15:00:00Z') })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+    expect((await service.getScoreboard(office.id, { now: today })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+    // payroll pays it: the board shows the 3 year bonus
+    await db('payroll_pay_lines').insert({
+      technician_id: delta.id, kind: 'stay_bonus', source_type: 'tech_rewards', source_id: `stay_bonus:${delta.id}:1`, status: 'paid', earned_week_start: '2026-12-07', amount_cents: 1400,
+    });
+    expect((await service.getScoreboard(delta.id, { now: today })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+  });
+
+  // PostgreSQL prints a date BC with no era in YYYY-MM-DD, and holds years past 9999: payroll reads neither, so the board does not
+  test.each(['2025-12-01 BC', '20251-12-01', '0099-12-01', 'infinity'])('a hire date on file that payroll cannot read (%s) is none on the board', async (hireDate) => {
+    await seed();
+    const [odd] = await db('technicians').insert({ name: 'Sample Odd', hire_date: hireDate }).returning('id');
+    const board = await service.getScoreboard(odd.id, { now: new Date('2026-12-20T15:00:00Z') });
+    expect(board.stayBonus).toBeNull();
+    expect(board.multiplier).toEqual({ reason: 'no_hire_date' });
   });
 
   test('commission is recorded through the end of the pay week of the newest ledger line, never a run date', async () => {
@@ -358,6 +516,54 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.seasonBonus.grossCents).toBe(6000); // six weeks of 1000, every covered day in August
   });
 
+  test('a stay bonus on a check, and the overtime it caused, are not in the season base; the commission beside it and its overtime are', async () => {
+    const [rho] = await db('technicians').insert({ name: 'Sample Rho', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-06-01', pay_date: '2026-06-12' }).returning('id');
+    // 70,000 of wages, a 10,000 commission and a 30,000 stay bonus both earned in the week of May 4 (50 hours, 10 of them
+    // overtime), and the 4,000 of overtime the two lines caused together: 1,000 from the commission, 3,000 from the bonus.
+    // The row is an older one with no stored split and no earlier pay: the commission is priced alone from the row's hours.
+    const [check] = await insertChecks([{
+      run_id: run.id, technician_id: rho.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 114000, regular_pay_cents: 70000, tech_rewards_cents: 30000,
+      calc_snapshot: { lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 3000, overtimeMinutes: 600, premiumCents: 4000 }] },
+    }]).returning('id');
+    await db('payroll_pay_lines').insert([
+      { technician_id: rho.id, check_id: check.id, kind: 'commission', status: 'paid', earned_week_start: '2026-05-04', amount_cents: 10000 },
+      { technician_id: rho.id, check_id: check.id, kind: 'stay_bonus', status: 'paid', earned_week_start: '2026-06-01', covers_from: '2026-05-04', covers_to: '2026-05-10', amount_cents: 30000 },
+    ]);
+    const board = await service.getScoreboard(rho.id, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(70000 + 10000 + 1000);
+  });
+
+  test('a week paid on two checks: a stay bonus on the second check never moves the season base', async () => {
+    const [tau, twin] = await db('technicians').insert([{ name: 'Sample Tau', hire_date: '2024-01-15' }, { name: 'Sample Twin', hire_date: '2024-01-15' }]).returning('id');
+    // inserted newest first: each check is read from its own rows, so the order they are stored or dated in changes nothing
+    const [later, own] = await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-06-01', pay_date: '2026-06-12' },
+      { status: 'finalized', week_start: '2026-05-04', pay_date: '2026-05-15' },
+    ]).returning('id');
+    // The week of May 4: 45 hours, 5 of them overtime. Its own check paid a 600 commission and 33 of premium (33.33).
+    // The later check paid another 600 commission for that week. Alone that commission pays 34 (the twin). With a 600 stay
+    // bonus for the same week beside it the check paid 67 (Tau), and the pay run stored the commission's 34 with the week.
+    const week = (premiumCents, extra = {}) => ({ lineOvertimeWeeks: [{ weekStart: '2026-05-04', workedMinutes: 2700, overtimeMinutes: 300, premiumCents, ...extra }] });
+    const earlierPay = { earlierAllocatedCents: 600, earlierPremiumCents: 33 };
+    const [tauLater, tauOwn, twinLater, twinOwn] = await insertChecks([
+      { run_id: later.id, technician_id: tau.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 600 + 67, regular_pay_cents: 70000, tech_rewards_cents: 600, calc_snapshot: week(67, { ...earlierPay, ordinaryPremiumCents: 34 }) },
+      { run_id: own.id, technician_id: tau.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 70000 + 600 + 33, regular_pay_cents: 70000, calc_snapshot: week(33) },
+      { run_id: later.id, technician_id: twin.id, status: 'finalized', week_start: '2026-06-01', gross_cents: 70000 + 600 + 34, regular_pay_cents: 70000, calc_snapshot: week(34, earlierPay) },
+      { run_id: own.id, technician_id: twin.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 70000 + 600 + 33, regular_pay_cents: 70000, calc_snapshot: week(33) },
+    ]).returning('id');
+    const commissionOn = (technician, check) => ({ technician_id: technician.id, check_id: check.id, kind: 'commission', status: 'paid', earned_week_start: '2026-05-04', amount_cents: 600 });
+    await db('payroll_pay_lines').insert([
+      commissionOn(tau, tauOwn), commissionOn(tau, tauLater), commissionOn(twin, twinOwn), commissionOn(twin, twinLater),
+      { technician_id: tau.id, check_id: tauLater.id, kind: 'stay_bonus', status: 'paid', earned_week_start: '2026-06-01', covers_from: '2026-05-04', covers_to: '2026-05-10', amount_cents: 600 },
+    ]);
+    // both weeks' wages, both commissions, and the 67 the commissions were paid in overtime (33, then 34)
+    const base = 140000 + 1200 + 67;
+    expect((await service.getScoreboard(twin.id, { now: NOW })).seasonBonus.grossCents).toBe(base);
+    // Tau: the same, with the stay bonus and the other 33 of the second check's 67 left out
+    expect((await service.getScoreboard(tau.id, { now: NOW })).seasonBonus.grossCents).toBe(base);
+  });
+
   test('review asks are counted in SQL on each send time: an initial ask outside the season does not drag its in-season follow-up out', async () => {
     const [c1, c2] = [randomUUID(), randomUUID()];
     const rows = await db('review_requests').insert([
@@ -385,6 +591,101 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.commission.paidCents).toBe(33333);
   });
 
+  describe('the season scores a pay run reads before its transaction opens (tech-rewards-pay-lines.js readSeasonScores)', () => {
+    const SEASON_GATES = ['GATE_PAYROLL_PAY_LINES', 'GATE_TECH_REWARDS_SEASON_BONUS'];
+    const OLD_GATES = Object.fromEntries(SEASON_GATES.map((name) => [name, process.env[name]]));
+    const PAY_DATE = '2027-09-24'; // the last Friday of September 2027
+    const recipient = { employment_type: 'w2', role: 'technician', employment_status: 'active', field_dispatchable: true, hire_date: '2024-01-10' };
+    const keyOf = (id) => `season_bonus:${id}:2027`;
+    const scored = (year) => ({ complete: true, year, parts: PARTS, score: 91.5, rateBps: 400, settings: { version: 0, weights: WEIGHTS, cutLines: CUTS } });
+    let payLines;
+    let made;
+
+    beforeEach(async () => {
+      payLines = require('../services/tech-rewards-pay-lines');
+      for (const name of SEASON_GATES) process.env[name] = 'true';
+      made = (await db('technicians').insert(['Sample Delta', 'Sample Echo', 'Sample Foxtrot'].map((name) => ({ name, ...recipient }))).returning('id'))
+        .map((row) => row.id).sort();
+    });
+    afterEach(async () => {
+      for (const name of SEASON_GATES) {
+        if (OLD_GATES[name] === undefined) delete process.env[name];
+        else process.env[name] = OLD_GATES[name];
+      }
+      await db('technicians').whereIn('id', made).del();
+    });
+
+    test('one REPEATABLE READ, read-only snapshot for every technician; one technician\'s failed read leaves the others; the connection is given back', async () => {
+      const [first, second, settled] = made;
+      // the third technician's 2027 bonus is settled: the pay run's own line, no longer open
+      await db('payroll_pay_lines').insert({ technician_id: settled, kind: 'season_bonus', source_type: 'tech_rewards', source_id: keyOf(settled), status: 'paid', earned_week_start: '2027-09-13', amount_cents: 1000 });
+      const seen = [];
+      scores.buildSeasonScore.mockImplementation(async (id, year, season, trx) => {
+        seen.push({
+          id,
+          level: (await trx.raw('SHOW transaction_isolation')).rows[0].transaction_isolation,
+          readOnly: (await trx.raw('SHOW transaction_read_only')).rows[0].transaction_read_only,
+          pid: (await trx.raw('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+        });
+        if (id === first) await trx.raw('SELECT 1 / 0'); // the first one read fails inside PostgreSQL
+        return scored(year);
+      });
+      const read = await payLines.readSeasonScores(db, PAY_DATE);
+      // Alpha and Beta get no Tech Rewards lines (not W-2 field technicians) and the settled bonus needs no score: none is read.
+      // (Technicians that earlier tests of this suite left on file are read too; this test looks at its own three.)
+      const mine = (list, idOf) => list.filter((item) => made.includes(idOf(item)));
+      expect(read.failed).toBe(false);
+      for (const id of [alpha, beta, settled]) expect(read.figures.has(keyOf(id))).toBe(false);
+      expect(mine([...read.figures.keys()], (key) => key.split(':')[1])).toEqual([keyOf(first), keyOf(second)]);
+      expect(read.figures.get(keyOf(first))).toBeNull();
+      expect(read.figures.get(keyOf(second))).toMatchObject({ seasonScore: { complete: true, score: 91.5, year: 2027 }, asks: 0, reviews: 0 });
+      expect(Object.keys(read.figures.get(keyOf(second))).sort()).toEqual(['asks', 'reviews', 'seasonScore', 'settings']);
+      expect(mine(seen, (s) => s.id).map((s) => [s.id, s.level, s.readOnly])).toEqual([[first, 'repeatable read', 'on'], [second, 'repeatable read', 'on']]);
+      expect(new Set(seen.map((s) => `${s.level} ${s.readOnly} ${s.pid}`)).size).toBe(1); // every technician: one snapshot, one connection
+      expect(require('../services/logger').error).toHaveBeenCalledWith(expect.stringContaining(`season 2027 score could not be read for technician ${first}`));
+      expect(db.client.pool.numUsed()).toBe(0); // given back before the pay run asks for its own
+      // nothing is read for a run dated for no season bonus, or with a gate off
+      seen.length = 0;
+      expect(await payLines.readSeasonScores(db, '2027-09-17')).toBeNull();
+      const [run] = await db('payroll_runs').insert({ status: 'draft', week_start: '2027-09-13', pay_date: PAY_DATE }).returning('id');
+      expect(mine([...(await payLines.readSeasonScoresOfRun(db, run.id)).figures.keys()], (key) => key.split(':')[1])).toHaveLength(2);
+      expect(await payLines.readSeasonScoresOfRun(db, randomUUID())).toBeNull(); // no such run
+      seen.length = 0;
+      delete process.env.GATE_TECH_REWARDS_SEASON_BONUS;
+      expect([await payLines.readSeasonScores(db, PAY_DATE), await payLines.readSeasonScoresOfRun(db, run.id), seen]).toEqual([null, null, []]);
+      // the snapshot itself cannot be taken: every bonus waits, and the pay run goes on
+      process.env.GATE_TECH_REWARDS_SEASON_BONUS = 'true';
+      const noConnection = { transaction: async () => { throw new Error('no connection'); } };
+      expect(await payLines.readSeasonScores(noConnection, PAY_DATE)).toEqual({ figures: new Map(), failed: true });
+    });
+
+    test('with a pool of two connections that two pay runs hold, the read waits for a connection while it holds none, and runs when one is free', async () => {
+      const knex = require('knex');
+      const small = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [mockSchema], pool: { min: 0, max: 2 }, acquireConnectionTimeout: 20000 });
+      const held = [];
+      try {
+        held.push(await small.transaction()); // the pay run that holds the payroll lock
+        held.push(await small.transaction()); // a pay run that waits for that lock, and holds its connection while it waits
+        const [holder, waiter] = held;
+        await Promise.all([holder.raw('SELECT 1'), waiter.raw('SELECT 1')]);
+        expect(small.client.pool.numUsed()).toBe(2);
+        let done = false;
+        const read = payLines.readSeasonScores(small, PAY_DATE).then((result) => { done = true; return result; });
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
+        // a third pay run's score read: it waits in line and holds nothing, so the two pay runs are never held up by it
+        expect([done, small.client.pool.numUsed(), small.client.pool.numPendingAcquires()]).toEqual([false, 2, 1]);
+        await holder.commit();
+        const result = await read;
+        expect([result.failed, made.every((id) => result.figures.has(keyOf(id)))]).toEqual([false, true]);
+        expect(small.client.pool.numUsed()).toBe(1); // the waiting pay run's own: the read gave its connection back
+        await waiter.commit();
+      } finally {
+        for (const open of held) if (!open.isCompleted()) await open.rollback();
+        await small.destroy();
+      }
+    });
+  });
+
   test('reads in one REPEATABLE READ, read-only snapshot', async () => {
     await seed();
     scores.buildSeasonScore.mockImplementation(async (id, year, season, trx) => {
@@ -407,6 +708,29 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     const list = await service.listTechnicians();
     expect(list.map((t) => t.name)).toEqual(expect.arrayContaining(['Sample Alpha', 'Sample Beta']));
     expect(list.map((t) => t.id)).not.toContain(gone);
-    expect(Object.keys(list[0]).sort()).toEqual(['id', 'name']);
+    expect(Object.keys(list.find((t) => t.id === alpha)).sort()).toEqual(['id', 'name']);
+  });
+
+  test('also lists a former technician who has a finalized paycheck of a finalized run, marked not active, once', async () => {
+    const add = async (name) => (await db('technicians').insert({ name, active: false }).returning('id'))[0].id;
+    const [paid, never, draftOnly, voidedOnly, voidedRun] = [await add('Sample Former Paid'), await add('Sample Former Never'), await add('Sample Former Draft'), await add('Sample Former Voided'), await add('Sample Former Voided Run')];
+    const [final, draft, voided] = (await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-05-04', pay_date: '2026-05-15' },
+      { status: 'draft', week_start: '2026-05-11', pay_date: '2026-05-22' },
+      { status: 'voided', week_start: '2026-05-18', pay_date: '2026-05-29' },
+    ]).returning('id')).map((r) => r.id);
+    await insertChecks([
+      { run_id: final, technician_id: paid, status: 'finalized', week_start: '2026-05-04', gross_cents: 100000 },
+      { run_id: final, technician_id: paid, status: 'finalized', week_start: '2026-04-27', gross_cents: 100000 }, // two checks: still listed once
+      { run_id: draft, technician_id: draftOnly, status: 'draft', week_start: '2026-05-11', gross_cents: 100000 },
+      { run_id: final, technician_id: voidedOnly, status: 'voided', week_start: '2026-05-04', gross_cents: 100000 },
+      { run_id: voided, technician_id: voidedRun, status: 'finalized', week_start: '2026-05-18', gross_cents: 100000 },
+    ]);
+    const list = await service.listTechnicians();
+    expect(list.filter((t) => t.id === paid)).toEqual([{ id: paid, name: 'Sample Former Paid', active: false }]);
+    for (const id of [never, draftOnly, voidedOnly, voidedRun]) expect(list.map((t) => t.id)).not.toContain(id);
+    // an active technician is listed as before, with or without a paycheck, and never marked
+    expect(list.filter((t) => t.id === alpha)).toEqual([{ id: alpha, name: 'Sample Alpha' }]);
+    expect(list.map((t) => t.name)).toEqual([...list.map((t) => t.name)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
   });
 });

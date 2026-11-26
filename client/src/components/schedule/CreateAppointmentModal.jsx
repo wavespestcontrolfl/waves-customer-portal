@@ -51,11 +51,11 @@ import { labelNamesRetiredSale, RETIRED_SALE_SERVICE_KEYS } from '../../constant
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
 import { NOTICED_AMOUNT_DECLINED, sendWithNoticedAmountConfirm } from '../../lib/noticedRenewalAmount';
-import { formatETTime } from '../../lib/timezone';
+import { formatETDate, formatETTime } from '../../lib/timezone';
 import InPersonCardSheet from './InPersonCardSheet';
-import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { AskedTimeBoxLegacy } from './DayOnlyPromiseLegacy';
 import { askedTimeCreateFields, reminderAnswerFor } from './dayOnlyPromise';
+import { openEstimateLinkNotice, recentOpenEstimates } from './openEstimateLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -1102,9 +1102,9 @@ export function firstGroupSendFlags({ resultsCount, createdCount, sendSms, cardL
   };
 }
 
-// "Customer's words" (GATE_RESERVICE_OFFICE_REQUEST): the pest/lawn re-service
+// "Customer's words": the pest/lawn re-service
 // catalog rows an office booking may attach the customer's own words to. The
-// server re-checks the catalog key and the gate; this only decides whether the
+// server re-checks the catalog key; this only decides whether the
 // section renders and the field rides the POST.
 export const OFFICE_REQUEST_SERVICE_KEYS = ['pest_re_service', 'lawn_re_service'];
 export const CUSTOMER_WORDS_MAX = 400;
@@ -1713,9 +1713,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const dateSectionRef = useRef(null);
   // Service-address picker for a multi-property customer. `bookingProperties`
   // is the customer's active customer_properties list; the picker renders
-  // only when the address lane is enabled server-side
-  // (canChangeAppointmentAddress — GATE_EDIT_APPT_ADDRESS) AND there is a
-  // real choice (2+ properties). Otherwise the server's sole-property anchor
+  // only when there is a real choice (2+ properties). Otherwise the server's sole-property anchor
   // applies exactly as before. `propertyRefresh` re-reads the list after a
   // quick-add "Attach as additional property" on the same customer.
   const [bookingProperties, setBookingProperties] = useState([]);
@@ -1968,7 +1966,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // complete, else the first complete row (an incomplete legacy primary
         // must not hide a bookable secondary — the server's sole-property
         // anchor sees both rows and would fall back to the profile address).
-        if (data?.canChangeAppointmentAddress === true && all.length > 1 && complete.length > 0) {
+        if (all.length > 1 && complete.length > 0) {
           // Same invalidation as applyBookingProperty: a suggestion applied
           // before this list arrived was scored at the primary, and the
           // default here may be a complete SECONDARY.
@@ -2064,8 +2062,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // has no agreed time to open on, so the person must pick one before it can be saved. Every
   // way of setting the time (the selector, a suggested slot) counts as that choice.
   const [timeChosen, setTimeChosen] = useState(!requireTimeChoice);
-  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): with the gate on the office can mark "Customer asked for this time".
-  const dayOnlyPromiseOn = useFeatureFlag('day_only_promise');
+  // The office can mark "Customer asked for this time".
   const [customerAskedTime, setCustomerAskedTime] = useState(false);
   const setWindowStart = (value) => { setWindowStartValue(value); setTimeChosen(true); };
   const [techMode, setTechMode] = useState(defaultTechId ? 'choose' : 'auto');
@@ -2272,13 +2269,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
-  // "Customer's words" on a pest/lawn re-service (GATE_RESERVICE_OFFICE_REQUEST).
-  // The probe doubles as the gate read: the route answers {enabled:false} while
-  // the lane is dark, and a failed fetch hides the section too, so a dark lane
-  // renders byte-identical. Probed only once a re-service line is on the form.
+  // "Customer's words" on a pest/lawn re-service.
+  // A failed fetch hides the section. Probed only once a re-service line is on the form.
   const [customerWords, setCustomerWords] = useState('');
   const [usedSuggestion, setUsedSuggestion] = useState(null);
-  const [reserviceRequestProbe, setReserviceRequestProbe] = useState({ customerId: '', enabled: false, suggestion: null });
+  const [reserviceRequestProbe, setReserviceRequestProbe] = useState({ customerId: '', loaded: false, suggestion: null });
   const hasReServiceLine = services.some(isOfficeRequestLine);
   const reserviceProbeCustomerId = hasReServiceLine && selectedCustomer?.id != null ? String(selectedCustomer.id) : '';
   useEffect(() => {
@@ -2287,18 +2282,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     adminFetch(`/admin/schedule/reservice-request-suggestion?customerId=${encodeURIComponent(reserviceProbeCustomerId)}`)
       .then((r) => {
         if (cancelled) return;
-        setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, enabled: !!r?.enabled, suggestion: r?.suggestion || null });
+        // An older server (after a rollback) answers {enabled:false} and ignores the saved words: show no box then.
+        setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, loaded: r?.enabled !== false, suggestion: r?.suggestion || null });
       })
       .catch(() => {
-        if (!cancelled) setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, enabled: false, suggestion: null });
+        if (!cancelled) setReserviceRequestProbe({ customerId: reserviceProbeCustomerId, loaded: false, suggestion: null });
       });
     return () => { cancelled = true; };
   }, [reserviceProbeCustomerId]);
   // A different customer's suggestion or words never carry over.
   useEffect(() => { setCustomerWords(''); setUsedSuggestion(null); }, [reserviceProbeCustomerId]);
-  // "Canceled on a call" (GATE_CALL_CANCEL_GUARD): the chosen customer's latest call, when it was a cancellation.
-  // A warning only. The probe doubles as the gate read: the route answers {enabled:false} while the lane is dark,
-  // and a failed fetch shows nothing, so a dark lane renders as before. It runs for every chosen customer, so a fetch
+  // "Canceled on a call": the chosen customer's latest call, when it was a cancellation.
+  // A warning only. A failed fetch shows nothing. It runs for every chosen customer, so a fetch
   // that throws synchronously is turned into that same quiet failure.
   const cancelProbeCustomerId = selectedCustomer?.id != null ? String(selectedCustomer.id) : '';
   const [cancelCallProbe, setCancelCallProbe] = useState({ customerId: '', call: null });
@@ -2308,7 +2303,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     Promise.resolve()
       .then(() => adminFetch(`/admin/schedule/cancel-call-notice?customerId=${encodeURIComponent(cancelProbeCustomerId)}`))
       .then((r) => {
-        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: r?.enabled ? (r.call || null) : null });
+        if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: r?.call || null });
       })
       .catch(() => {
         if (!cancelled) setCancelCallProbe({ customerId: cancelProbeCustomerId, call: null });
@@ -2318,7 +2313,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const cancelCallNotice = cancelCallProbe.customerId === cancelProbeCustomerId ? cancelCallProbe.call : null;
   const reserviceRequestActive = !!reserviceProbeCustomerId
     && reserviceRequestProbe.customerId === reserviceProbeCustomerId
-    && reserviceRequestProbe.enabled;
+    && reserviceRequestProbe.loaded;
   const [saving, setSaving] = useState(false);
   // State updates are async — two clicks in one tick both saw saving=false
   // during the awaited re-quote and booked twice; the ref is synchronous.
@@ -2446,9 +2441,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const formatScheduleEstimateLabel = (estimate) => {
     if (!estimate) return '';
     const isAccepted = estimate.status === 'accepted';
-    const stamp = isAccepted ? estimate.acceptedAt : (estimate.createdAt || estimate.acceptedAt);
+    // Eastern dates, and the same sent-or-created stamp the booking-win notice
+    // uses, so the picker and the notice never name different days.
+    const stamp = isAccepted ? estimate.acceptedAt : (estimate.sentAt || estimate.createdAt || estimate.acceptedAt);
     const date = stamp
-      ? new Date(stamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      ? formatETDate(stamp, { month: 'short', day: 'numeric' })
       : '';
     // Spell out acceptance so the operator can tell a phone-accepted-but-not-
     // yet-marked quote from one the customer formally accepted.
@@ -4400,8 +4397,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : undefined,
               callBookingReviewedIds: callBookingOverrides.get(key),
             }),
-            // GATE_DAY_ONLY_PROMISE: the office ticked "Customer asked for this time" (a set time). Absent unless true.
-            ...askedTimeCreateFields(dayOnlyPromiseOn, customerAskedTime),
+            // The office ticked "Customer asked for this time" (a set time). Absent unless true.
+            ...askedTimeCreateFields(customerAskedTime),
             // Staff-saved "Customer's words": rides only the first group whose
             // primary line is a pest/lawn re-service (the server stamps the
             // primary row and decides the source itself).
@@ -5788,7 +5785,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </select>
             </div>
           </div>
-          {dayOnlyPromiseOn && !newCallerBookMode && (
+          {!newCallerBookMode && (
             <AskedTimeBoxLegacy id="new-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={partialCommitLocked} colors={D} slot={{ date: apptDate, start: windowStart, timeChosen, reminder24hOn: reminderAnswerFor(bookingReminder24h, selectedCustomer, selectedPropertyId) }} />
           )}
           {duplicateConflict && (
@@ -5941,6 +5938,54 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       Showing estimates for {formatBookingPropertyAddress(selectedBookingProperty).street} only.
                     </div>
                   )}
+                  {(() => {
+                    // Booking-win tracking: an open estimate this booking would
+                    // otherwise leave at "sent". Recomputed from the offered list
+                    // on every render (customer, address and property changes all
+                    // move it); nothing is linked until staff tap the button, which
+                    // is the same pick as choosing it in the picker above. A pick replaces the
+                    // service list, so the notice shows only while the booking has no lines.
+                    const settled = bookingPropertyState === 'ready' || bookingPropertyState === 'hidden';
+                    if (linkedEstimate || saving || partialCommitLocked || !settled || services.length > 0) return null;
+                    // Only a quote for the address the booking will use: with one active
+                    // property the picker is hidden and the list holds every property's
+                    // quotes, so keep a quote for that property or an address-free one.
+                    const activeId = propertyPickerActive ? String(selectedPropertyId || '')
+                      : (bookingProperties.length === 1 ? String(bookingProperties[0].id) : '');
+                    // A quote tied to a property counts only for that property; one tied to
+                    // none counts only when it carries no street of its own (it may be for
+                    // another address). Anything else gets no notice.
+                    const forThisAddress = visibleScheduleEstimates.filter((e) => (e.propertyId
+                      ? String(e.propertyId) === activeId
+                      : !e.hasQuotedAddress));
+                    // Fail closed: an open quote with no property and a street of its own may
+                    // be the one the customer said yes to, so with one present no quote is
+                    // singled out (it would make an address-free quote look like the only one).
+                    const unplacedStreetQuote = recentOpenEstimates(visibleScheduleEstimates, selectedCustomer?.id)
+                      .some((e) => !e.propertyId && e.hasQuotedAddress);
+                    const notice = unplacedStreetQuote ? null : openEstimateLinkNotice({ estimates: forThisAddress, customerId: selectedCustomer?.id });
+                    if (!notice) return null;
+                    return (
+                      <div data-testid="open-estimate-link-notice" style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', fontSize: 14, color: D.text }}>
+                        <span style={{ minWidth: 0 }}>{notice.text}</span>
+                        {notice.estimateId != null && (
+                          <button
+                            type="button"
+                            onClick={() => applyScheduleEstimate(notice.estimateId)}
+                            style={{
+                              border: `1px solid ${D.border}`, borderRadius: 6,
+                              background: 'transparent', color: D.text, cursor: 'pointer',
+                              fontSize: isMobile ? 14 : 12, fontWeight: 500, whiteSpace: 'nowrap',
+                              padding: isMobile ? '10px 14px' : '6px 10px',
+                              minHeight: isMobile ? 40 : undefined,
+                            }}
+                          >
+                            Link it
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {linkedEstimate && (
                     <>
                       {/* Acceptance status — spells out whether the customer

@@ -306,7 +306,7 @@ async function assertRowMovableAlone(t, rowId, observedVisitId) {
   }
 }
 
-async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId, noticePrevious } = {}) {
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId, noticePrevious, shiftHours } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
   // actorId: the staff row behind a unit move (dispatch_alerts.resolved_by
   // + the broadcast). noticeActorId: who the tech's card names when that is
@@ -316,6 +316,8 @@ async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = f
   await assignDispatchJob({
     jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam,
     ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}),
+    // GATE_TECH_SHIFT_HOURS: an automatic unit move asks the assignment to judge the shift too.
+    ...(shiftHours ? { shiftHours: true } : {}),
     ...(noticeActorId !== undefined ? { noticeActorId } : {}),
     ...(noticePrevious ? { noticePrevious } : {}),
   });
@@ -1741,6 +1743,132 @@ function planMemberTargets({ members, primary, visitWindowStart, win, newDateStr
   });
 }
 
+// GATE_TECH_SHIFT_HOURS: the keys of a caller's own fence that the unit move's
+// shift verdict depends on (moveVisitAsUnit's plan). Each row: the key, when a
+// caller value that differs from the plan's locked read is a stale request
+// ('changes': the first service will change; 'judged': a shift judged it), and
+// the form the two values are compared in.
+const CALLER_FENCE_KEYS = [
+  ['technician_id', 'changes', (value) => String(value || '')],
+  ['estimated_duration_minutes', 'judged', (value) => value ?? null],
+  ['window_start', 'judged', toMinutes],
+  ['window_end', 'judged', toMinutes],
+];
+
+/**
+ * GATE_TECH_SHIFT_HOURS: the id of the first landing its technician's shift
+ * on `date` does not hold, else null. A landing is one member as a unit move
+ * leaves it: `{ id, technicianId, start, end, durationMinutes }`. Its block is
+ * the commit's own (rowBlockMinutes: the start, and the later of the end and
+ * the start plus the stored length). `shiftOf` is loadTechShifts' answer. A
+ * member with no technician, no set hours or no start is not judged. A bound
+ * that is there but is no clock time (a request can carry one) refuses the
+ * member: the block cannot be read from it, and a write could still take a
+ * time from it. `judged` (optional) is filled with the stored length of every
+ * member a shift judged, by id: what that member's own write then pins.
+ */
+function memberOutsideShift(shiftOf, date, landings, judged = {}) {
+  const { shiftBounds } = require('./technician-eligibility');
+  const { rowBlockMinutes, unreadableBound } = require('./scheduling/window-rules');
+  for (const landing of landings) {
+    const shift = landing.technicianId ? shiftOf(landing.technicianId, date) : null;
+    if (!shift) continue;
+    judged[landing.id] = landing.durationMinutes ?? null;
+    if (unreadableBound(landing.start) || unreadableBound(landing.end, true)) return landing.id;
+    const { startMin, endMin } = rowBlockMinutes({ window_start: landing.start, window_end: landing.end, estimated_duration_minutes: landing.durationMinutes });
+    if (startMin == null) continue;
+    const held = shiftBounds(shift, startMin, endMin);
+    if (held.openMin > startMin || held.closeMin < endMin) return landing.id;
+  }
+  return null;
+}
+
+/**
+ * GATE_TECH_SHIFT_HOURS (D4 part 3c): the office's own move of a grouped stop
+ * is told from the rows it leaves. `rows` is the visit's rows as the mover
+ * itself read them FOR UPDATE to retarget the visit, after every member's own
+ * move and its assignment to the technician the move names (a reassignment
+ * linearizes after that read), less the rows that are no longer on the day and
+ * hours this move wrote. Each member that moved is asked once, about the
+ * technician its row has there (memberOfficeLine). No writer's answer is used,
+ * so a line is never about a row as it was planned, and is not lost with a
+ * writer's answer (a refused assignment, a member's failed post-commit work).
+ * Each line once: two members can state the same one. Gate off, or a move the
+ * office did not start: no line (gate off, each member's own move states its
+ * day-off line, as before). A line that cannot be read is logged: the move is
+ * committed, and is not failed for a line.
+ */
+async function unitOfficeLines(targets, moved, rows, initiatedBy) {
+  if (initiatedBy !== 'admin' || !require('../config/feature-gates').techShiftHoursLive()) return [];
+  const lineOf = async (target) => memberOfficeLine(rows.find((row) => String(row.id) === String(target.id)), target);
+  const lines = await Promise.all(targets.filter((x) => moved.includes(x.id)).map((target) => lineOf(target).catch((err) => {
+    require('./logger').warn(`[visit-groups] unit move: the office line of moved member ${target.id} was not read: ${err.message}`);
+  })));
+  return [...new Set(lines)].filter(Boolean);
+}
+
+// One moved member's line, about its row as the move left it: the day-off line,
+// or the shift line when the shift does not hold the row. `expect` and
+// `plannedMinutes` are the row as the plan read it. A member that kept its day
+// and its technician is asked the shift alone (as one visit's hours-only move
+// is); when its block is the one it had too, the move changed nothing a line
+// is about, and it is not asked. The blocks are compared as a shift reads them
+// (rowBlockMinutes: the hours and the stored length): an end the member's own
+// move derived is no change, an end the office set later than the length is.
+function memberOfficeLine(row, { expect, plannedMinutes }) {
+  if (!row || !row.technician_id) return undefined;
+  const { rowBlockMinutes } = require('./scheduling/window-rules');
+  const kept = expectMatchesRow(row, { scheduled_date: expect.scheduled_date, technician_id: expect.technician_id });
+  const was = rowBlockMinutes({ window_start: expect.window_start, window_end: expect.window_end, estimated_duration_minutes: plannedMinutes });
+  const now = rowBlockMinutes(row);
+  if (kept && was.startMin === now.startMin && was.endMin === now.endMin) return undefined;
+  return require('./technician-eligibility').dayWarningFor(row.technician_id, dateOnly(row.scheduled_date), { block: row, shiftOnly: kept });
+}
+
+/**
+ * GATE_TECH_SHIFT_HOURS, read-only: moveVisitAsUnit's shift check as a test of
+ * one placement, for a list whose pick commits as an automatic move of
+ * `service` with the technicians kept (the tech app's rain-out sheets).
+ * Returns `(dateStr, windowStart, windowEnd) => true` when the unit's check
+ * would refuse that placement: the mover's own planner (predictMemberWindows)
+ * gives every member's landing, and each is judged on its own technician. A
+ * plan the mover refuses for another reason is not this test's to drop, but
+ * the tapped service's own shift still is: it is then judged alone at the
+ * asked hours, as an ungrouped visit is.
+ * Returns null when `service` is not a member of an open stop of two or more
+ * live services (the caller's single-visit test applies), and with the gate
+ * off (no read). A point-in-time read, as the list itself is.
+ */
+async function unitShiftTest(conn, service) {
+  if (!service || !service.visit_id || !require('../config/feature-gates').techShiftHoursLive()) return null;
+  const visit = await conn('service_visits').where({ id: service.visit_id }).first('status', 'window_start');
+  if (!visit || String(visit.status) !== 'open') return null;
+  const members = await conn('scheduled_services').where({ visit_id: service.visit_id })
+    .whereNotIn('status', TERMINAL_ROW_STATUSES)
+    .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'estimated_duration_minutes');
+  if (members.length < 2 || !members.some((m) => String(m.id) === String(service.id))) return null;
+  const shiftOf = await require('./technician-eligibility').loadTechShifts(conn, {
+    technicianIds: [...new Set(members.map((m) => m.technician_id).filter(Boolean).map(String))],
+  });
+  return (dateStr, windowStart, windowEnd) => {
+    const predicted = predictMemberWindows({
+      members, primaryId: service.id, visitWindowStart: visit.window_start, requestedStart: windowStart, requestedEnd: windowEnd, newDateStr: dateStr,
+    });
+    if (!predicted.ok) {
+      const tapped = members.find((m) => String(m.id) === String(service.id));
+      return memberOutsideShift(shiftOf, dateStr, [{ id: tapped.id, technicianId: tapped.technician_id || null, start: windowStart, end: windowEnd, durationMinutes: tapped.estimated_duration_minutes }]) != null;
+    }
+    // A member the placement leaves where it is does not move, and the mover does not judge it.
+    const stays = (m, tg) => dateOnly(m.scheduled_date) === dateStr
+      && toMinutes(m.window_start) === toMinutes(tg.start) && toMinutes(m.window_end) === toMinutes(tg.end);
+    const landings = predicted.targets
+      .map((tg, index) => ({ tg, m: members[index] }))
+      .filter(({ tg, m }) => !stays(m, tg))
+      .map(({ tg, m }) => ({ id: tg.id, technicianId: m.technician_id || null, start: tg.start, end: tg.end, durationMinutes: m.estimated_duration_minutes }));
+    return memberOutsideShift(shiftOf, dateStr, landings) != null;
+  };
+}
+
 /**
  * Read-only prediction for auto-dispatch: planMemberTargets for moving
  * `primaryId` to `requestedStart`-`requestedEnd` on `newDateStr`, with the
@@ -2031,6 +2159,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           return {
             id: m.id, isPrimary, window, alreadyAtTarget, previousStatus: String(m.status),
             startHHMM: norm(targetStart) || norm(m.window_start) || null,
+            // The stored length the plan read, beside the write fence (`expect`): the office's lines
+            // compare the block the member had with the one it is left with (memberOfficeLine).
+            plannedMinutes: m.estimated_duration_minutes,
             // Original bounds kept SEPARATELY (local audit): a null end must
             // roll back as { start, end: null }, never as a zero-length
             // "09:00-09:00" window.
@@ -2088,9 +2219,59 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             techClashWarnings.push(`service ${tg.id} overlaps another job on the destination technician's route (${clashId})`);
           }
         }
+        // GATE_TECH_SHIFT_HOURS (D4 part 3b-2b): the unit's shift check. A
+        // member's own move through the rebooker is not judged on the shift
+        // (skipVisitSeam: it runs one member at a time, and on the member's
+        // old technician when the unit names a new one). So the unit is
+        // judged here, under the stop lock and before the first write: every
+        // member that will change, as the move leaves it, on the technician
+        // it will carry (the named one, else its own). One member the shift
+        // does not hold refuses the whole unit as a clash does (SLOT_TAKEN),
+        // so no group is moved in part. The office's own move is not checked.
+        // Gate off: loadTechShifts answers "no shift" before any read.
+        // shiftJudgedLengths: the length each judged member's verdict used,
+        // read here under the stop lock. That member's own move pins it.
+        const shiftJudgedLengths = {};
+        if (initiatedBy !== 'admin') {
+          // A member's own move takes its new window as a range in minutes
+          // (the rebooker's parseWindow reads no other range string); for any
+          // other range string it keeps the row's stored hours, as on main (a
+          // requested time sent with seconds, "09:00:00"). So such a member
+          // is judged where its write leaves it: at its stored hours.
+          const keepsStored = (index) => typeof targets[index].window === 'string' && !/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(targets[index].window);
+          const landings = members.map((m, index) => ({
+            id: m.id, start: keepsStored(index) ? m.window_start : planned[index].start, end: keepsStored(index) ? m.window_end : planned[index].end, durationMinutes: m.estimated_duration_minutes,
+            technicianId: options.technicianId !== undefined ? (options.technicianId || null) : (m.technician_id || null),
+          })).filter((landing, index) => !targets[index].alreadyAtTarget);
+          const shiftOf = await require('./technician-eligibility').loadTechShifts(t, { technicianIds: [...new Set(landings.map((x) => x.technicianId).filter(Boolean).map(String))] });
+          const outside = memberOutsideShift(shiftOf, newDateStr, landings, shiftJudgedLengths);
+          if (outside != null) {
+            throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), { statusCode: 409, status: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: outside });
+          }
+          // The first service's own write carries the caller's fence, and that
+          // fence wins there over the plan's. A caller that pinned another
+          // technician than the plan read under the lock asks from a stale
+          // view, and this verdict was for the technician the plan read (or
+          // for none: no technician, or one without set hours). So with the
+          // gate on, a first service that will change and whose caller fence
+          // names another technician is refused here, before any write; so is
+          // a fence that names another length or other stored hours than a
+          // verdict used (CALLER_FENCE_KEYS; hours compared by value). The
+          // write can then never pass on a technician, length or hours no
+          // verdict judged.
+          const callerPin = { ...options.expect };
+          const fenceApplies = {
+            changes: require('../config/feature-gates').techShiftHoursLive() && landings.some((landing) => String(landing.id) === String(primary.id)),
+            judged: Object.prototype.hasOwnProperty.call(shiftJudgedLengths, primary.id),
+          };
+          if (CALLER_FENCE_KEYS.some(([key, when, form]) => fenceApplies[when]
+            && Object.prototype.hasOwnProperty.call(callerPin, key) && form(callerPin[key]) !== form(primary[key]))) {
+            throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), { statusCode: 409, status: 409, isOperational: true, code: 'SLOT_TAKEN' });
+          }
+        }
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
-          customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings,
+          customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings, shiftJudgedLengths,
           targets, memberIds: members.map((m) => m.id),
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
           primary,
@@ -2456,10 +2637,23 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // planned technician); a caller's own expect fields are MERGED on top,
     // never replace it (codex r8). A caller fencing via expectAnchor /
     // expectSchedule keeps those and still gets the unit keys.
+    // GATE_TECH_SHIFT_HOURS: the plan judged this member's block with the
+    // length it read under the stop lock, and the locks are released since.
+    // The member's own write pins that length beside the technician, so a
+    // dispatch edit of either that lands in between ends this member's move
+    // as a concurrent change. It pins the stored hours the plan read too: a
+    // move of the day alone carries them to the new day, and the other
+    // members shift by the first service's stored start. A sibling's fence
+    // has them already; the first service's loses them when the caller sends
+    // a fence of its own. Not judged (gate off, the office's move, no set
+    // hours): no key is added.
+    const shiftPin = Object.prototype.hasOwnProperty.call(plan.shiftJudgedLengths, target.id)
+      ? { window_start: target.expect.window_start, window_end: target.expect.window_end, estimated_duration_minutes: plan.shiftJudgedLengths[target.id] } : {};
     const primaryExpect = {
       ...(callerFenced ? {} : target.expect),
       visit_id: plan.visitId,
       technician_id: target.expect.technician_id,
+      ...shiftPin,
       ...(options.expect || {}),
     };
     // technicianId never rides ANY member's rebooker call (local codex audit):
@@ -2508,7 +2702,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
-      : { ...siblingBase, ...noticeOpts, ...techProbeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
+      : { ...siblingBase, ...noticeOpts, ...techProbeOpts, expect: { ...target.expect, ...optOutFence, ...shiftPin }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
     // Callers sync reminders for the tapped row only (r2): every moved
     // sibling gets its reminder row synced here, notice suppressed — the
     // visit's one reminder text is the primary's. A sibling's own series
@@ -2594,6 +2788,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             await alignMemberTechnician(t, target.id, options.technicianId || null, {
               skipVisitSeam: true,
               expectTechnicianId: target.expect.technician_id || null,
+              // GATE_TECH_SHIFT_HOURS (D4 part 3b-2b): the plan judged this
+              // member on the destination technician under the stop lock, and
+              // the member's own move pinned what that verdict used through
+              // that write only. This assignment is a later transaction, so an
+              // automatic move asks the assignment's own locked re-check to
+              // judge the row as it now is against that technician's shift
+              // (assignDispatchJob `shiftHours`). Refused: the row stays moved
+              // on its old technician and is reported failed, as for any other
+              // refused assignment. The office's own move does not ask.
+              shiftHours: initiatedBy !== 'admin',
               // Staff UUID only — assignDispatchJob's actorId also stamps
               // dispatch_alerts.resolved_by; a system label never goes there.
               actorId: options.actorId || null,
@@ -2735,6 +2939,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 
   // ---- 3. retarget the parent from the rows that actually landed ----
   let parentRetargetFailed = false;
+  let leftRows = [];
   const newKey = stopBaseKey({ propertyId: plan.propertyId, customerId: plan.customerId, scheduledDate: newDateStr });
   try {
     await db.transaction(async (t) => {
@@ -2754,7 +2959,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .orderBy('id').forUpdate()
-        .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+        .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'estimated_duration_minutes');
+      // The rows as this move left them, for the office's lines (unitOfficeLines): a row that is not
+      // on the day and hours this move wrote for it is another editor's by now, and is left out.
+      leftRows = rows.filter((row) => expectMatchesRow(row, landedState[row.id]));
       // Every member reported MOVED must still be a member of this visit
       // sitting at its landed target under these locks (codex r17): a
       // newer assignment/move between a member's move and this retarget can
@@ -2946,7 +3154,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     .filter(Boolean).map((v) => String(v).slice(0, 5)).sort();
   const visitStart = representedStarts[0] || null;
   const visitMove = { visitId: plan.visitId, moved, failed, members, unchanged, visitStart, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
-  return { ...(primaryResult || { success: true, newDate }), visitMove, ...(warnings.length ? { warnings } : {}) };
+  const lines = [...warnings, ...await unitOfficeLines(plan.targets, moved, leftRows, initiatedBy)];
+  return { ...(primaryResult || { success: true, newDate }), visitMove, ...(lines.length ? { warnings: lines } : {}) };
 }
 
 module.exports = {
@@ -2971,6 +3180,7 @@ module.exports = {
   lockStop,
   lockStopForRow,
   openMembers,
+  unitShiftTest,
   visitActivity,
   LIVE_COMPLETION_CLAIM_STATUSES,
   frozenVisitVerdict,
@@ -2999,6 +3209,8 @@ module.exports = {
   visitSummariesForRows,
   visitSummaryForService,
   _test: {
+    memberOfficeLine,
+    memberOutsideShift,
     shiftClock,
     expectMatchesRow,
     siblingEligibleFor,

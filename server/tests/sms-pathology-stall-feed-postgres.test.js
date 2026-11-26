@@ -79,7 +79,7 @@ jest.setTimeout(60000);
     await database('message_drafts').insert({
       id, inbound_message: 'when are you coming?', draft_response: 'STALLED: let me confirm and get back to you.',
       facts_block: 'UPCOMING SERVICES: Quarterly Pest Control, Tuesday, window 2-4 PM',
-      prompt_version: 'house_voice_v12_real_answers26_n', intended_actions: JSON.stringify({ verify: { converged: false } }),
+      prompt_version: 'house_voice_v12_real_answers42_n', intended_actions: JSON.stringify({ verify: { converged: false } }),
       created_at: new Date('2026-10-30T15:00:00Z'), ...over,
     });
     return id;
@@ -111,7 +111,7 @@ jest.setTimeout(60000);
     const row = stored.find((r) => r.evidence_id === wanted);
     expect(row).toMatchObject({
       evidence_type: 'judgment_stall', surface: 'prompt_discipline', failure_mode: 'stalled_deferred',
-      prompt_version: 'house_voice_v12_real_answers26_n', verifier_missed: false, model: 'scripted',
+      prompt_version: 'house_voice_v12_real_answers42_n', verifier_missed: false, model: 'scripted',
     });
     expect(stored.find((r) => r.evidence_id === second)).toMatchObject({ surface: 'facts_block_gap', failure_mode: 'knew_more', prompt_version: null });
 
@@ -140,7 +140,7 @@ jest.setTimeout(60000);
   });
 
   describe('the proposer counts by the base prompt identity', () => {
-    const BASE = 'house_voice_v12_real_answers26_n';
+    const BASE = 'house_voice_v12_real_answers42_n';
     const entry = (version, i, over = {}) => ({
       evidence_type: 'judgment_stall', evidence_id: randomUUID(), surface: 'prompt_discipline', failure_mode: 'stalled_deferred',
       prompt_version: version, summary: `Synthetic stall ${i}.`, classified_at: new Date('2026-10-30T12:00:00Z'), ...over,

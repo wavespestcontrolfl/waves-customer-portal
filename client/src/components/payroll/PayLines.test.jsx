@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PayrollSettings from './PayrollSettings';
 import { dollarsToCents } from './PayLinesPanel';
@@ -107,6 +107,20 @@ describe('Pay lines panel (GATE_PAYROLL_PAY_LINES on)', () => {
     expect(within(paid).getByText('Review bonus')).toBeInTheDocument();
     expect(within(paid).getByText('Earned week only')).toBeInTheDocument();
     expect(within(paid).queryByRole('button', { name: /Remove/ })).toBeNull();
+  });
+
+  it('lists a season bonus, a stay bonus and a December gift in plain words', async () => {
+    open = [
+      line({ id: 'l-s', kind: 'season_bonus', amountCents: 150000 }),
+      line({ id: 'l-y', kind: 'stay_bonus', amountCents: 102000 }),
+      line({ id: 'l-d', kind: 'december_gift', amountCents: 30000 }),
+    ];
+    render(<PayrollSettings />);
+    const view = within(await panel());
+    const waiting = await view.findByRole('table', { name: 'Pay lines waiting' });
+    for (const word of ['Season bonus', 'Stay bonus', 'December gift']) expect(within(waiting).getByText(word)).toBeInTheDocument();
+    // the pay run works these out itself: no Remove button for them (the commission line of the default fixture is not in this list)
+    expect(within(waiting).queryByRole('button', { name: /Remove/ })).toBeNull();
   });
 
   it('adds a line and sends whole cents, the earned week and the span', async () => {
@@ -229,10 +243,39 @@ describe('pay run with pay lines', () => {
     const table = await openRun();
     expect(within(table).getByText('Bonus, commission, allowance')).toBeInTheDocument();
     expect(within(table).getByText('$76.15')).toBeInTheDocument();
-    expect(within(table).getByText('Overtime on those')).toBeInTheDocument();
+    expect(within(table).getByText('Overtime on additional earnings')).toBeInTheDocument();
     expect(within(table).getByText('$1.81')).toBeInTheDocument();
     expect(within(table).getByText('HSA from Waves')).toBeInTheDocument();
     expect(within(table).getByText('$200.00')).toBeInTheDocument();
+  });
+
+  it('adds tech rewards pay to the check row and the stub when a check holds it', async () => {
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => {
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: { ...RUN, checks: [check({ reviewBonusCents: 0, healthAllowanceCents: 0, hsaEmployerCents: 0, lineOvertimePremiumCents: 0, techRewardsCents: 30000 })] } });
+      if (path === '/admin/payroll/checks/check-a/stub') return reply({ stub: { ...STUB, earnings: { ...STUB.earnings, techRewardsCents: 30000 } } });
+      return original(path, options);
+    });
+    const table = await openRun();
+    expect(within(table).getByText('$300.00')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Stub for Sample Alpha' }));
+    const stub = within(await screen.findByLabelText('Pay stub'));
+    const amounts = within(stub.getByRole('table', { name: 'Pay stub amounts' }));
+    expect(amounts.getByText('Tech rewards (season bonus, stay bonus or December gift)')).toBeInTheDocument();
+  });
+
+  it('lists a gift that waits, and shows no such list on a run with none', async () => {
+    await openRun();
+    expect(screen.queryByRole('list', { name: 'Bonuses waiting' })).toBeNull();
+    cleanup();
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => {
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: { ...RUN, techRewardsNotes: ['December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run dated Feb 16, 2027 or earlier can add it'] } });
+      return original(path, options);
+    });
+    await openRun();
+    const list = await screen.findByRole('list', { name: 'Bonuses waiting' });
+    expect(within(list).getByText('December gift for Sample Alpha waits: the week of Nov 2, 2026 is not paid yet. Only a pay run dated Feb 16, 2027 or earlier can add it')).toBeInTheDocument();
   });
 
   it('shows the lines and the employer HSA contribution on the stub, outside gross pay', async () => {
@@ -242,7 +285,7 @@ describe('pay run with pay lines', () => {
     const amounts = within(stub.getByRole('table', { name: 'Pay stub amounts' }));
     expect(amounts.getByText('Review bonus')).toBeInTheDocument();
     expect(amounts.getByText('Health allowance')).toBeInTheDocument();
-    expect(amounts.getByText('Overtime on bonus, commission and allowance')).toBeInTheDocument();
+    expect(amounts.getByText('Overtime on additional earnings')).toBeInTheDocument();
     expect(amounts.queryByText('Commission')).toBeNull();
     expect(stub.getByText('Employer contributions')).toBeInTheDocument();
     expect(stub.getByText('HSA from Waves (not part of gross pay or taxes)')).toBeInTheDocument();
@@ -284,6 +327,56 @@ describe('pay run with pay lines', () => {
     // The void reopened it: it waits again, with its Remove button.
     expect(await view.findByRole('button', { name: 'Remove Commission for Sample Alpha' })).toBeInTheDocument();
     expect(view.queryByRole('table', { name: 'Pay lines paid' })).toBeNull();
+  });
+
+  it('keeps the newest pay lines when an older request answers last', async () => {
+    let reads = 0;
+    let releaseOld;
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', payDate: '2026-10-23', status: 'finalized', totals }] });
+      if (path === '/admin/payroll/pay-lines?status=open') {
+        reads += 1;
+        // The first read is slow. Its answer still holds a line that a pay run has paid since.
+        if (reads === 1) return new Promise(resolve => { releaseOld = () => resolve(reply({ payLines: [line()] })); });
+        return reply({ payLines: [] });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    await waitFor(() => expect(releaseOld).toBeTypeOf('function'));
+    // Opening a run starts a newer read, and it answers first.
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    const view = within(await panel());
+    expect(await view.findByText('No pay lines waiting for a pay run.')).toBeInTheDocument();
+    expect(reads).toBe(2);
+    await act(async () => { releaseOld(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    expect(view.getByText('No pay lines waiting for a pay run.')).toBeInTheDocument();
+    expect(view.queryByRole('button', { name: 'Remove Commission for Sample Alpha' })).toBeNull();
+  });
+
+  it('keeps the newest paid lines when an older request answers last', async () => {
+    let reads = 0;
+    let releaseOld;
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', payDate: '2026-10-23', status: 'finalized', totals }] });
+      if (path === '/admin/payroll/pay-lines?status=open') return reply({ payLines: [] });
+      if (path === '/admin/payroll/pay-lines?status=paid') {
+        reads += 1;
+        // The first read is slow. Its answer is from before a pay run paid the line.
+        if (reads === 1) return new Promise(resolve => { releaseOld = () => resolve(reply({ payLines: [] })); });
+        return reply({ payLines: [line({ status: 'paid', checkId: 'check-a' })] });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    await waitFor(() => expect(releaseOld).toBeTypeOf('function'));
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    const view = within(await panel());
+    expect(within(await view.findByRole('table', { name: 'Pay lines paid' })).getByText('Commission')).toBeInTheDocument();
+    await act(async () => { releaseOld(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    expect(within(view.getByRole('table', { name: 'Pay lines paid' })).getByText('Commission')).toBeInTheDocument();
   });
 
   it('shows none of it when the checks carry no pay line figures', async () => {

@@ -65,6 +65,7 @@ async function resolveLeadSource(attribution) {
   let googlePaid = false;
   let aiReferral = false;
   let organicSocialSource = null;
+  let printSource = null;
 
   const classified = classifyAttributionSignals(attribution);
 
@@ -99,6 +100,15 @@ async function resolveLeadSource(attribution) {
     detail = classified.reason === 'paid_tags'
       ? `Meta paid campaign${utm.campaign ? `: ${String(utm.campaign).slice(0, 80)}` : ''}`
       : `Meta click (${classified.reason === 'fbc' ? '_fbc' : 'fbclid'})`;
+  } else if (classified.bucket === 'print') {
+    // A printed piece (business card, yard sign, new-home postcard). Its link
+    // lands on the main site, which would fold it into the Main Site row below;
+    // GBP, Maps and paid clicks have already won above. Resolved by source_type
+    // (seed: 20261124150000_print_lead_sources.js), shared with the webhook via
+    // print-lead-sources.js. An unknown print source resolves to Print — other.
+    printSource = classified.print;
+    targetName = printSource.name;
+    detail = `${printSource.name}${utm.campaign ? ` — ${String(utm.campaign).slice(0, 80)}` : ''}`;
   } else if (classified.bucket === 'ai') {
     // Organic, not paid — checked before the spoke/Main-Site fallback so an
     // AI-referred visit isn't silently folded into a spoke or "Main Site"
@@ -144,6 +154,10 @@ async function resolveLeadSource(attribution) {
       // 'google_ads' with leadSourceId null, and the dashboard's
       // leads_unattributed_7d alert surfaces the missing row.
       row = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first();
+    } else if (printSource) {
+      // By source_type (stable if the office renames the row). is_active is not
+      // filtered: a paused piece still names the true channel.
+      row = await db('lead_sources').where({ source_type: printSource.sourceType }).first();
     } else if (aiReferral) {
       // Matched by source_type (seed: migration
       // 20260928030000_ai_assistant_lead_source.js) rather than name — stable
@@ -174,7 +188,7 @@ async function resolveLeadSource(attribution) {
     // anything else without a row stays null (no funnel row, fail-closed).
     // AI referrals mirror that same "keep the type even if the row lookup
     // ever misses" shape, though the seed migration means it normally won't.
-    sourceType: row?.source_type || (googlePaid ? 'google_ads' : metaPaid ? 'facebook' : ['Facebook', 'Instagram'].includes(organicSocialSource) ? 'facebook_organic' : aiReferral ? AI_ASSISTANT_SOURCE_TYPE : null),
+    sourceType: row?.source_type || (googlePaid ? 'google_ads' : metaPaid ? 'facebook' : ['Facebook', 'Instagram'].includes(organicSocialSource) ? 'facebook_organic' : aiReferral ? AI_ASSISTANT_SOURCE_TYPE : printSource ? printSource.sourceType : null),
     isPaidClick,
   };
 }

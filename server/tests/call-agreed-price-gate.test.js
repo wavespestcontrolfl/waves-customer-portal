@@ -338,3 +338,254 @@ describe('processRecording — failed quarantines never ride the retry lane alon
     expect(block).toContain('if (!queued) pendingQuarantineMarker = { reason: rejectionReason, procGeneration };');
   });
 });
+
+// 2026-11-21: a one-time job booked as a plan visit. With GATE_CALL_AGREED_ONE_TIME_JOB on, the booker keeps
+// the one-time service on the record, and the AI books no visit for a job the hold changed (owner 2026-11-22,
+// "card"): the office books it with its price from a review card.
+describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE_TIME_JOB)', () => {
+  const at = source.indexOf('const priceInfo = resolveCallBookingPrice({');
+  const call = source.slice(at, source.indexOf('});', at));
+  const count = (text) => source.split(text).length - 1;
+  const held = 'const agreedJobHeldForOffice = agreedJobAtAdoption\n              && (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));';
+  const txAt = source.indexOf('const svc = await db.transaction(async (trx) => {');
+  const guard = "if (agreedJobHeldForOffice) {\n                  // A street-only address match (the visit would have booked\n                  // pending with an address card) rides on the office notification.\n                  // So does the address the booking resolved (null: none).\n                  return {\n                    __held: {\n                      reason: 'agreed_one_time_job_office_books',";
+
+  test('the visit price call is unchanged, and the processor never reads a price staff only stated', () => {
+    expect(at).toBeGreaterThan(-1);
+    expect(source.indexOf('const priceInfo = resolveCallBookingPrice({', at + 1)).toBe(-1);
+    expect(call).toContain('quotedPrice: bookingExtracted.quoted_price,');
+    expect(call).toContain('catalogRow: callBookingCatalogRow,');
+    expect(call).not.toContain('agreedOnCall');
+    expect(source).not.toContain('resolveStatedOneTimeCallPrice');
+    expect(source).not.toContain('statedPrice');
+    // The gate has one call-time reader, and a mock of feature-gates without it reads as off.
+    expect(source).toContain("return typeof gates.callAgreedOneTimeJobLive === 'function' && gates.callAgreedOneTimeJobLive();");
+    expect(count('callAgreedOneTimeJobLive')).toBe(2);
+  });
+
+  test('the booking is held when the hold changed its service: a label at adoption, or the rule on the booking\'s own view', () => {
+    expect(count(held)).toBe(1);
+    // Set once, read once (by the guard below); nothing else writes it.
+    expect(count('agreedJobHeldForOffice =')).toBe(1);
+    expect(count('if (agreedJobHeldForOffice) {')).toBe(1);
+    // Set next to the price call, before the booking transaction opens.
+    expect(source.indexOf(held)).toBeGreaterThan(at);
+    expect(source.indexOf(held)).toBeLessThan(txAt);
+  });
+
+  test('inside the transaction the hold returns before the make-up decision and the insert, after every booking guard', () => {
+    const guardAt = source.indexOf(guard);
+    expect(count(guard)).toBe(1);
+    expect(guardAt).toBeGreaterThan(txAt);
+    // After the slot-elapsed recheck, the last booking guard.
+    expect(guardAt).toBeGreaterThan(source.indexOf("return { __held: { reason: 'arranger_slot_elapsed_pre_insert' } };", txAt));
+    const hook = source.indexOf("require('./call-reschedule-apply').planCallMakeupForBooking(trx, {", guardAt);
+    expect(hook).toBeGreaterThan(guardAt);
+    expect(source.indexOf('.insert(insertData)', hook)).toBeGreaterThan(hook);
+    // Option A's parts are gone: no plan read, no row lock for the hold, no price bell from the booker.
+    expect(source).not.toContain('agreedOneTimeJobForCaller');
+    expect(source).not.toContain('planSettlesUnpricedVisit');
+    expect(source).not.toContain('raisePriceBellForBooking');
+  });
+
+  // The office's booking task is ONE admin notification (owner 2026-11-22: "make it an admin notification"),
+  // never a review card. Only when it gets no row does main's generic skipped-booking card file.
+  test('the held booking raises one admin notification with the job\'s facts, and files no card of its own', () => {
+    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  // The Bill-To the booking would have stamped on the visit (a third";
+    expect(count(site)).toBe(1);
+    const call = source.slice(source.indexOf(site), source.indexOf("} else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')"));
+    expect(call).toContain('const alert = buildAgreedOneTimeJobAlert({\n                    call, firstName: extracted.first_name, serviceType, scheduledDate, windowStart,\n                    price: agreedJobCardPrice, followUpPlan: callFollowUpPlan,\n                    streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress, billToPayer,\n                  });');
+    // Only the call's current worker publishes or refreshes the task, under the call row's lock, in one transaction.
+    expect(call).toContain("const raised = await db.transaction(async (atrx) => {\n                      const owner = await atrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');\n                      if (!owner) return { superseded: true };\n                      return require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, { ...alert.opts, trx: atrx });\n                    });");
+    // A superseded pass files nothing either: the current worker owns the task.
+    expect(call).toContain('agreedJobAlerted = !!(raised && (raised.id || raised.superseded));');
+    expect(call).not.toContain('fileSkippedBookingCard');
+    // A raised notification is the office's task: the call gets no review state and no confirm-before-dispatch note.
+    expect(source).toContain("const agreedJobTaskRaised = svc.__held.reason === 'agreed_one_time_job_office_books' && agreedJobAlerted;\n                if (!agreedJobTaskRaised && !bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);");
+    // The Bill-To the booking would have stamped rides on the notification.
+    expect(call).toContain("const payerRow = await db('payers').where({ id: callBookingPayerId }).first('display_name').catch(() => null);");
+    // The address the booking resolved and a street-only match ride from the hold.
+    expect(source).toContain("? ['line1', 'line2', 'city', 'state', 'zip'].reduce((out, key) => ({ ...out, [key]: propertyLinkage.address[key] || null }), {})");
+    expect(source).toContain("streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null,\n                      bookingAddress: propertyLinkage.address");
+    // The card writers are main's: no agreed-job key, no clears.
+    for (const gone of ['AGREED_JOB_CARD_CLEARS', 'agreed_one_time_job:', 'agreedOneTimeJob = null', 'buildAgreedJobCardEvidence', 'agreedJobCardEvidence', 'agreedJobCardFiled']) {
+      expect(source).not.toContain(gone);
+    }
+  });
+
+  test('buildAgreedOneTimeJobAlert composes under the notification rule, with every fact in its detail', () => {
+    const { buildAgreedOneTimeJobAlert } = require('../services/call-recording-processor')._test;
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    const base = { call: { id: 'call-1' }, firstName: 'Jane', serviceType: 'One-Time Pest Control Service', scheduledDate: '2026-11-21', windowStart: '17:00' };
+    const alert = buildAgreedOneTimeJobAlert({
+      ...base,
+      price: { amount: 250, basis: 'stated' },
+      bookingAddress: { line1: '100 Example St', line2: null, city: 'Bradenton', state: 'FL', zip: '34202' },
+      billToPayer: { id: 'payer-1', name: 'Example Property Management' },
+      followUpPlan: { scheduledDate: '2026-12-05', windowStart: '17:00', packageOnly: true },
+    });
+    const composed = composeAdminAlert(alert.spec);
+    expect(composed.headline).toBe("Schedule — book Jane's one-time job");
+    expect(composed.why).toBe('One-Time Pest Control Service, Sat Nov 21, 5 PM: the AI booked no visit and sent no text.');
+    expect(alert.spec).toEqual(expect.objectContaining({
+      area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_booked',
+      link: '/admin/communications#tab=calls&call=call-1', subject: { type: 'call', id: 'call-1' },
+    }));
+    expect(alert.category).toBe('schedule');
+    // One ring per call, for good: a later pass of the call updates the text quietly (no ring; read and done kept).
+    expect(alert.opts).toEqual(expect.objectContaining({ bell: true, dedupeKey: 'agreed-one-time-job:call-1', refreshOnDedupe: true }));
+    expect(alert.opts.ringOnRefresh()).toBe(false);
+    expect(alert.opts.dedupeOpenOnly).toBeUndefined();
+    expect(alert.opts.dedupeKey.startsWith(require('../services/call-one-time-job').AGREED_ONE_TIME_JOB_ALERT_PREFIX)).toBe(true);
+    // The resolved payer stays identifiable: its id rides in metadata and as a payer page link in the detail.
+    expect(alert.opts.metadata).toEqual({ callLogId: 'call-1', source: 'call_agreed_one_time_job', payerId: 'payer-1' });
+    const detail = alert.opts.detail;
+    expect(detail).toContain('Staff said $250.00 one-time. Check the terms on the call before you set the visit\'s price.');
+    expect(detail).toContain('Book at: 100 Example St, Bradenton, FL 34202.');
+    expect(detail).toContain('Bill-To: Example Property Management (payer page: /admin/payers?payer=payer-1). Select this payer as Bill-To when you book');
+    expect(detail).toContain('Visit 2 is owed: it is part of this two-treatment service. Around Sat Dec 5, 5 PM: the call did not set this time');
+    expect(detail).toContain('Book visit 2 only if it is missing, and book or move it only to the time the customer confirms.');
+    expect(detail).toContain('Before you book: check the customer\'s schedule.');
+    expect(detail).not.toContain('Google matched only the street');
+
+    // An agreed total, no address, a street-only match, no Bill-To, a discussed visit 2 at a set off-hour time.
+    const other = buildAgreedOneTimeJobAlert({
+      ...base, firstName: null,
+      price: { amount: 250, basis: 'agreed_total' },
+      streetLevelAddress: '',
+      followUpPlan: { scheduledDate: '2026-12-05', windowStart: '14:30', hourStated: true },
+    });
+    expect(composeAdminAlert(other.spec).headline).toBe("Schedule — book the caller's one-time job");
+    expect(other.opts.detail).toContain('Agreed price: $250.00 one-time, the total the caller accepted on the call.');
+    expect(other.opts.detail).toContain('No address resolved: confirm the service address with the customer before you book.');
+    expect(other.opts.detail).toContain('Google matched only the street of this address');
+    expect(other.opts.detail).not.toContain('Bill-To');
+    // No payer: payerId is written as null, so a quiet refresh of a row that named a payer clears the old id.
+    expect(other.opts.metadata.payerId).toBeNull();
+    const { mergeRefreshMetadata } = require('../services/notification-service')._private;
+    expect(mergeRefreshMetadata(alert.opts.metadata, other.opts.metadata, false).payerId).toBeNull();
+    // A set off-hour time is never the time to book: staff book or move visit 2 only to the on-hour time the customer confirms.
+    expect(other.opts.detail).toContain('the call agreed a second visit. The call set it for Sat Dec 5, 2:30 PM, which is not on the hour: confirm an on-hour time with the customer.');
+    expect(other.opts.detail).toContain('and book or move it only to the time the customer confirms.');
+    expect(other.opts.detail).not.toContain('move it to this time if it differs');
+    // A set on-hour time is firm.
+    const firm = buildAgreedOneTimeJobAlert({ ...base, followUpPlan: { scheduledDate: '2026-12-05', windowStart: '17:00', hourStated: true } });
+    expect(firm.opts.detail).toContain('The call set it for Sat Dec 5, 5 PM. Save visit 1 first');
+    expect(firm.opts.detail).toContain('Book visit 2 only if it is missing, and move it to this time if it differs.');
+
+    // No price, no follow-up, and a service name too long for the why: the plain why, still one sentence.
+    const plain = buildAgreedOneTimeJobAlert({ ...base, serviceType: 'One-Time Pest Control Service With An Extremely Long Catalog Name For Testing Only', price: null });
+    expect(composeAdminAlert(plain.spec).why).toBe('Staff priced a one-time job on the call, so the AI booked no visit and sent no text.');
+    expect(plain.opts.detail).toContain('No price is shown: check the service and its billing terms on the call.');
+    expect(plain.opts.detail).not.toContain('Visit 2');
+  });
+
+  // A notification with no row (a failed write, a muted preference) leaves the task to main's generic
+  // approved-but-unbooked card below, so the office never loses it. A raised one files no card.
+  test('the fallback files main\'s generic card only when the notification got no row', () => {
+    const heldReasons = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/);
+    expect(heldReasons).not.toBeNull();
+    expect(heldReasons[0]).not.toContain('agreed_one_time_job_office_books');
+    expect(count("if (agreedJobAlerted) heldReasons.add('agreed_one_time_job_office_books');")).toBe(1);
+    expect(count('agreedJobAlerted = ')).toBe(2); // false at the start, the raise
+    expect(source.indexOf("if (agreedJobAlerted) heldReasons.add('agreed_one_time_job_office_books');"))
+      .toBeGreaterThan(source.indexOf('const heldReasons = new Set('));
+    const { buildTriageItem } = require('../services/call-routing-gates');
+    // No card reason of its own.
+    expect(buildTriageItem({ callLogId: 1, flag: 'agreed_one_time_job_office_books', extraction: {} }).category).toBe('service_unknown');
+  });
+
+  // The notification holds what the call said; no later pass rewrites it (it tells staff to check the schedule).
+  test('no later pass writes visit details onto the office task', () => {
+    expect(source).not.toContain('noteAgreedJobCardVisit');
+    expect(source).not.toContain('visit_candidate');
+  });
+
+  // The hold acts only on a call's first booking: a call with any visit (any status) runs as before the gate, so a
+  // reprocess never re-labels or re-routes a booking it already made. One read, only when the hold would apply.
+  test('the hold needs a call with no visit of its own, read only when the hold would apply', () => {
+    expect(source).toContain('&& callAgreedOneTimeJob(v2Result.extraction, bookableCallServices)\n      && !(await callHasAnyVisit(call));');
+    expect(count('callHasAnyVisit(')).toBe(2); // the definition and the one read
+    const helper = source.slice(source.indexOf('async function callHasAnyVisit(call) {'), source.indexOf('// The price the office notification (buildAgreedOneTimeJobAlert)'));
+    expect(helper).toContain('qb.where({ source_call_log_id: call.id });');
+    expect(helper).toContain("if (call.twilio_call_sid) qb.orWhere('notes', 'like', `%Call SID: ${call.twilio_call_sid}%`);");
+    // No status filter: a cancelled visit counts too.
+    expect(helper).not.toContain('status');
+    // An unreadable answer counts as no: the hold applies (a visit the call has is still found by the booking first).
+    expect(helper).toContain('return false;\n  }\n}');
+    expect(helper).toContain('if (!call?.id) return false;');
+    // The replay-only paths it replaces are gone.
+    for (const gone of ['agreedJobPriorByKey', 'agreedJobFollowUpWithheld', 'kept_visit_id']) expect(source).not.toContain(gone);
+  });
+
+  // An off-hour start never reaches the hold: the on-hour guard (or V2 routing) stops it first and files main's
+  // off-hour card, unchanged. So the notification's first-visit slot is always on the hour.
+  test('the off-hour path stays main\'s', () => {
+    const at = source.indexOf("flag: 'off_hour_start',\n                  extraction: v2ApprovedExtraction || undefined,");
+    expect(at).toBeGreaterThan(-1);
+    expect(source.slice(at, source.indexOf('scheduledDate = null;', at))).not.toContain('agreed_one_time_job');
+    expect(source).not.toContain('booking_off_hour');
+  });
+
+  test('offTheHour: true only for a start that is not on the hour', () => {
+    const { offTheHour } = require('../services/call-recording-processor')._test;
+    expect(offTheHour('10:30')).toBe(true);
+    expect(offTheHour('09:15:00')).toBe(true);
+    expect(offTheHour('10:00')).toBe(false);
+    expect(offTheHour('17:00:00')).toBe(false);
+    expect(offTheHour(null)).toBe(false);
+    expect(offTheHour('')).toBe(false);
+  });
+
+  // The card's price belongs to the service the call priced, with what kind of price it is.
+  test('agreedOneTimeJobCardPrice: the price only for the priced service, and its basis', () => {
+    const { agreedOneTimeJobCardPrice } = require('../services/call-recording-processor')._test;
+    const price = { amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent' };
+    const reading = (over = {}) => ({ service_request: { specific_service_name: 'One-Time Pest Control Service', quoted_price_usd: null, price, prices: [price], ...over } });
+    expect(agreedOneTimeJobCardPrice(reading(), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
+    expect(agreedOneTimeJobCardPrice(reading(), ' one-time pest control service ')).toEqual({ amount: 250, basis: 'stated' });
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250 }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
+    // An explicit contradiction (not final, or not accepted) makes the total a price to check.
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: false }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_accepted_by_caller: false }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: true, price_accepted_by_caller: true }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
+    // A disputed total the CALLER stated is never shown as staff's number.
+    const callers = { ...price, stated_by: 'caller' };
+    // …nor a caller's number the extraction says staff did not offer, even as a total. The hold itself does not
+    // count it either (resolveAgreedOneTimeJobPrice), so such a call books as before.
+    const { resolveAgreedOneTimeJobPrice } = require('../utils/call-agreed-price');
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false, price: callers, prices: [callers] }))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false }))).toBe(250);
+    // The 11-21 shape (no strict total, staff's own term, price_offered_by_staff false) still reads as agreed.
+    expect(resolveAgreedOneTimeJobPrice(reading({ price_offered_by_staff: false, price_is_final: false }))).toBe(250);
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toBeNull();
+    // Staff's own term, not offered: a price to check, never "the total the caller accepted".
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: false, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toBeNull();
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
+    // The hold and the card read the same evidence: a held call's card always shows the price that held it.
+    for (const contradiction of [{ price_is_final: false }, { price_accepted_by_caller: false }, { price_offered_by_staff: false }]) {
+      const byCaller = reading({ quoted_price_usd: 250, ...contradiction, price: callers, prices: [callers] });
+      expect(resolveAgreedOneTimeJobPrice(byCaller)).toBeNull();
+      expect(agreedOneTimeJobCardPrice(byCaller, 'One-Time Pest Control Service')).toBeNull();
+      const byStaff = reading({ quoted_price_usd: 250, ...contradiction });
+      expect(resolveAgreedOneTimeJobPrice(byStaff)).toBe(250);
+      expect(agreedOneTimeJobCardPrice(byStaff, 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
+    }
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, price: callers, prices: [callers] }))).toBe(250);
+    // A second staff term next to a disputed total (a trip fee added after the price): not the one price, so no
+    // hold and no price on a card. With no dispute the strict total stays the caller's accepted total.
+    const tripFee = { ...price, amount_usd: 75, accepted: false };
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, price_is_final: false, prices: [price, tripFee] }))).toBeNull();
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: false, prices: [price, tripFee] }), 'One-Time Pest Control Service')).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, prices: [price, tripFee] }))).toBe(250);
+    // The booking resolved to another row (a free re-service): no price on the card.
+    expect(agreedOneTimeJobCardPrice(reading(), 'Pest Control Re-Service')).toBeNull();
+    expect(agreedOneTimeJobCardPrice(reading(), null)).toBeNull();
+    // No agreed one-time price, or no reading.
+    expect(agreedOneTimeJobCardPrice(reading({ price: null, prices: [] }), 'One-Time Pest Control Service')).toBeNull();
+    expect(agreedOneTimeJobCardPrice(null, 'One-Time Pest Control Service')).toBeNull();
+    // Computed only for a held booking, next to the hold.
+    expect(count('const agreedJobCardPrice = agreedJobHeldForOffice ? agreedOneTimeJobCardPrice(v2Result?.extraction, serviceType) : null;')).toBe(1);
+  });
+});

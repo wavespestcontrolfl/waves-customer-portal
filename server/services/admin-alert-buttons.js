@@ -35,6 +35,10 @@ const KINDS = {
   // Owner plan A 2026-11-02 "Your word list goes to Google automatically, and the advisor drafts new words for your one-click
   // yes or no. Every block can be undone.": Add / Decline on an ads-advisor word. The Ads page's own decide step; Undo is on that page.
   negative_keyword: () => require('./ads/negative-keyword-buttons').buttonHandler,
+  // Owner 2026-11-24 "do whateverr you rec" (Bill and send): on the "Completed first visit needs manual billing" bell,
+  // one invoice for the visit and the setup fee, created and sent through the bar's create and send steps.
+  // GATE_SETUP_FEE_BILL_BUTTON.
+  setup_fee_bill: () => require('./setup-fee-bill-button').buttonHandler,
 };
 
 // Close-only buttons an emitter puts on its row: Handled on a customer's texts, Called back on a call-back

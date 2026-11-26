@@ -40,11 +40,10 @@ const { resolveCompletionProfileForScheduledService } = require('./service-compl
 const { typedFollowupVerdict, FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
-  probeSlotOverlap, slotOverlapWarning, assertAdminAppointmentWindow, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  probeSlotOverlap, slotOverlapWarning, assertAdminAppointmentWindow, ADMIN_OCCUPANCY_EXCLUDE_STATUSES, rowBlockMinutes,
 } = require('./scheduling/window-rules');
 const { findConflictingVisits } = require('./scheduling/occupancy');
 const { assertAssignableTechnician } = require('./technician-eligibility');
-const { techWorkDaysLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { completeScheduledServiceInsert } = require('./booking/create-scheduled-service');
 const { placeAutoSavedVisit } = require('./scheduling/staff-save-route-check');
@@ -386,6 +385,17 @@ function buildFollowupInsert(svc, cols, { date, windowStart, windowEnd, technici
   return insertData;
 }
 
+// The technician check's options: the same question in the preview and at the write. An inherited
+// technician is automatic: a day they do not work (workDays, GATE_TECH_WORK_DAYS) or a shift that
+// does not hold the follow-up's own block (`hours`, GATE_TECH_SHIFT_HOURS) lands the follow-up
+// unassigned. An admin override is an office choice, which only warns: neither is checked.
+function technicianCheck(conn, date, insertData, technicianOverride) {
+  return {
+    conn, date: String(date).slice(0, 10), workDays: !technicianOverride,
+    hours: technicianOverride ? undefined : rowBlockMinutes(insertData),
+  };
+}
+
 // Preview (IB closeout repair plan): everything before this is read-only;
 // report what would be booked, with the inherited technician resolved the
 // way the write resolves it (an unassignable one lands unassigned) and the
@@ -394,7 +404,7 @@ async function followupPreview({ date, insertData, technicianOverride }) {
   let wouldTechnicianId = insertData.technician_id;
   if (wouldTechnicianId) {
     try {
-      await assertAssignableTechnician(wouldTechnicianId, { conn: db, date: String(date).slice(0, 10), workDays: !technicianOverride });
+      await assertAssignableTechnician(wouldTechnicianId, technicianCheck(db, date, insertData, technicianOverride));
     } catch (eligErr) {
       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
       wouldTechnicianId = null;
@@ -487,7 +497,7 @@ async function commitFollowup({ svc, date, cols, insertData, technicianOverride,
         // An inherited technician is automatic (workDays: a day they do not
         // work lands the follow-up unassigned); an admin override is an office
         // choice, which only warns (GATE_TECH_WORK_DAYS).
-        await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(date).slice(0, 10), workDays: !technicianOverride });
+        await assertAssignableTechnician(insertData.technician_id, technicianCheck(trx, date, insertData, technicianOverride));
       } catch (eligErr) {
         if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
         logger.warn(`[dispatch] follow-up inherits technician ${insertData.technician_id} who is not assignable; booking unassigned`);
@@ -502,8 +512,8 @@ async function commitFollowup({ svc, date, cols, insertData, technicianOverride,
           if (blind.length && !overlapWarning) overlapWarning = slotOverlapWarning(date);
         }
       }
-      if (technicianOverride && insertData.technician_id && techWorkDaysLive()) {
-        const offDay = await require('./technician-eligibility').offDayWarningFor(insertData.technician_id, String(date).slice(0, 10), { conn: trx });
+      if (technicianOverride) {
+        const offDay = await require('./technician-eligibility').dayWarningFor(insertData.technician_id, String(date).slice(0, 10), { conn: trx, block: insertData });
         if (offDay) overlapWarning = [overlapWarning, offDay].filter(Boolean).join(' ');
       }
     }

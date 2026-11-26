@@ -30,6 +30,11 @@ describe('alert sounds map', () => {
     expect(soundForTrigger('new_lead_email')).toBe('waves-lead.caf');
   });
 
+  test('a website quote banner plays the New lead sound', () => {
+    expect(soundForTrigger('new_lead_quote')).toBe(soundForTrigger('new_lead'));
+    expect(soundForTrigger('new_lead_quote')).toBe('waves-lead.caf');
+  });
+
   test('the map is frozen', () => {
     expect(Object.isFrozen(ALERT_SOUNDS)).toBe(true);
   });

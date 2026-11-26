@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const { startCustomerRainRank, withDisplayTier, rainTierDiff } = require('../services/scheduling/customer-rain-rank');
 const db = require('../models/db');
-const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
+const { isAssignable, assertAssignableTechnician, loadTechShifts, shiftBounds, shiftExcluding } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
@@ -31,6 +31,7 @@ const {
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { resolveZoneRouteDaySlug } = require('../services/scheduling/zone-route-days');
+const { leadBookingZone } = require('../services/slot-zone');
 const { violatesTravelGap, travelGapEnabled, customerFacingBufferMinutes, requiredGapMinutes, effectiveEndMinutes } = require('../services/scheduling/travel-gap');
 const { expectedMinutesForServices } = require('../services/scheduling/expected-service-minutes');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
@@ -128,6 +129,13 @@ const BOOKING_FUNNEL_SERVICE_CATEGORIES = {
   rodent: 'rodent',
   bora_care: 'termite', // catalog service_key 'bora_care' carries category 'termite'
 };
+// The service line of a funnel key whose catalog category cannot say it. The /book rodent option
+// saves a general "Rodent Control" visit: the first look at a rodent problem (the booking-link text
+// sends a rodent inspection here too, sms-book-funnel-map.js). That visit is on the exclusion line
+// with the rodent inspection (owner 2026-11-21: the owner does the first visit and the inspection,
+// the second technician traps), the same line its saved name reads
+// (auto-dispatch/service-category.js), so the offer and the saved visit agree.
+const BOOKING_FUNNEL_SERVICE_LINES = Object.freeze({ rodent: 'exclusion' });
 
 // The booking's own expected-minutes credit (owner ruling 2026-09-23) for
 // a funnel serviceKey ('pest_control', 'pest_control+lawn_care', …): every
@@ -165,7 +173,9 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
   }
   return durationMinutes;
 }
-const { fallbackCenterZoneName, funnelOfferPool } = require('../services/scheduling/zone-day-funnel');
+const {
+  fallbackCenterZoneName, funnelOfferPool, offerFunnelView, dropOtherTruckDays, funnelOn,
+} = require('../services/scheduling/zone-day-funnel');
 const {
   CUSTOMER_HOUR_GRID, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
@@ -1733,9 +1743,14 @@ function crewSlots(slots, crew) {
 // `technicianId`: opt-in. find-time searches that one technician's days only
 // (its own technicianId filter). Only reschedule-public.js passes it: a visit
 // that already has a technician keeps that technician.
-// `zoneFunnelAddress`: opt-in address text. With GATE_SOUTH_ZONE_DAY_FUNNEL live and an address in a
+// `zoneFunnelAddress`: opt-in address text, and `zoneFunnelCity` its city (a city decides the zone alone, the text
+// only without one, as createSelfBooking stamps it from callbackVisit.zoneAddress), else `zoneFunnelCustomerCity`,
+// the customer's city on file that the booking falls back to (slot-zone.js leadBookingZone). With GATE_SOUTH_ZONE_DAY_FUNNEL
+// live and an address in a
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, paidLookups, crew, verifiedOnly }) {
+// Per truck (GATE_MULTI_TECH_CONFIRM, owner rule B) find-time's slots of a truck on another truck's zone
+// day go before any start is claimed (dropOtherTruckDays), so a start goes to the zone day's own truck.
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, crew, verifiedOnly }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -1895,6 +1910,12 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // Slot rules come from the shared bookingSlotWindow derivation so the
   // /confirm commit path enforces exactly what is offered here.
   const { slotGridMinutes, dayStartMin, dayEndMin } = bookingSlotWindow(config);
+  // GATE_TECH_SHIFT_HOURS (technician-eligibility.js shiftBounds): each
+  // technician's shift for a date. The finder holds its own starts inside
+  // the shift; the hours this builder adds itself (an open day's block, a
+  // gap's later hours, a start snapped to the grid) are held to it in
+  // addCandidate. Gate off: no read, and every day keeps its own bounds.
+  const shiftOf = await loadTechShifts(db);
   // Offer must mirror the /confirm commit gate (the #2704 estimate-surface
   // rule, filterCollidingSlots' dead-end-loop incident): createSelfBooking
   // blocks on unassigned zone rows and live customer-NULL estimate holds,
@@ -1977,7 +1998,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const addCandidate = (slot, startMin) => {
     const endMin = startMin + duration;
     if (!isWholeHour(startMin)) return;
-    if (startMin < dayStartMin || endMin > dayEndMin) return;
+    const day = shiftBounds(shiftOf(slot.technician.id, slot.date), dayStartMin, dayEndMin);
+    if (startMin < day.openMin || endMin > day.closeMin) return;
     // The documented public grid (09:00-17:00) is narrower than dayStartMin
     // (08:00, this file's own day-start default — matched to the voice
     // agent's 8am-6pm business-hours bound, call-recording-processor.js) —
@@ -2085,10 +2107,16 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     }, lineRankOf(lineRanking, slot));
   };
 
+  // The far-south funnel's zone days (zoneFunnelAddress), read before the claims: per truck, a truck on another
+  // truck's zone day never claims a start, so the zone truck keeps each start it has. Null = no funnel.
+  const offerFunnel = result.slots?.length
+    ? await offerFunnelView({ address: zoneFunnelAddress, city: zoneFunnelCity, customerCity: zoneFunnelCustomerCity, dateFrom: rangeFrom, dateTo: rangeTo, conn: db })
+    : null;
+  const findTimeSlots = dropOtherTruckDays(result.slots || [], offerFunnel || {}, (slot) => slot?.technician?.id);
   // A graced build never offers a slot whose simulated arrival delay is past
   // its grace (bookSlotGrace's -1): verifyArrivalCapacity would refuse it at
   // confirm. Ungraced builds pass every slot through untouched.
-  const offerSlots = orderByLineRank(crewSlots(graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []), crew), lineRanking);
+  const offerSlots = orderByLineRank(crewSlots(graceBuild ? findTimeSlots.filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : findTimeSlots, crew), lineRanking);
   for (const slot of offerSlots) {
     if (capacityEnabled()) {
       // Capacity evaluates each start against the whole route and live blocks.
@@ -2153,9 +2181,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today, floor: !crew, verifiedOnly });
   // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL), opt-in per caller with the address text
   // (the lead assessment link): the pool narrows BEFORE the customer route check, as on the estimate page.
-  const funneledCandidates = await funnelOfferPool(stampedCandidates, {
-    address: zoneFunnelAddress, dateFrom: rangeFrom, dateTo: rangeTo, routeDaySlug: zoneSlug, conn: db,
-  });
+  const funneledCandidates = await funnelOfferPool(stampedCandidates, offerFunnel, { routeDaySlug: zoneSlug, conn: db });
   const candidates = await applyRouteCheck(routeCheck, funneledCandidates);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
@@ -2263,7 +2289,9 @@ function funnelServiceLines(serviceKey) {
   if (!lineMapLive()) return null;
   const { categoryForCatalogCategory } = require('../services/auto-dispatch/service-category');
   const lines = normalizeBookingServiceKeys(serviceKey)
-    .map((key) => categoryForCatalogCategory(BOOKING_FUNNEL_SERVICE_CATEGORIES[key]))
+    .map((key) => (Object.prototype.hasOwnProperty.call(BOOKING_FUNNEL_SERVICE_LINES, key)
+      ? BOOKING_FUNNEL_SERVICE_LINES[key]
+      : categoryForCatalogCategory(BOOKING_FUNNEL_SERVICE_CATEGORIES[key])))
     .filter(Boolean);
   return lines.length ? [...new Set(lines)].sort() : null;
 }
@@ -2700,6 +2728,7 @@ async function createSelfBooking(payload = {}) {
       customersOnly,
       authedCustomer,
       callbackVisit,
+      commitGuard,
     } = payload;
 
     // callbackVisit is INTERNAL-ONLY (reservice-public.js, inspection-public.js):
@@ -2731,6 +2760,17 @@ async function createSelfBooking(payload = {}) {
     // revalidate(trx) }): a booking made from an estimate's page
     // (commercial-first-visit.js, estimate-assessment-public.js) re-checks
     // that estimate inside the booking transaction (see the lock below).
+    // callbackVisit.slotGuard(trx, { zone }) (the lead assessment link): the
+    // caller's own re-check of this slot on the booking transaction, under the
+    // date lock, given the zone this booking stamps on its visit; false
+    // refuses it as a taken slot. callbackVisit.zoneAddress(customer) (the lead
+    // assessment link): given this booking's own customer row, the booking
+    // address the caller's list resolved its zone from ({ address, city }, or
+    // null): a typed address, or that row's own address when the booking uses
+    // the profile's; this booking's zone is that address's zone, resolved the
+    // same way, else the zone of this booking's customer's city on file
+    // (slot-zone.js leadBookingZone), so the list, the slot guard and the
+    // stamp agree.
     const paidInternalVisit = callbackVisit && callbackVisit.isCallback === false
       && Number.isFinite(Number(callbackVisit.billing?.estimatedPrice)) && Number(callbackVisit.billing.estimatedPrice) > 0
       ? { estimatedPrice: Math.round(Number(callbackVisit.billing.estimatedPrice) * 100) / 100 }
@@ -3522,11 +3562,22 @@ async function createSelfBooking(payload = {}) {
 
     const confCode = generateConfirmationCode();
 
-    // Resolve zone from city (best-effort, for reporting)
-    const zones = await db('service_zones').select('*');
-    const zone = zones.find(z => (z.cities || []).some(c =>
-      c.toLowerCase() === (customer.city || '').toLowerCase()
-    )) || null;
+    // Resolve zone from city (best-effort, for reporting). A caller that names
+    // the booking address its list resolved a zone from (callbackVisit.zoneAddress,
+    // given this booking's own customer row) gets that zone: a city no zone lists
+    // ('North Venice') takes the zone whose city its name contains, as its list
+    // did. Only with the far-south funnel on (GATE_SOUTH_ZONE_DAY_FUNNEL): off, no
+    // list resolved a zone, and the customer's city decides as before. The
+    // customer's city also decides when that address resolves to no zone
+    // (slot-zone.js leadBookingZone): a visit with no zone stamp is read later by
+    // its customer's city. Every customer field the zone reads comes from this
+    // booking's own row, which the fence below re-checks (owner rule B, pre-push
+    // P1s on 3e6fd14320, 3b494d3581 and 5fc5e4d648).
+    const zone = callbackVisit?.zoneAddress && funnelOn()
+      ? (await leadBookingZone(db, callbackVisit.zoneAddress(customer), customer.city)).zone
+      : (await db('service_zones').select('*')).find(z => (z.cities || []).some(c =>
+        c.toLowerCase() === (customer.city || '').toLowerCase()
+      )) || null;
 
     // ALLOWLIST, never echo: the persisted/displayed label derives from the
     // slot_sig-VERIFIED serviceKey first, then from allowlist-matching the
@@ -3962,7 +4013,13 @@ async function createSelfBooking(payload = {}) {
         const freshBookingCustomer = await trx('customers')
           .where({ id: custId }).forShare()
           .first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude');
-        if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)) {
+        // The zone (the far-south truck check below and the visit's stamp) read this booking's customer row before
+        // the pre-fence snapshot: its city, and for the lead link its whole address. The fingerprint cannot see an
+        // edit between those two reads, so with the funnel on (GATE_SOUTH_ZONE_DAY_FUNNEL) the locked row's address
+        // must be the address the zone read (owner rule B, pre-push P1s on 7cdf34198a and 5fc5e4d648); with it off
+        // the zone is only the stamp it always was.
+        if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)
+          || (funnelOn() && JSON.stringify(bookingAddressStamp(freshBookingCustomer)) !== JSON.stringify(bookingAddressStamp(customer)))) {
           throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
             statusCode: 409,
             isOperational: true,
@@ -4287,7 +4344,6 @@ async function createSelfBooking(payload = {}) {
           });
         }
       }
-
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate. A
       // callback commit additionally requires the existing row to be THIS
@@ -4305,6 +4361,17 @@ async function createSelfBooking(payload = {}) {
       // is not this one, and replaying it would mark this proposal won against
       // that visit and price (pre-push audit P0). Its estimate guard already
       // answers a visit linked to its own estimate as ALREADY_BOOKED, above.
+      // A commitGuard caller (the new-home postcard page) replays only a LIVE visit linked to its own estimate: a
+      // different service at that start, or a visit staff cancelled while its booking row stayed open, is not its booking.
+      if (typeof commitGuard === 'function') {
+        if (!sourceEstimateId) replayQuery.whereRaw('false');
+        else {
+          replayQuery.whereExists((visit) => visit.select(trx.raw('1')).from('scheduled_services')
+            .whereRaw('scheduled_services.self_booking_id = self_booked_appointments.id')
+            .where('scheduled_services.source_estimate_id', String(sourceEstimateId))
+            .whereNotIn('scheduled_services.status', ['cancelled', 'skipped', 'rescheduled']));
+        }
+      }
       if (paidInternalVisit) {
         const ownEstimateId = callbackVisit.estimateGuard?.estimateId;
         if (!ownEstimateId) replayQuery.whereRaw('false');
@@ -4462,6 +4529,34 @@ async function createSelfBooking(payload = {}) {
         });
       }
 
+      // commitGuard (internal caller only: services/mail/home-book.js, the new-home postcard page): the caller's own
+      // re-check on THIS transaction, after the replay and the conflict checks and before the visit is inserted, of what
+      // it decided before it started (its gate, the prospect row it share-locks until commit, the price). A false verdict
+      // refuses the booking. It is a function, so a request body (JSON) can never carry one.
+      // It is given what this booking is about to stamp (the visit price and the follow-up price the pay-at-visit block
+      // resolved, the payment preference, the estimate the visit links to, the resolved customer), so the caller can check
+      // the price that will actually be billed, not only the draft it was read from.
+      if (typeof commitGuard === 'function'
+        && !(await commitGuard(trx, { custId, visitPrice, followUpVisitPrice, paymentPref, sourceEstimateId }))) {
+        throw Object.assign(new Error('This offer just changed. Please reload the page.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'COMMIT_GUARD_REFUSED',
+        });
+      }
+
+      // callbackVisit.slotGuard (the lead assessment link, owner rule B per truck): under the date lock taken first,
+      // after the idempotent replay, the caller re-checks its slot on THIS transaction with the zone this booking
+      // stamps on its visit (`zone`, from callbackVisit.zoneAddress). Two commits that rebuilt the same new far-south
+      // day before either inserted would otherwise send a second truck south (zone-day-funnel.js truckMayTakeDate).
+      if (typeof callbackVisit?.slotGuard === 'function' && !(await callbackVisit.slotGuard(trx, { zone }))) {
+        throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
+
       // Tech-blind occupancy backstop (ORDERING CONTRACT: every rung-1
       // holder runs the global predicate under the date lock before
       // committing). The conflictQuery above stays as this path's fast
@@ -4589,7 +4684,10 @@ async function createSelfBooking(payload = {}) {
       // miss here is a "pick another slot" outcome, so it rides the SLOT_TAKEN
       // recovery below (just-created profile rolled back, generic message).
       try {
-        await assertAssignableTechnician(technician_id || null, { conn: trx, date: String(slotDateStr).slice(0, 10), workDays: true });
+        // `hours` (GATE_TECH_SHIFT_HOURS): the visit's own block against the technician's shift, the rule
+        // the offer was held to (buildBookingAvailability addCandidate).
+        await assertAssignableTechnician(technician_id || null, { conn: trx, date: String(slotDateStr).slice(0, 10), workDays: true,
+          hours: { startMin: endMin - duration, endMin } });
       } catch (eligErr) {
         if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
         const err = new Error('That time slot is no longer available. Please pick another.');
@@ -4794,7 +4892,7 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN' || txErr.code === 'ESTIMATE_CHANGED') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED' || txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN' || txErr.code === 'ESTIMATE_CHANGED' || txErr.code === 'COMMIT_GUARD_REFUSED') {
         if (txErr.code === 'ESTABLISHED_CUSTOMER_SIGN_IN') {
           // No message may follow this refusal: retire the recovery intent the
           // wizard's capture-intent staged for this contact.
@@ -4856,6 +4954,8 @@ async function createSelfBooking(payload = {}) {
         source: 'book', scheduledServiceId: row.id, customerId: row.customer_id, date: row.scheduled_date,
         windowStart: row.window_start, windowEnd: row.window_end, serviceId: row.service_id, serviceKey: serviceKey || null,
         serviceType: row.service_type, durationMinutes: row.estimated_duration_minutes, actualTechnicianId: row.technician_id,
+        // The lead a Waves Assessment was booked for (the lead link's own lead, the estimate's linked lead).
+        leadId: callbackVisit?.lineLeadId || null,
       });
     }
 
@@ -5763,7 +5863,14 @@ async function createSelfBooking(payload = {}) {
               // route plus unassigned rows; gate off or unassigned = tech-blind, as before).
               technicianId: seriesParentRow.technician_id || null,
             });
-            if (extensionClashes.length === 0) {
+            // Shift hours (GATE_TECH_SHIFT_HOURS): the commit checked the signed block against the
+            // technician's shift. The longer block must fit it too. When it does not, the signed slot
+            // stays and the office is told, as for adjacent work. A point-in-time read with no row
+            // lock (see shiftExcluding): an hours change that lands after it is the same as one that
+            // lands after this commit. Gate off: no read.
+            const pastShift = extensionClashes.length === 0 && Boolean(await shiftExcluding(trx, seriesParentRow.technician_id,
+              parentDateStr, { startMin: timeToMin(slot_start), endMin: parentEndMin }));
+            if (extensionClashes.length === 0 && !pastShift) {
               await trx('scheduled_services')
                 .where({ id: seriesParentRow.id })
                 .update({ estimated_duration_minutes: seededChildDuration, window_end: extendedEnd, updated_at: trx.fn.now() });
@@ -5779,7 +5886,9 @@ async function createSelfBooking(payload = {}) {
               await trx('scheduled_services')
                 .where({ id: seriesParentRow.id })
                 .update({
-                  notes: trx.raw("COALESCE(notes, '') || ' — first visit reserved at the funnel duration; the program needs a longer slot but the following time is occupied; office to adjust'"),
+                  notes: trx.raw(pastShift
+                    ? "COALESCE(notes, '') || ' — first visit reserved at the funnel duration; the program needs a longer slot but it does not fit the shift hours; office to adjust'"
+                    : "COALESCE(notes, '') || ' — first visit reserved at the funnel duration; the program needs a longer slot but the following time is occupied; office to adjust'"),
                   updated_at: trx.fn.now(),
                 });
               // The note alone is passive (codex #3504 r14): ring the
@@ -5792,11 +5901,11 @@ async function createSelfBooking(payload = {}) {
               await notifySeriesOfficeBellInTx(trx, {
                 dedupeKey: `wizard-activation-short-slot:${seriesParentRow.id}`,
                 title: 'Self-booked plan: first visit reserved short',
-                body: `A self-booked recurring plan for customer ${custId} activated, but its first visit (${parentDateStr} ${slot_start}) is reserved at the funnel's ${parentDurationNow}-minute slot while the program needs ${seededChildDuration} minutes and the following time is already occupied. Move the neighbouring work or re-place this visit so the technician has the full slot.`,
+                body: `A self-booked recurring plan for customer ${custId} activated, but its first visit (${parentDateStr} ${slot_start}) is reserved at the funnel's ${parentDurationNow}-minute slot while the program needs ${seededChildDuration} minutes and ${pastShift ? "the longer slot does not fit that technician's shift hours. Re-place" : 'the following time is already occupied. Move the neighbouring work or re-place'} this visit so the technician has the full slot.`,
                 metadata: { scheduled_service_id: seriesParentRow.id, reserved_minutes: parentDurationNow, needed_minutes: seededChildDuration },
                 failLabel: 'short-slot',
               });
-              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} could not extend to ${seededChildDuration}min (adjacent work) — signed ${parentDurationNow}min slot kept, office noted + belled`);
+              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} could not extend to ${seededChildDuration}min (${pastShift ? 'shift hours' : 'adjacent work'}) — signed ${parentDurationNow}min slot kept, office noted + belled`);
             }
           }
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {

@@ -71,9 +71,12 @@ async function openTimesBlock({ decision, outgoingBody }) {
 // FOLLOW-UP PROMISE: an escalated real-answers draft's timing phrase must
 // still match the current ET window, and an edit may not turn it into
 // timing copy the phrase list does not know.
-function followupBlock({ decision, outgoingBody }) {
-  const { followupPromiseBlockReason, slaDraftedAt } = require('./sms-followup-sla');
+async function followupBlock({ decision, outgoingBody }) {
+  const { followupPromiseBlockReason, slaDraftedAt, replyPromisesFollowup, loadFollowupClosedDates } = require('./sms-followup-sla');
+  // The phrase a draft quotes can name the next open day when Waves is closed: read the closed days only for a body that carries one.
+  const closedDates = replyPromisesFollowup(outgoingBody) ? await loadFollowupClosedDates(new Date()) : null;
   const reason = followupPromiseBlockReason({
+    closedDates,
     inputSnapshot: decision.input_snapshot,
     promptVersion: decision.prompt_version,
     originalBody: decision.suggested_message,
@@ -168,17 +171,27 @@ async function labelFactsBlock({ decision, outgoingBody }) {
 // (prompt 25_n / 26_n; 15-24 were earlier wordings inside PR #6447, never in production) saw the old inside-spray policy (every visit unless declined) and the old payment policy (technicians take
 // cards, never cash). No word list can tell a restated old policy from a correct answer, so an UNEDITED draft from those prompts
 // is refused at send whatever it says; a person rewrites it, and a staff-edited body (it differs from the stored draft) goes out.
-// Drafts from 25_n on are not affected. (Prod 2026-10-22: 107 such drafts pending review, 1 ever accepted.)
-const ANSWER_BOOK_PROMPT_NUMBER = 25;
+// (Prod 2026-10-22: 107 such drafts pending review, 1 ever accepted.)
+// SERVICE AREA HOLD (owner ruling 2026-11-23, ended when the second technician was hired): prompts 29 to 36 carried COMPANY FACTS
+// line 22 saying Waves was "not taking new customers" in the held places (six places in 29 to 32, seven in 33 to 36). The line
+// now says again what prompts 25 to 28 said (Charlotte County is served except Punta Gorda), so an UNEDITED draft from 29 to 36
+// is refused too: it could turn away a customer who is now served; a person rewrites it. Prompts 25 to 28 and 37_n on
+// (sms-shadow-drafter.js) were not affected by that.
+// HOLIDAYS LINE (owner 2026-11-24): every prompt below 41_n carried COMPANY FACTS line 6, "We work Sundays and holidays, same as any
+// other day". Waves is now closed on six holidays, so an unedited draft from any of them could promise a visit on one of those days
+// (prompts 25 to 28 and 37 to 40 included); a person rewrites it. 41_n on (sms-shadow-drafter.js) carry the closed-days line.
+const COMPANY_FACTS_CURRENT_PROMPT_NUMBER = 41;
 function draftedBeforeAnswerBook(decision) {
   const m = /^house_voice_v12_real_answers(\d*)/.exec(String(decision?.prompt_version || ''));
-  return !!m && (!m[1] || Number(m[1]) < ANSWER_BOOK_PROMPT_NUMBER);
+  if (!m) return false;
+  return !m[1] || Number(m[1]) < COMPANY_FACTS_CURRENT_PROMPT_NUMBER;
 }
+const RETIRED_COMPANY_FACT_REASON = 'company fact retired (an unedited draft written under earlier company facts)';
 const RETIRED_COMPANY_FACT_REASON_PREFIX = 'company fact retired';
 const blockReasonIsRetiredCompanyFact = (reason) => typeof reason === 'string' && reason.startsWith(RETIRED_COMPANY_FACT_REASON_PREFIX);
 function retiredCompanyFactBlock({ decision, outgoingBody }) {
   if (!draftedBeforeAnswerBook(decision) || bodyIsStaffEdited(decision.suggested_message, outgoingBody)) return null;
-  return 'company fact retired (an unedited draft from before the 2026-10-22 company facts)';
+  return RETIRED_COMPANY_FACT_REASON;
 }
 
 // The scheduled-send version of the same check: the scheduler reads the decision row itself, and a row it cannot read (missing,
@@ -226,9 +239,12 @@ function blockReasonIsBillingInfrastructure(blockReason) {
 }
 // OPEN LOOPS (PR #5499): an open-loop recheck that could not read its rows is infrastructure too.
 const blockReasonIsOpenLoopsInfrastructure = (blockReason) => String(blockReason || '') === 'open-loop facts stale (open_loops_recheck_failed)';
-/** Any send-time recheck that could not read its state (live ETA, label facts, open loops or billing): refuse, keep the decision retryable. */
+// FOLLOW-UP PROMISE: the closed days could not be read just now (sms-followup-sla CLOSED_DAYS_UNREADABLE_REASON): about the read, not
+// the message, so the attempt is refused but the decision is not retired.
+const blockReasonIsFollowupInfrastructure = (blockReason) => String(blockReason || '') === 'follow-up promise unsendable (closed_days_unreadable)';
+/** Any send-time recheck that could not read its state (live ETA, label facts, open loops, billing or the closed days): refuse, keep the decision retryable. */
 const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason) || blockReasonIsLabelInfrastructure(blockReason)
-  || blockReasonIsOpenLoopsInfrastructure(blockReason) || blockReasonIsBillingInfrastructure(blockReason);
+  || blockReasonIsOpenLoopsInfrastructure(blockReason) || blockReasonIsBillingInfrastructure(blockReason) || blockReasonIsFollowupInfrastructure(blockReason);
 
 async function etaBlockReason({ decision, outgoingBody, dbh }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
@@ -396,7 +412,7 @@ function labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot = null, inb
     let reason;
     try {
       // an auto-send body is the AI draft itself, so a pre-answer-book prompt is refused outright
-      reason = draftedBeforeAnswerBook({ prompt_version: promptVersion }) ? 'company fact retired (an unedited draft from before the 2026-10-22 company facts)'
+      reason = draftedBeforeAnswerBook({ prompt_version: promptVersion }) ? RETIRED_COMPANY_FACT_REASON
         : await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: labelFactsSnapshot, body: outgoingBody, inbound: inboundMessage, ...(dbi ? { conn: dbi } : {}) });
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] LABEL FACTS boundary recheck failed: ${err.message}; blocking send`);
@@ -460,6 +476,39 @@ function gratitudeOpenLoopsProviderPreSendCheck({ customerId }) {
     return require('./sms-shadow-drafter').visitLoopsNeedAnswer({ visitLoops: fresh })
       ? { ok: false, code: 'OPEN_LOOPS_NEED_ANSWER_AT_BOUNDARY', reason: 'open-loop facts need an answer (gratitude refused)' }
       : { ok: true };
+  };
+  return markRepeatable(check);
+}
+
+// FOLLOW-UP PROMISE at the true provider boundary: the phrase the body carries is revalidated against the clock and the closed days
+// as they are NOW. An unreadable closure read refuses RETRYABLY (the bounded retry rail), never as a stale phrase; a read decision
+// row that cannot be loaded does the same. A phrase that is no longer true refuses for good.
+function followupProviderPreSendCheck({ decisionId, getBody }) {
+  const check = async ({ dbi } = {}) => {
+    const sla = require('./sms-followup-sla');
+    const body = typeof getBody === 'function' ? getBody() : null;
+    if (!sla.replyPromisesFollowup(body)) return { ok: true };
+    let reason;
+    try {
+      const conn = dbi || require('../models/db');
+      const row = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version', 'suggested_message', 'created_at');
+      if (!row) return { ok: true }; // the earlier send-time check already failed closed on an absent row
+      reason = sla.followupPromiseBlockReason({
+        inputSnapshot: row.input_snapshot, promptVersion: row.prompt_version, originalBody: row.suggested_message, body,
+        draftedAt: sla.slaDraftedAt(row), closedDates: await sla.loadFollowupClosedDates(new Date(), dbi),
+      });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] follow-up boundary recheck failed for decision ${decisionId}: ${err.message}; refusing retryably`);
+      reason = sla.CLOSED_DAYS_UNREADABLE_REASON;
+    }
+    if (reason == null) return { ok: true };
+    const retryable = reason === sla.CLOSED_DAYS_UNREADABLE_REASON;
+    return {
+      ok: false,
+      code: retryable ? 'CLOSED_DAYS_UNREADABLE_AT_BOUNDARY' : 'FOLLOWUP_PROMISE_STALE_AT_BOUNDARY',
+      reason: `follow-up promise unsendable (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
   };
   return markRepeatable(check);
 }
@@ -644,7 +693,7 @@ async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
  */
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
-    || followupBlock({ decision, outgoingBody })
+    || (await followupBlock({ decision, outgoingBody }))
     || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
@@ -683,4 +732,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, retiredCompanyFactBlock, blockReasonIsRetiredCompanyFact, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };
+module.exports = { followupProviderPreSendCheck, blockReasonIsFollowupInfrastructure, bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, retiredCompanyFactBlock, blockReasonIsRetiredCompanyFact, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };

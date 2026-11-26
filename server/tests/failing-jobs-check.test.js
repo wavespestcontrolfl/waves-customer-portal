@@ -223,6 +223,8 @@ describe('scheduler wiring', () => {
     expect(fixedCronsAt(src, 23, 32)).toEqual(['32 23 * * *']);
     // late-sent-bill-check
     expect(fixedCronsAt(src, 23, 30)).toEqual(['30 23 * * *']);
+    // tab-reload-check
+    expect(fixedCronsAt(src, 23, 51)).toEqual(['51 23 * * *']);
     // The rule check itself: three hourly jobs run at minute 20.
     expect(fixedCronsAt(src, 23, 20).length).toBeGreaterThan(1);
   });

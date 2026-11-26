@@ -12030,8 +12030,7 @@ export default function Customer360ProfileV2({
         onLoadOlder={history.loadOlder}
       />
     ),
-    // Read-only sent/engagement feed; the server answers { enabled: false }
-    // while GATE_CUSTOMER_ACTIVITY_TIMELINE is dark and it renders nothing.
+    // Read-only sent/engagement feed.
     engagement: <CustomerEngagementTimeline customerId={customerId} adminOnly={isAdmin} />,
     timeline: (
       <CustomerProfileTimeline

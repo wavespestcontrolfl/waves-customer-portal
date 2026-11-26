@@ -206,11 +206,12 @@ async function saveReply(threadId, message, { body, handOff }) {
   });
 }
 
-// The customer's notice of a saved AI reply: the in-app bell plus an app push, recorded on the row so the notice
-// sweep never touches it.
+// The customer's notice of a saved AI reply: the in-app bell plus an app push (the bell alone with
+// GATE_PORTAL_ANSWER_TEXT on, owner 2026-11-22: no push and no text for an AI answer), recorded on the row so the
+// notice sweep never touches it.
 async function notifyCustomer(customerId, saved) {
   const PortalMessages = require('./portal-messages');
-  const sent = await PortalMessages.__private.bellAndPush(customerId, saved, { push: true });
+  const sent = await PortalMessages.__private.bellAndPush(customerId, saved, { push: !featureGates.portalAnswerTextLive?.() });
   await db('messages').where({ id: saved.id })
     .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('notice', ?::jsonb)", [JSON.stringify({ bell: sent.bell, pushAccepted: sent.pushAccepted, pending: false })]) });
 }

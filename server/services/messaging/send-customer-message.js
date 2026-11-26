@@ -459,6 +459,11 @@ function normalizeRecipient(phone) {
  *   encoding?: 'GSM_7' | 'UCS_2',
  * }>}
  */
+// Entry points whose recipient may have no notification_prefs row (a stranger who texted us), so the phone-keyed STOP list is
+// their only opt-out check: an unreadable suppression row refuses (retryable) and is re-read at the provider handoff, the
+// same as policy.requireVerifiedSuppression, instead of failing open for SMS.
+const VERIFIED_SUPPRESSION_ENTRY_POINTS = new Set(['mail_home_text_to_book']);
+
 // Purposes with policy.requireVerifiedSuppression (payer_payment_link): the phone-keyed suppression row is read AGAIN at the
 // provider handoff, so a STOP that committed while the send was prepared still stops it, and an unreadable row refuses
 // (retryable) instead of failing open. The read uses the handoff's held transaction when there is one.
@@ -528,6 +533,7 @@ async function sendCustomerMessageCore(input) {
   let policy;
   try {
     policy = policyModule.resolvePolicy(input.audience, input.purpose);
+    if (VERIFIED_SUPPRESSION_ENTRY_POINTS.has(input.entryPoint)) policy = { ...policy, requireVerifiedSuppression: true };
   } catch (err) {
     logger.warn(`[send_customer_message] unknown policy: ${err.message}`);
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNKNOWN_POLICY', reason: err.message };
@@ -686,7 +692,14 @@ async function sendCustomerMessageCore(input) {
     || (input.audience === 'customer' && input.purpose === 'billing'
       && input.operatorInitiated === true
       && input.metadata?.original_message_type === 'price_change_notice'
-      && input.metadata?.rate_review_letter === true);
+      && input.metadata?.rate_review_letter === true)
+    // The text that carries an office answer from the portal (portal-messages.js answerText,
+    // GATE_PORTAL_ANSWER_TEXT): the whole answer goes to the number on the customer's row, so the
+    // customer-comms + phone locks and the customer row are held through the provider request while the
+    // number is re-read (a phone correction can never send the answer to the old number).
+    || (input.audience === 'customer' && input.purpose === 'support_resolution'
+      && input.entryPoint === 'admin_portal_answer'
+      && input.metadata?.original_message_type === 'portal_answer');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }

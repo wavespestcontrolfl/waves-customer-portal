@@ -24,7 +24,10 @@ const { leadIdForEstimate } = require('./estimate-lead-linkage');
 const { REPRICE_PENDING_ABSENT_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { estimateOptedOutOfEngagement } = require('./estimate-comms-eligibility');
-const { isStaffLossRow, STAFF_LOSS_CLEARED_UPDATES, STAFF_LOSS_ROW_SQL } = require('./estimate-disposition');
+const {
+  isStaffLossRow, STAFF_LOSS_CLEARED_UPDATES, STAFF_LOSS_ROW_SQL,
+  isSystemBookedRow, SYSTEM_BOOKED_CLEARED_UPDATES, SYSTEM_BOOKED_ROW_SQL,
+} = require('./estimate-disposition');
 // Router module doubling as the template helper — same import the
 // estimate-follow-up service uses.
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -115,7 +118,9 @@ function revivableSiblingsQuery(database, estimate) {
     // public reader rejects it first) — it is neither judged here nor
     // revived below (GH codex P2 r26).
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
-    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''");
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+    // A plan offer's quote ends on its own date and is never revived (the sibling update below).
+    .whereRaw(require('./plan-offer-estimate').PLAN_OFFER_ABSENT_SQL);
 }
 
 // The ONE question the public extension-request (generic 404, before the
@@ -303,6 +308,8 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     // after the snapshot was read is cleared as well, and one saved after this lock waits for it and
     // then finds the row live (its write is guarded on status = 'expired') and answers 409.
     if (revivedStatus && isStaffLossRow(anchor)) Object.assign(updates, STAFF_LOSS_CLEARED_UPDATES);
+    // …and a SYSTEM booked-another-way stamp from the daily reclaim: the offer is live again.
+    if (revivedStatus && isSystemBookedRow(anchor)) Object.assign(updates, SYSTEM_BOOKED_CLEARED_UPDATES);
     // The county-roll address block (and every other off-surface marker)
     // is judged on the LOCKED anchor and reasserted on the write: a flag
     // stamped after the public eligibility read must not revive the row
@@ -373,6 +380,11 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         // the group renderer drops it as off-surface (codex r23 P2).
         .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
         .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
+        // A plan offer's quote (plan-offer-estimate.js; owner 2026-11-19) is good until its own end date,
+        // with the setup fee waived. Its own link cannot ask for an extension
+        // (isEstimateExtensionRequestEligible), and a grouped sibling's extension, from the customer or from
+        // staff, must not bring it back with the waiver past that date. It keeps its expiry and its status.
+        .whereRaw(require('./plan-offer-estimate').PLAN_OFFER_ABSENT_SQL)
         // Atomic belt to the pre-mutation verdict (uncapped codex P0 r20):
         // while the gate is on a sibling that fails the authority predicate
         // is never revived, whatever raced between the verdict and here.
@@ -400,10 +412,10 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           // a revived sibling sheds the sweep's expiry classification.
           // A staff loss reason on a revived (expired) sibling goes the same way, with its competitor
           // fields and legacy label. Every SET expression reads the pre-update row.
-          disposition: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition END`),
-          disposition_source: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition_source END`),
-          disposition_at: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition_at END`),
-          disposition_note: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL}) THEN NULL ELSE disposition_note END`),
+          disposition: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL} OR ${SYSTEM_BOOKED_ROW_SQL}) THEN NULL ELSE disposition END`),
+          disposition_source: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL} OR ${SYSTEM_BOOKED_ROW_SQL}) THEN NULL ELSE disposition_source END`),
+          disposition_at: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL} OR ${SYSTEM_BOOKED_ROW_SQL}) THEN NULL ELSE disposition_at END`),
+          disposition_note: db.raw(`CASE WHEN status = 'expired' AND (disposition IN ('expired_unviewed','expired_viewed') OR ${STAFF_LOSS_ROW_SQL} OR ${SYSTEM_BOOKED_ROW_SQL}) THEN NULL ELSE disposition_note END`),
           competitor_name: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE competitor_name END`),
           competitor_price: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE competitor_price END`),
           decline_reason: db.raw(`CASE WHEN status = 'expired' AND ${STAFF_LOSS_ROW_SQL} THEN NULL ELSE decline_reason END`),

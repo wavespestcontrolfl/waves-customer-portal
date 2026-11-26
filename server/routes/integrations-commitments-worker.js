@@ -17,6 +17,11 @@ function commitmentsGate(req, res, next) {
   next();
 }
 
+// Mounted in server/index.js BEFORE the global /api/ limiter: the dark 404 (with the privacy headers) never reads as a 429.
+function commitmentsDarkGuard(req, res, next) {
+  return noStore(req, res, () => commitmentsGate(req, res, next));
+}
+
 router.use(noStore);
 router.use(commitmentsGate);
 router.use(rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false }));
@@ -69,3 +74,4 @@ router.get('/open', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.commitmentsDarkGuard = commitmentsDarkGuard;

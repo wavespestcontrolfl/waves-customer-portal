@@ -65,6 +65,7 @@ export default function OfferSection({ detail, offerFlow, onChanged, detailStale
         offer={current}
         draft={data.draft || null}
         history={history}
+        firstDays={data.firstDays}
         outStamp={data.outStamp}
         canMakeOffer={canMakeOffer}
         onMakeOffer={() => openForm(null, detail.id)}

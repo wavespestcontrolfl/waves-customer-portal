@@ -323,6 +323,27 @@ describe('waveguard approval engine', () => {
       expect(repeats(await run([plain], [last], { productId: 'base' }, plan))).toEqual([]);
     });
 
+    // The October bag (owner 2026-11-21 "stonewall"). Its production catalog row holds the group in the older free-text
+    // column only (moa_group "Group 3", hrac_group NULL), as the liquid pre-emergents do (Stonewall 4FL, Dimension 2EW).
+    // The granular it replaces held hrac_group "3", so the exemption never had to read the free-text column in October.
+    test('a Group 3 pre-emergent whose catalog row holds the group in the free-text column is no approval block either', async () => {
+      const BAG = { id: 'base', name: 'LESCO Stonewall 0.37% 18-0-10', category: 'herbicide', subcategory: 'Pre-emergent + fertilizer combo', active_ingredient: 'Prodiamine 0.37% + 18-0-10', moa_group: 'Group 3' };
+      const liquid = prior({ service_date: '2026-06-10', product_name: 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', moa_group: 'Group 3' });
+      const granular = prior({ service_date: '2026-04-14', product_name: 'LESCO Dimension 0.21% 18-0-10', catalog_group: '3', hrac_group: '3' });
+      const october = { productId: 'base', serviceDate: '2026-10-12' };
+      expect(repeats(await run([BAG], [liquid], october))).toEqual([]);
+      expect(repeats(await run([BAG], [liquid, granular], october))).toEqual([]);
+      // The same row with the typed column filled too: both readings are exempt, so still no block.
+      expect(repeats(await run([{ ...BAG, hrac_group: '3' }], [liquid, granular], october))).toEqual([]);
+      // March Dimension 2EW after January Stonewall 4FL: both rows hold only the free-text column.
+      const TWO_EW = { id: 'base', name: 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', category: 'herbicide', moa_group: 'Group 3' };
+      const january = prior({ service_date: '2026-01-12', product_name: 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', moa_group: 'Group 3' });
+      expect(repeats(await run([TWO_EW], [january], { productId: 'base', serviceDate: '2026-03-10' }))).toEqual([]);
+      // A herbicide that is not a pre-emergent keeps the block on the free-text column.
+      const post = { id: 'base', name: 'Some Post-Emergent', category: 'herbicide', moa_group: 'Group 3' };
+      expect(repeats(await run([post], [liquid], october)).map((b) => b.code)).toEqual(['repeat_moa_group']);
+    });
+
     test('a non-pre-emergent Group 3 product still blocks', async () => {
       const last = prior({ service_date: '2026-03-10', product_name: 'Older post-emergent', catalog_group: '3', hrac_group: '3' });
       const post = { id: 'base', name: 'Some Post-Emergent', category: 'herbicide', hrac_group: '3' };

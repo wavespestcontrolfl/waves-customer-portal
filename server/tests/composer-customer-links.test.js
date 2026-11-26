@@ -23,7 +23,9 @@ jest.mock('../services/pay-combined', () => ({
 jest.mock('../services/referral-engine', () => ({
   resolvePromoter: jest.fn(),
   getLiveSettings: jest.fn(async () => ({ program_active: true })),
+  step2FriendCreditCentsOf: jest.fn(() => 0),
 }));
+jest.mock('../services/referral-inbound', () => ({ customerForCode: jest.fn(async () => ({ id: 'c1' })) }));
 // buildConsultationLink's own lead-resolution logic (customerId vs a
 // caller-supplied leadId override) is what this file tests; the SMS-
 // template render + fallback contract is lead-consultation-link.test.js's.
@@ -146,7 +148,8 @@ jest.mock('../models/db', () => mockDb);
 
 const { openBalanceSummary } = require('../services/open-balance');
 const { combinedEligibleSiblings } = require('../services/pay-combined');
-const { resolvePromoter, getLiveSettings } = require('../services/referral-engine');
+const { resolvePromoter, getLiveSettings, step2FriendCreditCentsOf } = require('../services/referral-engine');
+const { customerForCode } = require('../services/referral-inbound');
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const { requestAutopaySetupLink, setupLinkIneligibility } = require('../services/autopay-setup-link');
 const { isEnabled } = require('../config/feature-gates');
@@ -488,6 +491,81 @@ describe('buildReferralLink', () => {
     const r = await buildReferralLink('c2');
     expect(r.url).toContain('/r/WAVES-ABC12345');
     expect(r.line).toContain(r.url);
+  });
+
+  test('GATE_REFERRAL_STEP2 off (no amount): the insert is today\'s line exactly', async () => {
+    const link = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
+    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: link }, alreadyEnrolled: true });
+    step2FriendCreditCentsOf.mockClear();
+    getLiveSettings.mockClear();
+    customerForCode.mockClear();
+    const r = await buildReferralLink('c1');
+    expect(r.line).toBe(`Know someone who needs pest control? Share Waves here: ${link}\n\n`);
+    // One settings read: the amount comes from the row the program check already read. No owner lookup.
+    expect(getLiveSettings).toHaveBeenCalledTimes(1);
+    expect(step2FriendCreditCentsOf).toHaveBeenCalledWith({ program_active: true });
+    expect(customerForCode).not.toHaveBeenCalled();
+  });
+
+  test('GATE_REFERRAL_STEP2 on: the insert names the friend\'s credit from the live amount, on one line, with no STOP line', async () => {
+    const link = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
+    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_link: link }, alreadyEnrolled: true });
+    step2FriendCreditCentsOf.mockReturnValueOnce(5000);
+    customerForCode.mockClear();
+    const r = await buildReferralLink('c1');
+    // The owner is looked up by the code the link carries, not by a column of the promoter row.
+    expect(customerForCode).toHaveBeenCalledWith('WAVES-ABC12345');
+    expect(r.url).toBe(link);
+    expect(r.line).toBe(`Know someone who needs pest or lawn care? They get a $50 credit after their first plan service with your link: ${link}\n\n`);
+    // Owner 2026-11-22 "no line" (docs/sms-stop-line-policy.md, deliberate exceptions). One line, so the composer
+    // removes the whole insert by its link.
+    expect(r.line).not.toMatch(/STOP/i);
+    expect(r.line.trimEnd().split('\n')).toHaveLength(1);
+  });
+
+  // The credit is stated only when the link in the line leads to a member the office can confirm. A household
+  // promoter can belong to an archived sibling profile (resolvePromoter's household fallback reads archived profiles
+  // too), and getPromoterReferralLink can keep a stored link that is not an /r/ link.
+  const MEMBER_LINK = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
+  test.each([
+    ['the code has no owner the Referrals queue can name', MEMBER_LINK, () => customerForCode.mockResolvedValueOnce(null), 1],
+    ['the owner lookup fails', MEMBER_LINK, () => customerForCode.mockRejectedValueOnce(new Error('db down')), 1],
+    ['the stored link is a page with no code', 'https://wavespestcontrol.com/', () => {}, 0],
+    ['the stored link has the code only in its query', 'https://wavespestcontrol.com/?ref=WAVES-ABC12345', () => {}, 0],
+    ['the stored link is an /r/ link on a host that is not the portal', 'https://example.com/r/WAVES-ABC12345', () => {}, 0],
+    // What GET /r/:code does not answer as a member link (routes/referral-links.js: one optional trailing slash,
+    // a code of 4 to 32 characters).
+    ['the stored link ends in two slashes', 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345//', () => {}, 0],
+    ['the stored link has a longer path', 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345/x', () => {}, 0],
+    ['the code is shorter than the route accepts', 'https://portal.wavespestcontrol.com/r/abc', () => {}, 0],
+    ['the code is longer than the route accepts', `https://portal.wavespestcontrol.com/r/${'A'.repeat(33)}`, () => {}, 0],
+    ['the stored link is not https', 'http://portal.wavespestcontrol.com/r/WAVES-ABC12345', () => {}, 0],
+  ])('GATE_REFERRAL_STEP2 on, %s: the link with today\'s line, which promises nothing', async (_name, link, arrange, lookups) => {
+    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: link }, alreadyEnrolled: true, household: true });
+    step2FriendCreditCentsOf.mockReturnValueOnce(5000);
+    customerForCode.mockClear();
+    arrange();
+    const r = await buildReferralLink('c2');
+    expect(r.url).toBe(link);
+    expect(r.line).toBe(`Know someone who needs pest control? Share Waves here: ${link}\n\n`);
+    expect(customerForCode).toHaveBeenCalledTimes(lookups);
+  });
+
+  test('GATE_REFERRAL_STEP2 on: a member link on the short-link host, with one trailing slash, with a query or in the FQDN spelling is read the same', async () => {
+    for (const link of [
+      'https://wavespest.co/r/WAVES-ABC12345',
+      'https://portal.wavespestcontrol.com/r/WAVES-ABC12345/',
+      'https://portal.wavespestcontrol.com/r/WAVES-ABC12345?x=1',
+      // The terminal DNS dot is the same host (ownedHostKey), as in every other owned-host check.
+      'https://Portal.WavesPestControl.com./r/WAVES-ABC12345',
+    ]) {
+      resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_link: link }, alreadyEnrolled: true });
+      step2FriendCreditCentsOf.mockReturnValueOnce(5000);
+      customerForCode.mockClear();
+      const r = await buildReferralLink('c1');
+      expect(customerForCode).toHaveBeenCalledWith('WAVES-ABC12345');
+      expect(r.line).toContain('They get a $50 credit');
+    }
   });
 
   test('a non-conflict enroll failure answers the plain reason', async () => {
@@ -3488,6 +3566,53 @@ describe('wrappedOwnedLinkIn', () => {
     const surfaced = nestedOwnedLinkRuns(link).join(' ');
     expect(surfaced).toContain(`portal.wavespestcontrol.com/pay/${T}`);
     expect((await composerOnlyLinkPresence(`${link} ${surfaced}`, { includeVerifyOnly: true })).present).toBe(true);
+  });
+});
+
+describe('ownedPortalHosts: every host the portal answers on', () => {
+  const { ownedPortalHosts, ownedPortalLinkSpans } = require('../services/composer-customer-links');
+  const RAILWAY = 'waves-portal-production.up.railway.app';
+  const PREP = `https://${RAILWAY}/prep/${'a'.repeat(32)}`;
+  const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT', 'RAILWAY_DEPLOYMENT_ID', 'RAILWAY_REPLICA_ID'];
+  // The running production deployment (utils/railway-deployment.js isDeployedProduction).
+  const asProduction = () => {
+    process.env.RAILWAY_ENVIRONMENT_NAME = 'production';
+    process.env.RAILWAY_DEPLOYMENT_ID = 'deployment-test';
+  };
+  let saved;
+  beforeEach(() => {
+    saved = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
+    for (const name of NAMES) delete process.env[name];
+  });
+  afterEach(() => {
+    for (const name of NAMES) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  test('the production deployment adds every host a portal origin value names (its CLIENT_URL keeps the raw Railway host); elsewhere the list is the link-building hosts', () => {
+    process.env.CLIENT_URL = `https://${RAILWAY}/`;
+    process.env.RAILWAY_PUBLIC_DOMAIN = 'Portal.WavesPestControl.com';
+    process.env.PORTAL_DOMAIN = 'not a host';
+    expect(ownedPortalHosts()).toEqual(['wavespest.co', 'portal.wavespestcontrol.com']);
+    // `railway run` sets the environment name but runs no deployment: still not the production deployment.
+    process.env.RAILWAY_ENVIRONMENT_NAME = 'production';
+    expect(ownedPortalHosts()).toEqual(['wavespest.co', 'portal.wavespestcontrol.com']);
+    asProduction();
+    expect(ownedPortalHosts()).toEqual(['wavespest.co', 'portal.wavespestcontrol.com', RAILWAY]);
+  });
+
+  test('in production a link on the Railway host is judged like a portal link: the SMS link wrap finds it, and a foreign URL carrying it is refused', () => {
+    asProduction();
+    expect(ownedPortalLinkSpans(`Prep: ${PREP}`)).toEqual([]);
+    expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${PREP}`)).toBe(false);
+    process.env.CLIENT_URL = `https://${RAILWAY}`;
+    expect(ownedPortalLinkSpans(`Prep: ${PREP}`)).toEqual([expect.objectContaining({ url: PREP, family: 'prep' })]);
+    expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${PREP}`)).toBe(true);
+    expect(wrappedOwnedLinkIn(`Prep: ${PREP}`)).toBe(false);
+    // A look-alike of the Railway host stays foreign.
+    expect(ownedPortalLinkSpans(`https://evil-${RAILWAY}/prep/${'a'.repeat(32)}`)).toEqual([]);
   });
 });
 

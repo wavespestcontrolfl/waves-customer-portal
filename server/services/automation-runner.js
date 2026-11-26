@@ -19,6 +19,7 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
+const { newLeadDripStop, isNewLeadDripStep, NEW_LEAD_DRIP_STEP_IDS } = require('./new-lead-drip-stops');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -215,7 +216,75 @@ async function estimateAcceptedForFollowUp(enrollment) {
   return !!accepted;
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null }) {
+// GATE_ESTIMATE_TWO_HOUR_EMAIL_STOPS (owner 2026-11-21): the 2-hour estimate_sent email (step 0) reads its estimate at delivery and
+// is not sent, and its enrollment ends, when the estimate is final, opted out, or the customer replied. It sends no new message
+// and changes no words. Only an enrollment that carries metadata.estimate_id, a real estimate row, gate on, and not a test send
+// (automationDeliveryBlock returns early for a test); anything else is exactly as before.
+async function twoHourEstimateFor(enrollment) {
+  if (require('../config/feature-gates').estimateTwoHourEmailStopsLive?.() !== true) return null;
+  const estimateId = enrollmentMetadata(enrollment).estimate_id;
+  if (!estimateId) return null;
+  return (await db('estimates').where({ id: estimateId }).first()) || null;
+}
+
+// The customer replied by text or email since the send that enrolled them (the engine's two reply arms). The cutoff is the
+// EARLIER of enrollment.enrolled_at and estimate.sent_at that can be read as times: a resend overwrites estimates.sent_at while
+// the enrollment stays active, so sent_at alone would miss a reply made before the resend. Neither readable: no check. A failed
+// read fails OPEN, as the engine's cron path does: the email goes. Only the error code or name is logged (a knex message
+// carries phone numbers and addresses).
+async function customerRepliedSinceEstimate(estimate, enrollment) {
+  const times = [enrollment.enrolled_at, estimate.sent_at]
+    .filter(Boolean)
+    .map((value) => new Date(value).getTime())
+    .filter(Number.isFinite);
+  if (!times.length) return false;
+  try {
+    return await require('./estimate-follow-up').hasRepliedSince(estimate, new Date(Math.min(...times)));
+  } catch (e) {
+    logger.warn(`[automation-runner] estimate reply check skipped for estimate ${estimate.id}: ${(e && (e.code || e.name)) || 'error'}`);
+    return false;
+  }
+}
+
+// The seeded 2-hour step of the estimate_sent sequence (migration 20260424000009). The gate's stops belong to this step alone;
+// any other step of the template keeps only the accept stop.
+const ESTIMATE_SENT_INITIAL_STEP_ORDER = 0;
+const isTwoHourStep = (step) => Number(step?.step_order) === ESTIMATE_SENT_INITIAL_STEP_ORDER;
+
+// The estimate_sent stops, read at delivery; each ends the enrollment the same way. The accept stop is on for every step, exactly
+// as before the gate. The others (step 0 only, gate on), in order: a final state, an opt-out, a reply. A status that is neither
+// final nor sent or viewed (draft, scheduled, sending, send_failed) may be transient: it is never a stop by itself.
+async function estimateSentStop(enrollment, step) {
+  if (await estimateAcceptedForFollowUp(enrollment)) {
+    return { reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' };
+  }
+  return isTwoHourStep(step) ? estimateSentTwoHourStop(enrollment) : null;
+}
+
+async function estimateSentTwoHourStop(enrollment) {
+  const estimate = await twoHourEstimateFor(enrollment);
+  if (!estimate) return null;
+  const ended = estimateEndedStop(estimate);
+  if (ended) return ended;
+  if (await customerRepliedSinceEstimate(estimate, enrollment)) {
+    return { reason: 'The customer replied since the estimate went out', cancelReason: 'estimate_replied' };
+  }
+  return null;
+}
+
+// A FINAL state (archived, a status in the engine's TERMINAL_STATUSES, or an expires_at already past; the status can still
+// read sent or viewed) ends the enrollment as estimate_closed; an estimate that opted out of automated follow-up as estimate_opted_out.
+function estimateEndedStop(estimate) {
+  const closed = { reason: 'The estimate is no longer open', cancelReason: 'estimate_closed' };
+  if (estimate.archived_at || require('./estimate-follow-up')._private.TERMINAL_STATUSES.has(estimate.status)) return closed;
+  if (estimate.expires_at && new Date(estimate.expires_at).getTime() < Date.now()) return closed;
+  if (require('./estimate-comms-eligibility').estimateOptedOutOfEngagement(estimate)) {
+    return { reason: 'The estimate opted out of follow-ups', cancelReason: 'estimate_opted_out' };
+  }
+  return null;
+}
+
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null, step = null, nudge }) {
   if (testRecipient) return null;
   if (handedOffStep) return completeHandedOffRetry(enrollment, handedOffStep);
   if (retryNotBound) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: 'not_bound' });
@@ -243,33 +312,91 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     return blockSendAndCancelEnrollment({ enrollment, sendId,
       reason: 'No termite bond on file', cancelReason: 'not_termite_bond' });
   }
-  if (template.key === 'estimate_sent' && await estimateAcceptedForFollowUp(enrollment)) {
-    return blockSendAndCancelEnrollment({ enrollment, sendId,
-      reason: 'The customer accepted the estimate', cancelReason: 'estimate_accepted' });
+  if (template.key === 'estimate_sent') {
+    const stop = await estimateSentStop(enrollment, step);
+    if (stop) return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
   }
-  if (template.key === 'referral_nudge') {
-    const verdict = await referralNudgeVerdict(enrollment.customer_id);
-    if (verdict === 'defer') {
-      // Standing unknown (settings or ledger unreadable) or the program paused: try again later; the once-ever
-      // enrollment is never cancelled on a doubt.
-      return deferPaymentFailedForHold({ enrollment, sendId, reason: 'Referral offer unavailable; referral nudge deferred' });
-    }
-    if (verdict === 'cap') {
-      return blockSendAndCancelEnrollment({ enrollment, sendId,
-        reason: 'The member reached the yearly referral credit limit', cancelReason: 'referral_yearly_limit' });
-    }
-  }
+  if (isNewLeadDripStep(template.key, step)) return newLeadDripBlock({ enrollment, sendId, recipient });
+  if (template.key === 'referral_nudge') return referralNudgeBlock({ enrollment, sendId, nudge });
   return null;
+}
+
+// The new_lead drip's later steps (GATE_NEW_LEAD_DRIP_STEPS), read at delivery: a stop ends the enrollment with nothing sent; a
+// doubt (a read failed) leaves the step due for a later tick and never sends.
+async function newLeadDripBlock({ enrollment, sendId, recipient }) {
+  const stop = await newLeadDripStop(enrollment, recipient);
+  if (!stop) return null;
+  if (stop.defer) return deferPaymentFailedForHold({ enrollment, sendId, reason: stop.reason });
+  return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
+}
+
+const REFERRAL_NUDGE_STOPS = Object.freeze({
+  cap: { reason: 'The member reached the yearly referral credit limit', cancelReason: 'referral_yearly_limit' },
+  no_member: { reason: 'No customer on file for the referral nudge', cancelReason: 'referral_no_member' },
+});
+
+async function referralNudgeBlock({ enrollment, sendId, nudge }) {
+  const verdict = await referralNudgeVerdict(enrollment.customer_id, nudge);
+  if (verdict === 'defer') {
+    // Standing unknown (settings or ledger unreadable) or the program paused: try again later; the once-ever
+    // enrollment is never cancelled on a doubt.
+    return deferPaymentFailedForHold({ enrollment, sendId, reason: 'Referral offer unavailable; referral nudge deferred' });
+  }
+  const stop = REFERRAL_NUDGE_STOPS[verdict];
+  return stop ? blockSendAndCancelEnrollment({ enrollment, sendId, ...stop }) : null;
 }
 
 // GATE_REFERRAL_STEP2, checked again at delivery (the member can reach the limit after the sequence was queued, or
 // before the gate was switched on): the referral_nudge copy promises a credit for each referral, so a member at the
 // yearly limit is cancelled; one whose standing cannot be read, or a paused program, is deferred. Gate off: never withheld.
-async function referralNudgeVerdict(customerId) {
-  if (!customerId) return 'send';
+// An enrollment with no customer (the customer record was deleted; the enrollment keeps its email): under the gate there
+// is no member to credit and no standing to read, so the promise cannot be kept and the enrollment is cancelled.
+// `nudge`: the send's holder. The decision read here, at the delivery check, is left in it, so the email that goes out
+// is worded from the same read that let it go.
+async function referralNudgeVerdict(customerId, nudge = {}) {
+  if (!customerId) return require('../config/feature-gates').isEnabled('referralStep2') ? 'no_member' : 'send';
   const offer = await require('./referral-engine').referralOfferDecision(db, customerId);
+  nudge.decision = offer;
   if (offer.skip) return 'defer';
   return offer.atLimit ? 'cap' : 'send';
+}
+
+// GATE_REFERRAL_STEP2, the words of the referral_nudge email (words: owner 2026-11-21). The stored step still holds its seeded
+// sentence; with the gate on that sentence is swapped for the approved Step 2 words at render time (referral-step2.js),
+// with the live amounts. A step an admin rewrote no longer holds it and renders as stored. Gate off: the decision answers
+// at once, reads nothing, and nothing is swapped.
+// A real send reads the member's decision ONCE, where it always did: at the delivery check, after the send row and the
+// suppression checks (referralNudgeVerdict). That decision decides whether the email goes (limit: cancelled; unreadable
+// or paused: deferred) and, once it may go, picks its words: the step is rendered after the check. A real send with no
+// customer on the enrollment reads nothing and is not swapped: under the gate the delivery check cancels it. A test
+// send, the test sequence and the preview page have no member and no delivery check: they show what a member under
+// the limit gets (a null member id).
+function memberlessNudgeDecision(templateKey) {
+  return templateKey === 'referral_nudge' ? require('./referral-engine').referralOfferDecision(db, null) : null;
+}
+
+function testSendNudgeDecision(templateKey, testRecipient) {
+  return testRecipient ? memberlessNudgeDecision(templateKey) : null;
+}
+
+// Gate off, or no decision: the body as stored. Gate on: the seeded sentence is always swapped. A decision that can
+// promise nothing (skip: the program paused or its settings unreadable) states no credit, so a test send and the
+// preview page never show the seeded reward while a real send is deferred.
+function nudgeOffer(decision) {
+  if (!decision?.gateOn) return null;
+  return decision.skip
+    ? { refereeCents: 0, memberCents: 0, atLimit: false }
+    : { refereeCents: decision.refereeCents, memberCents: decision.memberCents, atLimit: decision.atLimit };
+}
+
+function nudgeBody(body, decision, html) {
+  const offer = nudgeOffer(decision);
+  return offer ? require('./referral-step2').nudgeEmailWithOffer(body, { html, ...offer }) : body;
+}
+
+function nudgePreviewLine(line, decision) {
+  const offer = nudgeOffer(decision);
+  return offer ? require('./referral-step2').nudgePreviewWithOffer(line, offer) : line;
 }
 
 // A payment-failed notice is billing mail, so it goes through the shared
@@ -417,8 +544,8 @@ function renderAutomationStepContent({ template, htmlBody, textBody, customer, a
  * sender runs; if no, Beehiiv handles it (legacy fallback).
  */
 async function hasLocalContent(templateKey) {
-  const row = await db('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
+  // The same gated step list the runner sends (new_lead's two drip steps count only while GATE_NEW_LEAD_DRIP_STEPS is on).
+  const row = await enabledSequenceSteps(templateKey)
     .where(function () { this.whereNotNull('html_body').orWhereNotNull('text_body'); })
     .where(function () { this.whereRaw("coalesce(html_body,'') <> ''").orWhereRaw("coalesce(text_body,'') <> ''"); })
     .first();
@@ -444,9 +571,7 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   // termite bond (see the post-lock check in runEnrollment).
   if (requiresTermiteBond(templateKey) && !customer.id) return { enrolled: false, reason: 'not_termite_bond' };
 
-  const steps = await dbh('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
-    .orderBy('step_order', 'asc');
+  const steps = await enabledSequenceSteps(templateKey, dbh);
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
   const leadId = await enrollmentLeadIdFor({ templateKey, customer, normalizedEmail, context });
@@ -711,11 +836,26 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
 // step"). An enrollment last advanced before this change has no metadata cursor:
 // its place is the enabled step just before current_step, which is the step it
 // would have sent next anyway.
-function enabledSequenceSteps(templateKey) {
-  return db('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
-    .orderBy('step_order', 'asc')
-    .orderBy('id', 'asc');
+//
+// GATE_NEW_LEAD_DRIP_STEPS (owner 2026-11-24): the new_lead sequence has two seeded steps (1 and 2, found by id) that migration
+// 20261124140100 stores with enabled=false, so a runner from before this change, or a revert of it, never selects them. Gate on:
+// they are loaded whatever their enabled flag says (the gate is their switch; their copy is still editable in Admin). Gate off:
+// they are never loaded, even if someone set enabled=true, so an enrollment completes after step 0 exactly as before (one that
+// was waiting on step 1 when the gate was switched off completes without a send). A step the owner adds by hand follows the
+// ordinary enabled rule either way. Read at call time; a suite that mocks the whole gates module has no function there.
+// `client` lets enrollCustomer read through its own transaction.
+function enabledSequenceSteps(templateKey, client = db) {
+  let query;
+  if (templateKey !== 'new_lead') {
+    query = client('automation_steps').where({ template_key: templateKey, enabled: true });
+  } else if (require('../config/feature-gates').newLeadDripStepsLive?.() === true) {
+    query = client('automation_steps').where({ template_key: templateKey })
+      .where((own) => own.where('enabled', true).orWhereIn('id', NEW_LEAD_DRIP_STEP_IDS));
+  } else {
+    query = client('automation_steps').where({ template_key: templateKey, enabled: true })
+      .where((rest) => rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS));
+  }
+  return query.orderBy('step_order', 'asc').orderBy('id', 'asc');
 }
 
 const stepKey = (step) => [Number(step.step_order), String(step.id)];
@@ -763,10 +903,7 @@ function nextSequenceStep(enrollment, steps) {
  * customer's prep-send lock, so no tick can be mid-send on this enrollment. Returns true when the enrollment was rewound.
  */
 async function rewindEnrollmentToStep({ enrollment, stepId, email, metadata = {} }, client = db) {
-  const steps = await client('automation_steps')
-    .where({ template_key: enrollment.template_key, enabled: true })
-    .orderBy('step_order', 'asc')
-    .orderBy('id', 'asc');
+  const steps = await enabledSequenceSteps(enrollment.template_key, client);
   const step = steps.find((s) => String(s.id) === String(stepId));
   if (!step) return false;
   const { anchor, passedIds } = sequenceCursor(enrollment, steps);
@@ -1114,15 +1251,6 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   if (routed.blocked) return routed.blocked;
   const { recipient } = routed;
   const consultationBlock = await resolveConsultationBlock(step, enrollment, recipient);
-  const { html, text } = renderAutomationStepContent({
-    template,
-    htmlBody: step.html_body,
-    textBody: step.text_body,
-    customer: personal,
-    asmGroupId,
-    consultationHtml: consultationBlock.html,
-    consultationText: consultationBlock.text,
-  });
 
   const billingSend = template.key === 'payment_failed' && !!enrollment.customer_id && !testRecipient;
   // Collections DISPUTE hold: read BEFORE the step-send row is inserted, so a held step leaves no
@@ -1137,11 +1265,23 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   }
 
   const sendRow = await insertStepSend({ enrollment, step, recipient, testRecipient });
+  const nudge = { decision: await testSendNudgeDecision(template.key, testRecipient) };
 
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
     sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound,
-    handedOffStep: sendRow.retryHandedOff ? step : null });
+    handedOffStep: sendRow.retryHandedOff ? step : null, step, nudge });
   if (deliveryBlock) return deliveryBlock;
+
+  // Rendered once delivery is allowed, so a referral_nudge is worded from the decision the delivery check just read.
+  const { html, text } = renderAutomationStepContent({
+    template,
+    htmlBody: nudgeBody(step.html_body, nudge.decision, true),
+    textBody: nudgeBody(step.text_body, nudge.decision, false),
+    customer: personal,
+    asmGroupId,
+    consultationHtml: consultationBlock.html,
+    consultationText: consultationBlock.text,
+  });
 
   const handoff = { started: false, accepted: null };
   const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({
@@ -1307,23 +1447,22 @@ async function processDueSteps() {
 async function testSequence({ templateKey, toEmail }) {
   const template = await db('automation_templates').where({ key: templateKey }).first();
   if (!template) throw new Error('template not found');
-  const steps = await db('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
-    .orderBy('step_order', 'asc');
+  const steps = await enabledSequenceSteps(templateKey);
   if (!steps.length) throw new Error('no steps to send');
 
   const asmGroupId = automationAsmGroupId(template);
 
   const fake = { first_name: 'Test', last_name: 'User', email: toEmail };
   const results = [];
+  const nudgeDecision = await memberlessNudgeDecision(templateKey);
 
   for (const step of steps) {
     if (!step.html_body && !step.text_body) { results.push({ step: step.step_order, skipped: 'empty' }); continue; }
     try {
       const rendered = renderAutomationStepContent({
         template,
-        htmlBody: step.html_body,
-        textBody: step.text_body,
+        htmlBody: nudgeBody(step.html_body, nudgeDecision, true),
+        textBody: nudgeBody(step.text_body, nudgeDecision, false),
         customer: fake,
         asmGroupId,
       });
@@ -1363,4 +1502,7 @@ module.exports = {
   automationSuppressionMatches,
   activeAutomationSuppressionFor,
   requiresTermiteBond,
+  memberlessNudgeDecision,
+  nudgeBody,
+  nudgePreviewLine,
 };

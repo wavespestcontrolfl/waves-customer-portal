@@ -25,6 +25,13 @@ jest.mock('../config/feature-gates', () => ({
   // The gone-quiet consultation offer's own gate — off unless a test turns
   // it on, so every other suite here runs the single-pass path unchanged.
   estimateEmailConsultationOfferLive: jest.fn(() => false),
+  // GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME: off unless a test turns it on.
+  estimateFollowupServiceNameLive: jest.fn(() => false),
+}));
+// The emailed service name has its own suite (estimate-emailed-service-name.test.js);
+// here only WHERE the engine calls it and what it changes in the payload are pinned.
+jest.mock('../services/estimate-emailed-service-name', () => ({
+  emailedServiceName: jest.fn(async () => null),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -90,7 +97,8 @@ jest.mock('../services/estimate-email-consultation-offer', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled, estimateEmailConsultationOfferLive } = require('../config/feature-gates');
+const { isEnabled, estimateEmailConsultationOfferLive, estimateFollowupServiceNameLive } = require('../config/feature-gates');
+const { emailedServiceName } = require('../services/estimate-emailed-service-name');
 const logger = require('../services/logger');
 const { inferEstimateServiceLines } = require('../services/estimate-service-lines');
 const { customerConvertedSince } = require('../services/estimate-conversion-guard');
@@ -248,6 +256,8 @@ beforeEach(() => {
   mintGoneQuietConsultationUrl.mockResolvedValue('');
   goneQuietConsultationStillValid.mockResolvedValue(true);
   estimateEmailConsultationOfferLive.mockReturnValue(false);
+  estimateFollowupServiceNameLive.mockReturnValue(false);
+  emailedServiceName.mockResolvedValue(null);
 });
 
 describe('onEstimateViewed (view-event rules)', () => {
@@ -439,12 +449,52 @@ describe('processDueJobs', () => {
     expect(result.sent).toBe(1);
     expect(followupShared.sendDualChannel).toHaveBeenCalled();
   });
+  describe('GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME (owner 2026-11-21)', () => {
+    // The `extra` argument the engine hands estimateEmailPayload for one send.
+    async function sendOnce() {
+      enqueueProcessorHappyPath();
+      const result = await Engine.processDueJobs(NOW);
+      expect(result.sent).toBe(1);
+      return followupShared.estimateEmailPayload.mock.calls.pop()[3];
+    }
+
+    test('gate off: no delivery-email read and today\'s payload', async () => {
+      emailedServiceName.mockResolvedValue('lawn care and pest control');
+      const extra = await sendOnce();
+      expect(emailedServiceName).not.toHaveBeenCalled();
+      expect(extra.service_label).toBe('pest control');
+    });
+
+    test('gate on with proof: only service_label differs', async () => {
+      const before = await sendOnce();
+      estimateFollowupServiceNameLive.mockReturnValue(true);
+      emailedServiceName.mockResolvedValue('lawn care and pest control');
+      const after = await sendOnce();
+      // The engine hands the reader today's label; the reader decides whether that label may be replaced.
+      expect(emailedServiceName).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }), 'pest control');
+      expect(after.service_label).toBe('lawn care and pest control');
+      expect({ ...after, service_label: before.service_label }).toEqual(before);
+    });
+
+    test('gate on without proof: identical to today', async () => {
+      const before = await sendOnce();
+      estimateFollowupServiceNameLive.mockReturnValue(true);
+      emailedServiceName.mockResolvedValue(null);
+      const after = await sendOnce();
+      expect(emailedServiceName).toHaveBeenCalledTimes(1);
+      expect(after).toEqual(before);
+    });
+  });
+
   test('sends the email, claims the ledger, marks the job done', async () => {
     enqueueProcessorHappyPath();
 
     const result = await Engine.processDueJobs(NOW);
 
     expect(result.sent).toBe(1);
+    // Only the engine's emails take the since-estimate reply window (GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE); the
+    // reader decides whether it applies. safetyGate never passes the flag.
+    expect(followupShared.hasRepliedRecently).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }), 14, { sinceEstimate: true });
     expect(followupShared.claimFollowupSend).toHaveBeenCalledWith(
       'est-1', 'viewed_gone_quiet_72h', 'estimate.engage_gone_quiet', expect.any(Object),
       { blockLegacyFlags: [], blockRuleKeys: [] },

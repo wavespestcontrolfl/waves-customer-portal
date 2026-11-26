@@ -461,6 +461,17 @@ describe('sendStageComms', () => {
     expect(row.status).toBe('uncertain');
   });
 
+  test('email send refused for a missing SendGrid key (no request was made) -> outcome failed, not uncertain', async () => {
+    mockSendOne.mockRejectedValue(Object.assign(new Error('SENDGRID_API_KEY not configured'), { code: 'SENDGRID_NOT_CONFIGURED' }));
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+
+    const result = await RecruitingComms.sendStageComms(app, 'application_received', { sms: false, email: true });
+    expect(result.email).toBe('failed');
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.status).toBe('failed');
+  });
+
   test('email_messages ledger insert failure refuses the send (Codex P1) — no sendOne call, no untracked send', async () => {
     const app = baseApp();
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });

@@ -7,7 +7,9 @@
  *     unit-tested on their own;
  *   - the Technician Terms lookup (ISSUED versions only, never a draft);
  *   - admin operations (panel, save draft, send, withdraw, revise, signed copy);
- *   - public operations (view, text consent, accept, date request, decline).
+ *   - public operations (view, text consent, accept, date request, decline);
+ *   - the scheduled 7-day close (closeExpiredOffers) and 2-day reminder (sendDueReminders);
+ *   - the staff record a signed offer gets (makeStaffRecord, and its catch-up pass makeDueStaffRecords).
  *
  * Every state change is ONE transaction that locks the application row, then the offer row (always in that order),
  * re-reads the status under the lock and refuses a replay with the current state. Comms and bells run AFTER the
@@ -18,7 +20,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { dateOnlyAtNoonUtc, dateOnlyString, formatDateOnly, validDateOnly } = require('../utils/date-only');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { addETBusinessDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 const { portalUrl } = require('../utils/portal-url');
 const { hash: canonicalHash } = require('./staff-document-source');
@@ -352,8 +354,9 @@ const ownerFirstName = (snapshot) => String((snapshot && snapshot.owner && snaps
 
 /**
  * What the applicant's page shows for a row: open | signed | declined | date_requested | expired | withdrawn |
- * superseded, or null for a draft. A sent offer past its expiry reads expired before the sweep flips the row; an offer
- * whose application was closed by the owner meanwhile reads withdrawn.
+ * superseded, or null for a draft. An offer past its expiry reads expired, before that state is stored and after it,
+ * whatever the application does later: it closed on that date. (The 7-day close, a Send and a stage move each store
+ * it.) An open offer or a date request whose application the owner closed or moved back reads withdrawn.
  */
 function publicStateOf(offer, { now = new Date(), applicationStatus = null } = {}) {
   switch (offer.status) {
@@ -364,10 +367,10 @@ function publicStateOf(offer, { now = new Date(), applicationStatus = null } = {
     case 'expired': return 'expired';
     case 'sent':
     case 'date_requested': {
+      if (expiredByClock(offer, now)) return 'expired';
       // A live offer belongs to an application sitting at 'offer': closed, or moved back to review or interview, it is dead.
       if (applicationStatus && applicationStatus !== 'offer') return 'withdrawn';
-      if (offer.status === 'date_requested') return 'date_requested';
-      return offer.expires_at && now.getTime() > new Date(offer.expires_at).getTime() ? 'expired' : 'open';
+      return offer.status === 'date_requested' ? 'date_requested' : 'open';
     }
     default: return null;
   }
@@ -380,7 +383,9 @@ function closedMessage(state, snapshot, offer) {
   return `This offer closed on ${fmtDay(instantToEtDay(offer.expires_at), { year: true })}. Please call ${owner} at ${WAVES_SUPPORT_PHONE_DISPLAY} if you still want the job.`;
 }
 
-// A sent offer past its expiry (the sweep has not flipped the row yet).
+// A sent offer past its expiry whose row does not say so yet. One rule for every reader and writer: such an offer is
+// expired. The 7-day close stores it (closeExpiredOffers); a Send (supersedePrior) or a stage move
+// (closeOffersWithApplication) that comes first stores the same state.
 const expiredByClock = (row, now) => row.status === 'sent' && Boolean(row.expires_at) && now.getTime() > new Date(row.expires_at).getTime();
 
 // ------------------------------------------------------------ admin shape
@@ -401,7 +406,13 @@ function timelineOf(row, { sentByName = null } = {}) {
   add(row.withdrawn_at, 'withdrawn', 'Offer withdrawn');
   if (row.status === 'superseded') add(row.updated_at, 'superseded', 'Replaced by an updated offer');
   if (row.status === 'expired') add(row.expires_at, 'expired', 'Closed unsigned');
+  const staff = asObject(row.checklist)[STAFF_RECORD_KEY];
+  if (staff && staffRecordLabel(staff)) add(staff.at, 'staff_record', staffRecordLabel(staff));
   add(row.activated_at, 'activated', 'Login turned on');
+  for (const item of ALL_FIRST_DAYS_ITEMS) {
+    const mark = asObject(row.checklist)[item.key];
+    if (mark) add(mark.at, 'checklist_done', `${item.label} marked done${mark.by_name ? ` by ${mark.by_name}` : ''}`);
+  }
   return items.sort((a, b) => a.at.localeCompare(b.at));
 }
 
@@ -542,10 +553,12 @@ function panelOffers(rows, now) {
 const PANEL_SNAPSHOT = Object.freeze({ isolationLevel: 'repeatable read', readOnly: true });
 
 async function adminPanel(applicationId, actor, now = new Date()) {
-  const { application, rows } = await db.transaction(async (trx) => {
+  const { application, rows, signed, firstDay } = await db.transaction(async (trx) => {
     const app = await loadApplication(trx, applicationId);
     const offers = await trx('job_offers').where({ application_id: applicationId }).orderBy('created_at', 'desc');
-    return { application: app, rows: offers };
+    // The first-days checklist: a Hired application's signed offers, newest signature first, and the first day.
+    const signedOffers = app.status === 'hired' ? newestSignedFirst(offers) : [];
+    return { application: app, rows: offers, signed: signedOffers, firstDay: signedOffers.length ? await firstDayOf(trx, signedOffers) : null };
   }, PANEL_SNAPSHOT);
   const names = await sentByNames(db, rows);
   const { terms, payDayLine, blockers } = await loadIssuedTerms(db, now);
@@ -584,9 +597,10 @@ async function adminPanel(applicationId, actor, now = new Date()) {
     // The offer out now that sending the open draft replaces (its link stops working at the send), or null. `out` is
     // already null for an offer past its expiry, whose link no longer works.
     sendReplacesId: replacedBySend(out, revision),
-    // The offers out now (sent, date requested) as this read saw them, each with its version. Send carries it back
-    // (expectedOut), so an answer or a date request after this read refuses the send (commitSend).
-    outStamp: offerStampOf(rows.filter((r) => OUT_STATUSES.includes(r.status))),
+    // The offers the applicant holds now (a sent offer not past its expiry, a date request) as this read saw them, each
+    // with its version. Send carries it back (expectedOut), so an answer or a date request after this read refuses the
+    // send (commitSend). An offer past its expiry is left out, stored as expired or not: see liveOffersOf.
+    outStamp: offerStampOf(rows.filter((r) => isHeldOffer(r, now))),
     // The preview names the offer its letter belongs to (the open draft, else the frozen letter of the current offer, else
     // none: the defaults) and that draft's hash, so a Save, Send or Discard can be tied to what was read.
     letterPreview: {
@@ -595,6 +609,8 @@ async function adminPanel(applicationId, actor, now = new Date()) {
       markdown: renderLetterMarkdown(view),
     },
     current: present(current),
+    // The first-days checklist of a Hired application, on its newest signed offer (firstDays.offerId), or null.
+    firstDays: signed.length ? firstDaysOf(signed, firstDaysMarks(signed), firstDay) : null,
     draft: present(revision),
     history: rows.filter((r) => !current || (r.id !== current.id && !(revision && r.id === revision.id))).map(present),
   };
@@ -743,8 +759,9 @@ async function reviseOffer(applicationId, offerId, input, actor, fixedNow) {
 /**
  * POST /:id/offer/:offerId/withdraw — sends nothing; the application status stays as it is. Needs { expectedStatus } (the
  * state the owner saw: 'draft', 'sent' or 'date_requested') and, for a draft, the { draftHash } of the preview he read.
+ * fixedNow: a clock for tests; without it the clock is read once both row locks are held.
  */
-async function withdrawOffer(applicationId, offerId, actor, precondition = {}, now = new Date()) {
+async function withdrawOffer(applicationId, offerId, actor, precondition = {}, fixedNow) {
   const { expectedStatus, draftHash } = precondition || {};
   if (!LIVE_STATUSES.includes(expectedStatus)) {
     throw new OfferError(400, 'EXPECTED_STATUS_REQUIRED', 'Say which state of the offer you are acting on.');
@@ -755,6 +772,9 @@ async function withdrawOffer(applicationId, offerId, actor, precondition = {}, n
   return db.transaction(async (trx) => {
     await loadApplication(trx, applicationId, { lock: true });
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
+    // Both rows are locked: the clock is read now. A withdrawal that waited for a lock while the offer passed its
+    // expiry is refused, so an offer whose link already read closed is never stored as withdrawn.
+    const now = fixedNow || new Date();
     assertExpectedStatus(offer, expectedStatus, LIVE_STATUSES);
     if (expectedStatus === 'draft') {
       const { terms, payDayLine } = await loadIssuedTerms(trx, now);
@@ -801,10 +821,25 @@ function stageMoveClosesOffers(fromStatus, toStatus) {
     || (['rejected', 'withdrawn', 'hired'].includes(toStatus) && fromStatus !== toStatus);
 }
 
-// The live offers such a move withdraws (a draft, a sent offer, a date request).
-function liveOffersOf(knex, applicationId, { lock = false } = {}) {
-  const query = knex('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES);
-  return (lock ? query.forUpdate() : query).select('id', 'status', 'expires_at', 'updated_at');
+// The live offers a stamp names: a draft, a date request, and a sent offer not past its expiry. A sent offer past its
+// expiry is left out whether or not the 7-day close has stored that state (closeExpiredOffers): both pages already
+// show it closed, so storing it must not change a stamp the owner read. (A stage move stores such a row's expiry,
+// closeOffersWithApplication; no dialog names it, because the applicant no longer holds it.)
+const liveRowsOf = (knex, applicationId) => knex('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES);
+const STAMP_COLUMNS = ['id', 'status', 'expires_at', 'updated_at'];
+
+async function liveOffersOf(knex, applicationId, now = new Date()) {
+  const rows = await liveRowsOf(knex, applicationId).select(...STAMP_COLUMNS);
+  return rows.filter((o) => !expiredByClock(o, now));
+}
+
+// The same offers, locked, and the clock read once they are: for a write that judges an expiry and stores a state at
+// one instant (a Send, a stage move). The applicant's page holds an offer row while it stamps a view, so a clock read
+// before these locks could be older than the closed state the link already showed. fixedNow: a test's clock.
+async function lockLiveOffers(trx, applicationId, fixedNow) {
+  const rows = await liveRowsOf(trx, applicationId).forUpdate().select(...STAMP_COLUMNS);
+  const now = fixedNow || new Date();
+  return { now, offers: rows.filter((o) => !expiredByClock(o, now)) };
 }
 
 // One stamp for the offers a stage move withdraws, from their ids, statuses and versions (updated_at, which every offer
@@ -827,13 +862,19 @@ function nextVersion(row) {
 
 /** What such a move would withdraw, for the stage dialog's preview: a plain read (the move re-checks under its lock). */
 async function liveOfferStake(knex, applicationId, now = new Date()) {
-  const rows = await liveOffersOf(knex, applicationId);
+  const rows = await liveOffersOf(knex, applicationId, now);
   return { held: rows.some((o) => isHeldOffer(o, now)), draft: rows.some((o) => o.status === 'draft'), stamp: offerStampOf(rows) };
 }
 
 async function closeOffersWithApplication(trx, applicationId, actorId, now = new Date()) {
-  return trx('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES)
+  // A sent offer already past its expiry closed on that date. The move stores that, as the 7-day close does, so the
+  // applicant's link reads the same whichever of the two came first.
+  await trx('job_offers').where({ application_id: applicationId, status: 'sent' }).where('expires_at', '<', now)
+    .update({ status: 'expired', updated_at: new Date() });
+  const withdrawn = await trx('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES)
     .update({ status: 'withdrawn', withdrawn_at: now, withdrawn_by: actorId || null, updated_at: new Date() });
+  await clearExpiredBells(trx, applicationId, 'Cleared: the application left the offer stage');
+  return withdrawn;
 }
 
 /** GET /:id/offer/:offerId/signed-copy */
@@ -882,15 +923,21 @@ function replacedBySend(out, draft) {
   return out && draft && out.id === draft.supersedes_id ? out.id : null;
 }
 
+// Stores the expiry of a sent offer past its date, for the 7-day close and for a Send. The 7-day close also rings the
+// owner (closeIfExpired). A Send over a lapsed offer does not ring: the owner sent the new offer on the card that
+// showed the old one closed, so that Send is his answer to it and a bell would ask for it again.
+const storeExpiry = (trx, offerId) => trx('job_offers').where({ id: offerId }).update({ status: 'expired', updated_at: new Date() });
+
 async function supersedePrior(trx, applicationId, offer, now) {
   const out = await trx('job_offers').where({ application_id: applicationId }).whereIn('status', OUT_STATUSES).forUpdate().first();
   if (!out) return;
-  const replaced = replacedBySend(out, offer);
-  if (!replaced && expiredByClock(out, now)) {
-    await trx('job_offers').where({ id: out.id }).update({ status: 'expired', updated_at: new Date() });
+  // An offer past its expiry is expired, also when this Send is a revision of it drafted while it was open: its link
+  // already reads closed, and the offer read names no offer this Send replaces (sendReplacesId).
+  if (expiredByClock(out, now)) {
+    await storeExpiry(trx, out.id);
     return;
   }
-  if (!replaced) {
+  if (!replacedBySend(out, offer)) {
     throw new OfferError(409, 'OFFER_ALREADY_OPEN', 'An offer is already out. Use Revise to make an updated one.', { offerId: out.id });
   }
   await trx('job_offers').where({ id: out.id }).update({ status: 'superseded', superseded_by_id: offer.id, updated_at: new Date() });
@@ -907,16 +954,20 @@ function sentHistoryEntry(application, actor) {
   };
 }
 
-async function commitSend(applicationId, offerId, actor, now, draftHash, expectedOut) {
+async function commitSend(applicationId, offerId, actor, fixedNow, draftHash, expectedOut) {
   return db.transaction(async (trx) => {
     const application = await loadApplication(trx, applicationId, { lock: true });
     const offer = await loadOffer(trx, applicationId, offerId, { lock: true });
+    // Every row this Send reads or writes is locked before the clock is read, as in reviseOffer. A Send that waited for
+    // a lock while the offer out passed its expiry is judged at the instant it writes (the stamp, the offer it
+    // replaces, the new expiry).
+    const { now, offers: live } = await lockLiveOffers(trx, applicationId, fixedNow);
     const name = await actorName(trx, actor);
     const { terms, payDayLine } = await assertSendable(trx, application, offer, { now, ownerName: name, draftHash });
     // The owner sends on a read of the offers out now (the offer read's outStamp, which sendOffer requires). An answer, a
     // date request or any other write to them since that read refuses the send, before anything is replaced or sent: the
     // owner sees it first. Every offer writer locks the application row first, so this read holds until the commit.
-    const outNow = (await liveOffersOf(trx, applicationId, { lock: true })).filter((o) => OUT_STATUSES.includes(o.status));
+    const outNow = live.filter((o) => OUT_STATUSES.includes(o.status));
     if (offerStampOf(outNow) !== expectedOut) {
       throw new OfferError(409, 'OFFERS_CHANGED', 'The offer you sent before changed after you opened this, so nothing was sent.');
     }
@@ -943,6 +994,7 @@ async function commitSend(applicationId, offerId, actor, now, draftHash, expecte
       status_history: JSON.stringify([...(Array.isArray(application.status_history) ? application.status_history : []), sentHistoryEntry(application, actor)]),
       updated_at: new Date(),
     }).returning('*');
+    await clearExpiredBells(trx, applicationId, 'Cleared: a new offer was sent');
     return { offer: row, application: updatedApplication, ownerName: name, snapshot };
   });
 }
@@ -1001,7 +1053,8 @@ const outcomesOf = (comms) => ({
 
 /** POST /:id/offer/:offerId/send */
 // expectedOut: the offer read's outStamp, which the page always sends; null skips the check.
-async function sendOffer(applicationId, offerId, actor, draftHash, now = new Date(), { expectedOut } = {}) {
+// fixedNow: a test's clock. The route passes none, so the clock is read under the locks (commitSend).
+async function sendOffer(applicationId, offerId, actor, draftHash, fixedNow, { expectedOut } = {}) {
   if (typeof draftHash !== 'string' || !draftHash) {
     throw new OfferError(400, 'DRAFT_HASH_REQUIRED', 'Send needs the hash of the preview you reviewed.');
   }
@@ -1010,7 +1063,7 @@ async function sendOffer(applicationId, offerId, actor, draftHash, now = new Dat
   if (typeof expectedOut !== 'string' || !expectedOut) {
     throw new OfferError(400, 'OUT_STAMP_REQUIRED', 'Send needs the offers out you reviewed. Open the offer again, then send.');
   }
-  const committed = await commitSend(applicationId, offerId, actor, now, draftHash, expectedOut);
+  const committed = await commitSend(applicationId, offerId, actor, fixedNow, draftHash, expectedOut);
   const comms = await deliverOfferComms(committed, actor);
   const fresh = await db('job_offers').where({ id: committed.offer.id }).first();
   return { offer: presentOffer(fresh || committed.offer, { sentByName: committed.ownerName, includeUrl: true }), comms };
@@ -1181,7 +1234,10 @@ async function acceptOffer(token, { signedName, version, ip, userAgent }) {
     }
     return { body: await signOffer(trx, offer, { name, ip, userAgent, now: found.now }), forBell: offer };
   });
-  if (result.forBell) await bell('signed', result.forBell, null);
+  if (result.forBell) {
+    await bell('signed', result.forBell, null);
+    await staffRecordAfterSigning(result.forBell.id);
+  }
   return result;
 }
 
@@ -1256,7 +1312,689 @@ async function declineOffer(token, { reason, version }) {
   return result;
 }
 
-// ------------------------------------------------------------------ bells
+// ------------------------------------------------------------ 7-day close
+
+// Stores the expiry of one sent offer and writes its bell in the same transaction, so the two commit together: a close
+// whose bell was not written is rolled back, the row stays sent, and the next pass does both again. False when there
+// is nothing to close: the applicant answered, the owner withdrew or replaced the offer, or the application left Offer
+// since the pass listed it. Both rows are read SKIP LOCKED: a row another transaction holds is left for the next pass,
+// so one slow write cannot hold back the offers after it (the whole pass runs under one job lock).
+async function closeIfExpired(applicationId, offerId) {
+  return db.transaction(async (trx) => {
+    const application = await trx('job_applications').where({ id: applicationId }).forUpdate().skipLocked().first('status');
+    const offer = application && await trx('job_offers').where({ id: offerId }).forUpdate().skipLocked().first();
+    // The clock is read after both locks, as for the applicant's own writes (lockByToken).
+    if (!application || application.status !== 'offer' || !offer || !expiredByClock(offer, new Date())) return false;
+    await storeExpiry(trx, offerId);
+    const written = await raiseBell('expired', offer, fmtDay(instantToEtDay(offer.expires_at)), trx);
+    if (!written) throw new Error('the closed-unsigned bell was not written');
+    return true;
+  });
+}
+
+/**
+ * The 7-day close. Each sent offer past its expiry, on an application still at Offer, is stored as 'expired' and rings
+ * one bell for the owner. Both pages already read such a row as expired by the clock (expiredByClock); this stores it,
+ * so the row stops being an offer out. A date request does not expire: the owner answers it. The sweep is a catch-up
+ * (every pass tries each offer that is due, so a missed pass loses nothing) and sends the applicant nothing.
+ *
+ * The list has no page size: an application has at most one sent offer (the partial unique index), so it is never
+ * longer than the applications at Offer, and an offer that keeps failing cannot hold back the ones after it.
+ */
+async function closeExpiredOffers() {
+  const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
+    .where('o.status', 'sent').where('a.status', 'offer').where('o.expires_at', '<', new Date())
+    .orderBy('o.expires_at').select('o.id', 'o.application_id');
+  const result = { closed: 0, failed: 0 };
+  for (const row of due) {
+    try {
+      if (await closeIfExpired(row.application_id, row.id)) result.closed += 1;
+    } catch (err) {
+      result.failed += 1;
+      logger.error(`[job-offers] close failed (offer ${row.id}): ${errTag(err)}`);
+    }
+  }
+  return result;
+}
+
+// ----------------------------------------------------------- 2-day reminder
+
+const REMINDER_AFTER_MS = 2 * 24 * 60 * 60 * 1000;
+// The reminder goes out in the working day (Eastern). It is a courtesy to the applicant, not a legal window: the text
+// rail keeps its own 8 AM to 8 PM, and the email has none. The pass takes an offer from 9:00 AM until 5:55 PM, and a
+// channel's handoff starts only before 6:00 PM (the check before each provider reads the clock); the five minutes
+// are for the provider calls of the last offer taken. A handoff that passed its check finishes: the sender takes
+// its own locks after that check, and no clock read can sit on the provider request itself.
+const REMINDER_DAY_ET = Object.freeze({ from: 9 * 60, lastClaim: 17 * 60 + 55, until: 18 * 60 });
+const minuteOfDayEt = (now) => {
+  const { hour, minute } = etParts(now);
+  return hour * 60 + minute;
+};
+const mayClaimAt = (now) => minuteOfDayEt(now) >= REMINDER_DAY_ET.from && minuteOfDayEt(now) < REMINDER_DAY_ET.lastClaim;
+const maySendAt = (now) => minuteOfDayEt(now) >= REMINDER_DAY_ET.from && minuteOfDayEt(now) < REMINDER_DAY_ET.until;
+// The reminder's gates (GATE_JOB_OFFER_REMINDER and GATE_JOB_OFFERS), as the sender reads them for the stage. The
+// scheduler reads them before its lock. The pass reads them again before it takes an offer: a claim made with a
+// gate off would use up the offer's one attempt on a send that the sender refuses.
+const reminderOn = () => require('./recruiting-comms').stageEnabled('offer_reminder');
+// A channel that did not go cleanly for a reason on our side: it failed, or its result is not known (the applicant
+// may hold the message, and nobody can say so).
+const NOT_CLEAN = ['failed', 'uncertain'];
+
+// The applicant's yes to a text about this offer: the "Text me about this offer" box on the offer page. It starts
+// empty and the applicant can clear it again. The page shows that box, so it alone decides: the application's own
+// text consent (sms_consent) is about the application, and it does not stand in for a box the applicant sees empty
+// or has cleared. The reminder is the one message of the flow that no person presses, so its text needs this yes
+// when the pass takes the offer and again when the text goes to the provider.
+const agreedToTexts = (offer) => Boolean(offer.text_consent_at);
+
+// What the reminder may use for one applicant: a text with the applicant's yes, an email when one is on file.
+function reminderChannels(application, offer) {
+  const contact = contactOf(application);
+  return { sms: Boolean(contact.phone) && agreedToTexts(offer), email: Boolean(contact.email) };
+}
+
+// An offer sent two days ago or more, still open, on an application still at Offer, that has had no reminder. A
+// reminder that went out (reminder_sent_at) counts by itself, also on a row that holds no claim.
+const reminderDue = (application, offer, now) => application.status === 'offer' && offer.status === 'sent'
+  && !expiredByClock(offer, now) && !offer.reminder_claimed_at && !offer.reminder_sent_at && Boolean(offer.sent_at)
+  && now.getTime() - new Date(offer.sent_at).getTime() >= REMINDER_AFTER_MS;
+
+// Takes one offer for its reminder. Null when it is not due any more, it is past 5:55 PM, it has no channel to
+// use, or a row is held by another transaction (SKIP LOCKED: the next pass takes it). The claim (reminder_claimed_at)
+// commits before anything is sent, so an offer is tried once: a send that fails, or a process that stops after it,
+// never leads to a second reminder. An offer with no channel is not claimed: it gets its reminder if the applicant
+// agrees to texts later. The claim does not move updated_at: a reminder changes nothing the applicant or the owner
+// acts on, so no page they have open goes stale.
+async function claimReminder(applicationId, offerId, clock) {
+  return db.transaction(async (trx) => {
+    const application = await trx('job_applications').where({ id: applicationId }).forUpdate().skipLocked().first();
+    const offer = application && await trx('job_offers').where({ id: offerId }).forUpdate().skipLocked().first();
+    // The clock is read after both locks, as for every offer write. Each offer has its own read, so a long pass
+    // stops taking offers at 5:55 PM.
+    const now = clock();
+    if (!offer || !mayClaimAt(now) || !reminderDue(application, offer, now)) return null;
+    const channels = reminderChannels(application, offer);
+    if (!channels.sms && !channels.email) return null;
+    await trx('job_offers').where({ id: offerId }).update({ reminder_claimed_at: now });
+    return { application, offer, channels };
+  });
+}
+
+// Sends the reminder of a claimed offer through the recruiting sender (the stage 'offer_reminder'): the same link and
+// the same link rules as the offer text and email. The sender reads stillEligible again before each provider, for the
+// text inside its locked handoff (the application row is held, and every offer write takes that row first): the offer
+// must still be the open one with this link, it must be before 6:00 PM, and the text needs the applicant's yes to
+// texts at that moment. The sender never queues a reminder text for later (recruiting-comms TRIED_ONCE_STAGES).
+// Returns the sender's outcome for each channel, and checkFailed: a read of that check threw. The sender stops that
+// channel (it reports 'stale'), and the offer is not tried again, so the pass counts it as a failure.
+async function deliverReminder({ application, offer, channels }, clock) {
+  const snapshot = asObject(offer.snapshot);
+  let checkFailed = false;
+  const stillEligible = async (conn = db, channel) => {
+    try {
+      const row = await conn('job_offers').where({ id: offer.id }).first('status', 'token', 'expires_at', 'text_consent_at');
+      const app = await conn('job_applications').where({ id: application.id }).first('status');
+      const now = clock();
+      const open = Boolean(row && row.status === 'sent' && row.token === offer.token && !expiredByClock(row, now) && app && app.status === 'offer');
+      return open && maySendAt(now) && (channel !== 'sms' || agreedToTexts(row));
+    } catch (err) {
+      checkFailed = true;
+      logger.error(`[job-offers] reminder check failed before the ${channel || 'send'} (offer ${offer.id}): ${errTag(err)}`);
+      return false;
+    }
+  };
+  const comms = await require('./recruiting-comms').sendStageComms(application, 'offer_reminder', {
+    sms: channels.sms,
+    email: channels.email,
+    by: 'system',
+    stillEligible,
+    vars: {
+      offer_link: portalUrl(`/careers/offer/${offer.token}`),
+      expires_on: fmtDay(instantToEtDay(offer.expires_at)),
+      job_title: snapshot.jobTitle || offer.job_title,
+      sender_name: String((snapshot.owner && snapshot.owner.name) || '').trim() || ownerFirstName(snapshot),
+    },
+  });
+  return { sms: comms.sms, email: comms.email, checkFailed };
+}
+
+/**
+ * The 2-day reminder: the one message of the offer flow that no person presses (GATE_JOB_OFFER_REMINDER, read by the
+ * scheduler with GATE_JOB_OFFERS). Each sent offer that is two days old or more and still open, on an application
+ * still at Offer, gets one reminder: an email, and a text when the applicant ticked "Text me about this offer". A date request gets
+ * none: the owner answers it. A catch-up pass (each run takes every offer that is due); it takes an offer only from
+ * 9:00 AM to 5:55 PM Eastern, and no channel's handoff starts after 6:00 PM.
+ *
+ * Returns { reminded, notSent, failed }. reminded: a provider took the text or the email (reminder_sent_at is set;
+ * the offer timeline reads it as "Reminder sent", so a result that is not known does not set it). notSent: nothing went out, for a known reason (the offer closed first, the address is
+ * suppressed, the applicant opted out, it was 6 PM). failed: a channel failed or its result is not known, a check
+ * before a provider could not be read, or the pass threw; the scheduler fails the job. The sender reads the reminder
+ * text fail-loud (recruiting-comms triedOnceTextOutcome): a text that did not go is 'failed' unless the rail refused
+ * it because of the applicant.
+ * One offer can count as reminded and as failed (the email went, and the text failed or its result is not known).
+ * With either gate off the pass takes nothing, also on a direct call.
+ * clock: the time source, for tests. The scheduler passes none.
+ */
+async function sendDueReminders(clock = () => new Date()) {
+  const now = clock();
+  const result = { reminded: 0, notSent: 0, failed: 0 };
+  if (!reminderOn() || !mayClaimAt(now)) return result;
+  const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
+    .where('o.status', 'sent').where('a.status', 'offer').whereNull('o.reminder_claimed_at').whereNull('o.reminder_sent_at')
+    .where('o.sent_at', '<=', new Date(now.getTime() - REMINDER_AFTER_MS)).where('o.expires_at', '>=', now)
+    .orderBy('o.sent_at').select('o.id', 'o.application_id');
+  for (const row of due) {
+    try {
+      const claimed = await claimReminder(row.application_id, row.id, clock);
+      if (claimed) await remindClaimed(claimed, result, clock);
+    } catch (err) {
+      // A claimed offer is not tried again: a channel may already have gone out. The application's message history
+      // has what each channel did.
+      result.failed += 1;
+      logger.error(`[job-offers] reminder failed (offer ${row.id}): ${errTag(err)}`);
+    }
+  }
+  return result;
+}
+
+// Sends one claimed offer's reminder and counts it. A channel the sender reports as failed or as not known, or a
+// check before a provider that could not be read, fails the pass, also when the other channel went out: the offer is
+// not tried again, so the job's health is the only place the failure shows.
+// reminder_sent_at is written after the send, and only when a provider took a channel: the timeline must not say
+// "Reminder sent" for a result nobody knows (the claim alone keeps the offer from a second attempt). When that write
+// fails the reminder still went, so it counts as reminded and as a failure.
+async function remindClaimed(claimed, result, clock) {
+  const { id } = claimed.offer;
+  const comms = await deliverReminder(claimed, clock);
+  const went = comms.sms === 'sent' || comms.email === 'sent';
+  const channelFailed = NOT_CLEAN.includes(comms.sms) || NOT_CLEAN.includes(comms.email) || comms.checkFailed;
+  if (channelFailed) {
+    result.failed += 1;
+    logger.error(`[job-offers] reminder channel failed (offer ${id}): text ${comms.sms}, email ${comms.email}${comms.checkFailed ? ', a check could not be read' : ''}`);
+  } else if (!went) {
+    result.notSent += 1;
+    logger.warn(`[job-offers] reminder not sent (offer ${id}): text ${comms.sms}, email ${comms.email}`);
+  }
+  if (!went) return;
+  result.reminded += 1;
+  try {
+    await db('job_offers').where({ id }).update({ reminder_sent_at: new Date() });
+  } catch (err) {
+    if (!channelFailed) result.failed += 1;
+    logger.error(`[job-offers] reminder went out but its time was not stored (offer ${id}): ${errTag(err)}`);
+  }
+}
+
+// ------------------------------------------------- the staff record at signing
+
+// What the staff record step stores on the offer (job_offers.checklist.staff_record). It is there = the step ran for
+// this offer, and it never runs a second time.
+//   { at, made: true, pay_step: 'made' | 'refused' | 'none' }   the prospective staff row exists (technician_id)
+//   { at, made: false, reason: 'email_in_use' }                 no row: the owner adds the hire on the Team tab
+//   { at, made: false, reason: 'earlier_record' }               an earlier signed offer of this application made the
+//                                                               row: the owner sets it to this offer's terms
+//   { at, made: false, reason: 'newer_offer' }                  a newer signature is the hire's contract: nothing to do
+const STAFF_RECORD_KEY = 'staff_record';
+// The longest this step waits for a lock (the staff table, the payroll lock). Past it the step fails with nothing
+// written, and the 15-minute pass tries the offer again.
+const STAFF_LOCK_WAIT_MS = 3000;
+// technicians.name and technicians.phone hold this many characters.
+const STAFF_NAME_CHARS = 100;
+const STAFF_PHONE_CHARS = 20;
+
+// The timeline row of the step, or null for a signature a newer one replaced (the newer offer shows the record).
+function staffRecordLabel(staff) {
+  if (staff.reason === 'newer_offer') return null;
+  if (staff.reason === 'earlier_record') return 'Staff record kept from an earlier offer: set its first day and pay by hand';
+  if (!staff.made) return 'Staff record not made: the email is already a staff login';
+  if (staff.pay_step === 'refused') return 'Staff record made, without the pay step';
+  return staff.pay_step === 'made' ? 'Staff record made, with the pay step' : 'Staff record made';
+}
+
+const staffRecordDue = (application, offer) => application.status === 'hired' && offer.status === 'accepted'
+  && !offer.technician_id && !asObject(offer.checklist)[STAFF_RECORD_KEY];
+
+// The signed offers of one application, newest signature first. Read under the application row's lock: a signature
+// takes that lock, so the set cannot change.
+const signedOffersOf = (trx, applicationId) => trx('job_offers').where({ application_id: applicationId, status: 'accepted' })
+  .orderBy([{ column: 'signed_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+  .select('id', 'application_id', 'technician_id', 'start_date', 'signed_at', 'checklist');
+
+// The pay step of the offer, by the payroll rules (payroll-rate-steps.js createStep, in a savepoint of `trx`), in the
+// name of the owner who sent the offer. A step those rules refuse is 'refused'; any other error is the caller's.
+async function addOfferPayStep(trx, technicianId, offer) {
+  const { createStep } = require('./payroll-rate-steps');
+  const { PayrollError } = require('./payroll-w4');
+  try {
+    await createStep(technicianId, {
+      effectiveOn: ymdOf(offer.step_effective_on), hourlyRate: String(offer.step_rate), note: 'From the signed job offer.',
+    }, offer.sent_by, trx);
+    return 'made';
+  } catch (err) {
+    if (!(err instanceof PayrollError)) throw err;
+    logger.warn(`[job-offers] pay step refused by the payroll rules (offer ${offer.id}, status ${err.status})`);
+    return 'refused';
+  }
+}
+
+/**
+ * A signed offer gets the hire's staff record: a PROSPECTIVE staff row (first day, pay rate, job title, W-2) and, when
+ * the offer has one, the pay rate step. A prospective row signs in nowhere, takes no visit and is on no customer
+ * surface (technician-eligibility.js); the Team tab makes it active. Nothing here sends a message to anyone.
+ *
+ * One transaction, after the signature's own commit, so it never undoes a signature. Its first statement limits
+ * every lock wait in it to 3 seconds. Locks, in this order: the application row, the offer row, the payroll lock (only
+ * for an offer with a step, and BEFORE the staff table lock: a pay run holds the payroll lock while it writes a staff
+ * row), then the staff table lock every staff identity writer takes. checklist.staff_record is written in the same
+ * transaction as what the step made, so a second call does nothing, and an error leaves no mark: the 15-minute pass
+ * (makeDueStaffRecords) tries that offer again.
+ *
+ * Only the NEWEST signature of an application is the hire's contract. An application the owner reopened can hold two
+ * signed offers: the older one makes nothing (marked, no bell), whatever order the pass reads them in. And when an
+ * earlier signed offer already made the staff row, the newer one changes nothing on it: a bell asks the owner to set
+ * that row's first day, pay and pay step to the new offer. The portal never rewrites a staff row's pay by itself.
+ *
+ * No row is made when the application's email is already a staff login's (the staff email or the linked Google
+ * address of another staff row, of any status, or an owner login address): a bell asks the owner to add the hire by hand. A pay step the payroll rules refuse leaves the
+ * row made, with a bell. Both bells are written in this transaction.
+ *
+ * Returns 'made' | 'refused' (a bell rang) | null (nothing to do: not signed, the application is no longer Hired, the
+ * step already ran, a newer signature replaced this one, or another call holds the rows).
+ */
+async function makeStaffRecord(offerId) {
+  return db.transaction(async (trx) => {
+    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
+    const found = await trx('job_offers').where({ id: offerId }).first('application_id');
+    const application = found && await trx('job_applications').where({ id: found.application_id }).forUpdate().skipLocked().first();
+    const offer = application && await trx('job_offers').where({ id: offerId }).forUpdate().skipLocked().first();
+    if (!offer || !staffRecordDue(application, offer)) return null;
+
+    const at = new Date().toISOString();
+    const store = (staff, more = {}) => trx('job_offers').where({ id: offer.id }).update({
+      ...more, checklist: JSON.stringify({ ...asObject(offer.checklist), [STAFF_RECORD_KEY]: { at, ...staff } }),
+    });
+    // The application's signed offers, newest first (the application row is locked, so the set cannot change).
+    const signed = await signedOffersOf(trx, application.id);
+    if (signed[0].id !== offer.id) {
+      await store({ made: false, reason: 'newer_offer' });
+      return null;
+    }
+    if (signed.some((row) => row.technician_id)) {
+      await store({ made: false, reason: 'earlier_record' });
+      await raiseBell('staff_terms', offer, null, trx);
+      return 'refused';
+    }
+
+    const { canonicalStaffEmail, findStaffByLoginEmail, lockStaffIdentityWrites } = require('../utils/staff-identity');
+    const hasStep = offer.step_rate != null && Boolean(offer.step_effective_on);
+    if (hasStep) await require('./payroll-lock').lockPayrollMutations(trx);
+    await lockStaffIdentityWrites(trx);
+    const contact = contactOf(application);
+    const email = canonicalStaffEmail(contact.email);
+    const emailTaken = Boolean(email) && (require('./intelligence-bar/ib-access').isFullAccessEmail(email)
+      || Boolean(await findStaffByLoginEmail(trx, email)));
+    if (emailTaken) {
+      await store({ made: false, reason: 'email_in_use' });
+      await raiseBell('staff_record', offer, null, trx);
+      return 'refused';
+    }
+
+    const phone = String(contact.phone || '').trim();
+    const [tech] = await trx('technicians').insert({
+      name: String(contact.name || offer.signed_name || '').trim().slice(0, STAFF_NAME_CHARS),
+      // A phone too long for the column is left for the owner to type; an email that is not a valid address also is.
+      phone: phone && phone.length <= STAFF_PHONE_CHARS ? phone : null,
+      email,
+      ...require('./technician-eligibility').employmentPatch('prospective'),
+      field_dispatchable: false,
+      hire_date: ymdOf(offer.start_date),
+      pay_rate: offer.hourly_rate,
+      job_title: offer.job_title,
+      employment_type: 'w2',
+    }).returning('id');
+    // Every hire starts able to take every service, pending review (as a row added on the Team tab does).
+    await require('./technician-capabilities').seedNewHireCapabilities(trx, tech.id);
+    // Ids only: no name, email, phone or pay in the audit row.
+    await require('./audit-log').recordAuditEvent({
+      trx, critical: true, actor_type: 'system', actor_id: null,
+      action: 'staff.prospective_from_offer', resource_type: 'technician', resource_id: tech.id,
+      metadata: { technician_id: tech.id, job_offer_id: offer.id },
+    });
+    const payStep = hasStep ? await addOfferPayStep(trx, tech.id, offer) : 'none';
+    await store({ made: true, pay_step: payStep }, { technician_id: tech.id });
+    if (payStep === 'refused') await raiseBell('pay_step', offer, null, trx);
+    return 'made';
+  });
+}
+
+/** Right after a signature: one try. An error is logged and left to the 15-minute pass; the applicant never sees it. */
+async function staffRecordAfterSigning(offerId) {
+  try {
+    await makeStaffRecord(offerId);
+  } catch (err) {
+    logger.error(`[job-offers] staff record not made at signing (offer ${offerId}), the next pass tries again: ${errTag(err)}`);
+  }
+}
+
+/**
+ * The catch-up pass (scheduler.js, every 15 minutes): every signed offer of a Hired application whose staff record
+ * step has not run. It covers a signature whose own try failed or never ran (a restart between the two commits).
+ * Returns { made, refused, failed }; the caller fails the job when failed > 0.
+ */
+async function makeDueStaffRecords() {
+  const result = { made: 0, refused: 0, failed: 0 };
+  const due = await db('job_offers as o').join('job_applications as a', 'a.id', 'o.application_id')
+    .where('o.status', 'accepted').where('a.status', 'hired').whereNull('o.technician_id')
+    .whereRaw(`o.checklist -> '${STAFF_RECORD_KEY}' IS NULL`)
+    .orderBy('o.signed_at').pluck('o.id');
+  for (const id of due) {
+    try {
+      const outcome = await makeStaffRecord(id);
+      if (outcome) result[outcome] += 1;
+    } catch (err) {
+      result.failed += 1;
+      logger.error(`[job-offers] staff record not made (offer ${id}): ${errTag(err)}`);
+    }
+  }
+  return result;
+}
+
+// ------------------------------------------------ the first-days checklist
+
+// What the owner does by hand after a signature (owner plan 2026-11-19, "build"): four items before the first day,
+// and Form I-9 within 3 business days of it. A mark is job_offers.checklist[<key>] = { at, by, by_name }, kept on the
+// hire's contract: the newest signed offer of the application. An item is done when ANY signed offer of the
+// application holds its mark, so a second signature of a reopened application keeps what was done; a write moves the
+// marks to the newest signed offer.
+// The bell: ONE row for a hire (key job-offer-checklist:<application id>), kept true to the checklist by the
+// standing-row pattern of admin-alert-episodes.js (as referral-inbound-bell.js syncCard). It is raised while an open
+// item is due, rewritten with no ring while that holds, rung again when an item joins the due items, on the due day
+// of Form I-9 and when an item passes its due day, and closed when nothing is due. A row the owner marked done stays
+// done between those rings. No day is stored.
+const FIRST_DAYS_ITEMS = [
+  { key: 'driving_record', label: 'Driving record copy', inBell: 'the driving record copy' },
+  { key: 'license', label: "Driver's license check", inBell: "the driver's license check" },
+  // Owner 2026-11-24 *fix checklist*: no workers' comp policy for the first technician (workers-comp skip ruling),
+  // so that item is gone; a mark stored under it stays in job_offers.checklist and no longer shows. Form W-4 (none on
+  // file withholds as single) and the signed pay method form are due before the first day. The form records the
+  // hire's choice: direct deposit (F.S. 532.04: it needs the employee's written consent) or a paper check, which
+  // payroll also pays, so the item is done either way.
+  { key: 'w4', label: 'Form W-4', inBell: 'Form W-4' },
+  { key: 'pay_method', label: 'Pay method form (direct deposit or check)', inBell: 'the pay method form' },
+  { key: 'i9', label: 'Form I-9', inBell: 'Form I-9', afterStart: true },
+];
+// The hire's login (owner 2026-11-22 "press"): a person turns it on with the Team tab's Hired button, on a row with a
+// linked Waves Google address, and no job does it. This item is the reminder: first in the list, due before the first
+// day, marked by hand like the others (`note`: what to do, on the card; the alert's why holds 110 characters, so the
+// bell's words are short). The words fit a row with no Hired button too (a hire who is already active). It is in the
+// checklist while staff Google sign-in is live; with it off no press makes that login, and the checklist is the five
+// items above. A stored mark is kept either way.
+const LOGIN_ITEM = {
+  key: 'google_login',
+  label: 'Waves Google login',
+  inBell: 'the Waves Google login on the Team tab',
+  note: 'On the Team tab, link the Waves Google address, and press Hired if the row shows it.',
+};
+const ALL_FIRST_DAYS_ITEMS = [LOGIN_ITEM, ...FIRST_DAYS_ITEMS];
+// The items of the checklist today.
+const firstDaysList = () => (require('./staff-google-signin').googleSigninReady() ? ALL_FIRST_DAYS_ITEMS : FIRST_DAYS_ITEMS);
+const I9_BUSINESS_DAYS = 3;
+const FIRST_DAYS_BELL_FROM_ET = 7 * 60;
+// One bell for a hire, whichever signed offer is the contract.
+const checklistBellKey = (applicationId) => bellKey('checklist', applicationId);
+// Monday to Friday, by the shared rule (datetime-et addETBusinessDays); a holiday counts, so the day is never later
+// than the rule's.
+const addBusinessDays = (ymd, days) => etDateString(addETBusinessDays(parseETDateTime(`${ymd}T12:00:00`), days));
+// The newest signature first, as signedOffersOf reads them.
+const newestSignedFirst = (rows) => rows.filter((row) => row.status === 'accepted')
+  .sort((a, b) => (new Date(b.signed_at) - new Date(a.signed_at)) || (a.id < b.id ? 1 : -1));
+const firstDaysMarks = (signed) => Object.fromEntries(ALL_FIRST_DAYS_ITEMS
+  .map((item) => [item.key, signed.map((row) => asObject(row.checklist)[item.key]).find(Boolean)])
+  .filter(([, mark]) => mark));
+const withoutFirstDaysMarks = (checklist) => Object.fromEntries(Object.entries(asObject(checklist))
+  .filter(([key]) => !ALL_FIRST_DAYS_ITEMS.some((item) => item.key === key)));
+// The first day the checklist counts from: the staff record's (the owner can move it on the Team tab), or the newest
+// signed offer's start date while no signed offer of the application has made a staff record.
+async function firstDayOf(conn, signed) {
+  const withStaff = signed.find((row) => row.technician_id);
+  const staff = withStaff && await conn('technicians').where({ id: withStaff.technician_id }).first('hire_date');
+  return ymdOf((staff && staff.hire_date) || signed[0].start_date);
+}
+
+// Each item with its due day and its mark. `signed`: the hire's signed offers, newest first. The bell names an item
+// from `ringFrom`: the day after the hire's FIRST signature for the items due before the first day (a
+// replacement offer does not start them again), the first day for Form I-9.
+function firstDaysItems(signed, marks, firstDay) {
+  const i9Due = addBusinessDays(firstDay, I9_BUSINESS_DAYS);
+  const dayAfterSignature = addStaffWorkDays(instantToEtDay(signed[signed.length - 1].signed_at), 1);
+  return firstDaysList().map((item) => {
+    const mark = marks[item.key];
+    return {
+      key: item.key,
+      label: item.label,
+      ...(item.note ? { note: item.note } : {}),
+      due: item.afterStart
+        ? `Due ${fmtDay(i9Due, { year: true })}, ${I9_BUSINESS_DAYS} business days after the first day`
+        : `Due before the first day, ${fmtDay(firstDay, { year: true })}`,
+      dueOn: item.afterStart ? i9Due : firstDay,
+      doneAt: mark ? mark.at : null,
+      doneByName: (mark && mark.by_name) || null,
+      ringFrom: item.afterStart ? firstDay : dayAfterSignature,
+      afterStart: Boolean(item.afterStart),
+      inBell: item.inBell,
+    };
+  });
+}
+
+/** The checklist as the offer card shows it. `signed`: the signed offers of a Hired application, newest first. */
+function firstDaysOf(signed, marks, firstDay) {
+  return {
+    offerId: signed[0].id,
+    firstDay,
+    items: firstDaysItems(signed, marks, firstDay).map(({ ringFrom, afterStart, inBell, ...shown }) => shown),
+  };
+}
+
+// The open items the bell asks for on `today`, each with `late` (its due day has passed) and, for Form I-9,
+// `lastDay` (its due day has come).
+const dueFirstDaysItems = (signed, marks, firstDay, today) => firstDaysItems(signed, marks, firstDay)
+  .filter((item) => !item.doneAt && item.ringFrom <= today)
+  .map((item) => ({
+    ...item,
+    lastDay: Boolean(item.afterStart) && today >= item.dueOn,
+    late: item.afterStart ? today > item.dueOn : today >= item.dueOn,
+  }));
+
+// The checklist of an application, for a write: its signed offers (newest first, their rows locked), the marks and
+// the first day. Null when the application has no checklist: it is not Hired, or it has no signed offer. The caller
+// holds the application row's lock.
+async function loadFirstDays(trx, application) {
+  const signed = application.status === 'hired' ? await signedOffersOf(trx, application.id).forUpdate() : [];
+  if (!signed.length) return null;
+  return { signed, marks: firstDaysMarks(signed), firstDay: await firstDayOf(trx, signed) };
+}
+
+// Writes the marks on the newest signed offer and takes them off the older ones, keeping every other key.
+async function storeFirstDaysMarks(trx, signed, marks) {
+  for (const [index, row] of signed.entries()) {
+    const next = index === 0 ? { ...withoutFirstDaysMarks(row.checklist), ...marks } : withoutFirstDaysMarks(row.checklist);
+    if (JSON.stringify(next) !== JSON.stringify(asObject(row.checklist))) {
+      await trx('job_offers').where({ id: row.id }).update({ checklist: JSON.stringify(next) });
+    }
+  }
+}
+
+const closeChecklistBell = (trx, applicationId, now, resolution) => require('./admin-alert-episodes')
+  .closeAdminAlertKeys(trx, [checklistBellKey(applicationId)], 'checklist_done', { now, resolution });
+// The row forgets what it rang for an item that is now done (its ring keys, see checklistRingKeys). An undo is then a
+// new key for the next run, which rings, whether or not a run came between the mark and the undo.
+const forgetChecklistRingKeys = (trx, applicationId, key) => trx('notifications').where({ recipient_type: 'admin' })
+  .whereRaw("metadata->>'dedupeKey' = ?", [checklistBellKey(applicationId)])
+  .whereRaw("jsonb_typeof(metadata->'itemKeys') = 'array'")
+  .update({
+    metadata: trx.raw(
+      "jsonb_set(metadata, '{itemKeys}', COALESCE((SELECT jsonb_agg(k) FROM jsonb_array_elements_text(metadata->'itemKeys') AS k WHERE k NOT IN (?, ?, ?)), '[]'::jsonb))",
+      [key, `${key}:due`, `${key}:late`],
+    ),
+  });
+
+/**
+ * Marks one first-days item done, or not done again (done: false). Owner account only (the route). The write names
+ * the offer the card showed the checklist on: when the application is no longer Hired, or a newer offer was signed
+ * since that read, nothing is written (CHECKLIST_CLOSED). A second mark of a done item keeps the first one. An undo
+ * names the mark the card showed (seenDoneAt): when the item holds another mark (it was undone and marked again in
+ * another tab), nothing is written (CHECKLIST_CHANGED). An undo of an item that is not done changes nothing.
+ *
+ * A mark that leaves no item due that day closes the bell in the same transaction. Any other mark of an open item
+ * takes the item's ring keys off the row. Every other change of the bell (its words after a mark, a ring for an item
+ * due again after an undo) is the next run of ringDueChecklists.
+ * Returns { firstDays } as the write left it.
+ * clock: the time source, for tests. It is read after the locks: a write that waited across Eastern midnight marks
+ * and closes on the day it ran.
+ */
+async function setChecklistItem(applicationId, offerId, key, done, actor, { seenDoneAt = null, clock = () => new Date() } = {}) {
+  if (!firstDaysList().some((item) => item.key === key) || typeof done !== 'boolean') {
+    throw new OfferError(400, 'INVALID_CHECKLIST_ITEM', 'This is not a first-days item.');
+  }
+  return db.transaction(async (trx) => {
+    const application = await loadApplication(trx, applicationId, { lock: true });
+    const held = await loadFirstDays(trx, application);
+    if (!held || held.signed[0].id !== offerId) {
+      throw new OfferError(409, 'CHECKLIST_CLOSED',
+        'This checklist is closed: the application is no longer Hired, or a newer offer was signed. Nothing was changed.');
+    }
+    const now = clock();
+    const marks = { ...held.marks };
+    if (!done && marks[key] && marks[key].at !== seenDoneAt) {
+      throw new OfferError(409, 'CHECKLIST_CHANGED', 'This item was marked done again after this page was loaded. Nothing was changed.');
+    }
+    const newlyDone = done && !marks[key];
+    if (newlyDone) marks[key] = { at: now.toISOString(), by: actor.id, by_name: await actorName(trx, actor) };
+    if (!done) delete marks[key];
+    await storeFirstDaysMarks(trx, held.signed, marks);
+    if (newlyDone && !dueFirstDaysItems(held.signed, marks, held.firstDay, etDateString(now)).length) {
+      const all = firstDaysList().every((item) => marks[item.key]);
+      await closeChecklistBell(trx, application.id, now, all ? 'Every first-days item is marked done' : 'No first-days item is due today');
+    } else if (newlyDone) {
+      await forgetChecklistRingKeys(trx, application.id, key);
+    }
+    return { firstDays: firstDaysOf(held.signed, marks, held.firstDay) };
+  });
+}
+
+// A refresh of the standing row rings only when its ring keys gain one: an item joins the due items, Form I-9
+// comes to its due day, or an item passes its due day. (A comeback after the row closed rings through
+// raiseAdminAlertWithReopen, which ignores this.)
+const ringOnNewChecklistKey = (itemKeys) => (_existing, existingMeta) => {
+  const prior = new Set(Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys.map(String) : []);
+  return itemKeys.some((key) => !prior.has(key));
+};
+const checklistRingKeys = (due) => due
+  .flatMap((item) => [item.key, ...(item.lastDay ? [`${item.key}:due`] : []), ...(item.late ? [`${item.key}:late`] : [])]).sort();
+
+// Raises the hire's row, or rewrites the standing one. `due`: dueFirstDaysItems, not empty.
+async function raiseChecklistBell(trx, application, offer, open, due) {
+  const { composeAdminAlert } = require('./admin-alert-compose');
+  const { fitAction } = require('./admin-alert-names');
+  const next = due.reduce((first, item) => (item.dueOn < first.dueOn ? item : first));
+  const dueWords = `${next.late ? 'was due' : 'due'}${next.afterStart ? '' : ' before'} ${fmtDay(next.dueOn)}`;
+  const compose = (name) => composeAdminAlert({
+    area: 'Leads',
+    action: fitAction('Leads', name, [(n) => `finish ${n}'s first-days checklist`, (n) => `finish ${n}'s checklist`]),
+    why: `${open} of ${firstDaysList().length} items ${open === 1 ? 'is' : 'are'} open; next: ${next.inBell}, ${dueWords}.`,
+    severity: 'needs-you',
+    link: `/admin/recruiting?application=${application.id}`,
+    subject: { type: 'check', id: `job-offer:${offer.id}` },
+    doneWhen: 'checklist_done',
+    who: 'person',
+  });
+  let alert;
+  try {
+    alert = compose(contactOf(application).name || 'An applicant');
+  } catch (err) {
+    // A name the alert copy rules refuse (an emoji, an exclamation mark): the row is written with no name, through
+    // the same helper, so it still closes and comes back.
+    if (err.code !== 'ADMIN_ALERT_RULE') throw err;
+    alert = compose('An applicant');
+  }
+  const itemKeys = checklistRingKeys(due);
+  return require('./admin-alert-episodes').raiseAdminAlertWithReopen('job_application', alert.headline, alert.why, {
+    bell: true,
+    dedupeKey: checklistBellKey(application.id),
+    trx,
+    refreshOnDedupe: true,
+    ringOnRefresh: ringOnNewChecklistKey(itemKeys),
+    // A refresh that rings moves the row to the top of the newest-first bell.
+    bumpOnRefresh: true,
+    // The row follows the hire's contract: a replacement offer with the same words still rewrites it, with no ring.
+    dedupeVersion: offer.id,
+    link: alert.link,
+    metadata: { ...alert.metadata, applicationId: application.id, offerId: offer.id, itemKeys },
+  });
+}
+
+// Makes the bell of one hire true to the checklist. Locks, in this order: the application row, its signed offers,
+// then the row's own lock (raiseAdminAlertWithReopen). The clock is read after the first two.
+// Returns 'rung' (a new row, a comeback, or a refresh that rang) | 'closed' | null.
+async function syncChecklistBell(applicationId, clock) {
+  return db.transaction(async (trx) => {
+    await trx.raw("SELECT set_config('lock_timeout', ?, true)", [String(STAFF_LOCK_WAIT_MS)]);
+    const application = await trx('job_applications').where({ id: applicationId }).forUpdate().skipLocked().first();
+    // No row: a write in progress holds it and the next run takes the hire, or the application was deleted.
+    if (!application && await trx('job_applications').where({ id: applicationId }).first('id')) return null;
+    const held = application ? await loadFirstDays(trx, application) : null;
+    const now = clock();
+    const today = etDateString(now);
+    const close = async (resolution) => (await closeChecklistBell(trx, applicationId, now, resolution) ? 'closed' : null);
+    if (!application) return close('The application was deleted');
+    if (!held) return close('The application is no longer Hired');
+    const due = dueFirstDaysItems(held.signed, held.marks, held.firstDay, today);
+    const open = firstDaysList().filter((item) => !held.marks[item.key]).length;
+    if (!due.length) return close(open ? 'No first-days item is due today' : 'Every first-days item is marked done');
+    // Nothing rings at night: the due items change at midnight, and the row follows from 7:00 AM Eastern. The time is
+    // read here, under the locks, so a run that started before midnight does not ring a hire just after it.
+    if (minuteOfDayEt(now) < FIRST_DAYS_BELL_FROM_ET) return null;
+    const raised = await raiseChecklistBell(trx, application, held.signed[0], open, due);
+    if (!raised) throw new Error('the checklist bell was not written');
+    return raised.rang ? 'rung' : null;
+  });
+}
+
+/**
+ * The bell of the first-days checklist (scheduler.js, the 15-minute job offer tick; GATE_JOB_OFFERS). Each run makes
+ * the ONE row of a hire true to the checklist:
+ *  - From 7:00 AM Eastern, while an open item is due: the row says how many items are open and which is next. It
+ *    rings when it is raised (the morning after the signature), when an item joins the due items (Form I-9 on the
+ *    first day), on the due day of Form I-9 and when an item passes its due day. Every other change rewrites it with
+ *    no ring. A row the owner marked done stays done between those rings.
+ *  - In every run, also at night: the row is closed when it has nothing left to ask for (the application is no longer
+ *    Hired or was deleted, every item is done, or no item is due that day). An item that is due again later rings
+ *    again.
+ * It sends no one anything. Returns { rung, closed, failed }; the caller fails the job when failed > 0.
+ * clock: the time source, for tests. The scheduler passes none.
+ */
+async function ringDueChecklists(clock = () => new Date()) {
+  const result = { rung: 0, closed: 0, failed: 0 };
+  const marked = (key) => `EXISTS (SELECT 1 FROM job_offers m WHERE m.application_id = a.id AND m.status = 'accepted' AND m.checklist -> '${key}' IS NOT NULL)`;
+  // A Hired application with a signed offer and an item no signed offer of it holds a mark for.
+  const open = await db('job_applications as a').where('a.status', 'hired')
+    .whereExists(db('job_offers as o').whereRaw('o.application_id = a.id').where('o.status', 'accepted').select(db.raw('1')))
+    .whereRaw(`NOT (${firstDaysList().map((item) => marked(item.key)).join(' AND ')})`)
+    .orderBy('a.created_at').pluck('a.id');
+  // An application whose row is not closed yet (open, or marked done by the owner): it may have to close.
+  const prefix = checklistBellKey('');
+  const standing = (await require('./admin-alert-episodes').openAdminAlertKeys(db, prefix)).map((bellKeyOf) => bellKeyOf.slice(prefix.length));
+  for (const id of new Set([...open, ...standing])) {
+    try {
+      const outcome = await syncChecklistBell(id, clock);
+      if (outcome) result[outcome] += 1;
+    } catch (err) {
+      result.failed += 1;
+      logger.error(`[job-offers] checklist bell failed (application ${id}): ${errTag(err)}`);
+    }
+  }
+  return result;
+}
 
 const BELLS = {
   signed: {
@@ -1278,34 +2016,69 @@ const BELLS = {
     why: (extra) => `Asked to start ${extra}; open the application to make an updated offer or withdraw.`,
     doneWhen: 'offer_answered',
   },
+  expired: {
+    actions: [(n) => `${n}'s job offer closed unsigned`, (n) => `${n}'s offer closed unsigned`],
+    why: (extra) => `It closed ${extra} with no answer; open the application to make a new offer or close it.`,
+    doneWhen: 'offer_reviewed',
+  },
+  staff_record: {
+    actions: [(n) => `${n}'s staff record was not made`],
+    why: () => 'The email on the application is already a staff login, so add this hire on the Team tab by hand.',
+    doneWhen: 'offer_reviewed',
+  },
+  staff_terms: {
+    actions: [(n) => `${n}'s staff record needs the new terms`, (n) => `${n}'s staff record needs new terms`],
+    why: () => 'An earlier signed offer made the staff record; set its first day, pay and pay step to the new offer by hand.',
+    doneWhen: 'offer_reviewed',
+  },
+  pay_step: {
+    actions: [(n) => `${n}'s pay step was not made`],
+    why: () => 'The staff record is made without the pay step of the offer; add the step on the staff record.',
+    doneWhen: 'offer_reviewed',
+  },
 };
 
-/**
- * One bell per offer event, after the commit. Names the applicant (the bell is admin-only and rings whatever the
- * category override says: an applicant signing is a person acting). Never throws.
- */
+const bellKey = (kind, offerId) => `job-offer-${kind}:${offerId}`;
+
+// The "closed unsigned" bell asks the owner to make a new offer or to close the application. Each of the two clears
+// it, in the transaction that does it: a Send, and a stage move that takes the application out of Offer.
+async function clearExpiredBells(trx, applicationId, resolution) {
+  const ids = await trx('job_offers').where({ application_id: applicationId, status: 'expired' }).pluck('id');
+  if (!ids.length) return;
+  await require('./admin-alert-episodes').closeAdminAlertKeys(trx, ids.map((id) => bellKey('expired', id)), 'offer_reviewed', { resolution });
+}
+
+// Raises the bell for one offer event. It names the applicant (the bell is admin-only and rings whatever the category
+// override says: an applicant acting, or an offer closing, is the owner's to see). With `trx` the bell row is written
+// in that transaction and an error propagates to it.
+async function raiseBell(kind, offer, extra, trx = null) {
+  const { raiseAdminAlert } = require('./admin-alert-compose');
+  const { fitAction } = require('./admin-alert-names');
+  const application = await (trx || db)('job_applications').where({ id: offer.application_id }).first('contact_snapshot');
+  const name = contactOf(application).name || 'An applicant';
+  const spec = BELLS[kind];
+  const templates = spec.actions.map((make) => (who) => make(who, extra));
+  return raiseAdminAlert('job_application', {
+    area: 'Leads',
+    action: fitAction('Leads', name, templates),
+    why: spec.why(extra),
+    severity: 'needs-you',
+    link: `/admin/recruiting?application=${offer.application_id}`,
+    subject: { type: 'check', id: `job-offer:${offer.id}` },
+    doneWhen: spec.doneWhen,
+    who: 'person',
+  }, {
+    bell: true,
+    dedupeKey: bellKey(kind, offer.id),
+    metadata: { applicationId: offer.application_id, offerId: offer.id },
+    ...(trx ? { trx } : {}),
+  });
+}
+
+/** One bell per applicant answer, after the commit: it never undoes the answer and never throws. */
 async function bell(kind, offer, extra) {
   try {
-    const { raiseAdminAlert } = require('./admin-alert-compose');
-    const { fitAction } = require('./admin-alert-names');
-    const application = await db('job_applications').where({ id: offer.application_id }).first('contact_snapshot');
-    const name = contactOf(application).name || 'An applicant';
-    const spec = BELLS[kind];
-    const templates = spec.actions.map((make) => (who) => make(who, extra));
-    await raiseAdminAlert('job_application', {
-      area: 'Leads',
-      action: fitAction('Leads', name, templates),
-      why: spec.why(extra),
-      severity: 'needs-you',
-      link: `/admin/recruiting?application=${offer.application_id}`,
-      subject: { type: 'check', id: `job-offer:${offer.id}` },
-      doneWhen: spec.doneWhen,
-      who: 'person',
-    }, {
-      bell: true,
-      dedupeKey: `job-offer-${kind}:${offer.id}`,
-      metadata: { applicationId: offer.application_id, offerId: offer.id },
-    });
+    await raiseBell(kind, offer, extra);
   } catch (err) {
     logger.error(`[job-offers] ${kind} bell not raised (offer ${offer.id}): ${errTag(err)}`);
   }
@@ -1323,7 +2096,12 @@ module.exports = {
   snapshotHashOf, signatureHashOf, renderLetterMarkdown, readableTerms, payDayLineFrom,
   publicStateOf, closedMessage, presentOffer, timelineOf, buildSnapshot,
   // admin
-  loadIssuedTerms, draftHashOf, heldOffersOf, stageMoveClosesOffers, liveOffersOf, offerStampOf, liveOfferStake, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
+  loadIssuedTerms, draftHashOf, heldOffersOf, stageMoveClosesOffers, lockLiveOffers, offerStampOf, liveOfferStake, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
+  // scheduled
+  closeExpiredOffers, sendDueReminders, makeDueStaffRecords, ringDueChecklists,
+  // after signing
+  setChecklistItem,
+  makeStaffRecord,
 };

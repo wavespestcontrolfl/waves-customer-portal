@@ -112,4 +112,15 @@ router.post('/exposure', (req, res, next) => {
   return res.status(204).end();
 });
 
+// Mounted in server/index.js on /api/public/experiments BEFORE the global /api/ limiter: while GATE_GROWTHBOOK is off, POST
+// /exposure answers the same 404 as the route below and no limiter counts it. Express routes any case, repeated slashes
+// and a trailing slash to the route, so the match takes the same spellings. GET /status is not touched.
+function exposureDarkGuard(req, res, next) {
+  if (req.method === 'POST' && /^\/+exposure\/*$/i.test(req.path || '') && !featureGates.isEnabled('growthbookExperiments')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  return next();
+}
+
 module.exports = router;
+module.exports.exposureDarkGuard = exposureDarkGuard;

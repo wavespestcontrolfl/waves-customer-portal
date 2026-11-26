@@ -530,6 +530,24 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/email',
     }),
   },
+  // The phone banner for a website quote (bell-banners.js kind new_lead_quote, owner 2026-11-19 "do phase 1 first").
+  // The bell row is the plain 'new_lead' category row routes/public-quote.js already writes ("Calculator quote: ...",
+  // "Manual quote needed: ...", "Estimate requested: ..."), which carries no triggerKey of its own (the writer names
+  // this kind with notifyAdmin's bannerKind), so its rule is the retention expiry. `build` takes the written row's own
+  // words as alertTitle/alertBody/alertLink. Admin-only like the lead bell.
+  new_lead_quote: {
+    label: 'New website quote banner',
+    category: 'new_lead',
+    priority: 'high',
+    group: 'Leads & Sales',
+    rule: { area: 'Leads', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'New website quote',
+      body: p.alertBody || 'Open the lead to see the quote and call.',
+      link: p.alertLink || '/admin/leads',
+    }),
+  },
   // The phone banner for an upset caller on a live call (GATE_LIVE_CALL_UPSET_ALERT, bell-banners.js kind live_call_upset,
   // owner 2026-11-16). live-call-upset-alert.js writes the bell row (category live_call_upset, one per call) and names
   // this kind with notifyAdmin's bannerKind; `build` takes the row's own words. The call ends within the hour, so the
@@ -1000,7 +1018,8 @@ const TRIGGER_REGISTRY = {
     category: 'payment',
     priority: 'high',
     group: 'Payments',
-    rule: { area: 'Billing', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    // Money stays until settled: payment-failed-alert-close.js closes it when payload.invoiceId is paid (#8503).
+    rule: { area: 'Billing', severity: 'needs-you', who: 'person', doneWhen: 'invoice_paid', closedBy: 'server/services/payment-failed-alert-close.js' },
     build: (p) => {
       const invoiceLabel = p.invoiceNumber ? `Invoice ${p.invoiceNumber}` : 'Invoice payment';
       const method = p.methodLabel || 'Payment method';
@@ -1086,7 +1105,7 @@ const TRIGGER_REGISTRY = {
   // estimate, rung once per Eastern day) and closes it once the estimate is accepted, declined or archived; this
   // entry is the banner bell-banners.js sends for a write that rang, so `build` takes the row's own words.
   estimate_stuck: {
-    label: 'Customer stuck booking an estimate',
+    label: 'Customer stuck or still deciding on an estimate',
     category: 'estimate_stuck',
     priority: 'high',
     group: 'Leads & Sales',
@@ -1527,14 +1546,11 @@ function pushExpiryFor(triggerKey, payload = {}) {
   return { expiresAt: parseETDateTime(`${nextDay}T00:00`).toISOString() };
 }
 
-// GATE_ALERT_REGISTRY_LABELS (owner 2026-11-05, admin-alert plan S1): the labels a registry type's rule already declares,
+// Registry labels (owner 2026-11-05, admin-alert plan S1): the labels a registry type's rule already declares,
 // in the shape a composed alert stores (area, severity, who, doneWhen, contact or promise), each kept only when the
-// composer would accept it. Never a subject: a rule names no record. {} while the gate is off, or when the reader is
-// missing (a test that mocks feature-gates) or anything throws, so the row is written exactly as before.
+// composer would accept it. Never a subject: a rule names no record. {} when anything throws.
 function registryLabels(trigger) {
   try {
-    const gates = require('../config/feature-gates');
-    if (!(typeof gates.alertRegistryLabelsLive === 'function' && gates.alertRegistryLabelsLive())) return {};
     const { area, severity, who, doneWhen, contact, promise } = trigger?.rule || {};
     return require('./admin-alert-compose').validStructuredFields({ area, severity, who, doneWhen, contact, promise });
   } catch { return {}; }
@@ -1708,7 +1724,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
     // The one bell write, shared by a ring (the loop below) and a rescued Claude fault (writeRescuedFault): the
     // registry's built row under the given metadata, with the caller's dedupe and refresh options.
-    // GATE_ALERT_REGISTRY_LABELS: the labels the type's rule declares sit under the built alert's own fields (which win).
+    // The labels the type's rule declares sit under the built alert's own fields (which win).
     const bellMetadata = { ...registryLabels(trigger), ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload };
     const writeBell = (metadata) => NotificationService.notifyAdmin(
       trigger.category,

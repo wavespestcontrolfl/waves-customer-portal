@@ -10,9 +10,14 @@ const serviceLineMode = () => (typeof featureGates.serviceLineMapMode === 'funct
 // The Team tab card and its endpoints work in 'shadow' and 'live' alike.
 const serviceLineMapOn = () => ['shadow', 'live'].includes(serviceLineMode());
 const territoryReadoutOn = () => (typeof featureGates.territoryReadoutLive === 'function' ? featureGates.territoryReadoutLive() : false);
+// GATE_TECH_SHIFT_HOURS: the Team tab "Shift hours" row; looked up at call time like the readers above.
+const techShiftHoursOn = () => (typeof featureGates.techShiftHoursLive === 'function' ? featureGates.techShiftHoursLive() : false);
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
+const {
+  isEmploymentStatus, employmentPatch, isAssignable, isOffDay, loadTechShifts, shiftWarning, storedShift,
+} = require('../services/technician-eligibility');
+const { rowBlockMinutes } = require('../services/scheduling/window-rules');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const {
   categoriesForServices,
@@ -31,13 +36,17 @@ const {
 const {
   MAX_STAFF_EMAIL_LENGTH,
   canonicalStaffEmail,
+  findStaffByCanonicalEmail,
+  // One mailbox, one staff row: another row's staff email or linked Google address.
+  findStaffByLoginEmail: findTechnicianByMailbox,
+  lockStaffIdentityWrites: lockTechnicianMutations,
 } = require('../utils/staff-identity');
 const { assertMayChangeFullAccessEmail, ibFullAccess, isFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 const googleSignin = require('../services/staff-google-signin');
 const analyticsMath = require('../services/time-tracking-analytics');
 const { validDateOnly } = require('../utils/date-only');
 const { recordAuditEvent } = require('../services/audit-log');
-const { mintResetToken } = require('../services/staff-reset-token');
+const { mintResetToken, redeemClosed } = require('../services/staff-reset-token');
 const { HIRE_LINK_TTL_MS, sendStaffWelcomeEmail } = require('../services/staff-welcome-email');
 
 const STAFF_ENTRY_WORK_DATE_SQL = staffWorkDateSql('time_entries.clock_in');
@@ -104,9 +113,11 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'can_create_estimates',
   // Hired button state (GATE_HIRED_PACKET); present only while the gate is on.
   // Derived flags only: the token, its hash and the password hash never ship.
-  'hire_action', 'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at',
+  'hire_action', 'hire_password_unset', 'hire_link_pending', 'hire_link_expires_at', 'hire_login', 'hire_google_only',
   // Team tab "Work days" (GATE_TECH_WORK_DAYS); dropped from the response while the gate is off.
   'work_days',
+  // Team tab "Shift hours" (GATE_TECH_SHIFT_HOURS); dropped from the response while the gate is off.
+  'shift_start', 'shift_end',
 ];
 
 function pickTechResponseFields(tech, fields) {
@@ -140,6 +151,11 @@ function sanitizeTechForAdmin(tech) {
     if (out && out[f] != null) out[f] = Number(out[f]);
   }
   if (out && !techWorkDaysLive()) delete out.work_days;
+  // pg returns a time column as 'HH:MM:SS'; the API hands back 'HH:MM', the editor's format.
+  for (const f of ['shift_start', 'shift_end']) {
+    if (out && !techShiftHoursOn()) delete out[f];
+    else if (out && out[f] != null) out[f] = String(out[f]).slice(0, 5);
+  }
   // Team tab Google sign-in (GATE_STAFF_GOOGLE_SIGNIN): the linked address and
   // whether its first sign-in pinned a Google account; never Google's id.
   if (out && googleSignin.staffGoogleSigninLive()) {
@@ -168,6 +184,23 @@ function normalizeWorkDaysInput(value) {
     days.add(raw);
   }
   return { patch: { work_days: days.size === 7 ? null : [...days].sort((a, b) => a - b) } };
+}
+
+const SHIFT_HOURS_ERROR = 'shiftHours must be null (no set hours) or { start, end } as HH:MM times, with the end after the start';
+const SHIFT_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+// `shiftHours` on POST/PUT /technicians (GATE_TECH_SHIFT_HOURS). undefined, or the
+// gate off = leave alone (the columns are inert and the editor hidden). null = no
+// set hours (both columns NULL). Otherwise { start, end }: 'HH:MM' Eastern
+// wall-clock times on one day, the end after the start (the column CHECK too).
+function normalizeShiftHoursInput(value) {
+  if (value === undefined || !techShiftHoursOn()) return { patch: {} };
+  if (value === null) return { patch: { shift_start: null, shift_end: null } };
+  const { start, end } = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  if (typeof start !== 'string' || typeof end !== 'string' || !SHIFT_TIME.test(start) || !SHIFT_TIME.test(end) || end <= start) {
+    return { error: SHIFT_HOURS_ERROR };
+  }
+  return { patch: { shift_start: start, shift_end: end } };
 }
 
 const START_ADDRESS_MAX = 300;
@@ -789,21 +822,77 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 // TECHNICIAN MANAGEMENT — CRUD
 // ═══════════════════════════════════════════════════════════════════
 
+// The company Google address a Hired press would turn on as this row's only
+// sign-in, or null. With one, Hired makes a Google-only account: no password,
+// no link, no email. It needs:
+// - staff Google sign-in ready (gate and Google client) and a linked address
+//   the Team tab's link writer takes today;
+// - a row that never held a sign-in: no password, no sign-in on record
+//   (last_login_at; changing a Google link clears the pinned id), no Google
+//   account id pinned, no two-step enrollment. So this press only adds a
+//   sign-in. It has nothing of an earlier account to carry over or to remove;
+//   a person who had an account before is turned on again from the edit form;
+// - a row that is not an office (admin) login: two-step sign-in setup asks
+//   for the account password, and GATE_ADMIN_MFA_ENFORCE holds an admin with
+//   no authenticator on that setup page, so a Google-only admin could never
+//   get past it. The table refuses the mark on an admin row as well.
+function hireGoogleAddress(tech) {
+  if (!tech.google_email || !googleSignin.googleSigninReady()) return null;
+  // A technician row only: an admin needs a password for two-step setup, and
+  // a row with no role cannot sign in at all (the column allows NULL).
+  if (tech.role !== 'technician') return null;
+  // (password_hash: any value, as the table CHECK reads it; an empty string is not NULL.)
+  if (tech.password_hash != null || tech.last_login_at || tech.google_sub || tech.mfa_enabled_at) return null;
+  return googleSignin.normalizeLinkedGoogleEmail(tech.google_email).value || null;
+}
+
+// Whether a Google-only account can sign in today, for the row's label: the
+// Team tab hides the linked address with the gate off, so the page cannot
+// tell these apart itself. Each state names its own way out.
+function googleOnlyState(tech) {
+  if (!googleSignin.googleSigninReady()) return 'off';
+  if (!tech.google_email) return 'unlinked';
+  return googleSignin.normalizeLinkedGoogleEmail(tech.google_email).value ? 'ready' : 'bad_address';
+}
+
 // GATE_HIRED_PACKET row state, derived from columns that never leave the
 // server. "Password unset" = an active account whose hire has not set a
 // password yet (the reset and change handlers stamp password_changed_at and
 // write password_hash); "link pending" = a set-password token is still valid.
+// A Google-only account (google_only_login_at, set by the Hired press) has no
+// password by design: it is never "password unset" and gets no resend.
 function hireLinkState(tech, now = new Date()) {
   const status = tech.employment_status || (tech.active ? 'active' : 'inactive');
-  const passwordUnset = status === 'active' && tech.active === true
+  const googleOnly = Boolean(tech.google_only_login_at);
+  const hireGoogle = status === 'prospective' ? hireGoogleAddress(tech) : null;
+  // A prospective row that was made Google-only, still has a Google address
+  // and is past the Google press (the person signed in before, or the address
+  // cannot sign in today): no press applies (the emailed-link press answers
+  // HIRE_GOOGLE_ONLY_ROW), so the row offers none and says what to do.
+  const returning = status === 'prospective' && googleOnly && Boolean(tech.google_email) && !hireGoogle;
+  const passwordUnset = status === 'active' && tech.active === true && !googleOnly
     && !tech.password_hash && !tech.password_changed_at;
   const expires = tech.password_reset_expires_at ? new Date(tech.password_reset_expires_at) : null;
+  // A reset request's link on a row with a linked Google address sets no
+  // password (staff-reset-token redeemClosed), so it is not "pending".
   const pending = passwordUnset && Boolean(tech.password_reset_token_hash)
-    && expires !== null && expires > now;
+    && expires !== null && expires > now && !redeemClosed(tech);
   return {
     // The one action the Team tab offers on this row: hire a prospective
     // placeholder, or resend the link to a hire who has no password yet.
-    hire_action: status === 'prospective' ? 'hire' : (passwordUnset ? 'resend' : null),
+    hire_action: status === 'prospective' ? (returning ? null : 'hire') : (passwordUnset ? 'resend' : null),
+    // Which sign-in the Hired press turns on for this row. For 'google' the
+    // Hired form sends back the address it showed, and the press is refused
+    // when the row no longer holds that address.
+    hire_login: status === 'prospective' && !returning ? (hireGoogle ? 'google' : 'password') : null,
+    // null, or how a Google-only account stands today: 'ready', 'unlinked'
+    // (no address), 'bad_address' (outside the sign-in domains) or 'off'
+    // (staff Google sign-in off or not set up). 'returning' = the prospective
+    // row above while its address can sign in; otherwise that row says why it
+    // cannot ('off': the link cannot be cleared until the gate is on again).
+    hire_google_only: returning
+      ? (googleOnlyState(tech) === 'ready' ? 'returning' : googleOnlyState(tech))
+      : (googleOnly && status === 'active' && tech.active === true ? googleOnlyState(tech) : null),
     hire_password_unset: passwordUnset,
     hire_link_pending: pending,
     hire_link_expires_at: pending ? expires.toISOString() : null,
@@ -831,10 +920,9 @@ async function listTechnicians(req, res, next) {
     // needs review / off / not set) — the editor itself lives at
     // GET /technicians/:id/capabilities.
     const summaries = await summarizeCapabilities(db, techs.map((t) => t.id));
-    // GATE_HIRED_PACKET: admins also get each row's hire action and link
-    // state (hire_action turns the Hired / Resend link buttons on). Gate off
-    // (or a technician caller) = the response is exactly what it was.
-    const hiredPacket = callerIsAdmin && featureGates.hiredPacketLive();
+    // Admins also get each row's hire action and link state (hire_action
+    // turns the Hired / Resend link buttons on): see hireStateFor. A
+    // technician caller gets none.
     const now = new Date();
     // A technician sees active coworkers only: no prospective hires, no staff
     // who left. Its own row always stays.
@@ -846,13 +934,14 @@ async function listTechnicians(req, res, next) {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
         capability_summary: summaries.get(t.id),
-        ...(hiredPacket ? hireLinkState(t, now) : {}),
+        ...(callerIsAdmin ? hireStateFor(t, now) : {}),
       };
       return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row, req.technicianId);
     }));
     res.json({
       technicians: enriched,
       ...(techWorkDaysLive() ? { workDaysEnabled: true } : {}),
+      ...(techShiftHoursOn() ? { shiftHoursEnabled: true } : {}),
       ...(serviceLineMapOn() ? { serviceLinesEnabled: true } : {}),
       ...(territoryReadoutOn() ? { territoryReadoutEnabled: true } : {}),
       ...(callerIsAdmin && googleSignin.staffGoogleSigninLive() ? { googleSigninEnabled: true } : {}),
@@ -897,6 +986,13 @@ function payRateError(body) {
   return body[key] != null && body[key] !== '' && !valid(body[key]) ? message : null;
 }
 
+// A hire date must be a calendar date, YYYY-MM-DD. PostgreSQL's date type also takes a year past 9999 (one key too many in
+// the date box) and 'infinity', and no pay code can work an anniversary out from those. Absent, null or '' keeps or clears
+// the column, as for the pay rate.
+function hireDateError(body) {
+  return body.hireDate != null && body.hireDate !== '' && !validDateOnly(body.hireDate) ? 'Hire date must be a valid YYYY-MM-DD date' : null;
+}
+
 // One audit row when a save changes the pay rate (the old and new rate only; no other pay data).
 async function auditPayRateChange(trx, req, target, updates) {
   if (!('pay_rate' in updates)) return;
@@ -925,21 +1021,6 @@ function normalizeTechnicianEmail(value) {
   return { value: email };
 }
 
-async function findTechnicianByCanonicalEmail(connection, email, excludeId) {
-  if (!email) return null;
-  let query = connection('technicians')
-    .whereNotNull('email')
-    .whereRaw('LOWER(BTRIM(email)) = ?', [email]);
-  if (excludeId) query = query.whereNot('id', excludeId);
-  return query.first('id');
-}
-
-// The staff table is small and identity mutations are rare. Serialize them to
-// make canonical-email uniqueness and last-admin checks race-safe.
-async function lockTechnicianMutations(trx) {
-  await trx.raw('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE');
-}
-
 function disconnectRevokedStaffSessions(technicianId, reason) {
   try {
     const { disconnectStaffSockets } = require('../sockets');
@@ -958,7 +1039,8 @@ function listFutureAssignedVisits(conn, technicianId) {
     .where('s.scheduled_date', '>=', etDateString(new Date()))
     .whereNotIn('s.status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
     .orderBy('s.scheduled_date')
-    .select('s.id', 's.scheduled_date', 's.service_type', 's.service_id', 's.service_key_snapshot', 'c.first_name', 'c.last_name');
+    .select('s.id', 's.scheduled_date', 's.service_type', 's.service_id', 's.service_key_snapshot', 'c.first_name', 'c.last_name',
+      's.window_start', 's.window_end', 's.estimated_duration_minutes');
 }
 
 function formatFutureAssignedVisits(rows) {
@@ -968,6 +1050,34 @@ function formatFutureAssignedVisits(rows) {
     serviceType: v.service_type,
     customerName: [v.first_name, v.last_name].filter(Boolean).join(' ') || null,
   }));
+}
+
+// What a save of the shift hours tells the office (GATE_TECH_SHIFT_HOURS, D4): the technician's visits from
+// today (ET) forward that the hours this save set do not hold. They are the visits an office save gets the
+// shift line for (shiftWarning: on a day the technician works, the visit's own minutes, today on the hours
+// of the clock-in). Listed for the office to move or reassign; never modified, as on offboarding.
+// An estimate's slot hold (no customer, a reservation stamp) is not a visit: nobody has booked it, and it is
+// left out (the filter of occupancy.js and tech-open-visit-nudge.js).
+// {} and no read with the gate off, when the save left the hours as they were, or when the technician now
+// has no set hours.
+// The reads run in a savepoint of the save's transaction (as dayWarningsFor): a read that fails is logged
+// and gives no list, and the save goes on to its commit. The list never fails a save.
+async function outsideNewShiftReply(conn, before, tech) {
+  const [was, now] = [storedShift(before), storedShift(tech)];
+  if (!techShiftHoursOn() || !now || (was && was.startMin === now.startMin && was.endMin === now.endMin)) return {};
+  try {
+    return await conn.transaction(async (sp) => {
+      const shiftOf = await loadTechShifts(sp, { technicianIds: [tech.id] });
+      const visits = await listFutureAssignedVisits(sp, tech.id)
+        .where((q) => q.whereNotNull('s.customer_id').orWhereNull('s.reservation_expires_at'));
+      const outside = visits.filter((visit) => !isOffDay(tech, visit.scheduled_date)
+        && shiftWarning(tech, shiftOf(tech.id, visit.scheduled_date), rowBlockMinutes(visit)));
+      return { outsideShiftVisits: formatFutureAssignedVisits(outside) };
+    });
+  } catch (err) {
+    logger.warn(`[admin-timetracking] the visits outside the new shift hours were not read (${err.message}): the hours are saved, with no list`);
+    return {};
+  }
 }
 
 // A staff row with any operational or pay history is a person, not a slot.
@@ -1084,6 +1194,10 @@ async function createTechnician(req, res, next) {
     if (techLine.error) return res.status(400).json({ error: techLine.error });
     const workDays = normalizeWorkDaysInput(body.workDays);
     if (workDays.error) return res.status(400).json({ error: workDays.error });
+    const shiftHours = normalizeShiftHoursInput(body.shiftHours);
+    if (shiftHours.error) return res.status(400).json({ error: shiftHours.error });
+    const badHireDate = hireDateError(body);
+    if (badHireDate) return res.status(400).json({ error: badHireDate });
 
     const insertRow = {
       name: name.trim(),
@@ -1106,11 +1220,12 @@ async function createTechnician(req, res, next) {
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
     Object.assign(insertRow, techLine.patch);
     Object.assign(insertRow, workDays.patch);
+    Object.assign(insertRow, shiftHours.patch);
     applyPayrollProfileFields(insertRow, body);
 
     const outcome = await db.transaction(async (trx) => {
       await lockTechnicianMutations(trx);
-      if (insertRow.email && await findTechnicianByCanonicalEmail(trx, insertRow.email)) {
+      if (insertRow.email && await findTechnicianByMailbox(trx, insertRow.email)) {
         return { conflict: true };
       }
       if (await techLineHeldByAnother(trx, insertRow.twilio_number)) return { lineTaken: true };
@@ -1177,8 +1292,12 @@ async function updateTechnician(req, res, next) {
     if (startPoint.error) return res.status(400).json({ error: startPoint.error });
     const workDays = normalizeWorkDaysInput(body.workDays);
     if (workDays.error) return res.status(400).json({ error: workDays.error });
+    const shiftHours = normalizeShiftHoursInput(body.shiftHours);
+    if (shiftHours.error) return res.status(400).json({ error: shiftHours.error });
     const badPayRate = payRateError(body);
     if (badPayRate) return res.status(400).json({ error: badPayRate });
+    const badHireDate = hireDateError(body);
+    if (badHireDate) return res.status(400).json({ error: badHireDate });
 
     const outcome = await db.transaction(async (trx) => {
       // Every Staff identity writer takes the table lock before a row lock.
@@ -1215,7 +1334,7 @@ async function updateTechnician(req, res, next) {
           .first('id');
         if (activeTimer) return { activeTimer: true };
       }
-      if (normalizedEmail.value && await findTechnicianByCanonicalEmail(
+      if (normalizedEmail.value && await findTechnicianByMailbox(
         trx,
         normalizedEmail.value,
         target.id,
@@ -1234,6 +1353,7 @@ async function updateTechnician(req, res, next) {
       Object.assign(updates, techLine.patch);
       Object.assign(updates, startPoint.patch);
       Object.assign(updates, workDays.patch);
+      Object.assign(updates, shiftHours.patch);
 
       // Any transition that leaves `active` (→ inactive OR → prospective)
       // revokes sessions; entering active from prospective also rotates so a
@@ -1278,6 +1398,7 @@ async function updateTechnician(req, res, next) {
       return {
         tech,
         futureAssignedVisits,
+        shiftReply: await outsideNewShiftReply(trx, target, tech),
         revokeAccess,
         revocationReason: active === false
           ? 'account_deactivated'
@@ -1318,6 +1439,7 @@ async function updateTechnician(req, res, next) {
       success: true,
       technician: sanitizeTechForAdmin(tech),
       futureAssignedVisits: formatFutureAssignedVisits(outcome.futureAssignedVisits),
+      ...outcome.shiftReply,
     });
   } catch (err) {
     const dup = uniqueViolationBody(err);
@@ -1353,6 +1475,8 @@ async function putTechnicianGoogleSignin(req, res, next) {
         .first('id')) {
         return { conflict: true };
       }
+      // Nor another staff member's email: that mailbox gets their password reset mail.
+      if (parsed.value && await findStaffByCanonicalEmail(trx, parsed.value, target.id)) return { emailConflict: true };
       const revoke = Boolean(current);
       await trx('technicians').where({ id: target.id }).update({
         google_email: parsed.value,
@@ -1367,6 +1491,7 @@ async function putTechnicianGoogleSignin(req, res, next) {
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
     if (outcome.ownerOnly) return res.status(403).json({ error: 'Only the owner account can change this Google sign-in.' });
     if (outcome.conflict) return res.status(409).json({ error: 'That Google account is linked to another staff member' });
+    if (outcome.emailConflict) return res.status(409).json({ error: "That address is another staff member's email" });
     if (outcome.revoke) disconnectRevokedStaffSessions(outcome.tech.id, 'google_signin_changed');
     logger.info(`[team] Google sign-in ${outcome.tech.google_email ? 'linked' : 'cleared'} for technician id=${outcome.tech.id} (sessions revoked: ${Boolean(outcome.revoke)})`);
     return res.json({ success: true, technician: sanitizeTechForAdmin(outcome.tech) });
@@ -1409,13 +1534,30 @@ const HIRE_OPTIONAL_FIELD_CHECKS = [
   ['employmentType', (v) => HIRE_EMPLOYMENT_TYPES.includes(v), "Employment type must be 'w2' or '1099'"],
 ];
 
-function parseHireBody(body) {
+const HIRE_LOGIN_CHANGED = {
+  error: 'The sign-in for this person changed. Reload the page, then press Hired again.',
+  code: 'HIRE_LOGIN_CHANGED',
+};
+const HIRE_GOOGLE_ADDRESS_IN_USE = {
+  error: "The linked Google address is another staff member's email. Change the Google sign-in first.",
+  code: 'HIRE_GOOGLE_ADDRESS_IN_USE',
+};
+const HIRE_GOOGLE_ONLY_ROW = {
+  error: 'This person signs in with Google. Clear the Google sign-in on the row first, or turn the account on again from the edit form.',
+  code: 'HIRE_GOOGLE_ONLY_ROW',
+};
+const GOOGLE_ONLY_NO_LINK = { error: 'This person signs in with Google. No password link is sent.' };
+
+function parseHireBody(body, variant) {
   if (typeof body.name !== 'string' || !body.name.trim()) return { error: 'Name is required' };
   const normalizedEmail = normalizeTechnicianEmail(body.email);
   if (normalizedEmail.error) return { error: normalizedEmail.error };
   if (!normalizedEmail.value) return { error: 'Email is required' };
   if (!validDateOnly(body.hireDate)) return { error: 'First day must be a valid YYYY-MM-DD date' };
   if (body.phone != null && typeof body.phone !== 'string') return { error: 'Phone must be a string' };
+  // The Google press names the address its form showed. The emailed-link press reads none.
+  const shownGoogle = variant === 'google' ? canonicalStaffEmail(body.googleEmail) : null;
+  if (variant === 'google' && !shownGoogle) return { error: 'Google address must be a valid email' };
   const invalid = HIRE_OPTIONAL_FIELD_CHECKS
     .find(([key, valid]) => body[key] != null && body[key] !== '' && !valid(body[key]));
   if (invalid) return { error: invalid[2] };
@@ -1426,7 +1568,81 @@ function parseHireBody(body) {
     jobTitle: body.jobTitle,
     employmentType: body.employmentType,
   });
-  return { name: body.name.trim(), email: normalizedEmail.value, hireDate: body.hireDate, patch };
+  return {
+    name: body.name.trim(),
+    email: normalizedEmail.value,
+    hireDate: body.hireDate,
+    googleEmail: shownGoogle,
+    patch,
+  };
+}
+
+// The sign-in a Hired press turns on, decided under the row lock: { google }
+// (the address, or null for the emailed set-password link) or { refusal }.
+// Each press has its own endpoint, and the Google press names the address
+// its form showed (shownGoogle; null for the emailed-link press). A row that
+// no longer holds exactly that (an address linked, cleared, moved to another
+// address or made unusable since the form opened) is refused: no press mails
+// a link the form did not show, and none gives a staff login to a Google
+// account the form did not show.
+async function hireLoginFor(trx, target, shownGoogle) {
+  const google = hireGoogleAddress(target);
+  if (google !== shownGoogle) return { refusal: HIRE_LOGIN_CHANGED };
+  // A row that was made Google-only and still has a Google address on it
+  // gets no emailed link (after its first sign-in the Google press no longer
+  // applies to it, and its email can be one nobody proved). An admin clears
+  // the Google sign-in first, on purpose.
+  if (!google && target.google_only_login_at && target.google_email) return { refusal: HIRE_GOOGLE_ONLY_ROW };
+  // One mailbox, one staff row (the link writer and every email writer hold
+  // the same rule); a row linked before that rule is caught here.
+  if (google && await findTechnicianByMailbox(trx, google, target.id)) {
+    return { refusal: HIRE_GOOGLE_ADDRESS_IN_USE };
+  }
+  return { google };
+}
+
+// The credential columns of a Hired press.
+function hireCredentialColumns({ google, tokenHash, now }) {
+  if (google) {
+    // Google-only. The row held no sign-in (hireGoogleAddress, read again
+    // under the row lock), so the press only adds one: no password and no
+    // link. must_change_password stays false, because the staff middleware
+    // refuses every route while it is true and this account has no password
+    // to change. The token columns are cleared for the table's CHECK.
+    return {
+      must_change_password: false,
+      password_reset_token_hash: null,
+      password_reset_expires_at: null,
+      password_reset_requested_at: null,
+      google_only_login_at: now,
+    };
+  }
+  // The emailed link, as before the Google variant existed: the hire sets the
+  // first password from it, and any older credential on a reused placeholder
+  // is dropped so it cannot sign in. A row that was Google-only loses the mark
+  // in the UPDATE that stores its token (the table's CHECK).
+  return {
+    must_change_password: true,
+    password_hash: null,
+    password_changed_at: null,
+    password_reset_token_hash: tokenHash,
+    password_reset_expires_at: new Date(now.getTime() + HIRE_LINK_TTL_MS),
+    password_reset_requested_at: now,
+    google_only_login_at: null,
+  };
+}
+
+// The hire fields an admin's list carries. GATE_HIRED_PACKET on: all of them.
+// Off: only what belongs to staff Google sign-in, which the Google press is
+// part of (it mails nothing): the Hired action where the press makes a
+// Google-only login, and how a Google-only row stands today.
+function hireStateFor(tech, now = new Date()) {
+  const state = hireLinkState(tech, now);
+  if (featureGates.hiredPacketLive()) return state;
+  return {
+    ...(state.hire_login === 'google' ? { hire_action: 'hire', hire_login: 'google' } : {}),
+    ...(state.hire_google_only ? { hire_google_only: state.hire_google_only } : {}),
+  };
 }
 
 // The updated row in the shape GET /technicians returns for an admin.
@@ -1437,7 +1653,7 @@ async function hiredTechnicianResponse(tech) {
     ...tech,
     avatar_url: await resolveTechPhotoUrl(tech.photo_s3_key, tech.avatar_url),
     capability_summary: summaries.get(tech.id),
-    ...hireLinkState(tech),
+    ...hireStateFor(tech),
   });
 }
 
@@ -1482,13 +1698,23 @@ async function sendHireLink({ tech, token, tokenHash, firstDay }) {
   }
 }
 
-async function hireTechnician(req, res, next) {
+// `variant` is fixed by the route: 'google' for POST /technicians/:id/hire/google,
+// the emailed link for POST /technicians/:id/hire. Two endpoints, so a build that
+// does not know the Google press answers it 404 and never reads it as the
+// emailed-link press (a rollback, or two versions live during a deploy).
+async function hireTechnician(req, res, next, variant) {
   try {
-    if (!featureGates.hiredPacketLive()) return hiredPacketOff(res);
-    const parsed = parseHireBody(req.body || {});
+    // The emailed-link press is GATE_HIRED_PACKET. The Google press mails
+    // nothing and belongs to staff Google sign-in: it works with the packet
+    // gate off, and hireLoginFor then refuses it unless the row holds exactly
+    // the named address as its Google-only sign-in.
+    if (!featureGates.hiredPacketLive()
+      && !(variant === 'google' && googleSignin.googleSigninReady())) return hiredPacketOff(res);
+    const parsed = parseHireBody(req.body || {}, variant);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
 
-    const { token, tokenHash } = mintResetToken();
+    // The Google press has no token: it stores none and mails none.
+    const { token, tokenHash } = variant === 'google' ? {} : mintResetToken();
     const now = new Date();
     const outcome = await db.transaction(async (trx) => {
       // Same global order as every staff identity writer: table lock, then row.
@@ -1507,11 +1733,13 @@ async function hireTechnician(req, res, next) {
         const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: storedEmail, toEmail: parsed.email });
         if (fullAccessEmailGuard) return { fullAccessEmailGuard };
       }
-      if (await findTechnicianByCanonicalEmail(trx, parsed.email, target.id)) return { conflict: true };
+      if (await findTechnicianByMailbox(trx, parsed.email, target.id)) return { conflict: true };
       // A placeholder with history is a person, not a slot (same rule as PUT).
       if (parsed.name !== target.name && await technicianHasHistory(trx, target.id)) {
         return { renameLocked: true };
       }
+      const login = await hireLoginFor(trx, target, parsed.googleEmail);
+      if (login.refusal) return { loginRefusal: login.refusal };
 
       await trx('technicians').where({ id: target.id }).update({
         name: parsed.name,
@@ -1522,16 +1750,9 @@ async function hireTechnician(req, res, next) {
         // Being active never makes someone dispatchable: the Team tab grants
         // field eligibility deliberately.
         field_dispatchable: false,
-        // The hire sets the first password from the emailed link. Any older
-        // credential on a reused placeholder is dropped so it cannot sign in.
-        must_change_password: true,
-        password_hash: null,
-        password_changed_at: null,
+        ...hireCredentialColumns({ google: login.google, tokenHash, now }),
         // Entering active rotates sessions, as PUT does.
         auth_token_version: Number(target.auth_token_version || 0) + 1,
-        password_reset_token_hash: tokenHash,
-        password_reset_expires_at: new Date(now.getTime() + HIRE_LINK_TTL_MS),
-        password_reset_requested_at: now,
         updated_at: now,
       });
       await PushService.deactivateStaffUser(target.id, trx);
@@ -1546,11 +1767,12 @@ async function hireTechnician(req, res, next) {
         critical: true,
         trx,
       });
-      return { tech: await trx('technicians').where({ id: target.id }).first() };
+      return { tech: await trx('technicians').where({ id: target.id }).first(), google: Boolean(login.google) };
     });
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
     if (outcome.notProspective) return res.status(409).json({ error: 'Only a prospective row can be hired.' });
+    if (outcome.loginRefusal) return res.status(409).json(outcome.loginRefusal);
     if (outcome.ownerRowGuard) return res.status(403).json(outcome.ownerRowGuard);
     if (outcome.fullAccessEmailGuard) return res.status(403).json(outcome.fullAccessEmailGuard);
     if (outcome.conflict) return res.status(409).json(EMAIL_IN_USE);
@@ -1558,13 +1780,17 @@ async function hireTechnician(req, res, next) {
 
     const { tech } = outcome;
     disconnectRevokedStaffSessions(tech.id, 'account_status_changed');
-    logger.info(`[team] Hired technician id=${tech.id}`);
+    logger.info(`[team] Hired technician id=${tech.id} (login: ${outcome.google ? 'google' : 'password'})`);
+    // A Google-only hire gets no link and no email: the owner hands over the Google account.
+    if (outcome.google) {
+      return res.json({ hired: true, emailed: null, login: 'google', technician: await hiredTechnicianResponse(tech) });
+    }
     // The hire is committed; an email problem never rolls it back.
     const emailed = await sendHireLink({ tech, token, tokenHash, firstDay: parsed.hireDate });
     const fresh = emailed === false
       ? await db('technicians').where({ id: tech.id }).first()
       : tech;
-    return res.json({ hired: true, emailed, technician: await hiredTechnicianResponse(fresh || tech) });
+    return res.json({ hired: true, emailed, login: 'password', technician: await hiredTechnicianResponse(fresh || tech) });
   } catch (err) {
     const dup = uniqueViolationBody(err);
     if (dup) return res.status(409).json(dup);
@@ -1588,6 +1814,7 @@ async function resendHireLink(req, res, next) {
       if (target.employment_status !== 'active' || target.active !== true || !canonicalStaffEmail(target.email)) {
         return { notEligible: true };
       }
+      if (target.google_only_login_at) return { googleOnly: true };
       if (!state.hire_password_unset) return { passwordSet: true };
       const requestedAt = target.password_reset_requested_at ? new Date(target.password_reset_requested_at) : null;
       if (requestedAt && now.getTime() - requestedAt.getTime() < HIRE_RESEND_COOLDOWN_MS) {
@@ -1606,6 +1833,7 @@ async function resendHireLink(req, res, next) {
     if (outcome.notEligible) {
       return res.status(409).json({ error: 'Only an active staff member with an email can be sent a link.' });
     }
+    if (outcome.googleOnly) return res.status(409).json(GOOGLE_ONLY_NO_LINK);
     if (outcome.passwordSet) {
       return res.status(409).json({ error: 'This person already set a password.' });
     }
@@ -1625,10 +1853,11 @@ async function resendHireLink(req, res, next) {
   }
 }
 
-router.post('/technicians/:id/hire', requireAdmin, hireTechnician);
+router.post('/technicians/:id/hire', requireAdmin, (req, res, next) => hireTechnician(req, res, next, 'password'));
+router.post('/technicians/:id/hire/google', requireAdmin, (req, res, next) => hireTechnician(req, res, next, 'google'));
 router.post('/technicians/:id/hire/resend', requireAdmin, resendHireLink);
 
-// GET /technicians/:id/capabilities — the five dispatch categories for one
+// GET /technicians/:id/capabilities — the dispatch categories for one
 // tech, missing rows reported as 'unset'. Admin only: this is the editor's
 // read, and capability decisions are a management call.
 async function getTechnicianCapabilities(req, res, next) {
@@ -1642,7 +1871,7 @@ async function getTechnicianCapabilities(req, res, next) {
   }
 }
 
-// PUT /technicians/:id/capabilities — upsert any subset of the five
+// PUT /technicians/:id/capabilities — upsert any subset of the
 // categories as { service_category, state, notes }. The caller is stamped as
 // verifier. Turning a category Off never touches the schedule: visits already
 // assigned in that category are listed back for manual reassignment (same
@@ -1729,7 +1958,7 @@ router.put('/technicians/:id/voice-pin', requireAdmin, putTechnicianVoicePin);
 // live, new /book, phone and after-call bookings and the office Auto choice go to the
 // line's home technician, else its gap technician (services/scheduling/line-technician.js).
 // Admin only; 404 while the gate is off.
-const SERVICE_LINE_KEYS = ['general', 'mosquito', 'lawn', 'rodent', 'termite'];
+const SERVICE_LINE_KEYS = ['general', 'mosquito', 'lawn', 'rodent', 'exclusion', 'termite'];
 const SERVICE_LINE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHADOW_SUMMARY_DEFAULT_DAYS = 14;
 const SHADOW_SUMMARY_MAX_DAYS = 90;
@@ -1755,7 +1984,7 @@ async function readServiceLines(conn) {
 }
 
 // PUT body: { lines: [{ service_category, home_technician_id, gap_technician_id }] }.
-// Any subset of the five lines; a technician id is a uuid or null (cleared).
+// Any subset of the lines; a technician id is a uuid or null (cleared).
 function normalizeServiceLineEntries(input) {
   if (!Array.isArray(input) || !input.length) return { error: 'lines must be a non-empty array' };
   const seen = new Set();
@@ -2359,6 +2588,7 @@ router.post('/documents/:id/restore', requireAdmin, async (req, res, next) => {
 router._test = {
   STAFF_ENTRY_WORK_DATE_SQL,
   applyStaffEntryWorkDateRange,
+  hireLinkState,
   staffAnalyticsDateRange,
 };
 

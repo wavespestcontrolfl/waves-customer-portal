@@ -26,7 +26,10 @@ const { etDateString } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
 const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
 const { NON_PERFORMED_VISIT_OUTCOMES, applyPerformedVisitHistoryFilter } = require('../pest-pressure/first-visit');
-const { applicationAreaValues, uniqueStrings, normalizeAdvisoryForTreatmentScope, resolveTracedExteriorZone } = require('../service-report/report-data');
+// service-report/report-data loads this module back through its own tree (a require cycle). When report-data
+// loads first, as in the production boot, a destructure at load reads its exports before they exist: the four
+// helpers were undefined and readVisitSummary threw. So they are read at call time, never at load.
+const reportData = () => require('../service-report/report-data');
 
 // Every label entry cites a fact in the email-division fact register
 // (server/services/email-division/fact-register-data.js, PR #5187) and says
@@ -472,9 +475,9 @@ function visitAreas(service, products = []) {
   const values = [
     ...asArray(service.areas_serviced), ...asArray(structured.areasServiced), ...asArray(structured.areasTreated),
     ...snapshots.flatMap((snap) => TYPED_AREA_FIELD_KEYS.flatMap((key) => String(snap.values[key] ?? '').split(','))),
-    ...applicationAreaValues(products),
+    ...reportData().applicationAreaValues(products),
   ];
-  return uniqueStrings(values);
+  return reportData().uniqueStrings(values);
 }
 
 /** One visit's plain-language summary for a lifecycle email. */
@@ -492,8 +495,8 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
   // interior-only visit never exposes a stale exterior re-entry default
   // (codex round 10 P2 on #5164). Reuse the exact same canonical
   // normalizer and trace resolver — never a second copy of this logic.
-  const tracedExteriorZone = await resolveTracedExteriorZone(service, conn).catch(() => false);
-  const advisory = normalizeAdvisoryForTreatmentScope(asObject(service.advisory), {
+  const tracedExteriorZone = await reportData().resolveTracedExteriorZone(service, conn).catch(() => false);
+  const advisory = reportData().normalizeAdvisoryForTreatmentScope(asObject(service.advisory), {
     service, applications: products,
     zones: tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
     treatmentEvidence: products.length > 0,

@@ -144,16 +144,29 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db, completedDa
   };
 }
 
-// "New-customer callers: 40. Outcome known for 30. Booked on the call: 8 of 30 (27%). Estimate requested or promised, no booking recorded: 20."
+// The call script's line for a caller who asks for an estimate (owner 2026-11-19, lead plan phase 1: "offer the first
+// open visit before the estimate"). It follows the counts in any week where a caller asked for or was promised an
+// estimate and no booking is recorded for them.
+const FIRST_VISIT_SCRIPT_LINE = 'Call script: offer the first open visit before you offer to send an estimate.';
+
+// What the office says when a caller asks whether someone comes out to quote (owner 2026-11-21, his exact words). In
+// the four weeks to Nov 15, 9 of 16 calls about how the estimate works asked this. The sentence has one home,
+// services/estimate-no-visit-line.js; the estimate email for a home carries the same words.
+const { NO_VISIT_QUOTE_LINE } = require('../estimate-no-visit-line');
+// "A residential caller": the weekly count takes in commercial callers too, and the sentence speaks of a home and yard.
+const NO_VISIT_SCRIPT_LINE = `If a residential caller asks whether someone comes out to quote, say: "${NO_VISIT_QUOTE_LINE}"`;
+
+// "New-customer callers: 40. Outcome known for 30. Booked on the call: 8 of 30 (27%). Estimate requested or promised, no booking recorded: 20. Call script: offer the first open visit before you offer to send an estimate. If the caller asks whether someone comes out to quote, say: ..."
 function formatWeeklyCallOutcomes(o) {
   const head = `New-customer callers: ${o.newCustomerCallers}.`;
   if (o.newCustomerCallers === 0) return `${head} Booked on the call: 0. Estimate requested or promised, no booking recorded: 0.`;
+  const scriptLine = o.estimateRequestedOrPromised > 0 ? ` ${FIRST_VISIT_SCRIPT_LINE} ${NO_VISIT_SCRIPT_LINE}` : '';
   // The extraction's quote flags need no recorded outcome, so the estimate count shows even with no booking rate.
-  if (!o.callersWithOutcome) return `${head} No call outcomes recorded yet, so no booking rate. Estimate requested or promised, no booking recorded: ${o.estimateRequestedOrPromised}.`;
-  return `${head} Outcome known for ${o.callersWithOutcome}. Booked on the call: ${o.bookedOnCall} of ${o.callersWithOutcome} (${o.bookedPct}%). Estimate requested or promised, no booking recorded: ${o.estimateRequestedOrPromised}.`;
+  if (!o.callersWithOutcome) return `${head} No call outcomes recorded yet, so no booking rate. Estimate requested or promised, no booking recorded: ${o.estimateRequestedOrPromised}.${scriptLine}`;
+  return `${head} Outcome known for ${o.callersWithOutcome}. Booked on the call: ${o.bookedOnCall} of ${o.callersWithOutcome} (${o.bookedPct}%). Estimate requested or promised, no booking recorded: ${o.estimateRequestedOrPromised}.${scriptLine}`;
 }
 
 module.exports = {
   loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates, BOOKED_DISPOSITIONS, ESTIMATE_DISPOSITION,
-  PROSPECT_OUTCOMES, STAFF_NEW_LEAD_TAGS,
+  PROSPECT_OUTCOMES, STAFF_NEW_LEAD_TAGS, FIRST_VISIT_SCRIPT_LINE, NO_VISIT_QUOTE_LINE, NO_VISIT_SCRIPT_LINE,
 };

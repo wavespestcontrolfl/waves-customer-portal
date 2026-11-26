@@ -264,6 +264,15 @@ app.use('/api/public/watering-plan', (req, res, next) => {
   }
   next();
 });
+// New-home postcard page (GATE_MAIL_HOME_PAGE, dark): the WHOLE route is mounted here, BEFORE the wildcard CORS
+// handler below, cors(), the global /api limiter and the body parsers, so every answer (the dark 404, the unknown-token
+// 404, the page) leaves from one place with the same headers. Its guard (privacy headers; the generic 404 while dark,
+// for any method but GET/HEAD and for a path that is not one page token) runs first, then its own 60-a-minute limiter.
+// The page is same-origin (/h/:token), so it needs no CORS.
+app.use('/api/public/home', require('./routes/mail-home-public').preLimiterGuard, require('./routes/mail-home-public'));
+// The short typed address of a new home (GET /nh/<101-example>, printed on the postcard as gowavesfl.com/101-example):
+// 302 to /h/<token>, or to the marketing site for anything else (gate off included).
+app.use('/nh', require('./routes/mail-home-short-link'));
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()
 // middleware terminates OPTIONS for non-allowlisted origins without an
@@ -503,13 +512,18 @@ app.use('/api/public/secure-card', (req, res, next) => {
   res.set('X-Robots-Tag', 'noindex');
   next();
 });
-// Book at the Table (GATE_IN_PERSON_CARD): while dark, POST /:token/accept-terms is a
-// uniform 404 before the global limiter and the body parsers, never a 429/413/400
+// Book at the Table (GATE_IN_PERSON_CARD): while dark, POST /:token/accept-terms (and POST /:token/select-plan
+// while GATE_SECURE_PLAN_CHOICE is off) is a uniform 404 before the global limiter and the body parsers, never a 429/413/400
 // (privacy headers are already set above). Call-time gate read. Case-insensitive, as
 // Express routing is: /ACCEPT-TERMS reaches the same route.
 app.use('/api/public/secure-card', (req, res, next) => {
   if (req.method === 'POST' && /^\/[^/]+\/accept-terms\/?$/i.test(req.path)
     && !require('./config/feature-gates').inPersonCardLive()) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  // Plan choice (GATE_SECURE_PLAN_CHOICE): same reason, same body.
+  if (req.method === 'POST' && /^\/[^/]+\/select-plan\/?$/i.test(req.path)
+    && !require('./config/feature-gates').isEnabled('securePlanChoice')) {
     return res.status(404).json({ error: 'Not found' });
   }
   next();
@@ -640,6 +654,28 @@ app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 // Commercial first visit picker (GATE_COMMERCIAL_FIRST_VISIT): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
+// First-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME): same reason, same shape.
+app.use('/api/estimates', estimatePublicRoutes.firstVisitRequestPreGuard);
+// Dark estimate routes whose gate is read in the handler (referral-link, measurement-review, extension-request, service-opt-out,
+// change-request, promo-code, the service-details and warranty-comparison PDFs): same reason, one table in estimate-public.js.
+app.use('/api/estimates', estimatePublicRoutes.darkEstimateRoutePreGuard);
+// A token path segment that does not percent-decode answers the mount's generic unknown-token 404 here, before the global limiter,
+// instead of Express's param-decode error (the error handler logs the raw segment and answers 500). After the estimate header
+// guards above (they match the raw path and never decode), so that 404 carries their headers; the secure-card privacy headers
+// are stamped by the secure-card mount further up.
+app.use(['/api/estimates', '/api/pay', '/api/public/secure-card'], require('./middleware/reject-undecodable-path').rejectUndecodablePath);
+
+// Invoice pay page promo code (GATE_PAY_PROMO_CODE) and plan choice (GATE_PAY_PLAN_CHOICE): the dark 404 lands before the global limiter.
+app.use('/api/pay', require('./routes/pay-v2').darkRoutePreGuard);
+// Dark Hermes worker lanes (GATE_HERMES_COMMITMENTS, GATE_HERMES_WATCHDOG): the lane's own 404 lands before the global limiter.
+app.use('/api/integrations/commitments-worker', require('./routes/integrations-commitments-worker').commitmentsDarkGuard);
+app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watchdog-worker').watchdogGate);
+// Staff roof read (GATE_ROOF_ENTRY_READ): the router's own first middleware, answered here before the global limiter.
+app.use('/api/admin/roof-entry-read', require('./routes/admin-roof-entry-read').gateOn);
+// Public experiment exposure intake (GATE_GROWTHBOOK): POST /exposure only (any case, repeated or trailing slashes); GET /status stays open.
+app.use('/api/public/experiments', require('./routes/experiments-public').exposureDarkGuard);
+// Customer Photo ID (GATE_CUSTOMER_PHOTO_ID): the gate answers before the global limiter and the parsers (requireCustomerPhotoIdGateOpen, defined below).
+app.use('/api/photo-id', requireCustomerPhotoIdGateOpen);
 
 app.use('/api/', limiter);
 
@@ -813,7 +849,6 @@ function requireCustomerPhotoIdGateOpen(req, res, next) {
   if (!require('./config/feature-gates').isEnabled('customerPhotoId')) return res.status(404).json({ error: 'Not found' });
   return next();
 }
-app.use('/api/photo-id', requireCustomerPhotoIdGateOpen);
 app.use('/api/photo-id', require('./middleware/large-body-auth').requireCustomerTokenForLargeBody);
 app.use('/api/photo-id', express.json({ limit: '30mb' }));
 // Per-link Open Graph preview images (/og/report/:token.jpg, /og/<kind>.jpg)
@@ -879,10 +914,13 @@ app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
 app.use('/l', require('./routes/public-shortlinks'));
+// Printed-card review QR: 302 to the nearest office's Google review form (no page).
+app.use('/rv', require('./routes/review-geo-link'));
 // Outside-link click redirect for prep guides — registered destinations only.
 app.use('/go', require('./routes/outbound-redirect'));
 // Digital business card — public token-scoped data + Save-contact vCard.
 app.use('/api/card', require('./routes/card-public'));
+// One new home's page (QR code on a postcard): the address and its stored price by 32-hex token. Dark behind GATE_MAIL_HOME_PAGE.
 // Universal-link association files (apple-app-site-association / assetlinks.json).
 // Dark behind GATE_UNIVERSAL_LINKS — both files 404 until flipped.
 app.use('/.well-known', require('./routes/well-known'));

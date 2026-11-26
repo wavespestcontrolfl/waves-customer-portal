@@ -33,6 +33,13 @@
  * bypasses the timesheet: a technician whose worked time is not approved stays
  * waiting. Gate off, every function here reads and returns what it did before.
  *
+ * Time-off bank (owner 2026-11-21; no gate of its own, services/payroll-time-off-bank.js): for a
+ * technician whose yearly time-off hours are set, the draft pays paid time off only from the bank,
+ * and the check stores the hours it earned (pto_earned_minutes), the early illness minutes it paid
+ * (pto_early_illness_minutes) and the bank figures (calc_snapshot.ptoBank). Time off that is not paid is
+ * listed on the draft with its reason; the list is worked out on each view, so the review token takes it.
+ * With no yearly hours set, every function here reads and returns what it did before.
+ *
  * GATE_PAYROLL_PAY_LINES (owner 2026-10-29, D5 part 1): a draft also pays the open
  * pay lines of services/payroll-pay-lines.js (review bonus, commission, health
  * allowance, employer HSA money) and the extra overtime they cause in the federal
@@ -54,6 +61,13 @@
  * comes out of net pay. With no election (or a non-participant one) every function here reads and
  * returns what it did before.
  *
+ * GATE_PAYROLL_PRODUCTION_SHARE (owner 2026-11-24, production share PR 2; services/payroll-production-share.js): a draft also
+ * pays a "Production share" earning to a W-2 technician with approved hours whose production share settings are in force for the
+ * week: shareForWeek of the week's credited stops (services/production-share.js). The check stores production_share_cents and a
+ * frozen snapshot of the credit (calc_snapshot.productionShare); the share counts in the federal regular rate for its own week
+ * (the extra overtime rides on the same check, through payroll-regular-rate.js); a stop that needs review pays $0 and the draft
+ * says so; the review token takes the share and its credit rows. Gate off, every function here reads and returns what it did before.
+ *
  * Every write runs in one transaction with row locks. Audit events are
  * critical and carry ids only.
  */
@@ -69,19 +83,28 @@ const { syncPayrollFilingsSafe } = require('./payroll-tax-calendar');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const {
   STAFF_WORK_DATE_SQL,
+  STAFF_DAILY_WORK_SQL,
   addStaffWorkDays,
   staffWeekStartForWorkDate,
 } = require('../utils/staff-time-work-date');
 const { WAVES_BUSINESS_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
 const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY, lockPayrollMutations } = require('./payroll-lock');
 const { applyDueSteps, hasDueSteps, withWeekRates } = require('./payroll-rate-steps');
+const weekMinimum = require('./payroll-week-minimum');
+const { holidayWorkByDay, capHolidayDays } = require('./payroll-holiday-work');
 const { shiftCloseReviewLive, payrollTimeOffLive, payrollBankMatchLive, payrollMercuryStatusLive } = require('../config/feature-gates');
 const {
   payLinesOn, openLinesFor, priceLines, totalsOf, markLinesPaid, reopenLinesOfRun,
 } = require('./payroll-pay-lines');
 const { syncReviewBonusLines } = require('./payroll-review-bonuses');
 const { syncCommissionLines } = require('./payroll-commission');
+const {
+  syncTechRewardLines, readSeasonScores, readSeasonScoresOfRun, dropRewardLinesOfWeek, paidBonusCounting, waitNotes,
+  oldestUnpaidWeek,
+} = require('./tech-rewards-pay-lines');
 const { familyEmployeeOn, familyExemptIds } = require('./payroll-family-employee');
+const timeOffBank = require('./payroll-time-off-bank');
+const productionSharePay = require('./payroll-production-share');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_REASON = 500;
@@ -124,6 +147,32 @@ const mercuryStatusOn = () => typeof payrollMercuryStatusLive === 'function' && 
 const TIME_OFF_MINUTE_COLUMNS = ['pto_minutes', 'holiday_minutes'];
 const TIME_OFF_PAY_COLUMNS = ['pto_pay_cents', 'holiday_pay_cents'];
 const TIME_OFF_COLUMNS = [...TIME_OFF_MINUTE_COLUMNS, ...TIME_OFF_PAY_COLUMNS];
+// Time-off bank: a check of a technician with a bank stored the hours it earned (never null then) and its
+// bank figures; any other check stored neither and shows neither.
+const storedBank = (row) => row.pto_earned_minutes != null;
+// What buildCheck stores for a technician with a bank (evaluate() sets tech.pto_bank, only behind the gate).
+const bankSnapshot = (tech) => (tech.pto_bank ? { ptoBank: tech.pto_bank } : {});
+const bankColumns = (tech) => (tech.pto_bank ? {
+  pto_earned_minutes: tech.pto_bank.earnedMinutes, pto_early_illness_minutes: tech.pto_bank.earlyIllnessMinutes,
+} : {});
+// What a check with a bank shows; nothing for any other check, so that one keeps exactly its earlier keys.
+function bankView(row) {
+  if (!storedBank(row)) return {};
+  const figures = row.pto_bank || {};
+  // The hours the check paid out when the technician left. They are in pto_minutes and are not time off used.
+  const paidOut = Number(figures.payoutMinutes || 0);
+  return {
+    timeOffBank: {
+      earnedHours: hoursText(row.pto_earned_minutes),
+      usedHours: hoursText(Number(row.pto_minutes) - paidOut),
+      unpaidHours: hoursText(figures.unpaidMinutes),
+      balanceHours: hoursText(figures.afterMinutes),
+      ...(paidOut > 0 ? { paidOutHours: hoursText(paidOut) } : {}),
+      // A check of a week before a payout, paid after it: the hours the week would have earned, not paid out.
+      ...(Number(figures.notPaidOutMinutes) > 0 ? { notPaidOutHours: hoursText(figures.notPaidOutMinutes) } : {}),
+    },
+  };
+}
 
 // GATE_PAYROLL_PAY_LINES: payroll_checks column -> computePaycheck output key. Null on a
 // check made with the gate off; read and written only with the gate on.
@@ -132,6 +181,8 @@ const PAY_LINE_COLUMNS = {
   commission_cents: 'commissionCents',
   health_allowance_cents: 'healthAllowanceCents',
   hsa_employer_cents: 'hsaEmployerCents',
+  // Season bonus, stay bonus and December gift lines (Tech Rewards Plan, tech-rewards-pay-lines.js); null on a check with none of them.
+  tech_rewards_cents: 'techRewardsCents',
   line_overtime_premium_cents: 'lineOvertimePremiumCents',
   qualified_overtime_cents: 'qualifiedOvertimeCents',
   simple_compensation_cents: 'simpleCompensationCents',
@@ -140,6 +191,8 @@ const PAY_LINE_KEYS = Object.keys(PAY_LINE_COLUMNS);
 // A check drafted with the gate on stored its pay line figures (qualified_overtime_cents is
 // never null then). It keeps showing them after the gate is turned off, so a paid stub, run
 // and CSV still add up; a check drafted with the gate off stored none and shows none.
+// A pay line figure the calculator left out (tech_rewards_cents on a check with none) is stored as null.
+const nullWhenMissing = (value) => (value === undefined ? null : value);
 const storedLines = (row) => row.qualified_overtime_cents != null;
 
 // GATE_PAYROLL_FAMILY_EMPLOYEE: payroll_checks columns, null on a check drafted with the gate off;
@@ -234,6 +287,13 @@ const electionOrIrsDefault = (election, payDate) => election || {
   id: null, formYear: Number(String(payDate).slice(0, 4)), filingStatus: 'single', step2Checkbox: false, exempt: false,
 };
 
+// With the production share on, an employee who has share settings in force needs the overtime coverage set when the check holds a share
+// above $0 or any overtime hours: the qualified overtime (a covered employee's half-time premium and the share's) would otherwise be stored
+// as zero or left empty without a word, so the check waits for the owner to set it (Payroll settings, overtime coverage).
+const shareCoverageProblem = (tech, share, shareCents) => (share && tech.flsa_overtime_covered == null
+  && (shareCents > 0 || Number(tech.overtime_minutes || 0) > 0)
+  ? 'Set the overtime coverage first: the production share needs to know whether federal overtime law covers this employee.' : null);
+
 /**
  * Works out one technician's check. Returns { check } (the row to insert, minus
  * run_id) or { blocked } with a plain reason. Never throws for a calculation
@@ -245,9 +305,22 @@ function buildCheck({
 }) {
   const w4 = electionOrIrsDefault(election, payDate);
   const withTimeOff = timeOffOn();
-  const withLines = payLinesOn();
+  // GATE_PAYROLL_PRODUCTION_SHARE: evaluate() sets tech.production_share for a technician with settings in force that week. A
+  // share above $0 puts the check in pay line mode (the share is a pay line figure and causes line overtime), whatever the
+  // pay lines gate says; a share of $0 changes nothing but the stored figure and snapshot.
+  const share = tech.production_share && !tech.production_share.error ? tech.production_share : null;
+  const shareCents = share ? share.shareCents : 0;
+  // With the share gate on, EVERY check of an employee who has share settings and a set overtime coverage is a pay line check (a week at or
+  // under the bar too): the qualified overtime is stored as a figure, 0 for an uncovered employee, never left empty.
+  const withLines = payLinesOn() || shareCents > 0 || (share !== null && tech.flsa_overtime_covered != null);
+  const coverageProblem = shareCoverageProblem(tech, share, shareCents);
+  if (coverageProblem) return { blocked: coverageProblem };
   const ptoMinutes = tech.pto_minutes || 0;
   const holidayMinutes = tech.holiday_minutes || 0;
+  // The minimum paid week: set by evaluate() only for a technician who has one (payroll-week-minimum.js).
+  const withMinimum = withTimeOff && tech.minimum_week_minutes !== undefined;
+  // Holiday work premium: only a check with worked minutes on a holiday taken carries it (payroll-holiday-work.js holidayWorkByDay).
+  const withHolidayWork = withTimeOff && Number(tech.holiday_work_minutes || 0) > 0;
   // Open pay lines for this technician and the extra overtime they cause (evaluate()).
   const lines = (withLines && tech.pay_lines) || [];
   const linePremium = (withLines && tech.line_premium) || { extraPremiumCents: 0, weeks: [] };
@@ -260,10 +333,19 @@ function buildCheck({
       regularMinutes: tech.regular_minutes,
       overtimeMinutes: tech.overtime_minutes,
       ...(withTimeOff ? { ptoMinutes, holidayMinutes } : {}),
+      ...(withMinimum ? {
+        minimumWeekMinutes: tech.minimum_week_minutes,
+        minimumWeekTargetMinutes: tech.minimum_week_target_minutes || 0,
+        minimumWeekPayoutMinutes: (tech.pto_bank && tech.pto_bank.payoutMinutes) || 0,
+      } : {}),
+      ...(withHolidayWork ? { holidayWorkMinutes: tech.holiday_work_minutes } : {}),
       ytdGrossWages: centsText(ytdGrossCents),
       w4,
       ...(withLines ? {
-        payLines: { ...totalsOf(lines), lineOvertimePremiumCents: linePremium.extraPremiumCents },
+        payLines: {
+          ...totalsOf(lines), ...(shareCents > 0 ? { productionShareCents: shareCents } : {}),
+          lineOvertimePremiumCents: linePremium.extraPremiumCents,
+        },
         flsaCovered: tech.flsa_overtime_covered === true,
       } : {}),
       // GATE_PAYROLL_FAMILY_EMPLOYEE: decided by evaluate() (undefined = not decided, today's math).
@@ -284,13 +366,22 @@ function buildCheck({
     overtime_minutes: tech.overtime_minutes,
     ytd_gross_before_cents: ytdGrossCents,
     w4_election_id: w4.id,
-    calc_snapshot: JSON.stringify(lines.length ? { ...pay, payLines: lines, lineOvertimeWeeks: linePremium.weeks } : pay),
+    calc_snapshot: JSON.stringify({
+      ...(lines.length ? { ...pay, payLines: lines, lineOvertimeWeeks: linePremium.weeks }
+        : shareCents > 0 ? { ...pay, lineOvertimeWeeks: linePremium.weeks } : pay),
+      ...bankSnapshot(tech),
+      ...(share ? { productionShare: share.snapshot } : {}),
+      // The paid minutes worked on each holiday, frozen with the check: Tech Rewards dates the premium by them.
+      // and the recorded meals its split read (payroll-holiday-work.js), so the frozen check shows what it used
+      ...(withHolidayWork ? { holidayWorkDays: tech.holiday_work_days, holidayWorkMeals: tech.holiday_work_meals || [] }
+        : (withTimeOff && (tech.holiday_work_meals || []).length ? { holidayWorkMeals: tech.holiday_work_meals } : {})),
+    }),
     pay_method: tech.pay_method || 'check',
     status: 'draft',
     ...simpleColumns(simple, pay),
   };
   for (const [column, key] of Object.entries(MONEY_COLUMNS)) check[column] = pay[key];
-  if (withLines) for (const [column, key] of Object.entries(PAY_LINE_COLUMNS)) check[column] = pay[key];
+  if (withLines) for (const [column, key] of Object.entries(PAY_LINE_COLUMNS)) check[column] = nullWhenMissing(pay[key]);
   if (unemploymentExempt !== undefined) {
     check.unemployment_exempt = pay.unemploymentExempt;
     check.unemployment_wages_cents = pay.taxableWages.futaCents;
@@ -300,6 +391,17 @@ function buildCheck({
     check.holiday_minutes = holidayMinutes;
     check.pto_pay_cents = pay.ptoPayCents;
     check.holiday_pay_cents = pay.holidayPayCents;
+    Object.assign(check, bankColumns(tech));
+  }
+  if (withMinimum) {
+    check.minimum_week_minutes = tech.minimum_week_minutes;
+    check.minimum_week_pay_cents = pay.minimumWeekPayCents;
+  }
+  // Null on a check with no production share settings behind it (or drafted with the gate off), 0 on a week at or under the bar.
+  if (share) check.production_share_cents = shareCents;
+  if (withHolidayWork) {
+    check.holiday_work_minutes = tech.holiday_work_minutes;
+    check.holiday_work_premium_cents = pay.holidayWorkPremiumCents;
   }
   return { check };
 }
@@ -324,10 +426,61 @@ function payLinesSignature(row) {
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
 
+// The time-off bank figures a check holds, normalized. A stored row carries them as `pto_bank`
+// (calc_snapshot->'ptoBank'); a row about to be stored carries them in its calc_snapshot text.
+function ptoBankSignature(row) {
+  let bank = row.pto_bank;
+  if (!('pto_bank' in row) && typeof row.calc_snapshot === 'string') {
+    try { bank = JSON.parse(row.calc_snapshot).ptoBank; } catch { bank = null; }
+  }
+  const figures = ['earnedMinutes', 'earlyIllnessMinutes', 'unpaidMinutes', 'unpaidRuleMinutes', 'unpaidBeforeHireMinutes', 'beforeMinutes', 'afterMinutes']
+    .map((key) => Number((bank || {})[key] || 0).toFixed(2));
+  // What the bank paid on each date. A day off moved inside the week can keep every total and still change
+  // these, and pay earned by date reads them (tech-rewards-scoreboard.js readGross).
+  const paidDays = ((bank || {}).paidDays || []).map((day) => `${day.workDate}=${Number(day.minutes || 0).toFixed(2)}`).sort();
+  // The hours a catch-up check shows as not paid out: the owner reads them to pay by hand. Only when there are some,
+  // so every other check keeps its token.
+  const notPaidOut = Number((bank || {}).notPaidOutMinutes || 0);
+  return [...figures, paidDays.join(','), ...(notPaidOut > 0 ? [`notPaidOut=${notPaidOut.toFixed(2)}`] : [])];
+}
+
+// The holiday work days a check holds ('date=minutes', in date order). A stored row carries them as `holiday_work_days`
+// (calc_snapshot->'holidayWorkDays'); a row about to be stored carries them in its calc_snapshot text. A move of the
+// same minutes to another date changes what Tech Rewards dates the premium by, so it goes stale like any other change.
+function holidayWorkSignature(row) {
+  let days = row.holiday_work_days;
+  if (!('holiday_work_days' in row) && typeof row.calc_snapshot === 'string') {
+    try { days = JSON.parse(row.calc_snapshot).holidayWorkDays; } catch { days = null; }
+  }
+  return (Array.isArray(days) ? days : []).map((d) => `${d.workDate}=${Number(d.minutes || 0).toFixed(2)}`).sort().join(',');
+}
+
+// The unpaid time off list in the token (payroll-time-off-bank.js applyBank): who, how much and why.
+const unpaidSignature = (unpaid) => unpaid.map((row) => [row.technicianId, row.hours, row.reason])
+  .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+// The bank payouts in the token: who and how much. A payout of an empty bank changes no check, and finalize
+// still keeps it as the run's decision, so the owner must have seen it.
+const payoutSignature = (payouts) => ['bank payouts', ...payouts.map((row) => [row.technicianId, row.hours])
+  .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))];
+
+// What a run view shows of the time-off bank's two lists (time off not paid, bank payouts decided): each key is
+// present only when its list has a row.
+// What a run with no paycheck can still decide: time off a bank did not pay, or the payout of an empty bank.
+const decidesWithNoCheck = (evaluation) => evaluation.unpaidTimeOff.length + evaluation.bankPayouts.length > 0;
+// A payout row keeps the yearly hours it was worked out with (a catch-up check reads them, payroll-time-off-bank.js
+// paidOutInLaterWeek); the view does not show them.
+const bankLists = (unpaid, payouts) => ({
+  ...(unpaid && unpaid.length ? { unpaidTimeOff: unpaid } : {}),
+  ...(payouts && payouts.length ? { bankPayouts: payouts.map(({ hoursPerYear, ...shown }) => shown) } : {}),
+});
+
 // A token over everything that decides the numbers on a run. It is computed from
 // rows as stored (strings from Postgres) and from rows about to be stored
 // (numbers), so every value is normalized first.
-function tokenOf(run, rows) {
+// `unpaid` = the time off a time-off bank did not pay, as the view listed it. It is not stored (a technician it
+// names can have no check), so the view and finalize pass it; with none, the token is the one it always was.
+// `payouts` = the bank payouts the run decides (applyBank), passed the same way and for the same reason.
+function tokenOf(run, rows, unpaid = [], payouts = []) {
   const withTimeOff = timeOffOn();
   const withLines = payLinesOn();
   const withFamily = familyEmployeeOn();
@@ -345,6 +498,13 @@ function tokenOf(run, rows) {
       ...TIME_OFF_MINUTE_COLUMNS.map((key) => Number(row[key] || 0).toFixed(2)),
       ...TIME_OFF_PAY_COLUMNS.map((key) => Number(row[key] || 0)),
     ] : []),
+    // The time-off bank: a change of the yearly hours, the hire date, an illness mark or an earlier
+    // check after drafting changes what the bank pays or earns, so the draft goes stale.
+    ...(storedBank(row) ? [Number(row.pto_earned_minutes).toFixed(2), ptoBankSignature(row)] : []),
+    // The minimum paid week: only on a check that has one, so every other check keeps its token.
+    ...(row.minimum_week_minutes != null ? [`minimum=${Number(row.minimum_week_minutes).toFixed(2)}`, Number(row.minimum_week_pay_cents)] : []),
+    // The holiday work premium: only on a check that has one, so every other check keeps its token.
+    ...(row.holiday_work_minutes != null ? [`holidayWork=${Number(row.holiday_work_minutes).toFixed(2)}`, Number(row.holiday_work_premium_cents), holidayWorkSignature(row)] : []),
     // Adding, removing or changing a pay line after drafting changes the token too. A row that
     // stored pay line figures keeps them in the token after the gate is turned off, so a draft
     // that still shows them goes stale instead of finalizing without them.
@@ -353,8 +513,13 @@ function tokenOf(run, rows) {
     ...(withFamily || storedUnemployment(row) ? [row.unemployment_exempt === true, Number(row.unemployment_wages_cents || 0)] : []),
     // And for SIMPLE IRA savings: a new, changed or ended election after drafting makes the draft stale.
     ...(storedSimple(row) ? [row.simple_election_id, Number(row.simple_deferral_cents), Number(row.simple_employer_cents)] : []),
+    // The production share: its cents and every credit row it was worked out from, so a changed credit (a price, a stop
+    // completed late, a callback judged again, new settings) makes the draft stale. Only on a check that has one.
+    ...(row.production_share_cents != null ? [`share=${Number(row.production_share_cents)}`, productionSharePay.signature(row)] : []),
   ]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return crypto.createHash('sha256').update(JSON.stringify([run.week_start, run.pay_date, parts])).digest('hex').slice(0, 32);
+  const signed = [run.week_start, run.pay_date, parts, ...(unpaid.length ? [unpaidSignature(unpaid)] : []),
+    ...(payouts.length ? [payoutSignature(payouts)] : [])];
+  return crypto.createHash('sha256').update(JSON.stringify(signed)).digest('hex').slice(0, 32);
 }
 
 function sumRows(rows) {
@@ -366,6 +531,12 @@ function sumRows(rows) {
     netCents: total(['net_cents']),
     employerTaxesCents: total(EMPLOYER_TAX_KEYS),
     ...(timeOffOn() ? { ptoPayCents: total(['pto_pay_cents']), holidayPayCents: total(['holiday_pay_cents']) } : {}),
+    // Present only when a check of the run has a minimum paid week, so every other run keeps its keys.
+    ...(rows.some((row) => row.minimum_week_minutes != null) ? { minimumWeekPayCents: total(['minimum_week_pay_cents']) } : {}),
+    // Present only when a check of the run paid a production share.
+    ...(rows.some((row) => Number(row.production_share_cents) > 0) ? { productionShareCents: total(['production_share_cents']) } : {}),
+    // The same for the holiday work premium.
+    ...(rows.some((row) => row.holiday_work_minutes != null) ? { holidayWorkPremiumCents: total(['holiday_work_premium_cents']) } : {}),
   };
 }
 
@@ -376,12 +547,22 @@ const runColumns = (conn) => [
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
   conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"),
   'created_at', 'finalized_at', 'voided_at',
+  // The time off a finalized run did not pay and the bank payouts it decided (time-off bank), kept with the
+  // run; not read with the gate off.
+  ...(timeOffOn() ? ['unpaid_time_off', 'bank_payouts'] : []),
 ];
 
 const checkColumns = (conn) => [
   'id', 'run_id', 'technician_id', 'employee_name', 'hourly_rate', 'regular_minutes', 'overtime_minutes',
-  ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_COLUMNS : []),
+  ...MONEY_KEYS,
+  ...(timeOffOn() ? [...TIME_OFF_COLUMNS, 'pto_earned_minutes', conn.raw("calc_snapshot->'ptoBank' as pto_bank")] : []),
   ...PAY_LINE_KEYS, ...UNEMPLOYMENT_COLUMNS, ...SIMPLE_COLUMNS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
+  // The minimum paid week, read whatever the gates are: a check that paid one shows it.
+  'minimum_week_minutes', 'minimum_week_pay_cents',
+  // The production share, read whatever the gates are: a check that stored one shows it.
+  'production_share_cents', conn.raw("calc_snapshot->'productionShare' as production_share"),
+  // The holiday work premium, read whatever the gates are: a check that paid one shows it.
+  'holiday_work_minutes', 'holiday_work_premium_cents', conn.raw("calc_snapshot->'holidayWorkDays' as holiday_work_days"),
   'ytd_gross_before_cents', 'w4_election_id', 'pay_method', 'check_number', 'status',
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
   conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"),
@@ -431,11 +612,27 @@ function serializeCheck(row) {
       ptoPayCents: Number(row.pto_pay_cents || 0),
       holidayPayCents: Number(row.holiday_pay_cents || 0),
     } : {}),
+    ...bankView(row),
+    // The minimum paid week (payroll-week-minimum.js): only on a check of a technician who has one.
+    ...(row.minimum_week_minutes != null ? {
+      minimumWeekMinutes: Number(row.minimum_week_minutes),
+      minimumWeekHours: hoursText(row.minimum_week_minutes),
+      minimumWeekPayCents: Number(row.minimum_week_pay_cents),
+    } : {}),
+    // The production share (payroll-production-share.js): only on a check that stored one.
+    ...productionSharePay.viewOf(row),
+    // The holiday work premium (the extra half of hours worked on a holiday taken): only on a check that has one.
+    ...(row.holiday_work_minutes != null ? {
+      holidayWorkMinutes: Number(row.holiday_work_minutes),
+      holidayWorkHours: hoursText(row.holiday_work_minutes),
+      holidayWorkPremiumCents: Number(row.holiday_work_premium_cents),
+    } : {}),
     ...(payLinesOn() || storedLines(row) ? {
       reviewBonusCents: Number(row.review_bonus_cents || 0),
       commissionCents: Number(row.commission_cents || 0),
       healthAllowanceCents: Number(row.health_allowance_cents || 0),
       hsaEmployerCents: Number(row.hsa_employer_cents || 0),
+      ...(row.tech_rewards_cents != null ? { techRewardsCents: Number(row.tech_rewards_cents) } : {}),
       lineOvertimePremiumCents: Number(row.line_overtime_premium_cents || 0),
       payLines: Array.isArray(row.pay_lines) ? row.pay_lines : [],
     } : {}),
@@ -471,18 +668,12 @@ async function withPaperPayments(conn, rows) {
 
 // Technicians with worked time in the week, approved or not. Same test as the
 // timesheet approval screen, so "waiting" matches what the office sees there.
+
 async function workedTechnicianIds(conn, start, end) {
   const daily = await conn('time_entry_daily_summary')
     .where('work_date', '>=', start)
     .where('work_date', '<=', end)
-    .whereRaw(`(
-      COALESCE(total_shift_minutes, 0) <> 0
-      OR COALESCE(total_job_minutes, 0) <> 0
-      OR COALESCE(total_drive_minutes, 0) <> 0
-      OR COALESCE(total_break_minutes, 0) <> 0
-      OR COALESCE(total_admin_minutes, 0) <> 0
-      OR COALESCE(job_count, 0) <> 0
-    )`)
+    .whereRaw(STAFF_DAILY_WORK_SQL)
     .select('technician_id');
   const entries = await conn('time_entries')
     .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
@@ -491,21 +682,52 @@ async function workedTechnicianIds(conn, start, end) {
   return [...new Set([...daily, ...entries].map((row) => row.technician_id))];
 }
 
+// The Monday of a date's Monday-Sunday pay week, as a PostgreSQL date expression (staffWeekStartForWorkDate, in SQL).
+const weekStartSql = (dateSql) => `(${dateSql} - (EXTRACT(ISODOW FROM ${dateSql})::int - 1))`;
+
+// The same test by week, for the technicians in `ids`: Map of technician id -> Set of the pay weeks (their Mondays) in
+// [start, end] that hold recorded work (a daily summary with worked time, or a time entry that is not voided). `start` is a
+// Monday and `end` a Sunday. Two queries, whatever the span, and each returns at most one row per technician per week:
+// PostgreSQL finds the week, so a year of days and time entries is never read or converted here (the callers hold the
+// payroll lock).
+async function workedWeeksByTechnician(conn, ids, start, end) {
+  const byTech = new Map(ids.map((id) => [id, new Set()]));
+  if (!ids.length) return byTech;
+  const daily = await conn('time_entry_daily_summary')
+    .whereIn('technician_id', ids).where('work_date', '>=', start).where('work_date', '<=', end)
+    .whereRaw(STAFF_DAILY_WORK_SQL)
+    .distinct('technician_id', conn.raw(`to_char(${weekStartSql('work_date')}, 'YYYY-MM-DD') AS week_start`));
+  const entries = await conn('time_entries')
+    .whereIn('technician_id', ids).where('status', '!=', 'voided')
+    .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
+    .distinct('technician_id', conn.raw(`to_char(${weekStartSql(STAFF_WORK_DATE_SQL)}, 'YYYY-MM-DD') AS week_start`));
+  for (const row of [...daily, ...entries]) byTech.get(row.technician_id).add(row.week_start);
+  return byTech;
+}
+
+// One technician's pay weeks with recorded work in [start, end] (a Monday to a Sunday), oldest first. Tech Rewards asks it to
+// see which weeks a line covers still need a finalized check (tech-rewards-pay-lines.js).
+async function workedWeeks(conn, technicianId, start, end) {
+  return [...(await workedWeeksByTechnician(conn, [technicianId], start, end)).get(technicianId)].sort();
+}
+
 // GATE_PAYROLL_PAY_LINES: a line's overtime is priced from the approved hours of every
 // week it covers. A covered week that holds worked time but no approved timesheet would
 // price as no hours, and the line would be paid without that week's overtime for good.
 // Map of technician id -> the oldest such week; that technician waits until it is approved.
+// The worked time of every missing week is read at once (workedWeeksByTechnician, the test workedTechnicianIds applies to
+// one week), so a line that covers a year costs the same two queries as a line that covers a week.
 async function lineWeeksWaiting(conn, priced) {
-  const techsByWeek = new Map();
-  for (const [technicianId, { missingWeeks = [] }] of priced) {
-    for (const week of missingWeeks) techsByWeek.set(week, [...(techsByWeek.get(week) || []), technicianId]);
-  }
+  const missing = [...priced].filter(([, { missingWeeks = [] }]) => missingWeeks.length)
+    .map(([technicianId, { missingWeeks }]) => [technicianId, [...missingWeeks].sort()]);
   const waitingOn = new Map();
-  for (const week of [...techsByWeek.keys()].sort()) {
-    const worked = new Set(await workedTechnicianIds(conn, week, addStaffWorkDays(week, 6)));
-    for (const technicianId of techsByWeek.get(week)) {
-      if (worked.has(technicianId) && !waitingOn.has(technicianId)) waitingOn.set(technicianId, week);
-    }
+  if (!missing.length) return waitingOn;
+  const weeks = missing.flatMap(([, own]) => own).sort();
+  const worked = await workedWeeksByTechnician(conn, missing.map(([technicianId]) => technicianId),
+    weeks[0], addStaffWorkDays(weeks[weeks.length - 1], 6));
+  for (const [technicianId, own] of missing) {
+    const week = own.find((candidate) => worked.get(technicianId).has(candidate));
+    if (week) waitingOn.set(technicianId, week);
   }
   return waitingOn;
 }
@@ -532,6 +754,17 @@ async function lineWeeksUnreviewed(conn, priced) {
   return heldOn;
 }
 
+// The oldest week for which the two guards above would make a run wait or hold a check, for ONE pay line of a technician
+// ({ amountCents, earnedWeekStart, coversFrom, coversTo }), or null. Tech Rewards asks before it writes a line
+// (tech-rewards-pay-lines.js waitOf), so a line it writes never holds a pay run.
+async function lineGuardWeek(conn, technicianId, line) {
+  // only the covered weeks are read here, never the premium, so what earlier checks paid is not read
+  const priced = await priceLines(conn, new Map([[technicianId, { lines: [line] }]]), { history: false });
+  const waitingOn = (await lineWeeksWaiting(conn, priced)).get(technicianId);
+  const unreviewed = shiftCloseReviewLive() ? (await lineWeeksUnreviewed(conn, priced)).get(technicianId) : undefined;
+  return [waitingOn, unreviewed].filter(Boolean).sort()[0] || null;
+}
+
 // GATE_PAYROLL_TIME_OFF: paid time off and holiday minutes of W-2 technicians
 // dated inside the week, summed per technician. Map of id -> { pto, holiday }.
 async function timeOffByTechnician(conn, start, end) {
@@ -549,6 +782,17 @@ async function timeOffByTechnician(conn, start, end) {
     byTech.set(row.technician_id, entry);
   }
   return byTech;
+}
+
+// A worked row with its holiday work (holiday_work_minutes and holiday_work_days: the paid minutes worked on each holiday
+// taken, payroll-holiday-work.js holidayWorkByDay), none when it has none. Never more than the minutes the check pays
+// as worked, so the premium is never paid on hours the check does not pay.
+function rowWithHolidayWork(row, byTechnician) {
+  const found = byTechnician.get(row.technician_id) || { days: [], meals: [] };
+  const capped = capHolidayDays(found.days, Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0));
+  if (capped.minutes > 0) return { ...row, holiday_work_minutes: capped.minutes, holiday_work_days: capped.days, holiday_work_meals: found.meals };
+  // no premium (a meal took all the holiday minutes): the meals read are still kept on the check as evidence, the premium columns stay null
+  return found.meals.length ? { ...row, holiday_work_meals: found.meals } : row;
 }
 
 // Year-to-date before a pay date, in cents: finalized, non-voided checks of the same calendar
@@ -580,12 +824,111 @@ async function ytdBefore(conn, technicianIds, payDate, weekStart) {
   return byTech;
 }
 
+// What every check on a run needs beside the technician's own row, for the technicians in `ids`: pay of the year before this
+// check, SIMPLE IRA savings of the year, and who skips FUTA and RT-6 on the pay date.
+async function checkInputs(conn, run, ids, { lock = false } = {}) {
+  return {
+    ytd: await ytdBefore(conn, ids, run.pay_date, run.week_start),
+    simpleYtd: await simpleYtdBefore(conn, ids, run.pay_date, run.week_start),
+    // GATE_PAYROLL_FAMILY_EMPLOYEE: technicians whose pay on the pay date skips FUTA and RT-6 (empty when off).
+    familyLive: familyEmployeeOn(),
+    familyExempt: await familyExemptIds(conn, ids, run.pay_date, { lock }),
+  };
+}
+
+// One technician's check on the run from those figures: { check } or { blocked } (buildCheck).
+async function buildFor(conn, run, tech, inputs) {
+  const id = tech.technician_id;
+  const yearToDate = inputs.ytd.get(id);
+  return buildCheck({
+    tech,
+    payDate: run.pay_date,
+    weekStart: run.week_start,
+    w4: await currentW4For(id, run.pay_date, conn),
+    ytdGrossCents: yearToDate.gross,
+    ytdUnemploymentCents: yearToDate.unemployment,
+    simple: await simpleInputFor(id, run.pay_date, inputs.simpleYtd.get(id), conn),
+    // GATE_PAYROLL_FAMILY_EMPLOYEE: decided and stored with the gate on, and also after it is turned
+    // off for anyone whose year already holds exempt pay, so that pay never uses up the $7,000 base.
+    unemploymentExempt: inputs.familyLive || yearToDate.unemployment !== yearToDate.gross
+      ? inputs.familyExempt.has(id) : undefined,
+  });
+}
+
+// Why a check that holds only this pay line ({ kind, amountCents }) and no hours cannot be worked out for the technician on this
+// run, in buildCheck's own words (no pay rate, a rate under the minimum wage, ...), or null when it can. It is the smallest check
+// the technician can get: when it fails, any check of theirs on this run fails. Tech Rewards asks before it writes a line
+// (tech-rewards-pay-lines.js waitOf), so a line it writes never makes a check that blocks the run.
+async function lineOnlyCheckProblem(conn, run, technicianId, line) {
+  const row = await conn('technicians').where({ id: technicianId, employment_type: 'w2' })
+    .first('id', 'name', 'pay_rate', 'pay_method', 'flsa_overtime_covered');
+  if (!row) return 'Not a W-2 employee';
+  const [tech] = await withWeekRates(conn, [{
+    technician_id: row.id, name: row.name, pay_rate: row.pay_rate, pay_method: row.pay_method,
+    flsa_overtime_covered: row.flsa_overtime_covered, regular_minutes: 0, overtime_minutes: 0, pto_minutes: 0, holiday_minutes: 0,
+  }], run.week_start);
+  const built = await buildFor(conn, run, { ...tech, pay_lines: [line] }, await checkInputs(conn, run, [technicianId]));
+  return built.blocked || null;
+}
+
+// A bank payout waits until every earlier week of the technician is paid: Map of technician id -> the reason, for
+// each of `payouts` (applyBank) who has such a week. A payout pays what the bank holds after its week, and the bank
+// is zero after it: a paycheck for an earlier week made final later would earn hours the payout missed. That week
+// is then paid on a later pay date, by a catch-up check that pays those hours out itself (payroll-time-off-bank.js
+// paidOutInLaterWeek), in another pay period. So the run holds the payout's row while such a week is on file, with
+// the oldest one: the weeks are paid in order and one payout holds everything. The test is the one a Tech Rewards line
+// waits on (oldestUnpaidWeek: a timesheet with minutes, recorded work or time off, and no final check or kept
+// "not paid" decision), less a week whose pay run is final: nothing can pay that week any more, so it never holds a
+// payout. The weeks are asked from the hire date or an earlier stay on (payoutAsksFrom).
+const EVERY_WEEK_FROM = '2000-01-03';
+
+// finalizeRun's refusal under a later final run that paid out the time-off bank of a technician on this run. That
+// run cannot be voided once its payment is sent (payroll-mercury.js assertNoOpenPayments), so the way out is named.
+const LATER_RUN_PAID_OUT = 'A later pay run is already final, and it paid out the time-off bank of an employee on this pay run. Void it first, then finalize this one. If its payment was sent, make this pay run again with a pay date after that pay run\'s.';
+async function payoutWaits(conn, payouts, start) {
+  const waits = new Map();
+  if (!payouts.length) return waits;
+  const coversTo = addStaffWorkDays(start, -1);
+  const asksFrom = await payoutAsksFrom(conn, payouts.map((row) => row.technicianId));
+  for (const row of payouts) {
+    const coversFrom = asksFrom.get(row.technicianId);
+    const week = coversFrom <= coversTo ? await oldestUnpaidWeek(conn, row.technicianId, { coversFrom, coversTo, skipClosed: true }) : null;
+    if (week) waits.set(row.technicianId, timeOffBank.weekBeforePayoutReason(week));
+  }
+  return waits;
+}
+
+// The first day payoutWaits asks about, for each technician: Map of id -> 'YYYY-MM-DD'. It is the hire date, or
+// the first fact on file that only a W-2 employee has when that is earlier (an earlier stay: a rehire moved the
+// hire date forward): a check of theirs in a pay run that was final once (voided since or not) or in a draft that
+// is open now, a decision such a final run kept for them with no check (time off left unpaid, a bank paid out),
+// or a time-off entry. Work on file before that day is not asked: nothing tells an unpaid week there from work
+// that was paid outside pay runs (contractor pay before the employee became W-2, or wages before pay runs
+// started), and such a week would hold every payout for good. With no hire date on file, EVERY earlier week is
+// asked. Such a fact only ever moves the first day back from the hire date, never forward: a draft or a paycheck
+// of a later week hides no earlier week. A week this leaves out can still be paid after the payout, on a later
+// pay date: its check is a catch-up check (payroll-time-off-bank.js paidOutInLaterWeek).
+async function payoutAsksFrom(conn, ids) {
+  const hired = await conn('technicians').whereIn('id', ids).select('id', conn.raw("to_char(hire_date, 'YYYY-MM-DD') as hire_date"));
+  const paid = await conn('payroll_checks as c').join('payroll_runs as r', 'r.id', 'c.run_id')
+    .whereIn('c.technician_id', ids)
+    .where((runs) => runs.where('r.status', 'draft').orWhereNotNull('r.finalized_at'))
+    .groupBy('c.technician_id')
+    .select('c.technician_id', conn.raw("to_char(MIN(c.week_start), 'YYYY-MM-DD') as week_start"));
+  const firstCheck = new Map(paid.map((row) => [row.technician_id, row.week_start]));
+  const firstFact = await timeOffBank.firstBankFactDays(conn, ids);
+  return new Map(hired.map((row) => {
+    const first = [firstCheck.get(row.id), firstFact.get(row.id)].filter(Boolean).sort()[0];
+    return [row.id, row.hire_date ? [row.hire_date, first].filter(Boolean).sort()[0] : EVERY_WEEK_FROM];
+  }));
+}
+
 /**
  * Works out the whole run from current data: { checks, blocked, waiting }.
  * With lock, the approved weekly rows are locked FOR UPDATE, so an unlock of
  * that week waits for this transaction (unlockWeek then sees the finalized check).
  */
-async function evaluate(conn, run, { lock = false } = {}) {
+async function evaluate(conn, run, { lock = false, shareInputs = null } = {}) {
   const start = run.week_start;
   const end = addStaffWorkDays(start, 6);
   const approvedQuery = conn('time_weekly_summary as w')
@@ -617,22 +960,28 @@ async function evaluate(conn, run, { lock = false } = {}) {
   let timeOffOnlyRows = [];
   if (timeOffOn()) {
     const timeOff = await timeOffByTechnician(conn, start, end);
+    const holidayWork = await holidayWorkByDay(conn, start, end);
     withHours = workedRows.map((row) => {
       const off = timeOff.get(row.technician_id);
-      return { ...row, pto_minutes: off ? off.pto : 0, holiday_minutes: off ? off.holiday : 0 };
+      return rowWithHolidayWork({ ...row, pto_minutes: off ? off.pto : 0, holiday_minutes: off ? off.holiday : 0 }, holidayWork);
     });
     const workedIds = new Set(workedRows.map((row) => row.technician_id));
-    const offOnlyIds = [...timeOff.keys()].filter((id) => !workedIds.has(id) && !waitingIds.has(id));
+    // A technician whose time-off bank this run pays out gets a row with no time off in the week too.
+    const offOrPayoutIds = new Set([...timeOff.keys(), ...(await timeOffBank.payoutTechnicianIds(conn, start))]);
+    const offOnlyIds = [...offOrPayoutIds].filter((id) => !workedIds.has(id) && !waitingIds.has(id));
     if (offOnlyIds.length) {
       const techs = await conn('technicians').whereIn('id', offOnlyIds).where({ employment_type: 'w2' })
         .orderBy([{ column: 'name' }, { column: 'id' }])
         .select('id', 'name', 'pay_rate', 'pay_method', 'flsa_overtime_covered');
-      timeOffOnlyRows = techs.map((row) => ({
-        technician_id: row.id, name: row.name, pay_rate: row.pay_rate, pay_method: row.pay_method,
-        flsa_overtime_covered: row.flsa_overtime_covered,
-        regular_minutes: 0, overtime_minutes: 0,
-        pto_minutes: timeOff.get(row.id).pto, holiday_minutes: timeOff.get(row.id).holiday,
-      }));
+      timeOffOnlyRows = techs.map((row) => {
+        const off = timeOff.get(row.id) || { pto: 0, holiday: 0 };
+        return {
+          technician_id: row.id, name: row.name, pay_rate: row.pay_rate, pay_method: row.pay_method,
+          flsa_overtime_covered: row.flsa_overtime_covered,
+          regular_minutes: 0, overtime_minutes: 0,
+          pto_minutes: off.pto, holiday_minutes: off.holiday,
+        };
+      });
     }
   }
   // GATE_PAYROLL_PAY_LINES: open pay lines ride on the technician's check. A technician
@@ -652,18 +1001,57 @@ async function evaluate(conn, run, { lock = false } = {}) {
       reason: `Timesheet for the week of ${week} is not approved yet, and a pay line covers that week`,
     });
   }
-  const linesOnlyRows = [...lineMap.values()]
+  let linesOnlyRows = [...lineMap.values()]
     .filter(({ tech }) => !haveCheck.has(tech.technician_id))
     .map(({ tech }) => ({ ...tech, regular_minutes: 0, overtime_minutes: 0, pto_minutes: 0, holiday_minutes: 0 }));
+  // Time-off bank, over every row that can become a check: the bank pays the week's paid time off, the check
+  // earns hours, and a pay-line-only check carries the bank figures too. A week of time off alone that the
+  // bank pays nothing of makes no check unless a pay line needs one. Time off not paid is listed with its reason.
+  let bankHolds = new Map();
+  let unpaidTimeOff = [];
+  let payouts = [];
+  if (timeOffOn()) {
+    const banked = await timeOffBank.applyBank(conn, [...withHours, ...timeOffOnlyRows, ...linesOnlyRows], {
+      start, end, payDate: run.pay_date, lock,
+    });
+    ({ holds: bankHolds, unpaid: unpaidTimeOff, payouts } = banked);
+    // A payout whose technician has an earlier week still to pay is held, and the run decides nothing for them.
+    const payoutHolds = await payoutWaits(conn, payouts, start);
+    for (const [technicianId, reason] of payoutHolds) bankHolds.set(technicianId, reason);
+    unpaidTimeOff = unpaidTimeOff.filter((row) => !payoutHolds.has(row.technicianId));
+    // The minimum paid week of a technician who has one (payroll-week-minimum.js): a week of time off the bank
+    // could not pay in full still gets a check when the minimum adds hours to it.
+    const minimum = await weekMinimum.applyMinimum(conn, banked.rows, { start, end, lock });
+    const settled = minimum.rows;
+    for (const [technicianId, reason] of minimum.holds) if (!bankHolds.has(technicianId)) bankHolds.set(technicianId, reason);
+    const needsCheck = (row) => bankHolds.has(row.technician_id) || lineMap.has(row.technician_id)
+      || Number(row.pto_minutes) + Number(row.holiday_minutes) + Number(row.minimum_week_minutes || 0) > 0;
+    const offEnd = withHours.length + timeOffOnlyRows.length;
+    linesOnlyRows = settled.slice(offEnd);
+    timeOffOnlyRows = settled.slice(withHours.length, offEnd).filter(needsCheck);
+    withHours = settled.slice(0, withHours.length);
+  }
   // Each check pays the rate of ITS week (payroll-rate-steps.js); with no pay rate step the rows are unchanged.
   const payable = await withWeekRates(conn,
     [...withHours, ...timeOffOnlyRows, ...linesOnlyRows].filter((row) => !waitingIds.has(row.technician_id)), start);
-  const payableIds = payable.map((row) => row.technician_id);
-  const ytd = await ytdBefore(conn, payableIds, run.pay_date, start);
-  const simpleYtd = await simpleYtdBefore(conn, payableIds, run.pay_date, start);
-  // GATE_PAYROLL_FAMILY_EMPLOYEE: technicians whose pay on the pay date skips FUTA and RT-6 (empty when off).
-  const familyLive = familyEmployeeOn();
-  const familyExempt = await familyExemptIds(conn, payableIds, run.pay_date, { lock });
+  const inputs = await checkInputs(conn, run, payable.map((row) => row.technician_id), { lock });
+  // GATE_PAYROLL_PRODUCTION_SHARE: the share of the run's own week, for a technician with approved hours (a check that holds only
+  // time off or old pay lines pays none). The share counts in the regular rate of its own week, so a technician with a share above
+  // $0 is priced again with the share as one more line of the week (payroll-production-share.js says how).
+  const workedIds = new Set(withHours.map((row) => row.technician_id));
+  const shareRows = payable.filter((row) => workedIds.has(row.technician_id));
+  // The credit inputs come from one snapshot read before the pay run's transaction opened (readShareInputs); a caller that read
+  // none (the view of a draft) reads them here, on the connection it has.
+  // finalize passes a function: the authoritative read under the lock is narrowed to exactly the technicians this run can pay a share to.
+  const shareIds = shareRows.map((row) => row.technician_id);
+  const shareSource = typeof shareInputs === 'function' ? await shareInputs(shareIds) : (shareInputs || await productionSharePay.readInputs(conn, start));
+  const shares = productionSharePay.sharesFor(shareSource, shareIds, start);
+  const sharePriced = await priceLines(conn, new Map(shareRows
+    .filter((row) => shares.get(row.technician_id) && shares.get(row.technician_id).shareCents > 0)
+    .map((row) => [row.technician_id, {
+      tech: row,
+      lines: [...((lineMap.get(row.technician_id) || {}).lines || []), productionSharePay.priceableLine(start, shares.get(row.technician_id).shareCents)],
+    }])), { lock });
   // GATE_SHIFT_CLOSE_REVIEW: a week holding a shift the system closed (the
   // 11 PM job or the 14-hour check) that no admin has edited or confirmed
   // cannot be paid yet. Minutes are not changed; the line is only held.
@@ -681,6 +1069,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
   // per technician; the run's own week comes last, so its reason wins.
   const lineUnreviewed = shiftCloseReviewLive() ? await lineWeeksUnreviewed(conn, priced) : new Map();
   const holds = new Map([
+    ...bankHolds,
     ...[...lineUnreviewed].map(([id, week]) => [id, `${AUTO_CLOSE_BLOCK_REASON} in the week of ${week}, which a pay line covers`]),
     ...[...unreviewed].map((id) => [id, AUTO_CLOSE_BLOCK_REASON]),
   ]);
@@ -688,31 +1077,41 @@ async function evaluate(conn, run, { lock = false } = {}) {
   const blocked = [];
   for (const row of payable) {
     const held = lineMap.get(row.technician_id);
-    const tech = held ? { ...row, pay_lines: held.lines, line_premium: priced.get(row.technician_id) } : row;
+    const share = shares.get(row.technician_id);
+    // A share that pays brings its own pricing: the technician's lines and the share, over the run's week.
+    const premium = share && share.shareCents > 0 ? sharePriced.get(row.technician_id) : priced.get(row.technician_id);
+    const tech = {
+      ...row,
+      ...(held ? { pay_lines: held.lines } : {}),
+      ...(held || (share && share.shareCents > 0) ? { line_premium: premium } : {}),
+      ...(share ? { production_share: share } : {}),
+    };
     const hold = holds.get(tech.technician_id);
     if (hold) {
       blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: hold });
       continue;
     }
-    const w4 = await currentW4For(tech.technician_id, run.pay_date, conn);
-    const yearToDate = ytd.get(tech.technician_id);
-    const built = buildCheck({
-      tech,
-      payDate: run.pay_date,
-      weekStart: start,
-      w4,
-      ytdGrossCents: yearToDate.gross,
-      ytdUnemploymentCents: yearToDate.unemployment,
-      simple: await simpleInputFor(tech.technician_id, run.pay_date, simpleYtd.get(tech.technician_id), conn),
-      // GATE_PAYROLL_FAMILY_EMPLOYEE: decided and stored with the gate on, and also after it is turned
-      // off for anyone whose year already holds exempt pay, so that pay never uses up the $7,000 base.
-      unemploymentExempt: familyLive || yearToDate.unemployment !== yearToDate.gross
-        ? familyExempt.has(tech.technician_id) : undefined,
-    });
+    if (share && share.error) {
+      blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: share.error });
+      continue;
+    }
+    const built = await buildFor(conn, run, tech, inputs);
     if (built.blocked) blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: built.blocked });
     else checks.push({ ...built.check, run_id: run.id });
   }
-  return { checks, blocked, waiting, lines: lineMap };
+  // The bank payouts this run decides: not for a technician who waits or is blocked, whose paycheck no run has
+  // worked out yet. One with an empty bank has no check and is still on the list.
+  const undecided = new Set([...waitingIds, ...blocked.map((row) => row.technicianId)]);
+  const bankPayouts = payouts.filter((row) => !undecided.has(row.technicianId));
+  // Every payout set for this week ends as a payout the run keeps, or as a row the run shows (waiting or blocked).
+  // Finalize refuses a run that shows one, so no payout disappears without a word, whatever took the bank away.
+  // The rows on screen are asked, never `waitingIds`: that set also holds people the run shows no row for (a
+  // contractor with a time entry).
+  if (timeOffOn()) {
+    const shown = [...bankPayouts, ...waiting, ...blocked].map((row) => row.technicianId);
+    blocked.push(...await timeOffBank.payoutsNoRunRead(conn, start, new Set(shown)));
+  }
+  return { checks, blocked, waiting, lines: lineMap, unpaidTimeOff, bankPayouts };
 }
 
 // Bank status of each finalized check (GATE_PAYROLL_BANK_MATCH): matched with the date of the
@@ -760,11 +1159,27 @@ async function runView(conn, runId, { evaluation = null } = {}) {
     totals: sumRows(rows),
     token: tokenOf(run, rows),
   };
+  // A run that is no longer a draft shows the time off it did not pay, and the bank payouts it decided, as
+  // finalize kept them; a draft lists them live below.
+  if (run.status !== 'draft') Object.assign(view, bankLists(run.unpaid_time_off, run.bank_payouts));
   if (run.status === 'draft') {
     const live = evaluation || await evaluate(conn, run);
     view.blocked = live.blocked;
     view.waiting = live.waiting;
     view.stale = tokenOf(run, live.checks) !== view.token;
+    // Time off a time-off bank did not pay, and the bank payouts this run decides (a technician leaves). The lists
+    // are of now, so the token takes them: finalize refuses once when a list changed after this view. With
+    // neither, the token is the one above.
+    Object.assign(view, bankLists(live.unpaidTimeOff, live.bankPayouts));
+    view.token = tokenOf(run, rows, live.unpaidTimeOff, live.bankPayouts);
+  }
+  // plain notes about a December gift, a stay bonus or a season bonus that waits (tech-rewards-pay-lines.js waitNotes); present only when there is one
+  const notes = run.status === 'voided' ? [] : await waitNotes(conn, runId);
+  if (notes.length) view.techRewardsNotes = notes;
+  // Stops that need review in a draft's production shares: the owner reads this before he finalizes. Present only when there is one.
+  if (run.status === 'draft') {
+    const reviewNotes = view.checks.map((check) => productionSharePay.reviewNote(check.name, check.productionShare && check.productionShare.needsReviewCount)).filter(Boolean);
+    if (reviewNotes.length) view.productionShareNotes = reviewNotes;
   }
   return view;
 }
@@ -776,7 +1191,7 @@ async function listRuns(conn = db) {
     .select(runColumns(conn));
   if (!runs.length) return [];
   const rows = await conn('payroll_checks').whereIn('run_id', runs.map((run) => run.id))
-    .select(['run_id', ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_PAY_COLUMNS : [])]);
+    .select(['run_id', ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_PAY_COLUMNS : []), 'minimum_week_minutes', 'minimum_week_pay_cents', 'production_share_cents', 'holiday_work_minutes', 'holiday_work_premium_cents']);
   const byRun = new Map();
   for (const row of rows) {
     if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);
@@ -831,11 +1246,61 @@ const syncCommission = (trx, weekStart, actorId) => syncCommissionLines(trx, {
   weekEnd: addStaffWorkDays(weekStart, 6), lock: true, actorId,
 });
 
+// Tech Rewards lines (GATE_TECH_REWARDS_PAY_LINES, GATE_TECH_REWARDS_STAY_BONUS, GATE_TECH_REWARDS_SEASON_BONUS), at the same three points. Takes the run row. It runs after applyDueSteps:
+// it asks whether a check can be worked out for the technician, and a pay rate step that is due changes that answer.
+// `seasonScores`: the season score figures a season bonus is worked out from (readSeasonScores, readSeasonScoresOfRun). Each
+// run write reads them BEFORE its transaction opens, in one snapshot whose connection is given back first, so a pay run never
+// holds the payroll lock while it waits for a second connection. The sync reads each score again under the lock and holds a
+// bonus whose score changed in between. Null, and nothing read, on a run dated for no season bonus.
+const syncTechRewards = (trx, run, actorId, seasonScores) => syncTechRewardLines(run, trx, { actorId, seasonScores });
+// The Tech Rewards lines a void or a finalize took off (dropRewardLinesOfWeek), for that event's audit row: ids only. The key is
+// absent when there were none, so every other run's event is unchanged.
+const removedRewards = (ids) => (ids.length ? { tech_rewards_line_ids_removed: ids } : {});
+
 // The payroll lock comes before the run row, the order finalizeRun uses. Pay lines need it, and so does a pay
-// rate step that is due (applyDueSteps changes technicians.pay_rate). `today` is read once per run write, so
-// the answer here and in applyDueSteps is the same. With no step due and pay lines off, no lock is taken.
+// rate step that is due (applyDueSteps changes technicians.pay_rate). Time off needs it too: the evaluation
+// locks the week's approved rows and then the rows of the technicians who have a time-off bank, and a manual
+// shift entry takes this lock before it locks its technician row and reads the week. Without it the two can
+// deadlock. `today` is read once per run write, so the answer here and in applyDueSteps is the same. With no
+// step due and both gates off, no lock is taken.
 async function lockRunWrite(trx, today) {
-  if (payLinesOn() || await hasDueSteps(trx, today)) await lockPayrollMutations(trx);
+  if (payLinesOn() || timeOffOn() || productionSharePay.shareOn() || await hasDueSteps(trx, today)) await lockPayrollMutations(trx);
+}
+
+// The production share credit inputs of a pay week, read in one snapshot BEFORE a pay run write opens its transaction (see
+// payroll-production-share.js readInputs). The week of an existing run is read first; an unknown run reads nothing (the
+// transaction then refuses it as it always did).
+async function readShareInputsOfRun(conn, runId) {
+  if (!productionSharePay.shareOn()) return null;
+  const run = await conn('payroll_runs').where({ id: runId }).first(conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"));
+  return run ? productionSharePay.readInputs(conn, run.week_start) : null;
+}
+
+// The share inputs finalize works from, under the payroll lock: the ones read before the lock when a read made now agrees with
+// them, else the read made now. The gate is judged NOW: off at the lock = no shares at all (whatever was read before is discarded,
+// as the gate may have been turned off meanwhile); on at the lock with nothing read before (the gate was turned on meanwhile) = the
+// read of now. The read of now runs on the finalize transaction itself (readInputsUnderLock, no per-technician retry): no second
+// connection is taken while the payroll lock is held, and its consistency comes from listing every technician's stops in ONE
+// statement. It also sees every commit made before the lock was taken.
+async function shareInputsUnderLock(trx, run, earlier, technicianIds) {
+  if (!productionSharePay.shareOn()) return new Map();
+  const now = await productionSharePay.readInputsUnderLock(trx, run.week_start, technicianIds);
+  if (!earlier) return now;
+  const before = productionSharePay.restrictInputs(earlier, technicianIds);
+  return productionSharePay.revisionOf(now) === productionSharePay.revisionOf(before) ? before : now;
+}
+
+// The check on the stability of what was frozen. Under the payroll lock the finalize transaction is READ COMMITTED and cannot take a
+// snapshot of its own (a second connection while the lock is held could stall the pool; a REPEATABLE READ transaction takes its snapshot
+// BEFORE it waits for the lock). The stops and the invoice facts are therefore separate statements, and billing edits do not take the
+// payroll lock. So the credits are read a second time just before the run turns final, and finalize refuses (409, nothing is saved)
+// when the two reads differ: what was frozen is then what was stable across the whole finalize.
+async function confirmShareInputs(trx, run, used, technicianIds) {
+  if (!used || !technicianIds || !productionSharePay.shareOn()) return;
+  const again = await productionSharePay.readInputsUnderLock(trx, run.week_start, technicianIds);
+  if (productionSharePay.revisionOf(again) !== productionSharePay.revisionOf(productionSharePay.restrictInputs(used, technicianIds))) {
+    throw new PayrollError(409, 'The production share credits changed while this run was being finalized. Review the run and try again.');
+  }
 }
 
 async function draftRun(input, actor, conn = db) {
@@ -845,6 +1310,8 @@ async function draftRun(input, actor, conn = db) {
   const actorId = actorOf(actor);
   const taken = new PayrollError(409, 'That week already has a pay run. Open it, or void it first.');
   const today = etDateString();
+  const seasonScores = await readSeasonScores(conn, payDate);
+  const shareInputs = await productionSharePay.readInputs(conn, start);
   let runId;
   try {
     runId = await conn.transaction(async (trx) => {
@@ -856,9 +1323,16 @@ async function draftRun(input, actor, conn = db) {
       await syncReviewBonuses(trx, start, actorId);
       await syncCommission(trx, start, actorId);
       await applyDueSteps(trx, { today });
-      const evaluation = await evaluate(trx, run, { lock: true });
-      if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length) {
-        throw new PayrollError(409, 'No W-2 hours to pay for that week.');
+      await syncTechRewards(trx, run, actorId, seasonScores);
+      const evaluation = await evaluate(trx, run, { lock: true, shareInputs });
+      // A week whose time off a time-off bank did not pay still gets a run, also with no paycheck: finalizing it
+      // closes the week, so the unpaid decision is kept and those hours stop waiting for a pay run. The same for a
+      // week whose only decision is the payout of an empty bank: finalizing it settles the owner's instruction.
+      if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length && !decidesWithNoCheck(evaluation)) {
+        // No run is kept (this rolls back), so there is no screen to list a waiting Tech Rewards line on: the message says
+        // each one, with its reason and the last pay date that can add it. Read before the rollback takes the run row.
+        const waitingRewards = await waitNotes(trx, id);
+        throw new PayrollError(409, ['No W-2 hours to pay for that week.', ...waitingRewards.map((note) => `${note}.`)].join(' '));
       }
       await replaceDraftChecks(trx, id, evaluation.checks);
       await audit(trx, actorId, 'payroll.run_drafted', 'payroll_runs', id, { run_id: id });
@@ -875,6 +1349,8 @@ async function recomputeRun(runId, actor, conn = db) {
   requireUuid(runId, 'Pay run');
   const actorId = actorOf(actor);
   const today = etDateString();
+  const seasonScores = await readSeasonScoresOfRun(conn, runId);
+  const shareInputs = await readShareInputsOfRun(conn, runId);
   await conn.transaction(async (trx) => {
     await lockRunWrite(trx, today);
     const run = await loadRun(trx, runId, { lock: true });
@@ -882,7 +1358,8 @@ async function recomputeRun(runId, actor, conn = db) {
     await syncReviewBonuses(trx, run.week_start, actorId);
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx, { today });
-    const evaluation = await evaluate(trx, run, { lock: true });
+    await syncTechRewards(trx, run, actorId, seasonScores);
+    const evaluation = await evaluate(trx, run, { lock: true, shareInputs });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
   });
@@ -928,6 +1405,8 @@ async function finalizeRun(runId, input, actor, conn = db) {
   const v = validate(finalizeSchema, input);
   const actorId = actorOf(actor);
   let changed = false;
+  const seasonScores = await readSeasonScoresOfRun(conn, runId);
+  const shareInputs = await readShareInputsOfRun(conn, runId);
   await conn.transaction(async (trx) => {
     await lockPayrollMutations(trx);
     const run = await loadRun(trx, runId, { lock: true });
@@ -935,31 +1414,100 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await syncReviewBonuses(trx, run.week_start, actorId);
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx);
-    const evaluation = await evaluate(trx, run, { lock: true });
+    await syncTechRewards(trx, run, actorId, seasonScores);
+    // The credit inputs were read before the payroll lock (one snapshot). The pay run may have waited for the lock, so they are
+    // read again here, in a snapshot taken after the lock (shareInputsUnderLock), and compared: credits that changed in between
+    // are never frozen from the old read. The fresh read is used instead, the checks are saved from it, and the token check
+    // below answers with the usual stale-run refusal when the owner has not seen those numbers.
+    let usedShare = null;
+    let shareIds = null;
+    const evaluation = await evaluate(trx, run, {
+      lock: true,
+      shareInputs: async (ids) => { shareIds = ids; usedShare = await shareInputsUnderLock(trx, run, shareInputs, ids); return usedShare; },
+    });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
-    if (!evaluation.checks.length) throw new PayrollError(409, 'There are no paychecks to finalize.');
+    // A run with no paycheck can still close a week whose time off was not paid, or settle the payout of an empty
+    // bank (see draftRun). The token check below then covers a draft whose checks are gone.
+    if (!evaluation.checks.length && !decidesWithNoCheck(evaluation)) {
+      // A draft can still show checks that are gone: its only checks rode on a pay line that another run has paid since. Keep
+      // the fresh, empty numbers as the draft, as the token check below does, so the screen shows what changed.
+      if (!(await loadCheckRows(trx, runId)).length) throw new PayrollError(409, 'There are no paychecks to finalize.');
+      await replaceDraftChecks(trx, runId, []);
+      changed = true;
+      await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
+      return;
+    }
+    // The time-off bank, in any year. "Later" is the bank's order, the pay date first.
+    // A technician whose bank this run pays out is asked too, also with no check here: the run read an empty bank,
+    // and a final check of theirs that is later in the bank's order (an earlier week on a later pay date) holds
+    // hours this payout did not see. And a payout is for the hours through its own week: it waits when a final
+    // run for a later week holds a bank check of theirs or paid their bank out, also on an earlier pay date.
+    const paidOut = evaluation.bankPayouts.map((row) => row.technicianId);
+    const banked = [...new Set([...evaluation.checks.filter(storedBank).map((check) => check.technician_id), ...paidOut])];
+    if (await timeOffBank.laterWeekBankCheckExists(trx, run, paidOut)) {
+      throw new PayrollError(409, 'A later pay run is already final. Void it first, then finalize this one.');
+    }
+    // A later final run paid out the technician's bank (also an empty one, with no check). Asked before the guard
+    // of the tax year below, which refuses the same run with fewer words: this refusal names the way that needs no
+    // void. On a pay date after that run's, this run comes after the payout, and a check for a week before the
+    // payout week is a catch-up check (payroll-time-off-bank.js paidOutInLaterWeek).
+    // Every technician with a check here is asked, also one with no yearly hours now: the hours can be cleared after
+    // a payout, and a plain check before it on an earlier pay date would pay time off the payout never saw.
+    const checked = evaluation.checks.map((check) => check.technician_id);
+    if (await timeOffBank.laterPayoutDecisionExists(trx, run, [...new Set([...banked, ...checked])])) {
+      throw new PayrollError(409, LATER_RUN_PAID_OUT);
+    }
     if (await laterFinalCheckExists(trx, run, evaluation.checks.map((check) => check.technician_id))) {
+      throw new PayrollError(409, 'A later pay run is already final. Void it first, then finalize this one.');
+    }
+    // A later check already read the bank without this run, or a later final run already left time off of the
+    // technician unpaid from it (with or without a check).
+    if (await timeOffBank.laterBankCheckExists(trx, run, banked) || await timeOffBank.laterUnpaidDecisionExists(trx, run, banked)) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first, then finalize this one.');
     }
     await replaceDraftChecks(trx, runId, evaluation.checks);
     const rows = await loadCheckRows(trx, runId);
-    if (tokenOf(run, rows) !== v.token) {
+    if (tokenOf(run, rows, evaluation.unpaidTimeOff, evaluation.bankPayouts) !== v.token) {
       // Keep the fresh numbers as the draft, so the screen shows what changed.
       changed = true;
       await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
       return;
     }
+    // The time off this run does not pay stays on the run: a technician it names can have no check to show it.
+    // Written while the row is still a draft; the row is frozen once it is final.
+    if (evaluation.unpaidTimeOff.length) {
+      await trx('payroll_runs').where({ id: runId }).update({ unpaid_time_off: JSON.stringify(evaluation.unpaidTimeOff) });
+    }
+    // The bank payouts this run decides stay on the run too: the technician's payout week can move to another week
+    // later, and a payout of an empty bank has no check.
+    if (evaluation.bankPayouts.length) {
+      await trx('payroll_runs').where({ id: runId }).update({ bank_payouts: JSON.stringify(evaluation.bankPayouts) });
+    }
+    await confirmShareInputs(trx, run, usedShare, shareIds);
     const now = trx.fn.now();
     await trx('payroll_checks').where({ run_id: runId, status: 'draft' }).update({ status: 'finalized' });
     // The lines this run paid stay locked from the evaluation above; mark them paid with their check.
     if (payLinesOn()) await markLinesPaid(trx, runId, evaluation.lines, actorId);
+    // A finalized run keeps no open Tech Rewards line: one this run did not pay (pay lines turned off since it was written)
+    // comes off, so the next run dated for it writes it. Not behind the gate.
+    const droppedRewards = await dropRewardLinesOfWeek(trx, run.week_start);
     await trx('payroll_runs').where({ id: runId }).update({ status: 'finalized', finalized_by: actorId, finalized_at: now });
-    await audit(trx, actorId, 'payroll.run_finalized', 'payroll_runs', runId, { run_id: runId });
+    await audit(trx, actorId, 'payroll.run_finalized', 'payroll_runs', runId, { run_id: runId, ...removedRewards(droppedRewards) });
   });
   if (changed) throw new PayrollError(409, 'Hours or settings changed. Review the new numbers.');
   // Tax calendar rows follow the finalized checks. Never fails the finalize.
   await syncPayrollFilingsSafe({ conn });
   return runView(conn, runId);
+}
+
+// The technicians a FINAL run decided something for in the time-off bank, as voidRun asks the order guards:
+// { banked, paidOut }, the two lists of finalizeRun, and keptPaidOut, the payouts on the run's row. Read from the
+// run's checks and its row, never from today's settings, and not behind the gate.
+async function bankDecisionsOfRun(trx, run) {
+  const keptPaidOut = await timeOffBank.keptPayoutsOfRun(trx, run.id);
+  const paidOut = [...new Set([...keptPaidOut, ...await timeOffBank.payoutTechnicianIds(trx, run.week_start)])];
+  const banked = [...new Set([...await timeOffBank.bankTechniciansOfRun(trx, run.id), ...paidOut])];
+  return { banked, paidOut, keptPaidOut };
 }
 
 async function voidRun(runId, input, actor, conn = db) {
@@ -974,15 +1522,60 @@ async function voidRun(runId, input, actor, conn = db) {
     if (run.status === 'finalized' && await laterFinalCheckExists(trx, run, rows.map((row) => row.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first.');
     }
+    // A credit a LATER final check was worked out against a paid row of this run (a visit moved to another week and shown already
+    // paid, an invoice or package paid here) would change after it was paid. Not behind the gate: a stored check keeps its dependence.
+    const dependents = run.status === 'finalized' ? await productionSharePay.dependentChecksOf(trx, runId) : [];
+    if (dependents.length) {
+      throw new PayrollError(409, `Production share credits on later pay runs were worked out against this run (${dependents.map((one) => `${one.employeeName}, week of ${one.weekStart}`).join('; ')}). Void those runs first.`);
+    }
+    // The same for the time-off bank, in any year: a later check read the bank with this run in it, or a later final
+    // run left time off unpaid that the hours this void gives back would have paid (the 16 early illness hours too),
+    // or a later final run paid out the technician's bank (also an empty one, with no check).
+    // Not behind the gate: a check that holds a bank counts in later checks either way.
+    // The technicians are the ones finalizeRun asks, read from what the run kept: the checks that hold a bank and
+    // the payouts on its row (also of an empty bank, with no check). A void also opens again every payout set for
+    // this week (one the run kept, and one it missed), so those technicians are asked as paid out: under a later
+    // final check of theirs that payout could never be made final again, and it would hold their next paychecks
+    // (payoutsNotFinal). Time off the run kept as not paid, with no check, changed nothing in the bank: it is not asked.
+    const { banked, paidOut, keptPaidOut } = run.status === 'finalized'
+      ? await bankDecisionsOfRun(trx, run) : { banked: [], paidOut: [], keptPaidOut: [] };
+    if (await timeOffBank.laterBankCheckExists(trx, run, banked) || await timeOffBank.laterUnpaidDecisionExists(trx, run, banked)
+      // The payout guard asks every technician with a final check here, as finalizeRun does: the redo of a plain check
+      // on its own pay date would be refused under that payout. A draft decided nothing.
+      || await timeOffBank.laterPayoutDecisionExists(trx, run, run.status === 'finalized'
+        ? [...new Set([...banked, ...rows.map((row) => row.technician_id)])] : banked)
+      || await timeOffBank.laterWeekBankCheckExists(trx, run, paidOut)) {
+      throw new PayrollError(409, 'A later pay run is already final. Void it first.');
+    }
+    // The void puts the payouts this run paid back on its week. It waits while one is set for another week now.
+    const elsewhere = await timeOffBank.payoutsSetElsewhere(trx, run.week_start, keptPaidOut);
+    if (elsewhere.length) throw new PayrollError(409, timeOffBank.payoutSetElsewhereReason(elsewhere[0]));
+    // A paid stay bonus or season bonus on a later check was worked out from this run's pay (tech-rewards-pay-lines.js
+    // paidBonusCounting): the run that paid the bonus goes first, in another tax year too. Not behind a gate.
+    const countedBy = run.status === 'finalized' ? await paidBonusCounting(trx, run) : null;
+    if (countedBy) {
+      throw new PayrollError(409, `A ${countedBy === 'season_bonus' ? 'season' : 'stay'} bonus on another paycheck was worked out from this pay run. Void the pay run that paid the bonus first.`);
+    }
     // Money may be on its way through Mercury: not behind a gate, so turning the gates off never lets a void through.
     await require('./payroll-mercury').assertNoOpenPayments(trx, rows.map((row) => row.id));
     await trx('payroll_checks').where({ run_id: runId }).whereIn('status', ['draft', 'finalized']).update({ status: 'voided' });
     // Not behind the gate: a line a finalized run paid must reopen even if the gate was turned off since.
     await reopenLinesOfRun(trx, runId);
+    // A Tech Rewards line belongs to the run that wrote it: voiding the run takes it off (open, or reopened from paid), and the next
+    // run dated for it writes it again. Not behind the gate: a voided run must never leave one waiting for another run.
+    const droppedRewards = await dropRewardLinesOfWeek(trx, run.week_start);
     await trx('payroll_runs').where({ id: runId }).update({
       status: 'voided', voided_by: actorId, voided_at: trx.fn.now(), void_reason: v.reason,
     });
-    await audit(trx, actorId, 'payroll.run_voided', 'payroll_runs', runId, { run_id: runId });
+    // A payout this run had paid is the owner's decision for this week, so the void puts it back as "set for this
+    // week" where the technician has no payout week now (the owner set another week later and took that one back;
+    // while that other week is still set, the void is refused above). The run made again for this week then pays
+    // the bank out, or the owner presses "Do not pay out": the wages are never paid again with the payout dropped
+    // without a word. Not behind the gate.
+    const reopened = await timeOffBank.reopenPayouts(trx, run.week_start, keptPaidOut);
+    await audit(trx, actorId, 'payroll.run_voided', 'payroll_runs', runId, {
+      run_id: runId, ...removedRewards(droppedRewards), ...(reopened.length ? { bank_payouts_reopened: reopened } : {}),
+    });
   });
   await syncPayrollFilingsSafe({ conn });
   // Bank lines matched to this run's checks go back to review. Never fails the void.
@@ -1013,6 +1606,12 @@ async function setCheckNumber(checkId, input, actor, conn = db) {
 }
 
 // ---- Stub
+
+// The breakdown a stub prints under its production share line: no stop rows, nothing about a customer.
+const stubShare = (figures, shareCents) => ({
+  creditedCents: figures.creditedCents, barCents: figures.barCents, aboveBarCents: figures.aboveBarCents,
+  rateBps: figures.rateBps, barType: figures.barType, shifts: figures.shifts, shareCents,
+});
 
 async function getStub(checkId, conn = db) {
   requireUuid(checkId, 'Paycheck');
@@ -1057,16 +1656,25 @@ async function getStub(checkId, conn = db) {
       regular: c.regularHours,
       overtime: c.overtimeHours,
       ...(timeOffOn() ? { pto: c.ptoHours, holiday: c.holidayHours } : {}),
+      ...(c.minimumWeekHours === undefined ? {} : { minimumWeek: c.minimumWeekHours }),
+      ...(c.holidayWorkHours === undefined ? {} : { holidayWork: c.holidayWorkHours }),
     },
     hourlyRate: c.hourlyRate,
     earnings: {
       regularPayCents: c.regularPayCents,
       overtimePayCents: c.overtimePayCents,
       ...(timeOffOn() ? { ptoPayCents: c.ptoPayCents, holidayPayCents: c.holidayPayCents } : {}),
+      ...(c.minimumWeekPayCents === undefined ? {} : { minimumWeekPayCents: c.minimumWeekPayCents }),
+      // The production share and how it was worked out (credited, bar, above the bar, rate): the earning row only above $0, the
+      // breakdown on any check that stored a share figure, a $0 week too, so the technician sees credited production against the bar.
+      ...(c.productionShareCents > 0 ? { productionShareCents: c.productionShareCents } : {}),
+      ...(c.productionShare ? { productionShare: stubShare(c.productionShare, c.productionShareCents) } : {}),
+      ...(c.holidayWorkPremiumCents === undefined ? {} : { holidayWorkPremiumCents: c.holidayWorkPremiumCents }),
       ...(withLines ? {
         reviewBonusCents: c.reviewBonusCents,
         commissionCents: c.commissionCents,
         healthAllowanceCents: c.healthAllowanceCents,
+        ...(c.techRewardsCents === undefined ? {} : { techRewardsCents: c.techRewardsCents }),
         lineOvertimePremiumCents: c.lineOvertimePremiumCents,
       } : {}),
       grossCents: c.grossCents,
@@ -1086,6 +1694,8 @@ async function getStub(checkId, conn = db) {
     payMethod: c.payMethod,
     checkNumber: c.checkNumber,
     ...(c.w4Default ? { w4Default: true } : {}),
+    // Time-off bank after this check; only on a check of a technician with a bank.
+    ...(c.timeOffBank ? { timeOffBank: c.timeOffBank } : {}),
     ytd: {
       grossCents: Number(ytd.gross),
       federalIncomeTaxCents: Number(ytd.federal_income_tax),
@@ -1160,6 +1770,16 @@ const CSV_HEADERS = [
 const CSV_TIME_OFF_HEADERS = ['PTO Hours', 'PTO Pay', 'Holiday Hours', 'Holiday Pay'];
 // After those, gate GATE_PAYROLL_PAY_LINES on only. HSA From Waves is not in Gross Pay.
 const CSV_PAY_LINE_HEADERS = ['Review Bonus', 'Commission', 'Health Allowance', 'Overtime On Bonus And Allowance', 'HSA From Waves'];
+// The same column in a run that paid a production share: the overtime is on the share too, so the old name would be wrong there.
+const csvPayLineHeaders = (withShare) => CSV_PAY_LINE_HEADERS.map((name) => (withShare && name === 'Overtime On Bonus And Allowance' ? 'Overtime On Additional Earnings' : name));
+// Only when a check in the run holds a season bonus, stay bonus or December gift. It is in Gross Pay.
+const CSV_TECH_REWARDS_HEADERS = ['Tech Rewards Bonus'];
+// Only when a check in the run has a minimum paid week. The pay is in Gross Pay; the hours are not hours worked.
+const CSV_MINIMUM_WEEK_HEADERS = ['Minimum Week Hours', 'Minimum Week Pay'];
+// Before the SIMPLE IRA column, only when a check in the run paid a production share. It is in Gross Pay.
+const CSV_PRODUCTION_SHARE_HEADERS = ['Production Share'];
+// Only when a check in the run has a holiday work premium. The pay is in Gross Pay; the hours are hours worked, already in the hours above.
+const CSV_HOLIDAY_WORK_HEADERS = ['Holiday Work Hours', 'Holiday Work Premium'];
 // Last, only when a check in the run has SIMPLE IRA savings. It is in Gross Pay and comes out of Net Pay.
 const CSV_SIMPLE_HEADERS = ['SIMPLE IRA Savings'];
 
@@ -1168,7 +1788,11 @@ function checksToCsv(rows) {
   // Gate on, or a check in the run that stored pay line figures (drafted while it was on).
   const withLines = payLinesOn() || rows.some(storedLines);
   const withSimple = rows.some(storedSimple);
-  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? CSV_PAY_LINE_HEADERS : []), ...(withSimple ? CSV_SIMPLE_HEADERS : [])])];
+  const withTechRewards = withLines && rows.some((row) => row.tech_rewards_cents != null);
+  const withMinimum = rows.some((row) => row.minimum_week_minutes != null);
+  const withShare = rows.some((row) => Number(row.production_share_cents) > 0);
+  const withHolidayWork = rows.some((row) => row.holiday_work_minutes != null);
+  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? csvPayLineHeaders(withShare) : []), ...(withTechRewards ? CSV_TECH_REWARDS_HEADERS : []), ...(withMinimum ? CSV_MINIMUM_WEEK_HEADERS : []), ...(withShare ? CSV_PRODUCTION_SHARE_HEADERS : []), ...(withHolidayWork ? CSV_HOLIDAY_WORK_HEADERS : []), ...(withSimple ? CSV_SIMPLE_HEADERS : [])])];
   for (const row of rows) {
     const c = serializeCheck(row);
     lines.push(csvRow([
@@ -1182,6 +1806,10 @@ function checksToCsv(rows) {
         centsText(c.reviewBonusCents), centsText(c.commissionCents), centsText(c.healthAllowanceCents),
         centsText(c.lineOvertimePremiumCents), centsText(c.hsaEmployerCents),
       ] : []),
+      ...(withTechRewards ? [centsText(c.techRewardsCents || 0)] : []),
+      ...(withMinimum ? [c.minimumWeekHours || '0.00', centsText(c.minimumWeekPayCents || 0)] : []),
+      ...(withShare ? [centsText(c.productionShareCents || 0)] : []),
+      ...(withHolidayWork ? [c.holidayWorkHours || '0.00', centsText(c.holidayWorkPremiumCents || 0)] : []),
       ...(withSimple ? [centsText(c.simpleDeferralCents || 0)] : []),
     ]));
   }
@@ -1197,6 +1825,11 @@ async function exportCsv(runId, conn = db) {
 }
 
 module.exports = {
+  workedWeeks,
+  weekStartSql,
+  lineGuardWeek,
+  lineOnlyCheckProblem,
+  laterFinalCheckExists,
   defaultPayDate,
   validateWeek,
   resolvePayDate,

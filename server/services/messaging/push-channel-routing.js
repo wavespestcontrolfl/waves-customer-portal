@@ -2,7 +2,8 @@
 
 /**
  * Push channel routing — app-installed customers receive eligible automated
- * messages as native push notifications instead of (or in addition to) SMS.
+ * messages as native push notifications in addition to SMS, or instead of it
+ * once the customer chose App for that notice.
  *
  * Dark behind GATE_PUSH_CHANNEL_ROUTING (request-time gateEnvValue read;
  * default OFF). Design rules, in order of importance:
@@ -36,42 +37,29 @@
  *      SMS conversation, and an in-app bell notification for the customer.
  *
  * The per-template matrix is the OWNER-REVIEWED draft: time- and
- * money-critical messages send BOTH channels; only low-stakes
- * informational types are push-first; anything unlisted is sms_only by
- * omission (fail-safe default). Changing a template's channel is a
- * one-line edit here.
+ * money-critical messages send BOTH channels; anything unlisted is
+ * sms_only by omission (fail-safe default). Changing a template's channel
+ * is a one-line edit here.
  *
- * OWNER RULING 2026-11-04 (Twilio raises US-to-Verizon text prices on
- * 2027-01-01): "if anyone has the app, we would want to prefer to send
- * notifications in the app, rather than text". The matrix above changes in
- * three ways and nothing else:
- *   a. APP_FIRST_ANY_DEVICE_POLICY (below) moves appointment_reminder,
- *      reminder_72h, tech_arrived, lawn_watering_instruction and the
- *      invoice-free service_complete* / service_report_v1 completion
- *      notices to push_first, next to tech_en_route, receipt and
- *      deposit_receipt. Billing, payment-failure, autopay and ACH types stay
- *      push_and_sms; service_complete_with_invoice and
- *      service_report_v1_with_invoice carry a bill to pay and stay SMS;
- *      review_request, invoice, payment_link, manual, ai_assistant, the
- *      staff-initiated appointment_confirmation / appointment_cancelled and
- *      a completion text that bundles a review invite stay SMS too.
- *   b. A customer is reachable once the account HOLDER has any active app
- *      device. The "checked in within 72 hours" rule and the fan-out's
- *      heartbeat floor are dropped for these sends (a device the app
- *      released, or a provider-rejected token, is already inactive). The
- *      fallback is unchanged: when no device accepts the push, the text goes.
- *      With GATE_APP_FIRST_STALE_TEXT also on (owner 2026-11-18), a device
- *      counts only if the app checked in within the last 30 days
- *      (APP_FIRST_STALE_DAYS in push-notifications.js, applied inside customerStatus so the settings
- *      page and make-room follow it too); for a phone not opened for that long the text
- *      goes too, and the app alert still goes (stale_app_text: the text first, then the
- *      push as a companion once Twilio accepted it).
- *   c. Only the customer switches back to text: a stored 'sms' vetoes the app
- *      notice when the customer saved it (the *_channel_explicit marker the
- *      notifications route stamps); the seeded default 'sms' does not. Email
- *      and Both veto as before.
- * A customer's explicit App choice keeps its own path (explicitPushOnly) and
- * the 72 hour rule; the any-device rule above does not touch it.
+ * OWNER RULING 2026-11-20 ("lets revert to text, if they want to setup app
+ * notifications, let them do it on their own"): a routed notice never
+ * replaces its text by default. The 2026-11-04 app-first rule (reminders,
+ * arrived, completion and watering notices in the app for any customer with
+ * an app device) is withdrawn: phones accepted those pushes without showing
+ * them, and the text never went. What holds now:
+ *   a. No template is push_first by default. The matrix below lists only
+ *      push_and_sms types (billing and payment notices: the text always goes
+ *      and the app alert follows it); every other type is sms_only. That
+ *      includes tech_en_route, receipt and deposit_receipt (push_first before
+ *      2026-11-04) and the two visit reminders (push_and_sms before
+ *      2026-11-04): a reminder text carries the visit's links, and a companion
+ *      alert would repeat that text, links included, on every phone and
+ *      browser the account ever signed in on within 72 hours.
+ *   b. The app replaces a text only on the customer's own App choice in
+ *      Reminder Settings (wantsAppFirst -> explicitPushOnly), with the 72 hour
+ *      heartbeat rule and the text fallback.
+ *   c. A customer's own Text choice (the *_channel_explicit marker the
+ *      notifications route stamps) still stops the companion app alert.
  */
 
 const db = require('../../models/db');
@@ -81,9 +69,10 @@ const { BILLING_MESSAGE_CATEGORIES } = require('./billing-channel-routing');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
 
 // messageType (services/twilio.js vocabulary) → routing policy.
-//   push_first   — push replaces SMS when delivery is proven; SMS fallback.
 //   push_and_sms — both channels; push fires only after the SMS is accepted.
 //   (unlisted)   — sms_only.
+// No type is push_first here (owner 2026-11-20): only a customer's own App
+// choice replaces a text (explicitPushOnly, see wantsAppFirst). A test pins it.
 // Deliberately sms_only by omission: 'manual' + 'ai_assistant'
 // (conversational, reply-able), 'review_request' + 'payment_link' +
 // 'invoice' (their tap-through tokenized/external links are the whole
@@ -92,11 +81,8 @@ const { explicitBillingChannels } = require('../billing-delivery-channels');
 // autopay callers override original_message_type with specific types —
 // the generic purpose-mapped names alone would never match them).
 const PUSH_ROUTING_POLICY = {
-  tech_en_route: 'push_first',
-  receipt: 'push_first',
-  deposit_receipt: 'push_first',
-  appointment_reminder: 'push_and_sms',
-  reminder_72h: 'push_and_sms',
+  // appointment_reminder / reminder_72h are ABSENT since 2026-11-20: the
+  // reminder goes by text alone (file header, rule a).
   // appointment_confirmation / appointment_cancelled are deliberately
   // ABSENT: admin-schedule/admin-dispatch trigger those through shared
   // helpers that carry no operatorInitiated provenance, so routing them
@@ -122,31 +108,7 @@ const PUSH_ROUTING_POLICY = {
   bank_verification_failed: 'push_and_sms',
 };
 
-// OWNER RULING 2026-11-04: these types go in the
-// app instead of a text for a customer with an active app device. Layered
-// over PUSH_ROUTING_POLICY at call time. Every key
-// needs a PREF_CHANNEL_COLUMN entry (test-enforced), so a saved Email / Both
-// choice still vetoes. Deliberately ABSENT: service_complete_with_invoice and
-// service_report_v1_with_invoice (they carry a bill to pay), every billing /
-// payment-failure / autopay / ACH type, review_request, invoice, payment_link,
-// manual, ai_assistant, appointment_confirmation and appointment_cancelled.
-const APP_FIRST_ANY_DEVICE_POLICY = {
-  appointment_reminder: 'push_first',
-  reminder_72h: 'push_first',
-  tech_arrived: 'push_first',
-  service_complete: 'push_first',
-  service_complete_paid_receipt: 'push_first',
-  service_complete_prepaid: 'push_first',
-  service_complete_annual_prepay: 'push_first',
-  service_complete_annual_prepay_after_first_visit: 'push_first',
-  service_report_v1: 'push_first',
-  lawn_watering_instruction: 'push_first',
-};
-
 function routingPolicyFor(messageType) {
-  if (Object.prototype.hasOwnProperty.call(APP_FIRST_ANY_DEVICE_POLICY, messageType)) {
-    return APP_FIRST_ANY_DEVICE_POLICY[messageType];
-  }
   return PUSH_ROUTING_POLICY[messageType] || 'sms_only';
 }
 
@@ -296,57 +258,20 @@ function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAutho
 // push_and_sms is exempt: its SMS goes regardless.
 const { PUSH_HEARTBEAT_HOURS } = require('../push-notifications');
 
-// anyDevice: the holder counts as reachable with any
-// active device on a configured provider, however long ago it checked in. With
-// GATE_APP_FIRST_STALE_TEXT also on, only a phone app that checked in within the
-// last 30 days counts (staleTextFloor): customerStatus applies it itself, so every
-// reachability reader follows it; the legacy query below uses the same floor and
-// phone apps only (a fresh browser subscription must not pass it).
-// One read decides the route: `fresh` = a holder device counts
-// for this send; `appStale` (any-device sends with the floor on only) = the 30-day floor
-// alone excluded a holder phone app, so the text goes too and the app alert still goes
-// (noPhoneReason, sendCompanionPush staleApp). A holder with no phone app is not stale.
-async function holderPushReach(customerId, knex = db, { anyDevice = false } = {}) {
-  const staleFloor = anyDevice ? staleTextFloor() : null;
+// `fresh` = a holder device counts for this send: an active phone app on a configured
+// provider that checked in within the 72 hour heartbeat window.
+async function holderPushReach(customerId, knex = db) {
   if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
-    const status = await require('../push-notifications').customerStatus(customerId, undefined, anyDevice ? { withReachable: true } : undefined);
-    if (!status.enabled) return { fresh: false, appStale: false };
-    return anyDevice ? { fresh: status.reachable === true, appStale: status.appStale === true } : { fresh: Boolean(status.fresh), appStale: false };
+    const status = await require('../push-notifications').customerStatus(customerId);
+    if (!status.enabled) return { fresh: false };
+    return { fresh: Boolean(status.fresh) };
   }
   const query = knex('push_subscriptions')
     .where({ customer_id: customerId, active: true })
     // A contact's device (contact login) is never proof the HOLDER has the app.
-    .whereNull('contact_phone_key');
-  if (!anyDevice) query.where('updated_at', '>=', heartbeatCutoff());
-  if (!staleFloor) return { fresh: Boolean(await query.first('id').catch(() => null)), appStale: false };
-  // Floor on: phone apps on a configured provider only, as customerStatus counts them (a
-  // browser-only holder, or a phone whose provider is off, is neither fresh nor stale).
-  const providers = { ios: require('../apns').status().configured, android: require('../fcm').status().configured };
-  const phones = (await query.whereIn('platform', ['ios', 'android']).select('platform', 'updated_at').catch(() => []))
-    .filter((row) => providers[row.platform]);
-  const fresh = phones.some((row) => new Date(row.updated_at).getTime() >= staleFloor.getTime());
-  return { fresh, appStale: !fresh && phones.length > 0 };
-}
-
-// The not-delivered reason: a holder whose phone app the 30-day floor excluded gets the text
-// AND the app alert (twilio.js fires sendCompanionPush staleApp once the text is accepted);
-// no push goes before the text. Any other holder: no_fresh_device, as before.
-function noPhoneReason(appStale) {
-  return appStale === true ? { reason: 'stale_app_text', staleAppCompanion: true } : { reason: 'no_fresh_device' };
-}
-
-// A below-floor holder phone accepted the alert while the fresh phone did not: the text still goes
-// (delivery is false), but the phone that took the alert gets its in-app bell, recorded once with the
-// delivered path's event key. No push proof row (the text's row is the record).
-async function recordStaleAcceptanceBell(staleAccepted, { customerId, messageType, body, notificationEventKey, appointmentId, invoiceId }) {
-  if (staleAccepted) await recordBell(customerId, messageType, body, notificationEventKey, appointmentId, invoiceId);
-}
-
-// The proof row's app_checked_in_at: the check-in of the phone that accepted the push
-// (any-device sends only; unknown = no stamp). Internal log metadata, no customer effect.
-// The daily stale-app check reads it.
-function appCheckedInStamp(anyDevice, acceptedCheckedInAt) {
-  return anyDevice && acceptedCheckedInAt ? { app_checked_in_at: new Date(acceptedCheckedInAt).toISOString() } : {};
+    .whereNull('contact_phone_key')
+    .where('updated_at', '>=', heartbeatCutoff());
+  return { fresh: Boolean(await query.first('id').catch(() => null)) };
 }
 
 // messageType → the LIVE notification_prefs channel column the actual
@@ -530,10 +455,9 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, holderMinUpdatedAt, nativeOnly, signedInOnly = false, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
-  // signedInOnly: the tap opens the signed-in app tab, never a report / receipt bearer page.
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
   const presentation = pushPresentation(messageType);
-  const { title, link, category } = signedInOnly ? presentation : await resolvePushDestination(presentation, messageType, { customerId, appointmentId, invoiceId });
+  const { title, link, category } = await resolvePushDestination(presentation, messageType, { customerId, appointmentId, invoiceId });
   const PushService = require('../push-notifications');
   const stats = await PushService.sendToCustomer(customerId, {
     title,
@@ -544,10 +468,8 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     // The visit this message is about — the push sink resolves its saved
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
-  }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}), ...(holderMinUpdatedAt ? { holderMinUpdatedAt } : {}) });
-  return { stats, delivered: Number(stats && stats.sent) > 0, acceptedCheckedInAt: stats?.acceptedCheckedInAt || null,
-    // A below-floor holder phone took the push (GATE_APP_FIRST_STALE_TEXT): it never counts as delivery.
-    staleAccepted: Number(stats?.staleHolderDevices?.sent) > 0 };
+  }, { shouldContinue, minUpdatedAt, messageType });
+  return { stats, delivered: Number(stats && stats.sent) > 0 };
 }
 
 // The push's collapse tag (APNs apns-collapse-id, hashed when long; the Android
@@ -558,50 +480,6 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
 function pushTag(messageType, { appointmentId = null, invoiceId = null, eventKey = null } = {}) {
   const scope = appointmentId || invoiceId || eventKey;
   return scope ? `push-routed:${messageType}:${scope}` : `push-routed:${messageType}`;
-}
-
-// Any-device sends reach a device that may not have checked in for
-// weeks (Codex security #7581): logout cleanup is best-effort, so a former phone can
-// keep an active row. Such a push carries no bearer link: the body is the text's
-// first paragraph with any link removed (every routed template leads with the
-// greeting and the notice; its links sit on later lines, e.g. "Receipt: <link>"),
-// and the tap opens the signed-in app tab (sendPush signedInOnly). A line that lost
-// its link ends with a period instead of a colon.
-const LINK_IN_TEXT = /\s*\b(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}\/\S*/gi;
-function linkFreeBody(text) {
-  const first = String(text || '').split(/\n[ \t]*\n/)[0];
-  const lines = first.split('\n').map((line) => {
-    const stripped = line.replace(LINK_IN_TEXT, '');
-    if (stripped === line) return line;
-    const words = stripped.replace(/[\s:]+$/, '');
-    return /[.!?]$/.test(words) ? words : `${words}.`;
-  }).filter((line) => line.replace(/[\s.]/g, ''));
-  return lines.join('\n').trim() || 'Open the Waves app for the details.';
-}
-
-function pushBodyFor(anyDevice, body) {
-  return anyDevice ? linkFreeBody(body) : body;
-}
-
-// Which devices the push_first fan-out may count as delivery. Any-device sends
-// drop the heartbeat floor but stay on phone apps (customerStatus.reachable
-// counts phone apps only): a stale browser subscription that accepts must never
-// stand in for delivery and skip the text. Otherwise: the 72 hour floor. With
-// GATE_APP_FIRST_STALE_TEXT the 30-day floor applies to the HOLDER's phones only
-// (holderMinUpdatedAt): every phone still gets the push, but a below-floor holder phone's acceptance
-// never counts as the holder's delivery, so it cannot stand in for the text when the fresh phone failed.
-function fanOutReach(anyDevice) {
-  if (!anyDevice) return { minUpdatedAt: heartbeatCutoff() };
-  const staleFloor = staleTextFloor();
-  return staleFloor ? { nativeOnly: true, holderMinUpdatedAt: staleFloor } : { nativeOnly: true };
-}
-
-// GATE_APP_FIRST_STALE_TEXT (owner 2026-11-18): the shared floor lives in
-// push-notifications (appFirstStaleFloor, which customerStatus applies too); null
-// while the gate is off, or for a suite that mocks push-notifications without it.
-function staleTextFloor() {
-  const floor = require('../push-notifications').appFirstStaleFloor;
-  return typeof floor === 'function' ? floor() : null;
 }
 
 function heartbeatCutoff() {
@@ -745,12 +623,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
-    // A routed push_first send to the holder needs only an
-    // active device, not a recent check-in. A customer's explicit App choice
-    // keeps its own path and the 72 hour rule.
-    const anyDevice = !explicitPushOnly;
-    const routedBody = pushBodyFor(anyDevice, body);
-    const { fresh, appStale } = await holderPushReach(customerId, db, { anyDevice });
+    const { fresh } = await holderPushReach(customerId, db);
     // The visit and its send-time property, kept on the proof row and on the
     // stored notification, so a repaired proof restores the delivered scope
     // (Codex #4816 r49).
@@ -828,17 +701,16 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     }
     // A persisted in-app bell is customer-visible even when no device accepts
     // the push; callers that must not undo a seen notice read bellPersisted.
-    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', ...noPhoneReason(appStale), ...bell };
+    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
     deliveryOutcome = 'uncertain';
-    const { delivered, acceptedCheckedInAt, staleAccepted } = explicitPushOnly
+    const { delivered } = explicitPushOnly
       ? { delivered: Number(appNotification?.push?.accepted) > 0 }
-      : await sendPush(customerId, messageType, routedBody, {
+      : await sendPush(customerId, messageType, body, {
         shouldContinue: windowGuardFrom(preSendCheck),
-        ...fanOutReach(anyDevice),
-        signedInOnly: anyDevice,
+        minUpdatedAt: heartbeatCutoff(),
         appointmentId,
         invoiceId,
         eventKey: notificationEventKey,
@@ -851,7 +723,6 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           retryAfterMs: appNotification.push.retryAfterMs || 60000, ...bell };
       }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
-      await recordStaleAcceptanceBell(staleAccepted, { customerId, messageType, body, notificationEventKey, appointmentId, invoiceId });
       return { delivered: false, deliveryOutcome: 'not_sent', ...bell };
     }
     deliveryOutcome = 'accepted';
@@ -863,7 +734,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       direction: 'outbound',
       from_phone: 'push',
       to_phone: String(to || '').slice(0, 20),
-      message_body: routedBody,
+      message_body: body,
       twilio_sid: null,
       status: 'sent',
       created_at: acceptedAt,
@@ -878,9 +749,6 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         // history reader can correlate this proof with its keyed ledger
         // episode instead of counting the same contact twice.
         ...(notificationEventKey ? { notificationEventKey } : {}),
-        // The check-in of the phone that accepted the push (any-device sends): what the
-        // daily stale-app check reads, not a guess made afterward.
-        ...appCheckedInStamp(anyDevice, acceptedCheckedInAt),
         // The visit this notice is about, like the SMS path's metadata:
         // readers that scope by property (SMS commitment evidence) need
         // it on the proof row itself (Codex #4816 r40).
@@ -1016,15 +884,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
  * accepted the SMS — best-effort, never throws into the send path, and a
  * pipeline retry of a FAILED SMS can never reach it.
  */
-async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null, staleApp = false, invoiceId = null, notificationEventKey = null }) {
+async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
-    // staleApp (GATE_APP_FIRST_STALE_TEXT): the holder is already known stale, so the freshness
-    // check below would refuse them. The text went; this is the app alert that still goes.
-    // With an event key it goes through the event's bell claim, so the lifecycle bell for the same
-    // event (en-route, completed) can never push a second alert.
-    if (staleApp && notificationEventKey) return await sendClaimedStaleAppAlert({ customerId, messageType, body, preSendCheck, appointmentId, notificationEventKey });
-    if (!staleApp && !(await holderPushReach(customerId)).fresh) return;
+    if (!(await holderPushReach(customerId)).fresh) return;
     // The companion starts only after Twilio accepted the SMS, but its own
     // fan-out can still cross the cutoff — same per-leg gate. It also
     // applies the SAME heartbeat cutoff, for a different reason than
@@ -1033,45 +896,15 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
     // active row under the signed-out account, and an orphaned device
     // would otherwise keep receiving that account's appointment/billing
     // notices indefinitely. Bounding on the heartbeat retires it.
-    const { delivered } = await sendPush(customerId, messageType, companionBody(staleApp, body), {
+    const { delivered } = await sendPush(customerId, messageType, body, {
       shouldContinue: windowGuardFrom(preSendCheck),
-      ...companionReach(staleApp),
+      minUpdatedAt: heartbeatCutoff(),
       appointmentId,
-      // staleApp without an event key: the invoice keeps its own collapse tag and bell destination.
-      // Unset (push_and_sms) = as before.
-      invoiceId,
     });
-    if (delivered) await recordBell(customerId, messageType, body, undefined, appointmentId, invoiceId);
+    if (delivered) await recordBell(customerId, messageType, body, undefined, appointmentId);
   } catch (err) {
     logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
   }
-}
-
-// The stale-app alert, claimed through the event's bell (notifyCustomer with the event key, like the
-// explicit-App branch of attemptPushFirst): whichever of this and the lifecycle bell (en-route
-// `visit:<id>:en-route:<at>`, completed `scheduled-service:<id>:completed`) runs first claims the key;
-// the other dedupes and sends no push. Same signed-in destination (the presentation link, never a
-// bearer page), link-free body, phone apps only, no floor of any kind, no proof row.
-async function sendClaimedStaleAppAlert({ customerId, messageType, body, preSendCheck, appointmentId, notificationEventKey }) {
-  const { title, link, category } = pushPresentation(messageType);
-  await require('../notification-service').notifyCustomer(customerId, category, title, pushBodyFor(true, body), {
-    link,
-    dedupeKey: notificationEventKey,
-    awaitPush: true,
-    ...(appointmentId ? { appointmentId } : {}),
-    pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), nativeOnly: true, messageType },
-  });
-}
-
-// What the companion sends and to whom. staleApp: the same presentation as an any-device push
-// (signed-in tab, link-free body, phone apps only) with no floor of any kind, so the stale
-// holder phone and eligible contact phones get the alert as they do today. Otherwise: the
-// heartbeat-bounded companion, unchanged.
-function companionBody(staleApp, body) {
-  return staleApp ? pushBodyFor(true, body) : body;
-}
-function companionReach(staleApp) {
-  return staleApp ? { nativeOnly: true, signedInOnly: true } : { minUpdatedAt: heartbeatCutoff() };
 }
 
 module.exports = {
@@ -1082,8 +915,7 @@ module.exports = {
   bellPushAllowed,
   sendCompanionPush,
   PUSH_ROUTING_POLICY,
-  APP_FIRST_ANY_DEVICE_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushTag, linkFreeBody, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
+  _test: { pushTag, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };

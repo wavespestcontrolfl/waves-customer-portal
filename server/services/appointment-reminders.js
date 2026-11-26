@@ -776,7 +776,7 @@ async function deliverBouncedMoveNoticeEmail({ kind, audit, customerId, schedule
   }
   // GATE_DAY_ONLY_PROMISE part B2: a bounced DAY-ONLY reschedule text (window_unknown only because it quoted no window) goes
   // through B1's delayed-send chokepoint (revalidateDelayedDaySend) before its recovery email: 'day' -> the day-only email;
-  // 'window' (inside the cutoff, the gate rolled back, the 24-hour reminder off) -> today's window email; 'suppress' (a later
+  // 'window' (inside the cutoff, the 24-hour reminder off) -> today's window email; 'suppress' (a later
   // promise already stands, or none can be read) -> no email.
   const dayText = kind === 'rescheduled' && isDayPromise(meta);
   let dayOnly = false;
@@ -842,7 +842,57 @@ function cancellationNoticeReport(noticeSent, emailed) {
 // blockedCode and leave their row unmarked so the next cron tick re-decides
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null, dayState }) {
+// GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named on the call that booked THIS
+// visit gets this visit's confirmation and 72 h / 24 h reminders, and nothing else, whatever channel the account holder
+// chose (a holder on email still has the person texted). Dispatched ONCE per notice from here, after the holder's own
+// delivery, with its own entry checks and its own outcome: the holder's result below is never changed by it. Entry rule
+// as for the account contacts: no account contact at all, or a callback-number hold on the visit, sends nothing.
+// call-visit-recipient.js decides who is owed the text, writes its informational copy (no reschedule or tracker link,
+// the same day-only promise as the holder's), honors their existing declines and the send window, and persists a held
+// text; no customer, slot, consent stamp or opt-in row is written. Never throws.
+async function dispatchVisitOnlyLeg({ kind, customerId, scheduledServiceId, dayOnly, stillOwnsClaim, servedPhones = [] }) {
+  const visitRecipients = require('./call-visit-recipient');
+  const recipientKind = visitRecipients.gateLive() && scheduledServiceId ? visitRecipients.kindForNotice(kind) : null;
+  if (!recipientKind) return;
+  try {
+    if (stillOwnsClaim && !(await stillOwnsClaim())) return;
+    const { customer } = await getCustomerAndTech(customerId, null);
+    // A customer with no preferences row is on the defaults, as for every other transactional sender; only an UNREADABLE row holds.
+    const prefs = (await visitPrefsRow(customerId, scheduledServiceId)) ?? {};
+    if (!customer || prefs === PREFS_UNAVAILABLE || prefs.__prefsUnavailable === true) return;
+    if (await callbackNumberHoldActiveForVisit({ scheduledServiceId })) return;
+    const { contacts } = await resolveNoticeContacts(customer, prefs, visitRecipients.messageTypeFor(recipientKind), visitRecipients.purposeFor(recipientKind));
+    if (!contacts.length) return;
+    await visitRecipients.notifyVisitRecipients({
+      scheduledServiceId,
+      kind: recipientKind,
+      // Only the numbers the notice really TEXTED: a holder on email, or a contact whose text was held or failed, is not covered.
+      excludePhones: servedPhones,
+      dayOnly: dayOnly === true,
+      // A confirmation another sender already logged to this number (the call pipeline's own contact fan-out) is not sent twice.
+      ...(recipientKind === 'confirmation'
+        ? { gate: async (contact) => ((await confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contact.phone }).catch(() => false)) ? 'skip' : 'send') }
+        : {}),
+    });
+  } catch (err) {
+    logger.warn(`[appt-remind] visit-only ${kind} for visit ${scheduledServiceId} skipped: ${err.code || err.name || 'error'}`);
+  }
+}
+
+async function deliverAppointmentNotice(args) {
+  const reached = await deliverHolderNotice(args);
+  await dispatchVisitOnlyLeg({
+    kind: args.kind,
+    customerId: args.customerId,
+    scheduledServiceId: args.scheduledServiceId,
+    dayOnly: args.dayState?.dayOnly,
+    stillOwnsClaim: args.stillOwnsClaim,
+    servedPhones: args.smsOutcome?.servedPhones,
+  });
+  return reached;
+}
+
+async function deliverHolderNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null, cardHoldNote = null, emailIdempotencyKey = null, stillOwnsClaim = null, dayState }) {
   // LAST-moment unit-move hold check, at the one chokepoint every
   // confirmation/72h/24h leg passes — inline creation confirmations
   // included (codex #3609 r30 P1): a grouped move stamped after a caller's
@@ -1124,6 +1174,10 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   if (channel === 'sms' || channel === 'push' || !confirmationOn) {
     if (!(await visitStillLive())) return false;
     const smsOk = await smsAttempt();
+    // The default-channel booking confirmation (the call pipeline's) does not pass deliverAppointmentNotice: the
+    // visit-only leg is dispatched here, once, after the holder's own send. The call pipeline's own texts to the
+    // account contacts are not tracked here, so the confirmation log (dispatchVisitOnlyLeg) keeps it from a repeat.
+    await dispatchVisitOnlyLeg({ kind: 'confirmation', customerId, scheduledServiceId, dayOnly: false, stillOwnsClaim });
     if (smsOk || !smsPermanentlyBlocked || !confirmationOn || !prefsKnown) return smsOk;
     // Consent-blocked text on the default channel: reach them by email.
     // deliverAppointmentEmailFallback raises the no-channel human alert
@@ -1261,11 +1315,10 @@ function reminder24hWillSend(prefs) {
   return Boolean(prefs.serviceReminder24h) && !(prefs.reminder24hChannel === 'sms' && !prefs.smsEnabled);
 }
 
-/** True when this send may promise only the day. Gate off (or any error): false, and nothing is read. */
+/** True when this send may promise only the day. Any error: false. */
 async function dayOnlyForSend({ id, startAt, reminder24hEnabled, ignoreLevel = false }) {
   try {
     const timePromise = require('./time-promise');
-    if (!timePromise.dayOnlyPromiseOn()) return false;
     const decision = await timePromise.dayOnlySendDecision(db, { id, startAt, reminder24hEnabled, ...(ignoreLevel ? { ignoreLevel: true } : {}) });
     return decision.dayOnly === true;
   } catch (err) {
@@ -1284,11 +1337,10 @@ async function confirmationDayOnly(record, { scheduledServiceId, apptTime, prefs
 
 /** A held or merged MOVE notice re-sent as a confirmation (GATE_DAY_ONLY_PROMISE part B2) keeps the recorded intent: a day
  *  intent (customer_asked_time false) re-sends the day row even though the old promise was an hour (the move replaced it); a
- *  set time (true) stays a window. Gate off (or any error): false, and nothing is read. */
+ *  set time (true) stays a window. Any error: false. */
 async function moveReplayDayOnly({ id, startAt, reminder24hEnabled }) {
   try {
     const timePromise = require('./time-promise');
-    if (!timePromise.dayOnlyPromiseOn()) return false;
     return await timePromise.dayOnlyReplayDecision(db, { id, startAt, reminder24hEnabled });
   } catch (err) {
     logger.warn(`[appt-remind] day-only replay decision failed for ${id} (${err.message}) - sending the window copy`);
@@ -1318,20 +1370,18 @@ function confirmationCoversDayBefore({ sent, dayOnly, apptTime }) {
   return Boolean(sent) && dayOnly !== true && etDateString(apptTime) <= etDateString(addETDays(new Date(), 1));
 }
 
-// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: how long the 24-hour pass leaves a call-booked reminder row alone after it was
+// How long the 24-hour pass leaves a call-booked reminder row alone after it was
 // registered. Longer than the call pipeline's registration-to-close time (it registers the row, sends its own confirmation
 // text and closes the 24-hour flag within seconds), shorter than one 15-minute tick, so by the next tick the flag is closed
 // (text delivered) or still armed (text not delivered, and the reminder goes then).
 const FRESH_CALL_BOOKED_ROW_MS = 10 * 60 * 1000;
 
-/** True when the 24-hour pass must leave this reminder row alone this tick: the gate is on and the row was registered by the
+/** True when the 24-hour pass must leave this reminder row alone this tick: the row was registered by the
  *  call pipeline (source 'call_recording') less than FRESH_CALL_BOOKED_ROW_MS ago, so the pipeline's own booking text may
- *  still be in flight and about to close the 24-hour flag. Gate off (or a gate reader missing): always false, so the scan
- *  behaves exactly as before. A missing or unreadable created_at is not "fresh" (the reminder is never held on unknowns).
+ *  still be in flight and about to close the 24-hour flag. A missing or unreadable created_at is not "fresh" (the reminder is never held on unknowns).
  *  created_at is set once at the row's insert; no path bumps it, so a reschedule never makes an old row young. */
 function holdFreshCallBookedRow(row, now = new Date()) {
   if (!row || row.source !== 'call_recording') return false;
-  if (!require('../config/feature-gates').bookingTextCoversDayBeforeLive?.()) return false;
   const createdMs = new Date(row.created_at).getTime();
   const nowMs = new Date(now).getTime();
   if (!Number.isFinite(createdMs) || !Number.isFinite(nowMs)) return false;
@@ -1354,7 +1404,7 @@ async function reminderPrimaryRecipientPhone(customerId, scheduledServiceId) {
   return lastTenDigits(first?.phone) ? first.phone : null;
 }
 
-/** GATE_BOOKING_TEXT_COVERS_DAY_BEFORE (owner 2026-11-09). A booking path that sends its own confirmation text after the
+/** (Owner 2026-11-09.) A booking path that sends its own confirmation text after the
  *  reminder row was registered with the confirmation already marked (the call pipeline) cannot stamp the 24-hour flag in
  *  the confirmation's own write, so it calls this once the text is known delivered. The SAME rule as deliverConfirmation
  *  (confirmationCoversDayBefore), one fenced write: the row must still hold the time the text quoted, still be live, and
@@ -1362,12 +1412,11 @@ async function reminderPrimaryRecipientPhone(customerId, scheduledServiceId) {
  *  The text must also have reached the number the 24-hour reminder would text (reminderPrimaryRecipientPhone): an
  *  implied-consent text redirected to the caller's number, when that is not the reminder's recipient, leaves the saved
  *  number without any notice, so the reminder stays armed. An unknown recipient (either side) never closes.
- *  While the gate is on, the 24-hour pass leaves a call-booked reminder row alone for its first 10 minutes
+ *  The 24-hour pass leaves a call-booked reminder row alone for its first 10 minutes
  *  (holdFreshCallBookedRow), so it cannot send while the booking text is in flight.
- *  Gate off (or a gate reader missing): nothing is read or written. Returns true when a row was closed. */
+ *  Returns true when a row was closed. */
 async function closeDayBeforeForBookingText({ scheduledServiceId, apptTime, sent, dayOnly = false, customerId = null, recipientPhone = null }) {
   if (!scheduledServiceId || !(apptTime instanceof Date) || Number.isNaN(apptTime.getTime())) return false;
-  if (!require('../config/feature-gates').bookingTextCoversDayBeforeLive?.()) return false;
   if (!confirmationCoversDayBefore({ sent, dayOnly, apptTime })) return false;
   const reached = lastTenDigits(recipientPhone);
   if (!reached) return false;
@@ -1435,7 +1484,9 @@ async function delayedSendIsStale(scheduledServiceId, notice = null) {
   if (!scheduledServiceId) return false;
   try {
     const timePromise = require('./time-promise');
-    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date());
+    // The RAW rule (sameDateOnly: false): a delayed body may be for an older date, so an hour told for any date still blocks
+    // it (owner 11-24 *narrow*: only fresh decisions drop an off-date hour; told-visits loadPromiseFacts header).
+    const levels = await timePromise.loadPromiseLevels(db, [scheduledServiceId], new Date(), { sameDateOnly: false });
     if (levels.get(scheduledServiceId) !== 'hour') return false;
     if (!notice) return true;
     const promise = (await require('./auto-dispatch/told-visits').resolvePromises(db, [scheduledServiceId], new Date())).get(scheduledServiceId);
@@ -1454,9 +1505,9 @@ async function delayedSendIsStale(scheduledServiceId, notice = null) {
  * stored day-only body later must ask this first (day-only-promise-b1-persisted-paths.test.js scans for it).
  *   'suppress'  a promise newer than the original send stands (the latest promise is already an hour, e.g. the 24-hour text
  *               delivered the window) or the promise cannot be read: send nothing.
- *   'day'       the SAME shared decision a fresh send uses (dayOnlyNow: live gate, the cutoff, reminder24hWillSend on the
+ *   'day'       the SAME shared decision a fresh send uses (dayOnlyNow: the cutoff, reminder24hWillSend on the
  *               customer's CURRENT preferences, full eligibility) still says day: the day-only body may go.
- *   'window'    it no longer does (gate rolled back, the 24-hour reminder switched off, inside the cutoff): the day-only
+ *   'window'    it no longer does (the 24-hour reminder switched off, inside the cutoff): the day-only
  *               body must not go. The caller sends window copy if it can render it, else suppresses.
  * `apptTime` is the visit's start the caller already knows; absent, it is read from the visit.
  * `noticeAt` (a MOVE notice's recovery, with `apptTime` the slot that notice quoted, or `noticeDate` its ET date): only a promise
@@ -2551,6 +2602,8 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // a caller that finalizes on acceptance (handleCancellation) reads it to report a partial delivery. Contacts held
   // for a later send (quiet hours queue, move-hold office hand-off) have their own rail and are not listed.
   sharedOutcome.failedRecipients = [];
+  // The numbers this fan-out really texted (accepted by the provider): the visit-only leg skips exactly these.
+  sharedOutcome.servedPhones = [];
   // Only the holder can use App. Resolve that leg before accepting any
   // contact text, so a pending push can leave the whole reminder open.
   const primaryPhone = lastTenDigits(customer.phone);
@@ -2603,6 +2656,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       continue;
     }
     recordFailedRecipient(sharedOutcome, contact, sent, { heldIsFailure: sendOptions.noDeferredQueue === true });
+    if (sent) sharedOutcome.servedPhones.push(contact.phone);
     sentAny = sentAny || sent;
   }
   if (sentAny && moveHeldRoles.length) {
@@ -2619,7 +2673,8 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   // callers' own defer/skip paths re-fire the whole notice, so queueing
   // here too would double-text — rows are queued only on partial success.
   if (sentAny && heldContacts.length) {
-    await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra });
+    // A contact whose held text was QUEUED is served too: the visit-only leg must not text the same number again.
+    sharedOutcome.servedPhones.push(...(await queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra })));
   }
   return sentAny;
 }
@@ -2635,7 +2690,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
 async function queueHeldNoticeContacts({ customer, heldContacts, messageType, purpose, metaExtra }) {
   if (purpose === 'appointment_reminder_24h') {
     logger.info(`[appt-remind] ${heldContacts.length} held 24h-reminder contact(s) for customer ${customer.id} SKIPPED — an 8AM replay would land on the visit's own day`);
-    return;
+    return [];
   }
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   // Which visit state the notice DESCRIBES (codex r22). A confirmation or
@@ -2686,6 +2741,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
       logger.warn(`[appt-remind] slot snapshot read failed for ${metaExtra.scheduled_service_id} — queueing without one: ${slotErr.message}`);
     }
   }
+  const queuedPhones = [];
   for (const held of heldContacts) {
     const heldRow = {
       customer_id: customer.id,
@@ -2733,6 +2789,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
     }
     if (queued) {
       logger.info(`[appt-remind] ${messageType} to ${held.contact.role || 'contact'} held outside the 8AM-8PM ET send window — queued for ${held.nextAllowedAt}`);
+      queuedPhones.push(held.contact.phone);
       continue;
     }
     logger.error(`[appt-remind] held ${messageType} requeue failed for ${held.contact.role || 'contact'} (customer ${customer.id}) after 3 attempts: ${lastErr?.message}`);
@@ -2757,6 +2814,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
       logger.error(`[appt-remind] held-notice exception alert failed for customer ${customer.id}: ${notifyErr.message}`);
     }
   }
+  return queuedPhones;
 }
 
 // ── Get customer + tech info ──
@@ -5587,6 +5645,9 @@ const AppointmentReminders = {
       if (!customer) return;
 
       const scheduledServiceId = audit.metadata?.scheduled_service_id || null;
+      // A bounce of a visit-only recipient's text (call-visit-recipient.js) is that person's, never the holder's: no
+      // landline cache, no account email, no alert.
+      if (audit.metadata?.appointment_contact_role === require('./call-visit-recipient').ROLE) return;
       const primaryDigits = lastTenDigits(customer.phone);
       const targetDigits = lastTenDigits(to);
 
@@ -7473,12 +7534,11 @@ async function replayRecipient({ customerId, scheduledServiceId, contactKey, acc
 }
 
 // The day-only decision for a send made NOW outside the reminder scan (the service-contact replay, a bounce's email
-// recovery): the SAME shared decision a fresh send uses, on the live gate, the customer's CURRENT preferences
-// (reminder24hWillSend) and the full eligibility. Gate off (or any error, unreadable preferences): false, and the caller
+// recovery): the SAME shared decision a fresh send uses, on the customer's CURRENT preferences
+// (reminder24hWillSend) and the full eligibility. Any error or unreadable preferences: false, and the caller
 // sends window copy.
 async function dayOnlyNow({ customerId, scheduledServiceId, apptTime, ignoreLevel = false }) {
   try {
-    if (!require('./time-promise').dayOnlyPromiseOn()) return false;
     const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
     if (prefs.unavailable) return false;
     return await dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs), ...(ignoreLevel ? { ignoreLevel: true } : {}) });
@@ -7556,7 +7616,7 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     return { sent: false, reason: 'error' };
   }
 }
-// GATE_BOOKING_TEXT_COVERS_DAY_BEFORE: the call pipeline closes the 24h reminder after its own confirmation text (see the function).
+// The call pipeline closes the 24h reminder after its own confirmation text (see the function).
 AppointmentReminders.closeDayBeforeForBookingText = closeDayBeforeForBookingText;
 AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
 AppointmentReminders.revalidateDelayedDaySend = revalidateDelayedDaySend;

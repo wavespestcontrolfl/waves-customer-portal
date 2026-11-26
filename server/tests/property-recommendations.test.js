@@ -203,10 +203,60 @@ describe('route contracts (gate + drift)', () => {
   // Controls the route's mosquito revalidation without touching a DB.
   const mosquitoNote = jest.fn(async () => null);
 
-  function appWithGate(gateOn) {
+  // The tables the real request writer and the bell read, as one in-memory
+  // request row.
+  function requestTableDb() {
+    const requests = [];
+    const table = (name) => {
+      const q = {
+        where() { return q; },
+        whereIn() { return q; },
+        whereNotIn() { return q; },
+        orderBy() { return q; },
+        forUpdate() { return q; },
+        first: async () => (name === 'service_requests'
+          ? (requests[0] || null)
+          : { id: 'cust-1', first_name: 'Pat', last_name: 'Customer' }),
+        update: async (patch) => { Object.assign(requests[0], patch); return 1; },
+        insert: (row) => ({
+          returning: async () => { const saved = { id: 'req-1', ...row }; requests.push(saved); return [saved]; },
+        }),
+      };
+      return q;
+    };
+    const fake = (name) => table(name);
+    fake.transaction = (fn) => fn(table);
+    return { fake, requests };
+  }
+
+  // `offer` is what the route's recompute answers (default: no offer, this
+  // suite's stance). `ctaWrites` collects what the route hands the request
+  // writer, in place of a database write. `realWriter` runs the real writer
+  // over { db, bells }: an in-memory request table and the bells it rang.
+  function appWithGate(gateOn, { offer = null, ctaWrites = null, realWriter = null } = {}) {
+    if (realWriter) {
+      jest.doMock('../models/db', () => realWriter.db);
+      jest.doMock('../services/notification-triggers', () => ({
+        triggerNotification: async (type, payload) => { realWriter.bells.push({ type, payload }); },
+      }));
+    }
     jest.doMock('../middleware/auth', () => ({
       authenticate: (req, _res, nextFn) => { req.customerId = 'cust-1'; nextFn(); },
     }));
+    jest.doMock('../services/service-report/cross-sell', () => ({
+      ...jest.requireActual('../services/service-report/cross-sell'),
+      buildPortalOffer: async () => offer,
+    }));
+    if (ctaWrites) {
+      jest.doMock('../services/cta-service-request', () => ({
+        ...jest.requireActual('../services/cta-service-request'),
+        // deduped: the route rings no bell, so the test reads no customer row.
+        writeOrRefreshCtaRequest: async (_db, args) => {
+          ctaWrites.push(args);
+          return { deduped: true, request: { id: 'req-1' } };
+        },
+      }));
+    }
     jest.doMock('../services/property-recommendations', () => ({
       buildPropertyRecommendations: async () => ({ cards: [] }),
       mosquitoNoteCard: mosquitoNote,
@@ -239,6 +289,9 @@ describe('route contracts (gate + drift)', () => {
     jest.dontMock('../middleware/auth');
     jest.dontMock('../routes/reports-public');
     jest.dontMock('../services/property-recommendations');
+    jest.dontMock('../services/cta-service-request');
+    jest.dontMock('../models/db');
+    jest.dontMock('../services/notification-triggers');
     mosquitoNote.mockReset();
     mosquitoNote.mockImplementation(async () => null);
     if (server) { await new Promise((resolve) => server.close(resolve)); server = null; }
@@ -272,5 +325,79 @@ describe('route contracts (gate + drift)', () => {
     const gone = await post(base, { cardId: 'mosquito_note' });
     expect(gone.status).toBe(409);
     expect(mosquitoNote).toHaveBeenCalled();
+  });
+
+  // Owner 2026-11-21: the Billing tab shows the same offer card. The office
+  // must read which tab the customer tapped on, and one offer tapped on both
+  // tabs must stay one open request.
+  test('gate on: a Billing tap names Billing for the office; a Home tap stores what it stored before', async () => {
+    const offer = {
+      serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
+      fingerprint: 'fp-1', option: { id: 'opt-1', perVisit: 62 },
+    };
+    const ctaWrites = [];
+    const base = await listen(appWithGate(true, { offer, ctaWrites }));
+    const tap = {
+      cardId: 'plan_offer', serviceKey: 'lawn_care', offerMode: 'priced', perApplication: 62, optionId: 'opt-1', fingerprint: 'fp-1',
+    };
+
+    expect((await post(base, tap)).status).toBe(200);
+    expect((await post(base, { ...tap, surface: 'billing' })).status).toBe(200);
+    // Only the known tab name reaches the office text; anything else is Home.
+    expect((await post(base, { ...tap, surface: 'Billing <b>' })).status).toBe(200);
+
+    const [home, billing, unknown] = ctaWrites;
+    expect(home.subject).toBe('Add Lawn Care — requested from portal home');
+    expect(home.description).toContain('on the portal home recommendations (shown $62.00 per application on portal home)');
+    expect(home.revisionSnapshot).toEqual({ source: 'portal_home', offer });
+
+    expect(billing.subject).toBe('Add Lawn Care — requested from portal Billing');
+    expect(billing.description).toContain('on the portal Billing recommendations (shown $62.00 per application on portal Billing)');
+    // The same open-request slot and the same price-lock snapshot as Home:
+    // the tab is office text only, so it never looks like a new offer.
+    expect(billing.source).toBe('portal_home');
+    expect(billing.requestedService).toBe(home.requestedService);
+    expect(billing.revisionSnapshot).toEqual(home.revisionSnapshot);
+    expect(billing.sameAskSubjects).toEqual([home.subject, billing.subject]);
+    expect(home.sameAskSubjects).toEqual(billing.sameAskSubjects);
+
+    expect(unknown.subject).toBe(home.subject);
+    expect(unknown.revisionSnapshot).toEqual(home.revisionSnapshot);
+  });
+
+  test('gate on: the same offer tapped on Home and then on Billing is one request and one bell (real writer)', async () => {
+    const offer = {
+      serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
+      fingerprint: 'fp-1', option: { id: 'opt-1', perVisit: 62 },
+    };
+    const { fake, requests } = requestTableDb();
+    const bells = [];
+    const app = appWithGate(true, { offer, realWriter: { db: fake, bells } });
+    const base = await listen(app);
+    const tap = {
+      cardId: 'plan_offer', serviceKey: 'lawn_care', offerMode: 'priced', perApplication: 62, optionId: 'opt-1', fingerprint: 'fp-1',
+    };
+
+    const first = await post(base, tap);
+    expect(await first.json()).toEqual({ success: true, deduped: false });
+    expect(requests).toHaveLength(1);
+    expect(bells).toHaveLength(1);
+    expect(bells[0].payload.suggestedService).toBe('Lawn Care (shown $62.00 per application on portal home)');
+
+    const second = await post(base, { ...tap, surface: 'billing' });
+    expect(await second.json()).toEqual({ success: true, deduped: true });
+    expect(requests).toHaveLength(1);
+    expect(requests[0].subject).toBe('Add Lawn Care — requested from portal home');
+    expect(bells).toHaveLength(1);
+
+    // A moved price is a new offer: the row refreshes under the tab the
+    // customer tapped on, and the office hears about it.
+    offer.option = { id: 'opt-1', perVisit: 70 };
+    const moved = await post(base, { ...tap, perApplication: 70, surface: 'billing' });
+    expect(await moved.json()).toEqual({ success: true, deduped: false });
+    expect(requests).toHaveLength(1);
+    expect(requests[0].subject).toBe('Add Lawn Care — requested from portal Billing');
+    expect(bells).toHaveLength(2);
+    expect(bells[1].payload.refreshed).toBe(true);
   });
 });

@@ -20,9 +20,8 @@
  *     any placement over none, on its raw score as before;
  *   - a visit in conflict (current-conflict.js, behind
  *     GATE_AUTO_DISPATCH_CONFLICT_MOVES): it overlaps another customer's
- *     stop, or sits on an owner blackout day, or (GATE_AUTO_DISPATCH_MOWING_DAYS
- *     ='true') a Lawn Care Service visit sits on or next to the customer's
- *     mowing day. A free hour on the same day is
+ *     stop, or sits on an owner blackout day, or (mowing-days.js) a Lawn
+ *     Care Service visit sits on or next to the customer's mowing day. A free hour on the same day is
  *     taken first when the day itself stays open; then the slot that adds
  *     the least drive. A slot that adds more than
  *     config.conflictMaxAddedDriveMinutes is never taken: the visit stays
@@ -100,6 +99,44 @@ function withinConflictCeiling({ current, cand, config }) {
   return -driveSavingMinutes(current, cand) <= ceiling;
 }
 
+// Owner 2026-11-24 *all rec* (minutes rule): a day move that takes at least
+// minutesRuleFloor off the visit's modeled detour qualifies below the score bar
+// when it gives up no customer preference and no technician fit and still gains
+// points. 10 minutes is only 8.9 route points, so before this a clear drive
+// saving could miss the 15-point bar. A first move needs
+// config.minutesRuleSavingMinutes (10); a visit already moved needs
+// config.minutesRuleSecondMoveSavingMinutes (15; owner "do whatever you rec",
+// row 90) in place of the 20-point re-move bar. Real roads must confirm the
+// same minutes (road-check.js). 0 turns that half off.
+function minutesRuleFloor(service, config) {
+  return (service.auto_dispatch_change_count || 0) > 0
+    ? (config.minutesRuleSecondMoveSavingMinutes || 0)
+    : (config.minutesRuleSavingMinutes || 0);
+}
+
+// The customer's own preference credit: the preference score without the
+// service-type default window or the dry-time credit (neither is the
+// customer's choice; see moveGain).
+// In whole hundredths, so equal credits compare equal (16.67 - 4.17 is not 12.5 in floating point).
+function ownPreferenceScore(score) {
+  const hundredths = (v) => Math.round((Number(v) || 0) * 100);
+  return hundredths(score.customer_preference_score) - hundredths(score.default_time_score) - hundredths(score.dry_time_score);
+}
+
+// The rule needs the road check (GATE_AUTO_DISPATCH_ROAD_CHECK) and the
+// ordinary drive floor on (> 0): without both, road-check.js measures nothing,
+// and a minutes-only move must be confirmed on real roads.
+function minutesRuleOk({ service, current, cand, currentScore, candScore, gain, config }) {
+  const floor = minutesRuleFloor(service, config);
+  if (floor <= 0 || config.roadCheckEnabled !== true || !((config.minDayMoveDriveSavingMinutes || 0) > 0)) return false;
+  // A grouped visit moves with its siblings, whose own move counts this row
+  // cannot see: it keeps the score bar (candidate-slots.js groupFields).
+  if (!current || !cand || !isDayMove(current, cand) || current.grouped || current.detour_group_blind || !(gain > 0)) return false;
+  return driveSavingMinutes(current, cand) >= floor
+    && ownPreferenceScore(candScore) >= ownPreferenceScore(currentScore)
+    && (Number(candScore.technician_score) || 0) >= (Number(currentScore.technician_score) || 0);
+}
+
 // A visit that must leave its slot whatever the score says.
 function mustMove(service, current) {
   return isUnplacedDueDate(service) || !!(current && current.conflict);
@@ -123,12 +160,19 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     const normalFloorOk = meetsDriveFloor({ current, cand, config });
     const floorOk = forced || normalFloorOk;
     const ceilingOk = !conflict || withinConflictCeiling({ current, cand, config });
+    // Qualifies on minutes alone (no conflict to force it). A visit in conflict
+    // still uses it for the move it would make once the conflict is gone (normalOk).
+    const minutesOk = normalFloorOk && gain < threshold
+      && minutesRuleOk({ service, current, cand, currentScore, candScore: sc, gain, config });
+    const byMinutes = !forced && minutesOk;
     return {
       cand, sc, gain, index, floorOk, ceilingOk,
       // Would this slot move the visit with no conflict to force it?
-      normalOk: normalFloorOk && gain >= threshold,
+      normalOk: (normalFloorOk && gain >= threshold) || minutesOk,
+      minutesOk,
       saving: driveSavingMinutes(current, cand),
-      qualifies: forced ? ceilingOk : (floorOk && gain >= threshold),
+      qualifies: forced ? ceilingOk : (floorOk && (gain >= threshold || byMinutes)),
+      byMinutes,
       sameDay: !isDayMove(current, cand),
       sunday: isSundayDate(cand.date),
     };
@@ -139,7 +183,9 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
   const byGain = (a, b) => (sameDayFirst ? Number(b.sameDay) - Number(a.sameDay) : 0)
     || Number(a.sunday) - Number(b.sunday)
     || (conflict ? b.saving - a.saving : 0) || b.gain - a.gain || a.index - b.index;
-  const qualifying = rows.filter((r) => r.qualifies).sort(byGain);
+  // A same-day free hour still comes first for an overlap; then Sunday last, then bar before minutes rule.
+  const qualifying = rows.filter((r) => r.qualifies).sort((a, b) => (sameDayFirst ? Number(b.sameDay) - Number(a.sameDay) : 0)
+    || byBarThenSaving(a, b, 'byMinutes', byGain));
   // Nothing qualifies: the audit shows the nearest miss.
   const top = qualifying[0] || rows.slice().sort(byGain)[0] || null;
   return {
@@ -147,6 +193,8 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     bestScore: top && top.sc,
     gain: top ? top.gain : 0,
     qualifies: qualifying.length > 0,
+    // The slot taken qualifies only by the minutes rule (audit + road floor).
+    byMinutes: !!(qualifying[0] && qualifying[0].byMinutes),
     // The nearest miss cleared the score bar and was refused by the drive floor.
     floorFailed: qualifying.length === 0 && !!top && !forced && !top.floorOk && top.gain >= threshold,
     // A visit in conflict whose every slot adds too much drive.
@@ -156,22 +204,35 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
     movesWithoutConflict: !!conflict && rows.some((r) => r.normalOk && !r.cand.past_cap),
     // ...and the slot it would take then: ranked by gain alone, the order of
     // a visit with no conflict (Codex #6207 r10 P2).
-    ...normalBestOf(conflict, rows),
+    ...normalBestOf(conflict, rows, service, config),
     ranked: qualifying.map((r) => r.cand),
     // The same list with each slot's score and gain (road-check.js).
-    rankedRows: qualifying.map((r) => ({ cand: r.cand, sc: r.sc, gain: r.gain })),
+    rankedRows: qualifying.map((r) => ({ cand: r.cand, sc: r.sc, gain: r.gain, byMinutes: r.byMinutes })),
   };
 }
 
-function normalBestOf(conflict, rows) {
+// Order of qualifying slots: Sunday last (owner 2026-10-24); then a slot that clears
+// the score bar before a minutes-rule slot (key `flag`); minutes-rule slots by
+// the bigger drive saving; then `rest`.
+function byBarThenSaving(a, b, flag, rest) {
+  return Number(a.sunday) - Number(b.sunday)
+    || Number(a[flag]) - Number(b[flag])
+    || (a[flag] && b[flag] ? b.saving - a.saving : 0)
+    || rest(a, b);
+}
+
+function normalBestOf(conflict, rows, service, config) {
   if (!conflict) return {};
   // A past_cap slot is in the list only for the conflict repair (legacyCap).
+  // Ranked like an ordinary move: Sunday last, bar before minutes rule.
   const top = rows.filter((r) => r.normalOk && !r.cand.past_cap)
-    .sort((a, b) => Number(a.sunday) - Number(b.sunday) || b.gain - a.gain || a.index - b.index)[0];
-  return top ? { normalBest: top.cand, normalBestScore: top.sc } : {};
+    .sort((a, b) => byBarThenSaving(a, b, 'minutesOk', (x, y) => y.gain - x.gain || x.index - y.index))[0];
+  if (!top) return {};
+  // The road floor the projected move must keep (road-check.js withProjectionChecked).
+  return { normalBest: top.cand, normalBestScore: top.sc, ...(top.minutesOk ? { normalBestMinutesFloor: minutesRuleFloor(service, config) } : {}) };
 }
 
 module.exports = {
   isUnplacedDueDate, isDayMove, driveSavingMinutes, moveGain, meetsDriveFloor, withinConflictCeiling, mustMove, rankCandidates,
-  isSundayDate,
+  isSundayDate, minutesRuleOk, minutesRuleFloor,
 };

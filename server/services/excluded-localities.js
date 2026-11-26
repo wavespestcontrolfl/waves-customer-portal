@@ -9,14 +9,24 @@
  *
  *  - DeSoto County (Arcadia): owner ruling 2026-09-30. Whole county.
  *  - Punta Gorda, FL: owner ruling 2026-10-22 ("block punta gorda"). City
- *    only; the rest of Charlotte County (Port Charlotte, Englewood, Rotonda
- *    West, ...) stays served. There is deliberately NO lat/lng box for it:
- *    the city sits beside served Port Charlotte, so only city / ZIP text
- *    evidence decides.
+ *    only at the time. There is deliberately NO lat/lng box for it: the city
+ *    sits beside Port Charlotte, so only city / ZIP text evidence decides.
+ *  - NOT YET SERVED: a list for places held until a capacity change (a second
+ *    technician). It is EMPTY on purpose. Owner ruling 2026-11-23 held Rotonda
+ *    (Rotonda West), Placida, Boca Grande, Babcock Ranch, Gulf Cove, El Jobean,
+ *    Charlotte Harbor and Deep Creek for a few hours; the owner reversed it when
+ *    the second technician was hired, and those places are served again. To hold
+ *    a place again, add its name to NOT_YET_SERVED_LOCALITIES and its ZIPs to
+ *    NOT_YET_SERVED_ZIPS: every reader below (inspection route, address
+ *    validation, call veto, triage flag, public property lookup verdict) already
+ *    reads them. New leads and new bookings only: an existing customer's visits,
+ *    reschedules and re-service never read this list.
  *
  * Keys are normalized by normalizeLocality (lower-case, punctuation to
  * spaces, "ft"/"ft." -> "fort", single spaces).
  */
+
+const { zipToCity } = require('../utils/zip-to-city');
 
 const DESOTO_LOCALITIES = Object.freeze(new Set([
   'arcadia', 'southeast arcadia', 'se arcadia', 'nocatee', 'fort ogden',
@@ -35,6 +45,13 @@ const PUNTA_GORDA_ZIPS = Object.freeze(new Set(['33950', '33951', '33955']));
 // ZIPs shared between Punta Gorda and a served town: only the city decides.
 const PUNTA_GORDA_SHARED_ZIPS = Object.freeze(new Set(['33980', '33982', '33983']));
 
+// Places held for new customers until a capacity change. EMPTY: the 2026-11-23 hold (Rotonda West 33947, Placida
+// 33946 / 33927, Boca Grande 33921, Babcock Ranch 33982, Gulf Cove / El Jobean 33981, Charlotte Harbor 33980, Deep
+// Creek 33983) ended when the second technician was hired. To hold a place, add its normalized name here and its
+// ZIPs below. A ZIP that Punta Gorda shares with a served town holds by ZIP only if every town on it is held.
+const NOT_YET_SERVED_LOCALITIES = Object.freeze(new Set([]));
+const NOT_YET_SERVED_ZIPS = Object.freeze(new Set([]));
+
 function normalizeLocality(value) {
   return String(value || '')
     .toLowerCase()
@@ -47,13 +64,13 @@ function normalizeLocality(value) {
 const zip5 = (zip) => String(zip || '').trim().slice(0, 5);
 
 function isDesotoLocality(city) {
-  return DESOTO_LOCALITIES.has(normalizeLocality(city));
+  return DESOTO_LOCALITIES.has(normalizeLocality(city)) || DESOTO_LOCALITIES.has(townNamed(city));
 }
 function isDesotoZip(zip) {
   return DESOTO_ZIPS.has(zip5(zip));
 }
 function isPuntaGordaLocality(city) {
-  return PUNTA_GORDA_LOCALITIES.has(normalizeLocality(city));
+  return PUNTA_GORDA_LOCALITIES.has(normalizeLocality(city)) || PUNTA_GORDA_LOCALITIES.has(townNamed(city));
 }
 function isPuntaGordaZip(zip) {
   return PUNTA_GORDA_ZIPS.has(zip5(zip));
@@ -61,18 +78,72 @@ function isPuntaGordaZip(zip) {
 function isPuntaGordaSharedZip(zip) {
   return PUNTA_GORDA_SHARED_ZIPS.has(zip5(zip));
 }
+// The town an address parse's "city" really names, with a state, a ZIP or ZIP+4 tail and a leading unit ("Apt 4") removed:
+// "Punta Gorda Fl 33982" -> "punta gorda", "Fl 33982-1234" -> "".
+function townNamed(city) {
+  return normalizeLocality(city)
+    .replace(/\b\d{5}(?:[-\s]\d{4})?\b/g, ' ')
+    .replace(/\b(?:fl|florida)\b/g, ' ')
+    .replace(/^(?:(?:apt|apartment|unit|ste|suite|bldg|building|lot|spc|rm|room)\b\s*\S*|#\s*\S*)\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+// Words an address parse can leave where a city should be: a street direction, a unit word, a state. None is a town.
+const NON_TOWN_WORDS = Object.freeze(new Set([
+  'n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw', 'north', 'south', 'east', 'west', 'northeast', 'northwest', 'southeast', 'southwest',
+  'apt', 'apartment', 'unit', 'ste', 'suite', 'bldg', 'building', 'lot', 'spc', 'rm', 'room', 'fl', 'florida',
+]));
+// True when a city / address part names a town: something is left after the tails and unit are removed, it has no digit, and it is
+// not a direction or unit word.
+function namesTown(city) {
+  const named = townNamed(city);
+  return !!named && !/\d/.test(named) && !NON_TOWN_WORDS.has(named);
+}
+// A ZIP Punta Gorda shares with a served town cannot say which town an address is in: with no city beside it the area is
+// UNKNOWN, never served. EVERY service-area reader answers an unknown / recoverable verdict for it through this one
+// predicate (address validation, inspection booking, call veto and triage flag, public property lookup, prospect list).
+// A city counts as evidence only when it names a town (namesTown): a state / ZIP tail ("FL 33982") or a street direction ("NE")
+// that an address parse took for a city is not one. `trustInferred: false` (a stored address, or a reader with no lookup to
+// place the pin) also refuses a city that is just what the ZIP maps to: the lead webhook fills a cityless submission from the
+// ZIP, so that city proves nothing about which town the address is in.
+// On a shared ZIP only a town KNOWN on that ZIP counts (a per-ZIP allow-list, not a deny-list): "USA", "Unknown", "N/A",
+// any other odd parse, or a real town on the wrong ZIP never clears the guard. An unusual real name goes to review, which
+// fails closed. Punta Gorda is listed so the reader's own exclusion check refuses it, not this guard.
+const PG_NAMES = ['punta gorda', 'punta gorda isles'];
+const SHARED_ZIP_TOWNS = Object.freeze({
+  33980: Object.freeze(new Set(['port charlotte', 'charlotte harbor', ...PG_NAMES])),
+  33982: Object.freeze(new Set(['babcock ranch', 'port charlotte', 'cleveland', ...PG_NAMES])),
+  33983: Object.freeze(new Set(['port charlotte', 'deep creek', 'harbour heights', ...PG_NAMES])),
+});
+// True when a city / address part names a town known on this shared ZIP.
+function namesSharedZipTown(city, zip) {
+  const towns = SHARED_ZIP_TOWNS[zip5(zip)];
+  return !!towns && namesTown(city) && towns.has(townNamed(city));
+}
+function sharedZipNeedsCity(city, zip, { trustInferred = true } = {}) {
+  if (!isPuntaGordaSharedZip(zip)) return false;
+  return !namesSharedZipTown(city, zip) || (!trustInferred && townNamed(city) === normalizeLocality(zipToCity(zip)));
+}
+function isNotYetServedLocality(city) {
+  return NOT_YET_SERVED_LOCALITIES.has(normalizeLocality(city)) || NOT_YET_SERVED_LOCALITIES.has(townNamed(city));
+}
+function isNotYetServedZip(zip) {
+  return NOT_YET_SERVED_ZIPS.has(zip5(zip));
+}
 
-// Any excluded place, by city name or by a ZIP that belongs only to one.
+// Any excluded place (DeSoto, Punta Gorda, any not-yet-served place), by city name or by a ZIP that belongs only to one.
 function isExcludedLocality(city) {
-  return isDesotoLocality(city) || isPuntaGordaLocality(city);
+  return isDesotoLocality(city) || isPuntaGordaLocality(city) || isNotYetServedLocality(city);
 }
 function isExcludedZip(zip) {
-  return isDesotoZip(zip) || isPuntaGordaZip(zip);
+  return isDesotoZip(zip) || isPuntaGordaZip(zip) || isNotYetServedZip(zip);
 }
 
 module.exports = {
   DESOTO_LOCALITIES, DESOTO_ZIPS, PUNTA_GORDA_LOCALITIES, PUNTA_GORDA_ZIPS, PUNTA_GORDA_SHARED_ZIPS,
+  NOT_YET_SERVED_LOCALITIES, NOT_YET_SERVED_ZIPS, SHARED_ZIP_TOWNS,
   normalizeLocality,
-  isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isPuntaGordaSharedZip,
+  isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isPuntaGordaSharedZip, sharedZipNeedsCity, namesSharedZipTown, townNamed, namesTown,
+  isNotYetServedLocality, isNotYetServedZip,
   isExcludedLocality, isExcludedZip,
 };

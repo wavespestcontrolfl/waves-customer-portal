@@ -15,7 +15,23 @@ jest.mock('../services/day-replan/planner', () => {
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
-jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn() }));
+// loadPromiseFacts answers from the same `loadToldVisitIds` fake: a told id reads 'hour', any other 'none'; the told
+// slot starts (owner 2026-11-24 2-hour shift) come from the `toldStarts` fake, none unless a test sets them.
+jest.mock('../services/auto-dispatch/told-visits', () => {
+  const loadToldVisitIds = jest.fn();
+  const toldStarts = jest.fn(async () => new Map());
+  const loadPromiseFacts = jest.fn(async (...args) => {
+    const told = await loadToldVisitIds(...args);
+    const starts = await toldStarts();
+    return new Map(args[1].map((id) => [id, { level: told.has(id) ? 'hour' : 'none', start: starts.get(id) || null }]));
+  });
+  return { loadToldVisitIds, loadPromiseFacts, toldStarts };
+});
+jest.mock('../services/time-promise', () => ({
+  ...jest.requireActual('../services/time-promise'),
+  // No stop has a set time here (its own suite: day-only-promise-day-replan.test.js).
+  dayOnlyEligibility: jest.fn(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: true, level: 'none' }]))),
+}));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),
@@ -25,7 +41,7 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
 const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
 const { getCustomerSchedulingPreferences } = require('../services/auto-dispatch/preferences');
 const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
-const { loadToldVisitIds } = require('../services/auto-dispatch/told-visits');
+const { loadToldVisitIds, toldStarts: loadToldStarts } = require('../services/auto-dispatch/told-visits');
 const { runDayReplanIfEnabled, _internals } = require('../services/day-replan');
 
 const NOW = new Date('2026-11-03T12:00:00Z'); // 07:00 ET; DST has ended, ET = UTC-5
@@ -123,6 +139,8 @@ beforeEach(() => {
   isPersonPlacedVisit.mockImplementation(async () => ({ placed: false }));
   loadToldVisitIds.mockReset();
   loadToldVisitIds.mockResolvedValue(new Set());
+  loadToldStarts.mockReset();
+  loadToldStarts.mockResolvedValue(new Map());
 });
 afterAll(() => { process.env = savedEnv; });
 
@@ -140,8 +158,9 @@ describe('fixedReason with the told-lock context', () => {
     expect(_internals.fixedReason(stop(), base())).toBeNull();
   });
 
-  test('customer_confirmed', () => {
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base())).toBe('customer_confirmed');
+  // Owner 2026-11-22: "i dont think it matters if staff pick it or tom confirmed it".
+  test('a customer confirmation alone no longer fixes a stop', () => {
+    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base())).toBeNull();
   });
 
   test('first_or_one_time: not recurring, or no parent series', () => {
@@ -164,7 +183,7 @@ describe('fixedReason with the told-lock context', () => {
     const all = base({ sent24: new Set(['s1']), told: new Set(['s1']), personPlaced: new Set(['s1']) });
     expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false }), all)).toBe('reminder_24h_sent');
     expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false, status: 'dispatched' }), all)).toBe('status');
-    expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false }), { ...all, sent24: new Set() })).toBe('customer_confirmed');
+    expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false }), { ...all, sent24: new Set() })).toBe('first_or_one_time');
     expect(_internals.fixedReason(stop({ is_recurring: false }), { ...all, sent24: new Set() })).toBe('first_or_one_time');
     expect(_internals.fixedReason(stop(), { ...all, sent24: new Set() })).toBe('person_placed');
     expect(_internals.fixedReason(stop(), { ...all, sent24: new Set(), personPlaced: new Set() })).toBe('time_told');
@@ -242,7 +261,8 @@ describe('shadow run: the fixed list records each reason', () => {
     const rows = withParent({ a: { customer_confirmed: true }, b: { recurring_parent_id: null } });
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
     await runDayReplanIfEnabled({ now: NOW, conn });
-    expect(fixedOf(inserts)).toEqual([['a', 'customer_confirmed'], ['b', 'first_or_one_time'], ['c', 'person_placed'], ['d', 'time_told']]);
+    // a (confirmed) is not fixed: a confirmation alone no longer fixes a stop (owner 2026-11-22).
+    expect(fixedOf(inserts)).toEqual([['b', 'first_or_one_time'], ['c', 'person_placed'], ['d', 'time_told']]);
   });
 
   test('a person-placed history that cannot be read keeps every stop fixed', async () => {
@@ -314,5 +334,86 @@ describe('reminder_24h_off', () => {
     const ctx = await _internals.loadDayContext(conn, TOMORROW, NOW);
     expect([...ctx.reminder24hOff].sort()).toEqual(['a', 'b']);
     for (const r of dayRows()) expect(_internals.fixedReason(r, ctx)).toBe('reminder_24h_off');
+  });
+});
+
+// Owner 2026-11-24: "we give a 2 hr window, so if we move it back two hrs, this is fine".
+describe('2-hour told shift: a stop told an hour may start up to 2 hours later than the told slot', () => {
+  // Two days out, so a 7:00 start is past the 24-hour reach.
+  const base = (extra = {}) => ({
+    dateStr: '2026-11-05', now: NOW, visitCounts: new Map(), customerCounts: new Map(), sent24: new Set(),
+    toldLock: true, told: new Set(['s1']), personPlaced: new Set(), toldStart: new Map([['s1', 9 * 60]]), ...extra,
+  });
+  const stop = (start, extra = {}) => ({
+    id: 's1', status: 'confirmed', window_start: start, visit_id: null, customer_id: 'c1',
+    is_recurring: true, recurring_parent_id: 'p1', customer_confirmed: false, ...extra,
+  });
+
+  test('told 9:00: any start from 9:00 to 11:00 is movable; earlier, or past 2 hours later, it is time_told', () => {
+    for (const start of ['09:00:00', '10:00:00', '11:00:00']) {
+      expect(_internals.fixedReason(stop(start), base())).toBeNull();
+    }
+    // Never earlier than the told slot: the customer may not be home yet (the window is start to +2 hours).
+    expect(_internals.fixedReason(stop('08:00:00'), base())).toBe('time_told');
+    expect(_internals.fixedReason(stop('08:59:00'), base())).toBe('time_told');
+    expect(_internals.fixedReason(stop('11:01:00'), base())).toBe('time_told');
+    expect(_internals.fixedReason(stop('12:00:00'), base())).toBe('time_told');
+  });
+
+  test('no known told slot (an unknown window, another date, a failed read) keeps time_told', () => {
+    expect(_internals.fixedReason(stop('09:00:00'), base({ toldStart: new Map() }))).toBe('time_told');
+    expect(_internals.fixedReason(stop('09:00:00'), base({ toldStart: undefined }))).toBe('time_told');
+  });
+
+  test('a first or one-time visit told an hour gets the same 2 hours; outside them it stays first_or_one_time', () => {
+    expect(_internals.fixedReason(stop('10:00:00', { is_recurring: false }), base())).toBeNull();
+    expect(_internals.fixedReason(stop('12:00:00', { is_recurring: false }), base())).toBe('first_or_one_time');
+    expect(_internals.fixedReason(stop('08:00:00', { is_recurring: false }), base())).toBe('first_or_one_time');
+    expect(_internals.fixedReason(stop('10:00:00', { recurring_parent_id: null }), base({ toldStart: new Map() }))).toBe('first_or_one_time');
+  });
+
+  test('a time the customer picked or asked for still holds (person_placed, set_time)', () => {
+    expect(_internals.fixedReason(stop('09:00:00'), base({ personPlaced: new Set(['s1']) }))).toBe('person_placed');
+    expect(_internals.fixedReason(stop('09:00:00'), base({ askRecorded: true, setTime: new Map([['s1', 'set_time']]) }))).toBe('set_time');
+  });
+
+  test('limitToldShift: the planner may only use hours from the told slot to 2 hours later, inside any preference', () => {
+    const entries = [
+      { row: { id: 'a' }, why: null, pref: null },
+      { row: { id: 'b' }, why: null, pref: { startMin: 10 * 60, endMin: 17 * 60 } },
+      { row: { id: 'c' }, why: null, pref: { startMin: 14 * 60, endMin: 17 * 60 } },
+      { row: { id: 'd' }, why: 'staff_lock', pref: null },
+      { row: { id: 'e' }, why: null, pref: null },
+    ];
+    const starts = new Map([['a', 9 * 60], ['b', 9 * 60], ['c', 9 * 60], ['d', 9 * 60]]);
+    _internals.limitToldShift(entries, starts);
+    expect(entries[0]).toMatchObject({ why: null, pref: { startMin: 9 * 60, endMin: 11 * 60 + 1 } });
+    expect(entries[1]).toMatchObject({ why: null, pref: { startMin: 10 * 60, endMin: 11 * 60 + 1 } });
+    expect(entries[2].why).toBe('time_told'); // the preference and the 2 hours do not overlap
+    expect(entries[3]).toMatchObject({ why: 'staff_lock', pref: null });
+    expect(entries[4]).toMatchObject({ why: null, pref: null }); // never told an hour: unchanged
+  });
+
+  test('toldStartsOnDate: ET minutes, and a slot told for another date anchors nothing', () => {
+    const starts = new Map([
+      ['a', new Date('2026-11-04T14:00:00Z')], // 9:00 AM ET on Nov 4
+      ['b', new Date('2026-11-05T14:00:00Z')], // another date
+    ]);
+    expect([..._internals.toldStartsOnDate(starts, TOMORROW)]).toEqual([['a', 9 * 60]]);
+    expect(_internals.TOLD_SHIFT_MIN).toBe(120);
+  });
+
+  test('loadDayContext reads the told starts once; a failed read gives no stop the shift', async () => {
+    const dayRows = [{ ...row('a', 0.30, 8), recurring_parent_id: 'p1' }, { ...row('b', 0.02, 9), recurring_parent_id: 'p1' }];
+    loadToldVisitIds.mockResolvedValue(new Set(['a', 'b']));
+    loadToldStarts.mockResolvedValue(new Map([['a', new Date('2026-11-04T13:00:00Z')]]));
+    const ctx = await _internals.loadDayContext(fakeConn({ stopsByDate: { [TOMORROW]: dayRows } }).conn, TOMORROW, NOW);
+    expect([...ctx.toldStart]).toEqual([['a', 8 * 60]]);
+    expect(_internals.fixedReason({ ...dayRows[0], customer_confirmed: false }, ctx)).toBeNull();
+    expect(_internals.fixedReason({ ...dayRows[1], customer_confirmed: false }, ctx)).toBe('time_told');
+    loadToldStarts.mockRejectedValue(new Error('read down'));
+    const down = await _internals.loadDayContext(fakeConn({ stopsByDate: { [TOMORROW]: dayRows } }).conn, TOMORROW, NOW);
+    expect(down.toldStart.size).toBe(0);
+    expect(_internals.fixedReason({ ...dayRows[0], customer_confirmed: false }, down)).toBe('time_told');
   });
 });

@@ -1,9 +1,8 @@
-// Schedule tie-proximity (owner ruling 2026-09-26, GATE_SCHEDULE_TIE_PROXIMITY):
+// Schedule tie-proximity (owner ruling 2026-09-26):
 // when two stops on a tech's day start within 30 minutes of each other, the
 // one closer to the previous stop shows first — booking order must not
 // matter. Pure-helper coverage only; the route wiring (admin-schedule.js)
-// just calls this and is exercised through the client tie-break tests +
-// manual gate-off inspection (see PR notes).
+// just calls this and is exercised through the client tie-break tests.
 //
 // Deterministic geometry: HQ at the origin, plain Euclidean "miles" (not the
 // production haversine formula), and drive minutes == miles (identity) — the

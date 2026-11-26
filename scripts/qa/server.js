@@ -77,16 +77,174 @@ RequestClient.prototype.request = async function (options) {
     throw new Error('QA blocked an unexpected Twilio transport request');
   }
   const sid = `SM${require('node:crypto').randomBytes(16).toString('hex')}`;
-  capture('sms', { sid, customerId: fixture.customerId, hasMedia: !!payload.MediaUrl });
+  // The body lets a journey prove the words sent. The capture file stays private (mode 0600, never uploaded).
+  capture('sms', { sid, customerId: fixture.customerId, to: payload.To, body: payload.Body, hasMedia: !!payload.MediaUrl });
   return { statusCode: 201, headers: {}, body: { sid, status: 'queued', to: payload.To,
     from: payload.From, body: payload.Body, num_segments: '1', num_media: '0', error_code: null } };
 };
 
-// Real Stripe signature verification and application settlement code; only
-// external charge metadata lookup is simulated. No charge creation is enabled.
+// Real Stripe signature verification, request building and application settlement code run
+// unchanged. Only the SDK methods below are answered here, shaped like Stripe's API objects,
+// and each call is written to the private capture file as kind 'stripe'. Every other Stripe
+// method throws, as the Twilio transport does, so a new provider call shows up as a failure.
 const Stripe = require('stripe');
-Stripe.resources.Charges.prototype.retrieve = async (id) => {
-  if (id !== `ch_${fixture.paymentIntentId}`) throw new Error('Unknown QA charge');
-  return { id, payment_method_details: { type: 'us_bank_account', us_bank_account: { last4: '6789' } } };
+const crypto = require('node:crypto');
+const { SURCHARGE_API_VERSION } = require('../../server/services/stripe-pricing');
+const paymentIntents = new Map();
+const byIdempotencyKey = new Map();
+const unitCents = (value) => Number.isInteger(value) ? value : Number(value);
+// A refund of a QA intent, keyed by idempotency key like Stripe's own layer. Only an intent this fake created can be refunded.
+const refundsByIntent = new Map();
+const refundsByIdempotencyKey = new Map();
+// A new refund waits briefly for a second call with the same key, so a double submission always overlaps the first
+// one in flight (a real network round trip leaves that window; a local fake would otherwise close it at once). The
+// second call then waits for the first to finish and gets Stripe's idempotent answer.
+const refundsInFlight = new Map();
+const OVERLAP_WAIT_MS = 1500;
+const stable = (value) => (Array.isArray(value) ? value.map(stable)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, stable(value[k])])) : value);
+const sameParams = (a, b) => JSON.stringify(stable(a)) === JSON.stringify(stable(b));
+const refundedCents = (intentId) => (refundsByIntent.get(intentId) || []).reduce((sum, refund) => sum + refund.amount, 0);
+// A repeated idempotency key returns the first refund, and refuses any changed parameter, as Stripe does.
+function replayRefund(key, params) {
+  const replay = refundsByIdempotencyKey.get(key);
+  if (!replay) throw new Stripe.errors.StripeAPIError({ message: 'The earlier request with this key failed', type: 'api_error' });
+  if (!sameParams(replay.params, params)) {
+    throw new Stripe.errors.StripeIdempotencyError({ message: 'Keys for idempotent requests can only be used with the same parameters they were first used with.', type: 'idempotency_error' });
+  }
+  capture('stripe-refund-result', { refundId: replay.refund.id, replayed: true });
+  return replay.refund;
+}
+function createRefund(params, key) {
+  const intent = paymentIntents.get(params.payment_intent);
+  const remaining = unitCents(intent.amount) - refundedCents(intent.id);
+  const requested = params.amount === undefined ? remaining : unitCents(params.amount);
+  if (!Number.isInteger(requested) || requested <= 0 || requested > remaining) {
+    throw new Stripe.errors.StripeInvalidRequestError({ message: `Refund amount ($${(requested / 100).toFixed(2)}) is greater than unrefunded amount on charge ($${(remaining / 100).toFixed(2)})`, type: 'invalid_request_error' });
+  }
+  const refund = { id: `re_qa_${crypto.randomBytes(12).toString('hex')}`, object: 'refund', amount: requested, currency: intent.currency,
+    charge: intent.latest_charge, payment_intent: intent.id, status: 'succeeded', reason: params.reason || null,
+    created: Math.floor(Date.now() / 1000), metadata: { ...params.metadata } };
+  refundsByIntent.set(intent.id, [...(refundsByIntent.get(intent.id) || []), refund]);
+  if (key) refundsByIdempotencyKey.set(key, { params: JSON.parse(JSON.stringify(params)), refund });
+  capture('stripe-refund-result', { refundId: refund.id, replayed: false });
+  return refund;
+}
+const stripeStubs = {
+  Refunds: {
+    create: async (params, options = {}) => {
+      if (!paymentIntents.has(params.payment_intent)) throw new Error('QA fake Stripe only refunds a payment intent it created');
+      capture('stripe', { method: 'refunds.create', payment_intent: params.payment_intent, amount: params.amount,
+        reason: params.reason, idempotencyKey: options.idempotencyKey });
+      const key = options.idempotencyKey;
+      const inFlight = key && refundsInFlight.get(key);
+      if (inFlight) {
+        inFlight.release();
+        await inFlight.done.catch(() => {});
+        return replayRefund(key, params);
+      }
+      if (key && refundsByIdempotencyKey.has(key)) return replayRefund(key, params);
+      if (!key) return createRefund(params, key);
+      let release;
+      let finish;
+      const entry = { release: () => release?.(), done: new Promise((resolve, reject) => { finish = { resolve, reject }; }) };
+      // Waiters read the outcome; without one, a failed refund must not surface as an unhandled rejection.
+      entry.done.catch(() => {});
+      refundsInFlight.set(key, entry);
+      try {
+        await new Promise((resolve) => { const timer = setTimeout(resolve, OVERLAP_WAIT_MS); release = () => { clearTimeout(timer); resolve(); }; });
+        const refund = createRefund(params, key);
+        finish.resolve(refund);
+        return refund;
+      } catch (error) {
+        finish.reject(error);
+        throw error;
+      } finally {
+        refundsInFlight.delete(key);
+      }
+    },
+    // The refund history of a QA charge or intent, newest first, as Stripe lists it.
+    // Like the SDK, the result is a promise of one page that also offers autoPagingEach / autoPagingToArray.
+    list: (params = {}) => {
+      capture('stripe', { method: 'refunds.list', charge: params.charge, payment_intent: params.payment_intent });
+      const intentId = params.payment_intent || String(params.charge || '').replace(/^ch_/, '');
+      if (!paymentIntents.has(intentId)) return Promise.reject(new Error('QA fake Stripe only lists refunds of a payment intent it created'));
+      const data = [...(refundsByIntent.get(intentId) || [])].reverse();
+      const page = Promise.resolve({ object: 'list', data, has_more: false, url: '/v1/refunds' });
+      page.autoPagingToArray = async () => [...data];
+      page.autoPagingEach = async (onItem) => { for (const item of data) if (await onItem(item) === false) break; };
+      return page;
+    },
+  },
+  Charges: {
+    retrieve: async (id) => {
+      capture('stripe', { method: 'charges.retrieve', id });
+      if (id === `ch_${fixture.paymentIntentId}`) {
+        return { id, payment_method_details: { type: 'us_bank_account', us_bank_account: { last4: '6789' } } };
+      }
+      const intent = paymentIntents.get(String(id).replace(/^ch_/, ''));
+      if (!intent) throw new Error('Unknown QA charge');
+      const refunded = refundedCents(intent.id);
+      return { id, object: 'charge', payment_intent: intent.id, amount: intent.amount, currency: intent.currency, status: 'succeeded',
+        amount_refunded: refunded, refunded: refunded >= intent.amount,
+        payment_method_details: { type: 'card', card: { brand: fixture.cardBrand, last4: fixture.cardLastFour, funding: 'credit' } } };
+    },
+  },
+  PaymentIntents: {
+    // Only the saved-card charge for the synthetic customer: off-session, confirmed at creation.
+    create: async (params, options = {}) => {
+      if (params.customer !== fixture.stripeCustomerId || params.payment_method !== fixture.stripePaymentMethodId) {
+        throw new Error('QA fake Stripe only charges the synthetic saved card');
+      }
+      // Stripe accepts amount_details.surcharge only on the preview API version; the default client version refuses it.
+      if (params.amount_details?.surcharge && options.apiVersion !== SURCHARGE_API_VERSION) {
+        throw new Error(`QA fake Stripe: a surcharge needs apiVersion ${SURCHARGE_API_VERSION}, got ${options.apiVersion}`);
+      }
+      const call = { method: 'paymentIntents.create', amount: params.amount, currency: params.currency, customer: params.customer,
+        payment_method: params.payment_method, payment_method_types: params.payment_method_types, off_session: params.off_session,
+        confirm: params.confirm, amount_details: params.amount_details, metadata: params.metadata,
+        idempotencyKey: options.idempotencyKey, apiVersion: options.apiVersion };
+      capture('stripe', call);
+      // A repeated idempotency key returns the first object, as Stripe does.
+      const replay = byIdempotencyKey.get(options.idempotencyKey);
+      if (replay) return replay;
+      const id = `pi_qa_${crypto.randomBytes(12).toString('hex')}`;
+      const intent = { id, object: 'payment_intent', amount: unitCents(params.amount), amount_received: unitCents(params.amount),
+        currency: params.currency, customer: params.customer, payment_method: params.payment_method,
+        payment_method_types: params.payment_method_types, status: 'succeeded', latest_charge: `ch_${id}`,
+        capture_method: 'automatic', confirmation_method: 'automatic', description: params.description || null,
+        livemode: false, created: Math.floor(Date.now() / 1000), metadata: { ...params.metadata },
+        ...(params.amount_details ? { amount_details: params.amount_details } : {}) };
+      paymentIntents.set(id, intent);
+      if (options.idempotencyKey) byIdempotencyKey.set(options.idempotencyKey, intent);
+      return intent;
+    },
+  },
 };
-require('../../server/index');
+(function replaceStripeResources(resources, path = []) {
+  for (const [name, resource] of Object.entries(resources)) {
+    if (typeof resource === 'function' && resource.prototype) {
+      for (const method of Object.getOwnPropertyNames(resource.prototype)) {
+        if (method === 'constructor' || typeof resource.prototype[method] !== 'function') continue;
+        const stub = stripeStubs[name]?.[method];
+        resource.prototype[method] = stub || (async () => { throw new Error(`QA blocked an unexpected Stripe call: ${[...path, name].join('.')}.${method}`); });
+      }
+    } else if (resource && typeof resource === 'object') replaceStripeResources(resource, [...path, name]);
+  }
+}(Stripe.resources));
+const app = require('../../server/index');
+// QA-only control route, mounted ahead of every application route and answered only with this run's secret. It runs the
+// job the production scheduler runs, in this process, where the text and card providers are already replaced: the runner
+// process has no fakes and must never call a job that can text a customer.
+const qaJobs = { 'appointment-reminders': () => require('../../server/services/appointment-reminders').checkAndSendReminders() };
+const routeCount = app._router.stack.length;
+app.post('/__qa/run/:job', async (req, res) => {
+  if (!process.env.QA_CONTROL_TOKEN || req.get('x-qa-control') !== process.env.QA_CONTROL_TOKEN) return res.status(404).end();
+  const job = qaJobs[req.params.job];
+  if (!job) return res.status(404).end();
+  try { res.json({ ok: true, result: await job() }); } catch (error) { res.status(500).json({ ok: false, error: error.message }); }
+});
+// Express's own query and init layers must still run first; everything the application mounted comes after the route.
+const own = app._router.stack.splice(routeCount);
+const firstApplicationLayer = app._router.stack.findIndex((layer) => !['query', 'expressInit'].includes(layer.name));
+app._router.stack.splice(firstApplicationLayer, 0, ...own);

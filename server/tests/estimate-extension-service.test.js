@@ -317,6 +317,41 @@ describe('extendEstimate post-write SMS: annual-offer delivery guard (delivery-g
   });
 });
 
+describe('a revived offer sheds the reclaim\'s SYSTEM booked-another-way stamp (locked anchor row)', () => {
+  async function extendWithLockedRow(locked) {
+    const updates = [];
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = orig(table);
+      if (table === 'estimates') {
+        b.first = jest.fn(async () => ({ estimate_data: {}, ...locked }));
+        b.update = jest.fn((payload) => { updates.push(payload); return Promise.resolve(1); });
+      }
+      return b;
+    });
+    try {
+      await extendEstimate({
+        estimate: { id: 'est-sys', status: 'expired', archived_at: null, expires_at: PAST, sent_at: PAST, viewed_at: PAST },
+        days: 7, silent: true, entryPoint: 'test', workflow: 'test',
+      });
+    } finally {
+      db.mockImplementation(orig);
+    }
+    return updates[0];
+  }
+
+  it('clears a SYSTEM converted_other_path on the revived anchor', async () => {
+    const update = await extendWithLockedRow({ disposition: 'converted_other_path', disposition_source: 'system' });
+    expect(update.status).toBe('viewed');
+    expect(update).toMatchObject({ disposition: null, disposition_source: null, disposition_at: null, disposition_note: null });
+  });
+
+  it('leaves a staff-stamped converted_other_path alone', async () => {
+    const update = await extendWithLockedRow({ disposition: 'converted_other_path', disposition_source: 'staff' });
+    expect(update).not.toHaveProperty('disposition');
+  });
+});
+
 describe('EXTENDABLE_STATUSES', () => {
   it('covers every published status the public eligibility predicate can admit', () => {
     // Superset requirement: isEstimateExtensionRequestEligible admits
@@ -337,6 +372,35 @@ describe('extendEstimate — engine-authoritative pricing gate (#3750, GH codex 
       days: 7,
       entryPoint: 'test',
     })).rejects.toMatchObject({ statusCode: 409, code: 'PRICING_AUTHORITY_NOT_SERVER', message: expect.stringMatching(/call the office/i) });
+  });
+});
+
+describe('a plan offer quote is never revived as a grouped sibling (owner 2026-11-19; pre-push audit P0)', () => {
+  // The offer quote ends on its own date with the setup fee waived. Its own link cannot ask for an extension, and
+  // the extension of a sibling in its group must not bring it back: the revive UPDATE and the verdict that judges
+  // "what this extension would revive" both carry the stamp's SQL mirror.
+  const { PLAN_OFFER_ABSENT_SQL } = require('../services/plan-offer-estimate');
+  const src = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+  const OFFER_RULE = ".whereRaw(require('./plan-offer-estimate').PLAN_OFFER_ABSENT_SQL)";
+
+  test('the revivable-sibling verdict leaves an offer quote out', () => {
+    const verdict = src.slice(src.indexOf('function revivableSiblingsQuery('), src.indexOf('async function extensionDeliverableUnderGate('));
+    expect(verdict).toContain(OFFER_RULE);
+  });
+
+  test('the sibling revive UPDATE leaves an offer quote as it is', () => {
+    const start = src.indexOf('Multi-property group: the ONE link renders every sibling');
+    const revive = src.slice(start, src.indexOf('followup_expiring_sent: true', start));
+    expect(start).toBeGreaterThan(-1);
+    expect(revive).toContain(".whereNot({ id: estimate.id })");
+    expect(revive).toContain(OFFER_RULE);
+    // Before the write, never after it.
+    expect(revive.indexOf(OFFER_RULE)).toBeLessThan(revive.indexOf('.update({'));
+  });
+
+  test('the two predicates are the only uses: the anchor write stays open to a staff extension of the offer itself', () => {
+    expect(src.split(OFFER_RULE).length - 1).toBe(2);
+    expect(PLAN_OFFER_ABSENT_SQL).toContain("'planStart'->'offer'");
   });
 });
 

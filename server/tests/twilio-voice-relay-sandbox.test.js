@@ -490,8 +490,8 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
   // A cell request as Twilio sends it: signed over the public URL and the form
   // body (the route checks it itself; the shared middleware may only log).
   const CELL_PATH = '/api/webhooks/twilio/relay-sandbox/cell';
-  const cell = (digits, CallSid = 'CA-sb-live', { signed = true } = {}) => {
-    const body = { CallSid, To: SANDBOX, Digits: digits };
+  const cell = (digits, CallSid = 'CA-sb-live', { signed = true, extra = {} } = {}) => {
+    const body = { CallSid, To: SANDBOX, Digits: digits, ...extra };
     const headers = { host: 'portal.example.com', 'x-forwarded-proto': 'https' };
     if (signed) {
       headers['x-twilio-signature'] = require('twilio').getExpectedTwilioSignature(process.env.TWILIO_AUTH_TOKEN || '', `https://portal.example.com${CELL_PATH}`, body);
@@ -678,6 +678,19 @@ describe('GPT-Live trial: cell 71 / 72 behind GATE_VOICE_GPT_LIVE_TEST', () => {
       expect(res.body).toContain('<Hangup/>');
       expect(res.body).not.toContain('<Stream');
     }
+  });
+
+  test('a failed stamp write logs a bounded code, never the error message (it can echo the caller\'s numbers)', async () => {
+    process.env.GATE_VOICE_GPT_LIVE_TEST = 'true';
+    const { update } = primeLive({ stampFails: true });
+    update.mockImplementation(() => Promise.reject(Object.assign(new Error('update call_log set metadata = {"from":"+19415550100","to":"+19412412993"}'), { code: '57014' })));
+    logger.error.mockClear();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')(cell('71'), res);
+    expect(res.body).toContain('not available right now');
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).toContain('code=57014');
+    expect(logged).not.toMatch(/9415550100|9412412993|update call_log/);
   });
 
   test('relay not attached: the same spoken notice as the answer handler', async () => {

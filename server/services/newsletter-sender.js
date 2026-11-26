@@ -36,6 +36,9 @@ const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, C
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
+const { hasHomeToken, loadHomeFacts } = require('./pest-insider/home');
+const { referralLineForBatch } = require('./pest-insider/referral-line');
+const { toolBlockForBatch } = require('./pest-insider/tool-block');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
@@ -229,13 +232,10 @@ const OPTOUT_SAME_MAILBOX_SQL = (() => {
 // the address itself, LOWER(TRIM)'d, for every other domain. Two rows
 // sharing a mailbox always compute the SAME key regardless of which alias
 // spelling either one uses — collapsing the exact-match-OR-Google-alias-
-// match rule into one equality Postgres can hash-join.
-const MAILBOX_KEY_SQL = (fieldExpr) => {
-  const trimmed = `TRIM(${fieldExpr})`;
-  return `(CASE WHEN ${GOOGLE_MAILBOX_SQL.isGoogle(trimmed)} AND ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} <> ''
-    THEN ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} || '@gmail.com'
-    ELSE LOWER(${trimmed}) END)`;
-};
+// match rule into one equality Postgres can hash-join. The builder lives with
+// the mailbox identity it is made of (customer-comms-lock.js GOOGLE_MAILBOX_SQL.key),
+// so the Waves Pest Insider "Your home" mailbox rule reads the same key.
+const MAILBOX_KEY_SQL = (fieldExpr) => GOOGLE_MAILBOX_SQL.key(fieldExpr);
 // The ONE sendable row per mailbox among ACTIVE rows: DISTINCT ON collapses
 // each mailbox_key to its single earliest (created_at, id) row — the SAME
 // deterministic tie-break every other canonical pick in this codebase uses
@@ -464,6 +464,66 @@ async function loadPersonalizationContext(subscribers) {
     logger.warn(`[newsletter] personalization context load failed: ${err.message}`);
   }
   return map;
+}
+
+/**
+ * A Waves Pest Insider issue's "Your home" facts for the readers ONE chunk is about
+ * to mail (pest-insider/home.js, render.js): read per chunk, after that chunk's
+ * eligibility re-check and relink adoption, so the link, the address on file and the
+ * household are the database's at dispatch. A read that fails logs one warning and
+ * gives an empty Map, so that chunk's readers get '' and the send goes on. Never throws.
+ */
+async function loadHomeFactsSafe(subscriberIds, sendId) {
+  try {
+    return await loadHomeFacts(db, subscriberIds);
+  } catch (err) {
+    logger.warn(`[newsletter] send ${sendId} "Your home" facts load failed, no reader of this batch gets the block: ${err.message}`);
+    return new Map();
+  }
+}
+
+// A reader's block needs all of: a planned audience; facts whose customer is the
+// reader's current link (as adopted at the per-chunk re-check); facts read for the very
+// address the batch is about to mail; and the sender's own list of the customers behind
+// the reader's mailbox holding that customer and no one else (a shared mailbox, or an
+// unreadable one, shows nothing).
+function homeReaderIsUnambiguous(planned, home, subscriber, mailboxCustomerIds) {
+  const customerId = subscriber.customer_id;
+  if (!planned || !home || !customerId) return false;
+  if (String(home.customerId) !== String(customerId)) return false;
+  if (!home.address || String(subscriber.email ?? '').trim().toLowerCase() !== home.address) return false;
+  return Array.isArray(mailboxCustomerIds) && mailboxCustomerIds.length > 0
+    && mailboxCustomerIds.every((id) => String(id) === String(customerId));
+}
+
+// The substitutions for both home tokens, one reader at a time. A reader's
+// block must pass the send check (render.js homeBlockErrors); one that fails,
+// or a check that throws, leaves that reader '' and is counted in `state`.
+function makeHomeSubstitutions(planned) {
+  const { homeSubstitutions, homeBlockErrors } = require('./pest-insider/render');
+  const verdicts = new Map();
+  const state = { rejected: 0 };
+  const errorsOf = (block) => {
+    if (!verdicts.has(block.text)) {
+      try {
+        verdicts.set(block.text, homeBlockErrors(block));
+      } catch (err) {
+        verdicts.set(block.text, [`check failed: ${err.message}`]);
+      }
+    }
+    return verdicts.get(block.text);
+  };
+  return {
+    state,
+    // `facts` are the chunk's own, read after its re-check.
+    forReader(subscriber, facts, mailboxCustomerIds) {
+      const home = facts?.get(subscriber.id);
+      const shown = homeReaderIsUnambiguous(planned, home, subscriber, mailboxCustomerIds) ? home : null;
+      const { substitutions, rejected } = homeSubstitutions(shown, { errorsOf });
+      if (rejected) state.rejected += 1;
+      return substitutions;
+    },
+  };
 }
 
 /**
@@ -1193,7 +1253,9 @@ async function sendCampaign(sendId, opts = {}) {
   // Neutralize every merge tag: substitution happens inside SendGrid's payload,
   // so the raw body still carries {{greeting-name}}/{{city}}/{{grass-type}} —
   // touchpoints record the neutral form (matches a no-name/no-data subscriber).
-  const touchpointBody = stripPersonalizationTokens(send.text_body || stripHtml(send.html_body));
+  // One part is not neutral there: a Waves Pest Insider issue's referral line follows the
+  // referral program (it can state a credit, or be left out), so each batch's touchpoints
+  // record the line that batch was mailed (below).
 
   // Per-recipient city + grass-type for the {{city}} / {{grass-type}} tokens.
   // Batch-loaded once; resolved per recipient in the substitutions map below.
@@ -1211,6 +1273,14 @@ async function sendCampaign(sendId, opts = {}) {
   // engagement_token so a tap lands on the right delivery row. Scanned on
   // the local copies so the send-time append above is always resolved.
   const feedbackEnabled = hasFeedbackToken(quizBody);
+  // A Waves Pest Insider issue's "Your home" tokens ({{pi-home}} / {{pi-home-text}}):
+  // each reader's own block, or '' for both tokens (a missing key would mail the raw token).
+  const homeEnabled = hasHomeToken(quizBody);
+  // Only a Waves Pest Insider issue with its planned audience shows a block: a token
+  // pasted into another newsletter, even one that carries the Pest Insider audience
+  // filter, gets '' for every reader.
+  const homePlanned = homeEnabled && send.newsletter_type === PEST_INSIDER_TYPE && sendHoldout(send.segment_filter) !== null;
+  const homeSubs = homeEnabled ? makeHomeSubstitutions(homePlanned) : null;
   // Event click-tracking tokens ({{evclick:<eventId>}}): substituted per
   // recipient with the tracking redirect carrying their engagement_token —
   // same substitution mechanics as the quiz/feedback tokens. The direct
@@ -1322,6 +1392,28 @@ async function sendCampaign(sendId, opts = {}) {
         logger.info(`[newsletter] send ${send.id} refreshed ${relinkedSubs.length} recipient link(s) relinked between selection and dispatch (archive relink)`);
       }
 
+      // The customers behind each reader's mailbox, as this chunk's re-check read them.
+      const mailboxBySub = new Map(freshRows.map((r) => [r.id, r.mailbox_customer_ids]));
+      // The "Your home" facts, read now for exactly the readers this batch mails: after the
+      // eligibility re-check and the relink adoption, before the personalizations are built.
+      // The block is dark with its gate: an issue a person sends or resumes by hand while
+      // GATE_PEST_INSIDER_AUTO_SEND is off carries none. Read per batch, so turning the gate
+      // off stops the block from the next batch on.
+      // No lock is held from this read to the SendGrid handoff, by the rule of this sender
+      // (owner 2026-09-28 and 2026-09-29, #5165: a mailbox is judged at send time by state; the
+      // locks added to live paths were reverted). The batch's own eligibility re-check above
+      // (holdout, the customers behind the mailbox) stands on the same footing. A customer who
+      // takes this mailbox inside that moment changes nothing a send one second earlier would
+      // not have sent: the block states the visit of the customer whose own address it is.
+      const homeFacts = homePlanned && pestInsiderAutoSendLive() ? await loadHomeFactsSafe(chunkToSend.map((s) => s.id), send.id) : null;
+      // The referral line ({{pi-referral}} / {{pi-referral-text}}, pest-insider/referral-line.js):
+      // read once for this batch, the same for every reader of it, and for its touchpoints.
+      const referral = await referralLineForBatch(send, quizBody);
+      // "A tool we'd use" ({{pi-tool}}, HTML part only, pest-insider/tool-block.js): read once for this
+      // batch, for the readers whose opt-in evidence, address and tool pass its rules; every other
+      // reader of a body with the token gets ''. A body with no token reads nothing and adds no key.
+      const toolBlock = await toolBlockForBatch({ send, html: bodyHtml, text: bodyText, subscribers: chunkToSend, planned: Boolean(plan), db });
+      const touchpointBody = stripPersonalizationTokens(send.text_body ? referral.fill(send.text_body) : stripHtml(referral.fill(send.html_body)));
       const recipients = chunkToSend.map((s) => {
         const attemptToken = attemptTokenBySub.get(s.id);
         const pctx = s.customer_id ? personalizationByCustomer.get(s.customer_id) : null;
@@ -1345,6 +1437,9 @@ async function sendCampaign(sendId, opts = {}) {
             ...(quizEnabled ? buildQuizSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
             ...(feedbackEnabled ? buildFeedbackSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
             ...(evclickEnabled ? buildEvclickSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token, urlById: evclickUrlById }) : {}),
+            ...(homeEnabled ? homeSubs.forReader(s, homeFacts, mailboxBySub.get(s.id)) : {}),
+            ...referral.substitutions,
+            ...toolBlock.forReader(s),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row
@@ -1469,6 +1564,9 @@ async function sendCampaign(sendId, opts = {}) {
 
     }
     if (claimLost || deadlineReached) break;
+  }
+  if (homeEnabled && homeSubs.state.rejected) {
+    logger.warn(`[newsletter] send ${send.id}: ${homeSubs.state.rejected} reader(s) got no "Your home" block, the send check refused it`);
   }
 
   // A worker that lost its claim must not finalize, advance the calendar,
@@ -2115,11 +2213,24 @@ function refusedDelivery(q) {
 }
 
 /**
- * A send's delivery ledger: how many readers got it (any success signal, as
+ * A delivery row whose reader got the message: any success signal, as
  * hasDeliverySuccessSignal reads one, or a reader's own spam report or
  * unsubscribe, which only a delivered message gets, also when the sender lost
- * SendGrid's acceptance; and not refused), how many it reached no inbox of for
- * good (refusedDelivery), and how many a Resume would still mail:
+ * SendGrid's acceptance; and not refused (refusedDelivery). Unqualified
+ * columns, so it also serves a subquery over newsletter_send_deliveries
+ * (newsletter-quiz.js newsletterIssuePolls).
+ */
+function reachedDelivery(q) {
+  return q.where((got) => got.whereIn('status', TERMINAL_SUCCESS_STATUSES).orWhereNotNull('sent_at')
+    .orWhereNotNull('delivered_at').orWhereNotNull('opened_at').orWhereNotNull('clicked_at')
+    .orWhereNotNull('complained_at').orWhereNotNull('unsubscribed_at'))
+    .whereNot(refusedDelivery);
+}
+
+/**
+ * A send's delivery ledger: how many readers got it (reachedDelivery), how
+ * many it reached no inbox of for good (refusedDelivery), and how many a
+ * Resume would still mail:
  * outstandingEligibleDeliveries (the resume precheck's own predicate), and for
  * a planned issue only the readers its plan still holds, as each batch
  * re-checks them (narrowToPlannedAudience, then plannedEligibleRows on the
@@ -2127,11 +2238,7 @@ function refusedDelivery(q) {
  */
 async function ledgerProgress(trx, send) {
   const ledger = () => trx('newsletter_send_deliveries').where({ send_id: send.id });
-  const reached = await ledger()
-    .where((q) => q.whereIn('status', TERMINAL_SUCCESS_STATUSES).orWhereNotNull('sent_at').orWhereNotNull('delivered_at')
-      .orWhereNotNull('opened_at').orWhereNotNull('clicked_at').orWhereNotNull('complained_at').orWhereNotNull('unsubscribed_at'))
-    .whereNot(refusedDelivery)
-    .count('* as c').first();
+  const reached = await reachedDelivery(ledger()).count('* as c').first();
   const refused = await ledger().where(refusedDelivery).count('* as c').first();
   const got = Number(reached?.c) || 0;
   const refusedCount = Number(refused?.c) || 0;
@@ -2172,6 +2279,52 @@ async function spamReportCounts(db, sendId) {
     )
     .first();
   return { reports: Number(counts?.reports) || 0, delivered: Number(counts?.delivered) || 0 };
+}
+
+// A copy delivered by a given time (one binding): the earliest of the stamps that spamReportCounts
+// reads a delivered copy from (least skips a NULL; with none, the copy is not delivered).
+const DELIVERED_COPY_BY_SQL = 'least(delivered_at, opened_at, clicked_at, complained_at, unsubscribed_at) <= ?';
+// The mailed address is a Gmail mailbox. A Google Workspace mailbox on its own domain is not one
+// here: nothing in the address tells it apart.
+const GMAIL_COPY_SQL = "lower(split_part(newsletter_send_deliveries.email, '@', 2)) in ('gmail.com', 'googlemail.com')";
+// A person opened the copy by a given time (one binding): an open event on this copy's own message
+// that SendGrid did not mark as a machine open (sg_machine_open: Apple Mail Privacy Protection
+// fetched it, read or not). The ledger's opened_at takes the first open of any kind, so it cannot
+// tell the two apart; the webhook's event log (sendgrid_webhook_events) keeps the flag and the time
+// the open happened. A row logged before the flag or the time was kept has none: it counts, by the
+// time it was logged, as in the Waves Pest Insider warm audience (pest-insider/audience.js).
+const PERSON_OPENED_COPY_SQL = `exists (select 1 from sendgrid_webhook_events person_open
+  where person_open.event_type = 'open'
+    and person_open.message_id = newsletter_send_deliveries.provider_message_id
+    and lower(person_open.email) = lower(newsletter_send_deliveries.email)
+    and person_open.machine_open is not true
+    and coalesce(person_open.occurred_at, person_open.created_at) <= ?)`;
+
+/**
+ * A send's copies delivered by `asOf` and the ones a person opened by then, for Gmail mailboxes
+ * and for all other mailboxes, for the newsletter Gmail check (newsletter-gmail-check.js). A
+ * delivered copy is the one spamReportCounts counts (never a refused row). A click is not an open:
+ * a mail scanner follows links, and mostly outside Gmail. One statement reads all four counts.
+ * `asOf` (a Date) is required: with a fixed time, a later read counts the same copies and opens. A
+ * copy delivered after it is in neither count: its reader had no time to open it.
+ */
+async function gmailOpenCounts(db, sendId, asOf) {
+  const counts = await db('newsletter_send_deliveries')
+    .where({ send_id: sendId })
+    .whereNot(refusedDelivery)
+    .whereRaw(DELIVERED_COPY_BY_SQL, [asOf])
+    .select(
+      db.raw(`count(*) filter (where ${GMAIL_COPY_SQL}) as gmail_delivered`),
+      db.raw(`count(*) filter (where ${GMAIL_COPY_SQL} and ${PERSON_OPENED_COPY_SQL}) as gmail_opened`, [asOf]),
+      db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL})) as other_delivered`),
+      db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL}) and ${PERSON_OPENED_COPY_SQL}) as other_opened`, [asOf]),
+    )
+    .first();
+  const n = (value) => Number(value) || 0;
+  return {
+    gmail: { delivered: n(counts?.gmail_delivered), opened: n(counts?.gmail_opened) },
+    other: { delivered: n(counts?.other_delivered), opened: n(counts?.other_opened) },
+  };
 }
 
 // Why a planned issue did not go out: its 'failed' outcome, with the 'outcome' alert.
@@ -2521,4 +2674,4 @@ async function markEventsFeatured(send) {
 module.exports = {
   applyRetryableDeliveryFilter,
   outstandingEligibleDeliveries,
-  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, spamReportCounts, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMailboxNotMailable, withMailboxCustomers, SKIPPED_DELIVERY_STATUS, SPAM_REPORT_DROP_REASON, ledgerProgress, reachedDelivery, spamReportCounts, gmailOpenCounts, markEventsFeatured, sendingClaimIsStale, settlePlannedIssues };

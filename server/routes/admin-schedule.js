@@ -1,5 +1,5 @@
 const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
-const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
+const { autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -150,7 +150,7 @@ const { technicianReportCustomerCopy, containsReportAccessCode } = require('../s
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, observedAndReportedLines, writerRulesRejection,
   noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
-  activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation, lowercaseGermanRoach,
+  bookedReasonBlock, lawnResultTimingViolation, lowercaseGermanRoach,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 
@@ -1562,8 +1562,7 @@ function noticeOptions(options = {}, dateStr, startHHMM) {
 }
 
 // GATE_DAY_ONLY_PROMISE part B2: records the office's choice for a visit's NEW slot on the moved row(s): true = "the customer
-// asked for this time" (a set time, never promised as day only), anything else = day only. Gate off: nothing is written, so
-// every UPDATE stays exactly today's. Throws on a failed write (inside a transaction the move fails with it).
+// asked for this time" (a set time, never promised as day only), anything else = day only. Throws on a failed write (inside a transaction the move fails with it).
 async function recordOfficeMoveIntent(conn, ids, body) {
   return require('../services/time-promise').recordCustomerAskedTime(conn, ids, body?.customerAskedTime === true);
 }
@@ -1571,8 +1570,8 @@ async function recordOfficeMoveIntent(conn, ids, body) {
 // GATE_DAY_ONLY_PROMISE part E: stamps each office row with what the customer was told (`told: { level, dayOnly }`, visits of
 // the next 14 days) and the stored "customer asked for this time" choice (`customerAskedTime`), for the visit card and the
 // edit window, plus whether the customer's 24-hour reminder will go out (`reminder24hOn`, for the phone-script hint). ONE bulk read
-// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row. Gate off: no read and
-// no field. A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
+// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row.
+// A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
 async function attachOfficeToldFields(req, rows) {
   try {
     if (isTechnicianRequest(req) || !Array.isArray(rows) || !rows.length) return;
@@ -1589,12 +1588,11 @@ async function attachOfficeToldFields(req, rows) {
   }
 }
 
-// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} with
-// the gate off, for a technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
+// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} for a
+// technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
 async function officeFieldsForVisit(id) {
   try {
     const timePromise = require('../services/time-promise');
-    if (!timePromise.dayOnlyPromiseOn()) return {};
     const row = await db('scheduled_services').where({ id }).first('id', 'scheduled_date', 'status');
     if (!row) return {};
     const found = (await timePromise.loadOfficeToldFields(db, [row])).get(row.id);
@@ -1692,7 +1690,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         .catch(() => null);
       const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
       // GATE_DAY_ONLY_PROMISE part B2: a move to another date more than 24.25 h out promises only the new day, unless the
-      // office marked "customer asked for this time" (options.customerAskedTime). Gate off: false, nothing read.
+      // office marked "customer asked for this time" (options.customerAskedTime).
       const dayMove = require('../services/day-only-move-notice');
       const dayState = { dayOnly: await dayMove.moveNoticeDayOnly({
         serviceId, customerId: customer.id, newStartAt: apptTime, oldDate: options.previousDate, newDate: dateStr,
@@ -5777,6 +5775,13 @@ async function loadProjectCompletionContextByServiceId(services) {
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const linkedProjectLookupFailed = linkedProjectsByServiceId === null;
   const addOnVisits = await areaAddOnVisitIdsForFeed(rows);
+  // GATE_REPORT_AFTER_PAY: the visits a payment holds open for the report (invoice-issued-closeout.js reportAfterPayHeldVisitIds;
+  // empty with the gate off). A failed lookup shows no badge.
+  const heldForReport = await require('../services/invoice-issued-closeout').reportAfterPayHeldVisitIds(db, rows.map((s) => s.id))
+    .catch((e) => {
+      logger.warn(`[schedule] report-after-pay hold lookup failed: ${e.message}`);
+      return new Set();
+    });
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
@@ -5872,6 +5877,14 @@ async function loadProjectCompletionContextByServiceId(services) {
       // service with its own typed findings (cockroach, German roach
       // knockdowns): /complete requires them and the report flow has none.
       fastCompleteReportEnabled: fastCompleteReportOffered(completionProfile),
+      // GATE_REPORT_AFTER_PAY (owner 2026-11-19, *report after pay*): a payment holds this visit open for its technician's report.
+      // Dispatch's "Paid, report not sent" badge reads this flag alone. Not the row's newest bill: a bill the office adds after the
+      // payment must not hide the report still owed (pre-push audit round 6). Not the visit's profile: the hold is recorded only
+      // where the completion sends the customer a report (invoice-issued-closeout.js reportAfterPayWouldHold, round 12).
+      reportAfterPayHeld: heldForReport.has(String(service.id)),
+      // A Dispatch bundle loaded before that change shows the badge only when this second flag is true as well. It carries the
+      // same hold, so a tab that has not reloaded keeps its badge. No current client reads it: it goes when the gate is removed.
+      reportAfterPayEnabled: heldForReport.has(String(service.id)),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -7187,6 +7200,9 @@ router.get('/', async (req, res, next) => {
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_INVOICED_VISITS — see loadProjectCompletionContextByServiceId.
         invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
+        // GATE_REPORT_AFTER_PAY — see loadProjectCompletionContextByServiceId.
+        reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
+        reportAfterPayHeld: projectCompletionContext.reportAfterPayHeld === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
@@ -7318,24 +7334,42 @@ router.get('/', async (req, res, next) => {
       byTech[key].zones[s.zone] = (byTech[key].zones[s.zone] || 0) + 1;
     });
 
-    // Schedule tie-proximity display order (owner ruling 2026-09-26, dark by
-    // default): DISPLAY ONLY — attaches a `displayOrder` index to each of a
+    // Schedule tie-proximity display order (owner ruling 2026-09-26): DISPLAY ONLY — attaches a `displayOrder` index to each of a
     // tech's stops so the mobile day list and the desktop day board's route-
     // order badge can break a window-start tie by drive-time proximity to
     // the previous stop, instead of booking order. Nothing is written to the
     // DB and no stop is physically reordered here — `enriched` (and every
     // response field built from it) keeps its DB-query order; only the new
     // `displayOrder` field is added, in place, on the SAME objects `enriched`
-    // holds. Off = no field, byte-identical to before this gate existed.
-    if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
-      Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
-    }
+    // holds.
+    Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
 
     // Drive legs, the stop each leg comes from, and late risk against the
     // 2-hour arrival window, for the day list (display only). Today's risk
     // runs from the clock; any other day's from the booked plan.
     const legsToday = date === etDateString();
     Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services, { now: legsToday ? new Date() : null }));
+    // Planned arrival + on-site minutes per stop for the Day grid's blocks
+    // (display only, straight-line model, no paid call).
+    // Same departure time and tech start points as the day-quality model:
+    // two small reads for the whole request (the start-point read is none
+    // with GATE_TECH_START_POINTS off); a failed read plans from the office
+    // at the legacy 08:00.
+    const plannedTechs = Object.values(byTech);
+    if (plannedTechs.length) {
+      const departureMin = await require('../services/scheduling/departure-time').dayDepartureMinutes(db);
+      const startPoints = await loadTechStartPoints(db, plannedTechs.map((tech) => tech.technicianId)).catch(() => new Map());
+      // Tech unavailability (capacity mode), one read for the day: the route
+      // runs around it as arrival-route.js does. A failed read plans without.
+      const arrivalRoute = require('../services/scheduling/arrival-route');
+      const dayBlocks = await arrivalRoute.loadDayScheduleBlocks(db, date).catch(() => []);
+      plannedTechs.forEach((tech) => require('../services/scheduling/planned-blocks')
+        .attachPlannedBlocks(tech.services, {
+          departureMin,
+          home: homeFromMap(startPoints, tech.technicianId),
+          blockedIntervals: arrivalRoute.blockedIntervalsFor(dayBlocks, tech.technicianId),
+        }));
+    }
 
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {
@@ -7537,7 +7571,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.weekend_shift',
           'scheduled_services.source_estimate_id',
           'scheduled_services.annual_prepay_term_id',
-          // Tie-proximity display order (GATE_SCHEDULE_TIE_PROXIMITY) needs
+          // Tie-proximity display order needs
           // each stop's point — same stamped-vs-customer rule as the day feed.
           db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as visit_lat`),
           db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as visit_lng`),
@@ -7864,6 +7898,8 @@ router.get('/week', async (req, res, next) => {
           assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
+          reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
+          reportAfterPayHeld: projectCompletionContext.reportAfterPayHeld === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
@@ -7904,9 +7940,7 @@ router.get('/week', async (req, res, next) => {
       // Same display-only tie-proximity order as the day feed, per tech per
       // day, so week mode and day mode agree. Coordinates come from the raw
       // rows; only `displayOrder` is added to the payload.
-      if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
-        require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
-      }
+      require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
 
       days.push({
         date: dateStr,
@@ -8637,6 +8671,164 @@ function askedTimeStamp(cols, customerAskedTime) {
   return cols.customer_asked_time && customerAskedTime === true ? { customer_asked_time: true } : {};
 }
 
+// What an Intelligence Bar card approved for a booking, asserted inside the booking transaction (createScheduleBooking's
+// internal `approvedBooking`): a card pins values, but this handler re-reads and re-decides under its own locks, so the
+// rows it is about to commit must be the ones the card showed. Any difference rolls the whole booking back with a 409
+// APPROVED_BOOKING_CHANGED, which the card's tool answers as a stale card.
+function approvedBookingChanged(message) {
+  return Object.assign(httpError(409, `${message} Nothing was booked. Ask for a fresh confirmation card.`), { code: 'APPROVED_BOOKING_CHANGED' });
+}
+
+const CUSTOMER_PLAN_COLUMNS = ['waveguard_tier', 'waveguard_tier_source', 'monthly_rate', 'member_since', 'active', 'pipeline_stage', 'billing_mode'];
+// The customer fields a tier / monthly-rate sync writes, as one comparable string.
+async function customerPlanFingerprint(conn, customerId) {
+  const row = await conn('customers').where({ id: customerId }).first();
+  return JSON.stringify(CUSTOMER_PLAN_COLUMNS.map((c) => (row && row[c] != null ? String(row[c]) : null)));
+}
+
+// One comparable key for a stamped service address (a visit row's service_address_* or the card's address object).
+const addressKey = (a) => ['line1', 'line2', 'city', 'state', 'zip']
+  .map((f) => String(a?.[f] ?? a?.[`service_address_${f}`] ?? '').trim().toLowerCase().replace(/\s+/g, ' ')).join('|');
+
+// The eligibility facts the card judged, against the LOCKED customer row (before any insert): live and active, the billing
+// lane, the payer, the member tier and the monthly rate, and no prepay term the booking would refresh.
+async function assertApprovedCustomer(trx, customerId, approved) {
+  const row = await trx('customers').where({ id: customerId }).forUpdate().first();
+  const str = (v) => String(v ?? '');
+  const cents = (v) => (v == null || v === '' ? '' : String(Math.round(Number(v) * 100)));
+  if (!row || row.deleted_at || (approved && row.active !== approved.active)
+    || (approved && (str(row.billing_mode) !== str(approved.billing_mode) || str(row.payer_id) !== str(approved.payer_id)
+      || str(row.waveguard_tier) !== str(approved.waveguard_tier) || cents(row.monthly_rate) !== cents(approved.monthly_rate)))) {
+    throw approvedBookingChanged('The customer\'s status, billing lane, tier or monthly rate changed since the card was shown.');
+  }
+  const { refreshableTermsForCustomer } = require('../services/annual-prepay-renewals');
+  if ((await refreshableTermsForCustomer(customerId, trx)).length) throw approvedBookingChanged('An annual prepay term would be refreshed by this booking.');
+}
+
+// The earlier series that made this a rebook, re-read under lock through the same functions the card used
+// (services/prior-series-billing.js): it must still be the newest qualifying series of this customer (same service family, the
+// booking property), still a live series root, and every billing fact on its list (PRIOR_SERIES_BILLING_FIELDS) must still equal
+// what this booking stamps.
+async function assertApprovedPriorSeries(trx, customerId, approved) {
+  const prior = approved.priorSeries;
+  const { newestQualifyingPriorSeries, priorSeriesBillingMismatches } = require('../services/prior-series-billing');
+  const newest = prior?.id
+    ? await newestQualifyingPriorSeries(trx, { customerId, serviceId: prior.serviceId, family: prior.family, propertyId: approved.propertyId, lock: true })
+    : null;
+  if (!newest || String(newest.id) !== String(prior.id)) {
+    throw approvedBookingChanged('The earlier plan this rebook relies on changed since the card was shown.');
+  }
+  const check = await priorSeriesBillingMismatches(trx, prior.id, prior.expected, { lock: true });
+  if (check.gone || check.mismatches.length) {
+    throw approvedBookingChanged(`The billing of the earlier plan changed since the card was shown${check.gone ? '' : ` (${check.mismatches.map((m) => m.field).join(', ')})`}.`);
+  }
+}
+
+async function assertApprovedBooking(trx, approved, { rows, customerId, planBefore }) {
+  const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
+  // 1. The inserted dates are the pinned dates.
+  const dates = rows.map((r) => dateOnly(r.scheduled_date)).sort();
+  const pinnedDates = [...(approved.dates || [])].sort();
+  if (JSON.stringify(dates) !== JSON.stringify(pinnedDates)) throw approvedBookingChanged('The visit dates changed since the card was shown.');
+  // 2. The stamped price on every row is the pinned price; the property and technician are the pinned ones.
+  for (const row of rows) {
+    if (cents(row.estimated_price) !== cents(approved.price)) throw approvedBookingChanged('The visit price changed since the card was shown.');
+    if (approved.propertyId && String(row.property_id || '') !== String(approved.propertyId)) throw approvedBookingChanged('The visit address changed since the card was shown.');
+    // The stamped service address (the booking property's, re-read under its lock) is the address the card showed.
+    if (approved.address && addressKey(row) !== addressKey(approved.address)) throw approvedBookingChanged('The visit address changed since the card was shown.');
+    if (String(row.technician_id || '') !== String(approved.technicianId || '')) throw approvedBookingChanged('The technician changed since the card was shown.');
+    // 3. No setup fee rides any row (the stamp site refuses an owed one too).
+    if (row.pending_setup_fee != null && Number(row.pending_setup_fee) !== 0) throw approvedBookingChanged('A setup fee is now stamped on this booking.');
+  }
+  // 4. The locked tier / monthly-rate sync wrote nothing to the customer row.
+  if (planBefore != null && planBefore !== await customerPlanFingerprint(trx, customerId)) {
+    throw approvedBookingChanged('This booking would change the customer\'s WaveGuard tier or monthly rate.');
+  }
+  // 5. The post-commit prepay-term refresh (refreshActiveTermsForCustomer) would touch no term.
+  const { refreshableTermsForCustomer } = require('../services/annual-prepay-renewals');
+  if ((await refreshableTermsForCustomer(customerId, trx)).length) throw approvedBookingChanged('An annual prepay term would be refreshed by this booking.');
+}
+
+// The month anchor of a new series: a month-based cadence (and the Feb-Oct season) takes its nth weekday from
+// the first visit's date; every other pattern passes the operator's nth / weekday through raw.
+// seasonal_feb_oct derives its anchor from the date like every other month-based cadence;
+// monthly_nth_weekday stays raw passthrough because there the operator supplies nth/weekday explicitly.
+function seriesMonthAnchorOpts({ isRecurring, recurringPattern, scheduledDate, recurringNth, recurringWeekday }) {
+  return (isRecurring
+    && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
+    ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
+    : { nth: recurringNth, weekday: recurringWeekday };
+}
+
+// The dates a NEW recurring series writes (the Schedule POST's own plan, run by the handler before its
+// transaction and by the Intelligence Bar's book_plan_visits card). Fills `plannedChildDates` (the visits after
+// the first) and adds each to `seriesDates` (which already holds the first visit's date). Reads only.
+// Returns the plan's inputs the handler reuses for boosters, and a shortfall warning when blackout days leave
+// the plan undersized.
+async function planCreateSeriesDates(conn, {
+  customerId, scheduledDate, bookingProperty, isRecurring, recurringPattern, recurringIntervalDays,
+  recurringCount, recurringOngoing, monthAnchorOpts, skipWeekends, weekendShift, seriesDates, plannedChildDates,
+}) {
+  const parsedRecurringCount = Number.parseInt(recurringCount, 10);
+  const plannedCount = isRecurring
+    ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
+    : 0;
+  // Lawn neighborhood day (lawn-area-days.js): a NEW rounds series is placed from its area's anchor
+  // (the parent stores it below).
+  // createRoundOptions returns {} for any pattern other than lawn_rounds_9 without a read.
+  const rOpts = {
+    ...monthAnchorOpts,
+    intervalDays: recurringIntervalDays,
+    ...await createRoundOptions(conn, customerId, bookingProperty, recurringPattern),
+  };
+  const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
+  // B6 (owner ruling 2026-08-27): a customer whose saved property
+  // preference names a weekday has said "not weekends" — generated
+  // children/booster DATES honor it even when the operator left the
+  // skip-weekends box unticked. The STAMPED flag stays the operator's
+  // raw value: every generator and the rebooker consult the preference
+  // LIVE, so removing it restores weekend eligibility without touching
+  // series rows. The ANCHOR date itself never moves — the operator
+  // picked it deliberately.
+  const skipWeekendsEffective = !!skipWeekends
+    || (isRecurring && recurringPattern ? await customerPrefersNoWeekends(conn, customerId) : false);
+  // Blackout days (one-off + weekly days off) over the series horizon —
+  // every generated child/booster date runs through the shared nudge.
+  const seriesBlackoutDates = (isRecurring && recurringPattern)
+    ? await loadSeriesBlackoutDates(conn, dateOnly(scheduledDate))
+    : null;
+  let shortfallWarning = null;
+  if (isRecurring && recurringPattern && plannedCount > 1) {
+    // Iterate by inserts, not by attempts: when skip-weekends collapses
+    // consecutive recurrences onto the same shifted weekday (e.g. custom
+    // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
+    // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
+    // infinite loop if the pattern is degenerate.
+    const maxAttempts = (plannedCount - 1) * 4 + 30;
+    let attempt = 1;
+    while (plannedChildDates.length < plannedCount - 1 && attempt < maxAttempts) {
+      const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
+      attempt++;
+      const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipWeekendsEffective, shiftDir, seriesBlackoutDates);
+      if (!nextDateStr) continue;
+      if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
+      if (seriesDateTaken(seriesDates, recurringPattern, nextDateStr)) continue;
+      seriesDates.add(nextDateStr);
+      plannedChildDates.push(nextDateStr);
+    }
+    // Blackout/day-off exhaustion must not silently shrink the requested
+    // plan (mirror of the visit-count top-up's shortfall reporting): tell
+    // the office what was actually placed instead of returning success on
+    // an undersized series nobody can see.
+    if (plannedChildDates.length < plannedCount - 1) {
+      const placed = plannedChildDates.length + 1;
+      logger.warn(`[schedule/create] recurring series wanted ${plannedCount} visit(s), placed ${placed} — every remaining candidate within ${maxAttempts} cadence steps is blacked out, on a closed weekday, or a duplicate`);
+      shortfallWarning = `Recurring plan requested ${plannedCount} visits but only ${placed} could be placed — the remaining dates fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`;
+    }
+  }
+  return { plannedCount, rOpts, shiftDir, skipWeekendsEffective, seriesBlackoutDates, shortfallWarning };
+}
+
 // GATE_RESERVICE_FOLD (owner 2026-11-17): a pest/lawn re-service within 14 days before the customer's next plan visit of
 // that line moves that visit up instead of booking. null = no fold (gate off, a recurring booking, not a re-service, not a
 // free one without add-on lines, no plan visit in range); otherwise services/reservice-fold.js moveFoldTarget's { moved, answer | warning }.
@@ -8678,6 +8870,9 @@ async function scheduleCreateHandler(req, res, next) {
     // Reassigned below when a residential lawn 9x series is written as rounds.
     let { recurringPattern, recurringIntervalDays } = req.body;
 
+    // Internal only (createScheduleBooking sets it; never read from the HTTP body): what an Intelligence Bar card approved.
+    // The booking transaction asserts it before commit (assertApprovedBooking). Absent = the HTTP path, unchanged.
+    const approvedBooking = req.approvedBooking || null;
     const separateProgram = req.body.duplicateSeriesOverride;
     if (separateProgram !== undefined) {
       if (!isEnabled('separateRecurringProgram')) return res.status(409).json({ error: 'Separate recurring programs are not enabled.' });
@@ -8759,7 +8954,7 @@ async function scheduleCreateHandler(req, res, next) {
     // transaction, so it cannot stop two concurrent creates on its own. The
     // race-safe backstop is the locked re-check inside the transaction below.
     // Explicit service address (New Appointment "Service address" picker).
-    // Same gate as the Edit-appointment address dropdown: both are "the
+    // Same as the Edit-appointment address dropdown: both are "the
     // office chooses which of the customer's properties a visit lands on".
     // Resolved to the scheduled_services stamp up front so the duplicate-
     // series guards, zone, tech matching and the insert all see the chosen
@@ -8768,7 +8963,6 @@ async function scheduleCreateHandler(req, res, next) {
     let bookingProperty = null;
     let bookingSeriesScope = null;
     if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
-      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
       bookingProperty = await require('../services/customer-properties').bookingPropertyStamp({ customerId, propertyId });
       // Per-property duplicate-series scope (codex #3998 r2 P1): the same
       // shape the estimate converter hands the guards, so an active pest
@@ -9320,10 +9514,7 @@ async function scheduleCreateHandler(req, res, next) {
     // seasonal_feb_oct derives its anchor from the date like every other
     // month-based cadence; monthly_nth_weekday stays raw passthrough because
     // there the operator supplies nth/weekday explicitly.
-    const monthAnchorOpts = (isRecurring
-      && (MONTH_RECURRENCE_INTERVALS[recurringPattern] || recurringPattern === SEASONAL_FEB_OCT))
-      ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
-      : { nth: recurringNth, weekday: recurringWeekday };
+    const monthAnchorOpts = seriesMonthAnchorOpts({ isRecurring, recurringPattern, scheduledDate, recurringNth, recurringWeekday });
 
     // Re-service rows (pest_re_service / lawn_re_service) ARE callbacks by
     // definition — the new-appointment modal never sends `isCallback`, so
@@ -9334,13 +9525,12 @@ async function scheduleCreateHandler(req, res, next) {
     const resolvedIsCallback = isCallback
       || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
 
-    // Office "Customer's words" on a pest/lawn re-service (GATE_RESERVICE
-    // _OFFICE_REQUEST): trimmed + capped here, source decided by re-reading
+    // Office "Customer's words" on a pest/lawn re-service:
+    // trimmed + capped here, source decided by re-reading
     // the suggestion the client named — never taken from the client. Only the
-    // primary row below is stamped; null = nothing saved (gate off, not a
+    // primary row below is stamped; null = nothing saved (not a
     // pest/lawn re-service, or empty words).
-    const officeCustomerRequest = (isEnabled('reserviceOfficeRequest')
-      && resolvedIsCallback
+    const officeCustomerRequest = (resolvedIsCallback
       && reserviceOfficeRequest.isOfficeRequestServiceKey(serviceRecord?.service_key)
       && req.body.customerRequest && typeof req.body.customerRequest === 'object')
       ? await reserviceOfficeRequest.resolveCustomerRequest(db, customerId, req.body.customerRequest)
@@ -9450,6 +9640,8 @@ async function scheduleCreateHandler(req, res, next) {
     const appointmentDiscountType = pricing.appointmentDiscount?.discountType || null;
     const appointmentDiscountAmount = pricing.appointmentDiscount?.discountAmount ?? null;
     const createdAppointments = [];
+    // Every row this booking inserts (parent, children, boosters), for assertApprovedBooking.
+    const approvalRows = [];
     let svc;
 
     const cols = await db('scheduled_services').columnInfo();
@@ -9473,64 +9665,16 @@ async function scheduleCreateHandler(req, res, next) {
     const plannedChildDates = [];
     const plannedBoosterDates = [];
 
-    // Recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX)
-    const parsedRecurringCount = Number.parseInt(recurringCount, 10);
-    const plannedCount = isRecurring
-      ? (recurringOngoing ? 4 : (Number.isInteger(parsedRecurringCount) && parsedRecurringCount > 1 ? parsedRecurringCount : 4))
-      : 0;
-    // Lawn neighborhood day (lawn-area-days.js): a NEW rounds series is placed from its area's anchor
-    // (the parent stores it below). The dates are planned once
-    // here and the insert loop writes exactly these, so plan and write cannot differ.
-    // createRoundOptions returns {} for any pattern other than lawn_rounds_9 without a read.
-    const rOpts = {
-      ...monthAnchorOpts,
-      intervalDays: recurringIntervalDays,
-      ...await createRoundOptions(db, customerId, bookingProperty, recurringPattern),
-    };
-    const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
-    // B6 (owner ruling 2026-08-27): a customer whose saved property
-    // preference names a weekday has said "not weekends" — generated
-    // children/booster DATES honor it even when the operator left the
-    // skip-weekends box unticked. The STAMPED flag stays the operator's
-    // raw value: every generator and the rebooker consult the preference
-    // LIVE, so removing it restores weekend eligibility without touching
-    // series rows. The ANCHOR date itself never moves — the operator
-    // picked it deliberately.
-    const skipWeekendsEffective = !!skipWeekends
-      || (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false);
-    // Blackout days (one-off + weekly days off) over the series horizon —
-    // every generated child/booster date runs through the shared nudge.
-    const seriesBlackoutDates = (isRecurring && recurringPattern)
-      ? await loadSeriesBlackoutDates(db, dateOnly(scheduledDate))
-      : null;
-    if (isRecurring && recurringPattern && plannedCount > 1) {
-      // Iterate by inserts, not by attempts: when skip-weekends collapses
-      // consecutive recurrences onto the same shifted weekday (e.g. custom
-      // interval=1 over Sat+Sun → Mon), we still need plannedCount-1 children
-      // inserted, not plannedCount-1 attempts. Cap iterations to avoid an
-      // infinite loop if the pattern is degenerate.
-      const maxAttempts = (plannedCount - 1) * 4 + 30;
-      let attempt = 1;
-      while (plannedChildDates.length < plannedCount - 1 && attempt < maxAttempts) {
-        const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
-        attempt++;
-        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipWeekendsEffective, shiftDir, seriesBlackoutDates);
-        if (!nextDateStr) continue;
-        if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
-        if (seriesDateTaken(seriesDates, recurringPattern, nextDateStr)) continue;
-        seriesDates.add(nextDateStr);
-        plannedChildDates.push(nextDateStr);
-      }
-      // Blackout/day-off exhaustion must not silently shrink the requested
-      // plan (mirror of the visit-count top-up's shortfall reporting): tell
-      // the office what was actually placed instead of returning success on
-      // an undersized series nobody can see.
-      if (plannedChildDates.length < plannedCount - 1) {
-        const placed = plannedChildDates.length + 1;
-        logger.warn(`[schedule/create] recurring series wanted ${plannedCount} visit(s), placed ${placed} — every remaining candidate within ${maxAttempts} cadence steps is blacked out, on a closed weekday, or a duplicate`);
-        bookingWarnings.push(`Recurring plan requested ${plannedCount} visits but only ${placed} could be placed — the remaining dates fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`);
-      }
-    }
+    // Recurring instances (Ongoing mode still pre-seeds a 4-visit rolling window for UX).
+    // The dates are planned once here by the shared planner and the insert loop writes exactly these,
+    // so plan and write cannot differ (the Intelligence Bar's book_plan_visits card runs the same planner).
+    const {
+      plannedCount, rOpts, shiftDir, skipWeekendsEffective, seriesBlackoutDates, shortfallWarning,
+    } = await planCreateSeriesDates(db, {
+      customerId, scheduledDate, bookingProperty, isRecurring, recurringPattern, recurringIntervalDays,
+      recurringCount, recurringOngoing, monthAnchorOpts, skipWeekends, weekendShift, seriesDates, plannedChildDates,
+    });
+    if (shortfallWarning) bookingWarnings.push(shortfallWarning);
 
     // Booster months — extra one-off visits on top of the base series
     // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
@@ -9636,7 +9780,8 @@ async function scheduleCreateHandler(req, res, next) {
     // check does. This is an admin route (requireAdmin): the staff user pays.
     // A parent with a time, a technician and a location only; any refusal,
     // error or slow answer leaves the save on the cache and the model.
-    if (windowStart && resolvedTechId) {
+    // An approved (Intelligence Bar card) booking never buys one: the card showed no road-time spend.
+    if (windowStart && resolvedTechId && !approvedBooking) {
       // A chosen property is stamped on the visit with its own pin (nulls
       // included: the route read then excludes the primary address's pin), so
       // only that pin is priced; the customer's pin is for a visit with none.
@@ -9672,6 +9817,15 @@ async function scheduleCreateHandler(req, res, next) {
       // the same lock in the same position, so the #3011 customer-row →
       // series-advisory order below is unchanged relative to it.
       await lockCustomerComms(trx, customerId);
+      // An approved booking carries no inspection credit: the credit lock is taken here (comms -> credit -> customer row, as
+      // create_appointment takes it), and an open offer, paused ones included, is a change since the card.
+      if (approvedBooking) {
+        const InspectionCredit = require('../services/inspection-credit');
+        await InspectionCredit.lockInspectionCreditCustomer(trx, customerId);
+        if ((await InspectionCredit.projectRedeemableOfferAmount(customerId, { dbh: trx, includePaused: true })) > 0) {
+          throw approvedBookingChanged('An inspection-credit offer is now open for this customer.');
+        }
+      }
       // Phone-agent double-booking backstop: the call pipeline inserts its
       // booking under this same customer lock, so re-checking here — not
       // only in the preflight above, before the slow pricing reads — sees
@@ -9775,6 +9929,9 @@ async function scheduleCreateHandler(req, res, next) {
       if (isRecurring) {
         await trx('customers').where({ id: customerId }).forUpdate().first('id');
       }
+      // The card's eligibility facts, against the locked customer row, before anything is inserted.
+      if (approvedBooking) await assertApprovedCustomer(trx, customerId, approvedBooking.customer);
+      if (approvedBooking) await assertApprovedPriorSeries(trx, customerId, approvedBooking);
       // Race-safe duplicate-series backstop (P0: check-then-insert race).
       // The preflight above ran OUTSIDE this transaction, so two concurrent
       // recurring creates for the same customer + service family could both
@@ -9796,6 +9953,8 @@ async function scheduleCreateHandler(req, res, next) {
           serviceAddressScope: bookingSeriesScope,
         });
         if (separateProgram && guardError) throw guardError;
+        // An approved card was shown with no open series, so a guard that could not run is not a pass: roll back.
+        if (approvedBooking && guardError) throw approvedBookingChanged('The duplicate-series check could not run, so the booking cannot be confirmed.');
         if (guardError) logger.warn(`[schedule] locked duplicate-series guard failed (booking proceeds): ${guardError.message}`);
         const canCreate = separateProgram
           ? RecurringAppointmentSeeder.separateProgramMatches(matches, separateProgram.existingSeriesIds)
@@ -9835,11 +9994,13 @@ async function scheduleCreateHandler(req, res, next) {
       // Work days (GATE_TECH_WORK_DAYS): the office may put a technician on a day
       // they do not work; the save proceeds and the response says so, for the
       // parent date and every child/booster date.
-      if (resolvedTechId && techWorkDaysLive()) {
-        const { offDayWarningsFor } = require('../services/technician-eligibility');
-        const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
-        bookingWarnings.push(...await offDayWarningsFor(resolvedTechId, offDayDates, { conn: trx }));
-      }
+      // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the same
+      // read says when the shift does not hold the visit (dayWarningsFor). Every
+      // date of the plan carries the parent's hours and length.
+      const offDayDates = [String(scheduledDate).slice(0, 10), ...[...plannedChildDates, ...plannedBoosterDates].filter(Boolean)];
+      bookingWarnings.push(...await require('../services/technician-eligibility').dayWarningsFor(resolvedTechId, offDayDates, {
+        conn: trx, block: { window_start: windowStart, window_end: computedEnd, estimated_duration_minutes: duration },
+      }));
       // Job type (GATE_TECH_JOB_TYPE_CHECKS): the chosen technician is set to Off for this
       // service's category - the same advisory path, never a block ([] with the gate off).
       if (resolvedTechId) {
@@ -9959,6 +10120,8 @@ async function scheduleCreateHandler(req, res, next) {
           technicianId: insertData.technician_id || null,
         });
         if (adminCreateClash.length) {
+          // An approved card was shown with no overlap: a visit holding a planned slot now is a change since the card.
+          if (approvedBooking) throw approvedBookingChanged('Another visit now holds a planned time.');
           bookingWarnings.push(slotOverlapWarning(dateOnly(scheduledDate)));
         }
       }
@@ -9976,6 +10139,7 @@ async function scheduleCreateHandler(req, res, next) {
         trx, cols, source: { sourceAction: 'admin_manual' },
       });
       [svc] = await trx('scheduled_services').insert(adminCreateInsert).returning('*');
+      approvalRows.push(svc);
       if (separateProgram) {
         await trx('activity_log').insert({
           admin_user_id: req.technicianId || null,
@@ -10001,7 +10165,8 @@ async function scheduleCreateHandler(req, res, next) {
       await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
         customerId,
         scheduledServiceId: svc.id,
-        source: 'admin_schedule',
+        // A card-approved booking is approved credit-free: its event proves "this customer booked" but no later offer adopts it.
+        source: approvedBooking ? require('../services/inspection-credit').CREDIT_FREE_CARD_EVENT_SOURCE : 'admin_schedule',
       });
 
       // Consultation-outcomes reconciliation (round 10 fast path — see the
@@ -10131,10 +10296,12 @@ async function scheduleCreateHandler(req, res, next) {
             technicianId: childData.technician_id || null, // see the parent probe
           });
           if (childClash.length) {
+            if (approvedBooking) throw approvedBookingChanged('Another visit now holds a planned time.');
             bookingWarnings.push(slotOverlapWarning(nextDateStr));
           }
         }
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
+        approvalRows.push(childRow);
         // Mirror only add-on lines due on this child date. Mixed-cadence
         // bundles stay one visit on overlap months, but slower lines do
         // not ride every faster-cadence child.
@@ -10225,6 +10392,7 @@ async function scheduleCreateHandler(req, res, next) {
             }
           }
           const [boosterRow] = await trx('scheduled_services').insert(boosterData).returning('*');
+          approvalRows.push(boosterRow);
 
           // Mirror only add-ons due on this booster date; one-time and
           // off-cadence recurring lines stay off future generated visits.
@@ -10304,6 +10472,8 @@ async function scheduleCreateHandler(req, res, next) {
       if (isRecurring && (!linkedEstimateId || acceptEstimateOnBook)) {
         const plans = require('../services/secure-appointment-plans');
         const owedSetup = await plans.resolveDirectRodentSetupObligation(trx, { id: svc.id });
+        // An approved card never shows a setup fee, so one owed here is a change since the card: roll back.
+        if (approvedBooking && owedSetup > 0) throw approvedBookingChanged('A bait-station setup fee is now owed on this booking.');
         if (owedSetup > 0) {
           // A Customer 360 coverage-only prepay already billed this setup
           // before any series existed (codex #3591 r73 P1): its claim sits
@@ -10376,6 +10546,7 @@ async function scheduleCreateHandler(req, res, next) {
       // INSIDE the transaction, so a sync failure rolls back the appointment series
       // rather than committing recurring rows with a stale tier/monthly_rate/member_since
       // — the exact split state this is meant to prevent.
+      const approvedPlanBefore = approvedBooking ? await customerPlanFingerprint(trx, customerId) : null;
       if (isRecurring) {
         waveguardPlanSync = await syncCustomerWaveGuardPlanFromScheduledServices({
           database: trx,
@@ -10401,6 +10572,8 @@ async function scheduleCreateHandler(req, res, next) {
         serviceId: svc.id, date: dateOnly(svc.scheduled_date), windowStart: svc.window_start, windowEnd: svc.window_end,
         technicianId: svc.technician_id,
       }));
+      // The last statement before commit: what this transaction wrote must be what the card approved.
+      if (approvedBooking) await assertApprovedBooking(trx, approvedBooking, { rows: approvalRows, customerId, planBefore: approvedPlanBefore });
     });
 
     // A lead / standalone quote (customer_id was NULL at booking) gets attached
@@ -10744,7 +10917,7 @@ async function scheduleCreateHandler(req, res, next) {
     // FIRST created appointment only — a recurring series is one booking,
     // not one redemption per visit. Best-effort: a booking must never fail
     // because crediting failed, and the service never throws.
-    if (createdAppointments.length) {
+    if (createdAppointments.length && !approvedBooking) {
       try {
         const InspectionCredit = require('../services/inspection-credit');
         const first = createdAppointments[0];
@@ -10945,7 +11118,8 @@ async function scheduleCreateHandler(req, res, next) {
         } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 
         try {
-          await refreshAnnualPrepayTermsForCustomer(customerId);
+          // An approved booking was asserted to touch no prepay term inside the transaction, so no refresh is deferred for it.
+          if (!approvedBooking) await refreshAnnualPrepayTermsForCustomer(customerId);
         } catch (e) { logger.error(`[schedule] annual prepay terms refresh failed (non-blocking): ${e.message}`); }
 
         // Keep the live dispatch board in sync when a same-day job is created
@@ -10980,9 +11154,9 @@ async function scheduleCreateHandler(req, res, next) {
 // prime (as router.use above does, failures ignored), then the handler with
 // the only request fields it reads, and resolves the reply it would send:
 // { status, json }. An error the handler passes to next() rejects.
-async function createScheduleBooking({ body, actor }) {
+async function createScheduleBooking({ body, actor, approvedBooking = null }) {
   await primePercentDiscountExclusions().catch(() => {});
-  const req = { body, technicianId: actor.technicianId, technician: { name: actor.technicianName } };
+  const req = { body, technicianId: actor.technicianId, technician: { name: actor.technicianName }, ...(approvedBooking ? { approvedBooking } : {}) };
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -12404,8 +12578,8 @@ async function comboTargetElapsed(row, changes, newDate, newWindow) {
 }
 
 // 'together': every refusal comes before any write.
-// { customerAskedTime } for a planner body that moves a shared stop, or {} with the gate off (the body stays exactly today's).
-const comboAskedTimeBody = (body) => (require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: body.customerAskedTime === true } : {});
+// { customerAskedTime } for a planner body that moves a shared stop.
+const comboAskedTimeBody = (body) => ({ customerAskedTime: body.customerAskedTime === true });
 
 async function planComboTogetherMove(req, row, changes, shown) {
   const body = req.body;
@@ -12450,7 +12624,7 @@ async function planComboTogetherMove(req, row, changes, shown) {
       ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
       // GATE_DAY_ONLY_PROMISE part E: the office's "customer asked for this time" for the stop's new slot. The mover writes it in
       // each member's own UPDATE (B3), the only write for this move: the per-row edit below never moves (its date and time keys
-      // are removed), so recordOfficeMoveIntent does not fire a second time. Gate off: the planner body is exactly today's.
+      // are removed), so recordOfficeMoveIntent does not fire a second time.
       ...comboAskedTimeBody(body),
       expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
     },
@@ -12610,6 +12784,9 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        // GATE_DAY_ONLY_PROMISE: the form's "customer asked for this time" box, when it sent one; the series writer records it
+        // on the anchor (a staff placement alone no longer holds a visit, owner 2026-11-22). No field: no key.
+        ...(typeof req.body?.customerAskedTime === 'boolean' ? { customerAskedTime: req.body.customerAskedTime } : {}),
         // Save road buy: this route is requireAdmin; the anchor's hour
         // buys its road times before the series transaction.
         ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
@@ -14460,7 +14637,6 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     }
     const propertyId = req.body.propertyId;
     if (propertyId !== undefined) {
-      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
       if (typeof propertyId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
         throw httpError(422, 'Choose a saved customer address.');
       }
@@ -15208,6 +15384,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     // (move probe + recurrence guards) — returned as `warnings` so the
     // modal can say what stacked.
     const editWarnings = [];
+    // The day-off / shift line of the edited visit was asked for a new day or a new technician.
+    let dayLineAsked = false;
     const useArrivalWindows = require('../services/scheduling/arrival-route').arrivalWindowRoutingEnabled();
     // Rung-1 lock set for every date this save's recurrence paths can write
     // (cadence rewrite moves, make-recurring spawn, visit-count / ongoing
@@ -15503,7 +15681,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // as the create-appointment path.
       if (hasTechnicianIdUpdate || updates.scheduled_date !== undefined) {
         const eligibilityRow = await trx('scheduled_services').where({ id: req.params.id })
-          .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          .first('technician_id', 'service_type', 'service_id', 'service_key_snapshot', 'window_start', 'window_end', 'estimated_duration_minutes',
+            trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
         const finalTechnicianId = hasTechnicianIdUpdate
           ? requestedTechnicianId
           : (eligibilityRow?.technician_id || null);
@@ -15520,11 +15699,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           await assertAssignableTechnician(finalTechnicianId, { conn: trx, date: finalDate });
           // Work days (GATE_TECH_WORK_DAYS): an office save onto a day the
           // technician does not work still goes through; the modal is told.
-          if (techWorkDaysLive()) {
-            const { offDayWarningFor } = require('../services/technician-eligibility');
-            const offDayLine = await offDayWarningFor(finalTechnicianId, finalDate, { conn: trx });
-            if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
-          }
+          // Shift hours (GATE_TECH_SHIFT_HOURS): on a day the technician works, the
+          // same read says when the shift does not hold the visit as this save
+          // leaves it: the row's hours and length, with this save's own (dayWarningFor).
+          const offDayLine = await require('../services/technician-eligibility').dayWarningFor(finalTechnicianId, finalDate, { conn: trx, block: { ...eligibilityRow, ...updates } });
+          dayLineAsked = true;
+          if (offDayLine && !editWarnings.includes(offDayLine)) editWarnings.push(offDayLine);
           // Job type (GATE_TECH_JOB_TYPE_CHECKS): a technician set to Off for this visit's
           // category. Advisory, never a block ([] with the gate off).
           if (finalTechChanging) {
@@ -15675,6 +15855,13 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         throw httpError(422, 'Change the address and the recurrence in separate saves.');
       }
 
+      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): the plan's open rows as this save finds them. Read
+      // HERE: no row has been written yet, and the locks this save takes ahead of its writes are held (the
+      // fences, the plan's maintenance lock when this save takes it, the customer's comms lock and row), so
+      // the waits for them are over and a writer that takes one of them cannot change the plan before the
+      // save's last step. That step compares these rows with the rows the save leaves and tells the office
+      // about the plan's other visits (planOfficeLines). Gate off: null, no read.
+      const planBefore = await require('../services/scheduling/plan-office-lines').planRowsBefore(trx, req.params.id);
       if (assignmentPlan && JSON.stringify(await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope))
         !== JSON.stringify(assignmentPlan)) {
         throw Object.assign(httpError(409, 'Appointments changed routes while saving — reload and save again.'), {
@@ -15964,9 +16151,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       if (occupancyRouteTouched) {
         const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
-        // A staff date/window choice locks the occurrence from auto-dispatch
-        // (this path writes no reschedule_log row the person-placed guard reads).
-        Object.assign(updates, staffEditLockPatch(occRow, updates));
+        // A staff date/window choice no longer locks the occurrence from
+        // auto-dispatch (owner 2026-11-22); only the box does (staff-edit-lock.js).
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)
@@ -16082,11 +16268,25 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
             // non-null end and the visit went invisible to occupancy.
             updates.window_end = occEnd;
           }
+          const lengthChanged = updates.estimated_duration_minutes !== undefined
+            && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes);
+          // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): a save that keeps the
+          // visit's day and technician and changes its hours or its length is told
+          // when the technician's shift does not hold the visit as this save leaves
+          // it: the locked row with this save's values. The shift line alone
+          // (`shiftOnly`): this save put no one on a new day. A save that changes the
+          // day or the technician was asked above (dayLineAsked), and is asked once.
+          // Gate off: no read.
+          if (!dayLineAsked && (!slotUnchanged || lengthChanged)) {
+            const shiftLine = await require('../services/technician-eligibility').dayWarningFor(savedTechnicianId(updates, occRow), occDate, {
+              conn: trx, block: { ...occRow, ...updates }, shiftOnly: true,
+            });
+            if (shiftLine) editWarnings.push(shiftLine);
+          }
           // A longer job or a different technician/order can break arrival
           // promises even when the nominal calendar block is unchanged.
           const arrivalRouteChanged = useArrivalWindows && (assignmentNeedsChange
-            || (updates.estimated_duration_minutes !== undefined
-              && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes))
+            || lengthChanged
             || (updates.route_order !== undefined && updates.route_order !== occRow.route_order));
           if ((!slotUnchanged || arrivalRouteChanged) && occDate && occStart && occEnd) {
             const adminMoveClash = await findConflictingVisits({
@@ -17323,16 +17523,19 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           //    series — spawning from it creates grandchildren under a second
           //    parent inside one family. The shipped UI can't send this, but
           //    the API accepted it.
-          //  - A completed/cancelled/terminal or past-dated row anchors the
+          //  - A cancelled/rescheduled/skipped or past-dated row anchors the
           //    children to a stale date, back-filling phantom visits.
+          //  - A visit dated today that is en route, on site or completed is a
+          //    live anchor (owner 2026-11-24: the plan is set up at the door):
+          //    children are dated from its date and always land after today.
           // Throwing here rolls the whole edit back (still inside the trx):
           // better a clean 400 than a committed edit plus a refused spawn.
           if (parent.recurring_parent_id) {
             throw httpError(400, 'This visit is part of an existing recurring series — edit the series parent to change the schedule instead of spawning a new series from a child visit.');
           }
           const spawnAnchorDate = dateOnly(parent.scheduled_date);
-          if (!['pending', 'confirmed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
-            throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from an upcoming pending or confirmed visit.`);
+          if (!['pending', 'confirmed', 'en_route', 'on_site', 'completed'].includes(parent.status) || !spawnAnchorDate || spawnAnchorDate < etDateString()) {
+            throw httpError(400, `Cannot spawn recurring visits from this row (status "${parent.status}", date ${spawnAnchorDate || 'unknown'}) — recurring children can only be created from a visit dated today or later that is not cancelled, rescheduled or skipped.`);
           }
           // Customer row lock: taken up front in this transaction's
           // comms-lock section (Codex #4716 r2 P1 — moved off its original
@@ -17877,6 +18080,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           }
         }
       }
+      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): every write of this save to the plan's visits is done
+      // (the assignment's scope, the cadence rewrite, the hours it copies, the visits it adds). The office is
+      // told about the plan's OTHER visits from the rows the save leaves: the day-off line, or the shift line,
+      // of each one it added or left on another day, technician or block. The edited visit was told above.
+      editWarnings.push(...(await require('../services/scheduling/plan-office-lines').planOfficeLines(trx, req.params.id, planBefore))
+        .filter((line) => !editWarnings.includes(line)));
       // Staff route insertion:
       // an edit that moved this visit (another day, start or technician)
       // numbers its technician's day in the order the save check certified,
@@ -21673,7 +21882,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       const priceAlertContext = { parent, parentId, childDate: nextStr, serviceLabel: childIdentity.service_type };
       if (priceVerdict?.skip) {
         logger.warn(`[recurring] Auto-extend skipped for parent=${parentId} — ${nextStr} price ${priceVerdict.price} is templated from a cancelled series root and not backed by the last paid visit (${priceVerdict.lastPaid ?? 'none'})`);
-        SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, priceAlertContext);
+        await SeriesPriceGuards.raiseExtensionPriceAlertInTransaction(conn, priceVerdict, priceAlertContext);
         onSkip?.('cancelled_root_price');
         return spawnedVisit;
       }
@@ -21727,6 +21936,12 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
         await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars);
         if (priceVerdict && !(await SeriesPriceGuards.insertedRowIsPrepaid(conn, autoExtRow.id))) {
           SeriesPriceGuards.raiseExtensionPriceAlertAfterCommit(conn, priceVerdict, { ...priceAlertContext, childId: autoExtRow.id });
+        }
+        // The cancelled-root alert for this very date closes once the guard has
+        // added that occurrence at a price a paid visit backs (rationale on
+        // closeRefusedPriceAlertAfterInsert). Gate off or a verdict: no read.
+        if (!priceVerdict && SeriesPriceGuards.seriesPriceGuardsLive()) {
+          await SeriesPriceGuards.closeRefusedPriceAlertAfterInsert(conn, { parent, parentId, child: nextData, childDate: nextStr, childId: autoExtRow.id });
         }
         spawnedVisit = {
           scheduledServiceId: autoExtRow.id,
@@ -25204,37 +25419,35 @@ router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) 
 
 // GET /api/admin/schedule/reservice-request-suggestion?customerId= — the
 // New Appointment modal's "Customer's words" suggestion for a pest/lawn
-// re-service (GATE_RESERVICE_OFFICE_REQUEST): this customer's latest inbound
+// re-service: this customer's latest inbound
 // text or call note from the last 72 hours, whichever is newer, with its kind
-// and time so the modal can label it ("Text, 3 h ago"). Read-only. Gate off
-// answers {enabled:false, suggestion:null} — the modal renders nothing new.
+// and time so the modal can label it ("Text, 3 h ago"). Read-only.
 // requireAdmin like the booking route the suggestion feeds.
 router.get('/reservice-request-suggestion', requireAdmin, async (req, res, next) => {
   try {
-    if (!isEnabled('reserviceOfficeRequest')) return res.json({ enabled: false, suggestion: null });
     const customerId = String(req.query.customerId || '');
     if (!reserviceOfficeRequest.isUuid(customerId)) {
       return res.status(400).json({ error: 'customerId required' });
     }
     const suggestion = await reserviceOfficeRequest.pickSuggestion(db, customerId);
+    // enabled stays true for Schedule tabs opened before the gate came out (they hide the box without it).
     res.json({ enabled: true, suggestion });
   } catch (err) { next(err); }
 });
 
 // GET /api/admin/schedule/cancel-call-notice?customerId= — the New Appointment
-// modal's "Canceled on a call" notice (GATE_CALL_CANCEL_GUARD): this customer's
+// modal's "Canceled on a call" notice: this customer's
 // latest real conversation from the last 14 days, when that call filed a
 // cancellation card, with its time and the card's summary. Read-only and a
-// warning only: the booking route never reads it. Gate off answers
-// {enabled:false, call:null}, so the modal renders nothing new.
+// warning only: the booking route never reads it.
 router.get('/cancel-call-notice', requireAdmin, async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').callCancelGuardLive()) return res.json({ enabled: false, call: null });
     const customerId = String(req.query.customerId || '');
     if (!reserviceOfficeRequest.isUuid(customerId)) {
       return res.status(400).json({ error: 'customerId required' });
     }
     const call = await require('../services/call-cancel-guard').latestCancelCall(customerId);
+    // enabled stays true for Schedule tabs opened before the gate came out (they hide the notice without it).
     res.json({ enabled: true, call });
   } catch (err) { next(err); }
 });
@@ -28602,7 +28815,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category', 'manufacturer');
         const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
         catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);
-        const mentioned = catalogScreensForPrompt(catalogRows, fullUserMessage);
+        const mentioned = CompletionRecap.catalogScreensForPrompt(catalogRows, fullUserMessage);
         mentionedCatalogNames.push(...mentioned.names);
         mentionedCatalogActives.push(...mentioned.actives);
       } catch (err) {
@@ -30180,47 +30393,12 @@ function blackoutDateString(value) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// The catalog products, and their actives, a report prompt names: under the
-// writer rules each joins the trade-name and active screens, so a draft never
-// names a product a note mentioned. Supplies (yard signs, stakes, stickers)
-// are no products a report could name: their ordinary words ("yard sign",
-// "Serviced by Waves") once banned "yard" and "Waves" from every draft of a
-// visit whose notes said "yard" (prod 2026-10-02).
-const MENTION_GENERIC_TOKENS = new Set([...CompletionRecap.REPORT_GENERIC_PRODUCT_TOKENS, ...CompletionRecap.REPORT_VOCABULARY_NAME_WORDS]);
-function catalogScreensForPrompt(catalogRows, promptText) {
-  const names = [];
-  const actives = [];
-  const promptWritesAlias = CompletionRecap.promptAliasTest(promptText);
-  for (const row of (Array.isArray(catalogRows) ? catalogRows : []).filter((r) => !CompletionRecap.isSupplyCategory(r?.category))) {
-    // By its name or its short display name. A registered alias the prompt
-    // writes out is screened in the shared builder (mentionedText): aliases
-    // are staff shorthand, matched whole.
-    // Neither the report screen's own generic words (the pests, "station",
-    // "trap", "yard", "care") nor the plain report words inside catalog names
-    // ("high", "contact", "monitoring") mark a product named: a note that says
-    // "cockroach" or "keep monitoring" names no "Advion Cockroach Gel Bait"
-    // or "HexPro Termite Monitoring Baiting System" (audit 2026-10-03).
-    const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
-      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true, extraGenericTokens: MENTION_GENERIC_TOKENS }));
-    // Its alias written out counts as naming it for its actives.
-    const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
-    names.push(...mentioned);
-    // Its actives too: a draft must not swap the named product for its
-    // active ingredient; and an active the prompt names on its own
-    // ("azoxystrobin" in a note) is screened even with no product name.
-    if (row?.active_ingredient && (named || activeIngredientsMentioned(promptText, row.active_ingredient))) {
-      actives.push(row.active_ingredient);
-    }
-  }
-  return { names, actives };
-}
-
 router._test = {
   makeRecurringWelcomeCandidate, sendMakeRecurringWelcome,
   assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit, requestedAreaAddOnServiceKeys,
   areaAddOnVisitIdsForFeed, AREA_ADDON_LOOKUP_FAILED, postedAreaAddOnTotals,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
-  catalogScreensForPrompt,
+  catalogScreensForPrompt: CompletionRecap.catalogScreensForPrompt,
   siblingCoverageRefusal,
   copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
@@ -30506,6 +30684,13 @@ module.exports.stripTechOwnerOnlyMoney = stripTechOwnerOnlyMoney;
 
 // Same handler as POST / — see createScheduleBooking above.
 module.exports.createScheduleBooking = createScheduleBooking;
+// The create handler's own series-date plan, price builder and lawn-rounds pattern rewrite — consumed lazily by the IB
+// book_plan_visits card so its dates and per-visit price are the ones the handler will write.
+module.exports.planCreateSeriesDates = planCreateSeriesDates;
+module.exports.resolveSeriesCreateInvoiceOnComplete = resolveSeriesCreateInvoiceOnComplete;
+module.exports.seriesMonthAnchorOpts = seriesMonthAnchorOpts;
+module.exports.lawnRoundsSeriesForBooking = lawnRoundsSeriesForBooking;
+module.exports.bookingCreatesWaveGuardCoverage = bookingCreatesWaveGuardCoverage;
 // Same handler as PUT /:id/update-details — see updateVisitDetails above.
 module.exports.updateVisitDetails = updateVisitDetails;
 module.exports.assertApprovedRepriceState = assertApprovedRepriceState;

@@ -506,11 +506,8 @@ function buildRows() {
           LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
       // No lawn plan collects under the minimum after discounts (owner
-      // 2026-11-06, GATE_LAWN_MIN_AFTER_DISCOUNT), so no list price under it
-      // is advertised either.
-      (r) => Math.max(r.perApp, require('../../config/feature-gates').gateEnvValue('GATE_LAWN_MIN_AFTER_DISCOUNT')
-        ? Number(constants.LAWN_PRICING_V2.minimumPerVisitAfterDiscount) || 0
-        : 0)),
+      // 2026-11-06), so no list price under it is advertised either.
+      (r) => Math.max(r.perApp, Number(constants.LAWN_PRICING_V2.minimumPerVisitAfterDiscount) || 0)),
     notes: `${lawnCadenceText} applications per year by tier; priced by grass type and treatable turf area — larger or more complex lawns price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
@@ -678,7 +675,7 @@ function buildRows() {
       ],
       (opts) => sp.priceRodentGuarantee(opts),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
-    notes: 'Renewable 12-month rodent-free guarantee; eligibility requires completed trapping, completed exclusion, sanitation completed (or photo baseline), and no activity after the final trap check. Priced by property tier — larger, more complex properties price higher.',
+    notes: 'Renewable 12-month rodent exclusion guarantee covering up to 4 callbacks and re-sealing of the original exclusion points; eligibility requires completed trapping and completed exclusion. Priced by property tier — larger, more complex properties price higher.',
   }));
 
   add('trap_only_retainer', () => rangeRow({
@@ -762,7 +759,7 @@ function lastComputeUnstable() {
 }
 
 function gateSignature() {
-  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || ''), String(require('../../config/feature-gates').lawnV13Live?.() === true), process.env.GATE_LAWN_COST_PLUS_LIST || '', process.env.GATE_LAWN_MIN_AFTER_DISCOUNT || ''].join('|');
+  return [getLastSyncAt(), ...Object.values(PURCHASE_GATED_ROWS).map((gate) => process.env[gate] || ''), String(require('../../config/feature-gates').lawnV13Live?.() === true), process.env.GATE_LAWN_COST_PLUS_LIST || ''].join('|');
 }
 
 function computePublicPricingRanges({ refresh = false } = {}) {

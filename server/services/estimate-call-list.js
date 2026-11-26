@@ -103,6 +103,37 @@ async function lastCallOutcomeByEstimateId(database, ids) {
   return out;
 }
 
+/**
+ * The newest reason each customer sent under "What would help you decide?" on the estimate page, one batched query
+ * for the list route and the 9 AM push (the Call today rule shows such a row at once). The row is the still-deciding
+ * activity_log row of that day (estimate-change-request.js recordEstimateStillDeciding): metadata.reason is the key
+ * and metadata.reason_at is when the customer sent it. A tap with no reason is not read.
+ *
+ * @param {Function} database  knex-like handle
+ * @param {Array<string>} ids  estimate ids
+ * @returns {Promise<Map<string, {reason: string, at: Date|string}>>} estimate id -> its newest reason; an estimate
+ *   with none is absent.
+ */
+async function stillDecidingByEstimateId(database, ids) {
+  const out = new Map();
+  if (!Array.isArray(ids) || !ids.length) return out;
+  const { STILL_DECIDING_ACTION, STILL_DECIDING_REASONS } = require('./estimate-change-request');
+  const rows = await database('activity_log')
+    .where('action', STILL_DECIDING_ACTION)
+    .whereIn('estimate_id', ids)
+    .whereRaw("metadata->>'reason' IS NOT NULL")
+    .distinctOn('estimate_id')
+    .orderBy([{ column: 'estimate_id' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .select('estimate_id', 'created_at', 'metadata');
+  for (const row of rows) {
+    const reason = row.metadata?.reason;
+    if (Object.hasOwn(STILL_DECIDING_REASONS, String(reason))) {
+      out.set(row.estimate_id, { reason, at: row.metadata.reason_at || row.created_at });
+    }
+  }
+  return out;
+}
+
 // Hard ceiling for limit=all list fetches. The estimates pipeline computes all-time KPIs client-side from this list; if
 // the table ever outgrows this cap the analytics silently truncate to the newest rows, so keep generous headroom
 // (pricing-risk batch is pure compute after one inventory preload).
@@ -168,7 +199,7 @@ function estimateListQuery(database, { status, sentOnly = false, sources = null,
  *   three values read in batches (short_codes, call_log, activity_log), and the self-serve rule's answer for the row
  *   (services/self-serve-estimates.js)
  */
-function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, lastCallOutcome = null, callOutcomeUnknown = false, undeliveredSelfServe = false } = {}) {
+function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, lastCallOutcome = null, callOutcomeUnknown = false, stillDeciding = null, undeliveredSelfServe = false } = {}) {
   const hasBeenSent = !!row.sent_at;
   return {
     status: row.status,
@@ -184,6 +215,9 @@ function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null, lastC
     lastCallOutcome: lastCallOutcome || null,
     // The outcome read failed, so null above proves nothing: the shared rule withholds the row from Call today.
     callOutcomeUnknown: Boolean(callOutcomeUnknown),
+    // The newest reason the customer sent under "What would help you decide?", { reason, at }, or null. Only on an open
+    // offer (sent or viewed): an accepted, declined or expired row is not still deciding, and must not say so.
+    stillDeciding: (row.status === 'sent' || row.status === 'viewed') ? (stillDeciding || null) : null,
     // A self-serve quote nobody delivered (plan restart, plan start, report card) never makes the
     // list: the zero-follow-up contract (services/self-serve-estimates.js). The caller passes the
     // rule's answer.
@@ -206,6 +240,6 @@ function staffReasonOnExpiredAllowed(estimate, body = {}) {
 
 module.exports = {
   ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, clickStatsByEstimateId, lastCalledAtByEstimateId,
-  CALL_OUTCOME_ACTION, staffFirstName, lastCallOutcomeByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed,
+  CALL_OUTCOME_ACTION, staffFirstName, lastCallOutcomeByEstimateId, stillDecidingByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed,
   CUSTOMER_ANSWERED_SQL,
 };

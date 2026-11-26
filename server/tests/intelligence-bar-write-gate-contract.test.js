@@ -21,7 +21,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-process.env.GATE_EDIT_APPT_ADDRESS = 'true';
 // send_autopay_setup_link's preview runs the Auto Pay service's own eligibility
 // read, which refuses before the channel preflight while the lane is dark.
 process.env.GATE_AUTOPAY_SETUP_LINK = 'true';
@@ -71,10 +70,13 @@ const ORIGINAL_PLATFORM_GATE = process.env.GATE_IB_PLATFORM;
 beforeAll(() => {
   // reprice_future_visits is dark behind GATE_IB_REPRICE_VISITS; off, its preview refuses.
   process.env.GATE_IB_REPRICE_VISITS = 'true';
+  // book_plan_visits is dark behind GATE_IB_BOOK_PLAN_VISITS; off, its preview refuses.
+  process.env.GATE_IB_BOOK_PLAN_VISITS = 'true';
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
+  process.env.GATE_IB_SEND_ESTIMATE = 'true';
   process.env.GATE_IB_LEAD_CONVERT = 'true';
   process.env.GATE_IB_VOID_INVOICE = 'true';
   process.env.GATE_IB_PREPAY_SWITCH = 'true';
@@ -94,11 +96,13 @@ beforeAll(() => {
   process.env.GATE_IB_GENERAL_EDIT = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_BOOK_PLAN_VISITS;
   delete process.env.GATE_IB_GENERAL_EDIT;
   delete process.env.GATE_IB_INVOICE_ACTIONS;
   delete process.env.GATE_IB_RECORD_PAYMENT;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   delete process.env.GATE_IB_ACCEPT_ESTIMATE;
+  delete process.env.GATE_IB_SEND_ESTIMATE;
   delete process.env.GATE_IB_LEAD_CONVERT;
   delete process.env.GATE_IB_VOID_INVOICE;
   delete process.env.GATE_IB_PREPAY_SWITCH;
@@ -122,7 +126,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'tool-additions.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js', 'model-context.js', 'series-move.js', 'fast-mode.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'model-failure.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'invoice-action-effects.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'billing-mode-change.js', 'tier-upgrade-email.js', 'name-match.js', 'booking-service-match.js', 'tool-search.js', 'tool-additions.js', 'multi-card.js', 'ib-openai-backup.js', 'openai-tool-adapter.js', 'admin-write-snapshots.js', 'record-payment-fences.js', 'model-context.js', 'series-move.js', 'fast-mode.js', 'service-record-facts.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -193,6 +197,9 @@ const WRITE_TWO_STEP = [
   'remove_saved_payment_method',
   'correct_invoice_address',
   'accept_estimate',
+  // book_plan_visits: the Schedule create's own handler behind a card; the unconfirmed call is a preview only.
+  'book_plan_visits',
+  'send_estimate',
   'send_invoice',
   'record_payment',
   'void_invoice',
@@ -377,7 +384,7 @@ const READ_ONLY = [
   'get_scheduled_job_health',
   'search_call_research',
   // closeout-tools.js (#3647 follow-up): read-only surface over closeout-status.
-  'get_closeout_status', 'list_open_closeouts',
+  'get_closeout_status', 'get_closeout_bill_preview', 'list_open_closeouts',
   // gap-report-tools.js: read-only list over agent_gap_reports (rows are
   // written server-side by agent-gap-reports.js, never by a model tool).
   'list_gap_reports',
@@ -741,6 +748,18 @@ const UNCONFIRMED_CALLS = [
       invoices: [],
       scheduled_service_addons: [],
     }],
+    // book_plan_visits' preview reads the customer, the catalog service, the customer's earlier series and
+    // property, then plans dates and prices through the Schedule create's own helpers (spied below). It may
+    // not write without confirmed (intelligence-bar-book-plan-visits.test.js covers the card itself).
+    ['book-plan-visits-tools', 'executeBookPlanVisitsTool', 'book_plan_visits', {
+      customer_id: '00000000-0000-0000-0000-00000000c701', service_type: 'Quarterly Pest Control Service',
+      scheduled_date: '2099-03-02', time_window: '9:00 AM',
+    }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000c701', first_name: 'Robin', last_name: 'Sample', active: true, billing_mode: 'per_visit', payer_id: null, address_line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205' }],
+      services: [{ id: 'svc-quarterly-pest', name: 'Quarterly Pest Control Service', service_key: 'pest_quarterly', billing_type: 'recurring', frequency: 'quarterly', base_price: 89, is_active: true }],
+      scheduled_services: [{ id: 'old-parent', customer_id: '00000000-0000-0000-0000-00000000c701', is_recurring: true, recurring_parent_id: null, service_id: 'svc-quarterly-pest', service_type: 'Quarterly Pest Control Service', property_id: '00000000-0000-0000-0000-00000000c702', status: 'completed', scheduled_date: '2098-11-02', estimated_price: 89, primary_line_price: 89, create_invoice_on_complete: true }],
+      customer_properties: [{ id: '00000000-0000-0000-0000-00000000c702', customer_id: '00000000-0000-0000-0000-00000000c701', active: true, address_line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205' }],
+    }],
     // resend_receipt's preview reads the paid invoice and the receipt resolvers
     // (spied below — their own paths are covered by intelligence-bar-receipt-resend.test.js).
     // create_customer_link's preview reads only the customer (the composer
@@ -793,6 +812,15 @@ const UNCONFIRMED_CALLS = [
       }],
       customers: [{ id: '00000000-0000-0000-0000-00000000e002', first_name: 'Accept', last_name: 'Fixture', email: 'accept@example.com', pipeline_stage: 'lead', monthly_rate: 0 }],
       scheduled_services: [],
+    }],
+    // send_estimate reads the estimate and the estimate page's own send preview (spied below; the route's preview is
+    // covered by admin-estimates-reviewed-send.test.js, the card by intelligence-bar-send-estimate.test.js). It writes nothing.
+    ['estimate-send-tools', 'executeEstimateSendTool', 'send_estimate', { estimate_id: '00000000-0000-0000-0000-00000000e101' }, {
+      estimates: [{
+        id: '00000000-0000-0000-0000-00000000e101', token: 'sendfixture1', status: 'draft', customer_id: null, customer_name: 'Send Fixture',
+        monthly_total: 49, annual_total: 588, onetime_total: 0, waveguard_tier: 'Bronze', estimate_group_id: null,
+        sent_at: null, scheduled_at: null, archived_at: null, price_locked_at: null, estimate_data: {},
+      }],
     }],
     // send_invoice reads the invoice, the hold, the payer ownership and the recipients (the route helpers
     // are spied below — their own paths are covered by intelligence-bar-invoice-actions.test.js). It writes nothing.
@@ -1139,6 +1167,25 @@ const UNCONFIRMED_CALLS = [
         eligible: true, annualBase: 600, discountLabel: '10%', supersedes: [], setupFee: null,
         mintPayload: { amount: 540, visitCount: 4, coverageCadence: 'quarterly', serviceType: 'Quarterly Pest Control', termStart: '2099-02-03' },
       }) : null;
+    // book_plan_visits plans its dates, prices the visit and judges the plan sync through the Schedule create's own helpers,
+    // each covered by its own suite; this stand-in recorder answers a clean quarterly plan with no billing change.
+    const bookPlanSpies = toolName === 'book_plan_visits'
+      ? [
+        jest.spyOn(require('../routes/admin-schedule'), 'planCreateSeriesDates').mockImplementation(async (_conn, opts) => {
+          opts.plannedChildDates.push('2099-06-02', '2099-09-02', '2099-12-02');
+          return { plannedCount: 4, rOpts: {}, shiftDir: 'forward', skipWeekendsEffective: false, seriesBlackoutDates: null, shortfallWarning: null };
+        }),
+        jest.spyOn(require('../routes/admin-schedule'), 'buildAppointmentPricing')
+          .mockResolvedValue({ finalPrice: 89, primaryBase: 89, primaryDiscount: null, appointmentDiscount: null, addonLines: [] }),
+        jest.spyOn(require('../services/recurring-appointment-seeder'), 'findActiveRecurringSeries').mockResolvedValue([]),
+        jest.spyOn(require('../services/self-booking-plan-sync'), 'bookingWouldChangeCustomerPlan').mockResolvedValue({ writes: false, reason: 'no_change' }),
+        jest.spyOn(require('../services/service-library'), 'retiredServicesNotHeldBy').mockResolvedValue([]),
+        // The prepay-term refresh selection, the direct rodent setup resolver and the per-date overlap probe have their own suites.
+        jest.spyOn(require('../services/annual-prepay-renewals'), 'refreshableTermsForCustomer').mockResolvedValue([]),
+        jest.spyOn(require('../services/secure-appointment-plans'), 'directRodentSetupForRow').mockResolvedValue(0),
+        jest.spyOn(require('../services/inspection-credit'), 'projectRedeemableOfferAmount').mockResolvedValue(0),
+        jest.spyOn(require('../services/scheduling/window-rules'), 'probeSlotOverlap').mockResolvedValue([]),
+      ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     // accept_estimate's card is the accept run as a dry run (rolled back in its
@@ -1156,6 +1203,19 @@ const UNCONFIRMED_CALLS = [
           ],
         },
       }) : null;
+    // send_estimate's card is the estimate page's own send preview, run through the route handler; here the
+    // tool itself must send and write nothing, so the preview answers a canned message.
+    const sendEstimatePreview = toolName === 'send_estimate'
+      ? jest.spyOn(require('../routes/admin-estimates'), 'estimateSendPreviewForBar').mockResolvedValue({
+        status: 200,
+        json: {
+          id: '00000000-0000-0000-0000-00000000e101', status: 'draft', editVersion: 'edit-v1', messageVersion: 'msg-v1',
+          customerName: 'Send Fixture', customerPhone: '+19415550177', customerEmail: 'send@example.com', address: '1 Fixture Way',
+          smsBlockReason: null, uncertainAttempt: false, messages: { sms: 'Your estimate is ready.', email: { provider: 'sendgrid', subject: 'Your estimate', text: 'Ready.' } },
+        },
+      }) : null;
+    const sendEstimateSend = toolName === 'send_estimate'
+      ? jest.spyOn(require('../routes/admin-estimates'), 'sendEstimateFromBar').mockResolvedValue({ status: 200, json: { success: true, sent: true } }) : null;
     const receiptResolvers = toolName === 'resend_receipt'
       ? [
         jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
@@ -1216,8 +1276,12 @@ const UNCONFIRMED_CALLS = [
       createInvoiceSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
+      bookPlanSpies.forEach((spy) => spy.mockRestore());
       prepaySwitchPreview?.mockRestore();
       acceptDryRun?.mockRestore();
+      sendEstimatePreview?.mockRestore();
+      expect(sendEstimateSend?.mock.calls || []).toEqual([]);
+      sendEstimateSend?.mockRestore();
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {
           if (value === undefined) delete process.env[key];
@@ -1364,6 +1428,6 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // The Agent Review draft cards (_sideEffects): their confirmed runs text the customer (approve, revise) or record the draft ignored.
     // resolve_dispatch_alert / unblock_sender (_sideEffects): their confirmed runs resolve an Action Queue card / remove a blocklist entry and its Gmail filter.
     // The invoice reminder and payment-plan tools (_sideEffects): their confirmed runs change reminders, send, schedule or create a plan.
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_invoice', 'record_payment', 'void_invoice', 'switch_visit_to_annual_prepay', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'create_customer_link', 'send_autopay_setup_link', 'send_estimate', 'send_invoice', 'record_payment', 'void_invoice', 'switch_visit_to_annual_prepay', 'schedule_sms', 'edit_invoice', 'archive_invoice', 'unarchive_invoice', 'unvoid_invoice', 'pause_invoice_reminders', 'resume_invoice_reminders', 'stop_invoice_reminders', 'send_invoice_reminder_now', 'schedule_invoice_send', 'create_payment_plan', 'cancel_payment_plan', 'create_invoice', 'compose_email', 'set_customer_bill_to', 'approve_agent_review_draft', 'revise_agent_review_draft', 'ignore_agent_review_draft', 'resolve_dispatch_alert', 'unblock_sender', 'propose_admin_edit']);
   });
 });

@@ -1238,3 +1238,23 @@ describe('mosquito product costs follow the inventory catalog (owner 2026-11-01)
     expect(costs().summitDunkTablet).toBe(DEFAULTS.summitDunkTablet);
   });
 });
+
+describe('rodent guarantee eligibility list from pricing_config (owner 2026-11-23: no sanitation)', () => {
+  const original = [...constants.RODENT.guarantee.eligibilityRequires];
+  afterEach(() => { constants.RODENT.guarantee.eligibilityRequires = [...original]; });
+
+  test('code default has no sanitation requirement', () => {
+    expect(original).toEqual(['trappingCompleted', 'exclusionCompleted', 'noActivityAfterFinalTrapCheck']);
+  });
+
+  test('a stored list that still names sanitation is loaded without it', async () => {
+    await syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'rodent_guarantee',
+      data: JSON.stringify({
+        standard: 199, complex: 249, estate: 299,
+        eligibility_requires: ['trappingCompleted', 'exclusionCompleted', 'sanitationCompletedOrPhotoBaseline', 'noActivityAfterFinalTrapCheck'],
+      }),
+    }]));
+    expect(constants.RODENT.guarantee.eligibilityRequires).toEqual(['trappingCompleted', 'exclusionCompleted', 'noActivityAfterFinalTrapCheck']);
+  });
+});

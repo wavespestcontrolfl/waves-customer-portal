@@ -1181,15 +1181,24 @@ function stripPlaceholderSignOff(text) {
   return lines.join('\n').trim() || original;
 }
 
+// Owner-approved COMPANY FACTS (the one list the texting agent and the voice agent also read). They hold no customer
+// data, so they ride every draft, matched customer or not. A staff member still reviews the Gmail draft before it goes.
+function companyFactsSystemEntry() {
+  const { renderCompanyFactsSection } = require('../sms-company-facts');
+  return `${renderCompanyFactsSection().replace(/\n$/, '')}\nUse only the lines that answer what the customer asked. They promise no visit, date, price, or contact; the rules above still apply.`;
+}
+
 async function draftFactsSystemEntries(email, customer) {
-  if (!customer || !senderOwnsCustomerFacts(email, customer)) return [];
+  const company = companyFactsSystemEntry();
+  if (!customer || !senderOwnsCustomerFacts(email, customer)) return [company];
   const facts = await require('./email-draft-facts').buildEmailDraftFacts({ customer, receivedAt: email.received_at });
-  if (!facts) return [];
+  if (!facts) return [company];
   const { formatETDay, formatETDate, formatETTime } = require('../../utils/datetime-et');
   const now = new Date();
   return [
     `FACTS FROM WAVES RECORDS (current as of ${formatETDay(now)}, ${formatETDate(now)}, ${formatETTime(now)} ET):\n${facts}`,
     'Use the FACTS for any visit date, arrival window, status, technician name, or phone number. Use service names exactly as written in the FACTS. For anything the FACTS do not cover, write around it as the rules above say. Stay consistent with the texts Waves already sent. Never promise how or when Waves will contact the customer (a call, a text, an email) unless the FACTS say so. Never write \'sorry we missed your call\'.',
+    company,
   ];
 }
 

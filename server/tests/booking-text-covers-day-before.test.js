@@ -1,12 +1,12 @@
 /**
- * GATE_BOOKING_TEXT_COVERS_DAY_BEFORE (owner 2026-11-09). A customer who books a visit for tomorrow got the booking
+ * Booking text covers the day-before reminder (owner 2026-11-09). A customer who books a visit for tomorrow got the booking
  * confirmation text and, minutes later, the 24-hour "is tomorrow" reminder.
  *
  * Three booking paths, one shared rule (confirmationCoversDayBefore):
  *   - call pipeline (source_action ai_call_pipeline): registers the row with sendConfirmation:false, sends its own text
- *     afterwards, so it closes the 24h flag through closeDayBeforeForBookingText (gated).
+ *     afterwards, so it closes the 24h flag through closeDayBeforeForBookingText.
  *   - office-booked (admin_manual) and self-booked (inspection_link -> createSelfBooking, booking_new): the text goes
- *     through deliverConfirmation, which already closes the flag in the confirmation's own write (ungated, #6882).
+ *     through deliverConfirmation, which already closes the flag in the confirmation's own write (#6882).
  * All names are synthetic.
  */
 const fs = require('fs');
@@ -37,13 +37,11 @@ jest.mock('../services/messaging/send-window', () => ({ isWithinSendWindowET: je
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
   gateEnvValue: jest.fn(() => false),
-  bookingTextCoversDayBeforeLive: jest.fn(() => false),
 }));
 
 const db = require('../models/db');
 const CustomerContact = require('../services/customer-contact');
 const AppointmentEmail = require('../services/appointment-email');
-const gates = require('../config/feature-gates');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -77,37 +75,16 @@ function recordingDb({ updated = 1 } = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  gates.bookingTextCoversDayBeforeLive.mockReturnValue(false);
   CustomerContact.getAppointmentContacts.mockImplementation(() => [{ phone: SAVED_PHONE, name: 'Sample Customer', role: 'primary' }]);
   AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValue({ ok: true });
 });
 
-describe('call pipeline: closeDayBeforeForBookingText (the shared rule, gated)', () => {
+describe('call pipeline: closeDayBeforeForBookingText (the shared rule)', () => {
   const close = (over = {}) => closeDayBeforeForBookingText({
     scheduledServiceId: 'ss1', apptTime: tomorrowNoonET(), sent: true, customerId: 'c1', recipientPhone: SAVED_PHONE, ...over,
   });
 
-  test('gate off: nothing is read or written, the 24h reminder stays armed', async () => {
-    const writes = recordingDb();
-    await expect(close()).resolves.toBe(false);
-    expect(writes).toHaveLength(0);
-    expect(db).not.toHaveBeenCalled();
-  });
-
-  test('a gate reader missing from a bare feature-gates mock reads as off', async () => {
-    const writes = recordingDb();
-    const original = gates.bookingTextCoversDayBeforeLive;
-    delete gates.bookingTextCoversDayBeforeLive;
-    try {
-      await expect(close()).resolves.toBe(false);
-    } finally {
-      gates.bookingTextCoversDayBeforeLive = original;
-    }
-    expect(writes).toHaveLength(0);
-  });
-
-  test('gate on, text delivered, visit tomorrow: one write closes the 24h flag, fenced on the quoted time', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('text delivered, visit tomorrow: one write closes the 24h flag, fenced on the quoted time', async () => {
     const writes = recordingDb();
     const apptTime = tomorrowNoonET();
     await expect(close({ apptTime })).resolves.toBe(true);
@@ -118,29 +95,25 @@ describe('call pipeline: closeDayBeforeForBookingText (the shared rule, gated)',
     expect(writes[0].patch).toEqual(expect.objectContaining({ reminder_24h_sent: true, reminder_24h_sent_at: expect.any(Date) }));
   });
 
-  test('gate on, visit later today: closed too (a delivered text for today is the notice)', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('visit later today: closed too (a delivered text for today is the notice)', async () => {
     const writes = recordingDb();
     await expect(close({ apptTime: inDaysNoonET(0) })).resolves.toBe(true);
     expect(writes).toHaveLength(1);
   });
 
-  test('gate on, confirmation delivered to the reminder number in another format: closed (digits compare, not raw strings)', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('confirmation delivered to the reminder number in another format: closed (digits compare, not raw strings)', async () => {
     const writes = recordingDb();
     await expect(close({ recipientPhone: '(941) 555-0101' })).resolves.toBe(true);
     expect(writes).toHaveLength(1);
   });
 
-  test('gate on, ANI-only confirmation (implied consent redirected to a different number): not stamped, nothing written', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('ANI-only confirmation (implied consent redirected to a different number): not stamped, nothing written', async () => {
     const writes = recordingDb();
     await expect(close({ recipientPhone: OTHER_PHONE })).resolves.toBe(false);
     expect(writes).toHaveLength(0);
   });
 
-  test('gate on, redirected number that is a reminder contact but not the primary recipient: not stamped (decided by the primary)', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('redirected number that is a reminder contact but not the primary recipient: not stamped (decided by the primary)', async () => {
     CustomerContact.getAppointmentContacts.mockImplementation(() => [
       { phone: OTHER_PHONE, name: 'Sample Contact', role: 'spouse' },
       { phone: SAVED_PHONE, name: 'Sample Customer', role: 'primary' },
@@ -152,16 +125,14 @@ describe('call pipeline: closeDayBeforeForBookingText (the shared rule, gated)',
     expect(writes).toHaveLength(1);
   });
 
-  test.each([null, '', 'no digits'])('gate on, recipient unknown (%p): not stamped, nothing read or written', async (recipientPhone) => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test.each([null, '', 'no digits'])('recipient unknown (%p): not stamped, nothing read or written', async (recipientPhone) => {
     const writes = recordingDb();
     await expect(close({ recipientPhone })).resolves.toBe(false);
     expect(writes).toHaveLength(0);
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('gate on, the reminder recipient cannot be determined (no customer id, no contacts, unreadable prefs): not stamped', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('the reminder recipient cannot be determined (no customer id, no contacts, unreadable prefs): not stamped', async () => {
     let writes = recordingDb();
     await expect(close({ customerId: null })).resolves.toBe(false);
     CustomerContact.getAppointmentContacts.mockImplementation(() => []);
@@ -177,36 +148,31 @@ describe('call pipeline: closeDayBeforeForBookingText (the shared rule, gated)',
     expect(writes).toHaveLength(0);
   });
 
-  test('gate on, send failed, blocked or held (sent false): not stamped', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('send failed, blocked or held (sent false): not stamped', async () => {
     const writes = recordingDb();
     await expect(close({ sent: false })).resolves.toBe(false);
     expect(writes).toHaveLength(0);
   });
 
-  test('gate on, day-only confirmation: not stamped (it gave no window)', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('day-only confirmation: not stamped (it gave no window)', async () => {
     const writes = recordingDb();
     await expect(close({ dayOnly: true })).resolves.toBe(false);
     expect(writes).toHaveLength(0);
   });
 
-  test.each([2, 3, 10])('gate on, visit %i days out: not stamped (the 24h reminder is still owed)', async (days) => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test.each([2, 3, 10])('visit %i days out: not stamped (the 24h reminder is still owed)', async (days) => {
     const writes = recordingDb();
     await expect(close({ apptTime: inDaysNoonET(days) })).resolves.toBe(false);
     expect(writes).toHaveLength(0);
   });
 
-  test('gate on: a row that moved under the text (fence misses) reports false and stays armed', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('a row that moved under the text (fence misses) reports false and stays armed', async () => {
     const writes = recordingDb({ updated: 0 });
     await expect(close()).resolves.toBe(false);
     expect(writes).toHaveLength(1); // the fenced write ran and matched no row
   });
 
   test('a missing id or an invalid time never reaches the database', async () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
     recordingDb();
     await expect(closeDayBeforeForBookingText({ scheduledServiceId: null, apptTime: tomorrowNoonET(), sent: true, customerId: 'c1', recipientPhone: SAVED_PHONE })).resolves.toBe(false);
     await expect(closeDayBeforeForBookingText({ scheduledServiceId: 'ss1', apptTime: new Date('nope'), sent: true, customerId: 'c1', recipientPhone: SAVED_PHONE })).resolves.toBe(false);
@@ -276,7 +242,7 @@ describe('call pipeline: closeDayBeforeAfterBookingText hands the booked slot to
   });
 });
 
-describe('24-hour pass: holdFreshCallBookedRow (a call-booked row is left alone for its first 10 minutes, gate on)', () => {
+describe('24-hour pass: holdFreshCallBookedRow (a call-booked row is left alone for its first 10 minutes)', () => {
   const now = new Date('2026-11-10T15:00:00.000Z');
   const rowAged = (minutes, source = 'call_recording') => ({ source, created_at: new Date(now.getTime() - minutes * 60000).toISOString() });
 
@@ -284,43 +250,26 @@ describe('24-hour pass: holdFreshCallBookedRow (a call-booked row is left alone 
     expect(FRESH_CALL_BOOKED_ROW_MS).toBe(10 * 60 * 1000);
   });
 
-  test('gate on, call_recording row 2 minutes old: held (not selected for the 24h send)', () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('call_recording row 2 minutes old: held (not selected for the 24h send)', () => {
     expect(holdFreshCallBookedRow(rowAged(2), now)).toBe(true);
   });
 
-  test('gate on, the same row 11 minutes old: selected (and exactly 10 minutes: selected)', () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test('the same row 11 minutes old: selected (and exactly 10 minutes: selected)', () => {
     expect(holdFreshCallBookedRow(rowAged(11), now)).toBe(false);
     expect(holdFreshCallBookedRow(rowAged(10), now)).toBe(false);
   });
 
-  test.each(['admin_manual', 'booking_new', 'cron_selfheal', 'inspection_link', null])('gate on, source %p 2 minutes old: selected', (source) => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
+  test.each(['admin_manual', 'booking_new', 'cron_selfheal', 'inspection_link', null])('source %p 2 minutes old: selected', (source) => {
     expect(holdFreshCallBookedRow(rowAged(2, source), now)).toBe(false);
   });
 
-  test('gate off (or the gate reader missing): never held, the scan is unchanged', () => {
-    expect(holdFreshCallBookedRow(rowAged(2), now)).toBe(false);
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
-    const original = gates.bookingTextCoversDayBeforeLive;
-    delete gates.bookingTextCoversDayBeforeLive;
-    try {
-      expect(holdFreshCallBookedRow(rowAged(2), now)).toBe(false);
-    } finally {
-      gates.bookingTextCoversDayBeforeLive = original;
-    }
-  });
-
   test('an unreadable created_at or a missing row is never held (the reminder is not held on unknowns)', () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
     expect(holdFreshCallBookedRow({ source: 'call_recording', created_at: null }, now)).toBe(false);
     expect(holdFreshCallBookedRow({ source: 'call_recording', created_at: 'nope' }, now)).toBe(false);
     expect(holdFreshCallBookedRow(null, now)).toBe(false);
   });
 
   test('a row created in the future of now (clock skew) counts as fresh, never as stale-and-sendable early', () => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(true);
     expect(holdFreshCallBookedRow(rowAged(-1), now)).toBe(true);
   });
 
@@ -335,31 +284,28 @@ describe('24-hour pass: holdFreshCallBookedRow (a call-booked row is left alone 
   });
 });
 
-describe('office-booked (admin_manual) and self-booked (inspection_link / booking_new) paths: deliverConfirmation, ungated', () => {
-  // registerAppointment -> deliverConfirmation for both; the existing 2026-10-26 rule, unchanged by the new gate.
+describe('office-booked (admin_manual) and self-booked (inspection_link / booking_new) paths: deliverConfirmation', () => {
+  // registerAppointment -> deliverConfirmation for both; the existing 2026-10-26 rule.
   const confirm = (apptTime) => deliverConfirmation(
     { id: 'rem1' },
     { scheduledServiceId: 'ss1', customerId: 'c1', apptTime, serviceLabel: 'Lawn Care' },
   );
 
-  test.each([false, true])('gate %s: a delivered confirmation for tomorrow closes the 24h flag in the confirmation write', async (gateOn) => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(gateOn);
+  test('a delivered confirmation for tomorrow closes the 24h flag in the confirmation write', async () => {
     const writes = recordingDb();
     await expect(confirm(tomorrowNoonET())).resolves.toBe(true);
     expect(writes).toHaveLength(1);
     expect(writes[0].patch).toEqual(expect.objectContaining({ confirmation_sent: true, reminder_24h_sent: true }));
   });
 
-  test.each([false, true])('gate %s: a failed send leaves the 24h reminder armed', async (gateOn) => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(gateOn);
+  test('a failed send leaves the 24h reminder armed', async () => {
     AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValue({ ok: false, reason: 'bounced' });
     const writes = recordingDb();
     await confirm(tomorrowNoonET());
     expect(writes.every((w) => !('reminder_24h_sent' in w.patch))).toBe(true);
   });
 
-  test.each([false, true])('gate %s: a visit three days out keeps the 24h reminder armed', async (gateOn) => {
-    gates.bookingTextCoversDayBeforeLive.mockReturnValue(gateOn);
+  test('a visit three days out keeps the 24h reminder armed', async () => {
     const writes = recordingDb();
     await expect(confirm(inDaysNoonET(3))).resolves.toBe(true);
     expect(writes).toHaveLength(1);

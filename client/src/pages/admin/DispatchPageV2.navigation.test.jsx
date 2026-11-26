@@ -2,14 +2,15 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import DispatchPageV2 from './DispatchPageV2';
 import { adminFetch } from '../../utils/admin-fetch';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 const enabledVisit = { id: 'service-one', visitId: 'visit-one', visitCloseoutEnabled: true, visitCloseoutPacket: null };
-const enabledStandalone = { id: 'service-standalone', visitId: null, visitCloseoutEnabled: true, visitCloseoutPacket: null };
+// A feed row carries customerAskedTime (the office fields), so the editor opens at once instead of reading them first.
+const enabledStandalone = { id: 'service-standalone', visitId: null, visitCloseoutEnabled: true, visitCloseoutPacket: null, customerAskedTime: null };
 vi.mock('./SchedulePage', () => ({
   CompletionPanel: () => null,
   RescheduleModal: () => null,
@@ -17,7 +18,7 @@ vi.mock('./SchedulePage', () => ({
   ProtocolPanel: ({ service, initialSection }) => <div>Protocol panel {service.id} on {String(initialSection)}</div>,
   completionResumeOwed: () => false,
 }));
-vi.mock('../../components/schedule/TimeGridDay', () => ({ default: ({ onEdit, services = [] }) => <div>Schedule visits {services.map((service) => service.customerName).join(', ')}
+vi.mock('../../components/schedule/TimeGridDay', async (importOriginal) => ({ ...(await importOriginal()), default: ({ onEdit, services = [] }) => <div>Schedule visits {services.map((service) => service.customerName).join(', ')}
   <button onClick={() => onEdit(enabledVisit)}>Open day visit</button>
   <button onClick={() => onEdit(enabledStandalone)}>Open standalone day</button>
 </div> }));
@@ -524,4 +525,24 @@ it.each([['5-Day', 5], ['Week', 7]])('a %s grid change reloads quietly: a failed
   expect(screen.getByText('Grid date: 2026-09-30')).toBeInTheDocument();
   expect(screen.queryByText('Loading schedule…')).not.toBeInTheDocument();
   expect(screen.queryByText(/Failed to load schedule/)).not.toBeInTheDocument();
+});
+
+it('switches the desktop Day board between Grid and Route, remembers it, and opens a route line like a grid block', async () => {
+  const visit = { ...enabledVisit, customerName: 'Rae Route', status: 'confirmed', windowStart: '09:00', windowEnd: '10:00' };
+  vi.mocked(adminFetch).mockResolvedValue({ services: [visit], technicians: [], products: [], types: [] });
+  try {
+    render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-12']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Day', exact: true }))[0]);
+    // Grid is the default.
+    expect(await screen.findByRole('button', { name: 'Open day visit' })).toBeInTheDocument();
+    expect(screen.queryByTestId('route-list')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Route', exact: true }));
+    expect(localStorage.getItem('waves_dispatch_day_layout')).toBe('route');
+    expect(screen.queryByRole('button', { name: 'Open day visit' })).toBeNull();
+    // The line opens what the grid block opens: a closeout-enabled visit goes to its closeout.
+    fireEvent.click(within(await screen.findByTestId('route-list')).getByRole('button', { name: /Rae Route/ }));
+    expect(await screen.findByText('Visit closeout visit-one')).toBeInTheDocument();
+  } finally {
+    localStorage.removeItem('waves_dispatch_day_layout');
+  }
 });

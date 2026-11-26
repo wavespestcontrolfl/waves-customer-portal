@@ -24,14 +24,20 @@ jest.mock('../services/pest-insider/posts', () => {
   const postUrl = (id) => (Object.prototype.hasOwnProperty.call(POSTS, id) ? `${actual.SITE}${POSTS[id].path}` : null);
   return { ...actual, POSTS, postUrl, POST_URLS: Object.freeze([...new Set(Object.keys(POSTS).map(postUrl))]) };
 });
+// The send validator is wrapped, not replaced: a case reads what it was given.
+jest.mock('../services/newsletter-validator', () => {
+  const actual = jest.requireActual('../services/newsletter-validator');
+  return { ...actual, validateNewsletterDraft: jest.fn(actual.validateNewsletterDraft) };
+});
 const { buildIssue, NEWSLETTER_TYPE } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
 const { SPECIES, planIssue } = require('../services/pest-insider/plan');
 const { postUrl } = require('../services/pest-insider/posts');
-const { POST_LINK_TEXT, withToolBlock, escapeHtml } = require('../services/pest-insider/render');
+const { POST_LINK_TEXT, toolBlock, toolBlockErrors, TOOL_TOKEN, escapeHtml } = require('../services/pest-insider/render');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { loadTools, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 const { HEROES, heroFor } = require('../services/pest-insider/heroes');
+const { PEST_INSIDER_POLL_IDS, NEWSLETTER_POLL_IDS, getQuiz } = require('../services/newsletter-quiz');
 
 // Every main fact's post answers as live, unless a case says otherwise.
 const LIVE = FACTS.filter((f) => !f.reserve).map((f) => f.id);
@@ -67,10 +73,24 @@ describe('buildIssue', () => {
     // the lead links A01's own reviewed post
     expect(r.issue.html_body).toContain(`href="${postUrl('A01')}"`);
     expect(r.issue.text_body).toContain(`${POST_LINK_TEXT}: ${postUrl('A01')}`);
-    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, problems: [] });
+    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, pollId: null, problems: [] });
     // no live tool named: no tool, and no Amazon link anywhere
     expect(r.tool).toBeNull();
     for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
+  });
+
+  test('the send check reads the issue without the "Your home" tokens, which each reader fills at send time', () => {
+    usePlan(A01);
+    validateNewsletterDraft.mockClear();
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: PEST_INSIDER_POLL_IDS[0] });
+    expect(r.ok).toBe(true);
+    // The shared body (the archive's copy, once stripped) holds both tokens, right before the sign-off.
+    expect(r.issue.html_body).toContain('{{pi-home}}');
+    expect(r.issue.text_body).toContain('{{pi-home-text}}');
+    const [checked] = validateNewsletterDraft.mock.calls[validateNewsletterDraft.mock.calls.length - 1];
+    expect(checked.html_body).not.toMatch(/pi-home|\{\{/);
+    expect(checked.text_body).not.toMatch(/pi-home|\{\{/);
+    expect(checked.newsletter_type).toBe(NEWSLETTER_TYPE);
   });
 
   test("every identifier species builds: its band, latin name and verdict chip pass the copy and send checks", () => {
@@ -102,22 +122,30 @@ describe('buildIssue', () => {
     expect(missing).toEqual([]);
   });
 
-  test('a live tool comes back as `tool`, outside the shared body; its opted-in copy still fails the send check until PR 4', () => {
+  test('a named tool comes back as `tool`, outside the shared body; its HTML block fails the shared send check but passes the tool block check', () => {
     const mesh = toolById('stuff-it-copper-mesh');
     usePlan(A01, WFA, mesh);
     const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [mesh.url] });
     expect(r).toMatchObject({ ok: true, reason: null, tool: { productId: 'stuff-it-copper-mesh', url: mesh.url } });
     expect(r.diagnostics.toolId).toBe('stuff-it-copper-mesh');
-    // the shared body, which the archive serves, has no Amazon link (pre-push PR 3 r1)
+    // the shared body, which the archive serves, has no Amazon link (pre-push PR 3 r1); it holds the token only
     for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
-    const optedIn = withToolBlock(r.issue, r.tool);
+    expect(r.issue.html_body).toContain(TOOL_TOKEN);
+    // A tool in the plan changes only the diagnostics and `tool`: the text part is the text part of an issue with no tool.
+    usePlan(A01, WFA, null);
+    const bare = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [mesh.url] });
+    expect(r.issue).toEqual(bare.issue);
+    // The opted-in reader's HTML (the sender fills the token): the link and Amazon's sentence; the text part is unchanged.
+    const optedIn = { ...r.issue, html_body: r.issue.html_body.split(TOOL_TOKEN).join(toolBlock(mesh).html) };
     expect(optedIn.html_body).toContain(`>${toolLinkText(mesh)}</a>`);
-    expect(optedIn.text_body).toContain(`${mesh.lines.join(' ')}\n\n${toolLinkText(mesh)}: ${mesh.url}\n${AMAZON_DISCLOSURE}`);
-    // No newsletter type may carry it yet: PR 4 adds the per-recipient check with opt-in evidence.
+    expect(optedIn.html_body).toContain(AMAZON_DISCLOSURE);
+    expect(optedIn.text_body).toBe(r.issue.text_body);
+    // The shared send check refuses that copy by design; the block check (the sender's) tolerates only that one error.
     const { errors } = validateNewsletterDraft({
       subject: optedIn.subject, preview_text: optedIn.preview, html_body: optedIn.html_body, text_body: optedIn.text_body, newsletter_type: NEWSLETTER_TYPE,
     });
     expect(errors.join(' ')).toMatch(/AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL/);
+    expect(toolBlockErrors(toolBlock(mesh), mesh)).toEqual([]);
   });
 
   test('the builder refuses a tool the planner returns without a live check of its link', () => {
@@ -199,21 +227,121 @@ describe('buildIssue', () => {
 
   test('the builder loads and builds offline: no database module, under any NODE_ENV (pre-push round 21)', () => {
     // models/db.js opens Knex and throws for a NODE_ENV the knexfile lacks.
-    // The send validator's fact register used to load it at import.
+    // The send validator's fact register used to load it at import, and so
+    // did the poll module before its database read moved into its functions.
     const probe = [
       "const { buildIssue } = require('./services/pest-insider');",
       "const { POSTS } = require('./services/pest-insider/posts');",
-      "const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: Object.keys(POSTS) });",
+      `const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: Object.keys(POSTS), pollQuizId: '${PEST_INSIDER_POLL_IDS[0]}' });`,
       "const loaded = Object.keys(require.cache).filter((k) => /[\\\\/]models[\\\\/]db\\.js$|[\\\\/]node_modules[\\\\/]knex[\\\\/]/.test(k));",
-      "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, factId: r.diagnostics.factId, loaded }) + '\\n');",
+      "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, factId: r.diagnostics.factId, pollId: r.diagnostics.pollId, loaded }) + '\\n');",
     ].join('\n');
     const out = execFileSync(process.execPath, ['-e', probe], {
       cwd: path.join(__dirname, '..'), env: { ...process.env, NODE_ENV: 'offline-sample' }, encoding: 'utf8', timeout: 60000,
     });
     const line = out.split('\n').find((l) => l.startsWith('RESULT '));
     // the real reviewed post list here (a fresh process has no jest mock)
-    expect(JSON.parse(line.slice('RESULT '.length))).toEqual({ ok: true, factId: expect.any(String), loaded: [] });
+    expect(JSON.parse(line.slice('RESULT '.length))).toEqual({ ok: true, factId: expect.any(String), pollId: PEST_INSIDER_POLL_IDS[0], loaded: [] });
   }, 60000);
+
+  test('a Waves Pest Insider poll goes in both parts and the diagnostics; any other id adds none', () => {
+    usePlan(A01);
+    const [poll] = PEST_INSIDER_POLL_IDS;
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: poll });
+    expect(r.ok).toBe(true);
+    expect(r.diagnostics.pollId).toBe(poll);
+    expect(r.issue.html_body.split(`{{quiz:${poll}}}`)).toHaveLength(2);
+    expect(r.issue.text_body.split(`{{quiz-text:${poll}}}`)).toHaveLength(2);
+    for (const other of [NEWSLETTER_POLL_IDS[0], 'lawn-headache-v1', 'pi-poll-unknown-v1', null]) {
+      const plain = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: other });
+      expect(plain.diagnostics.pollId).toBeNull();
+      expect(`${plain.issue.html_body}${plain.issue.text_body}`).not.toMatch(/\{\{quiz/);
+    }
+  });
+
+  test("the send check reads a poll's words, not only its token: a poll that makes a safety claim stops the build", () => {
+    usePlan(A01);
+    const [poll] = PEST_INSIDER_POLL_IDS;
+    const quiz = getQuiz(poll);
+    const approved = quiz.question;
+    try {
+      quiz.question = 'Is it harmless to pets?';
+      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: poll });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/^send_validator_blocked: .*harmless/);
+    } finally {
+      quiz.question = approved;
+    }
+    // Every approved poll passes the check in an issue.
+    for (const id of PEST_INSIDER_POLL_IDS) {
+      expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, pollQuizId: id }).ok).toBe(true);
+    }
+  });
+
+  test("the last poll's result line is in both parts, named in the diagnostics, and read by the send check with the rest", () => {
+    usePlan(A01);
+    validateNewsletterDraft.mockClear();
+    const lastPoll = { quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } };
+    const line = 'Last poll: Spider in the house. What happens next? The top answer was Shoe.';
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, lastPoll });
+    expect(r.ok).toBe(true);
+    expect(r.issue.html_body).toContain(line);
+    expect(r.issue.text_body).toContain(line);
+    expect(r.diagnostics.lastPollId).toBe(PEST_INSIDER_POLL_IDS[0]);
+    expect(r.diagnostics).not.toHaveProperty('lastPollLineBlocked');
+    const checked = validateNewsletterDraft.mock.calls.map(([draft]) => draft);
+    expect(checked).toHaveLength(1);
+    expect(checked[0].html_body).toContain(line);
+    expect(checked[0].text_body).toContain(line);
+    // No result (or no votes): the issue and its diagnostics are the plain ones.
+    for (const none of [undefined, null, { quizId: PEST_INSIDER_POLL_IDS[0], counts: {} }]) {
+      const plain = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, lastPoll: none });
+      expect(plain.issue.html_body).not.toContain('Last poll:');
+      expect(plain.issue.text_body).not.toContain('Last poll:');
+      expect(plain.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, pollId: null, problems: [] });
+    }
+  });
+
+  test('a result line the send check refuses is left out, and the issue still builds', () => {
+    usePlan(A01);
+    const lastPoll = { quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } };
+    const quiz = getQuiz(lastPoll.quizId);
+    const approved = quiz.question;
+    try {
+      // The line prints the poll's question, so a question that makes a safety claim blocks the line.
+      quiz.question = 'Is it harmless to pets?';
+      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, lastPoll });
+      expect(r.ok).toBe(true);
+      expect(r.issue.html_body).not.toContain('Last poll:');
+      expect(r.issue.text_body).not.toContain('Last poll:');
+      expect(r.diagnostics.lastPollLineBlocked).toMatch(/harmless/);
+      expect(r.diagnostics).not.toHaveProperty('lastPollId');
+    } finally {
+      quiz.question = approved;
+    }
+  });
+
+  test('an issue the send check refuses without the line too does not blame the line', () => {
+    // The species text is the cause (see the second-swarm test above): the issue fails with the
+    // result line and without it, so the diagnostics name the issue's error and no blocked line.
+    const formosan = { ...SPECIES.find((s) => s.slug === 'formosan-termite'), fact: 'They swarm again in June.' };
+    usePlan(factById('T02'), formosan);
+    const r = buildIssue({ sendDate: '2027-05-06', livePostFactIds: LIVE, lastPoll: { quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } } });
+    expect(r).toMatchObject({ ok: false, issue: null, reason: expect.stringMatching(/^send_validator_blocked: Unverified claim \(termite_second_swarm\)/) });
+    expect(r.diagnostics).not.toHaveProperty('lastPollLineBlocked');
+    expect(r.diagnostics).not.toHaveProperty('lastPollId');
+  });
+
+  test('every approved poll gives a result line the send check accepts', () => {
+    usePlan(A01);
+    for (const quizId of PEST_INSIDER_POLL_IDS) {
+      const [first, second] = getQuiz(quizId).answers.map((a) => a.key);
+      for (const counts of [{ [first]: 3 }, { [first]: 2, [second]: 2 }]) {
+        const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, lastPoll: { quizId, counts } });
+        expect({ quizId, ok: r.ok, id: r.diagnostics.lastPollId, blocked: r.diagnostics.lastPollLineBlocked }).toEqual({ quizId, ok: true, id: quizId, blocked: undefined });
+      }
+    }
+  });
 
   test('a planner passed by the caller is ignored (pre-push round 17)', () => {
     const plan = jest.fn(() => ({ leadFact: { ...A01, lead: ['Colonies hold 9 million ants.', 'They are everywhere.'] }, idItem: WFA }));
@@ -278,7 +406,19 @@ describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
       const go = (...flags) => spawnSync(process.execPath, [SCRIPT, dir, '2026-12-03', '--assume-live', ...flags], { encoding: 'utf8', timeout: 60000 }).status;
       expect(go('--assume-tools')).toBe(0);
       expect(fs.readdirSync(dir).sort()).toEqual(['.html', '.optin.html', '.optin.txt', '.txt'].map((ext) => `pest-insider-2026-12-03${ext}`));
-      expect(fs.readFileSync(path.join(dir, 'pest-insider-2026-12-03.optin.txt'), 'utf8')).toContain(AMAZON_DISCLOSURE);
+      // The tool block is HTML only: the opted-in text is the shared text, and only the opted-in HTML has the link.
+      const read = (ext) => fs.readFileSync(path.join(dir, `pest-insider-2026-12-03${ext}`), 'utf8');
+      expect(read('.optin.html')).toContain(AMAZON_DISCLOSURE);
+      expect(read('.optin.html')).toContain('<a clicktracking=off class="dm-link" href="https://www.amazon.com/dp/');
+      expect(read('.optin.txt')).toBe(read('.txt'));
+      expect(read('.optin.txt')).not.toMatch(/amazon/i);
+      expect(read('.html')).not.toMatch(/amazon/i);
+      // A sample file shows an issue as the archive does: no token of the issue's own is left, and the referral line has no amount.
+      for (const f of fs.readdirSync(dir)) {
+        const file = fs.readFileSync(path.join(dir, f), 'utf8');
+        expect(file).not.toContain('{{pi-');
+        expect(file).toContain('referrals are the nicest compliment we get.');
+      }
       expect(go()).toBe(0);
       expect(fs.readdirSync(dir).sort()).toEqual(['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt']);
       for (const f of fs.readdirSync(dir)) expect(fs.readFileSync(path.join(dir, f), 'utf8')).not.toMatch(/amazon/i);

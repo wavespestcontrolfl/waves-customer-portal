@@ -42,7 +42,9 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/communications/messages/read` | admin-communications |
 | POST | `/api/admin/communications/name-check` | admin-communications |
 | POST | `/api/admin/communications/rewrite-sms` | admin-communications |
+| POST | `/api/admin/communications/send-howto` | admin-communications |
 | POST | `/api/admin/communications/send-prep` | admin-communications |
+| POST | `/api/admin/communications/send-welcome` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |
 | POST | `/api/admin/communications/sms` | admin-communications |
 | GET | `/api/admin/communications/unread-count` | admin-communications |
@@ -62,10 +64,12 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |
 | GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/context` | admin-dispatch |
+| POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/prepare-recommendations` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/sod-rooted` | admin-dispatch |
 | GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/treatment-guide` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/watering-preview` | admin-dispatch |
+| POST | `/api/admin/dispatch/:reportNoteServiceId/pest-recap/report-note` | admin-dispatch |
 | GET | `/api/admin/dispatch/:reserviceAsksServiceId/reservice-asks` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/blog-posts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/card-hold` | admin-dispatch |
@@ -326,6 +330,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/tech/payroll/checks/:id/stub` | tech-payroll |
 | GET | `/api/tech/rewards-scoreboard` | tech-rewards-scoreboard |
 | GET | `/api/tech/rewards-scoreboard/availability` | tech-rewards-scoreboard |
+| GET | `/api/tech/rewards-scoreboard/year-statement` | tech-rewards-scoreboard |
 | POST | `/api/tech/services/:id/customer-pick` | tech-track |
 | POST | `/api/tech/services/:id/dictation` | tech-track |
 | GET | `/api/tech/services/:id/dictation/availability` | tech-track |
@@ -462,6 +467,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/estimates/:id/edit-source` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/extend` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/follow-up` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/estimates/:id/follow-up-draft` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/group` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/mark-accepted` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/pricing-audit` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
@@ -528,6 +534,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/inventory/price-sync/run` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/price-sync/vendors` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/protocol-health` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/inventory/reorder-suggestions` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/inventory/restock-requests/:id/action` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/restock-requests/:id/order-evidence` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/inventory/restock-requests/:id/siteone-email` | admin-inventory (router exemption gate: admin-only unless its named staff exemption applies) |

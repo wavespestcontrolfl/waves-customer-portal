@@ -37,7 +37,7 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
   const NOW = new Date('2026-11-04T18:00:00Z'); // 1:00 PM Eastern, Wednesday
   const CALL_AT = '2026-11-04T15:00:00Z'; // 10:00 AM Eastern; with 120 s of talk time it ends 10:02, due 12:02 PM
   const ids = { customers: [], leads: [], calls: [], promises: [], visits: [], texts: [], estimates: [] };
-  let seq = 0;
+  const usedPhones = new Set();
 
   beforeAll(() => {
     const target = new URL(process.env.DATABASE_URL);
@@ -64,10 +64,40 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
     await db('customers').whereIn('id', ids.customers).del();
   });
 
+  // A number that no call row, text row or customer record in this database has. The bell counts ANY inbound call
+  // or text from the caller's number after the fixture call ended (2026-11-04; no upper bound, since in production no
+  // row is newer than now), and other DB suites leave inbound rows on random +1941555NNNN numbers stamped with the
+  // real clock. The old fixed numbers (+19415551001 and up) met such a row at random: the caller then read as "called
+  // back", so the bell was missing, or closed as "They called back", or an open promise read fulfilled (four failed
+  // main runs on 2026-11-20).
+  // A customer record on the number counts as well: a caller with no customer record is matched to every customer who
+  // carries the caller's number, and a visit booked for one of them after the call reads as "followed up"
+  // (followup-sla-watcher.js bookedVisits). Other DB suites leave customers on +1941555NNNN numbers with visits
+  // stamped with the real clock, so a number clean of calls and texts still read as followed up at random (five
+  // failed main runs on 2026-11-21 and 11-22, each on a caller with no customer record).
+  // Suites run one at a time in a database, so a number that is clean here stays clean.
+  async function freshPhone() {
+    const { phoneWhereAny } = require('../services/call-commitments');
+    for (let tries = 0; tries < 500; tries += 1) {
+      const phone = `+1941555${1000 + Math.floor(Math.random() * 9000)}`;
+      if (usedPhones.has(phone)) continue;
+      const rows = await Promise.all([
+        ...['call_log', 'sms_log'].map((table) => db(table).where((b) => {
+          phoneWhereAny(b, 'from_phone', [phone]);
+          phoneWhereAny(b, 'to_phone', [phone], { or: true });
+        }).first('id')),
+        phoneWhereAny(db('customers'), 'phone', [phone]).first('id'),
+      ]);
+      if (rows.some(Boolean)) continue;
+      usedPhones.add(phone);
+      return phone;
+    }
+    throw new Error('No unused fixture number left in +1941555NNNN');
+  }
+
   // One synthetic new-lead caller: a lead, the inbound call that made it, and the caller's own call_back promise.
   async function caller({ nature = 'new_lead', leadStatus = 'new', callAt = CALL_AT, withCustomer = false, promiseOver = {} } = {}) {
-    seq += 1;
-    const phone = `+1941555${String(1000 + seq)}`;
+    const phone = await freshPhone();
     const leadId = randomUUID();
     const callId = randomUUID();
     const sid = `CA${randomUUID().replace(/-/g, '')}`;
@@ -122,6 +152,38 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
   }
 
   const run = (now = NOW) => Bell.runCallerCallbackBell({ now });
+
+  // A customer on `phone` with a visit booked at `at`, as another suite leaves one: no link to any fixture call.
+  async function customerWithVisit(phone, at) {
+    const customerId = randomUUID();
+    await db('customers').insert({ id: customerId, first_name: 'Lee', last_name: 'Synthetic', phone });
+    ids.customers.push(customerId);
+    const visitId = randomUUID();
+    await db('scheduled_services').insert({
+      id: visitId, customer_id: customerId, scheduled_date: '2026-11-10', service_type: 'Quarterly Pest Control Service', status: 'confirmed', created_at: at,
+    });
+    ids.visits.push(visitId);
+    return customerId;
+  }
+
+  // Rows as another suite leaves them: on a +1941555NNNN number, stamped with the real clock.
+  test.each([
+    ['a call or a text', 'sms_log', (phone) => inboundText(phone, new Date().toISOString())],
+    ['a customer record', 'customers', (phone) => customerWithVisit(phone, new Date().toISOString())],
+  ])('a fixture caller never gets a number that already has %s', async (_name, table, leave) => {
+    const taken = await freshPhone();
+    usedPhones.delete(taken);
+    const left = await leave(taken);
+    const draw = jest.spyOn(Math, 'random').mockReturnValueOnce((Number(taken.slice(-4)) - 1000 + 0.5) / 9000);
+    try {
+      const c = await caller();
+      expect(draw.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(c.phone).not.toBe(taken);
+      expect(await db(table).where({ id: left }).first('id')).toBeTruthy();
+    } finally {
+      draw.mockRestore();
+    }
+  });
 
   test('a late callback raises one Leads bell with the right fields, and a repeat run adds nothing', async () => {
     const c = await caller();
@@ -187,6 +249,15 @@ maybeDescribe('caller callback late bell (live Postgres)', () => {
   ])('no bell when %s', async (_name, settle) => {
     const c = await caller({ withCustomer: true });
     await settle(c);
+    await run();
+    expect(await rowsFor(c.promiseId)).toHaveLength(0);
+  });
+
+  // Why freshPhone skips a number a customer carries: the call has no customer record, and the visit of a customer on
+  // the caller's number still counts as the follow-up.
+  test('no bell when a visit was booked for a customer who carries the number of a caller with no customer record', async () => {
+    const c = await caller();
+    await customerWithVisit(c.phone, '2026-11-04T16:00:00Z');
     await run();
     expect(await rowsFor(c.promiseId)).toHaveLength(0);
   });

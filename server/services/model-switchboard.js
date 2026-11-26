@@ -294,9 +294,9 @@ function nthImageChainModel(n) {
 const firstImageChainModel = nthImageChainModel(0);
 const secondImageChainModel = nthImageChainModel(1);
 
-// Social keeps its OWN default chain (SOCIAL_DEFAULT_CHAIN, social-media.js's
-// engine — not moved to the blog chain, no gpt-image-2.5-sunburst leg
-// yet). image-generator's parseChain/MODEL_MAP do the parsing (same slugs,
+// Social keeps its OWN default chain constant (SOCIAL_DEFAULT_CHAIN in
+// social-creative-engine.js; since 2026-11-20 it names the same legs as the
+// blog chain, 2.6-sunburst first). image-generator's parseChain/MODEL_MAP do the parsing (same slugs,
 // same pixel-watermark filter) but its OWN no-env default is the BLOG chain,
 // so a bare `parseChain(value)` call here would silently report the blog
 // lane's default whenever SOCIAL_IMAGE_PROVIDER is unset. Falling back to the
@@ -519,6 +519,7 @@ const LANES = [
   L('sms_canary_save_sale', 'SMS draft canary · save-the-sale route', 'sms-draft-canary.js', 'voice', R('smsDraftSaveSale'), null, { note: 'probe at boot + every 6h; alerts the owner when the route stops answering' }),
   L('report_ask', 'Service report Ask Waves answer', 'service-report/report-ask-ai.js', 'voice', P('reportAsk', 'primary'), P('reportAsk', 'fallback'), { inbound: true, note: 'GATE_REPORT_ASK_AI, dark; writes the answer from the report\'s own facts (owner 2026-10-05: Sonnet 5.5), a miss on both legs answers with the fixed-rule text' }),
   L('completion_recap', 'Completion recap (customer-facing)', 'completion-recap.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
+  L('report_own_note', 'Service report · the technician\'s own note, tidied', 'service-report/report-own-note-writer.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true, note: 'no caller yet (the own-note report, owner 2026-11-19); an answer that fails a screen gets the fixed sentence' }),
   L('lawn_visit_narratives', 'Lawn + visit-summary narratives', 'service-report/visit-summary-narrative.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('social_copy', 'Social post copy', 'social-media.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('tech_caption_copy', 'Tech social caption · copy', 'tech-social-caption.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
@@ -645,11 +646,11 @@ const LANES = [
   // firstImageChainModel/secondImageChainModel parse helpers the env-override
   // path uses, not a hand-typed slug, so a chain reorder (Images 2.5 leading
   // since 2026-09-25) can't drift the card out of sync with image-generator.js.
-  L('image_gen', 'Blog image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', firstImageChainModel(undefined) || 'gpt-image-2.5-sunburst', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), D('BLOG_IMAGE_PROVIDER', secondImageChainModel(undefined) || 'gpt-image-2', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondImageChainModel }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'effective chain, OpenAI only by default: gpt-image-2.5-sunburst → gpt-image-2 → gpt-image-1.5 → gpt-image-1 (Images 2.5 leads since 2026-09-25; owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain). ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs further down the chain (out of this card\'s first two legs) during a deliberate run.' }),
+  L('image_gen', 'Blog image generation', 'content/image-generator.js', 'locked', D('BLOG_IMAGE_PROVIDER', firstImageChainModel(undefined) || 'gpt-image-2.6-sunburst', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstImageChainModel }), D('BLOG_IMAGE_PROVIDER', secondImageChainModel(undefined) || 'gpt-image-2.5-sunburst', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondImageChainModel }), { lock: LOCK.provider('image chain, env BLOG_IMAGE_PROVIDER'), note: 'effective chain, OpenAI only by default: gpt-image-2.6-sunburst → gpt-image-2.5-sunburst → gpt-image-2 → gpt-image-1.5 → gpt-image-1 (Images 2.6 leads since 2026-11-20, owner: latest model for all ChatGPT image areas; owner 2026-09-24: no pixel watermarks — every Gemini image model is SynthID-marked and is dropped from any chain). ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs further down the chain (out of this card\'s first two legs) during a deliberate run.' }),
   // Social image generation (social-creative-engine.js, env SOCIAL_IMAGE_PROVIDER)
-  // keeps the OLDER chain — no gpt-image-2.5-sunburst leg (the 2026-09-25
-  // Images 2.5 switch covered the blog generator only; social was not moved).
-  L('social_image_gen', 'Social image generation', 'social-creative-engine.js', 'locked', D('SOCIAL_IMAGE_PROVIDER', firstSocialImageChainModel(undefined) || 'gpt-image-2', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstSocialImageChainModel }), D('SOCIAL_IMAGE_PROVIDER', secondSocialImageChainModel(undefined) || 'gpt-image-1.5', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondSocialImageChainModel }), { lock: LOCK.provider('image chain, env SOCIAL_IMAGE_PROVIDER'), note: 'social keeps the older chain (no Images 2.5 leg): gpt-image-2 → gpt-image-1.5 → gpt-image-1. ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs further down the chain during a deliberate run.' }),
+  // runs the same legs as the blog chain since 2026-11-20 (owner: latest model
+  // for all ChatGPT image areas), Images 2.6 first.
+  L('social_image_gen', 'Social image generation', 'social-creative-engine.js', 'locked', D('SOCIAL_IMAGE_PROVIDER', firstSocialImageChainModel(undefined) || 'gpt-image-2.6-sunburst', { accepts: { providers: ['openai'], cap: 'image' }, parse: firstSocialImageChainModel }), D('SOCIAL_IMAGE_PROVIDER', secondSocialImageChainModel(undefined) || 'gpt-image-2.5-sunburst', { accepts: { providers: ['openai', 'gemini'], cap: 'image' }, parse: secondSocialImageChainModel }), { lock: LOCK.provider('image chain, env SOCIAL_IMAGE_PROVIDER'), note: 'same legs as the blog chain since 2026-11-20: gpt-image-2.6-sunburst → gpt-image-2.5-sunburst → gpt-image-2 → gpt-image-1.5 → gpt-image-1. ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true restores the old interleaved Gemini legs further down the chain during a deliberate run.' }),
   L('video_gen', 'Reels video generation', 'content/video-generator.js', 'locked', T('GEMINI_VIDEO_FAST'), T('GEMINI_VIDEO_QUALITY'), { lock: LOCK.provider('video chain') }),
   L('mentions_prober', 'LLM mentions prober (Claude, OpenAI, Gemini, Perplexity arms)', 'seo/llm-mention-prober.js', 'locked', E('MODEL_MENTIONS', T('WORKHORSE'), { live: true }), null, { lock: LOCK.measurement('each engine is probed directly; a fallback would falsify the measurement'), note: 'OPENAI_MENTIONS_MODEL gpt-4o-search-preview · GEMINI_MENTIONS_MODEL gemini-2.5-flash · PERPLEXITY_MENTIONS_MODEL sonar' }),
   L('sealed_eval', 'SMS sealed-eval exam legs', 'sms-sealed-eval.js', 'locked', T('SMS_SONNET'), T('OPENAI_REPORT_WRITER'), { lock: LOCK.measurement('frozen exam; Gemini / Luna / Opus / Fable measurement legs too') }),
@@ -766,6 +767,7 @@ const LANE_AREA = {
   rodent_narrative: 'reports',
   project_report: 'reports',
   completion_recap: 'reports',
+  report_own_note: 'reports',
   lawn_visit_narratives: 'reports',
   visit_voice_facts: 'reports',
   visit_lane_facts: 'reports',
@@ -939,6 +941,7 @@ const LANE_DESCRIBE = {
   rodent_narrative: 'Writes rodent and typed reports',
   project_report: 'Writes the project report',
   completion_recap: 'Writes the short recap the customer gets',
+  report_own_note: 'Tidies the technician\'s own visit note into the report text; code checks it word by word against the note',
   lawn_visit_narratives: 'Writes lawn and visit summaries',
   visit_voice_facts: 'Reads where the technician treated and the pests they named from their visit note',
   visit_lane_facts: 'Reads a specialty visit\'s places and findings from the technician\'s visit note',
@@ -1029,7 +1032,7 @@ const LANE_DESCRIBE = {
 const JUDGED_LANES = new Set(["blog_draft", "call_extraction", "call_extraction_v1", "call_research", "estimate_followup", "sealed_eval", "sms_draft", "sms_save_sale", "sms_tone", "social_copy"]);
 // fact_check_gate is NOT verified: fact-check-gate.js accepts any truthy JSON
 // and treats a missing findings array as "no findings", so `{}` passes.
-const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fast_complete_voice_fill", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "rodent_narrative", "siteone_deal_end_date", "transcription", "treatment_narrative", "turf_ocr"]);
+const VERIFIED_LANES = new Set(["commercial_proposal", "completion_recap", "compliance_gate", "fast_complete_voice_fill", "image_screen", "intent_composer", "lawn_visit_narratives", "photo_scoring", "project_report", "report_copy", "report_own_note", "rodent_narrative", "siteone_deal_end_date", "transcription", "treatment_narrative", "turf_ocr"]);
 
 // ── Resolution ────────────────────────────────────────────────────────
 function firstSetEnv(names) {

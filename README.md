@@ -21,7 +21,7 @@ One monorepo serves three surfaces plus the automation that runs the business:
 | SMS/Voice | Twilio (messaging, voice recording + transcription, Lookup) |
 | AI | Anthropic Claude (+ routed OpenAI/Gemini for specific features) — model tiers in `server/config/models.js`, never hardcode model IDs |
 | Storage | AWS S3 (service photos, report assets) |
-| Hosting | Railway (service settings in the dashboard; `nixpacks.toml` adds ffmpeg) |
+| Hosting | Railway; the portal builds from `deploy/portal.Dockerfile` since 2026-11-02 (#7451), which installs ffmpeg |
 
 The marketing/SEO site (hub + spoke fleet) is a **separate repo**
 (`wavespestcontrolfl/wavespestcontrol-astro`) deployed to Cloudflare Pages;
@@ -79,4 +79,5 @@ runbook. User-visible features ship dark behind `GATE_*` env switches
 - `AGENTS.md` — code-review rulebook (P0/P1) used by the Codex hook + bot
 - `CODEX.md` — sandbox/DB setup for agent sessions
 - `docs/design/DECISIONS.md` — append-only architectural decision log
+- `docs/scheduling-days-off.md` — closed days: blackouts, weekly days off, the six closed holidays, technician birthdays, tech-out, and who reads each
 - `.claude/skills/` — operating procedures for ship flow, DB, billing, content

@@ -27,6 +27,7 @@ const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-r
 const { whereCompletedCall } = require('../missed-call-text-back');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { resolveCloseCatalogService } = require('./booking-service-match');
+const { loadServiceRecordFacts } = require('./service-record-facts');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -1066,6 +1067,7 @@ async function getCustomerDetail(customerId) {
     .where('customer_id', customerId)
     .orderBy('service_date', 'desc')
     .limit(10);
+  const serviceFacts = await loadServiceRecordFacts(services);
 
   const upcoming = await db('scheduled_services')
     .where({ customer_id: customerId })
@@ -1152,8 +1154,9 @@ async function getCustomerDetail(customerId) {
       id: s.id,
       date: s.service_date,
       type: s.service_type,
-      technician: s.technician_name,
-      notes: s.notes,
+      technician: serviceFacts.technicianFor(s),
+      notes: serviceFacts.notesFor(s),
+      products: serviceFacts.productsFor(s).map((p) => p.name),
       status: s.status,
     })),
     upcoming_services: upcoming.map(s => ({
@@ -3557,7 +3560,7 @@ function ibBookingBillingRefusal(customer, serviceType, price) {
 // Why the customer booked a re-service (scheduled_services.customer_request,
 // migration 20260927100000): the operator's words for it, saved exactly as the
 // Schedule screen's "Customer's words" box saves typed words — trimmed, capped,
-// source 'office' (never a quote; the operator relayed it). Same gate and same
+// source 'office' (never a quote; the operator relayed it). Same
 // two catalog rows as that box (reservice-office-request.js). Returns
 // { text } to stamp, null when no reason was given, or { error } when a reason
 // was given for a visit that cannot carry one — refused rather than dropped,
@@ -3566,9 +3569,7 @@ function ibBookingCustomerRequest(rawRequest, catalogRow) {
   const reserviceOfficeRequest = require('../reservice-office-request');
   const text = reserviceOfficeRequest.cleanRequestText(rawRequest);
   if (!text) return null;
-  const { isEnabled } = require('../../config/feature-gates');
-  if (!isEnabled('reserviceOfficeRequest')
-    || !reserviceOfficeRequest.isOfficeRequestServiceKey(catalogRow?.service_key)) {
+  if (!reserviceOfficeRequest.isOfficeRequestServiceKey(catalogRow?.service_key)) {
     return { error: 'customer_request is saved only on a Pest Control Re-Service or Lawn Care Re-Service visit — nothing was booked. Propose the booking again with the reason in notes instead, or without it.' };
   }
   return { text };
@@ -3666,18 +3667,16 @@ async function ibBookingOverlapRows(scheduledDate, timeWindow, technicianId = nu
 }
 
 // Which saved property the visit is at (the Schedule screen's "Service
-// address" picker, same GATE_EDIT_APPT_ADDRESS switch and the same
+// address" picker, the same
 // customer-properties.bookingPropertyStamp check). A named property returns
 // its stamp, which the route pins and shows on the card. With no property
 // named, a customer with two or more active properties is asked which one
 // (the sole-property anchor would leave the visit with no address); one
-// property, or the switch off, keeps the sole-property anchor as before.
+// property keeps the sole-property anchor as before.
 const BOOKING_PROPERTY_CHANGED_ERROR = 'The visit\'s address changed after the card was shown (edited, removed or deactivated) — nothing was booked. Ask again for a fresh confirmation card.';
 async function ibBookingPropertyProposal(customerId, propertyId) {
-  const addressSwitchOn = require('../../config/feature-gates').isEnabled('editApptAddress');
   const CustomerProperties = require('../customer-properties');
   if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
-    if (!addressSwitchOn) return { error: 'Choosing the visit\'s address is not enabled — omit property_id.', code: 'booking_property_not_enabled' };
     try {
       return { stamp: await CustomerProperties.bookingPropertyStamp({ customerId, propertyId: String(propertyId) }) };
     } catch (err) {
@@ -3685,7 +3684,6 @@ async function ibBookingPropertyProposal(customerId, propertyId) {
       throw err;
     }
   }
-  if (!addressSwitchOn) return { stamp: null };
   const properties = await db('customer_properties').where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
     .select('id', 'is_primary', 'label', 'address_line1', 'address_line2', 'city', 'state', 'zip');
@@ -3791,7 +3789,7 @@ const sameBookingProperty = (a, b) => BOOKING_PROPERTY_FIELDS.every((f) => Strin
 async function lockedBookingProperty(trx, customerId, input) {
   if (input.property_id === undefined || input.property_id === null || input.property_id === '') return null;
   const changed = () => Object.assign(new Error('booking_property_changed'), { bookingPropertyChanged: true });
-  if (!input._booking_property || !require('../../config/feature-gates').isEnabled('editApptAddress')) throw changed();
+  if (!input._booking_property) throw changed();
   let live;
   try {
     live = await require('../customer-properties').bookingPropertyStamp({ customerId, propertyId: String(input.property_id) }, trx, { lock: true });
@@ -5595,6 +5593,9 @@ module.exports = {
   CARD_CANCEL_REFUSED_MESSAGE,
   // Test hook: the bar's one booking pricer (every create path asks it before anything is booked).
   _ibBookingPricing: ibBookingPricing,
+  // The booking helpers the book_plan_visits card shares with create_appointment: the same window parse and rule, the
+  // same close-name catalog resolver, the same clock label.
+  parseTimeWindowStart, ibBookingWindowRefusal, resolveBookingCatalogRowWithClose, clockLabel,
   // Shared with services/customer-name-search.js (picker sound-alikes): one loader and cap for the shared name index.
   nameCandidates, NAME_INDEX_BOOK_CAP,
 };

@@ -10222,9 +10222,10 @@ function priceRodentInspection() {
 // ============================================================
 // RODENT GUARANTEE (gated, 3 tiers by complexity)
 // ============================================================
-// Eligibility: trap + exclusion + (sanitation OR photo baseline) + no
-// activity after final trap check. Caller passes the eligibility flags
-// and home-complexity facts; we determine tier and price.
+// Eligibility: trap + exclusion + no activity after final trap check.
+// Sanitation is NOT required (owner ruling 2026-11-23, matches the signed
+// agreement). Caller passes the eligibility flags and home-complexity
+// facts; we determine tier and price.
 function priceRodentGuarantee(options = {}) {
   const {
     homeSqFt = 2000,
@@ -10239,7 +10240,10 @@ function priceRodentGuarantee(options = {}) {
   const cfg = RODENT.guarantee;
 
   // Eligibility check — caller signals each flag; missing = not eligible
-  const required = cfg.eligibilityRequires;
+  // A stored pricing_config list that still names a retired flag (sanitation)
+  // cannot re-impose it.
+  const retired = new Set(cfg.retiredEligibilityFlags || []);
+  const required = cfg.eligibilityRequires.filter(flag => !retired.has(flag));
   const missing = required.filter(flag => !eligibility[flag]);
   const eligible = missing.length === 0;
 

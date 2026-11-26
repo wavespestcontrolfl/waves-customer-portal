@@ -110,7 +110,7 @@ describe('apple-app-site-association', () => {
       ...Object.keys(ESTIMATE_MARKETING_REDIRECTS).flatMap((p) => [p, `${p}/`]),
       ...BROWSER_ONLY_PATH_ROOTS.flatMap((root) => [root, `${root}/x1`]),
       '/Quote', '/estimate/Mosquito/', '/newsletter/archive/12', '/card/abc123', '/careers/interview/tok',
-      '/help/iphone-alerts.html',
+      '/help/iphone-alerts.html', '/h/0123456789abcdef0123456789abcdef',
     ];
     expect(toSafari.filter(claimed)).toEqual([]);
     const inApp = ['/', '/l/Ab12', '/estimate/9f8e7d6c5b4a', '/pay/tok', '/receipt/tok', '/report/tok', '/quotes', '/cards'];

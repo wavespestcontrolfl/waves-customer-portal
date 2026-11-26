@@ -26,6 +26,7 @@ import { TIMEZONE } from '../../lib/timezone';
 import { useBestTimes } from './useBestTimes';
 import AvailabilityStrip from './AvailabilityStrip';
 import { showScheduleSaveNotice } from './ScheduleSaveNotice';
+import RouteShiftNotice from './RouteShiftNotice';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -640,7 +641,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
     sameDayFloorMin: minTodayStartMin,
     // The same two best-times rows as New Appointment (owner 2026-10-08):
     // road-priced chips with the chance of rain for each hour, ranked by
-    // rain fit (GATE_BOOKING_RAIN_RANK). The server reads what the visit
+    // rain fit. The server reads what the visit
     // books from its own rows (serviceId), add-ons and a shared stop included.
     bestRows: true,
     // The open-times box (GATE_OPEN_TIMES_BOX), on the visit's own route.
@@ -664,7 +665,11 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
     ...(src?.conflicts || []).filter((c) => !(scope === 'route' && c.isRouteSibling)),
     ...(scope === 'route' && !routeStale ? (src?.routeConflicts || []) : []),
   ];
-  const activeConflicts = conflictsFor(liveCheck ?? selected);
+  const activeSource = liveCheck ?? selected;
+  const activeConflicts = conflictsFor(activeSource);
+  // GATE_TECH_SHIFT_HOURS: the stops a rest-of-route move would land outside the technician's
+  // shift (one row for each stop). Real only while the scope is the route, as routeConflicts.
+  const shiftRowsOf = (src) => (selected && scope === 'route' && !routeStale ? (src?.routeShiftConflicts || []) : []);
   const conflictLabel = (c) => {
     // A self-collision is two of THIS route's own stops projected onto one
     // window — naming a customer would be wrong, the fix is a different time.
@@ -1043,6 +1048,15 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
                 {' — the schedule will block this move. Pick a different time.'}
               </div>
             )}
+
+            <RouteShiftNotice
+              rows={shiftRowsOf(activeSource)}
+              formatTime={fmtTime}
+              style={{
+                fontSize: 14, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 18,
+                background: '#FFFBEB', border: '1px solid #FDE68A', color: '#B45309',
+              }}
+            />
 
             {!pickSelected && allowRouteScope && routeCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && !isCustomReason && (
               <>

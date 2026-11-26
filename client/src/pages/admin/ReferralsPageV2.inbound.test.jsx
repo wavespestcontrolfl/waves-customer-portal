@@ -37,6 +37,7 @@ beforeEach(() => {
     if (url === "/api/admin/referrals/queue") return response({ referrals: [] });
     if (url === "/api/admin/referrals/payouts") return response({ payouts: [] });
     if (url === "/api/admin/referrals/inbound") return response(inboundBody);
+    if (url.split("?")[0] === "/api/admin/referrals/thank-you-notes") return response({ notes: [], total: 0 });
     if (url === `/api/admin/referrals/inbound/${FRIEND}/confirm`) return confirmResponse();
     // The customer list API answers camelCase names (mapCustomerListRow).
     if (url.startsWith("/api/admin/customers?search=")) {

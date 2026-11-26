@@ -76,7 +76,7 @@ describe('gate on', () => {
     const all = COMPANY_FACTS.join('\n');
     for (const needle of [
       'inside spray', 'lanai and the pool cage', 'mud daubers', 'honeybees', 'rodent trapping only',
-      'Sundays and holidays', 'dry and bond', 'No mowing', 'watering days', 'check or cash through the office',
+      'We work Sundays and all other holidays', 'Thanksgiving and Christmas', 'dry and bond', 'No mowing', 'watering days', 'check or cash through the office',
       WAVES_ADDRESS_LINE,
     ]) expect(all).toContain(needle);
   });
@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers25_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers25_n+e');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers41_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers41_n+e');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -149,7 +149,7 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
 // Owner rulings 2026-10-21/22 (Waves AI answer book).
 describe('answer-book facts (owner 2026-10-21/22)', () => {
   const section = () => renderCompanyFactsSection();
-  const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
+  const { RETIRED_COMPANY_FACT_LINES, OLDER_RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const NEW_LINES = [
     'On a residential general pest plan that includes inside service (not mosquito service), the first visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask. A customer who chose exterior-only service can ask the office to add inside service back. Commercial accounts follow their sold service scope.',
     'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
@@ -177,9 +177,82 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
     expect(section()).not.toMatch(/@|\d{3}[-.\s]\d{4}/);
   });
   test('the retired wording is kept verbatim so earlier stored renders can be rebuilt', () => {
-    expect(Object.keys(RETIRED_COMPANY_FACT_LINES).sort()).toEqual(['0', '10']);
+    expect(Object.keys(RETIRED_COMPANY_FACT_LINES).sort()).toEqual(['0', '10', '22', '6']);
+    // line 6, holidays (owner 2026-11-24): the wording before Waves closed on six holidays
+    expect(RETIRED_COMPANY_FACT_LINES[6]).toBe('We work Sundays and holidays, same as any other day.');
     expect(RETIRED_COMPANY_FACT_LINES[0]).toMatch(/include an interior spray as well as the exterior/);
     expect(RETIRED_COMPANY_FACT_LINES[10]).toMatch(/accept cards at the visit, never cash/);
+    // line 22 was reworded twice on 2026-11-23 (a hold of places until a second technician was hired); the hold ended with the
+    // hire, so the line says again what it said before. The seven-place hold wording is the newest retired one, the six-place one the older.
+    expect(RETIRED_COMPANY_FACT_LINES[22]).toMatch(/not taking new customers in Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, Charlotte Harbor or Deep Creek yet/);
+    expect(Object.keys(OLDER_RETIRED_COMPANY_FACT_LINES)).toEqual(['22']);
+    expect(OLDER_RETIRED_COMPANY_FACT_LINES[22]).toMatch(/not taking new customers in Port Charlotte, Englewood, Rotonda, Placida, Boca Grande or Babcock Ranch yet/);
+  });
+  test('the holidays line says Waves is closed on the six holidays and works Sundays and every other holiday (owner 2026-11-24)', () => {
+    const line = COMPANY_FACTS[6];
+    for (const day of ["New Year's Day", 'Memorial Day', 'the 4th of July', 'Labor Day', 'Thanksgiving', 'Christmas']) expect(line).toContain(day);
+    expect(line).toContain('We work Sundays and all other holidays.');
+    expect(line).not.toMatch(/same as any other day/);
+    // exactly six holidays are named closed: nothing else (Black Friday, Christmas Eve, New Year's Eve, Easter...) is
+    expect(line.split('closed on ')[1].split('. ')[0].split(/, | and /)).toHaveLength(6);
+    expect(line).not.toMatch(/Black Friday|Christmas Eve|Eve\b|Easter|Presidents|Martin Luther/);
+    expect(hasBannedCustomerCopy(line)).toBeFalsy();
+  });
+  test('the holidays line names exactly FACT_CLOSED_HOLIDAY_KEYS, so the Settings drift alarm and the line cannot disagree', () => {
+    const { HOLIDAYS } = require('../services/scheduling/holidays');
+    const { FACT_CLOSED_HOLIDAY_KEYS, closedHolidaysMatchFactsLine } = require('../services/sms-company-facts');
+    const named = COMPANY_FACTS[6].split('closed on ')[1].split('. ')[0].split(/, | and /).map((n) => n.replace(/^the /, ''));
+    const keysNamed = named.map((n) => HOLIDAYS.find((h) => h.name === n)?.key);
+    expect(keysNamed.every(Boolean)).toBe(true);
+    expect([...keysNamed].sort()).toEqual([...FACT_CLOSED_HOLIDAY_KEYS].sort());
+    expect(FACT_CLOSED_HOLIDAY_KEYS).toHaveLength(6);
+    // the matcher: exactly that set, in any order
+    expect(closedHolidaysMatchFactsLine([...FACT_CLOSED_HOLIDAY_KEYS].reverse())).toBe(true);
+    expect(closedHolidaysMatchFactsLine(new Set(FACT_CLOSED_HOLIDAY_KEYS))).toBe(true);
+    expect(closedHolidaysMatchFactsLine([...FACT_CLOSED_HOLIDAY_KEYS, 'black_friday'])).toBe(false);
+    expect(closedHolidaysMatchFactsLine(FACT_CLOSED_HOLIDAY_KEYS.slice(1))).toBe(false);
+    expect(closedHolidaysMatchFactsLine([])).toBe(false);
+    expect(closedHolidaysMatchFactsLine(null)).toBe(false);
+    // the line says Sundays and every other holiday are work days
+    const { factsLineMatchesSettings } = require('../services/sms-company-facts');
+    expect(COMPANY_FACTS[6]).toContain('We work Sundays');
+    const six = FACT_CLOSED_HOLIDAY_KEYS;
+    expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: [] })).toBe(true);
+    // ANY weekly day off is a mismatch: a Friday off closes Good Friday and Black Friday, which the line says are work days
+    for (const day of [0, 1, 2, 3, 4, 5, 6]) expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: [day] })).toBe(false);
+    expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: new Set([5]) })).toBe(false);
+    expect(factsLineMatchesSettings({ closedHolidays: six, weeklyDaysOff: new Set() })).toBe(true);
+    expect(factsLineMatchesSettings({ closedHolidays: six.slice(1), weeklyDaysOff: [] })).toBe(false);
+    expect(factsLineMatchesSettings({})).toBe(false);
+  });
+  test('the holidays line states the observed-weekday rule, and holidays.js closes exactly those days (Christmas 2027 is a Saturday)', () => {
+    const { holidaysBetween } = require('../services/scheduling/holidays');
+    const line = COMPANY_FACTS[6];
+    expect(line).toContain('falls on a Saturday, we are also closed the Friday before');
+    expect(line).toContain('falls on a Sunday, we are also closed the Monday after');
+    // only the three fixed-date holidays can fall on a weekend; the line names exactly those
+    for (const fixed of ["New Year's Day", 'the 4th of July', 'Christmas']) expect(line.split('falls on a Saturday')[0]).toContain(fixed);
+    const big6 = ['new_years_day', 'memorial_day', 'independence_day', 'labor_day', 'thanksgiving', 'christmas'];
+    const closed = (from, to) => holidaysBetween(from, to, big6).map((d) => d.date);
+    // Christmas 2027 is Saturday 12-25: Friday 12-24 is closed too
+    expect(closed('2027-12-20', '2027-12-30')).toEqual(['2027-12-24', '2027-12-25']);
+    // Christmas 2022 is a Sunday: Monday 12-26 is closed too
+    expect(closed('2022-12-20', '2022-12-30')).toEqual(['2022-12-25', '2022-12-26']);
+    // New Year's Day 2028 is a Saturday: Friday 2027-12-31 is closed
+    expect(closed('2027-12-28', '2028-01-04')).toEqual(['2027-12-31', '2028-01-01']);
+    // Black Friday, Christmas Eve on a weekday (2026-12-24) and New Year's Eve stay open
+    expect(closed('2026-11-27', '2026-11-27')).toEqual([]);
+    expect(closed('2026-12-24', '2026-12-24')).toEqual([]);
+    expect(closed('2026-12-31', '2026-12-31')).toEqual([]);
+  });
+  test('the service-area line serves Charlotte County except Punta Gorda again (second technician hired)', () => {
+    const line = COMPANY_FACTS[22];
+    for (const place of ['Manatee', 'Sarasota', 'Charlotte County except Punta Gorda', 'Ruskin', 'Riverview']) expect(line).toContain(place);
+    expect(line).toContain('We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.');
+    expect(line).not.toMatch(/not taking new customers|second technician|Existing customers/);
+    for (const place of ['Rotonda', 'Placida', 'Boca Grande', 'Babcock', 'Gulf Cove', 'Deep Creek']) expect(line).not.toContain(place);
+    expect(section()).not.toContain('not taking new customers');
+    expect(hasBannedCustomerCopy(line)).toBeFalsy();
   });
   test('no price, product brand, EPA claim, or rain return-visit promise is in the section', () => {
     expect(COMPANY_FACTS.join('\n')).not.toMatch(/\$\d|\bEPA\b|\bsafe\b|Alpine|Termidor|Talstar|Taurus|Fusilade/i);
@@ -200,7 +273,7 @@ describe('fact lines pass the drafter\'s own compliance screens', () => {
   });
   test('plain restatements of the facts are not banned copy', () => {
     for (const reply of [
-      'Yes, we work Sundays and holidays, same as any other day.',
+      'We are closed on New Year\'s Day, Memorial Day, the 4th of July, Labor Day, Thanksgiving and Christmas. When New Year\'s Day, the 4th of July or Christmas falls on a Saturday, we are also closed the Friday before. When one falls on a Sunday, we are also closed the Monday after. We work Sundays and all other holidays.',
       'Rain is fine once the treatment has dried and bonded to surfaces; after that it holds up to weather.',
       'You can pay by the card on file, or by check or cash through the office, or mail a check to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
       'You and the friend you refer each get a $25 credit.',
@@ -395,8 +468,11 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
   const facts = require('../services/sms-company-facts');
   const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
   const { exactLabelFactsSection: labelSectionOf } = facts;
-  const oldRender = facts.knownCompanyFactsRenders()[1]; // the 19-line render live from 2026-10-09 to 2026-10-22
-  const oldestRender = facts.knownCompanyFactsRenders()[2]; // the 16-line render of 2026-10-03
+  const holidaysRender = facts.knownCompanyFactsRenders()[1]; // the 26-line render with the old holidays line 6 only (prompts 25 to 28 and 37 to 40), until 2026-11-24
+  const holdRender = facts.knownCompanyFactsRenders()[2]; // the 26-line render of the seven-place hold (prompts 33 to 36), live 2026-11-23 for hours
+  const serviceAreaRender = facts.knownCompanyFactsRenders()[3]; // the 26-line render of the six-place hold (prompts 29 to 32)
+  const oldRender = facts.knownCompanyFactsRenders()[4]; // the 19-line render live from 2026-10-09 to 2026-10-22
+  const oldestRender = facts.knownCompanyFactsRenders()[5]; // the 16-line render of 2026-10-03
   // per-customer head long enough that the company section would not fit a raw 6,000-char prefix
   const head = `CUSTOMER: synthetic\n${Array.from({ length: 110 }, (_, n) => `SERVICE HISTORY ${n}: Quarterly Pest completed`).join('\n')}\n`;
   const tail = 'BILLING:\n- balance: none\nRECENT PHONE CALLS:\n- 2026-10-01: caller was told the tech arrives Thursday\nRECENT SMS THREAD:\n[CUSTOMER] THREAD_SENTINEL';
@@ -407,7 +483,9 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     const renders = facts.knownCompanyFactsRenders();
     expect(renders[0]).toBe(facts.renderCompanyFactsSection());
     facts.PRIOR_COMPANY_FACTS_RENDERS.forEach((prior, i) => {
-      expect(prior.lines).toBeLessThan(COMPANY_FACTS.length);
+      // fewer lines than today's list, or the same count when a line was reworded in place (then its index is in `retired`)
+      expect(prior.lines).toBeLessThanOrEqual(COMPANY_FACTS.length);
+      if (prior.lines === COMPANY_FACTS.length) expect((Array.isArray(prior.retired) && prior.retired.length > 0) || (Array.isArray(prior.olderRetired) && prior.olderRetired.length > 0)).toBe(true);
       expect(crypto.createHash('sha256').update(renders[i + 1]).digest('hex')).toBe(prior.sha256);
     });
     expect(oldRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(19);
@@ -418,6 +496,30 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
       expect(r).toContain('accept cards at the visit, never cash');
     }
     expect(facts.renderCompanyFactsSection()).not.toContain('accept cards at the visit');
+    // the 2026-11-23 hold renders have the 2026-10-22 wording of lines 0 and 10 (current) and the hold wording of line 22 only
+    for (const hold of [holdRender, serviceAreaRender]) {
+      expect(hold.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(26);
+      expect(hold).toContain('not taking new customers in ');
+      expect(hold).not.toContain('Charlotte County except Punta Gorda');
+      expect(hold).not.toContain('accept cards at the visit, never cash');
+      expect(hold).not.toContain('include an interior spray as well as the exterior');
+      // two lines differ from today's render: the service-area line 22 and the holidays line 6
+      expect(facts.renderCompanyFactsSection().split('\n').filter((l, i) => l !== hold.split('\n')[i])).toHaveLength(2);
+      expect(hold).toContain('We work Sundays and holidays, same as any other day.');
+    }
+    // the render before the holidays change differs from today's in the holidays line 6 only
+    expect(holidaysRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(26);
+    expect(facts.renderCompanyFactsSection().split('\n').filter((l, i) => l !== holidaysRender.split('\n')[i])).toHaveLength(1);
+    expect(holidaysRender).toContain('We work Sundays and holidays, same as any other day.');
+    expect(holidaysRender).toContain('Charlotte County except Punta Gorda');
+    expect(facts.renderCompanyFactsSection()).not.toContain('same as any other day');
+    // today's render (the hold ended with the second technician) says again what the 2026-10-22 render said: Charlotte County except Punta Gorda
+    expect(facts.renderCompanyFactsSection()).toContain('Charlotte County except Punta Gorda');
+    expect(facts.renderCompanyFactsSection()).not.toContain('not taking new customers');
+    expect(holdRender).toContain('We are not taking new customers in Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, Charlotte Harbor or Deep Creek yet');
+    expect(serviceAreaRender).toContain('We are not taking new customers in Port Charlotte, Englewood, Rotonda, Placida, Boca Grande or Babcock Ranch yet');
+    // the 19 and 16-line renders predate line 22
+    expect(oldRender).not.toContain('We serve Manatee');
   });
 
   test('the judge keeps the size exemption for a block with the earlier render: the thread survives', () => {
@@ -428,6 +530,8 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     expect(out).toContain('- 2026-10-01: caller was told the tech arrives Thursday');
     expect(out).toContain(oldRender.trim().split('\n').pop()); // the old section itself is still shown, whole
     expect(sanitizeFactsForJudge(blockWith(oldestRender))).toContain('THREAD_SENTINEL'); // and so is the 16-line one
+    expect(sanitizeFactsForJudge(blockWith(serviceAreaRender))).toContain('THREAD_SENTINEL'); // and the six-place hold one
+    expect(sanitizeFactsForJudge(blockWith(holdRender))).toContain('THREAD_SENTINEL'); // and the seven-place hold one
     // today's render behaves the same
     expect(sanitizeFactsForJudge(blockWith(facts.renderCompanyFactsSection()))).toContain('THREAD_SENTINEL');
     // an UNKNOWN company section gets no exemption (the exact match is still the rule)
@@ -439,10 +543,16 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     const oldBlock = blockWith(oldRender);
     expect(labelSectionOf(oldBlock)).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     expect(labelSectionOf(blockWith(oldestRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    expect(labelSectionOf(blockWith(serviceAreaRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    expect(labelSectionOf(blockWith(holdRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     expect(labelSectionOf(blockWith(facts.renderCompanyFactsSection()))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     // contract: today's exact render only, so an old item never grades the new identity
     expect(hasExactCompanyFacts(oldBlock)).toBe(false);
     expect(hasExactCompanyFacts(blockWith(oldestRender))).toBe(false);
+    expect(hasExactCompanyFacts(blockWith(serviceAreaRender))).toBe(false);
+    expect(hasExactCompanyFacts(blockWith(holdRender))).toBe(false);
+    expect(facts.hasExactLabelFacts(blockWith(holdRender))).toBe(false);
+    expect(facts.hasExactLabelFacts(blockWith(serviceAreaRender))).toBe(false);
     expect(facts.hasExactLabelFacts(oldBlock)).toBe(false);
     expect(hasExactCompanyFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
     expect(facts.hasExactLabelFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
@@ -536,8 +646,31 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(verdict.reason).toMatch(/company fact retired/);
     const snap = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers14_n', getBody: () => body })({});
     expect(snap.ok).toBe(false);
-    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers25_n', getBody: () => 'See you Tuesday!' })({});
+    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers41_n', getBody: () => 'See you Tuesday!' })({});
     expect(fresh.ok).toBe(true);
+  });
+  // Owner rulings 2026-11-23 (service area hold, ended when the second technician was hired) and 2026-11-24 (closed on six holidays):
+  // a draft from any prompt below 41 carries a line that is wrong today (29 to 36 turned places away; every one of them said Waves
+  // works every holiday), so an unedited one is refused. 41 and later are current.
+  test('an unedited draft from any prompt below 41 is refused; 41 and later are not', async () => {
+    const sc = require('../services/agent-decision-send-checks');
+    const body = 'We work Sundays and holidays, same as any other day.';
+    for (const v of ['25_n', '26_n', '28_n', '29_n', '30_n', '32_n', '33_n', '36_n', '37_n', '40_n', '29_n+e', '32_n+bcelmvA', '33_n+c', '36_n+bcelmvA', '37_n+e', '40_n+bcelmvA']) {
+      const row = { id: 'd1', input_snapshot: '{}', prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body };
+      // immediate send, scheduled send, the provider-boundary row check and the auto-send snapshot check
+      expect(retiredCompanyFactBlock({ decision: row, outgoingBody: body })).toMatch(/company fact retired/);
+      expect(sc.blockReasonIsRetiredCompanyFact(await sc.scheduledLabelFactsBlock({ decision: row, outgoingBody: body }))).toBe(true);
+      const dbi = () => ({ where: () => ({ first: async () => row }) });
+      expect((await sc.labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => body })({ dbi })).reason).toMatch(/company fact retired/);
+      expect((await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: row.prompt_version, getBody: () => body })({})).ok).toBe(false);
+      // a staff-edited body goes out
+      expect(retiredCompanyFactBlock({ decision: row, outgoingBody: `${body} Please confirm.` })).toBeNull();
+    }
+    for (const v of ['41_n', '42_n', '43_n', '44_n', '42_n+c', '41_n+e', '44_n+bcelmvA']) {
+      expect(retiredCompanyFactBlock({ decision: { prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body }, outgoingBody: body })).toBeNull();
+    }
+    // older than the answer book is still refused
+    expect(retiredCompanyFactBlock({ decision: { prompt_version: 'house_voice_v12_real_answers24_n', suggested_message: body }, outgoingBody: body })).toMatch(/company fact retired/);
   });
   test('a scheduled refusal carries its own reason, not the label-timing one', async () => {
     const sc = require('../services/agent-decision-send-checks');
@@ -554,7 +687,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(retiredCompanyFactBlock({ decision, outgoingBody: RETIRED_COMPANY_FACT_LINES[10] })).toMatch(/company fact retired/);
   });
   test('a draft from the answer-book prompts, or not a real-answers draft, is never refused by it', () => {
-    for (const prompt_version of ['house_voice_v12_real_answers25_n', 'house_voice_v12_real_answers26_n+c', 'house_voice_v11', null]) {
+    for (const prompt_version of ['house_voice_v12_real_answers41_n', 'house_voice_v12_real_answers42_n+c', 'house_voice_v11', null]) {
       for (const body of [COMPANY_FACTS[10], 'We don’t take cash during your visit; please pay cash through the office.', COMPANY_FACTS[0]]) {
         expect(retiredCompanyFactBlock({ decision: { prompt_version }, outgoingBody: body })).toBeNull();
       }
@@ -585,10 +718,87 @@ describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
   });
   test('an earlier render with extra typed text after it is not rebased', () => {
     expect(cf.rebaseCompanyFactsToCurrent(block(knownCompanyFactsRenders()[1], 'Pets: a dog\n'))).toBeNull();
+    expect(cf.rebaseCompanyFactsToCurrent(block(knownCompanyFactsRenders()[2], 'Pets: a dog\n'))).toBeNull();
+  });
+  test('the earlier conversation is screened too: a held place said three messages up (owner ruling 2026-11-23)', () => {
+    const { heldPlaceInConversationContext } = cf;
+    const withThread = (company, thread) => `UPCOMING SERVICES:\n- none\n${company}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n${thread}`;
+    for (const company of knownCompanyFactsRenders()) {
+      // the static section names the held places in every block and never counts
+      expect(heldPlaceInConversationContext(withThread(company, '[CUSTOMER] Can I book my first visit?\n[STAFF] Yes, Tuesday works'))).toBe(false);
+      expect(heldPlaceInConversationContext(withThread(company, "[CUSTOMER] I'm in Englewood\n[CUSTOMER] Can I book my first visit?"))).toBe(true);
+      expect(heldPlaceInConversationContext(withThread(company, '[CUSTOMER] my zip is 33948'))).toBe(true);
+      expect(heldPlaceInConversationContext(withThread(company, '[CUSTOMER] we are in Deep Creek'))).toBe(true);
+    }
+    expect(heldPlaceInConversationContext('CUSTOMER: synthetic\nADDRESS: 1 Sample Way, Port Charlotte, FL 33952\n')).toBe(true);
+    expect(heldPlaceInConversationContext(null)).toBe(false);
+  });
+  test('every earlier render carries the retired holidays line; today\'s render and typed text do not (owner 2026-11-24)', () => {
+    const { carriesRetiredHolidayLine, carriesRetiredServiceAreaLine } = cf;
+    const block = (render, thread = '') => `UPCOMING SERVICES:\n- none\n${render}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n${thread}`;
+    const [today, ...earlier] = knownCompanyFactsRenders();
+    expect(earlier.length).toBeGreaterThan(0);
+    // keyed on the recorded render: the messages never matter ("December 25?" / "Yes" is as stale as "Christmas?")
+    for (const render of earlier) {
+      expect(carriesRetiredHolidayLine(block(render))).toBe(true);
+      expect(carriesRetiredHolidayLine(block(render, '[CUSTOMER] December 25?\n[STAFF] Yes'))).toBe(true);
+    }
+    expect(carriesRetiredHolidayLine(block(today))).toBe(false);
+    expect(carriesRetiredHolidayLine(block(today, '[CUSTOMER] Are you coming on Christmas?'))).toBe(false);
+    // a header typed into a thread proves nothing, and neither does a missing company section
+    expect(carriesRetiredHolidayLine('no billing line')).toBe(false);
+    expect(carriesRetiredHolidayLine(null)).toBe(false);
+    // the line each prior render is built with is the one RETIRED_COMPANY_FACT_LINES keeps
+    for (const render of earlier) expect(render).toContain(cf.RETIRED_COMPANY_FACT_LINES[6]);
+    expect(today).not.toContain(cf.RETIRED_COMPANY_FACT_LINES[6]);
+    // the service-area gate is separate: the render live until the holidays change (prompts 25 to 28, 37 to 40) had today's service-area line
+    expect(carriesRetiredServiceAreaLine(block(earlier[0]))).toBe(false);
+    for (const render of earlier.slice(1)) expect(carriesRetiredServiceAreaLine(block(render))).toBe(true);
+    expect(carriesRetiredServiceAreaLine(block(today))).toBe(false);
+  });
+  test('the retired topics are those of the block\'s own render: the 26-line render keeps payment and inside-spray exchanges', () => {
+    const block = (render) => `UPCOMING SERVICES:\n- none\n${render}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n`;
+    const [, wasLive26, hold7, hold6, nineteen, sixteen] = [null, ...knownCompanyFactsRenders().slice(1)];
+    // both 26-line hold renders (seven places, six places) keep today's payment and inside-spray lines
+    for (const render of [hold7, hold6]) {
+      const re26 = cf.retiredTopicReForBlock(block(render));
+      expect(re26.test('Do you take cash?\nWe take cards or cash at the visit.')).toBe(false);
+      expect(re26.test('Do you spray inside?')).toBe(false);
+      expect(re26.test('Do you cover 33948?\nYes, we do')).toBe(true);
+      expect(re26.test('Is Port Charlotte served?')).toBe(true);
+      // Englewood and Port Charlotte are served again, but an exchange drafted under the hold line about them is stale
+      expect(re26.test('Can you service Englewood?\nWe are not taking new customers there yet.')).toBe(true);
+      expect(re26.test('Do you cover 34223?')).toBe(true);
+    }
+    // the render live until the holidays change had the old holidays line only, so no service-area topic is retired for it (prompts 37 to 40 stay as on main)
+    expect(cf.retiredTopicReForBlock(block(wasLive26))).toBeNull();
+    for (const r of [nineteen, sixteen]) {
+      const re = cf.retiredTopicReForBlock(block(r));
+      expect(re.test('Do you take cash?')).toBe(true);
+      expect(re.test('Do you cover 33948?')).toBe(true);
+    }
+    expect(cf.retiredTopicReForBlock(block(cf.renderCompanyFactsSection()))).toBeNull();
+    expect(cf.retiredTopicReForBlock('no billing line')).toBeNull();
+  });
+  test('a frozen OPEN TIMES lookup in a held place keeps the exchange out (owner ruling 2026-11-23)', () => {
+    const { heldPlaceInOpenTimesLookup } = cf;
+    const actions = (lookup) => ({ actions: [], open_times_snapshot: { lookup } });
+    expect(heldPlaceInOpenTimesLookup(actions({ source: 'website_engine', city: 'Port Charlotte', zip: '33948' }))).toBe(true);
+    expect(heldPlaceInOpenTimesLookup(JSON.stringify(actions({ city: 'Englewood' })))).toBe(true);
+    expect(heldPlaceInOpenTimesLookup(actions({ city: 'North Port', zip: '34287' }))).toBe(false);
+    expect(heldPlaceInOpenTimesLookup(actions({ scheduledServiceId: 'sv-1' }))).toBe(false);
+    expect(heldPlaceInOpenTimesLookup({ actions: [] })).toBe(false);
+    expect(heldPlaceInOpenTimesLookup(null)).toBe(false);
+    expect(heldPlaceInOpenTimesLookup('not json {')).toBe(false);
   });
   test('the retired-topic filter names the two reworded lines\' topics', () => {
-    for (const t of ['do you take cash', 'can I pay by check', 'do you spray inside', 'the interior too?']) expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test(t)).toBe(true);
+    for (const t of ['do you take cash', 'can I pay by check', 'do you spray inside', 'the interior too?', 'do you serve Port Charlotte', 'are you in Englewood']) expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test(t)).toBe(true);
     expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test('when is my next visit?')).toBe(false);
+    // the held places' ZIPs and aliases too (owner ruling 2026-11-23), on either side of an exchange
+    for (const t of ['Do you cover 33948?\nYes, we do', 'my house is in Deep Creek', 'zip 33983-1234', 'Gulf Cove or El Jobean?', 'Charlotte Harbor', 'is 34223 ok', 'Rotunda West', 'Boca Grande']) {
+      expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test(t)).toBe(true);
+    }
+    for (const t of ['call me at 4155551234', 'order 123456', 'zip 34287']) expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test(t)).toBe(false);
     expect(exactSectionSuffix().startsWith('\nCOMPANY FACTS')).toBe(true);
   });
 });

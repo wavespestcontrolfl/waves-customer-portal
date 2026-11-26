@@ -288,16 +288,17 @@ describe('a moved visit must still be movable under the fence', () => {
   // Night told-lock (owner 2026-11-05, "D1 a"): the move transaction re-reads the told-lock facts.
   const recurring = { a: { route_order: 1, is_recurring: true, recurring_parent_id: 'p-a' }, b: { route_order: 2, is_recurring: true, recurring_parent_id: 'p-b' },
     c: { route_order: 3, is_recurring: true, recurring_parent_id: 'p-c' }, d: { route_order: 4, is_recurring: true, recurring_parent_id: 'p-d' } };
-  // loadToldIds is the no-show detector's promise reader (a known-slot promise = told); `told` is the set of ids it answers with.
+  // loadPromiseFacts is the promise reader (a known-slot promise = 'hour' = told); `told` is the set of ids it answers 'hour' for.
+  const levelsFor = (told) => async (_conn, ids) => new Map(ids.map((id) => [id, { level: told.includes(id) ? 'hour' : 'none', start: null }]));
   const toldLockOver = (told = []) => ({
     isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
-    loadToldIds: jest.fn(async (_conn, ids) => new Set(ids.filter((id) => told.includes(id)))),
+    loadPromiseFacts: jest.fn(levelsFor(told)),
   });
 
   test('the customer was told a time for it meanwhile', async () => {
     const over = toldLockOver();
     const w = plan4({ rowExtra: recurring, over });
-    w.lockDayRows.mockImplementationOnce(async () => { over.loadToldIds.mockImplementation(async (_conn, ids) => new Set(ids.filter((id) => id === 'b'))); });
+    w.lockDayRows.mockImplementationOnce(async () => { over.loadPromiseFacts.mockImplementation(levelsFor(['b'])); });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:time_told', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
   });
@@ -315,14 +316,37 @@ describe('a moved visit must still be movable under the fence', () => {
     const w = plan4({ rowExtra: recurring, over });
     w.lockDayRows.mockImplementationOnce(async () => { w.db.reminders.push({ scheduled_service_id: 'b', reminder_72h_sent: true }); });
     expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
-    expect(over.loadToldIds).toHaveBeenCalled();
+    expect(over.loadPromiseFacts).toHaveBeenCalled();
   });
 
   test('a promise read that fails stops the write (fail closed)', async () => {
     const over = toldLockOver();
-    over.loadToldIds = jest.fn(async () => { throw new Error('promise read down'); });
+    over.loadPromiseFacts = jest.fn(async () => { throw new Error('promise read down'); });
     const w = plan4({ rowExtra: recurring, over });
-    expect(await w.run()).toEqual({ status: 'failed', reason: 'write_failed:error', moved: 0 });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:time_told', moved: 0 });
+    expect(w.rowWrites()).toEqual([]);
+  });
+
+  // Owner 2026-11-24: a stop told an hour may start up to 2 hours LATER than the told slot (TOLD_SHIFT_MIN), never earlier.
+  const toldAt = (starts) => async (_conn, ids) => new Map(ids.map((id) => [id, starts[id]
+    ? { level: 'hour', start: new Date(`${DATE}T${String(starts[id] + 5).padStart(2, '0')}:00:00Z`) } // ET = UTC-5
+    : { level: 'none', start: null }]));
+  const toldShiftOver = (starts) => ({ ...toldLockOver(), loadPromiseFacts: jest.fn(toldAt(starts)) });
+
+  test('2-hour told shift: a told stop moved 1 hour later is written', async () => {
+    const w = swap({ rowExtra: { ...numbered, ...recurring }, over: toldShiftOver({ a: 8 }) });
+    expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
+  });
+
+  test('2-hour told shift: a told stop moved earlier than its told slot is not written', async () => {
+    const w = swap({ rowExtra: { ...numbered, ...recurring }, over: toldShiftOver({ b: 9 }) });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:time_told', moved: 0 });
+    expect(w.rowWrites()).toEqual([]);
+  });
+
+  test('2-hour told shift: a told stop moved 4 hours later is not written', async () => {
+    const w = plan4({ rowExtra: { ...numbered, ...recurring }, over: toldShiftOver({ a: 8 }) });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:time_told', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
   });
 

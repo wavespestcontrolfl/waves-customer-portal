@@ -129,6 +129,75 @@ export function standardInvoiceShape({ setupFee = null, extraInvoiceRows = [], s
   return { hasSetupInvoice, hasFirstVisitInvoice, setupOnly: hasSetupInvoice && !hasFirstVisitInvoice };
 }
 
+// The up-front rows and the first application's bill of the pay-per-application invoice:
+// the rows the invoice box above the CTA lists. One place, so that box and the page's
+// first-visit line (firstVisitTotalPreview) cannot disagree.
+function payPerApplicationInvoiceParts({ setupFee = null, extraInvoiceRows = [], selectedFrequency = null } = {}) {
+  const setupAmount = Number(setupFee?.amount);
+  const hasWaveGuardSetupRow = Number.isFinite(setupAmount) && setupAmount > 0;
+  const upFrontRows = [
+    ...(hasWaveGuardSetupRow ? [{ label: 'WaveGuard Membership Setup', amount: setupAmount }] : []),
+    ...(Array.isArray(extraInvoiceRows) ? extraInvoiceRows : [])
+      .filter((row) => Number(row?.amount) > 0)
+      .map((row) => ({ label: row.label || 'Setup', amount: Math.round(Number(row.amount) * 100) / 100 })),
+  ];
+  return { setupAmount, hasWaveGuardSetupRow, upFrontRows, firstVisit: firstVisitAmount(selectedFrequency || {}) };
+}
+
+// The first visit's bill as one number, for the line under the price (owner 2026-11-21):
+// the WaveGuard setup fee plus the first application, the two rows and the "Invoice total"
+// the box above the CTA shows once a time is picked. Null unless that box would show exactly
+// those two rows, nothing is billed beside them, and the first application is proven:
+// - a one-time visit, an invoice-mode or site-priced plan, the annual prepay (setup waived),
+//   a setup fee with no first-application amount: no such bill;
+// - another up-front row (bait stations, a misting installation), another first-visit fee
+//   (`firstVisitFees`: the initial cockroach treatment, which the box does not list) or
+//   one-time services billed after completion: "application + one-time setup" is not all of it;
+// - `creditApplies`: the page knows of a credit the accept takes off this bill (a required
+//   booking deposit, an applied promo or referral code, a declared plan credit, a pest
+//   service the customer turned off);
+// - `cardPerApplicationTotal` is the proof. The accept bills the selected plan's rows less a
+//   service-preference credit and a plan-credit slice, and reads a partly priced bundle
+//   another way, so the box's first application can sit above the real invoice. The page
+//   passes the price card's per-application price only for a one-service plan whose monthly
+//   average reconciles it with the plan's own monthly, credit-free (null otherwise). The
+//   line shows only when that price is the box's first application to the cent.
+const sameCents = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.round(a * 100) === Math.round(b * 100);
+
+// Anything that makes "application + one-time setup" not the whole first bill.
+function firstBillHasOtherLines({ oneTimeExtrasTotal = 0, firstVisitFees = [], creditApplies = false }) {
+  if (creditApplies || Number(oneTimeExtrasTotal) > 0) return true;
+  // The page's own first-visit fee list. With a one-time option on the estimate the breakdown
+  // is the alternate price and oneTimeExtrasTotal reads 0, so this list is checked by itself.
+  return (Array.isArray(firstVisitFees) ? firstVisitFees : [])
+    .some((fee) => fee?.service !== 'waveguard_setup' && Number(fee?.amount) > 0);
+}
+
+export function firstVisitTotalPreview({
+  serviceMode,
+  paymentPreference,
+  invoiceMode,
+  siteConfirmationHold,
+  setupFee,
+  extraInvoiceRows,
+  selectedFrequency,
+  oneTimeExtrasTotal,
+  firstVisitFees,
+  creditApplies,
+  cardPerApplicationTotal,
+} = {}) {
+  if (serviceMode === 'one_time' || paymentPreference === 'prepay_annual' || invoiceMode || siteConfirmationHold) return null;
+  if (firstBillHasOtherLines({ oneTimeExtrasTotal, firstVisitFees, creditApplies })) return null;
+  const { setupAmount, hasWaveGuardSetupRow, upFrontRows, firstVisit } = payPerApplicationInvoiceParts({ setupFee, extraInvoiceRows, selectedFrequency });
+  if (!hasWaveGuardSetupRow || upFrontRows.length !== 1 || !(firstVisit > 0)) return null;
+  if (cardPerApplicationTotal == null || !sameCents(Number(cardPerApplicationTotal), firstVisit)) return null;
+  return {
+    firstApplication: firstVisit,
+    setup: setupAmount,
+    total: Math.round((setupAmount + firstVisit) * 100) / 100,
+  };
+}
+
 // The first application's bill the confirm step repeats under the visit line, so
 // "at the price shown" has a price on the same screen. It is the figure the invoice
 // box above the CTA already shows (firstVisitAmount of the selected plan), never
@@ -200,16 +269,8 @@ export default function PaymentPreferenceButtons({
   // The accept handler rejects it too (fail-closed); hiding it here keeps the
   // customer from selecting a dead-end option.
   const offerPrepay = !invoiceMode && !isOneTime && !siteConfirmationHold && (annualPrepayEligible || !!waivableSetupFee);
-  const setupAmount = Number(setupFee?.amount);
-  const hasWaveGuardSetupRow = Number.isFinite(setupAmount) && setupAmount > 0;
-  const upFrontRows = [
-    ...(hasWaveGuardSetupRow ? [{ label: 'WaveGuard Membership Setup', amount: setupAmount }] : []),
-    ...(Array.isArray(extraInvoiceRows) ? extraInvoiceRows : [])
-      .filter((row) => Number(row?.amount) > 0)
-      .map((row) => ({ label: row.label || 'Setup', amount: Math.round(Number(row.amount) * 100) / 100 })),
-  ];
+  const { upFrontRows, firstVisit } = payPerApplicationInvoiceParts({ setupFee, extraInvoiceRows, selectedFrequency });
   const hasSetupInvoice = upFrontRows.length > 0;
-  const firstVisit = firstVisitAmount(selectedFrequency || {});
 
   const btnBase = {
     padding: '16px 20px', borderRadius: 12,

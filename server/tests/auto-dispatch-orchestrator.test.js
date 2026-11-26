@@ -153,6 +153,25 @@ test('apply mode moves the visit and logs a changed decision', async () => {
   }
 });
 
+// Owner 2026-11-24 "do whatever you rec": an APPLIED minutes-rule move keeps its audit marker
+// (the audit is rebuilt after apply.js, from the settings the evaluation carried).
+test('apply mode: a second move on minutes logs a changed row with the 15-minute floor', async () => {
+  const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    servicesResult = [svc({ auto_dispatch_change_count: 1 })];
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_MODERATE] });
+    jest.spyOn(require('../services/auto-dispatch/road-check'), 'createRunTravel')
+      .mockReturnValue({ preload: async () => {}, lookup: () => null, diagnostics: () => ({ requests: 0, elements: 0 }) });
+    const res = await runAutoDispatch({ mode: 'apply', roadCheckEnabled: true });
+    expect(res).toMatchObject({ changed: 1 });
+    expect(lastDecision('changed').constraints.minutes_rule).toEqual({ saving_floor_minutes: 15 });
+  } finally {
+    jest.restoreAllMocks();
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+  }
+});
+
 test('every run ends by telling the move-check-down notice what the check did (owner audit 2026-10-22, finding 1)', async () => {
   const checkDown = require('../services/auto-dispatch/check-down-notice');
   await runAutoDispatch({ mode: 'dry_run' });
@@ -457,7 +476,6 @@ test.each([
   // Staff took the visit out of auto-dispatch after pass 1 (r21 P2).
   ['with a visit locked', { auto_dispatch_locked: true }],
   ['with a visit excluded', { auto_dispatch_excluded: true }],
-  ['who confirmed the visit', { customer_confirmed: true }],
 ])('a customer %s after pass 1 raises no missing-geo notice', async (_label, change) => {
   geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
   eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
@@ -467,6 +485,17 @@ test.each([
   db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc(child)] : [svc({ ...child, ...change })])));
   await runAutoDispatch({ mode: 'dry_run' });
   expect(notifications.notifyAdmin).not.toHaveBeenCalled();
+});
+
+// Owner 2026-11-22: a confirmation no longer takes a visit out of auto-dispatch, so its pin still matters.
+test('a customer who confirmed the visit after pass 1 still gets the missing-geo notice', async () => {
+  geocoder.ensureCustomerGeocoded.mockResolvedValue(null);
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO', reason_description: 'no geo' });
+  let reads = 0;
+  const child = { recurring_parent_id: 'parent-1' };
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : (reads++ === 0 ? [svc(child)] : [svc({ ...child, customer_confirmed: true })])));
+  await runAutoDispatch({ mode: 'dry_run' });
+  expect(notifications.notifyAdmin).toHaveBeenCalledTimes(1);
 });
 
 // A visit that is not a recurring child never goes through auto-dispatch: its pin serves the route check, so a
@@ -737,9 +766,27 @@ test('idempotency: an already-moved visit needs a much larger gain to move again
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
   servicesResult = [svc({ auto_dispatch_change_count: 1 })];
   db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
-  const moved = await runAutoDispatch({ mode: 'dry_run' });
+  // The second-move minutes rule off: the raised bar alone decides.
+  const moved = await runAutoDispatch({ mode: 'dry_run', minutesRuleSecondMoveSavingMinutes: 0 });
   expect(moved.recommended).toBe(0);
   expect(lastDecision('no_change').reason_code).toBe('NO_SCORE_IMPROVEMENT');
+
+  // Owner 2026-11-24 "do whatever you rec": with the default 15-minute second-move rule, this
+  // 30-minute saving moves the visit again below the raised bar.
+  jest.clearAllMocks();
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_MODERATE] });
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: true });
+  eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
+  db.mockImplementation((table) => buildChain(table === 'technician_capabilities' ? [] : servicesResult));
+  // The minutes rule needs the road check on; no road legs on these fixtures, so the model's number stands.
+  const noRoads = jest.spyOn(require('../services/auto-dispatch/road-check'), 'createRunTravel')
+    .mockReturnValue({ preload: async () => {}, lookup: () => null, diagnostics: () => ({ requests: 0, elements: 0 }) });
+  const byMinutes = await runAutoDispatch({ mode: 'dry_run', roadCheckEnabled: true });
+  noRoads.mockRestore();
+  expect(byMinutes.recommended).toBe(1);
+  // The audit row names the second-move floor that applied (15), not the first-move 10.
+  const row = audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.constraints && d.constraints.minutes_rule).pop();
+  expect(row.constraints.minutes_rule).toEqual({ saving_floor_minutes: 15 });
 });
 
 
@@ -1348,7 +1395,9 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
       current: { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: [service.id === 'sameday' ? 'daymove' : 'sameday'] } },
       candidates: [service.id === 'sameday' ? SAME_DAY : CAND_BIG],
     }));
-    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    // Minutes rule off: CAND_BIG saves 10 minutes and would move 'daymove' on minutes once its
+    // partner leaves (owner 2026-11-24); this test is about which of the pair moves.
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true, minutesRuleSavingMinutes: 0 });
     expect(res).toMatchObject({ recommended: 1 });
     expect(lastDecision('recommended').service.id).toBe('sameday');
     expect(lastDecision('no_change')).toMatchObject({ reason_code: 'CONFLICT_PARTNER_MOVES' });
@@ -1387,6 +1436,13 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
 });
 
 describe('move limit (owner 2026-10-09: at most two automatic moves per visit)', () => {
+  // The default is off since owner 2026-11-22 ("this is all too limiting"); these tests run the cap the env brings back.
+  let prevLimit;
+  beforeEach(() => { prevLimit = process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT; process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT = '2'; });
+  afterEach(() => {
+    if (prevLimit === undefined) delete process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT;
+    else process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT = prevLimit;
+  });
   const AT_LIMIT = [{ scheduled_service_id: 's1', moves: '2' }];
   const OVERLAP = { kind: 'overlap', date: CURRENT.date, with: ['other-1'] };
   const applyMode = async (fn) => {

@@ -51,6 +51,32 @@ describe('weather-forecast Open-Meteo backup', () => {
     expect(global.fetch.mock.calls.some(([url]) => isOpenMeteo(url))).toBe(false);
   });
 
+  test('getNwsHourlyRain: fetchTimeoutMs gives each NWS fetch its longer wait; the default stays 2.5 s', async () => {
+    const spy = jest.spyOn(global, 'setTimeout');
+    const nwsOk = () => global.fetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ properties: { forecastHourly: 'https://api.weather.gov/x' } }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ properties: { periods: [{ startTime: '2026-10-07T08:00:00-04:00', probabilityOfPrecipitation: { value: 20 } }] } }) });
+    nwsOk();
+    await getNwsHourlyRain(27.63, -82.63, { fetchTimeoutMs: 10000 });
+    expect(spy.mock.calls.filter(([, ms]) => ms === 10000)).toHaveLength(2);
+    spy.mockClear();
+    nwsOk();
+    await getNwsHourlyRain(27.64, -82.64);
+    expect(spy.mock.calls.filter(([, ms]) => ms === 2500)).toHaveLength(2);
+    spy.mockRestore();
+  });
+
+  test('a long NWS read is not shared: a short reader at the same point makes its own read', async () => {
+    let release;
+    global.fetch.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const long = getNwsHourlyRain(27.65, -82.65, { fetchTimeoutMs: 10000 });
+    global.fetch.mockResolvedValueOnce({ ok: false });
+    expect(await getNwsHourlyRain(27.65, -82.65)).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(2); // its own read, not a wait on the long one
+    release({ ok: false });
+    expect(await long).toBeNull();
+  });
+
   test('getNwsHourlyRain: a cached backup answer is not used; its NWS answer is cached and reused', async () => {
     process.env.OPEN_METEO_API_KEY = 'test-key';
     // Another reader cached a backup answer for this point.

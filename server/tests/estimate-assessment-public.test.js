@@ -13,6 +13,8 @@ const mockInspection = {
   searchParseOpts: jest.fn(() => ({})),
   loadAssessmentCatalog: jest.fn(),
   buildAvailabilityForLead: jest.fn(),
+  assessmentServiceLines: jest.fn(),
+  assessmentLineUnchanged: jest.fn(),
   shapeAvailability: jest.fn((built, range) => ({ ...built, rangeFrom: range.rangeFrom, rangeTo: range.rangeTo })),
   findSlotIn: jest.fn(),
   commitWindowFailure: jest.fn(() => null),
@@ -99,6 +101,8 @@ beforeEach(() => {
   for (const fn of Object.values(mockInspection)) if (jest.isMockFunction(fn)) fn.mockClear();
   mockInspection.loadAssessmentCatalog.mockResolvedValue({ serviceId: 'svc-assessment', serviceType: 'Waves Assessment', durationMinutes: 45 });
   mockInspection.buildAvailabilityForLead.mockResolvedValue({ days: [{ date: '2026-11-03', slots: [{ start_time: '09:00', end_time: '09:45' }] }], slots: [], nearby: false });
+  mockInspection.assessmentServiceLines.mockResolvedValue({});
+  mockInspection.assessmentLineUnchanged.mockResolvedValue(true);
   mockInspection.findSlotIn.mockImplementation((day, date, time) => day?.days?.find((d) => d.date === date)?.slots?.find((s) => s.start_time === time) || null);
   mockInspection.findOpenVisit.mockResolvedValue(null);
   mockInspection.serviceAreaFailure.mockReset().mockResolvedValue(null);
@@ -243,6 +247,27 @@ describe('GET /:token', () => {
     expect(await router._internals.assessmentFirstFor(estimate(), { open: true })).toBeNull();
   });
 
+  // The 2026-11-23 hold (a second technician was hired, so it ended): every place on it is offered the assessment again.
+  test.each([
+    [{ city: 'Port Charlotte', zip: '33981' }], [{ city: 'Gulf Cove' }], [{ city: 'Deep Creek' }], [{ city: 'Charlotte Harbor' }],
+    [{ city: 'Rotonda West' }], [{ city: 'Placida' }],
+    [{ city: 'Boca Grande' }], [{ city: 'Babcock Ranch' }], [{ city: null, zip: '33947' }], [{ city: '', zip: '33983' }],
+    [{ city: 'Port Charlotte', zip: '33948' }], [{ city: 'Englewood', zip: '34223' }], [{ city: null, zip: '33952' }], [{ city: '', zip: '34224' }],
+  ])('a place held on 2026-11-23 %j is served again: offered the assessment', async (place) => {
+    const zip = place.zip || '34205';
+    customerRow = { ...CUSTOMER, zip, ...place };
+    estimateRow = estimate({ address: `100 Sample Way, ${place.city || 'Somewhere'}, FL ${zip}` });
+    expect((await call(TOKEN)).body).not.toEqual({ state: 'gone' });
+    expect(mockBookingInternals.customerBookingLocation).toHaveBeenCalled();
+  });
+
+  test('North Port is still offered the assessment', async () => {
+    customerRow = { ...CUSTOMER, city: 'North Port', zip: '34287' };
+    estimateRow = estimate({ address: '100 Sample Way, North Port, FL 34287' });
+    expect((await call(TOKEN)).body).not.toEqual({ state: 'gone' });
+    expect(mockBookingInternals.customerBookingLocation).toHaveBeenCalled();
+  });
+
   test('a customer\'s own plan quote that staff changed: gone before any location work, and /data never offers it (codex pre-push P1)', async () => {
     estimateRow = estimate({ source: 'plan_start', bill_by_invoice: true });
     expect((await call(TOKEN)).body).toEqual({ state: 'gone' });
@@ -346,6 +371,120 @@ describe('POST /:token (book)', () => {
 
 // Pre-push audit rule (AGENTS.md): the commit re-checks the preflight read on the locked row, inside the booking
 // transaction createSelfBooking runs the guard in.
+// Owner 2026-11-21 (assessments go by the lead's service interest): the estimate's OWN lead decides the line, so a
+// customer's newer inquiry for another service does not move this estimate's assessment to another technician.
+describe('the assessment line reads the estimate\'s own lead', () => {
+  const offer = require('../services/estimate-consultation-offer');
+  let linked;
+  beforeEach(() => { linked = jest.spyOn(offer, 'linkedLeadIdFor').mockResolvedValue('lead-9'); });
+  afterEach(() => { linked.mockRestore(); delete process.env.GATE_SERVICE_LINE_MAP; });
+
+  test('map off: the lead is not read and no lead id is passed', async () => {
+    await call(TOKEN);
+    expect(linked).not.toHaveBeenCalled();
+    expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ customer: expect.objectContaining({ id: 'cust-1' }), leadId: null });
+  });
+
+  test('map in shadow: no request reads the lead; the booking hands the shadow recorder a read to run after it', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    // A lead lookup that fails must not fail a public request in shadow: nothing routes by it yet.
+    linked.mockRejectedValue(new Error('lead read failed'));
+    expect((await call(TOKEN)).status).toBe(200);
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '09:00' } });
+    expect(res.status).toBe(200);
+    expect(linked).not.toHaveBeenCalled();
+    expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ leadId: null });
+    // The recorder runs this after the booking, best-effort (line-technician shadowLeadId).
+    const { lineLeadId } = mockInspection.bookAssessmentVisit.mock.calls[0][0];
+    expect(lineLeadId).toEqual(expect.any(Function));
+    linked.mockResolvedValue('lead-9');
+    await expect(lineLeadId()).resolves.toBe('lead-9');
+    expect(linked).toHaveBeenCalledWith('est-1', expect.anything());
+  });
+
+  test('the commit reads its line once and re-checks it on the booking transaction', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    const scope = { serviceLines: ['general'] };
+    mockInspection.assessmentServiceLines.mockResolvedValue(scope);
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '09:00' } });
+    expect(res.status).toBe(200);
+    expect(mockInspection.assessmentServiceLines).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }), 'lead-9');
+    // The slot is found in a build for that scope.
+    expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ lineScope: scope, leadId: 'lead-9' });
+    // The booking gets a slot guard for that scope. On ITS transaction the guard reads the estimate's link again
+    // (the pointing leads held) and checks the line of the lead linked THEN.
+    const args = mockInspection.bookAssessmentVisit.mock.calls[0][0];
+    expect(args).toMatchObject({ lineLeadId: 'lead-9', slotGuard: expect.any(Function) });
+    const stamped = { lead_id: 'lead-stamp', lead_linkage: 'strong' };
+    const first = jest.fn(async () => ({ estimate_data: stamped }));
+    const trx = jest.fn(() => ({ where: jest.fn(() => ({ first })) }));
+    linked.mockClear();
+    await expect(args.slotGuard(trx)).resolves.toBe(true);
+    expect(trx).toHaveBeenCalledWith('estimates');
+    expect(linked).toHaveBeenCalledWith('est-1', stamped, trx, { lock: true });
+    expect(mockInspection.assessmentLineUnchanged).toHaveBeenCalledWith(trx, { lineScope: scope, customer: expect.objectContaining({ id: 'cust-1' }), leadId: 'lead-9' });
+    // Staff linked the estimate to another lead since the request started: the guard checks THAT lead.
+    linked.mockResolvedValue('lead-relinked');
+    mockInspection.assessmentLineUnchanged.mockResolvedValue(false);
+    await expect(args.slotGuard(trx)).resolves.toBe(false);
+    expect(mockInspection.assessmentLineUnchanged).toHaveBeenLastCalledWith(trx, expect.objectContaining({ leadId: 'lead-relinked' }));
+    // The map went off live in between: no line was read for a build then, and the guard reads nothing.
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    trx.mockClear();
+    await expect(args.slotGuard(trx)).resolves.toBe(true);
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('map live: the offer, the search, the commit check and the 409 refresh all pass the linked lead', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    estimateRow = estimate({ estimate_data: { lead_id: 'lead-9', lead_linkage: 'created' } });
+    await call(TOKEN);
+    await call(`${TOKEN}/find-slots`, { method: 'POST', body: { query: 'next tuesday morning' } });
+    // A time that is not in the build: the commit check, then the refresh.
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '13:00' } });
+    expect(res.status).toBe(409);
+    expect(linked).toHaveBeenCalledWith('est-1', expect.objectContaining({ lead_id: 'lead-9' }));
+    const calls = mockInspection.buildAvailabilityForLead.mock.calls;
+    expect(calls).toHaveLength(4);
+    for (const [, opts] of calls) expect(opts).toMatchObject({ customer: expect.objectContaining({ id: 'cust-1' }), leadId: 'lead-9' });
+  });
+
+  test('map live, the booking refuses the slot after a relink: the fresh times are for the lead linked now', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    mockInspection.bookAssessmentVisit.mockImplementation(async () => {
+      linked.mockResolvedValue('lead-new'); // staff linked the estimate to another lead while the booking ran
+      return { ok: false, status: 409, code: 'SLOT_TAKEN', error: 'That time was just taken.' };
+    });
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '09:00' } });
+    expect(res).toMatchObject({ status: 409, body: { code: 'SLOT_TAKEN' } });
+    const calls = mockInspection.buildAvailabilityForLead.mock.calls;
+    expect(calls[0][1]).toMatchObject({ leadId: 'lead-9' });
+    expect(calls[calls.length - 1][1]).toMatchObject({ leadId: 'lead-new' });
+  });
+
+  test('map live, the time is not in the fresh build after a relink: the 409 times are for the lead linked now', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    const build = mockInspection.buildAvailabilityForLead.getMockImplementation();
+    mockInspection.buildAvailabilityForLead.mockImplementationOnce(async (...args) => {
+      linked.mockResolvedValue('lead-new'); // staff linked the estimate to another lead while the single-day build ran
+      return build ? build(...args) : undefined;
+    });
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '13:00' } });
+    expect(res).toMatchObject({ status: 409, body: { code: 'SLOT_TAKEN' } });
+    expect(mockInspection.bookAssessmentVisit).not.toHaveBeenCalled();
+    const calls = mockInspection.buildAvailabilityForLead.mock.calls;
+    expect(calls[0][1]).toMatchObject({ leadId: 'lead-9' });
+    expect(calls[calls.length - 1][1]).toMatchObject({ leadId: 'lead-new' });
+  });
+
+  test('map live, no unambiguous lead for the estimate: no lead id, so the customer is read', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    linked.mockResolvedValue(null);
+    await call(TOKEN);
+    expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ customer: expect.objectContaining({ id: 'cust-1' }), leadId: null });
+  });
+});
+
 describe('the in-transaction estimate guard', () => {
   const { estimateGuardFor } = router._internals;
   // A booking transaction stub: answers like db, and records which tables it read and whether the estimate was locked.

@@ -514,7 +514,11 @@ router.post('/invite-email', inviteLimiter, async (req, res, next) => {
           // The acting customer's name, not the household promoter owner's.
           referrer_name: selfCustomer?.first_name || promoter.first_name || 'A Waves customer',
           referral_url: referralLink,
-          referral_offer_line: engine.buildRefereeOfferLine(settings),
+          // GATE_REFERRAL_STEP2: the amount in the new words comes from the live settings row only, never from the
+          // code defaults getSettings() falls back to (0 = the line with no amount).
+          referral_offer_line: engine.buildRefereeOfferLine(
+            isEnabled('referralStep2') ? { referee_discount_cents: await engine.step2FriendCreditCents() } : settings,
+          ),
         },
         recipientType: 'referral_promoter',
         recipientId: promoter.id,

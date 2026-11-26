@@ -35,6 +35,11 @@
 #   CLAUDE_REVIEW_MODEL=opus           — fallback auditor model (default sonnet)
 #   SPLIT_WARN_FILES=25                — advisory split threshold, files (0 disables)
 #   SPLIT_WARN_BYTES=120000            — advisory split threshold, bytes (0 disables)
+#   SPLIT_WARN_LINES=600               — advisory split threshold, changed lines of
+#                                         non-test code (0 disables)
+#   CODEX_REVIEW_ROUND_LOG=off         — do not log this push in the round log; or
+#                                         a directory to log it in (default: the
+#                                         clone's common git dir)
 #
 # ── Two LLM auditors ─────────────────────────────────────────────────────
 # Codex is the PRIMARY reviewer. Claude is the FALLBACK, and it runs only
@@ -321,7 +326,190 @@ ${hits}
   fi
 fi
 
+# ── Changed-function complexity report (advisory, no LLM) ─────────────────
+# Prints every function the branch ADDS, rewrites or makes worse that is over
+# ESLint `complexity` 20 or `max-depth` 4 (the two QUALITY_WARN rules in
+# eslint.config.js), as a loud `[changed-complexity] NEW/WORSE:` section ahead
+# of the Codex audit. Codex raises each as a P2, so fix them before the first
+# push. A touched legacy function already over the limit with an equal or lower
+# score only prints a WARN. The base is BASE (CODEX_REVIEW_BASE, default origin/main). It never blocks: AGENTS.md treats structural lint
+# as advice. Only the changed files are linted, read at the pushed sha. A check
+# that cannot run (no node_modules, no origin/main, git or ESLint error) warns
+# and carries on.
+#   SKIP_CHANGED_COMPLEXITY=1 git push   — skip this report
+if [ "${SKIP_CHANGED_COMPLEXITY:-0}" = "1" ]; then
+  echo "[changed-complexity] SKIP_CHANGED_COMPLEXITY=1 set — skipping complexity report." >&2
+elif ! command -v node >/dev/null 2>&1 || [ ! -f scripts/check-changed-complexity.js ]; then
+  echo "[changed-complexity] node or scripts/check-changed-complexity.js missing — skipping complexity report." >&2
+elif ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+  echo "[changed-complexity] $BASE not found locally — skipping complexity report (git fetch origin to enable it)." >&2
+else
+  CC_SEEN=" "
+  for cc_sha in "${GUARD_SHAS[@]}"; do
+    case "$CC_SEEN" in *" $cc_sha "*) continue ;; esac
+    CC_SEEN="$CC_SEEN$cc_sha "
+    node scripts/check-changed-complexity.js --base "$BASE" --head "$cc_sha" >&2
+    cc_rc=$?
+    if [ "$cc_rc" -ne 0 ]; then
+      echo "[changed-complexity] the check could not run (exit $cc_rc) — carrying on." >&2
+    fi
+  done
+fi
+
+# ── Round log ────────────────────────────────────────────────────────────
+# One line for each pushed commit, in the clone's COMMON git dir, so every
+# worktree of this clone appends to the same files:
+#   <dir>/codex-review-rounds-YYYY-MM.jsonl   (UTC month)
+#   CODEX_REVIEW_ROUND_LOG=<dir>   write the month files there instead
+#   CODEX_REVIEW_ROUND_LOG=off     write nothing
+# Why: local rounds were invisible. The artifact dir below keeps only the
+# last run, so a branch that took ten audit rounds looked the same as one
+# that took one, and nobody could see a branch looping (waves-ship §4's round
+# cap counts GitHub rounds only). A weekly read shows rounds per branch, P0
+# blocks and pushes that went out with no audit.
+#
+# ONE place decides what is written: write_round_log, in the EXIT trap. It
+# walks every pushed commit (REF_SHAS). The rest of the hook only reports
+# what it knows:
+#   round_log_mark  — the per-ref loop, when it has an outcome for a commit
+#   ROUND_LOG_WHY   — an exit before the loop (skip, preflight), the reason
+# A commit nobody marked is written as "unaudited", so an exit path that
+# reports nothing, today's or a later one, still leaves a line. The only
+# commit left out is one git proves has no diff against the base: the loop
+# marks that when it makes the comparison, and for a commit the loop never
+# reached write_round_log makes the comparison itself. Earlier
+# drafts logged at each exit site, and each audit of them found one more
+# site that left no line.
+#
+# What a line holds: its commit's own destination ref(s), outcome "audited"
+# (with that commit's P0/P1 counts and its auditor) or "unaudited" (with
+# `why`), and `exit`, the verdict of the whole push. A push of two branches
+# is two lines, so a block on one is never booked to the other.
+# `why`: skipped (SKIP_CODEX_REVIEW=1), no_auditor, no_schema, no_agents_md,
+# no_base, diff_too_large, auditors_failed, sha_unreachable, diff_failed (git
+# could not compare the commit with the base), not_reached (anything else).
+# An "audited" line has no `why`, with one exception: partial_diff, when git
+# failed after it printed part of the diff and the auditor saw only that part.
+#
+# No line at all: a run with no ref update on stdin (an up-to-date push;
+# the hook audits HEAD then, but nothing was pushed), a delete-only push, a
+# push the applied-migration guard above blocks (nothing was pushed, no
+# audit ran), and a machine without jq (the lines are built with it).
+#
+# Each line is one short write to a file opened for append, and no file is
+# ever rewritten, so two worktrees pushing at once cannot lose or split each
+# other's lines. Size is bounded by deleting whole month files past the
+# newest ROUND_LOG_KEEP. Nothing here prints, changes the exit code, or
+# blocks: a line that cannot be built or written is dropped.
+ROUND_LOG_KEEP=3
+ROUND_LOG_WHY=""
+ROUND_LOG_OUTCOME=()
+ROUND_LOG_REASON=()
+ROUND_LOG_P0=()
+ROUND_LOG_P1=()
+ROUND_LOG_AUDITOR=()
+
+# round_log_mark <REF_SHAS index> <audited|unaudited|none> <why> <p0> <p1> <auditor>
+# "none" = the loop compared the commit with the base and found no diff.
+round_log_mark() {
+  ROUND_LOG_OUTCOME[$1]="$2"
+  ROUND_LOG_REASON[$1]="$3"
+  ROUND_LOG_P0[$1]="$4"
+  ROUND_LOG_P1[$1]="$5"
+  ROUND_LOG_AUDITOR[$1]="$6"
+  return 0
+}
+
+# round_log_unmarked_why <sha>: why a commit nobody marked went un-audited.
+# Prints nothing when git proves it has no diff against the base.
+round_log_unmarked_why() {
+  if ! git cat-file -e "$1" 2>/dev/null; then
+    printf 'sha_unreachable'
+    return 0
+  fi
+  if git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+    git diff --quiet "$BASE...$1" >/dev/null 2>&1
+    case "$?" in
+      0) return 0 ;;
+      1) ;;
+      *) printf 'diff_failed'; return 0 ;;
+    esac
+  fi
+  printf '%s' "${ROUND_LOG_WHY:-not_reached}"
+  return 0
+}
+
+# write_round_log <hook exit code>. EXIT trap only.
+write_round_log() {
+  local rc="$1" dir="${CODEX_REVIEW_ROUND_LOG:-}" now="" file="" line="" dests=""
+  local i j sha outcome why
+  [ "$dir" = "off" ] && return 0
+  # Git also runs this hook with nothing on stdin when every ref is up to
+  # date. The hook then audits HEAD as a courtesy, but nothing was pushed.
+  [ "$ANY_REFS" = "1" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  if [ -z "$dir" ]; then
+    dir="$(git rev-parse --git-common-dir 2>/dev/null)" || return 0
+    dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
+  fi
+  [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  # One clock read: a line's time and its month file agree, also in the last
+  # second of a month.
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  file="$dir/codex-review-rounds-${now:0:7}.jsonl"
+  # Append to a plain file, or make one. A pipe with no reader would hold the
+  # push here for ever, and a link would send the lines somewhere else.
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  fi
+  for i in "${!REF_SHAS[@]}"; do
+    sha="${REF_SHAS[$i]}"
+    outcome="${ROUND_LOG_OUTCOME[$i]:-}"
+    why="${ROUND_LOG_REASON[$i]:-}"
+    [ "$outcome" = "none" ] && continue
+    if [ -z "$outcome" ]; then
+      why="$(round_log_unmarked_why "$sha")"
+      [ -n "$why" ] || continue
+      outcome="unaudited"
+    fi
+    dests=""
+    for j in "${!GUARD_SHAS[@]}"; do
+      if [ "${GUARD_SHAS[$j]}" = "$sha" ] && [ -n "${GUARD_REMOTE_REFS[$j]:-}" ]; then
+        dests="${dests}${GUARD_REMOTE_REFS[$j]}
+"
+      fi
+    done
+    # jq 1.6 (still on some runners) reserves keywords as variable names:
+    # `$label` does not compile there, and with jq's errors silenced every
+    # line would be dropped with no sign. Keep these names clear of jq's
+    # keywords.
+    line="$(jq -cn --arg ts "$now" --arg sha "$sha" --arg local_ref "${REF_LABELS[$i]:-}" \
+      --arg dests "$dests" --arg outcome "$outcome" --arg why "$why" \
+      --arg p0 "${ROUND_LOG_P0[$i]:-0}" --arg p1 "${ROUND_LOG_P1[$i]:-0}" \
+      --arg auditor "${ROUND_LOG_AUDITOR[$i]:-}" --arg rc "$rc" --arg seconds "${SECONDS:-0}" \
+      '($dests | split("\n") | map(select(length > 0))) as $refs
+       | {ts: $ts, ref: ($refs[0] // $local_ref), refs: $refs, sha: $sha, outcome: $outcome}
+         + (if $why == "" then {} else {why: $why} end)
+         + {p0: ($p0 | tonumber), p1: ($p1 | tonumber)}
+         + (if $auditor == "" then {} else {auditor: $auditor} end)
+         + {exit: ($rc | tonumber), seconds: ($seconds | tonumber)}' 2>/dev/null)" || continue
+    [ -n "$line" ] || continue
+    printf '%s\n' "$line" >> "$file" || return 0
+  done
+  # Month names sort by date, so the first matches are the oldest files.
+  set -- "$dir"/codex-review-rounds-[0-9][0-9][0-9][0-9]-[0-9][0-9].jsonl
+  while [ "$#" -gt "$ROUND_LOG_KEEP" ]; do
+    rm -f "$1"
+    shift
+  done
+  return 0
+}
+# From here on every exit goes through write_round_log. The per-ref section
+# below replaces this trap with one that also removes its temp dir.
+trap 'ROUND_LOG_RC=$?; write_round_log "$ROUND_LOG_RC" 2>/dev/null || true' EXIT
+
 if [ "$SKIP_AUDIT" = "1" ]; then
+  ROUND_LOG_WHY=skipped
   exit 0
 fi
 
@@ -341,11 +529,14 @@ CLAUDE_TIMEOUT="${CLAUDE_REVIEW_TIMEOUT:-600}"
 CLAUDE_MODEL="${CLAUDE_REVIEW_MODEL:-sonnet}"
 SPLIT_WARN_FILES="${SPLIT_WARN_FILES:-25}"
 SPLIT_WARN_BYTES="${SPLIT_WARN_BYTES:-120000}"
+SPLIT_WARN_LINES="${SPLIT_WARN_LINES:-600}"
 
 # ── Preflight: required tools / files ────────────────────────────────────
+# warn_and_pass <message> <round-log reason>
 warn_and_pass() {
   echo "[codex-review] $1" >&2
   echo "[codex-review] push allowed (advisory check skipped)." >&2
+  ROUND_LOG_WHY="$2"
   exit 0
 }
 
@@ -358,24 +549,24 @@ command -v claude >/dev/null 2>&1 && HAVE_CLAUDE=1
 [ "${SKIP_CLAUDE_FALLBACK:-0}" = "1" ] && HAVE_CLAUDE=0
 
 if [ "$HAVE_CODEX" = "0" ] && [ "$HAVE_CLAUDE" = "0" ]; then
-  warn_and_pass "no LLM auditor on PATH — install codex (npm i -g @openai/codex) or claude"
+  warn_and_pass "no LLM auditor on PATH — install codex (npm i -g @openai/codex) or claude" no_auditor
 fi
 if [ "$HAVE_CODEX" = "0" ]; then
   echo "[codex-review] codex CLI not found — the Claude fallback auditor will run instead." >&2
 fi
 
-command -v jq    >/dev/null 2>&1 || warn_and_pass "jq not found on PATH — install with: brew install jq"
-[ -f "$SCHEMA" ]    || warn_and_pass "missing $SCHEMA"
-[ -f "$AGENTS_MD" ] || warn_and_pass "missing $AGENTS_MD"
+command -v jq    >/dev/null 2>&1 || warn_and_pass "jq not found on PATH — install with: brew install jq" no_jq
+[ -f "$SCHEMA" ]    || warn_and_pass "missing $SCHEMA" no_schema
+[ -f "$AGENTS_MD" ] || warn_and_pass "missing $AGENTS_MD" no_agents_md
 
 # ── Resolve base ref ─────────────────────────────────────────────────────
 if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
-  warn_and_pass "base ref '$BASE' not found locally — try: git fetch origin"
+  warn_and_pass "base ref '$BASE' not found locally — try: git fetch origin" no_base
 fi
 
 # ── Per-ref audit ────────────────────────────────────────────────────────
 TMPDIR_RUN="$(mktemp -d -t codex-review.XXXXXX)"
-trap 'rm -rf "$TMPDIR_RUN"' EXIT
+trap 'ROUND_LOG_RC=$?; write_round_log "$ROUND_LOG_RC" 2>/dev/null || true; rm -rf "$TMPDIR_RUN"' EXIT
 
 # Stable artifact dir: the EXIT trap above deletes $TMPDIR_RUN the moment the
 # hook exits, so on a BLOCKED push the findings JSON was gone before anyone
@@ -1166,11 +1357,26 @@ for i in "${!REF_SHAS[@]}"; do
   # pushing something we don't have an object for), skip rather than crash.
   if ! git cat-file -e "$AUDIT_SHA" 2>/dev/null; then
     echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): SHA not locally reachable — skipping this ref." >&2
+    round_log_mark "$i" unaudited sha_unreachable 0 0 ""
     continue
   fi
 
   DIFF="$(git diff --no-color "$BASE...$AUDIT_SHA" 2>/dev/null)"
+  DIFF_RC=$?
+  # DIFF_RC is read by the round log only. What this loop does with a diff
+  # git could not finish is unchanged: no output = skipped as "no changes"
+  # below, and part of a diff = audited as it is. The log says what that
+  # was: `diff_failed` for the first, and an audit marked `partial_diff` for
+  # the second. To change what the loop does is to change the audit, not the
+  # log, and belongs in a change of its own.
   if [ -z "$DIFF" ]; then
+    # The round log keeps what THIS comparison found: another worktree can
+    # move $BASE before the EXIT trap runs. A failed diff is not "no changes".
+    if [ "$DIFF_RC" -eq 0 ]; then
+      round_log_mark "$i" none "" 0 0 ""
+    else
+      round_log_mark "$i" unaudited diff_failed 0 0 ""
+    fi
     echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): no changes vs $BASE — skipping." >&2
     continue
   fi
@@ -1178,6 +1384,9 @@ for i in "${!REF_SHAS[@]}"; do
   CHANGED_FILES="$(git diff --name-only "$BASE...$AUDIT_SHA" 2>/dev/null)"
   DIFF_BYTES="$(printf '%s' "$DIFF" | wc -c | tr -d ' ')"
   FILE_COUNT="$(printf '%s\n' "$CHANGED_FILES" | wc -l | tr -d ' ')"
+  # Changed lines outside tests, lockfiles and generated indexes (binary files count 0).
+  CODE_LINES="$(git diff --numstat "$BASE...$AUDIT_SHA" 2>/dev/null \
+    | awk -F'\t' '$3 !~ /(^|\/)(tests?|__tests__)\/|\.test\.[cm]?[jt]sx?$|package-lock\.json$|docs\/gate-index\.md$/ { if ($1 != "-") n += $1 + $2 } END { print n + 0 }')"
 
   # ── Split advisory (never blocks) ──────────────────────────────────────
   # waves-ship §4's round cap discovers "this PR is too large to converge"
@@ -1193,12 +1402,18 @@ for i in "${!REF_SHAS[@]}"; do
     [ -n "$SPLIT_HINT" ] && SPLIT_HINT="$SPLIT_HINT, "
     SPLIT_HINT="$SPLIT_HINT$DIFF_BYTES bytes (threshold $SPLIT_WARN_BYTES)"
   fi
+  # 11-16..23: 1 of 205 PRs at 400 changed lines or fewer needed 3+ Codex
+  # verdicts, against 14 of 58 over 1,500 (owner 2026-11-24).
+  if [ "$SPLIT_WARN_LINES" -gt 0 ] && [ "$CODE_LINES" -gt "$SPLIT_WARN_LINES" ]; then
+    [ -n "$SPLIT_HINT" ] && SPLIT_HINT="$SPLIT_HINT, "
+    SPLIT_HINT="$SPLIT_HINT$CODE_LINES changed lines of non-test code (threshold $SPLIT_WARN_LINES)"
+  fi
   if [ -n "$SPLIT_HINT" ]; then
     echo "" >&2
     echo "[codex-review] ⚠️  SPLIT ADVISORY — $AUDIT_LABEL is large: $SPLIT_HINT" >&2
     echo "[codex-review] Wide PRs have run 15–18 review rounds here; narrow ones converge in 1–3." >&2
     echo "[codex-review] Consider cutting siblings off main BEFORE the first @codex tag." >&2
-    echo "[codex-review] Advisory only, the push is not blocked. Tune with SPLIT_WARN_FILES / SPLIT_WARN_BYTES." >&2
+    echo "[codex-review] Advisory only, the push is not blocked. Tune with SPLIT_WARN_FILES / SPLIT_WARN_BYTES / SPLIT_WARN_LINES." >&2
     echo "" >&2
   fi
 
@@ -1207,6 +1422,7 @@ for i in "${!REF_SHAS[@]}"; do
   if [ "$MAX_DIFF_BYTES" -gt 0 ] && [ "$DIFF_BYTES" -gt "$MAX_DIFF_BYTES" ]; then
     echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): diff is $DIFF_BYTES bytes (cap $MAX_DIFF_BYTES) — skipping audit for this ref. Set CODEX_REVIEW_MAX_DIFF_BYTES=0 to disable the cap." >&2
     UNAUDITED_REFS=$((UNAUDITED_REFS + 1))
+    round_log_mark "$i" unaudited diff_too_large 0 0 ""
     continue
   fi
 
@@ -1378,6 +1594,7 @@ for i in "${!REF_SHAS[@]}"; do
     fi
     UNAUDITED_REFS=$((UNAUDITED_REFS + 1))
     persist_ref_artifacts "$i"
+    round_log_mark "$i" unaudited auditors_failed 0 0 ""
     continue
   fi
 
@@ -1392,6 +1609,12 @@ for i in "${!REF_SHAS[@]}"; do
   P1_COUNT="$(jq '[.findings[]? | select(.priority=="P1")] | length' "$OUT_FILE")"
   P0_TOTAL=$((P0_TOTAL + P0_COUNT))
   P1_TOTAL=$((P1_TOTAL + P1_COUNT))
+  # An audit of what git printed before it failed saw part of the change:
+  # zero findings there say nothing about the rest. Same counts, same push
+  # verdict; the line only carries the mark.
+  ROUND_LOG_NOTE=""
+  [ "$DIFF_RC" -eq 0 ] || ROUND_LOG_NOTE=partial_diff
+  round_log_mark "$i" audited "$ROUND_LOG_NOTE" "$P0_COUNT" "$P1_COUNT" "$AUDITOR"
 
   echo "" >&2
   echo "──────── Review · $AUDIT_LABEL ($SHORT_SHA) · auditor: $AUDITOR ────" >&2

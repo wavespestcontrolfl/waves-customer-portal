@@ -51,8 +51,13 @@ jest.mock('../services/stripe', () => ({
 }));
 jest.mock('../services/payment-method-consents', () => ({
   hasEnrollmentScopedConsent: jest.fn(async () => true),
+  deferredCaptureConsentVersionCurrent: jest.fn(async () => true),
   recordConsent: jest.fn(async () => ({})),
   linkPaymentMethodId: jest.fn(async () => ({})),
+}));
+jest.mock('../services/portal-save-only-card', () => ({
+  ...jest.requireActual('../services/portal-save-only-card'),
+  finishSaveOnlyAdd: jest.fn(async ({ method }) => method),
 }));
 jest.mock('../services/autopay-enrollment', () => ({
   enrollConsentedMethod: jest.fn(async () => ({ enrolled: true })),
@@ -68,6 +73,7 @@ jest.mock('../services/notification-service', () => ({
 const db = require('../models/db');
 const PayerService = require('../services/payer');
 const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+const { finishSaveOnlyAdd } = require('../services/portal-save-only-card');
 const NotificationService = require('../services/notification-service');
 const { _handleSetupIntentSucceeded: handleSetupIntentSucceeded } = require('../routes/stripe-webhook');
 
@@ -122,5 +128,42 @@ describe('portal-add-method webhook payer fence', () => {
     PayerService.resolveForInvoice.mockRejectedValue(new Error('payer lookup down'));
     await expect(handleSetupIntentSucceeded(SETUP_INTENT)).rejects.toThrow('payer lookup down');
     expect(enrollConsentedMethod).not.toHaveBeenCalled();
+  });
+});
+
+// The "add a card" reminder email's save-only form (GATE_CARD_ON_FILE_REMINDER): the SetupIntent is stamped
+// enroll_autopay=false, so this webhook saves the method, writes no consent row and never enrolls Auto Pay.
+describe('portal-add-method webhook save-only form', () => {
+  const ConsentService = require('../services/payment-method-consents');
+  const { SAVE_ONLY_CONSENT_VERSION } = require('../services/payment-method-consent-text');
+
+  test('a stamped SetupIntent is saved without a consent row, never enrolled, and the payer is not even consulted', async () => {
+    const saveOnly = {
+      ...SETUP_INTENT,
+      metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false', consent_text_version: SAVE_ONLY_CONSENT_VERSION, save_only_ip: '203.0.113.9', save_only_ua: 'test-agent' },
+    };
+    await handleSetupIntentSucceeded(saveOnly);
+    // Webhook first: the evidence the mint kept travels with the intent.
+    expect(finishSaveOnlyAdd).toHaveBeenCalledWith(expect.objectContaining({ ip: '203.0.113.9', userAgent: 'test-agent', consentTextVersion: SAVE_ONLY_CONSENT_VERSION }));
+    // No consent row, and the helper settles the audit record and the default role.
+    expect(finishSaveOnlyAdd).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', method: expect.objectContaining({ id: 'pm-row-1' }), via: 'portal_add_method_webhook' }));
+    expect(ConsentService.recordConsent).not.toHaveBeenCalled();
+    expect(enrollConsentedMethod).not.toHaveBeenCalled();
+    expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('an intent minted under any other text version (the Auto Pay authorization, an older save-only text, none) is neither recorded nor given the default role', async () => {
+    // No local row yet (the browser never saved it): the stale stamp must stop the webhook before it persists one.
+    db.mockImplementation(() => ({ where: () => ({ first: async () => undefined }) }));
+    const StripeService = require('../services/stripe');
+    for (const stamp of [SETUP_INTENT.metadata.consent_text_version, 'save_only_2020-01-01', undefined]) {
+      await handleSetupIntentSucceeded({ ...SETUP_INTENT, metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false', consent_text_version: stamp } });
+    }
+    expect(finishSaveOnlyAdd).not.toHaveBeenCalled();
+    expect(enrollConsentedMethod).not.toHaveBeenCalled();
+    expect(ConsentService.recordConsent).not.toHaveBeenCalled();
+    // Nothing is persisted before the stamp check: with no local row, the webhook never saves the method.
+    expect(StripeService.savePaymentMethod).not.toHaveBeenCalled();
   });
 });

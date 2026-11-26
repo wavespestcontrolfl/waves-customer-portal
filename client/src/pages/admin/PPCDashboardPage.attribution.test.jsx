@@ -14,9 +14,9 @@ function campaign(id, platform, campaignType, spend, revenue, conversions, statu
   };
 }
 
-async function mount(campaigns) {
+async function mount(campaigns, lsaSummary) {
   vi.stubGlobal("fetch", vi.fn(async (url) => {
-    if (url === "/api/admin/ads/campaigns") return { ok: true, json: async () => ({ campaigns }) };
+    if (url === "/api/admin/ads/campaigns") return { ok: true, json: async () => ({ campaigns, ...(lsaSummary === undefined ? {} : { lsaSummary }) }) };
     if (url === "/api/admin/ads/funnel?period=30d" || url === "/api/admin/ads/revenue-attribution?period=month") {
       return { ok: true, json: async () => null };
     }
@@ -81,5 +81,53 @@ describe("PPC platform attribution", () => {
     }
     // An LSA campaign that is paused and spent nothing in the period gets no card.
     expect(screen.queryByText("Local Service Ads")).not.toBeInTheDocument();
+  });
+});
+
+// Owner 2026-11-23, Local Services step B: the Local Service Ads card carries a
+// second row from /campaigns' lsaSummary (leads matched to calls, booked jobs,
+// recurring plans, spend per booked job). No summary, no row.
+describe("Local Service Ads lead row", () => {
+  const lsaCamps = [
+    campaign(1, "google_ads", "SEARCH", 20, 90, 3),
+    campaign(4, "google_lsa", "google_lsa", 70, 210, 1),
+  ];
+
+  it("shows leads with matched count, booked, recurring and cost per won job", async () => {
+    const card = await mount(lsaCamps, {
+      leads: 4, charged: 3, matched: 3, booked: 2, recurring: 1, spend: 70, costPerWon: 35,
+    });
+    const row = within(card("google_lsa").getByText("LEADS").closest("[data-qa=lsa-leads-row]"));
+    expect(row.getByText("4", { exact: true })).toBeInTheDocument();
+    expect(row.getByText("3 of 4 matched")).toBeInTheDocument();
+    expect(row.getByText("BOOKED")).toBeInTheDocument();
+    expect(row.getByText("2", { exact: true })).toBeInTheDocument();
+    expect(row.getByText("RECURRING")).toBeInTheDocument();
+    expect(row.getByText("1", { exact: true })).toBeInTheDocument();
+    expect(row.getByText("COST / WON")).toBeInTheDocument();
+    expect(row.getByText("$35.00", { exact: true })).toBeInTheDocument();
+  });
+
+  it("shows -- for cost per won job when nothing booked", async () => {
+    const card = await mount(lsaCamps, {
+      leads: 1, charged: 1, matched: 0, booked: 0, recurring: 0, spend: 70, costPerWon: null,
+    });
+    const row = card("google_lsa").getByText("COST / WON").closest("[data-qa=lsa-leads-row]");
+    expect(row.querySelector("[data-metric=lsa-cost-per-won]")).toHaveTextContent("--");
+  });
+
+  it("leaves the second row out when the response carries no summary", async () => {
+    for (const summary of [undefined, null]) {
+      const card = await mount(lsaCamps, summary);
+      expect(card("google_lsa").queryByText("COST / WON")).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it("never puts the lead row on the Search card", async () => {
+    const card = await mount(lsaCamps, {
+      leads: 4, charged: 3, matched: 3, booked: 2, recurring: 1, spend: 70, costPerWon: 35,
+    });
+    expect(card("google_search").queryByText("COST / WON")).not.toBeInTheDocument();
   });
 });

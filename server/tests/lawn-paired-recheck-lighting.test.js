@@ -1,7 +1,7 @@
-// Lawn paired-photo recheck under GATE_LAWN_LIGHTING (owner 2026-10-04):
+// Lawn paired-photo recheck with lawn lighting-aware color (owner 2026-10-04):
 // lawn-paired-recheck-v3. Each pair carries its two photos' stored light and
 // whether color may be compared; color is dropped from any pair in different or
-// unknown light, both in the prompt and in code. Gate off = the v2 request and
+// unknown light, both in the prompt and in code. Without the visit assessment gate = the v2 request and
 // v2 stored record, byte for byte. Fakes only: no provider, no S3, no database.
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
@@ -12,7 +12,7 @@ const { recordPairedRecheck } = require('../services/service-report/lawn-visit-m
 const recheck = require('../services/lawn-paired-recheck');
 const shotList = require('../services/lawn-photo-shots');
 
-const GATES = ['GATE_LAWN_PAIRED_RECHECK', 'GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_LIGHTING', 'GATE_LAWN_VISIT_ASSESSMENT'];
+const GATES = ['GATE_LAWN_PAIRED_RECHECK', 'GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_VISIT_ASSESSMENT'];
 const saved = {};
 beforeAll(() => GATES.forEach((g) => { saved[g] = process.env[g]; }));
 afterAll(() => GATES.forEach((g) => { if (saved[g] === undefined) delete process.env[g]; else process.env[g] = saved[g]; }));
@@ -23,7 +23,6 @@ beforeEach(() => {
   process.env.GATE_LAWN_PAIRED_RECHECK = 'true';
   process.env.GATE_LAWN_VISIT_MEMORY = 'true';
   process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
-  delete process.env.GATE_LAWN_LIGHTING;
   delete process.env.GATE_LAWN_VISIT_ASSESSMENT;
 });
 
@@ -81,7 +80,7 @@ const answerJson = () => ({
   ],
 });
 
-describe('gate off: v2, byte for byte', () => {
+describe('visit assessment gate off: v2, byte for byte', () => {
   test('the request is the v2 prompt and version, no light text, no run read; the stored record is stamped v2', async () => {
     const { knex, reads } = makeKnex({ runs: [] });
     dispatchWithFallback.mockResolvedValue(ok(answerJson()));
@@ -105,8 +104,8 @@ describe('gate off: v2, byte for byte', () => {
   });
 });
 
-describe('gate on: v3', () => {
-  beforeEach(() => { process.env.GATE_LAWN_LIGHTING = 'true'; process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true'; });
+describe('visit assessment gate on: v3', () => {
+  beforeEach(() => { process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true'; });
 
   test('the prompt is v2 plus the light rule, and the version is v3', () => {
     expect(recheck.LIGHTING_PROMPT_VERSION).toBe('lawn-paired-recheck-v3');
@@ -195,7 +194,7 @@ describe('gate on: v3', () => {
     expect(recordPairedRecheck).not.toHaveBeenCalled();
   });
 
-  test('normalizeAnswer without light marks (gate-off pairs) strips nothing', () => {
+  test('normalizeAnswer without light marks (pairs without light) strips nothing', () => {
     const pairs = [{ zone: 'front' }];
     const out = recheck.normalizeAnswer(
       { pairs: [{ pair: 1, verdict: 'better', what_changed: ['color'] }], items: [{ item: 'weeds', verdict: 'better', what_changed: ['color'], pairs: [1] }] },

@@ -58,7 +58,6 @@ jest.mock('../services/appointment-address', () => ({
 const knex = require('knex');
 const express = require('express');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { gates } = require('../config/feature-gates');
 const router = require('../routes/admin-schedule');
 const { dateOnly } = require('../services/visit-groups');
 const { geocodeAddress } = require('../services/geocoder');
@@ -89,12 +88,10 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
   let database;
   let server;
   let baseUrl;
-  const gateNames = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_EDIT_APPT_ADDRESS'];
+  const gateNames = ['GATE_ADMIN_ARRIVAL_WINDOWS'];
   const savedGates = Object.fromEntries(gateNames.map(key => [key, process.env[key]]));
-  const savedAddressGate = gates.editApptAddress;
   beforeAll(async () => {
     gateNames.forEach(key => { process.env[key] = 'true'; });
-    gates.editApptAddress = true;
     database = knex({ client: 'pg', connection, pool: { min: 0, max: 2 } });
     const app = express();
     app.use(express.json());
@@ -107,7 +104,6 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
   afterAll(async () => {
     await new Promise(resolve => server.close(resolve));
     await database.destroy();
-    gates.editApptAddress = savedAddressGate;
     gateNames.forEach(key => {
       if (savedGates[key] === undefined) delete process.env[key]; else process.env[key] = savedGates[key];
     });
@@ -304,6 +300,85 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
     expect(result.body.assignmentUpdatedCount).toBe(1);
     expect(result.body.warnings).toEqual([expect.stringContaining(LATER)]);
     expect((await mockConn('scheduled_services').where({ id: PARENT }).first()).technician_id).toBe(OLD_TECH);
+  });
+
+  // GATE_TECH_SHIFT_HOURS (D4 part 3c): the office is told about the plan's OTHER visits from the rows the
+  // save leaves (services/scheduling/plan-office-lines.js). PARENT is the edited visit and CHILD the other
+  // one, unless a test says otherwise. The diff rules are proven on their own in plan-office-lines-postgres.
+  describe('the plan\'s other visits are told the day off and the shift', () => {
+    const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const weekday = (day) => new Date(`${day}T12:00:00Z`).getUTCDay();
+    // CHILD's day here: a weekday that is not DAY's weekday, so a line about it is not a line about PARENT.
+    const OTHER = [40, 41, 42, 43, 44, 45, 46].map((n) => etDateString(addETDays(new Date(), n)))
+      .find((day) => ![0, 6, weekday(DAY)].includes(weekday(day)));
+    const WEEK_LATER = etDateString(addETDays(DAY_DATE, 7)); // where a weekly rewrite puts CHILD: DAY's weekday
+    const offLine = (day) => `Fixture morning does not work on ${WEEKDAYS[weekday(day)]}s.`;
+    const shiftLine = (hours) => `Fixture morning's shift is ${hours}. This visit is outside those hours.`;
+    const dayLines = (result) => (result.body.warnings || []).filter((w) => /does not work|shift is/.test(w));
+    const worksAllBut = (day) => [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== weekday(day));
+    const setTech = (id, over) => mockConn('technicians').where({ id }).update({ name: 'Fixture morning', ...over });
+    const child = () => mockConn('scheduled_services').where({ id: CHILD }).first();
+    const saved = async (body, id) => {
+      const result = await save(body, id);
+      expect({ status: result.status, error: result.body.error }).toEqual({ status: 200, error: undefined });
+      return dayLines(result);
+    };
+    const WEEKLY = { isRecurring: true, recurringPattern: 'weekly', spawnRecurringChildren: false };
+    beforeEach(async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      await mockConn('scheduled_services').where({ id: CHILD }).update({ scheduled_date: OTHER });
+    });
+    afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; delete process.env.GATE_TECH_WORK_DAYS; });
+
+    test('the whole plan to a technician who does not work on the other visit\'s day: the day-off line', async () => {
+      await setTech(TECH, { work_days: worksAllBut(OTHER) });
+      expect(await saved({ technicianId: TECH, assignmentScope: 'series' })).toEqual([offLine(OTHER)]);
+      expect(await child()).toMatchObject({ technician_id: TECH });
+    });
+
+    test('the whole plan to a technician whose shift does not hold the other visit: the shift line, once', async () => {
+      await setTech(TECH, { shift_start: '08:00', shift_end: '12:00' });
+      await mockConn('scheduled_services').where({ id: CHILD }).update({ window_start: '11:30', window_end: '12:30' });
+      expect(await saved({ technicianId: TECH, assignmentScope: 'series' })).toEqual([shiftLine('8:00 AM to 12:00 PM')]);
+    });
+
+    test('the edited visit and the other visit both outside the shift: the same line is stated once', async () => {
+      await setTech(TECH, { shift_start: '13:00', shift_end: '17:00' });
+      expect(await saved({ technicianId: TECH, assignmentScope: 'series' })).toEqual([shiftLine('1:00 PM to 5:00 PM')]);
+    });
+
+    test('this and following, saved from the later visit: the earlier visit keeps its technician and is not asked', async () => {
+      await setTech(TECH, { work_days: worksAllBut(DAY) });
+      expect(await saved({ technicianId: TECH, assignmentScope: 'following' }, CHILD)).toEqual([]);
+      expect((await mockConn('scheduled_services').where({ id: PARENT }).first()).technician_id).toBe(OLD_TECH);
+    });
+
+    // The reason the line is read from the final rows: one save can assign the plan and then re-date it.
+    test('a new technician and a new cadence in one save: the line is about the day the other visit has when the save ends', async () => {
+      // TECH does not work on the day the other visit has as the save finds it. The weekly rewrite then puts
+      // that visit one week after PARENT, on PARENT's weekday, which TECH works.
+      await setTech(TECH, { work_days: worksAllBut(OTHER) });
+      expect(await saved({ technicianId: TECH, assignmentScope: 'series', ...WEEKLY })).toEqual([]);
+      expect(await child()).toMatchObject({ technician_id: TECH });
+      expect(dateOnly((await child()).scheduled_date)).toBe(WEEK_LATER);
+    });
+
+    test('a new cadence alone puts the other visit on a day its technician does not work: the day-off line', async () => {
+      // OLD_TECH does not work on PARENT's weekday. PARENT keeps its day and technician (it is not asked);
+      // the weekly rewrite puts the other visit on that weekday.
+      await setTech(OLD_TECH, { work_days: worksAllBut(DAY) });
+      expect(await saved(WEEKLY)).toEqual([offLine(DAY)]);
+      expect(dateOnly((await child()).scheduled_date)).toBe(WEEK_LATER);
+      expect((await child()).technician_id).toBe(OLD_TECH);
+    });
+
+    test('GATE_TECH_SHIFT_HOURS off: the plan\'s other visits get no line, with the work-days gate on', async () => {
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      await setTech(TECH, { work_days: worksAllBut(OTHER) });
+      expect(await saved({ technicianId: TECH, assignmentScope: 'series' })).toEqual([]);
+      expect(await child()).toMatchObject({ technician_id: TECH });
+    });
   });
 
   // Staff route insertion (owner 2026-10-25, "save order"): an Edit

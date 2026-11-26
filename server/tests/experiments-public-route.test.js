@@ -155,3 +155,30 @@ describe('POST /exposure', () => {
     expect(Experiments.logExposure).not.toHaveBeenCalled();
   });
 });
+
+describe('exposureDarkGuard — before any limiter', () => {
+  test('a dark POST /exposure in any spelling is the 404 and is not counted; GET /status and a live POST pass', async () => {
+    const hits = { limiter: 0 };
+    const app = express();
+    app.use(express.json());
+    app.use('/api/public/experiments', require('../routes/experiments-public').exposureDarkGuard);
+    app.use('/api/', (req, res, next) => { hits.limiter += 1; next(); });
+    app.use('/api/public/experiments', require('../routes/experiments-public'));
+    const srv = app.listen(0);
+    await new Promise((resolve) => srv.once('listening', resolve));
+    const url = (p) => `http://127.0.0.1:${srv.address().port}${p}`;
+    const send = (p, method = 'POST') => fetch(url(p), { method, headers: { 'Content-Type': 'application/json' }, body: method === 'POST' ? '{}' : undefined });
+    try {
+      isEnabled.mockReturnValue(false);
+      for (const p of ['/exposure', '//exposure', '/exposure/', '/EXPOSURE', '//Exposure//']) {
+        const res = await send(`/api/public/experiments${p}`);
+        expect([p, res.status, await res.json()]).toEqual([p, 404, { error: 'Not found' }]);
+      }
+      expect(hits.limiter).toBe(0);
+      expect((await send('/api/public/experiments/status', 'GET')).status).toBe(200);
+      expect(hits.limiter).toBe(1);
+      isEnabled.mockReturnValue(true);
+      expect((await send('/api/public/experiments/exposure')).status).toBe(400); // past the gate: the payload check answers
+    } finally { await new Promise((resolve) => srv.close(resolve)); }
+  });
+});

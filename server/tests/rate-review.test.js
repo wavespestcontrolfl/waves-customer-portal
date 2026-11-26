@@ -32,6 +32,11 @@ const fixture = require('./helpers/rate-review-fixture');
 const rateReview = require('../services/rate-review');
 
 const { DEFAULT_CONFIG, _private: P } = rateReview;
+// The invoice link and application-line SQL the visit loader interpolates (shared with the production share): read with it.
+const sharedInvoiceSql = () => {
+  const text = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
+  return text.slice(text.indexOf('const COMBINED_SETUP_INVOICE_SQL'), text.indexOf('async function loadCompletedVisitRows'));
+};
 const { NOW } = fixture;
 
 afterEach(() => {
@@ -180,7 +185,7 @@ describe('trimmed median and the usable-visit floor', () => {
     expect(P.lineDurationStats([40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', prepay: { id: 't0', settled: 404, visits: null } })), { termVisitsFallback: 4 }).revenuePerHourCents).toBe(P.lineDurationStats([40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 101 }))).revenuePerHourCents);
     // the SQL never reads the charged stamps
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
-    const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    const q = sharedInvoiceSql() + src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
     expect(q).toMatch(/AS term_settled_amount/);
     expect(q).toMatch(/pi\.id = apt\.prepay_invoice_id/);
     expect(q).not.toMatch(/prepaid_amount|term_prepay_amount/);
@@ -1337,7 +1342,7 @@ describe('engine replay guards', () => {
     expect(src).not.toMatch(/RECURRING_SQL/);
     expect(planQuery).toMatch(/c\.active = true/);
     expect(planQuery).toMatch(/c\.pipeline_stage IN \('active_customer', 'won', 'at_risk'\)/);
-    const revenue = src.slice(src.indexOf('(SELECT sum(LEAST('), src.indexOf('AS paid_revenue'));
+    const revenue = sharedInvoiceSql() + src.slice(src.indexOf('(SELECT sum(LEAST('), src.indexOf('AS paid_revenue'));
     expect(revenue).toMatch(/refund_amount/);
     // linked the way invoice.js links payments to invoices — never a payments.invoice_id (there is none)
     expect(revenue).toMatch(/p\.stripe_payment_intent_id = i\.stripe_payment_intent_id/);
@@ -1352,7 +1357,7 @@ describe('engine replay guards', () => {
     expect(revenue).toMatch(/SELECT sum\(\$\{REFUND_BASE_SQL\}\) FROM payments p/);
     expect(src).not.toMatch(/sum\(COALESCE\(p\.refund_amount, 0\)\)/);
     // an invoice linked only through its service record (invoice.js linkedScheduledServiceId) still pairs its revenue
-    const completed = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    const completed = sharedInvoiceSql() + src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
     expect(completed).toMatch(/SELECT DISTINCT ON \(scheduled_service_id\) scheduled_service_id, id AS service_record_id,/);
     expect(revenue).toMatch(/OR \(i\.service_record_id IS NOT NULL AND i\.service_record_id = sr\.service_record_id\)/);
     expect(dues).toMatch(/sum\(i\.total\) - COALESCE\(sum\(\(/);
@@ -1381,7 +1386,7 @@ describe('engine replay guards', () => {
   });
   test('a composite visit (add-ons in the same stop) is no $/hr or wall-clock evidence for the line — excluded and counted, never the whole stop\'s money over the whole stop\'s clock', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
-    const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    const q = sharedInvoiceSql() + src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
     expect(q).toMatch(/\(EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\) OR \$\{COMBINED_CATALOG_SQL\}\) AS composite_visit/);
     const plain = [40, 42, 44].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 117 }));
     const composite = [75, 80].map((m) => fixture.visit('c', 'pest_control', { minutes: m, interaction: 'not_home_full_access', revenue: 192, composite: true }));
@@ -1406,14 +1411,14 @@ describe('engine replay guards', () => {
     expect(P.RETIRED_COMBINED_CATALOG_KEYS).toEqual(['pest_termite_bait_quarterly', 'lawn_tree_shrub_combo']); // estimate-converter.js RETIRED_COMBINED_CATALOG_KEYS
     expect(P.COMBINED_CATALOG_SQL).toBe("COALESCE(s.service_key_snapshot, sv.service_key) IN ('pest_termite_bait_quarterly', 'lawn_tree_shrub_combo')");
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
-    const completed = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    const completed = sharedInvoiceSql() + src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
     expect(completed).toMatch(/\(EXISTS \(SELECT 1 FROM scheduled_service_addons a WHERE a\.scheduled_service_id = s\.id\) OR \$\{COMBINED_CATALOG_SQL\}\) AS composite_visit/);
     const planQuery = src.slice(src.indexOf('async function loadActivePlanLines'), src.indexOf('async function loadCustomers'));
     expect(planQuery).toMatch(/CASE\n\s+WHEN \$\{COMBINED_CATALOG_SQL\} THEN NULL\n\s+WHEN NOT EXISTS/);
   });
   test('a combined completion-packet invoice credits each member its own settled share, never its whole total to the anchor member', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rate-review.js'), 'utf8');
-    const revenue = src.slice(src.indexOf('(SELECT sum(LEAST('), src.indexOf('AS paid_revenue'));
+    const revenue = sharedInvoiceSql() + src.slice(src.indexOf('(SELECT sum(LEAST('), src.indexOf('AS paid_revenue'));
     // visit-completion-invoice.js mintPacketInvoice: one invoice under billed[0].member.id, members linked via visit_completion_packet_items.invoice_id
     expect(revenue).toMatch(/OR EXISTS \(SELECT 1 FROM visit_completion_packet_items pm2 WHERE pm2\.invoice_id = i\.id AND pm2\.scheduled_service_id = s\.id\)/);
     expect(revenue).toMatch(/LEFT JOIN LATERAL \(/);
@@ -1429,7 +1434,7 @@ describe('engine replay guards', () => {
     expect(revenue).toMatch(/\), 0\) \+ \$\{depositCreditSql\('i'\)\},/); // net settled consideration
     expect(revenue).toMatch(/ELSE i\.total \+ \$\{depositCreditSql\('i'\)\} END/); // the plain-invoice cap
     expect(revenue).toMatch(/AND COALESCE\(li ->> 'category', ''\) <> 'deposit_credit'\)/); // never netted out of the application lines
-    const q = src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
+    const q = sharedInvoiceSql() + src.slice(src.indexOf('async function loadCompletedVisitRows'), src.indexOf('async function loadEstimates'));
     expect(q).toMatch(/\), 0\) \+ \$\{depositCreditSql\('pi'\)\}\)/); // the prepay settlement too
     expect(revenue).toMatch(/\) \* COALESCE\(share\.fraction, 1\)\)/);
     expect(revenue).not.toMatch(/WHERE i\.scheduled_service_id = s\.id AND/);

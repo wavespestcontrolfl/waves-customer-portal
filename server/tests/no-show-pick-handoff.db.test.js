@@ -124,7 +124,7 @@ postgres('the no-show detector reads the pick-a-day hand-off text as the newest 
   }
   const refuse = (id, why) => new Error(`refused ${id}: ${why}`);
   const nightMoveCheck = (id) => knex.transaction((trx) => require('../services/auto-dispatch/apply')
-    .assertNotToldOnMove(trx, { id }, { dayOnlyPromise: true }, refuse));
+    .assertNotToldOnMove(trx, { id }, refuse));
 
   test('an expired hand-off is not frozen by the night told-lock, with the day-only setting too', async () => {
     const told = require('../services/auto-dispatch/told-visits');

@@ -5603,6 +5603,15 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       const StripeService = require('../services/stripe');
       const ConsentService = require('../services/payment-method-consents');
       const gateOn = require('../config/feature-gates').isEnabled('portalAchAutopay');
+      // The same stale-copy rule as the browser save, and BEFORE any local save: a save-only intent minted under older
+      // save-only text persists nothing here (POST /cards refuses it too and asks the customer to add the card again).
+      // No consent row is ever written for a save-only add, so there is nothing for the office to re-collect (the
+      // authorization bell would never close).
+      const SaveOnlyStamp = require('../services/portal-save-only-card');
+      if (SaveOnlyStamp.setupIntentSavesOnly(setupIntent) && !SaveOnlyStamp.saveOnlyStampIsCurrent(setupIntent)) {
+        logger.warn(`[stripe-webhook] portal-add-method save-only SI ${setupIntent?.id}: stamped text version ${setupIntent?.metadata?.consent_text_version || 'absent'} is not the current save-only one, nothing saved or recorded (customer ${wavesCustomerId})`);
+        return;
+      }
       let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
       if (saved && saved.customer_id !== wavesCustomerId) {
         logger.warn(`[stripe-webhook] portal-add-method pm ${stripePmId} belongs to ${saved.customer_id}, SI customer ${wavesCustomerId} — skipping`);
@@ -5643,6 +5652,19 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           }
           throw saveErr;
         }
+      }
+      // Save-only form (the "add a card" reminder email link, services/portal-save-only-card.js): the card is saved and
+      // Auto Pay is NOT turned on, here or in POST /billing/cards. No consent row is written and nothing below runs;
+      // the customer turns Auto Pay on from the Auto Pay card, which asks for its own checkbox.
+      const SaveOnlyCard = require('../services/portal-save-only-card');
+      if (SaveOnlyCard.setupIntentSavesOnly(setupIntent)) {
+        await SaveOnlyCard.finishSaveOnlyAdd({
+          customerId: wavesCustomerId,
+          method: saved,
+          ...SaveOnlyCard.saveOnlyEvidence(setupIntent),
+          via: 'portal_add_method_webhook',
+        });
+        return;
       }
       // The consent-version rule runs BEFORE any state moves (codex #5434 r2
       // P1): a stale or absent stamp — an intent minted under older copy,

@@ -179,7 +179,7 @@ import termiteTreatmentMethods from "../../../../shared/termite-treatment-method
 import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
 import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.json";
 import completionMarkerGrammar from "../../../../shared/completion-marker-grammar.json";
-import { useFeatureFlag, useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import { AskedTimeBoxLegacy, ToldBadgeLegacy } from "../../components/schedule/DayOnlyPromiseLegacy";
 import { usePropertyReminderAnswer } from "../../components/schedule/useHydratedOfficeService";
 import { askedTimeMoveFields } from "../../components/schedule/dayOnlyPromise";
@@ -1293,6 +1293,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
   "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
   "proposal_terms_unread",               // an invoice-mode commercial proposal's Net terms could not be read; the resume re-reads them and mints
+  "held_payment_lookup_failed",          // GATE_REPORT_AFTER_PAY: the payment holding the visit could not be read; the resume re-reads it before any invoice is linked
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -1969,9 +1970,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // arrival time — admin chooses per save; default matches the drag-and-drop
   // reschedule modal (no text).
   const [notificationType, setNotificationType] = useState("none");
-  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): "Customer asked for this time" for a save that moves the visit,
-  // pre-filled from the stored choice (true = checked). Gate off: no box and no field in the request.
-  const dayOnlyPromiseOn = useFeatureFlag("day_only_promise");
+  // "Customer asked for this time" for a save that moves the visit, pre-filled from the stored choice (true = checked).
   const [customerAskedTime, setCustomerAskedTime] = useState(service.customerAskedTime === true);
   // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE, owner ruling
   // 2026-08-28): a DATE change on a recurring visit moves its later sister
@@ -2101,7 +2100,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [addressState, setAddressState] = useState("loading");
   const [selectedPropertyId, setSelectedPropertyId] = useState("");
   // GATE_DAY_ONLY_PROMISE part E: the 24-hour-reminder answer for the property the save will use (the phone-script hint).
-  const reminder24hOn = usePropertyReminderAnswer(service, selectedPropertyId, dayOnlyPromiseOn);
+  const reminder24hOn = usePropertyReminderAnswer(service, selectedPropertyId);
   // Advisory drive-detour suggestions for the same fixed day — picking a
   // chip only fills the window fields (never saves). A terminal visit's
   // date/window edit is a record correction: there is no route to price,
@@ -2389,7 +2388,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       .then((data) => {
         if (cancelled) return;
         setAddressOptions(data.properties || []);
-        setAddressState(data.canChangeAppointmentAddress === true ? "ready" : "disabled");
+        setAddressState("ready");
       })
       .catch(() => { if (!cancelled) setAddressState("error"); });
     return () => { cancelled = true; };
@@ -3547,8 +3546,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             : undefined,
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
-          // GATE_DAY_ONLY_PROMISE: the office's choice for the new slot; only a moving save with the gate on.
-          ...askedTimeMoveFields(dayOnlyPromiseOn && moveNotifyOffered, customerAskedTime),
+          // The office's choice for the new slot; only a moving save.
+          ...askedTimeMoveFields(moveNotifyOffered, customerAskedTime),
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
           ...(comboTogether ? {} : seriesAckPayload(seriesPreview.preview)),
@@ -4931,9 +4930,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               >
                 {customerName}
               </span>{" "}
-              {dayOnlyPromiseOn && (
-                <ToldBadgeLegacy told={service.told} currentDate={service.scheduledDate} colors={D} />
-              )}{" "}
+              <ToldBadgeLegacy told={service.told} currentDate={service.scheduledDate} colors={D} />{" "}
             </div>{" "}
           </div>{" "}
           <div
@@ -6158,7 +6155,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
-              {dayOnlyPromiseOn && moveNotifyOffered && (
+              {moveNotifyOffered && (
                 <AskedTimeBoxLegacy id="edit-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={saving} colors={D} style={{ marginBottom: 14 }} slot={{ date: form.scheduledDate, start: form.windowStart, reminder24hOn, originalDate: service.scheduledDate }} />
               )}{" "}
               {moveNotifyOffered && (
@@ -6884,7 +6881,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
 const JOB_CARD_CHIP = {
   ok: { label: "OK", bg: "#F4F4F5", fg: "#3F3F46" },
-  // GATE_SPRAY_RAIN_RULES: rain likely but the dose stays on the card; neutral, as red is for a hold.
+  // Rain likely but the dose stays on the card; neutral, as red is for a hold.
   caution: { label: "Caution", bg: "#F4F4F5", fg: "#3F3F46" },
   // Rain very likely (owner 2026-10-29, step 2): the dose still shows. Dark, not red: the admin stays monochrome.
   warning: { label: "Warning", bg: "#18181B", fg: "#FFFFFF" },
@@ -9512,11 +9509,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // Immediate reschedule text — admin chooses per move ('none' | 'sms'),
   // matching the drag-and-drop RescheduleConfirmModal's default of no text.
   const [notificationType, setNotificationType] = useState("none");
-  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): "Customer asked for this time" for the new slot, pre-filled from the
-  // stored choice. Gate off: no box and no field in the request.
-  const dayOnlyPromiseOn = useFeatureFlag("day_only_promise");
+  // "Customer asked for this time" for the new slot, pre-filled from the stored choice.
   const [customerAskedTime, setCustomerAskedTime] = useState(service.customerAskedTime === true);
-  const askedTimeFields = askedTimeMoveFields(dayOnlyPromiseOn, customerAskedTime);
+  const askedTimeFields = { customerAskedTime: customerAskedTime === true };
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [showManual, setShowManual] = useState(false);
@@ -9787,7 +9782,6 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       setNotes={setNotes}
       notificationType={notificationType}
       setNotificationType={setNotificationType}
-      dayOnlyPromiseOn={dayOnlyPromiseOn}
       customerAskedTime={customerAskedTime}
       setCustomerAskedTime={setCustomerAskedTime}
       sending={sending}

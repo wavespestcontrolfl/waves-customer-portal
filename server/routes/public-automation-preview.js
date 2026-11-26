@@ -34,6 +34,20 @@ function fill(s) {
     .replace(/\{\{\s*consultation_booking(?:_text)?\s*\}\}\n?/g, '');
 }
 
+// GATE_REFERRAL_STEP2: the referral_nudge step shows what a member under the limit gets (the seeded sentence and summary
+// swapped for the approved words, live amounts, as the send renders them). Gate off or any other step: as stored.
+// Nothing is written; the stored step is not changed.
+async function withNudgeOffer(step) {
+  if (step.template_key !== 'referral_nudge') return step;
+  const runner = require('../services/automation-runner');
+  const decision = await runner.memberlessNudgeDecision(step.template_key);
+  return {
+    ...step,
+    preview_text: runner.nudgePreviewLine(step.preview_text, decision),
+    html_body: runner.nudgeBody(step.html_body, decision, true),
+  };
+}
+
 function escapeHtml(s) {
   return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -55,9 +69,10 @@ router.get('/:stepId/:token', async (req, res) => {
 
     const template = await db('automation_templates').where({ key: step.template_key }).first();
 
-    const subject = fill(step.subject);
-    const previewText = fill(step.preview_text);
-    const body = fill(step.html_body || '<p><em>(This step has no HTML body yet.)</em></p>');
+    const shown = await withNudgeOffer(step);
+    const subject = fill(shown.subject);
+    const previewText = fill(shown.preview_text);
+    const body = fill(shown.html_body || '<p><em>(This step has no HTML body yet.)</em></p>');
 
     const doc = `<!doctype html>
 <html lang="en">
@@ -110,4 +125,4 @@ function notFoundPage() {
 }
 
 module.exports = router;
-module.exports._test = { fill, PREVIEW_CSP };
+module.exports._test = { fill, PREVIEW_CSP, withNudgeOffer };

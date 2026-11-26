@@ -35,6 +35,7 @@ import {
   classifyEstimateForPipeline,
   getUrgencyIndicator,
   detectCompetitor,
+  isBookedOtherWayEstimate,
 } from "./EstimatePage";
 import { LeadsSection } from "./LeadsTabs";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -58,6 +59,7 @@ import PipelineAnalytics, {
 // The Call today rule's one home, shared with the 9 AM push.
 import {
   CALL_OUTCOMES,
+  STILL_DECIDING_HELP,
   isCallableEstimate,
   isCallTodayEstimate,
   lastEngagementMs,
@@ -427,9 +429,11 @@ export function useCallOutcomes({ setEstimates, refresh, onNotInterested }) {
     },
     [setEstimates, refresh, onNotInterested],
   );
+  // A follow-up text sent from the row is the contact: the hold ends, as it does on an outcome tap.
+  const release = useCallback((id) => setHeld((prev) => withoutKey(prev, id)), []);
   return useMemo(
-    () => ({ hold, onCallToday, save, saving }),
-    [hold, onCallToday, save, saving],
+    () => ({ hold, onCallToday, release, save, saving }),
+    [hold, onCallToday, release, save, saving],
   );
 }
 // The list filter, with Call today widened to the rows a call from the list still holds.
@@ -448,20 +452,31 @@ export function callOutcomesUnreadNote(estimates, filter) {
     ? CALL_OUTCOMES_UNREAD_NOTE
     : "";
 }
+// When a call-list event happened, as a row says it: the time today (ET), the date and time on any other day.
+function callListWhen(stamp, now) {
+  const at = new Date(stamp);
+  const time = formatETTime(at);
+  return etDateString(at) === etDateString(now)
+    ? time
+    : `${formatETDate(at, { month: "short", day: "numeric" })}, ${time}`;
+}
 // A row's newest outcome: "No answer · 9:42 AM · Virginia", with the date when it was not today (ET).
 export function callOutcomeLine(callOutcome, now = new Date()) {
   const label = CALL_OUTCOMES.find((o) => o.key === callOutcome?.outcome)?.label;
   if (!label || !callOutcome.at) return "";
-  const at = new Date(callOutcome.at);
-  const time = formatETTime(at);
-  const when =
-    etDateString(at) === etDateString(now)
-      ? time
-      : `${formatETDate(at, { month: "short", day: "numeric" })}, ${time}`;
-  return [label, when, callOutcome.by].filter(Boolean).join(" · ");
+  return [label, callListWhen(callOutcome.at, now), callOutcome.by].filter(Boolean).join(" · ");
+}
+// What the customer said would help them decide (the estimate page's "Not ready yet?" sheet), as a row says it:
+// "Still deciding: wants to talk to a person first · 9:42 AM". "" for a reason this page does not know.
+export function stillDecidingLine(stillDeciding, now = new Date()) {
+  if (!stillDeciding?.at) return "";
+  const help = Object.hasOwn(STILL_DECIDING_HELP, String(stillDeciding.reason)) ? STILL_DECIDING_HELP[stillDeciding.reason] : null;
+  return help ? `Still deciding: ${help} · ${callListWhen(stillDeciding.at, now)}` : "";
 }
 // The four outcome buttons on a Call today row.
-export function CallOutcomeButtons({ estimate, onPick, saving = false, className }) {
+// `onFollowUp` (the mobile rows, which show these buttons on Call today only): a "Follow up" tap after the four outcomes opens the Follow Up modal
+// for the row. The desktop cards already carry their own Follow Up button, so they pass nothing.
+export function CallOutcomeButtons({ estimate, onPick, saving = false, className, onFollowUp }) {
   return (
     <div
       role="group"
@@ -483,10 +498,23 @@ export function CallOutcomeButtons({ estimate, onPick, saving = false, className
           {o.label}
         </Button>
       ))}
+      {onFollowUp && (
+        <Button
+          size="sm"
+          variant="secondary"
+          className="whitespace-nowrap"
+          onClick={(evt) => {
+            evt.stopPropagation();
+            onFollowUp(estimate);
+          }}
+        >
+          Follow up
+        </Button>
+      )}
     </div>
   );
 }
-function v3ChipMatches(e, chip) {
+export function v3ChipMatches(e, chip) {
   if (chip === "all") return true;
   if (Object.hasOwn(CALL_LIST_MATCHERS, chip)) return CALL_LIST_MATCHERS[chip](e);
   if (chip === "pricing_risk") return !!e.pricingRisk?.hasRisk;
@@ -500,13 +528,18 @@ function v3ChipMatches(e, chip) {
     return (
       e.status === "scheduled" || e.status === "sent" || e.status === "viewed"
     );
+  // Closed also holds an expired offer whose customer booked another way (a win).
   if (chip === "closed")
-    return e.status === "accepted" || e.status === "declined";
+    return (
+      e.status === "accepted" ||
+      e.status === "declined" ||
+      isBookedOtherWayEstimate(e)
+    );
   if (chip === "action") {
     // Never a self-serve quote nobody delivered (undeliveredSelfServe): the
     // zero-follow-up contract.
     if (e.undeliveredSelfServe) return false;
-    if (e.status === "expired") return true;
+    if (e.status === "expired") return !isBookedOtherWayEstimate(e);
     if (e.status === "viewed" && e.viewedAt) {
       const hrs = (Date.now() - new Date(e.viewedAt).getTime()) / 3.6e6;
       return hrs >= 48;
@@ -2543,6 +2576,7 @@ function EstimatePipelineViewV2({
           estimate={followUpTarget}
           onClose={() => setFollowUpTarget(null)}
           onSent={() => {
+            callOutcomes.release(followUpTarget.id);
             setFollowUpTarget(null);
             refreshEstimates();
           }}
@@ -2858,6 +2892,13 @@ function EstimatePipelineViewV2({
                         {e.address || "—"}
                         {e.serviceInterest ? ` · ${e.serviceInterest}` : ""}
                       </div>{" "}
+                      {/* What the customer said would help them decide. It sits with the name, in the column that can
+                       wrap: in the right-hand timeline its length pushed the row's actions to a second line. */}
+                      {stillDecidingLine(e.stillDeciding) && (
+                        <div className="text-ui-body text-ink-secondary mt-0.5">
+                          {stillDecidingLine(e.stillDeciding)}
+                        </div>
+                      )}
                       <EstimateSoldByRow estimate={e} onChanged={refreshEstimates} />
                     </div>
                     {/* Call + text + send-estimate trailing buttons — matches the
@@ -3839,6 +3880,7 @@ export function MobileEstimateRow({
   onCalled,
   onCallOutcome,
   callOutcomeSaving = false,
+  onFollowUp,
 }) {
   const navigate = useNavigate();
   const sendEstimateFromPipeline = useEstimateSend();
@@ -4072,12 +4114,18 @@ export function MobileEstimateRow({
               {callOutcomeLine(estimate.lastCallOutcome)}
             </span>
           )}
+          {stillDecidingLine(estimate.stillDeciding) && (
+            <span className="text-ui-body text-ink-tertiary">
+              {stillDecidingLine(estimate.stillDeciding)}
+            </span>
+          )}
           {onCallOutcome && (
             <CallOutcomeButtons
               estimate={estimate}
               onPick={onCallOutcome}
               saving={callOutcomeSaving}
               className="mt-1"
+              onFollowUp={onFollowUp}
             />
           )}
         </div>
@@ -4320,6 +4368,7 @@ function EstimatesMobileListView({
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [reasonTarget, setReasonTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
+  const [followUpTarget, setFollowUpTarget] = useState(null);
   const [estimates, setEstimates] = useState([]);
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -4820,6 +4869,7 @@ function EstimatesMobileListView({
               }}
               onCallOutcome={filter === "call_today" ? callOutcomes.save : undefined}
               callOutcomeSaving={callOutcomes.saving.has(e.id)}
+              onFollowUp={setFollowUpTarget}
             />
           ))}
         </div>
@@ -4882,6 +4932,19 @@ function EstimatesMobileListView({
           onClose={() => setReasonTarget(null)}
           onSaved={() => {
             setReasonTarget(null);
+            refreshEstimates();
+          }}
+        />
+      )}
+      {/* Opened by a Call today row's "Follow up" tap. A sent text stamps the estimate, which takes the row off Call today
+          (a row a call from the list was holding too). */}
+      {followUpTarget && (
+        <FollowUpModalV2
+          estimate={followUpTarget}
+          onClose={() => setFollowUpTarget(null)}
+          onSent={() => {
+            callOutcomes.release(followUpTarget.id);
+            setFollowUpTarget(null);
             refreshEstimates();
           }}
         />

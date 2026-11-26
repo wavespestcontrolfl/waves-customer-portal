@@ -513,6 +513,7 @@ describe("completionResumeOwedError", () => {
       "deferred_prepay_lookup_failed",
       "membership_dues_coverage_unverified",
       "proposal_terms_unread",
+      "held_payment_lookup_failed",
     ]) {
       expect(completionResumeOwedError({ status: 503, code })).toBe(true);
     }

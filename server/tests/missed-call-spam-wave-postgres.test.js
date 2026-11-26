@@ -535,8 +535,19 @@ jest.setTimeout(30000);
       expect((await stored(row)).metadata.missed_call_spam_wave).toBe('screen_quiet');
     });
 
-    test('gate off: the failed-screen call pushes as before and is stamped for the shadow read', async () => {
+    test('the all-unknown trial gate alone also quiets a failed-screen call (owner 2026-11-24 "trial")', async () => {
       isEnabled.mockImplementation((name) => name !== 'callScreenExchangeHistory');
+      const row = officeCall('+15125550101', 10, { metadata: { preconnect_screen: 'failed' } });
+      await database('call_log').insert(row);
+      reports({ bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } });
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      const { beforePush } = triggerNotification.mock.calls[0][2];
+      expect(await beforePush({ dispatching: true })).toBe(false);
+      expect((await stored(row)).metadata.missed_call_spam_wave).toBe('screen_quiet');
+    });
+
+    test('both screen gates off: the failed-screen call pushes as before and is stamped for the shadow read', async () => {
+      isEnabled.mockImplementation((name) => !['callScreenExchangeHistory', 'callScreenAllUnknown'].includes(name));
       const row = officeCall('+15125550101', 10, { metadata: { preconnect_screen: 'failed' } });
       await database('call_log').insert(row);
       reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });

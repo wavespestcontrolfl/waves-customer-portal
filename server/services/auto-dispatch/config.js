@@ -56,18 +56,6 @@ function isFlexTierEnabled() {
   }
 }
 
-// GATE_DAY_ONLY_PROMISE (owner 2026-11-05 "D2 a"): a visit whose latest promise is day-only (or
-// an unknown window) is frozen too: the customer was told that day. Same call-time, fail-closed read, once per run,
-// into config.dayOnlyPromise.
-function isDayOnlyPromiseEnabled() {
-  try {
-    const gates = require('../../config/feature-gates');
-    return typeof gates.dayOnlyPromiseLive === 'function' && gates.dayOnlyPromiseLive() === true;
-  } catch (_) {
-    return false;
-  }
-}
-
 // GATE_AUTO_DISPATCH_CONFLICT_MOVES: same call-time, fail-closed convention.
 function isConflictMovesEnabled() {
   const { gateEnvValue } = require('../../config/feature-gates');
@@ -161,7 +149,7 @@ function keepTechEnabled() {
 
 // The 2026-10-09 move rules (move-rules.js), resolved apart from
 // getAutoDispatchConfig to keep that function inside its complexity budget.
-function moveRuleConfig(overrides) {
+function moveRuleConfig(overrides, flexTierEnabled) {
   return {
     // A DAY move must save at least this many modeled drive minutes on the
     // visit's own detour (owner 2026-10-09: 16 of 50 moves in a week cleared
@@ -169,6 +157,16 @@ function moveRuleConfig(overrides) {
     // with no drive saved). A same-day re-time is held to it too. 0 = off.
     minDayMoveDriveSavingMinutes: overrides.minDayMoveDriveSavingMinutes
       ?? intEnv('AUTO_DISPATCH_MIN_DAY_MOVE_DRIVE_SAVING_MINUTES', 6, { min: 0, max: 120 }),
+    // MINUTES RULE (owner 2026-11-24 *all rec*): a first day move saving this
+    // many modeled detour minutes (and as many on real roads) qualifies below
+    // the score bar when preference and technician fit do not drop
+    // (move-rules.js minutesRuleOk). 0 = off.
+    minutesRuleSavingMinutes: overrides.minutesRuleSavingMinutes
+      ?? intEnv('AUTO_DISPATCH_MINUTES_RULE_SAVING_MINUTES', 10, { min: 0, max: 120 }),
+    // The same rule for a visit already moved once (owner 2026-11-24 "do whatever
+    // you rec": 15 minutes in place of the 20-point re-move bar). 0 = off.
+    minutesRuleSecondMoveSavingMinutes: overrides.minutesRuleSecondMoveSavingMinutes
+      ?? intEnv('AUTO_DISPATCH_MINUTES_RULE_SECOND_MOVE_SAVING_MINUTES', 15, { min: 0, max: 120 }),
     // CONFLICT MOVES (GATE_AUTO_DISPATCH_CONFLICT_MOVES): a visit that overlaps
     // another customer's stop, or sits on an owner blackout day, moves to the
     // best legal slot without the score bar. See current-conflict.js.
@@ -179,11 +177,20 @@ function moveRuleConfig(overrides) {
     // closed-day move too. Owner decision pending on the number.
     conflictMaxAddedDriveMinutes: overrides.conflictMaxAddedDriveMinutes
       ?? intEnv('AUTO_DISPATCH_CONFLICT_MAX_ADDED_DRIVE_MINUTES', 15, { min: 0, max: 240 }),
-    // The most automatic moves one visit may have (owner 2026-10-09: "at most
-    // two"), counted from the durable reschedule_log (move-limit.js). Day
-    // moves, same-day re-times and forced moves all count. 0 = no limit.
+    // The most automatic DAY moves one visit may have, counted from the durable
+    // reschedule_log (move-limit.js). Under the flex tier the default is 0 = no
+    // limit, since the owner's 2026-11-22 "this is all too limiting": every flex
+    // move stays inside its band around the visit's durable original date, a
+    // second move needs the higher re-move score (removeStabilityFloor), and
+    // nothing moves inside 25 hours or after a time was told. The route-tiers
+    // and legacy guards search around the CURRENT date, so there the 2026-10-09
+    // default of 2 ("at most two") stays: the cap is what stops nightly drift.
+    // The env var overrides both. When on: a same-day change of the hour does not
+    // count (owner 2026-11-22, "days"); a forced move of a placed visit counts
+    // when it changes the day; the first placement of a visit with no arrival
+    // window never counts.
     maxAutoMovesPerVisit: overrides.maxAutoMovesPerVisit
-      ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', 2, { min: 0, max: 20 }),
+      ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', flexTierEnabled ? 0 : 2, { min: 0, max: 20 }),
     // ROAD CHECK (GATE_AUTO_DISPATCH_ROAD_CHECK, road-check.js): an ordinary
     // move's drive saving is measured again on Google's traffic-aware roads
     // before the visit moves. The cap is the most route-matrix legs one run
@@ -226,9 +233,10 @@ function moveRuleConfig(overrides) {
     // other technicians' slots (`other_tech`) and apply.js refuses a change
     // (TECH_CHANGE_BLOCKED). Unassigned visits are unchanged.
     keepTech: overrides.keepTech ?? keepTechEnabled(),
-    // GATE_DAY_ONLY_PROMISE: a day-only or unknown-window promise also freezes the visit
-    // (loadReminderFreeze opts.anyPromise). Read once per run, so it lands in config_snapshot.
-    dayOnlyPromise: overrides.dayOnlyPromise ?? isDayOnlyPromiseEnabled(),
+    // A day-only or unknown-window promise also freezes the visit (loadReminderFreeze opts.anyPromise); always so since
+    // GATE_DAY_ONLY_PROMISE was removed. Kept in config_snapshot as a recorded fact: the Auto-Dispatch page reads it to state
+    // the rule a run used, and a run saved before 2026-11-08 says false or has no key.
+    dayOnlyPromise: true,
   };
 }
 
@@ -264,7 +272,7 @@ function getAutoDispatchConfig(overrides = {}) {
       ?? intEnv('AUTO_DISPATCH_DATE_TOLERANCE_DAYS', 7, { min: 1, max: 60 }),
     minScoreImprovement: overrides.minScoreImprovement
       ?? intEnv('AUTO_DISPATCH_MIN_SCORE_IMPROVEMENT', 15, { min: 0, max: 100 }),
-    ...moveRuleConfig(overrides),
+    ...moveRuleConfig(overrides, flexTierEnabled),
     maxChangesPerRun: overrides.maxChangesPerRun
       ?? intEnv('AUTO_DISPATCH_MAX_CHANGES_PER_RUN', 100, { min: 0, max: 100000 }),
     // Self-heal: per-run cap on geocoding MISSING_GEO customers (each is a Google
@@ -287,7 +295,7 @@ function getAutoDispatchConfig(overrides = {}) {
     // runs — behavior is the legacy flat lock, byte for byte.
     routeTiersEnabled,
     // FLEX-TIER: when true, auto-dispatch's day-move guard is the Flexible
-    // tier (flex-tier.js: 73h freeze, fixed ±5-day radius clamped by the
+    // tier (flex-tier.js: 25h night freeze, a ±5-day radius (±7 for a visit that repeats every 8 weeks or less often) clamped by the
     // series' adjacent occurrence) instead of the route-tiers days-out
     // ladder. Independent of routeTiersEnabled; guardMode below gives this
     // one precedence when both are somehow on.
@@ -299,7 +307,18 @@ function getAutoDispatchConfig(overrides = {}) {
     // this same config object — a grouped move's siblings are always
     // checked under the identical mode as the tapped row that triggered it.
     guardMode: flexTierEnabled ? 'flex' : (routeTiersEnabled ? 'tiers' : 'legacy'),
+    ...flexPolicyFacts(flexTierEnabled),
   };
+}
+
+// What the admin page states for a flex run (AutoDispatchPage policyText), saved in config_snapshot so a run keeps
+// the rule it ran under: the night freeze in hours (the run always passes lock24h, owner 2026-11-03) and the widest
+// band (±7, owner 2026-11-22) and the 2-month band (±6, owner 2026-11-24); flexBandRadius decides which visits get them. A run saved before these fields existed
+// has neither, and the page then states only what every flex run had in common.
+function flexPolicyFacts(flexTierEnabled) {
+  if (!flexTierEnabled) return {};
+  const flexTier = require('./flex-tier');
+  return { flexFreezeHours: flexTier.flexFreezeHoursFor(true), flexWideRadiusDays: flexTier.FLEX_TIER_WIDE_RADIUS_DAYS, flexBimonthlyRadiusDays: flexTier.FLEX_TIER_BIMONTHLY_RADIUS_DAYS };
 }
 
 module.exports = {

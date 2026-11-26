@@ -98,6 +98,23 @@ function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+// Outcomes where the service was not (fully) performed: the visit happened, the
+// work did not finish (pest-recap.js NON_PERFORMED_VISIT_OUTCOMES).
+const NOT_FINISHED_OUTCOMES = new Set(['inspection_only', 'customer_declined', 'incomplete']);
+
+// The report email's opening line (owner 2026-11-24, email wording change 1):
+// who came for which visit, and when. Built here so a visit with no
+// technician name or no date still reads as a whole sentence, and only a
+// completed visit says "finished".
+function visitDoneLine({ technicianName, serviceLabel, serviceDate, visitOutcome }) {
+  const who = String(technicianName || '').trim() || 'We';
+  const label = String(serviceLabel || '').trim();
+  const what = label ? `your ${label}` : 'your visit';
+  const when = serviceDate ? ` on ${serviceDate}` : '';
+  const verb = NOT_FINISHED_OUTCOMES.has(String(visitOutcome || '').toLowerCase()) ? 'stopped by for' : 'finished';
+  return `${who} ${verb} ${what}${when}.`;
+}
+
 function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel, pdf, inspectionCreditNote = '', firstReport = false }) {
   const findings = customerActionFindings(Array.isArray(data?.findings) ? data.findings : []);
   const applications = Array.isArray(data?.applications) ? data.applications : [];
@@ -114,6 +131,8 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
       !exteriorReadyAt && minutes(advisory.exterior_reentry_min) ? `Exterior re-entry: ${minutes(advisory.exterior_reentry_min)}` : null,
       !interiorReadyAt && minutes(advisory.interior_reentry_min) ? `Interior re-entry: ${minutes(advisory.interior_reentry_min)}` : null,
     ].filter(Boolean);
+  const serviceDate = data?.serviceDate ? formatDate(data.serviceDate) : '';
+  const technicianName = data?.technicianName || '';
   const pressureMetric = (data?.metrics || []).find((metric) => /pressure/i.test(metric.label || ''));
   const pressureValue = pressureMetric?.value != null && pressureMetric.value !== ''
     ? String(pressureMetric.value)
@@ -126,8 +145,9 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
     first_name: recipient.name ? firstName(recipient.name) : (reportGreetingFirstToken(data) || 'there'),
     report_url: reportUrl,
     service_label: serviceLabel,
-    service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
-    technician_name: data?.technicianName || '',
+    service_date: serviceDate,
+    technician_name: technicianName,
+    visit_done_line: visitDoneLine({ technicianName, serviceLabel, serviceDate, visitOutcome: data?.visitOutcome }),
     property_address: propertyAddressLine(data),
     // Nothing logged = blank, so the template's "Findings" row drops (a
     // details row with a blank value is not rendered). The row never
@@ -737,6 +757,62 @@ async function sendServiceReportV1Email(recordId, {
     disposition: 'attachment',
   }] : undefined;
 
+  // GATE_DOC_CROSS_SELL_EMAIL (owner 2026-11-21): one closing line pointing
+  // at the report page's add-a-service / referral cards, on the ACCOUNT
+  // HOLDER's copy only — service contacts on this send must not be invited
+  // to start the homeowner's plan. Names only the cards the live report
+  // shows (GATE_REPORT_CROSS_SELL, complaint visits suppressed), never a
+  // price. The line is a pitch inside an operational email, so it follows
+  // the account holder's marketing choices (email-division's embedded-pitch
+  // rule). Best-effort: no line on any failure.
+  // Composed HERE, before the two send fences below: its reads (offer
+  // pricing, the referral decision) must not run inside the re-entry send
+  // seal's window, where a slow read could outlive the seal.
+  let offerLine = null;
+  const gates = require('../../config/feature-gates');
+  if (gates.isEnabled('docCrossSellEmail') && gates.isEnabled('reportCrossSell')) {
+    try {
+      const holder = recipients.find((r) => r.role === 'primary');
+      const { reserviceReportCopyGateOn } = require('./reservice-report');
+      // A complaint visit's report carries no card, so its email names none.
+      const callback = reserviceReportCopyGateOn() && service.is_callback === true;
+      if (holder && !callback) {
+        // The card the live report shows: the report route's own composer,
+        // on the row this sender loaded with the report's frozen identity
+        // applied (loadServiceRecord), as the report route does. So the line
+        // and the report read the same premises. Best-effort by contract:
+        // null on any failure.
+        const crossSell = await require('./cross-sell').buildReportCrossSell(service, db);
+        // The customer's own card: with GATE_REFERRAL_STEP2 on, the report
+        // page's per-customer reward decision. A card that cannot be read is
+        // no card: the service offer still rides the line.
+        let referralCard = null;
+        try {
+          referralCard = await require('../referral-share').composeReferralCard({ customerId: service.customer_id });
+        } catch (err) {
+          logger.warn(`[report-email] referral card skipped (code=${err?.code || 'none'})`);
+        }
+        if (crossSell || referralCard) {
+          // The customer's choices are read ONCE, AFTER the cards are
+          // composed (pricing can take seconds): a customer who turned
+          // offers off or unsubscribed in the meantime gets no line. The
+          // referral part is a referral ask too, so the same read gives its
+          // own answer, apart from the service offer.
+          const consent = await require('../email-division/eligibility')
+            .embeddedLineConsent({ customerId: service.customer_id, email: holder.email });
+          if (consent.pitch) {
+            offerLine = require('../doc-offer-email-line').docOfferEmailLine({
+              crossSell, referral: consent.referralAsk ? referralCard : null, url: fullReportUrl, place: 'report',
+            });
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(`[report-email] offer line skipped (code=${err?.code || 'none'})`);
+    }
+  }
+  const { joinBodyAppends } = require('../doc-offer-email-line');
+
   // Post-render fence (codex P1 #3093 r36): a recommendation run that
   // starts after the worker's one-time sanitize check can overwrite the
   // assessment while the attachment renders. The caller re-verifies the
@@ -814,7 +890,7 @@ async function sendServiceReportV1Email(recordId, {
           inspectionCreditNote,
           firstReport,
         }),
-        bodyAppend: followUsLine(),
+        bodyAppend: joinBodyAppends(recipient.role === 'primary' ? offerLine : null, followUsLine()),
         recipientType: 'customer',
         recipientId: service.customer_id || null,
         triggerEventId: `service_report_ready:${recordId}:${recipient.role || 'recipient'}`,
@@ -998,6 +1074,7 @@ module.exports = {
   buildServiceReportV1Email,
   legacyRecipientData,
   serviceReportTemplatePayload,
+  visitDoneLine,
   sendServiceReportV1Email,
   REENTRY_SEND_LOCK_CLASS,
   REENTRY_SEND_SEAL_KEY,

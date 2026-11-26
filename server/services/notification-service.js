@@ -130,7 +130,7 @@ const CUSTOMER_UNREAD_INBOUND_SQL = `(
 const REMINDER_STAMP_KEYS = Object.freeze(['leadCallReminderAt', 'newLeadRealertAt', 'newLeadRealertLeads']);
 const VERSIONED_METADATA_SQL = `CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata${REMINDER_STAMP_KEYS.map((key) => ` - '${key}'`).join('')} ELSE metadata END`;
 const NOTIFICATION_VERSION_SQL = `md5(jsonb_build_array(title, body, link, detail, ${VERSIONED_METADATA_SQL})::text)`;
-// GATE_ALERT_BELL_ORDER: where a row sits in the admin bell. 0 = metadata.severity is 'needs-you'; 1 = no severity label
+// Where a row sits in the admin bell. 0 = metadata.severity is 'needs-you'; 1 = no severity label
 // (an older or unconverted alert stays above known FYI rows); 2 = any other severity. Inside a rank: newest first.
 const BELL_RANK_SQL = "(CASE WHEN metadata->>'severity' = 'needs-you' THEN 0 WHEN COALESCE(metadata->>'severity', '') = '' THEN 1 ELSE 2 END)";
 
@@ -392,8 +392,16 @@ const RING_METADATA_KEYS = ['count', 'newCount', 'itemKeys', 'itemSetHash'];
 
 // Did this emission change anything a standing keyed row shows, routes by,
 // or rings on?
-function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged }) {
-  return versionChanged || existing.title !== nextTitle || existing.body !== nextBody
+// refreshQuietClosed (opt-in): the quiet policy closed the standing row, so an identical
+// emission still enters the refresh branch and lets ringOnRefresh decide whether it comes back.
+// A row the quiet policy or the nightly retention sweep closed, never a person's close.
+// 'retention' = admin-alert-retention RETENTION_BY (the nightly age30 / fyi7 sweep); an older close of an opted-in row
+// by that sweep is recovered the same way as a quiet close.
+const AGED_OUT_DONE_BY = new Set([QUIET_FALL_OFF_DONE_BY, 'retention']);
+const closedByQuietPolicy = (row) => Boolean(row.done_at) && AGED_OUT_DONE_BY.has(row.done_by);
+
+function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, refreshQuietClosed }) {
+  return (refreshQuietClosed && closedByQuietPolicy(existing)) || versionChanged || existing.title !== nextTitle || existing.body !== nextBody
     || existing.link !== nextLink || detailChanged || routingChanged || ringMetadataChanged;
 }
 
@@ -526,6 +534,47 @@ function createPlainAdmin(service, { category, title, body, createOpts, ringGate
     return service.create({ recipientType: 'admin', category, title, body, ...createOpts, metadata: meta, connection: conn });
   };
   return callerTrx ? gated(callerTrx) : db.transaction(gated);
+}
+
+// refreshOnlyOpen: the standing row as it stands now, locked, with the metadata to merge onto it. The rewrite
+// replaces the metadata, so it must be built from this read, not the probe's: a "Send to Claude" stamp or note
+// written after the probe survives, and an Undo of one is not reversed: keepSentToClaude runs exactly once, on the
+// ORIGINAL emission metadata against this locked row. null when a person closed the row since the probe.
+async function lockOpenStandingRow(trx, existing, emissionMeta) {
+  const current = await trx('notifications').where({ id: existing.id }).forUpdate().first();
+  if (!current || current.done_at != null) return null;
+  const existingMeta = typeof current.metadata === 'string' ? JSON.parse(current.metadata) : (current.metadata || {});
+  return { existing: current, existingMeta, useMeta: keepSentToClaude(current, existingMeta, emissionMeta) };
+}
+
+// notifyAdmin's refresh of a standing keyed row (the refreshOnDedupe branch): decides the ring, merges the
+// metadata and rewrites the row, returning the write's result. refreshOnlyOpen (opt-in, with dedupeOpenOnly): the
+// rewrite lands only while the row is still open (done_at IS NULL). A person's Done between the probe and this
+// write would otherwise take the new content onto a closed row and leave no open bell; with no row written it
+// returns null and the caller inserts a fresh one, as it does when no standing row exists.
+async function refreshStandingRow(trx, ctx) {
+  const { adjusted, ringOnRefresh, bumpOnRefresh, refreshOnlyOpen } = ctx;
+  const row = refreshOnlyOpen ? await lockOpenStandingRow(trx, ctx.existing, ctx.emissionMeta) : ctx;
+  if (!row) return null;
+  const { existing, existingMeta, useMeta } = row;
+  const { nextTitle, nextBody, nextDetail, nextLink, detailChanged, sameText } = ctx;
+  // A row that newly enters the owner audience (engineering/fyi ->
+  // owner) is news to the owner even at an equal count: it may
+  // have been read in Activity, so it must ring into the bell.
+  const enteredOwner = useMeta.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
+  // Likewise a row that leaves Claude's queue for the bell is news to the owner: it rings back in,
+  // unless the emission itself asked for a quiet refresh.
+  const leftClaudeQueue = Boolean(existingMeta.claudeQueue) && !useMeta.claudeQueue;
+  const shouldRing = adjusted?.quiet ? false : (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
+  const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
+  const bump = shouldRing && bumpOnRefresh;
+  const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
+    metadata: trx.raw(KEEP_DB_HOLD_SQL, [JSON.stringify(mergedMetadata), shouldRing]), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
+  const target = trx('notifications').where({ id: existing.id });
+  const written = await (refreshOnlyOpen ? target.whereNull('done_at') : target)
+    .update(bump ? { ...refreshed, created_at: trx.fn.now() } : refreshed);
+  if (refreshOnlyOpen && !written) return null;
+  return { notification: { ...existing, ...refreshed, ...(bump ? { created_at: new Date() } : {}), metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
 }
 
 const NotificationService = {
@@ -704,11 +753,13 @@ const NotificationService = {
     // and the row it gates can never observe each other's in-between state.
     // dedupeOpenOnly (optional, with dedupeKey): the dedupe probe skips rows with
     // done_at set, so a closed row never hides a new ring (see the probe below).
+    // refreshQuietClosed (optional, with refreshOnDedupe): an identical emission still reaches ringOnRefresh
+    // when the quiet policy closed the standing row; a person's Done never does.
     // bumpOnRefresh (optional, with refreshOnDedupe): a refresh that rings also
     // moves the row's created_at to now, so a standing row that keeps getting
     // newer news (one row per customer thread: "3 texts") rises to the top of
     // the newest-first bell instead of staying where its first text put it.
-    const { dedupeKey, dedupeWindowMs, dedupeOpenOnly = false, dedupeVersion, refreshOnDedupe = false, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, dedupeOpenOnly = false, dedupeVersion, refreshOnDedupe = false, refreshQuietClosed, refreshOnlyOpen, bumpOnRefresh = false, standingRefresh = null, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
@@ -746,7 +797,8 @@ const NotificationService = {
             ? await standingRefresh(existing, existingMeta) : null;
           // A row the owner sent to Claude stays in Claude's queue while it is open: this
           // emission still updates its text, never its routing (admin-alert-routing.js keepSentToClaude).
-          const useMeta = keepSentToClaude(existing, existingMeta, adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata);
+          const emissionMeta = adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata;
+          const useMeta = keepSentToClaude(existing, existingMeta, emissionMeta);
           const useDetail = adjusted && 'detail' in adjusted ? adjusted.detail : createOpts.detail;
           // Compared and stored in create()'s admin form (emoji-stripped +
           // brevity-cut), or a difference the guard itself introduces (an
@@ -791,23 +843,16 @@ const NotificationService = {
           // Compared by JSON so an itemKeys array compares by value.
           const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(useMeta, k)
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(useMeta[k] ?? null));
-          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
-            // A row that newly enters the owner audience (engineering/fyi ->
-            // owner) is news to the owner even at an equal count: it may
-            // have been read in Activity, so it must ring into the bell.
-            const enteredOwner = useMeta.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
-            // Likewise a row that leaves Claude's queue for the bell is news to the owner: it rings back in,
-            // unless the emission itself asked for a quiet refresh.
-            const leftClaudeQueue = Boolean(existingMeta.claudeQueue) && !useMeta.claudeQueue;
-            const shouldRing = adjusted?.quiet ? false : (enteredOwner || leftClaudeQueue || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta));
-            const mergedMetadata = mergeRefreshMetadata(existingMeta, useMeta, shouldRing);
-            const bump = shouldRing && bumpOnRefresh;
-            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
-              metadata: trx.raw(KEEP_DB_HOLD_SQL, [JSON.stringify(mergedMetadata), shouldRing]), ...(shouldRing ? { read_at: null, ...DONE_CLEARED } : {}) };
-            await trx('notifications').where({ id: existing.id }).update(bump ? { ...refreshed, created_at: trx.fn.now() } : refreshed);
-            return { notification: { ...existing, ...refreshed, ...(bump ? { created_at: new Date() } : {}), metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged, refreshQuietClosed })) {
+            const refreshedStanding = await refreshStandingRow(trx, {
+              existing, existingMeta, useMeta, emissionMeta, adjusted, ringOnRefresh, bumpOnRefresh, refreshOnlyOpen,
+              nextTitle, nextBody, nextDetail, nextLink, detailChanged, sameText,
+            });
+            if (refreshedStanding) return refreshedStanding;
+            // refreshOnlyOpen: a person closed the row since the probe. Fall through to a fresh row below.
+          } else {
+            return { notification: existing, deduped: true };
           }
-          return { notification: existing, deduped: true };
         }
         // A fresh keyed insert takes the same ring gate as a plain one.
         const created = await createPlainAdmin(this, {
@@ -1034,25 +1079,25 @@ const NotificationService = {
   // is exact, so rows sharing a millisecond are never skipped or repeated.
   // An owner-only row (metadata.ownerOnly: a Claude plan or copy) is listed for the owner login only (`fullAccess`).
   //
-  // ranked (GATE_ALERT_BELL_ORDER, the route passes it): the feed order becomes BELL_RANK_SQL ASC, created_at DESC,
-  // id DESC, and every row also selects its rank as bell_rank for the route's cursor. The cursor then carries
-  // `before.rank`: "strictly after" is a higher rank, or the same rank and an older (created_at, id). The route only
-  // passes a cursor of the same order (a cursor of the other order restarts at page 1). Offset paging uses the same order.
-  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null, fullAccess = false, ranked = false } = {}) {
+  // The feed order is BELL_RANK_SQL ASC, created_at DESC, id DESC, and every row also selects its rank as bell_rank
+  // for the route's cursor. The cursor carries `before.rank`: "strictly after" is a higher rank, or the same rank and an
+  // older (created_at, id). The route only passes a cursor of this order (a chronological cursor restarts at page 1).
+  // Offset paging uses the same order.
+  async getAdminNotifications(limit = 50, offset = 0, { role, technicianId = null, before = null, fullAccess = false } = {}) {
     const query = excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }).whereNull('done_at'),
       role, technicianId,
     ));
     if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
-    if (before && ranked) {
+    if (before) {
       const { rank } = before;
       query.whereRaw(`(${BELL_RANK_SQL} > ? OR (${BELL_RANK_SQL} = ? AND (created_at, id) < (?::timestamptz, ?::uuid)))`,
         [rank, rank, before.at, before.id]);
-    } else if (before) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [before.at, before.id]);
+    }
     const rows = await query
       .select('*', db.raw(`${NOTIFICATION_VERSION_SQL} AS version`), db.raw('created_at::text AS created_at_cursor'),
-        ...(ranked ? [db.raw(`${BELL_RANK_SQL} AS bell_rank`)] : []))
-      .orderByRaw(ranked ? `${BELL_RANK_SQL} ASC, created_at DESC, id DESC` : 'created_at DESC, id DESC')
+        db.raw(`${BELL_RANK_SQL} AS bell_rank`))
+      .orderByRaw(`${BELL_RANK_SQL} ASC, created_at DESC, id DESC`)
       .limit(limit).offset(offset);
     if (!role || role === 'admin') return rows;
     // A non-admin reads a technician's copy of a row whose trigger names techOmit keys (call content, owner
@@ -1445,6 +1490,7 @@ module.exports._private = {
   REOPENABLE_DONE_BY_SQL,
   KEEP_DB_HOLD_SQL,
   QUIET_FALL_OFF_DONE_BY,
+  closedByQuietPolicy,
   QUIET_HOLD_KEY,
   DONE_CLEARED,
   MAX_ADMIN_TITLE_CHARS,

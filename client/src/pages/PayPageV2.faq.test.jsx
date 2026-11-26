@@ -100,7 +100,7 @@ describe('pay page — FAQ under the Pay button (GATE_PAY_PAGE_FAQ)', () => {
     renderPage();
     await screen.findByText('Review and pay');
     expect(FAQ()).toBeNull();
-    expect(screen.queryByText('Common questions')).not.toBeInTheDocument();
+    expect(screen.queryByText('Payment questions')).not.toBeInTheDocument();
   });
 
   it('renders the card-fee, bank-timing and saved-card questions with the derived surcharge percent', async () => {
@@ -115,8 +115,23 @@ describe('pay page — FAQ under the Pay button (GATE_PAY_PAGE_FAQ)', () => {
     expect(screen.getByText(/few business days to clear/)).toBeInTheDocument();
     expect(screen.getByText('Is my card saved?')).toBeInTheDocument();
     expect(screen.getByText(/Only if you check the box/)).toBeInTheDocument();
+    // The questions customers call about (owner 2026-11-24), under the "Payment questions" heading.
+    expect(screen.getByText('Payment questions')).toBeInTheDocument();
+    for (const q of [
+      'The page or my bank link isn’t working. What do I do?',
+      'Will I get a receipt, and where is my invoice copy?',
+      'Why is this the amount? Where is my WaveGuard discount?',
+      'Can I pay by check or cash?',
+      'How do I pay from my bank automatically?',
+      'Can I prepay for the year?',
+      'Someone else is paying (a closing or a property manager). How does that work?',
+      'I think this bill is wrong. Who do I contact?',
+    ]) expect(screen.getByText(q)).toBeInTheDocument();
     // No Zelle question without manualPayOptions, and no Zelle mention in the fee answer.
     expect(screen.queryByText('Can I pay by Zelle?')).not.toBeInTheDocument();
+    // No payment form on this page (Stripe unavailable): no manual bank-entry steps.
+    expect(screen.queryByText('My bank won’t let me sign in. How do I pay by bank?')).not.toBeInTheDocument();
+    expect(screen.queryByText(/enter your bank details manually/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Zelle has no fees/)).not.toBeInTheDocument();
     // The FAQ sits inside the payment panel, above "Other ways to pay".
     expect(FAQ().closest('.waves-pay-payment-panel')).not.toBeNull();
@@ -149,6 +164,7 @@ describe('pay page — FAQ under the Pay button (GATE_PAY_PAGE_FAQ)', () => {
     await screen.findByText('Review and pay');
     expect(FAQ()).not.toBeNull();
     expect(screen.queryByText('Is my card saved?')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Someone else is paying/)).not.toBeInTheDocument();
   });
 
   it('is gone once the invoice is paid (the page hands off to the receipt)', async () => {

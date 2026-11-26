@@ -391,6 +391,213 @@ describe('rain-out service', () => {
       expect(finder.mock.calls[0][0].pickerRoadCheck).toBeUndefined();
     });
 
+    // GATE_TECH_SHIFT_HOURS (D4 part 3b-2a): a technician's own move refuses an hour the visit's
+    // technician's shift today does not hold, so the sheet does not offer one. Now is 10:00 ET.
+    describe('shift hours', () => {
+      afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+      const sameDayOnShift = async (shift, overrides = {}) => {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed', ...overrides }) }),
+            chain({ rows: [] }),
+          ],
+          // loadTechShifts: the set hours, then today's clock-ins (none).
+          technicians: [chain({ whereNotNull: jest.fn().mockReturnThis(), rows: [{ id: 'tech-1', shift_start: shift[0], shift_end: shift[1] }] })],
+          time_entries: [chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue([]) })],
+        });
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+        expect(options.ok).toBe(true);
+        return options.sameDay.map((o) => o.window.start);
+      };
+      // The dispatch board's sheet: it commits as the office. No technicians queue is wired, so a shift read would throw.
+      const sameDayForOffice = async () => {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed' }) }),
+            chain({ rows: [] }),
+          ],
+        });
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: true, technicianId: 'admin-1' }, initiatedBy: 'admin' });
+        expect(options.ok).toBe(true);
+        return options.sameDay.map((o) => o.window.start);
+      };
+
+      // The rest of the route (routeShiftRows): each hour and each day says which later stops it would land
+      // outside the shift. A technician's sheet reads the hours twice (its own hours, then the route's stops).
+      describe('the rest of the route', () => {
+        const ROUTE = [
+          { id: 'svc-2', window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60 },
+          { id: 'svc-3', window_start: '14:00:00', window_end: '15:00:00', estimated_duration_minutes: 60 },
+          { id: 'svc-4', window_start: '17:00:00', window_end: '18:00:00', estimated_duration_minutes: 60 },
+        ];
+        const hours = () => chain({ whereNotNull: jest.fn().mockReturnThis(), rows: [{ id: 'tech-1', shift_start: '08:00', shift_end: '17:30' }] });
+        const clockIns = (at) => chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue(at ? [{ technician_id: 'tech-1', clock_in: at }] : []) });
+        const optionsFor = async ({ office = false, workDays = null, clockIn = null, route = ROUTE } = {}) => {
+          finder.mockResolvedValue({ slots: [slot('12:00', 5)] });
+          SmartRebooker.findRescheduleOptions.mockResolvedValue([
+            { date: '2026-06-12', displayDate: 'Fri, Jun 12', suggestedWindow: { start: '08:00', end: '10:00', display: '8:00-10:00 AM' }, score: 120 },
+          ]);
+          wireDb({
+            scheduled_services: [
+              chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed' }) }),
+              chain({ rows: route.map((job) => ({ scheduled_date: etDateString(), ...job })) }),
+            ],
+            // The technician's sheet reads the hours twice (its own hours, then the route's) and no work
+            // days: a third read would throw, and the rows would be gone. The office's sheet does not hold
+            // its own hours to the shift: the hours once, then the work days.
+            technicians: office ? [hours(), chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', work_days: workDays }) })] : [hours(), hours()],
+            time_entries: [...(office ? [] : [clockIns(clockIn)]), clockIns(clockIn)],
+          });
+          const options = await RainOut.getOptions('svc-1', office
+            ? { caller: { isAdmin: true, technicianId: 'admin-1' }, initiatedBy: 'admin' }
+            : { caller: { isAdmin: false, technicianId: 'tech-1' } });
+          expect(options.ok).toBe(true);
+          return options;
+        };
+
+        test('gate on: a start the mover cannot read (a stored 24:00) is a row on the technician\'s sheet; the office is told nothing of it', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          // PostgreSQL stores 24:00:00 as a TIME. A day move keeps it; the mover reads it as a block no
+          // shift holds and refuses the technician's move of that stop.
+          const route = [ROUTE[0], { id: 'svc-7', window_start: '24:00:00', window_end: null, estimated_duration_minutes: 60 }];
+          expect((await optionsFor({ route })).days.map((o) => o.routeShiftConflicts)).toEqual([[{ windowStart: '24:00', windowEnd: null }]]);
+          // The office's line reads the block to the minute: no start it can read, no line, no row.
+          expect((await optionsFor({ office: true, route })).days[0]).not.toHaveProperty('routeShiftConflicts');
+        });
+
+        test('gate on: an hour and a day each carry the stops they would land outside the shift', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          const options = await optionsFor();
+          // 09:00 to 12:00 is a push of three hours: svc-3 lands 17:00 to 18:00, svc-4 lands 20:00 to 21:00.
+          expect(options.sameDay.map((o) => [o.window.start, o.routeShiftConflicts])).toEqual([
+            ['12:00', [{ windowStart: '17:00', windowEnd: '18:00' }, { windowStart: '20:00', windowEnd: '21:00' }]],
+          ]);
+          // A day move: each stop keeps its window, and only svc-4 ends after 17:30.
+          expect(options.days.map((o) => [o.date, o.routeShiftConflicts])).toEqual([
+            ['2026-06-12', [{ windowStart: '17:00', windowEnd: '18:00' }]],
+          ]);
+        });
+
+        test('gate on: the office\'s sheet carries the same rows', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          const options = await optionsFor({ office: true });
+          expect(options.sameDay.find((o) => o.window.start === '12:00').routeShiftConflicts)
+            .toEqual([{ windowStart: '17:00', windowEnd: '18:00' }, { windowStart: '20:00', windowEnd: '21:00' }]);
+          expect(options.days[0].routeShiftConflicts).toEqual([{ windowStart: '17:00', windowEnd: '18:00' }]);
+        });
+
+        test('gate on: today is judged on the clock-in, another day on the set hours', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          // Clocked in at 09:00 ET: today's shift is the set nine and a half hours from then, 09:00 to 18:30.
+          const options = await optionsFor({ office: true, clockIn: new Date('2026-06-11T13:00:00Z') });
+          // svc-3 lands 17:00 to 18:00: after the set end (17:30), and inside today's shift.
+          expect(options.sameDay.find((o) => o.window.start === '12:00').routeShiftConflicts).toEqual([{ windowStart: '20:00', windowEnd: '21:00' }]);
+          expect(options.days[0].routeShiftConflicts).toEqual([{ windowStart: '17:00', windowEnd: '18:00' }]);
+        });
+
+        // 2026-06-11 is a Thursday and 2026-06-12 a Friday.
+        test('gate on, a day the technician does not work: the office has no row for it, the technician has', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          process.env.GATE_TECH_WORK_DAYS = 'true';
+          try {
+            const office = await optionsFor({ office: true, workDays: [1, 2, 3, 4] });
+            expect(office.sameDay.find((o) => o.window.start === '12:00').routeShiftConflicts).toHaveLength(2);
+            expect(office.days[0]).not.toHaveProperty('routeShiftConflicts');
+            // The technician's own move is judged on the shift whatever the day.
+            const own = await optionsFor();
+            expect(own.days[0].routeShiftConflicts).toEqual([{ windowStart: '17:00', windowEnd: '18:00' }]);
+            expect(db.mock.calls.filter(([table]) => table === 'technicians')).toHaveLength(4);
+          } finally {
+            delete process.env.GATE_TECH_WORK_DAYS;
+          }
+        });
+
+        test('gate off: no option has the key', async () => {
+          const options = await optionsFor({ office: true });
+          for (const option of [...options.sameDay, ...options.days]) expect(option).not.toHaveProperty('routeShiftConflicts');
+          expect(db.mock.calls.map(([table]) => table)).not.toContain('technicians');
+        });
+      });
+
+      test('gate on: a route-checked hour that starts before the shift, or ends after it, is not offered', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('12:00', 5), slot('13:00', 4), slot('14:00', 6)] });
+        expect(await sameDayOnShift(['12:00', '14:00'])).toEqual(['13:00', '12:00']);
+      });
+
+      test('gate on: the block is the commit\'s, so a 90-minute visit loses the last hour too', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('12:00', 5), slot('13:00', 4)] });
+        expect(await sameDayOnShift(['08:00', '14:00'], { estimated_duration_minutes: 90 })).toEqual(['11:00', '12:00']);
+      });
+
+      test('gate on: the +2h and +4h guesses are held to the shift as well', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockRejectedValue(new Error('finder down'));
+        expect(await sameDayOnShift(['08:00', '13:00'])).toEqual(['12:00']);
+      });
+
+      test('gate on: an hour the shift drops does not take a place from the next-best hour (at most 4, after the shift)', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // Lowest drive first: 15:00, 14:00, 13:00, 12:00, then 11:00. A 90-minute visit at 15:00 ends at 16:30.
+        finder.mockResolvedValue({ slots: [slot('11:00', 5), slot('12:00', 4), slot('13:00', 3), slot('14:00', 2), slot('15:00', 1)] });
+        expect(await sameDayOnShift(['08:00', '16:00'], { estimated_duration_minutes: 90 })).toEqual(['14:00', '13:00', '12:00', '11:00']);
+      });
+
+      test('gate on: the route keeps hours and the shift holds none of them: no hour, not a guess', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // The 12:00 guess fits the shift, but the route did not keep 12:00.
+        finder.mockResolvedValue({ slots: [slot('15:00', 1)] });
+        expect(await sameDayOnShift(['08:00', '13:00'])).toEqual([]);
+      });
+
+      test('gate on, the dispatch board\'s sheet (it commits as the office): every hour stays, and no shift is read', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+        expect(await sameDayForOffice()).toEqual(['11:00', '14:00']);
+        finder.mockRejectedValue(new Error('finder down'));
+        expect(await sameDayForOffice()).toEqual(['12:00', '14:00']);
+      });
+
+      // A grouped stop commits through the unit mover, which judges every member (visit-groups unitShiftTest;
+      // its own cases are in visit-groups-unit-move.test.js). The sheet asks that test, not the single-visit one.
+      describe('a grouped stop', () => {
+        const vg = require('../services/visit-groups');
+        let unitShiftTest;
+        afterEach(() => unitShiftTest.mockRestore());
+
+        test('gate on: an hour the unit\'s check refuses is not offered, though the tapped visit alone fits; no single-visit shift read', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          const refuses = jest.fn((date, start) => start === '13:00');
+          unitShiftTest = jest.spyOn(vg, 'unitShiftTest').mockResolvedValue(refuses);
+          finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('12:00', 5), slot('13:00', 4)] });
+          SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+          // No technicians queue is wired: a single-visit shift read would throw.
+          wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed' }) }), chain({ rows: [] })] });
+          const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+          expect(options.sameDay.map((o) => o.window.start)).toEqual(['11:00', '12:00']);
+          expect(unitShiftTest).toHaveBeenCalledWith(db, expect.objectContaining({ id: 'svc-1' }));
+          expect(refuses.mock.calls.map((c) => c.slice(1))).toEqual(expect.arrayContaining([['11:00', '12:00'], ['13:00', '14:00']]));
+        });
+
+        test('gate on: the dispatch board\'s sheet (it commits as the office) does not ask', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          unitShiftTest = jest.spyOn(vg, 'unitShiftTest').mockResolvedValue(() => true);
+          finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+          expect(await sameDayForOffice()).toEqual(['11:00', '14:00']);
+          expect(unitShiftTest).not.toHaveBeenCalled();
+        });
+      });
+
+      test('gate off: every hour stays, and no shift is read', async () => {
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+        // `sameDay` wires no technicians queue: a read would throw.
+        expect((await sameDay()).map((o) => o.window.start)).toEqual(['11:00', '14:00']);
+      });
+    });
+
     test('an hour with no drive number is offered last, without driveMinutes', async () => {
       finder.mockResolvedValue({ slots: [slot('11:00', null), slot('12:00', 9)] });
       const options = await sameDay();
@@ -2298,7 +2505,9 @@ describe('rain-out service', () => {
         // admin reschedule-options stay overlap-only (advisory saves).
         // caller: the route-checked day list buys Google road times for an
         // admin caller only; this tech caller stays on the estimate.
-        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true, caller: { isAdmin: false, technicianId: 'tech-1' } },
+        // initiatedBy: who the sheet's commit records (default 'tech'); the day
+        // options are held to the technician's shift unless it is the office.
+        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true, caller: { isAdmin: false, technicianId: 'tech-1' }, initiatedBy: 'tech' },
       );
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
@@ -2339,6 +2548,11 @@ describe('rain-out service', () => {
       wire();
       await RainOut.getOptions('svc-1');
       expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toBeNull();
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].initiatedBy).toBe('tech');
+      // The dispatch board's sheet commits as the office and says so.
+      wire();
+      await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' }, initiatedBy: 'admin' });
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].initiatedBy).toBe('admin');
     });
 
     // The customer-pick offer rides the options payload.
@@ -3252,6 +3466,230 @@ describe('rain-out service', () => {
       expect(result.routeConflicts).toEqual([
         expect.objectContaining({ id: 'svc-there', windowStart: '10:00', windowEnd: '11:00' }),
       ]);
+    });
+
+    // GATE_TECH_SHIFT_HOURS (D4): the stops a rest-of-route move would land outside the route technician's
+    // shift. The technician's commit refuses each of them, the office's is told a line for each; the sheets
+    // say so before the tap (routeShiftConflicts, routeShiftRows).
+    describe('route scope: the stops a move would land outside the shift', () => {
+      afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; delete process.env.GATE_TECH_WORK_DAYS; });
+      // After the 09:00 anchor, in route order.
+      const ROUTE = [
+        { id: 'svc-2', window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60 },
+        { id: 'svc-3', window_start: '12:00:00', window_end: '13:00:00', estimated_duration_minutes: 60 },
+        // The window is thirty minutes; the stored length is ninety.
+        { id: 'svc-4', window_start: '11:30:00', window_end: '12:00:00', estimated_duration_minutes: 90 },
+      ];
+      const WINDOWLESS = { id: 'svc-5', window_start: null, window_end: null, estimated_duration_minutes: 60 };
+      // `technicians` answers the set hours (loadTechShifts, with today's clock-ins: none), then the work days.
+      // The route's stops are today's, as remainingRouteJobs reads them; the tapped stop's day can be another.
+      const check = async (target, { shift = ['08:00', '17:00'], workDays = null, route = ROUTE, hoursRead, anchorDate = etDateString() } = {}) => {
+        listOccupiedWindows.mockResolvedValue([]);
+        const technicians = [
+          chain({ whereNotNull: jest.fn().mockReturnThis(), rows: shift ? [{ id: 'tech-1', shift_start: shift[0], shift_end: shift[1] }] : [], ...hoursRead }),
+          chain({ first: jest.fn().mockResolvedValue({ id: 'tech-1', work_days: workDays }) }),
+        ];
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1', scheduled_date: anchorDate, window_start: '09:00', route_order: 1 }) }),
+            chain({ rows: route.map((job) => ({ scheduled_date: etDateString(), ...job })) }),
+          ],
+          technicians,
+          time_entries: [chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue([]) })],
+        });
+        const result = await RainOut.checkTarget({ serviceId: 'svc-1', caller: { isAdmin: true, technicianId: 'admin-1' }, target });
+        expect(result.ok).toBe(true);
+        return { result, technicianReads: 2 - technicians.length };
+      };
+      // A push of five hours: the anchor from 09:00 to 14:00, every later stop by the same five hours.
+      const laterToday = () => ({ date: etDateString(), window: { start: '14:00', end: '15:00' } });
+      // 2031-03-06 is a Thursday, 2031-03-07 a Friday: a day move, where each stop keeps its own window.
+      const [THU, FRI] = ['2031-03-06', '2031-03-07'];
+      const onDay = (date) => ({ date, window: { start: '09:00', end: '10:00' } });
+
+      test('gate on: a stop the push lands after the shift end is a row, with the window it lands on; a stop the shift holds is not', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { result } = await check(laterToday());
+        // svc-2 lands 15:00 to 16:00: held. svc-3 lands 17:00 to 18:00. svc-4 lands 16:30 to 17:00 and runs ninety minutes.
+        expect(result.routeShiftConflicts).toEqual([
+          { windowStart: '17:00', windowEnd: '18:00' },
+          { windowStart: '16:30', windowEnd: '17:00' },
+        ]);
+        // The overlap advisory is its own list, as before.
+        expect(result.conflicts).toEqual([]);
+        expect(result.routeConflicts).toEqual([]);
+      });
+
+      test('gate on: a stop that lands at the shift end exactly is held, and one minute less of shift is not', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        expect((await check(laterToday(), { shift: ['08:00', '18:00'] })).result).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect((await check(laterToday(), { shift: ['08:00', '17:59'] })).result.routeShiftConflicts).toHaveLength(2);
+        // A stop that lands before the shift starts is outside it too: every stop here lands before 16:00.
+        expect((await check(laterToday(), { shift: ['16:00', '22:00'] })).result.routeShiftConflicts)
+          .toEqual([{ windowStart: '15:00', windowEnd: '16:00' }]);
+      });
+
+      test('gate on: two stops that land on one window are two rows (a row is a stop)', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const twin = { id: 'svc-6', window_start: '12:00:00', window_end: '13:00:00', estimated_duration_minutes: 60 };
+        const { result } = await check(laterToday(), { route: [ROUTE[1], twin] });
+        expect(result.routeShiftConflicts).toEqual([
+          { windowStart: '17:00', windowEnd: '18:00' },
+          { windowStart: '17:00', windowEnd: '18:00' },
+        ]);
+      });
+
+      test('gate on: a day move judges each stop on the window it keeps, and a stop with no window is not judged', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { result } = await check(onDay(THU), { shift: ['08:00', '12:00'], route: [...ROUTE, WINDOWLESS] });
+        expect(result.routeShiftConflicts).toEqual([
+          { windowStart: '12:00', windowEnd: '13:00' },
+          { windowStart: '11:30', windowEnd: '12:00' },
+        ]);
+      });
+
+      test('gate on: a same-day stop with no window lands on the anchor\'s target and is judged there', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { result } = await check(laterToday(), { shift: ['08:00', '14:30'], route: [WINDOWLESS] });
+        expect(result.routeShiftConflicts).toEqual([{ windowStart: '14:00', windowEnd: '15:00' }]);
+      });
+
+      // The overlap advisory cannot read a day-move stop with no stored end when REBOOKER_NULL_END_OCCUPANCY
+      // is off (commit then skips that occupancy check). The shift check is not that switch's.
+      test('gate on: a day move judges a stop with a start and no stored end on its stored length, whatever the occupancy switch', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const openEnded = { id: 'svc-7', window_start: '16:30:00', window_end: null, estimated_duration_minutes: 90 };
+        const short = { id: 'svc-8', window_start: '16:30:00', window_end: null, estimated_duration_minutes: 30 };
+        try {
+          for (const occupancySwitch of [undefined, 'off']) {
+            if (occupancySwitch) process.env.REBOOKER_NULL_END_OCCUPANCY = occupancySwitch;
+            const { result } = await check(onDay(THU), { route: [openEnded, short] });
+            expect(result.routeShiftConflicts).toEqual([{ windowStart: '16:30', windowEnd: null }]);
+          }
+        } finally {
+          delete process.env.REBOOKER_NULL_END_OCCUPANCY;
+        }
+      });
+
+      test('gate on: a target that leaves the later stops on their own hours today judges none of them', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // The tapped stop keeps its 09:00 start and takes a new end: no push. svc-3 and svc-4 are after 12:00
+        // already, where the office put them; the move does not write their hours.
+        const sameStart = { date: etDateString(), window: { start: '09:00', end: '10:30' } };
+        expect((await check(sameStart, { shift: ['08:00', '12:00'] })).result).not.toHaveProperty('routeShiftConflicts');
+        // A stop with no window does get hours from that target, and they are judged.
+        expect((await check(sameStart, { shift: ['08:00', '10:00'], route: [...ROUTE, WINDOWLESS] })).result.routeShiftConflicts)
+          .toEqual([{ windowStart: '09:00', windowEnd: '10:30' }]);
+        // One minute of push writes every stop's hours.
+        const oneMinute = { date: etDateString(), window: { start: '09:01', end: '10:01' } };
+        expect((await check(oneMinute, { shift: ['08:00', '12:00'] })).result.routeShiftConflicts).toHaveLength(2);
+      });
+
+      test('gate on: a tapped stop from another day, moved to today: a stop that keeps its day and its hours is not judged', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // An overdue visit. Today's stops stay today, on their own hours: svc-3 and svc-4 are after 12:00
+        // already, and the move does not write them.
+        const toToday = { date: etDateString(), window: { start: '09:00', end: '10:00' } };
+        expect((await check(toToday, { shift: ['08:00', '12:00'], anchorDate: '2020-01-06' })).result).not.toHaveProperty('routeShiftConflicts');
+        // A stored time with seconds is rewritten to the minute, so that stop is judged.
+        const seconds = { id: 'svc-13', window_start: '12:00:30', window_end: '13:00:00', estimated_duration_minutes: 60 };
+        expect((await check(toToday, { shift: ['08:00', '12:00'], anchorDate: '2020-01-06', route: [...ROUTE, seconds] })).result.routeShiftConflicts)
+          .toEqual([{ windowStart: '12:00', windowEnd: '13:00' }]);
+        // The stop's own day as pg reads a DATE back.
+        const pgDate = { ...ROUTE[1], scheduled_date: new Date(`${etDateString()}T00:00:00Z`) };
+        expect((await check(toToday, { shift: ['08:00', '12:00'], anchorDate: '2020-01-06', route: [pgDate] })).result).not.toHaveProperty('routeShiftConflicts');
+      });
+
+      test('gate on: a tapped stop on another day that keeps its day: today\'s stops change day, and are judged on their hours', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // No push (the tapped stop keeps 09:00), and still a move of every later stop: from today to Thursday.
+        expect((await check(onDay(THU), { shift: ['08:00', '12:00'], anchorDate: THU })).result.routeShiftConflicts)
+          .toEqual([{ windowStart: '12:00', windowEnd: '13:00' }, { windowStart: '11:30', windowEnd: '12:00' }]);
+      });
+
+      test('gate on: a stored time with seconds is a change of hours, as the mover reads it', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // No push. The move writes 12:00 over a stored 12:00:30, and the mover judges a stop whose hours it writes.
+        const sameStart = { date: etDateString(), window: { start: '09:00', end: '10:30' } };
+        const seconds = { id: 'svc-11', window_start: '12:00:30', window_end: '13:00:00', estimated_duration_minutes: 60 };
+        const lateEnd = { id: 'svc-12', window_start: '12:30:00', window_end: '13:30:30', estimated_duration_minutes: 60 };
+        expect((await check(sameStart, { shift: ['08:00', '12:00'], route: [ROUTE[1], seconds, lateEnd] })).result.routeShiftConflicts)
+          .toEqual([{ windowStart: '12:00', windowEnd: '13:00' }, { windowStart: '12:30', windowEnd: '13:30' }]);
+      });
+
+      test('gate on: a member of a visit group is not judged, today or on a day move', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // The group moves as a unit through its own planner; this advisory does not follow it.
+        const windowless = { ...WINDOWLESS, id: 'svc-9', visit_id: 'visit-1' };
+        const timed = { ...ROUTE[1], id: 'svc-10', visit_id: 'visit-1' };
+        expect((await check(laterToday(), { shift: ['08:00', '14:30'], route: [windowless, timed] })).result).not.toHaveProperty('routeShiftConflicts');
+        expect((await check(onDay(THU), { shift: ['08:00', '12:00'], route: [timed] })).result).not.toHaveProperty('routeShiftConflicts');
+        // The stops of the route that are not grouped are judged beside it.
+        expect((await check(laterToday(), { route: [timed, ROUTE[1]] })).result.routeShiftConflicts).toEqual([{ windowStart: '17:00', windowEnd: '18:00' }]);
+      });
+
+      test('gate on: no row on a day the technician does not work (the shift is not that day\'s)', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        const monThu = { shift: ['08:00', '12:00'], workDays: [1, 2, 3, 4] };
+        expect((await check(onDay(FRI), monThu)).result).not.toHaveProperty('routeShiftConflicts');
+        expect((await check(onDay(THU), monThu)).result.routeShiftConflicts).toHaveLength(2);
+        // With the work-days gate off every day is a work day.
+        delete process.env.GATE_TECH_WORK_DAYS;
+        expect((await check(onDay(FRI), monThu)).result.routeShiftConflicts).toHaveLength(2);
+      });
+
+      test('gate on, no set hours: no key, and the work days are not read', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { result, technicianReads } = await check(laterToday(), { shift: null });
+        expect(result).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect(technicianReads).toBe(1);
+      });
+
+      test('gate on, no other stop on the route: nothing is read', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { result, technicianReads } = await check(laterToday(), { route: [] });
+        expect(result).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect(technicianReads).toBe(0);
+        expect(db.mock.calls.map(([table]) => table)).not.toContain('time_entries');
+      });
+
+      test('gate off: no key and nothing is read, for stops the hours do not hold', async () => {
+        const { result, technicianReads } = await check(laterToday());
+        expect(result).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect(technicianReads).toBe(0);
+        expect(db.mock.calls.map(([table]) => table)).not.toContain('time_entries');
+      });
+
+      test('gate on: a read of the hours that fails is logged, gives no key, and the check still answers', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const logger = require('../services/logger');
+        const { result } = await check(laterToday(), { hoursRead: { select: jest.fn().mockRejectedValue(new Error('hours unread')) } });
+        expect(result).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect(logger.info).toHaveBeenCalledWith('[rain-out] route-scope shift probe failed for svc-1: hours unread');
+      });
+
+      test('gate on: a failure while the stops are judged is logged, gives no key, and the check still answers', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const logger = require('../services/logger');
+        const judged = jest.spyOn(require('../services/technician-eligibility'), 'isOffDay')
+          .mockImplementationOnce(() => { throw new Error('day unread'); });
+        try {
+          expect((await check(laterToday())).result).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+          expect(logger.info).toHaveBeenCalledWith('[rain-out] route-scope shift probe failed for svc-1: day unread');
+        } finally {
+          judged.mockRestore();
+        }
+      });
+
+      test('gate on: a push today on a day the technician does not work gives the office no row', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        const today = new Date(`${etDateString()}T12:00:00Z`).getUTCDay();
+        const everyOtherDay = [0, 1, 2, 3, 4, 5, 6].filter((day) => day !== today);
+        expect((await check(laterToday(), { workDays: everyOtherDay })).result).toEqual({ ok: true, conflicts: [], routeConflicts: [] });
+        expect((await check(laterToday(), { workDays: [today] })).result.routeShiftConflicts).toHaveLength(2);
+      });
     });
 
     test('clear window → ok with no conflicts; bad target and missing service reject', async () => {

@@ -88,9 +88,9 @@ const NEWSLETTER_TYPES = {
     // issues (see docs/design/newsletter-fresh-this-week-style-guide.md):
     // ~60% edutainment facts → ONE sincere pitch section → voice-y close.
     requiredSections: ['seasonal_hook', 'pest_facts', 'featured_service', 'cta_close'],
-    // AI-generated like the flagship → same hallucinated-claim hard-block
-    // at the send gates (the prompt forbids prices/efficacy claims; this
-    // is the defense when the model slips anyway).
+    // Every send of this type gets the claim hard-block at the send gates,
+    // like the flagship: the last check on the body (built from reviewed
+    // facts by services/pest-insider) before it reaches a reader.
     claimValidation: true,
     sourceRequirements: null,
     // With GATE_PEST_INSIDER_AUTO_SEND on, a planned issue sends itself after

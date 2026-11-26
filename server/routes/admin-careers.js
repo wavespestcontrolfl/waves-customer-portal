@@ -479,12 +479,14 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan, { o
   // anything is written, and the dialog reads the preview again: another session sent, edited or withdrew an offer, or
   // the preview read the application at another stage than this move leaves. A move without a stamp (a page loaded
   // before the stamp) never showed an offer: it goes through only when it withdraws none.
-  const withdrawn = closesOffers ? await JobOffers.liveOffersOf(trx, applicationId, { lock: true }) : [];
+  // The offer rows are locked first, then one clock is read for the three offer steps of this move: an offer is past
+  // its expiry for all of them or for none (JobOffers.lockLiveOffers).
+  const { now: offerClock, offers: withdrawn } = closesOffers ? await JobOffers.lockLiveOffers(trx, applicationId) : { now: null, offers: [] };
   if (!plan.expectedOffers && withdrawn.length) return { row, offersUnseen: true };
   if (plan.expectedOffers && JobOffers.offerStampOf(withdrawn) !== plan.expectedOffers) return { row, offersChanged: true };
   // An offer the applicant holds is withdrawn only by the owner account, as on POST .../withdraw: any other admin's
   // stage move is refused here, before anything is written.
-  if (closesOffers && !ownerAccount && (await JobOffers.heldOffersOf(trx, applicationId)).length) {
+  if (closesOffers && !ownerAccount && (await JobOffers.heldOffersOf(trx, applicationId, offerClock)).length) {
     return { row, ownerOnly: true };
   }
 
@@ -493,7 +495,7 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan, { o
     .where({ id: applicationId })
     .update(updatePayload)
     .returning('*');
-  if (closesOffers) await JobOffers.closeOffersWithApplication(trx, applicationId, technicianId);
+  if (closesOffers) await JobOffers.closeOffersWithApplication(trx, applicationId, technicianId, offerClock);
 
   return { row: next, interviewApplicable, willSend };
 }
@@ -636,7 +638,7 @@ router.patch('/:id/status', async (req, res) => {
 });
 
 // --- Job offers (GATE_JOB_OFFERS) ------------------------------------------
-// Dark: every offer endpoint answers 404 { enabled: false } before any database work. send / withdraw / revise
+// Dark: every offer endpoint answers 404 { enabled: false } before any database work. send / withdraw / revise / checklist
 // belong to the owner account (ibFullAccess, the check requireFullAccess uses); the read, the
 // draft save and the signed copy stay open to any admin. The offer token itself never rides in a response: only
 // the computed offer URL does, and only on the admin shape.
@@ -687,7 +689,7 @@ router.post('/:id/offer', offerHandler('save', async (req) => ({
 })));
 
 router.post('/:id/offer/:offerId/send', requireOwnerAccount, offerHandler('send', (req) => JobOffers.sendOffer(
-  req.params.id, req.params.offerId, offerActor(req), req.body && req.body.draftHash, new Date(), { expectedOut: req.body && req.body.expectedOut },
+  req.params.id, req.params.offerId, offerActor(req), req.body && req.body.draftHash, undefined, { expectedOut: req.body && req.body.expectedOut },
 )));
 
 router.post('/:id/offer/:offerId/withdraw', requireOwnerAccount, offerHandler('withdraw', async (req) => ({
@@ -699,6 +701,12 @@ router.post('/:id/offer/:offerId/withdraw', requireOwnerAccount, offerHandler('w
 router.post('/:id/offer/:offerId/revise', requireOwnerAccount, offerHandler('revise', async (req) => ({
   offer: await JobOffers.reviseOffer(req.params.id, req.params.offerId, req.body && typeof req.body === 'object' ? req.body : {}, offerActor(req)),
 })));
+
+// One first-days item of a Hired application, marked done or not done again ({ done: true | false }).
+router.post('/:id/offer/:offerId/checklist/:item', requireOwnerAccount, offerHandler('checklist', (req) => JobOffers.setChecklistItem(
+  req.params.id, req.params.offerId, req.params.item, req.body && req.body.done, offerActor(req),
+  { seenDoneAt: req.body && req.body.seenDoneAt },
+)));
 
 router.get('/:id/offer/:offerId/signed-copy', offerHandler('signed copy', (req) => JobOffers.signedCopy(req.params.id, req.params.offerId)));
 

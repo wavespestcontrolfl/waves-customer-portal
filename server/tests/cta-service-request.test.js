@@ -86,6 +86,46 @@ describe('writeOrRefreshCtaRequest', () => {
     expect(onWrite).not.toHaveBeenCalled();
   });
 
+  // The portal offer card is on Home and on Billing (owner 2026-11-21) and
+  // each subject names its tab. The identical offer tapped on the second tab
+  // must not churn the row or ring the office again.
+  describe('sameAskSubjects (one card on two tabs)', () => {
+    const BILLING_SUBJECT = 'Add Tree & Shrub Care — requested from portal Billing';
+    const TABS = [ARGS.subject, BILLING_SUBJECT];
+    const homeRow = (snapshot = ARGS.revisionSnapshot) => ({
+      id: 'req-1', source: 'portal_home', subject: ARGS.subject, pricing_revision: JSON.stringify(snapshot),
+    });
+
+    test('the identical offer from the second tab is the no-op; the row keeps the first tab', async () => {
+      const { db, ops } = fakeDb({ existing: homeRow() });
+      const onWrite = jest.fn();
+      const outcome = await writeOrRefreshCtaRequest(db, {
+        ...ARGS, subject: BILLING_SUBJECT, sameAskSubjects: TABS, onWrite,
+      });
+      expect(outcome.deduped).toBe(true);
+      expect(outcome.request.subject).toBe(ARGS.subject);
+      expect(ops.updates).toHaveLength(0);
+      expect(ops.inserts).toHaveLength(0);
+      expect(onWrite).not.toHaveBeenCalled();
+    });
+
+    test('a moved offer from the second tab still refreshes, under the new tab', async () => {
+      const { db, ops } = fakeDb({ existing: homeRow({ source: 'portal_home', offer: { serviceKey: 'tree_shrub', option: { perVisit: 80 } } }) });
+      const outcome = await writeOrRefreshCtaRequest(db, { ...ARGS, subject: BILLING_SUBJECT, sameAskSubjects: TABS });
+      expect(outcome.refreshed).toBe(true);
+      expect(ops.updates[0].patch.subject).toBe(BILLING_SUBJECT);
+    });
+
+    test('a subject outside the list is still a different ask (the report card)', async () => {
+      const { db, ops } = fakeDb({
+        existing: { ...homeRow(), source: 'service_report', subject: 'Add Tree & Shrub Care — requested from service report' },
+      });
+      const outcome = await writeOrRefreshCtaRequest(db, { ...ARGS, subject: BILLING_SUBJECT, sameAskSubjects: TABS });
+      expect(outcome.refreshed).toBe(true);
+      expect(ops.updates).toHaveLength(1);
+    });
+  });
+
   test('a stored mintedEstimate linkage does NOT break the dedupe match', async () => {
     // The mint hook stamps pricing_revision.mintedEstimate AFTER the
     // snapshot is stored; the freshly recomputed snapshot never carries it.

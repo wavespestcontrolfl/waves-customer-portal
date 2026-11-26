@@ -231,6 +231,10 @@ describe('the preview', () => {
     const text = (await preview()).effects.map((e) => e.text).join('\n');
     expect(text).toMatch(/completes the linked visit \(Pest Control on 2099-01-01\) quietly/);
     expect(text).toMatch(/enrolled in the review-request follow-up/);
+    // GATE_REPORT_AFTER_PAY: the card's payment carries the card's pin and never holds its visit for the report, so the card asks
+    // for the visit that payment closes now (noHold). Without it the card would name no visit for a same-day payment, pin 'none',
+    // and that pin would leave the visit open for good.
+    expect(issuedCloseoutTarget).toHaveBeenLastCalledWith(expect.objectContaining({ id: state.invoices[0].id }), { trigger: 'paid', noHold: true });
   });
 
   test('an open pay-page card session is disclosed as cancelled, never charged', async () => {

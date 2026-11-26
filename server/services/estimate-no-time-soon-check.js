@@ -12,7 +12,8 @@
 //      pageSlotPicker, the same resolution the texting AI reads). An estimate the page shows no picker for (a
 //      refusal; a parked, commercial, invoice-only or quote-required answer; a linked existing appointment) is not
 //      judged. "No time soon" = the first open day, the earlier of metadata.firstDayAvailability and the earliest
-//      listed slot, is missing or after ET today + SOON_DAYS.
+//      listed slot, is missing or after ET today + SOON_DAYS. A plan offer's quote counts those days from its own
+//      first visit day (plan-offer-estimate.js), which is weeks out by design.
 //   2. CLOSE: every open bell whose estimate settled, left the open set, shows a time within 7 days, became a
 //      no-booking answer, or whose category the owner silenced, closes with a one-line resolution (per-key advisory
 //      lock, as closeSettledStuckAlerts). A lookup that throws fails CLOSED for that row (no raise, no close).
@@ -89,7 +90,12 @@ async function judge(row, { now }) {
   }
   if (NO_BOOKING_FLAGS.some((flag) => result?.[flag])) return { kind: 'no_booking' };
   const firstDay = firstOpenDay(result);
-  const horizon = etDateString(addETDays(now, SOON_DAYS));
+  // A plan offer's quote books no visit before its own first day (weeks out by design), so its 7 days count
+  // from that day: a time on its first eligible days is "soon", and only a real gap behind them rings.
+  const today = etDateString(now);
+  const offerFrom = require('./plan-offer-estimate').planOfferOf(row.estimate_data)?.firstVisitFrom;
+  const start = offerFrom && offerFrom > today ? new Date(`${offerFrom}T12:00:00Z`) : now;
+  const horizon = etDateString(addETDays(start, SOON_DAYS));
   return firstDay && firstDay <= horizon ? { kind: 'soon' } : { kind: 'late', firstDay };
 }
 

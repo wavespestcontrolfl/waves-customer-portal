@@ -73,7 +73,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
+const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, completionLaneFlags, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
@@ -4836,6 +4836,58 @@ async function completeScheduledService(completionInput, packetContext = null) {
         completionInput.body?.blogPostId,
       )
       : { post: null, rejected: false };
+    // The technician's own note as the pest Fast Complete sheet showed it
+    // (GATE_REPORT_OWN_NOTE, report speed plan step 2): screened again here
+    // against the note this completion stores, before the transaction, and
+    // frozen with the record below (the tidied note, or the fixed sentence).
+    // Only a performed, untyped pest visit the recap sheet takes; with the gate
+    // off, or for any other visit, a sent note is ignored. Never throws; in a
+    // grouped closeout `db` is the packet's transaction and the reads run in
+    // savepoints.
+    const reportNoteLive = require('../config/feature-gates').reportOwnNoteLive();
+    const reportNoteSent = reportNoteLive && completionInput.body?.reportNote != null;
+    // A note sent while the gate is off (turned off after the sheet loaded) refuses a fresh attempt (409 below): the
+    // raw note it carries is never a recap's input. Replays and resumes of a committed attempt are untouched.
+    const reportNoteStale = !reportNoteLive && completionInput.body?.reportNote != null;
+    // The preview route's own visit check (strict profile, area add-on rows), in a savepoint scope (its profile
+    // resolver runs its own savepoint reads). undefined = not asked; null = the check could not run.
+    // The report shows the note only on its pest layout (detectServiceLine of the visit label), so a label read as
+    // another line takes none.
+    const reportNoteVisit = reportNoteSent && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion
+      && detectServiceLine(svc.service_type || '') === 'pest'
+      ? await savepointScope(db, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true })).catch(() => null)
+      : undefined;
+    // A sent note on a visit that could not be checked refuses the completion below (retryable): the record never
+    // goes out without the note marker while the raw note reaches the recap model.
+    // resolveEligibility answers a failed profile lookup as profile null, and a failed add-on lookup as "has add-on
+    // rows": both are a check that could not run, so the add-on read is made again here and a failure counts.
+    const reportNoteAddOnsUnread = reportNoteVisit?.ok === true && reportNoteVisit.svc?.hasAreaAddOnRows === true
+      // Rows found again = a confirmed add-on visit (no note); none, or a read that fails = the first verdict was a
+      // failed read, so the completion is refused as retryable.
+      && await savepointScope(db, (k) => require('./area-addon-visit-rows').visitHasAreaAddOnRows(k, svc.id))
+        .then((hasRows) => hasRows !== true, () => true);
+    const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile)
+      || reportNoteAddOnsUnread;
+    // A sent note on a visit the check now finds the sheet does not take (an add-on or a reclassification since the
+    // sheet loaded) refuses as a changed visit (409 below): the sheet reloads, never a recap from the raw note.
+    const reportNoteVisitChanged = reportNoteVisit?.ok === true && reportNoteVisit.eligible !== true && !reportNoteUnverified;
+    // A sent note in no shape the sheet sends is a bad request (400 below), never a completion without the marker.
+    // A visit with a companion service is never one: its report shows the companion card, not the note.
+    const reportNoteCompanions = Array.isArray(companionFindings) ? companionFindings.length > 0
+      : Boolean(companionFindings && typeof companionFindings === 'object' && Object.keys(companionFindings).length);
+    // So is a visit the check never asks about (not performed, typed, a backfill): the sheet sends a note only for a
+    // performed pest visit.
+    const reportNoteInvalid = reportNoteSent && (reportNoteCompanions || reportNoteVisit === undefined
+      || !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote));
+    const reportNotePick = reportNoteVisit?.eligible === true && !reportNoteInvalid
+      ? await require('./service-report/report-own-note').reportNoteToStore({
+        reportNote: completionInput.body.reportNote,
+        note: typeof technicianNotes === 'string' ? technicianNotes.trim() : '',
+        serviceType: svc.service_type,
+        customerId: svc.customer_id,
+        db,
+      })
+      : null;
     // Typed lanes (mosquito_event, one-time pest, …) record their work in the
     // typed findings schema, never through the specialty presets, even when
     // their profile key aliases onto a specialty lane (mosquito_one_time →
@@ -5262,6 +5314,50 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A blog post that is no longer live on the site (unpublished, moved,
     // never live) is an actionable 400 for a fresh attempt, before any write,
     // like a retired tip: a link the tech chose never vanishes silently.
+    if (claim.action === 'proceed' && reportNoteStale) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_off'),
+        db,
+      ).catch(() => {});
+      return ({ status: 409, body: {
+        error: 'The report note is turned off. Reload the sheet and complete again.',
+        code: 'REPORT_NOTE_OFF',
+      } });
+    }
+    if (claim.action === 'proceed' && reportNoteInvalid) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_invalid'),
+        db,
+      ).catch(() => {});
+      return ({ status: 400, body: {
+        error: 'The report note was not sent in a form the server reads. Reload the sheet and complete again.',
+        code: 'REPORT_NOTE_INVALID',
+      } });
+    }
+    if (claim.action === 'proceed' && reportNoteVisitChanged && !reportNoteInvalid) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_visit_changed'),
+        db,
+      ).catch(() => {});
+      return ({ status: 409, body: {
+        error: 'This visit changed since the sheet opened. Reload it and complete again.',
+        code: 'visit_identity_changed',
+      } });
+    }
+    if (claim.action === 'proceed' && reportNoteUnverified) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_unverified'),
+        db,
+      ).catch(() => {});
+      return ({ status: 503, body: {
+        error: 'The report note could not be checked right now. Try Complete again.',
+        code: 'REPORT_NOTE_UNVERIFIED',
+      } });
+    }
     if (claim.action === 'proceed' && blogPostPick.rejected) {
       await CompletionAttempts.markCompletionAttemptFailed(
         completionAttempt,
@@ -5527,10 +5623,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // never fall back to the monthly rate, and per-application precedence is
     // explicit visit price → acceptance fee → nothing (see
     // completionInvoiceAmount in billing-lane.js).
-    const perApplicationBilling = svc.cust_billing_mode === 'per_application';
-    const annualPrepayBilling = svc.cust_billing_mode === 'annual_prepay';
-    const explicitMembershipLane = svc.cust_billing_mode === 'monthly_membership';
-    const explicitPerVisitLane = ['per_visit', 'one_time'].includes(svc.cust_billing_mode);
+    const laneFlags = completionLaneFlags(svc.cust_billing_mode);
+    const perApplicationBilling = laneFlags.perApplicationBilling;
+    const annualPrepayBilling = laneFlags.annualPrepayBilling;
+    const explicitMembershipLane = laneFlags.explicitMembershipLane;
+    const explicitPerVisitLane = laneFlags.explicitPerVisitLane;
     const invoiceAmount = reviewedVisitPrice ? reviewedPriceAmount : completionInvoiceAmount({
       estimatedPrice: svc.estimated_price,
       isCallback: svc.is_callback,
@@ -6539,7 +6636,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // call so a stalled provider can't keep the already-claimed completion
         // attempt 'pending' (retries would then 409 until the stale window expires)
         // — on timeout (or error) we fall back to the deterministic recap.
-        let effectiveCustomerRecap = customerRecap;
+        // A frozen report note is the customer copy: the recap (and its text)
+        // is that screened note, so no model reads the raw note for a recap.
+        let effectiveCustomerRecap = reportNotePick ? reportNotePick.text : customerRecap;
         // An invoice-issued closeout has no form, no products and no
         // application evidence behind it, and renders no report — a
         // generated recap would spend an LLM call (plus its six-second
@@ -6985,7 +7084,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning, approvedVisitChanged, reportAfterPayHold, heldOnOtherInvoice, paymentReversed } = require('../services/invoice-issued-closeout');
             // A closeout approved on a card (record_payment) carries the visit's facts as the card showed them: the LOCKED row must still
             // match (service type, scheduled date, status, edit time), or the visit is left open for a person (the payment stays recorded).
             if (issuedInvoiceCloseout.expectedVisit && approvedVisitChanged(lockedSvcRow, issuedInvoiceCloseout.expectedVisit)) {
@@ -7000,11 +7099,30 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // (on_site) visit closes on a past day or on money received
             // today; a visit nobody has reached never closes today (owner
             // ruling 2026-10-04).
+            // GATE_REPORT_AFTER_PAY: the visit's recorded hold, read again
+            // under the visit's mint lock (the payment's closeout records a
+            // hold under the same lock). A hold on another invoice's payment
+            // leaves the visit for that payment (pre-push audit round 7: the
+            // locked check read only this invoice); a hold on this payment
+            // keeps the visit open for the rest of its day.
+            const lockedToday = etDateString();
+            const lockedHold = await reportAfterPayHold(trx, svc.id);
+            if (heldOnOtherInvoice(lockedHold, lockedIssuedInvoice.id)) {
+              throw Object.assign(new Error('visit held on another invoice\'s payment during the issued-invoice closeout'), { code: 'issued_visit_paid_on_other_invoice' });
+            }
+            // A close on a payment needs that payment still standing on the invoice row locked above (gate on; pre-push audit
+            // round 8 on the visit's own day, round 9 after it, where the next day's sweep closes a held visit): one undone or
+            // charged back since the closeout read it leaves the visit open, and so does one undone and made again (round 11:
+            // the closeout carries the payment it loaded as `paidAtMs`; another payment has its own closeout, or its own card).
+            if (paymentReversed(lockedIssuedInvoice, issuedInvoiceCloseout)) {
+              throw Object.assign(new Error('payment reversed during the issued-invoice closeout'), { code: 'issued_visit_payment_reversed' });
+            }
             const lockedRefusal = lockedDay !== serviceDateOnly(svc.scheduled_date)
               ? 'visit_moved'
               : issuedCloseoutVisitRefusal(lockedSvcRow?.status, lockedDay, {
-                today: etDateString(),
+                today: lockedToday,
                 trigger: issuedInvoiceCloseout.trigger,
+                heldForReport: Boolean(lockedHold),
                 // The prepayment proof (lockedIssuedDay): a
                 // visit nobody arrived at closes only on an invoice settled /
                 // delivered after its day — re-decided here against the
@@ -7578,6 +7696,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             formRecommendations,
             ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
             ...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),
+            ...(reportNotePick ? { reportNote: reportNotePick } : {}),
             // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
             // from the lawnFast echo and frozen here; no customer or public path reads it.
             ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { products }),
@@ -7858,6 +7977,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
               profile: frozenCompletionProfile,
             }))) {
             delete structuredNotes.blogPost;
+          }
+          // The report note was screened on the pre-lock visit: a repoint since
+          // (another service or catalog service, another customer, a profile
+          // the sheet does not take, an area add-on row) or an identity the
+          // re-resolve could not establish rolls the record back as a changed
+          // visit (the sheet reloads and is sent again), never a record left
+          // with the raw note and no note marker.
+          if (structuredNotes.reportNote && (!primaryFreezeTrusted
+            || (lockedSvcRow && (String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')
+              || String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')
+              || String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')))
+            // The preview route's own visit check again, on the locked visit (strict profile, add-on rows), and the
+            // same resolved service as the note was screened on (a null service_id resolves through the key snapshot).
+            || await savepointScope(trx, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }))
+              .then((locked) => locked?.eligible !== true
+                || String(locked.profile?.serviceKey ?? '') !== String(reportNoteVisit?.profile?.serviceKey ?? ''), () => true))) {
+            throw Object.assign(new Error('visit changed since the report note was screened'), { code: 'visit_identity_changed' });
           }
           // The inspection-credit marker keys to the LOCKED identity too
           // (Codex #3178 r32 P2): the serviceData literal tested the
@@ -9437,6 +9573,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
             reason: err.refusal || null,
           } });
         }
+        if (err && err.code === 'issued_visit_paid_on_other_invoice') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit is held for its report on another invoice\'s payment — it completes on that payment, and stays open.',
+            code: 'issued_visit_paid_on_other_invoice',
+          } });
+        }
+        if (err && err.code === 'issued_visit_payment_reversed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit\'s payment was undone or replaced while the visit was being closed on it — the visit stays open.',
+            code: 'issued_visit_payment_reversed',
+          } });
+        }
         if (err && err.code === 'issued_visit_in_progress') {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: 409, body: {
@@ -10737,6 +10887,36 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     }
     let existingCompletionInvoice = null;
+    // GATE_REPORT_AFTER_PAY: the payment this visit is held on, as its
+    // payment's closeout recorded it (linkReportAfterPayHold; null with the
+    // gate off or no live hold). It is linked to this record here, by the
+    // statement that re-checks it under the invoice's row lock (still settled
+    // with the same payment, still on this visit), so a payment undone before
+    // the link leaves nothing held and the lookups below choose as with the
+    // gate off (pre-push audit round 7). Both invoice lookups below reuse it,
+    // never a bill added after the payment, which stays the office's. Read
+    // before any invoice is linked or reused, and FAIL CLOSED: without it those
+    // lookups could link, text a pay link for, or charge the later bill. A
+    // failure releases the attempt for resume and 503s, as the
+    // refunded-invoice check below does. An issued-invoice closeout pins its
+    // own invoice.
+    let reportAfterPayHeld = null;
+    if (!packetEffects && !systemQuietCloseout && !issuedInvoiceCloseout) {
+      try {
+        reportAfterPayHeld = await require('../services/invoice-issued-closeout').linkReportAfterPayHold(db, {
+          visitId: svc.id, serviceRecordId: record.id, technicianId: svc.technician_id || null,
+        });
+      } catch (heldErr) {
+        logger.error(`[dispatch] held-payment check FAILED for ${svc.id} — closeout NOT finalized: ${heldErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, heldErr);
+        return ({ status: 503, body: {
+          error: 'The paid-invoice check for this visit failed — the closeout is saved but NOT finalized. Retry the closeout.',
+          code: 'held_payment_lookup_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
+      }
+    }
     // A REFUNDED invoice on THIS visit (codex #3456): the suppressor
     // above skips it (it collects nothing), but a fresh mint beside it is
     // unsafe while its refund can still bounce — so it blocks the mint via
@@ -10760,6 +10940,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } else {
           existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { service_record_id: record.id });
         }
+        // GATE_REPORT_AFTER_PAY: the held payment read above.
+        if (reportAfterPayHeld) existingCompletionInvoice = reportAfterPayHeld;
         if (!existingCompletionInvoice && !issuedInvoiceCloseout) {
           existingCompletionInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
         }
@@ -11249,6 +11431,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           preMintedInvoice = issuedInvoiceCloseout
             ? existingCompletionInvoice
             : await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });
+          // GATE_REPORT_AFTER_PAY: the held payment pinned above, never a
+          // bill added after it.
+          if (reportAfterPayHeld) preMintedInvoice = reportAfterPayHeld;
           // Refunded-invoice reconciliation wins here too (pre-push P0): when
           // a newer refunded invoice beat an older live row above, this lookup
           // would fetch that same older row again and its pay link would be
@@ -11943,6 +12128,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             alertBody = `The first visit for accepted estimate ${feeEstimateRef} was completed, but ${feeHistoryClause}, so NO invoice was cut and the customer's completion text carried no pay link. Bill BOTH charges manually: the one-time setup fee (${setupFeeLabel}) plus the first application${firstAppLabel}. Use the EXACT line description "First service application" for the application charge and "WaveGuard Membership — one-time setup fee" for the fee, AND include "accepted estimate #${unmintedSetupFeeObligation.estimateId}" in the invoice notes — that linkage is how the system recognizes the charges as billed and retires this alert.`;
           }
           alertBody += unmintedSetupFeeObligation.setupFeeParkedNote || '';
+          // The bell's Bill and send button (GATE_SETUP_FEE_BILL_BUTTON): only the plain case, both charges unbilled
+          // in full and nothing else on the visit; the button's own handler checks the records again on the tap.
+          const billBothPlain = !feeCoveredBy && !applicationCoveredBy && !applicationCoveredOutOfBand && !liveOnVisit
+            && liveFeeCentsNow === 0 && appCentsNow === 0 && expectedSetupFeeCents > 0 && expectedAppCentsThisVisit > 0
+            && !unmintedSetupFeeObligation.setupFeeParkedNote
+            && !svc.prepaid_method && !(Number(svc.prepaid_amount) > 0)
+            && svc.primary_line_price == null && Math.round(Number(svc.estimated_price) * 100) === expectedAppCentsThisVisit
+            && !(await trx('scheduled_service_addons').where({ scheduled_service_id: svc.id }).first('id'));
           if (already) {
             // resolvedCovered flips back to false: a re-park after a
             // resolved round means the obligation REOPENED (coverage
@@ -11974,7 +12167,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             'billing',
             'Completed first visit needs manual billing — setup fee was never invoiced',
             alertBody,
-            { link: `/admin/customers?customerId=${svc.customer_id}`, bell: true, metadata: { scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
+            { link: `/admin/customers?customerId=${svc.customer_id}`, bell: true, metadata: { ...(billBothPlain ? { buttons: require('../services/setup-fee-bill-button').billButtons({ applicationCents: expectedAppCentsThisVisit, feeCents: expectedSetupFeeCents, visit: svc }) } : {}), scheduledServiceId: svc.id, serviceRecordId: record.id, sourceEstimateId: unmintedSetupFeeObligation.estimateId, expectedSetupFeeCents, ...(expectedAppCentsThisVisit > 0 ? { expectedApplicationCentsByVisit: { [String(svc.id)]: expectedAppCentsThisVisit } } : {}), ...(liveOnVisit ? { liveBesideInvoiceId: liveOnVisit.id } : {}), customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
           if (!created) throw new Error('unminted-setup-fee notification insert failed');
           return true;

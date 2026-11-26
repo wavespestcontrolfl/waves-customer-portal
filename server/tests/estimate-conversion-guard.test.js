@@ -47,6 +47,8 @@ const logger = require('../services/logger');
 const {
   customerConvertedSince,
   archiveConvertedOpenEstimates,
+  reclaimExpiredConvertedEstimates,
+  BOOKED_WON_WINDOW_DAYS,
   excludePendingFirstBookings,
   NON_LIVE_APPOINTMENT_STATUSES,
 } = require('../services/estimate-conversion-guard');
@@ -64,13 +66,13 @@ function makeBuilder(table, cfg = {}, calls = []) {
     return b;
   };
   for (const m of [
-    'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot',
+    'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull',
     'whereRaw', 'select', 'from', 'groupBy', 'max', 'as', 'join', 'andWhere',
-    'orWhereNull', 'leftJoin',
+    'orWhereNull', 'orWhereIn', 'orWhereNotIn', 'orWhereRaw', 'orWhereNotNull', 'min', 'leftJoin',
   ]) {
     b[m] = jest.fn(record(m));
   }
-  for (const m of ['where', 'orWhere']) {
+  for (const m of ['where', 'orWhere', 'whereNot']) {
     b[m] = jest.fn((...args) => {
       calls.push({ table, m, args });
       if (typeof args[0] === 'function') args[0].call(b, b);
@@ -312,10 +314,11 @@ describe('archiveConvertedOpenEstimates', () => {
     // and the customer row itself — applied to every row (a pre-estimate
     // signal of ANY kind disqualifies — judging sources independently would
     // archive live upsell estimates). The sixth NOT EXISTS is the
-    // received-deposit money guard.
+    // received-deposit money guard. A seventh sits INSIDE the completed-visit
+    // signal: a closeout that performed nothing (customer_declined etc.) is not a sale.
     expect(calls.filter((c) => c.m === 'whereExists')).toHaveLength(1);
     expect(calls.filter((c) => c.m === 'orWhereExists')).toHaveLength(1);
-    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(6);
+    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(7);
 
     // A booking CREATED before the estimate (live or since completed)
     // disqualifies even before its completion/payment evidence lands —
@@ -492,6 +495,79 @@ describe('archiveConvertedOpenEstimates', () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('nothing to archive'),
     );
+  });
+});
+
+describe('reclaimExpiredConvertedEstimates', () => {
+  test('stamps the disposition only, scoped to expired un-archived rows, inside the 90-day window', async () => {
+    const calls = wireDb({ estimates: { returning: [{ id: 'est-9' }] } });
+    const res = await reclaimExpiredConvertedEstimates();
+    expect(res).toEqual({ reclaimed: 1, rows: [{ id: 'est-9' }] });
+    expect(BOOKED_WON_WINDOW_DAYS).toBe(90);
+
+    const est = (m) => calls.filter((c) => c.table === 'estimates' && c.m === m);
+    expect(est('where').find((c) => c.args[0] === 'status').args).toEqual(['status', 'expired']);
+    expect(est('whereNull').map((c) => c.args[0])).toEqual(
+      expect.arrayContaining(['archived_at', 'disposition', 'disposition_source']),
+    );
+    expect(est('whereNotNull').map((c) => c.args[0])).toEqual(
+      expect.arrayContaining(['customer_id']),
+    );
+    // No sent_at prerequisite: the delivery anchor (viewed-only rows too) must exist.
+    expect(est('whereNotNull').map((c) => c.args[0])).not.toContain('sent_at');
+    expect(calls.some((c) => c.m === 'whereRaw' && /LEAST\(.*\) IS NOT NULL$/s.test(c.args[0]))).toBe(true);
+    // Only the system's own expiry classification may be replaced.
+    expect(est('orWhereIn')[0].args).toEqual(['disposition', ['expired_viewed', 'expired_unviewed']]);
+    expect(est('orWhere').find((c) => c.args[0] === 'disposition_source').args).toEqual(['disposition_source', 'system']);
+
+    // A self-serve quote nobody delivered never qualifies (the shared guard).
+    expect(est('orWhereNotIn')[0].args[0]).toBe('estimates.source');
+    expect(est('orWhereRaw')[0].args[0]).toMatch(/IS NOT NULL/);
+
+    // The shared signal helper carries the window on BOTH signal sources
+    // (paid invoice, completed visit): from the DELIVERY instant (a self-serve
+    // quote's firstDeliveredAt, else sent_at) to delivery + 90 days...
+    const windowed = calls.filter((c) => c.m === 'whereRaw' && /make_interval/.test(c.args[0]));
+    expect(windowed).toHaveLength(2);
+    windowed.forEach((c) => {
+      expect(c.args[0]).toMatch(/>= .*estimates\.sent_at.* AND .*<= .*estimates\.sent_at/s);
+      expect(c.args[0]).toMatch(/firstDelivered|deliveryState,firstDeliveredAt/);
+      expect(c.args[1]).toEqual([90]);
+    });
+    // ...and the FIRST signal is inside it: none strictly before delivery.
+    const before = calls.filter(
+      (c) => c.m === 'whereRaw' && !/make_interval/.test(c.args[0]) && /< \(CASE WHEN estimates\.source/.test(c.args[0]),
+    );
+    expect(before).toHaveLength(2);
+    // The same none-before-created helper as the open sweep runs, plus the
+    // two competing-estimate guards (accepted / already won elsewhere, and a
+    // later delivery before the first signal).
+    expect(calls.filter((c) => c.m === 'whereNotExists').length).toBeGreaterThanOrEqual(7);
+    expect(calls.filter((c) => c.m === 'from' && c.args[0] === 'estimates as other')).toHaveLength(2);
+
+    // Disposition columns ONLY: status, archived_at, expires_at and updated_at stay.
+    const update = calls.find((c) => c.m === 'update');
+    expect(Object.keys(update.args[0]).sort()).toEqual([
+      'disposition', 'disposition_at', 'disposition_source',
+    ]);
+    expect(update.args[0]).toMatchObject({ disposition: 'converted_other_path', disposition_source: 'system' });
+    // disposition_at is the customer's EARLIEST conversion signal (a subquery
+    // over the same two sources), falling back to the run time; updated_at is now.
+    expect(String(update.args[0].disposition_at)).toMatch(/^COALESCE\(\(\?\), \?\)$/);
+    expect(calls.filter((c) => c.table === 'invoices' && c.m === 'select')).not.toHaveLength(0);
+  });
+
+  test('quiet run reclaims nothing and says so', async () => {
+    wireDb({ estimates: { returning: [] } });
+    const res = await reclaimExpiredConvertedEstimates();
+    expect(res.reclaimed).toBe(0);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('nothing to reclaim'));
+  });
+
+  test('the open sweep stays un-windowed', async () => {
+    const calls = wireDb({ estimates: { returning: [] } });
+    await archiveConvertedOpenEstimates();
+    expect(calls.filter((c) => c.m === 'whereRaw' && /make_interval/.test(String(c.args[0])))).toHaveLength(0);
   });
 });
 

@@ -1357,6 +1357,9 @@ module.exports = {
   tapStateOf,
   tapPreviewTokenOf,
   acceptPhoneYesCard,
+  // Read by call-estimate-link-shadow.js (the record-only after-call estimate check): the same open-estimate reads.
+  openEstimatesOf,
+  otherEstimateOpenAt,
   // Tests only: the two writes under the lock, without the sweep's own reads first.
   _private: {
     fileCardForTest: fileCard, applyCardStateForTest: applyCardState,

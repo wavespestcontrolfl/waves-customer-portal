@@ -30,7 +30,6 @@ const { recheckDeferredReplay } = require('../services/messaging/deferred-replay
 const { promiseMetaOf } = timePromise;
 
 const ENTRY = 'appointment_notice_contact_deferred';
-const OLD_GATE = process.env.GATE_DAY_ONLY_PROMISE;
 let prefsRow;
 
 function chain(first) {
@@ -51,7 +50,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   // Three days before the 9:00 ET visit: outside the 24.25 h cutoff.
   jest.useFakeTimers().setSystemTime(new Date('2026-06-19T14:00:00.000Z'));
-  process.env.GATE_DAY_ONLY_PROMISE = 'true';
   prefsRow = { sms_enabled: true, service_reminder_24h: true };
   db.raw = jest.fn((sql) => sql);
   db.mockImplementation((table) => {
@@ -69,7 +67,6 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
-  if (OLD_GATE === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD_GATE;
 });
 
 describe('the morning replay of a queued day-only body', () => {
@@ -85,12 +82,6 @@ describe('the morning replay of a queued day-only body', () => {
   test('after the 24-hour text delivered the window (the latest promise is an hour): suppressed, never a newer day promise', async () => {
     timePromise.loadPromiseLevels.mockResolvedValue(new Map([['ss-1', 'hour']]));
     expect(await recheckDeferredReplay(ENTRY, queuedMeta)).toEqual({ eligible: false, reason: 'day-promise-superseded' });
-    expect(timePromise.dayOnlySendDecision).not.toHaveBeenCalled();
-  });
-
-  test('the gate was turned off since it was queued: suppressed (no window copy can be rendered from a frozen body)', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    expect(await recheckDeferredReplay(ENTRY, queuedMeta)).toEqual({ eligible: false, reason: 'day-promise-no-longer-valid' });
     expect(timePromise.dayOnlySendDecision).not.toHaveBeenCalled();
   });
 
@@ -192,10 +183,7 @@ describe('a stored day-only EMAIL goes through the same chokepoint (dayOnlyStore
     expect(await stale()).toBe(true);
   });
 
-  test('gate off, 24-hour reminder off, or inside the cutoff: stale', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    expect(await stale()).toBe(true);
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+  test('24-hour reminder off, or inside the cutoff: stale', async () => {
     prefsRow = { sms_enabled: true, service_reminder_24h: false };
     expect(await stale()).toBe(true);
     prefsRow = { sms_enabled: true, service_reminder_24h: true };

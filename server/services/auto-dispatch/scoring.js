@@ -48,14 +48,17 @@ function weekdayOf(dateStr) {
 }
 
 // --- workload balance: planned route minutes (shared model) or stop count
-// (legacy). The legacy term gives full credit up to 6 stops and none at 10;
-// the shared model keeps those bounds at the legacy 60-minute default per
-// stop (360 / 600 minutes) but measures the day as route-model.js's
-// route_minutes — drive plus the owner planning minutes of every stop, the
-// moving visit included (Codex r1: planning minutes must reach the
-// comparison). Same 5-point weight either way.
-const ROUTE_MINUTES_FULL_CREDIT = 6 * 60;
-const ROUTE_MINUTES_NO_CREDIT = 10 * 60;
+// (legacy). The legacy term gives full credit up to 6 stops and none at 10.
+// The shared model measures the day as route-model.js's route_minutes — drive
+// plus the owner planning minutes of every stop, the moving visit included
+// (Codex r1: planning minutes must reach the comparison). Owner 2026-11-24
+// *all rec*: a full day is 12 stops (owner 11-22), about 300 planning minutes
+// (pest 25) plus about 180 drive = 480, so the term gives full credit up to
+// 480 minutes and none at 570 (7:30 departure to the 17:00 day close,
+// candidate-slots.js DAY_CLOSE). The old 360 / 600 bounds pushed visits off
+// any day past about 6 stops. Same 5-point weight either way.
+const ROUTE_MINUTES_FULL_CREDIT = 480;
+const ROUTE_MINUTES_NO_CREDIT = 570;
 function workloadScoreFor(p, stops) {
   if (autoDispatchSharedModelLive() && Number.isFinite(p.route_minutes)) {
     return WEIGHTS.workload * clamp(

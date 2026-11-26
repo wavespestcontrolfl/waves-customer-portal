@@ -160,35 +160,37 @@ function finalRoute(fresh, env, techId) {
 // the same facts loadDayContext gives the planner (day-replan/index.js TOLD_LOCK_SELECT + the reason's own fields).
 const TOLD_ROW_COLUMNS = [
   'customer_confirmed', 'is_recurring', 'recurring_parent_id', 'scheduled_date', 'recurring_dispatch_due_date',
-  'date_exception', 'date_exception_source', 'date_exception_at',
+  'date_exception', 'date_exception_source', 'date_exception_at', 'customer_asked_time', 'customer_asked_time_at',
 ];
 
 /**
- * The told-lock facts for one visit, read inside its move transaction, so a time told to the customer or a person
- * placement made after the fresh plan still stops the write. The told read is the no-show detector's promise reader (a
+ * The told-lock facts for one visit, read inside its move transaction, so a time told to the customer, or a slot the
+ * customer picked or asked for, after the fresh plan still stops the write. The told read is the no-show detector's promise reader (a
  * 72-hour flag with no real promise does not stop the write); a read that throws stops the write (fail closed).
  * isPersonPlacedVisit fails closed too (an unreadable history = placed).
  */
 async function toldLockFacts(trx, deps, { row, id, dateStr }) {
-  const dayOnly = typeof deps.dayOnlyOn === 'function' && deps.dayOnlyOn() === true;
-  const levels = dayOnly ? await promiseLevelFacts(trx, deps, id) : { told: new Set(await deps.loadToldIds(trx, [id], deps.now())) };
+  const levels = await promiseLevelFacts(trx, deps, { id, dateStr });
+  // askRecorded: the app records whether the customer asked for the time (owner 2026-11-22): a set time (the visit may not
+  // be promised as a day only) stops the write as set_time, and an answer that cannot be read (a thrown read included) as
+  // set_time_unread.
+  const ask = { askRecorded: true, setTime: await deps.loadSetTime(trx, [{ id }], deps.now()) };
   const verdict = await deps.isPersonPlacedVisit({ ...row, scheduled_date: dateStr }, trx);
-  return { toldLock: true, ...levels, personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
+  return { toldLock: true, ...levels, ...ask, personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
 }
 
+
 /**
- * GATE_DAY_ONLY_PROMISE: the visit's promise level, re-read inside its move transaction. 'hour' = told, 'day' = dayTold.
- * A read that throws fails CLOSED: the visit counts as told an hour, so the write stops (time_told).
+ * The visit's promise facts, re-read inside its move transaction in ONE read (deps.loadPromiseFacts): 'hour' = told,
+ * 'day' = dayTold, and the told slot's start on `dateStr` (toldStart, the 2-hour told shift, owner 2026-11-24).
+ * A read that throws fails CLOSED: the visit counts as told an hour with no told start, so the write stops (time_told).
  */
-async function promiseLevelFacts(trx, deps, id) {
-  let level = 'hour';
+async function promiseLevelFacts(trx, deps, { id, dateStr }) {
   try {
-    const levels = await deps.loadPromiseLevels(trx, [id], deps.now());
-    level = levels.get(id) || levels.get(String(id)) || 'none';
+    return deps.toldFactsOf(await deps.loadPromiseFacts(trx, [id], deps.now()), [id], dateStr);
   } catch (_) {
-    level = 'hour';
+    return { told: new Set([id]), dayTold: new Set(), toldStart: new Map() };
   }
-  return { told: new Set(level === 'hour' ? [id] : []), dayTold: new Set(level === 'day' ? [id] : []) };
 }
 
 /**

@@ -527,6 +527,25 @@ async function markTechOut({ technicianId, date, reason, note, actorId }) {
   return result;
 }
 
+/**
+ * Resolve every open tech_out_overflow alert of a tech-day inside the caller's transaction (auto-resolved, so a
+ * fresh alert for the same unit stays possible). The one resolution clearTechOut and the days-off sync's
+ * reconcile share. resolveAlert is the sole writer; it broadcasts after the outer commit. Returns the resolved rows.
+ */
+async function resolveOverflowAlerts(trx, { technicianId, date, actorId = null }) {
+  const openAlerts = await trx('dispatch_alerts')
+    .where({ type: ALERT_TYPE, tech_id: technicianId })
+    .whereNull('resolved_at')
+    .whereRaw("payload->>'date' = ?", [date])
+    .select('id');
+  const resolvedAlerts = [];
+  for (const { id } of openAlerts) {
+    const row = await resolveAlert({ id, resolvedBy: actorId, trx, auto: true });
+    if (row) resolvedAlerts.push(row);
+  }
+  return resolvedAlerts;
+}
+
 /** Clear a technician's absence for a date and resolve its parked alerts, atomically. Moves nothing. */
 async function clearTechOut({ technicianId, date, actorId }) {
   const result = await db.transaction(async (trx) => {
@@ -546,17 +565,7 @@ async function clearTechOut({ technicianId, date, actorId }) {
       .update({ cleared_at: trx.fn.now(), cleared_by: actorId || null })
       .returning('*');
 
-    const openAlerts = await trx('dispatch_alerts')
-      .where({ type: ALERT_TYPE, tech_id: technicianId })
-      .whereNull('resolved_at')
-      .whereRaw("payload->>'date' = ?", [date])
-      .select('id');
-    const resolvedAlerts = [];
-    for (const { id } of openAlerts) {
-      // resolveAlert is the sole writer; it broadcasts after this commit.
-      const row = await resolveAlert({ id, resolvedBy: actorId, trx, auto: true });
-      if (row) resolvedAlerts.push(row);
-    }
+    const resolvedAlerts = await resolveOverflowAlerts(trx, { technicianId, date, actorId });
 
     logger.info(`[tech-out] cleared absence ${absence.id} for ${technicianId} on ${date}; resolved ${resolvedAlerts.length} overflow alert(s)`);
     return { absence: rows[0], resolvedAlerts };
@@ -575,6 +584,8 @@ module.exports = {
   getTechOut,
   markTechOut,
   clearTechOut,
+  resolveOverflowAlerts,
+  emitAbsenceChange,
   parkTechDay,
   sweepAbsentTechDays,
   rankBumpOrder,

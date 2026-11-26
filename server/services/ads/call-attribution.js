@@ -62,6 +62,11 @@ const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../../utils/call-link-override'
 const SOURCE_TYPE_ATTRIBUTION = {
   google_ads:      { leadSource: 'google_ads',      isPaid: true },
   facebook:        { leadSource: 'facebook',        isPaid: true },
+  // Google Local Services Ads (owner 2026-11-23, "setup google lsa tracking"):
+  // a tracking number used ONLY as the Local Services profile phone. Google
+  // charges each Local Services call as a lead, so it is paid. The channel key
+  // is the one the daily Local Services sync (ads/google-lsa.js) writes cost to.
+  google_lsa:      { leadSource: 'google_lsa',      isPaid: true },
   facebook_organic:{ leadSource: 'facebook_organic',isPaid: false },
   spoke_site:      { leadSource: 'domain_website',  isPaid: false },
   main_site:       { leadSource: 'waves_website',   isPaid: false },
@@ -88,6 +93,15 @@ const SOURCE_TYPE_ATTRIBUTION = {
   // ad_service_attribution funnel row (null ⇒ no funnel row, same as an
   // unmapped source_type).
   ai_assistant:    { leadSource: 'ai_assistant',    isPaid: false },
+  // Printed pieces (owner 2026-11-24): a link or QR on a business card, yard
+  // sign or new-home postcard. Not click-paid. Seeded rows: migration
+  // 20261124150000_print_lead_sources.js; resolved by every web path through
+  // ./print-lead-sources.js. Without these entries a print-tagged quote would
+  // resolve its source_type but get no ad_service_attribution funnel row.
+  business_card:     { leadSource: 'business_card',     isPaid: false },
+  yard_sign:         { leadSource: 'yard_sign',         isPaid: false },
+  new_home_postcard: { leadSource: 'new_home_postcard', isPaid: false },
+  print_other:       { leadSource: 'print_other',       isPaid: false },
 };
 
 /**
@@ -1798,4 +1812,6 @@ module.exports = {
   reconcileMovedCallAttributionRow,
   sweepPendingAttributionTransfers,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION, callCarriesDurableLeadEvidence },
+  // The LSA relabel (google-lsa-leads.js) re-proves its call with the same check.
+  resolveSourceCallProvenanceLocked,
 };

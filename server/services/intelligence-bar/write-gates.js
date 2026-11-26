@@ -96,6 +96,11 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'remove_saved_payment_method',
   'correct_invoice_address',
   'accept_estimate',
+  // book_plan_visits (owner 2026-11-24): the Schedule create's own handler (createScheduleBooking), run in process behind a card;
+  // books a recurring series for a customer who already has the plan; the first visit's confirmation text is disclosed.
+  'book_plan_visits',
+  // send_estimate (owner ruling 2026-11-24): one unsent draft, through the estimate page's own Send handler.
+  'send_estimate',
   // send_invoice (owner ruling 2026-10-07): an existing invoice only,
   // through the Invoices page's own send handler.
   'send_invoice',

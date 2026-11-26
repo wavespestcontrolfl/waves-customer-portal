@@ -1720,6 +1720,37 @@ const REGISTRY = {
     },
   },
 
+  // A visit-only text (services/call-visit-recipient.js, GATE_CALL_GIVEN_VISIT_TEXTS) that the send window held: the
+  // confirmation or 72 h reminder for the one visit the caller named this person on. The row belongs to that person's
+  // own number and carries informational copy frozen to the visit slot, so the replay re-asks the SAME module with a
+  // fresh read: the gate is still on, the visit is live and ahead in the same slot, the person is still on it and has
+  // not declined since. An unreadable answer holds the row for a retry. A replay that ends without a send gives the
+  // delivery claim back. The marker keeps a worker that predates this entry from sending the frozen body unchecked.
+  visit_text_recipient_deferred: {
+    async recheck(meta) {
+      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'visit-recipient', slotPinFor(meta));
+      if (visit.eligible === false) return visit;
+      try {
+        const owed = await require('../call-visit-recipient').recipientStillOwedDeferred(meta);
+        if (!owed) return { eligible: false, reason: 'recipient-not-owed' };
+      } catch (err) {
+        return failClosed('visit-recipient', meta.scheduled_service_id, err);
+      }
+      // A queued day-only body is only true while the day promise still stands (the same recheck as the holder's).
+      return meta.promise_level === 'day' ? dayPromiseStillValid(meta) : { eligible: true };
+    },
+    dispatch(meta, defaultDispatch) {
+      return defaultDispatch();
+    },
+    // The same fresh read at the true provider boundary (the permission, the callback-number hold, the slot and the quoted arrival).
+    providerPreSendCheck(meta) {
+      return () => require('../call-visit-recipient').providerCheck({ ...meta, replay: true });
+    },
+    async onTerminal(meta) {
+      await require('../call-visit-recipient').releaseDeferredClaim(meta);
+    },
+  },
+
   // The report text to an on-location contact (services/contact-report-text.js).
   // Same frozen-recipient contract as the
   // held contact notice above: the row belongs to the contact's phone, and
@@ -1932,7 +1963,7 @@ function slotPinFor(meta) {
 // A queued DAY-ONLY body (GATE_DAY_ONLY_PROMISE, queueHeldNoticeContacts stores promise_level 'day' with it) is
 // revalidated at replay time through the same chokepoint a bounce recovery uses (appointment-reminders.js
 // revalidateDelayedDaySend): a promise newer than the original send (the 24-hour text delivered the window) supersedes it,
-// and a gate rolled back, a 24-hour reminder switched off or a visit inside the cutoff means the day-only body is no longer
+// and a 24-hour reminder switched off or a visit inside the cutoff means the day-only body is no longer
 // true to say. This replay holds only the FROZEN body of one contact, with no template variables to re-render window copy
 // from, so both cases SUPPRESS it (logged by the scheduler as stale_replay). That is safe: the 24-hour reminder still gives
 // the window to every customer who will get it, and a customer who switched it off chose that. A read failure holds the row

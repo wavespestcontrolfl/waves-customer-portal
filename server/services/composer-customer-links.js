@@ -32,6 +32,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { isDeployedProduction } = require('../utils/railway-deployment');
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
@@ -305,8 +306,25 @@ async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert
   return mintEstimateLink(found.estimate, { purpose });
 }
 
+// The code of a member link that GET /r/:code answers (routes/referral-links.js): https, an owned portal host, the
+// path /r/<code> with at most one trailing slash, and a code of that route's shape (its CODE_RE: keep the two in
+// sync). null for every other link. Strict on purpose: buildReferralLink promises a credit only for such a link.
+// The send check reads referral links more widely (ownedBearerShapes), because it must judge every link that could
+// be one.
+const MEMBER_LINK_PATH_RE = /^\/r\/([A-Za-z0-9_-]{4,32})\/?$/;
+function memberLinkCode(link) {
+  try {
+    const url = new URL(String(link || '').trim());
+    if (url.protocol !== 'https:' || !ownedPortalHosts().includes(ownedHostKey(url.host))) return null;
+    return MEMBER_LINK_PATH_RE.exec(url.pathname)?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
 async function buildReferralLink(customerId) {
-  const { resolvePromoter, getLiveSettings } = require('./referral-engine');
+  const { resolvePromoter, getLiveSettings, step2FriendCreditCentsOf } = require('./referral-engine');
+  const { composerReferralLine } = require('./referral-step2');
   // Same STRICT settings read as the report referral endpoint
   // (reports-public.js): no live row or inactive program = no enrollment
   // and no link — enrollPromoter's own getSettings() falls back to
@@ -339,9 +357,27 @@ async function buildReferralLink(customerId) {
   if (!promoter?.referral_link) {
     return { url: null, line: '', reason: 'Could not build a referral link for this customer' };
   }
+  // GATE_REFERRAL_STEP2: the friend's credit from the live row read above (0 = today's line: gate off, paused, or no
+  // amount). The line states it only when the link in the line leads to a member the office can confirm:
+  //  - the link is one the public route answers, and the code is read from it (memberLinkCode above).
+  //    getPromoterReferralLink can keep a stored link that is not such a link, and it names nobody;
+  //  - that code has an owner the Referrals queue can name (referral-inbound customerForCode, the same rule as
+  //    the friend page in routes/referral-links.js). A household promoter can belong to an archived sibling profile.
+  // A failed lookup is a no. Gate off: no lookup.
+  let friendCents = step2FriendCreditCentsOf(liveSettings);
+  if (friendCents > 0) {
+    try {
+      const code = memberLinkCode(promoter.referral_link);
+      const { customerForCode } = require('./referral-inbound');
+      if (!code || !(await customerForCode(code))) friendCents = 0;
+    } catch (err) {
+      logger.warn(`[composer-links] referral code owner lookup failed (customerId=${customerId}, code=${err?.code || 'none'})`);
+      friendCents = 0;
+    }
+  }
   return {
     url: promoter.referral_link,
-    line: `Know someone who needs pest control? Share Waves here: ${promoter.referral_link}\n\n`,
+    line: composerReferralLine(promoter.referral_link, friendCents),
   };
 }
 
@@ -529,7 +565,7 @@ function ownedHostStartRe(hosts) {
 function isOwnedLinkCore(core, hosts) {
   try {
     const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(core) ? core : `https://${core}`);
-    return !url.username && !url.password && hosts.includes(url.host.toLowerCase().replace(/\.$/, ''));
+    return !url.username && !url.password && hosts.includes(ownedHostKey(url.host));
   } catch {
     return false;
   }
@@ -604,7 +640,7 @@ function stillEncoded(text) {
 function ownedHostStripped(run, hosts) {
   try {
     const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(run) ? run : `https://${run}`);
-    if ([].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, '')) && !url.username && !url.password) {
+    if ([].concat(hosts).includes(ownedHostKey(url.host)) && !url.username && !url.password) {
       return `${url.pathname}${url.search}${url.hash}`;
     }
   } catch { /* not a URL — scanned whole */ }
@@ -699,7 +735,7 @@ function canonicalPortalToken(run, hosts, pathRe, { anyScheme = false } = {}) {
   // A DNS-equivalent FQDN form (`portal.wavespestcontrol.com.`) keeps its
   // terminal dot through WHATWG parsing and still resolves to us — the
   // same working page, judged the same (GH Codex #3844 r10 P1).
-  if (![].concat(hosts).includes(url.host.toLowerCase().replace(/\.$/, ''))) return null;
+  if (![].concat(hosts).includes(ownedHostKey(url.host))) return null;
   // The public routes match with a trailing slash too (React Router and the
   // Express /l and /secure mounts alike), so /prep/<token>/ is the same
   // working page as /prep/<token> — judged the same, or it would slip the
@@ -897,9 +933,57 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
 // portal origin alike (server/index.js mounts /l with no host restriction) —
 // so a branded URL rewritten onto the portal host is the same working link
 // and is judged the same (GH Codex #3844 r6 P1) — and the long-form bearer
-// paths the same way in reverse (r8 P1). Any other host is not ours.
+// paths the same way in reverse (r8 P1). A host is ours when its links
+// resolve against this process's rows. Outside the production deployment
+// that is exactly the hosts the app builds links on: the short-link base and
+// publicPortalUrl(). The production deployment (isDeployedProduction) also
+// owns every port-less host its portal origin env values name (utils/portal-url.js
+// reads only the first one set, and production's CLIENT_URL still holds the
+// raw Railway service host; RAILWAY_PUBLIC_DOMAIN is a bare host) and the
+// branded portal host, in every configuration (also when its env values
+// name only aliases). A preview owns none of these: its tokens and short
+// codes resolve only on its own hosts, and a value it copied may still name
+// production, so a production link is never judged against a preview's
+// rows. A value that does not parse adds nothing. Any other host is not
+// ours. Owned and incoming hosts are compared in one spelling (ownedHostKey).
+const BRANDED_PORTAL_HOST = 'portal.wavespestcontrol.com';
+const PORTAL_HOST_ENV_NAMES = Object.freeze(['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN']);
+// Lower case with no trailing DNS dot: `portal.wavespestcontrol.com.` is the same host.
+function ownedHostKey(host) {
+  return String(host).toLowerCase().replace(/\.$/, '');
+}
+// The host an alias value names; null when it names none, so one bad alias drops only itself. A full value is
+// http(s):// followed at once by a host; a bare value is a host name alone (labels, an optional terminal dot and
+// port). Anything else names no host: a path ('/links.example/x' would parse as the host links.example), a scheme
+// with no `//` ('https:', 'mailto:x'), another scheme, extra slashes, userinfo.
+const FULL_URL_VALUE_RE = /^https?:\/\/[A-Za-z0-9]/i;
+const BARE_HOST_VALUE_RE = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.?(?::\d+)?$/;
+function portalHostOf(value) {
+  const raw = String(value || '').trim();
+  const full = FULL_URL_VALUE_RE.test(raw);
+  if (!full && !BARE_HOST_VALUE_RE.test(raw)) return null;
+  try {
+    const url = new URL(full ? raw : `https://${raw}`);
+    return url.username || url.password ? null : url.host;
+  } catch {
+    return null;
+  }
+}
+// A host the production deployment owns besides its link bases: a dotted domain name with no port. Production serves
+// its hosts on the default port, so a value with a port names a dev or test setup and adds nothing; so does a single
+// label, which would read every same word in a message as a link.
+const PRODUCTION_ALIAS_HOST_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.?$/i;
+function productionAliasHostOf(value) {
+  const host = portalHostOf(value);
+  return host && PRODUCTION_ALIAS_HOST_RE.test(host) ? host : null;
+}
 function ownedPortalHosts() {
-  return [...new Set([require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host.toLowerCase()))];
+  // The link bases parse exactly as before: the app builds its links on them as typed (the SMS wrap mints its short
+  // links on the short-link base), so a base that is not a full URL throws, and no check or wrap runs on it (the wrap
+  // then keeps the body as typed). Only an alias drops itself.
+  const hosts = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host);
+  if (isDeployedProduction()) hosts.push(BRANDED_PORTAL_HOST, ...PORTAL_HOST_ENV_NAMES.map((name) => productionAliasHostOf(process.env[name])));
+  return [...new Set(hosts.filter(Boolean).map(ownedHostKey))];
 }
 // Every owned-portal-host link in an outbound body that is NOT already an
 // /l/<code> short link — the recognition the SMS link-wrap seam
@@ -931,7 +1015,7 @@ function ownedPortalLinkSpans(body) {
     }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') continue;
     if (url.username || url.password) continue;
-    if (!hosts.includes(url.host.toLowerCase().replace(/\.$/, ''))) continue;
+    if (!hosts.includes(ownedHostKey(url.host))) continue;
     const path = url.pathname.replace(/\/+$/, '');
     if (/^\/l(\/|$)/i.test(path)) continue;
     if (!path && !url.search && !url.hash) continue;
@@ -1026,7 +1110,7 @@ function wrappedOwnedLinkIn(body) {
       return true;
     }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return true;
-    if (!hosts.includes(url.hostname.toLowerCase().replace(/\.$/, ''))) return true;
+    if (!hosts.includes(ownedHostKey(url.hostname))) return true;
     if (url.username || url.password) return true;
     return nestedOwnedLinkRuns(`${url.pathname}${url.search}${url.hash}`).length > 0;
   });
@@ -1051,7 +1135,7 @@ const SHORT_CODE_PATH_RE = /^\/l\/([A-Za-z0-9_-]+)$/i;
 function targetOnOwnedHost(target, hosts) {
   try {
     const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(target) ? target : `https://${target}`);
-    return hosts.includes(url.host.toLowerCase().replace(/\.$/, ''));
+    return hosts.includes(ownedHostKey(url.host));
   } catch {
     return false;
   }
@@ -3225,6 +3309,7 @@ async function visitsLinkedInBody(body) {
 module.exports = {
   visitsLinkedInBody,
   ownedPortalLinkSpans,
+  ownedPortalHosts,
   OPEN_ESTIMATE_STATUSES,
   REVIEW_GATE_REASONS,
   buildReviewRequestLink,

@@ -29,7 +29,7 @@ const VALUES = { uuid: '10000000-0000-4000-8000-00000000000a', int: '4821', text
 const valueFor = (entry, name) => VALUES[entry.paramKinds?.[name] || 'uuid'];
 const ONE_PARAM = catalog.entries.find(entry => entry.params.length === 1 && entry.paramKinds?.[entry.params[0]] !== 'text');
 const ONE_VALUE = valueFor(ONE_PARAM, ONE_PARAM.params[0]);
-const NO_PARAM = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length === 0);
+const NO_PARAM = catalog.entries.find(entry => !entry.keep && entry.params.length === 0 && entry.query.length === 0);
 const QUERY_ENTRY = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length > 0);
 const QUERY_KEY = QUERY_ENTRY?.query[0];
 const TEXT_ENTRY = catalog.entries.find(entry => Object.values(entry.paramKinds || {}).includes('text'));
@@ -987,8 +987,8 @@ describe('the general read needs the platform gate', () => {
 // (ib-admin-read-returned-notes.test.js); the office login still gets the withholding, tested here on any row.
 describe('operator notes are withheld', () => {
   const readOffice = async ({ endpoint }) => shapeResponse(await global.fetch(), catalog.entries.find(entry => entry.endpoint === endpoint), AUTH, { office: true });
-  const NOTE_ENTRY = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('note'));
-  const CONTENT_ENTRY = catalog.entries.find(entry => entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('content'));
+  const NOTE_ENTRY = catalog.entries.find(entry => !entry.keep && entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('note'));
+  const CONTENT_ENTRY = catalog.entries.find(entry => !entry.keep && entry.params.length === 0 && entry.query.length === 0 && Object.values(entry.freeText || {}).includes('content'));
   const noteKey = NOTE_ENTRY && Object.keys(NOTE_ENTRY.freeText).find(key => NOTE_ENTRY.freeText[key] === 'note');
   const contentKey = CONTENT_ENTRY && Object.keys(CONTENT_ENTRY.freeText).find(key => CONTENT_ENTRY.freeText[key] === 'content');
   const sessionLink = 'https://portal.example.test/pay/home' + '?session=' + 'abc' + '123';

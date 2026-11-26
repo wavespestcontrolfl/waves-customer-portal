@@ -5,15 +5,17 @@ import { UiSurface } from "../../components/ui";
 import BidDeskPage from "./BidDeskPage";
 import BidKitPage from "./BidKitPage";
 import BuilderProspectsPage from "./BuilderProspectsPage";
+import MailProspectsPage from "./MailProspectsPage";
 import RestaurantProspectsPage from "./RestaurantProspectsPage";
 
-// One menu entry, four tabs: Open bids (Bid Desk), Bid kit, Builders and Restaurants. The tab lives in the URL
-// (?tab=kit, ?tab=builders or ?tab=restaurants; no tab = Open bids) so a link or a reload lands on the same view.
+// One menu entry, five tabs: Open bids (Bid Desk), Bid kit, Builders, Restaurants and Mail. The tab lives in the URL
+// (?tab=kit, ?tab=builders, ?tab=restaurants or ?tab=mail; no tab = Open bids) so a link or a reload lands on the same view.
 const TABS = [
   { key: "desk", label: "Open bids", param: null },
   { key: "kit", label: "Bid kit", param: "kit" },
   { key: "builders", label: "Builders", param: "builders" },
   { key: "restaurants", label: "Restaurants", param: "restaurants" },
+  { key: "mail", label: "Mail", param: "mail" },
 ];
 
 export default function BidsPage() {
@@ -37,11 +39,12 @@ export default function BidsPage() {
         activeKey={active.key}
         onSectionChange={select}
         ariaLabel="Bids view"
-        navGridClassName="grid-cols-2 lg:grid-cols-4"
+        navGridClassName="grid-cols-2 lg:grid-cols-5"
       />
       {active.key === "kit" && <BidKitPage embedded />}
       {active.key === "builders" && <BuilderProspectsPage embedded />}
       {active.key === "restaurants" && <RestaurantProspectsPage embedded />}
+      {active.key === "mail" && <MailProspectsPage embedded />}
       {active.key === "desk" && <BidDeskPage embedded />}
     </UiSurface>
   );

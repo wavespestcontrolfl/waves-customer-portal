@@ -68,12 +68,8 @@ jest.mock('../services/scheduling/occupancy', () => {
   return { ...actual, findConflictingVisits: jest.fn((...args) => actual.findConflictingVisits(...args)) };
 });
 
-// The property choice (GATE_EDIT_APPT_ADDRESS + bookingPropertyStamp): real
-// implementations by default; the property cases below steer them.
-jest.mock('../config/feature-gates', () => {
-  const actual = jest.requireActual('../config/feature-gates');
-  return { ...actual, isEnabled: jest.fn(actual.isEnabled) };
-});
+// The property choice (bookingPropertyStamp): real implementation by default;
+// the property cases below steer it.
 jest.mock('../services/customer-properties', () => {
   const actual = jest.requireActual('../services/customer-properties');
   return { ...actual, bookingPropertyStamp: jest.fn(actual.bookingPropertyStamp) };
@@ -86,7 +82,6 @@ const AppointmentReminders = require('../services/appointment-reminders');
 const datetimeEt = require('../utils/datetime-et');
 const { loadLiveRecurringObligationRows } = require('../services/waveguard-existing-services');
 const { executeTool, ibBookingProposal, ibBookingPropertyProposal } = require('../services/intelligence-bar/tools');
-const featureGates = require('../config/feature-gates');
 const customerProperties = require('../services/customer-properties');
 
 // Real ET "today" — the date a same-day move targets.
@@ -2451,20 +2446,17 @@ describe('IB overlap probes pass the saved row\'s technician', () => {
   });
 });
 
-describe('create_appointment — which property the visit is at (GATE_EDIT_APPT_ADDRESS, the Schedule screen\'s address picker)', () => {
+describe('create_appointment — which property the visit is at (the Schedule screen\'s address picker)', () => {
   const STAMP = {
     property_id: 'prop-rental', service_address_line1: '12 Sample Ct', service_address_line2: '',
     service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34202', lat: '27.4', lng: '-82.5',
   };
-  const switchOn = (on) => featureGates.isEnabled.mockImplementation((key) => (key === 'editApptAddress' ? on : jest.requireActual('../config/feature-gates').isEnabled(key)));
   const propertiesRead = (rows) => chain({ orderBy: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue(rows) });
   afterEach(() => {
-    featureGates.isEnabled.mockImplementation(jest.requireActual('../config/feature-gates').isEnabled);
     customerProperties.bookingPropertyStamp.mockImplementation(jest.requireActual('../services/customer-properties').bookingPropertyStamp);
   });
 
   test('proposal: a customer with two active properties and none named is asked which one, primary first; one property is not asked', async () => {
-    switchOn(true);
     wireDb({ customer_properties: [propertiesRead([
       { id: 'prop-home', is_primary: true, label: null, address_line1: '1 Home St', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
       { id: 'prop-rental', is_primary: false, label: 'Rental', address_line1: '12 Sample Ct', address_line2: 'Unit 2', city: 'Bradenton', state: 'FL', zip: '34202' },
@@ -2479,20 +2471,11 @@ describe('create_appointment — which property the visit is at (GATE_EDIT_APPT_
   });
 
   test('proposal: a named property returns its stamp; one that is not this customer\'s active, addressed property is refused', async () => {
-    switchOn(true);
     customerProperties.bookingPropertyStamp.mockResolvedValueOnce(STAMP);
     expect(await ibBookingPropertyProposal('cust-1', 'prop-rental')).toEqual({ stamp: STAMP });
     expect(customerProperties.bookingPropertyStamp).toHaveBeenCalledWith({ customerId: 'cust-1', propertyId: 'prop-rental' });
     customerProperties.bookingPropertyStamp.mockRejectedValueOnce(Object.assign(new Error('Choose a saved customer address.'), { code: 'INVALID_BOOKING_PROPERTY' }));
     expect(await ibBookingPropertyProposal('cust-1', 'someone-elses')).toMatchObject({ code: 'invalid_booking_property' });
-  });
-
-  test('proposal with the address switch off: today\'s behavior — no question, no read; a named property is refused', async () => {
-    switchOn(false);
-    wireDb({});
-    expect(await ibBookingPropertyProposal('cust-1', undefined)).toEqual({ stamp: null });
-    expect(await ibBookingPropertyProposal('cust-1', 'prop-rental')).toMatchObject({ code: 'booking_property_not_enabled' });
-    expect(db).not.toHaveBeenCalled();
   });
 
   const bookAt = (extra) => {
@@ -2508,7 +2491,6 @@ describe('create_appointment — which property the visit is at (GATE_EDIT_APPT_
   };
 
   test('commit: the pinned property is re-read under the booking lock and stamped on the visit', async () => {
-    switchOn(true);
     customerProperties.bookingPropertyStamp.mockResolvedValueOnce(STAMP);
     const { insertChain, run } = bookAt({ property_id: 'prop-rental', _booking_property: STAMP });
     expect(await run()).toMatchObject({ success: true });
@@ -2528,7 +2510,6 @@ describe('create_appointment — which property the visit is at (GATE_EDIT_APPT_
   });
 
   test('commit: the pin as the pending-action store hands it back (jsonb key order) still books', async () => {
-    switchOn(true);
     customerProperties.bookingPropertyStamp.mockResolvedValueOnce(STAMP);
     // jsonb orders keys by length, then bytes: the same values in a different order.
     const stored = Object.fromEntries(Object.entries(STAMP).sort(([a], [b]) => a.length - b.length || a.localeCompare(b)));
@@ -2539,7 +2520,6 @@ describe('create_appointment — which property the visit is at (GATE_EDIT_APPT_
   });
 
   test('commit: an address that changed since the card, a property gone, or a property with no card pin books nothing', async () => {
-    switchOn(true);
     customerProperties.bookingPropertyStamp.mockResolvedValueOnce({ ...STAMP, service_address_line1: '14 Sample Ct' });
     let booking = bookAt({ property_id: 'prop-rental', _booking_property: STAMP });
     expect(await booking.run()).toMatchObject({ preview_changed: true, error: expect.stringMatching(/address changed after the card/) });

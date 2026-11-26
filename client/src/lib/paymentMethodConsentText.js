@@ -57,6 +57,15 @@ export const RATE_IN_EFFECT_SENTENCE = 'Each invoice is billed at the rate then 
 // the sentence).
 export const AFTER_VISIT_CONSENT_VERSION = 'v13_2026-10-01';
 
+// Mirror of the server's SAVE_ONLY_CONSENT_TEXT / SAVE_ONLY_CONSENT_VERSION: the save-only add-card form (the link in the
+// "add a card" reminder email) shows this statement instead of the Auto Pay authorization, and its mint attests this
+// version. No consent row is written for a save-only add.
+export const SAVE_ONLY_CONSENT_TEXT = 'Save this card for future payments. We charge it only when you pay with it or turn on Auto Pay.';
+export const SAVE_ONLY_CONSENT_VERSION = 'save_only_2026-11-24';
+export function saveOnlyConsentAttestation() {
+  return { consentTextVersion: SAVE_ONLY_CONSENT_VERSION };
+}
+
 export const CARD_CONSENT_TEXT = [
   'By checking this box, I authorize Waves Pest Control, LLC to save',
   'this card and charge it for future service visits and invoices as',
@@ -181,6 +190,7 @@ export const AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT = [
 export const CONSENT_TEXT = CARD_CONSENT_TEXT;
 
 export function getConsentText(methodType, { variant = null } = {}) {
+  if (variant === 'save_only') return SAVE_ONLY_CONSENT_TEXT;
   if (methodType === 'us_bank_account' || methodType === 'ach') {
     if (variant === 'prepay_card') return PREPAY_ACH_CONSENT_TEXT;
     if (variant === 'after_visit_prepay') return AFTER_VISIT_PREPAY_ACH_CONSENT_TEXT;
@@ -195,6 +205,7 @@ export function getConsentText(methodType, { variant = null } = {}) {
 
 const AFTER_VISIT_VARIANTS = new Set(['after_visit_prepay', 'after_visit_card']);
 export function consentVersionForVariant(variant, methodType = 'card') {
+  if (variant === 'save_only') return SAVE_ONLY_CONSENT_VERSION;
   if (!AFTER_VISIT_VARIANTS.has(variant)) return CONSENT_VERSION;
   const isBank = methodType === 'us_bank_account' || methodType === 'ach';
   if (isBank && variant === 'after_visit_card') return CONSENT_VERSION;

@@ -1,0 +1,296 @@
+/**
+ * tab-reload-check: the nightly read-only check that posts one engineering
+ * FIX row when a staff page view ran an out-of-date portal build that should
+ * have reloaded (owner 2026-11-19, option A: logging and a daily check), and
+ * retires the row on a clean night.
+ */
+const fs = require('fs');
+const path = require('path');
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/sendgrid-mail', () => ({
+  isConfigured: jest.fn(() => true),
+  sendOne: jest.fn(async () => ({ ok: true })),
+}));
+jest.mock('../services/ops-digest', () => ({
+  deliverOpsDigest: jest.fn(async () => ({ ok: true, channel: 'in_app', id: 'n1' })),
+  resolveOpsDigest: jest.fn(async () => 0),
+}));
+// Only for the route's list of names (routes/admin-usage.js).
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
+}));
+
+const sendgrid = require('../services/sendgrid-mail');
+const { deliverOpsDigest, resolveOpsDigest } = require('../services/ops-digest');
+const { runTabReloadCheck, readWindow, OPS_KEY, EDGE_AT, FAILED_NAMES } = require('../services/tab-reload-check');
+const { RELOAD_BLOCKERS } = require('../routes/admin-usage');
+
+const TECH_A = 'a0000000-0000-4000-8000-000000000001';
+const TECH_B = 'b0000000-0000-4000-8000-000000000002';
+const rows = (list) => jest.fn(async () => list);
+// Nov 20 2026, 11:51:02 PM EST: a nightly run, and the window it reads.
+const NOW = new Date('2026-11-21T04:51:02Z');
+const START = new Date('2026-11-20T04:50:00Z');
+const END = new Date('2026-11-21T04:50:00Z');
+// The check's own mark of how far it has read: the run of the night before
+// finished, unless a test sets another.
+const markStore = { get: jest.fn(), set: jest.fn() };
+const RETIRE = { key: OPS_KEY, source: null, resolvedBy: 'tab-reload-check:clean-run', throwOnError: true };
+const run = (options) => runTabReloadCheck({ markStore, now: NOW, ...options });
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  sendgrid.isConfigured.mockReturnValue(true);
+  markStore.get.mockResolvedValue(START);
+  markStore.set.mockResolvedValue();
+});
+
+describe('runTabReloadCheck', () => {
+  test('a clean night retires the standing row and posts nothing', async () => {
+    const readRows = rows([]);
+
+    await expect(run({ readRows })).resolves.toEqual({ views: 0 });
+    expect(readRows).toHaveBeenCalledWith({ start: START, end: END });
+    expect(resolveOpsDigest.mock.calls).toEqual([[RETIRE]]);
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    expect(markStore.set.mock.calls).toEqual([[END]]);
+  });
+
+  test('missed reloads post one FIX row with the totals for each cause and page', async () => {
+    // Not in ranked order: the totals rank by views, then by name.
+    const readRows = rows([
+      { reload_hold: 'reloaded', page_key: 'dashboard', technician_id: TECH_A, views: '1' },
+      { reload_hold: null, page_key: 'pipeline', technician_id: TECH_A, views: '3' },
+      { reload_hold: 'reloaded', page_key: 'pipeline', technician_id: TECH_B, views: '2' },
+    ]);
+
+    const result = await run({ readRows });
+
+    expect(result.views).toBe(6);
+    expect(resolveOpsDigest).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+    const sent = deliverOpsDigest.mock.calls[0][0];
+    expect(sent).toMatchObject({
+      key: OPS_KEY,
+      fallOff: true,
+      dedupeKey: OPS_KEY,
+      refreshOnDedupe: true,
+      count: 6,
+      itemKeys: ['none', 'reloaded'],
+      subject: 'FIX: 6 staff page views missed a reload to the live portal build',
+      headline: 'System — fix the reload of out-of-date staff tabs',
+    });
+    expect(sent).not.toHaveProperty('dedupeWindowMs');
+    expect(sent.headline.length).toBeLessThanOrEqual(60);
+    expect(sent.summary.length).toBeLessThanOrEqual(110);
+    expect(sent.text).toContain('6 staff page views by 2 staff members');
+    // The window, in Eastern time (the formatter's space before PM is not a plain one).
+    expect(sent.text).toMatch(/^From Thu, Nov 19, 11:50\sPM to Fri, Nov 20, 11:50\sPM ET, 6 staff page views by 2 staff members ran/);
+    expect(sent.summary).toMatch(/^6 staff page views up to Fri, Nov 20, 11:50\sPM ET ran an out-of-date build/);
+    expect(sent.text).toContain('- reloaded (3): three reloads for the live build');
+    expect(sent.text).toContain('- no name (3): the move was due a reload');
+    expect(sent.text).toContain('- pipeline: 5\n- dashboard: 1');
+    expect(result.delivery).toEqual({ ok: true, channel: 'in_app', id: 'n1' });
+    expect(markStore.set.mock.calls).toEqual([[END]]);
+  });
+
+  // A standing row with unchanged text is left as it is, also when staff
+  // marked it done (notifyAdmin, refreshOnDedupe). So the text names the window.
+  test('a later night with the same totals changes the text; a second run on the same window does not', async () => {
+    const sameRows = () => rows([{ reload_hold: null, page_key: 'pipeline', technician_id: TECH_A, views: 1 }]);
+    await run({ readRows: sameRows() });
+    await run({ readRows: sameRows() });
+    markStore.get.mockResolvedValue(END);
+    await run({ readRows: sameRows(), now: new Date('2026-11-22T04:51:02Z') });
+
+    const [first, again, nextNight] = deliverOpsDigest.mock.calls.map(([sent]) => [sent.summary, sent.text, sent.html]);
+    expect(again).toEqual(first);
+    nextNight.forEach((part, i) => expect(part).not.toBe(first[i]));
+  });
+
+  // The mark moves only once a window is handled, so the next run reads again
+  // what a failed run left: a read that throws, a finding not delivered.
+  test('a finding that was not delivered leaves the mark, so the next run reads the window again', async () => {
+    deliverOpsDigest.mockResolvedValueOnce({ ok: false, error: 'row write failed' });
+
+    const result = await run({ readRows: rows([{ reload_hold: null, page_key: 'pipeline', technician_id: TECH_A, views: 1 }]) });
+
+    expect(result).toEqual({ views: 1, delivery: { ok: false, error: 'row write failed' } });
+    expect(markStore.set).not.toHaveBeenCalled();
+    expect(resolveOpsDigest).not.toHaveBeenCalled();
+  });
+
+  test('a row that could not be retired fails the run and leaves the mark', async () => {
+    resolveOpsDigest.mockRejectedValueOnce(new Error('row write failed'));
+
+    await expect(run({ readRows: rows([]) })).rejects.toThrow('row write failed');
+    expect(markStore.set).not.toHaveBeenCalled();
+  });
+
+  test('the first run keeps its start as the mark before it reads, so the next run reads its window when it fails', async () => {
+    markStore.get.mockResolvedValue(null);
+
+    await expect(run({ readRows: jest.fn().mockRejectedValue(new Error('read failed')) })).rejects.toThrow('read failed');
+    expect(markStore.set.mock.calls).toEqual([[START]]);
+  });
+
+  test('a run after a night that failed reads from the mark, both nights in one read', async () => {
+    const twoNightsBack = new Date('2026-11-19T04:50:00Z');
+    markStore.get.mockResolvedValue(twoNightsBack);
+    const readRows = rows([]);
+
+    await run({ readRows });
+
+    expect(readRows).toHaveBeenCalledWith({ start: twoNightsBack, end: END });
+    expect(markStore.set).toHaveBeenCalledWith(END);
+  });
+
+  test('a run after a finished run has read this far reads nothing and leaves the row and the mark', async () => {
+    markStore.get.mockResolvedValue(END);
+    const readRows = rows([]);
+
+    // By hand the next afternoon: the night's run finished this window.
+    await expect(run({ readRows, now: new Date('2026-11-21T20:00:00Z') })).resolves.toEqual({ views: 0, upToDate: true });
+    expect(readRows).not.toHaveBeenCalled();
+    expect(resolveOpsDigest).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    expect(markStore.set).not.toHaveBeenCalled();
+  });
+
+  test('one view reads in the singular, and the html escapes what it lists', async () => {
+    await run({ readRows: rows([{ reload_hold: 'reloaded', page_key: 'a<b', technician_id: TECH_A, views: 1 }]) });
+
+    const sent = deliverOpsDigest.mock.calls[0][0];
+    expect(sent.subject).toBe('FIX: 1 staff page view missed a reload to the live portal build');
+    expect(sent.text).toContain('1 staff page view by 1 staff member ran');
+    expect(sent.text).toContain('- reloaded (1): three reloads for the live build came back on the old build');
+    expect(sent.html).toContain('a&lt;b: 1');
+  });
+
+  test('a reload that came back on the build it left is a failed reload', async () => {
+    await run({ readRows: rows([{ reload_hold: 'reload-missed', page_key: 'schedule', technician_id: TECH_B, views: '2' }]) });
+
+    const sent = deliverOpsDigest.mock.calls[0][0];
+    expect(sent.itemKeys).toEqual(['reload-missed']);
+    expect(sent.text).toContain("- reload-missed (2): the tab's own reload for a newer build came back on the build it left");
+  });
+
+  // The route stores a name only when it is on its list (RELOAD_BLOCKERS), so
+  // a name this check reads that the route cannot store would never be found.
+  // 'never-heard' is not read: a healthy tab sends it for a move made before
+  // its first server answer.
+  test('every name the check reads is a name the route stores, and each has its cause line', async () => {
+    expect(FAILED_NAMES).toEqual(['reloaded', 'reload-missed']);
+    for (const name of FAILED_NAMES) expect(RELOAD_BLOCKERS.has(name)).toBe(true);
+
+    for (const name of [null, ...FAILED_NAMES]) {
+      deliverOpsDigest.mockClear();
+      await run({ readRows: rows([{ reload_hold: name, page_key: 'pipeline', technician_id: TECH_A, views: 1 }]) });
+      const sent = deliverOpsDigest.mock.calls[0][0];
+      expect(sent.text).not.toContain('undefined');
+      expect(sent.html).not.toContain('undefined');
+    }
+  });
+
+  test('a read that throws fails the run and never retires the row', async () => {
+    const readRows = jest.fn().mockRejectedValue(new Error('column "stale_build" does not exist'));
+
+    await expect(run({ readRows })).rejects.toThrow('stale_build');
+    expect(resolveOpsDigest).not.toHaveBeenCalled();
+    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    expect(markStore.set).not.toHaveBeenCalled();
+  });
+
+  test('the email fallback goes only to the internal ops inbox, and fails when the mailer is not set up', async () => {
+    await run({ readRows: rows([{ reload_hold: null, page_key: 'pipeline', technician_id: TECH_A, views: '2' }]) });
+    const { sendEmail } = deliverOpsDigest.mock.calls[0][0];
+
+    await sendEmail();
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'contact@wavespestcontrol.com',
+      subject: 'FIX: 2 staff page views missed a reload to the live portal build',
+      categories: ['ops', OPS_KEY],
+    }));
+
+    // The provider's answer can quote an address; the error goes to
+    // job_health and the log with the status only.
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('SendGrid 403: from a@b.example does not match a verified Sender Identity'), { status: 403 }));
+    await expect(sendEmail()).rejects.toThrow(/^the email to the ops inbox failed \(status 403\)$/);
+    sendgrid.sendOne.mockRejectedValueOnce(new Error('connect ETIMEDOUT a@b.example'));
+    await expect(sendEmail()).rejects.toThrow(/^the email to the ops inbox failed \(status unknown\)$/);
+
+    sendgrid.sendOne.mockClear();
+    sendgrid.isConfigured.mockReturnValue(false);
+    await expect(sendEmail()).rejects.toThrow('mailer not configured');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+});
+
+// A run reads from its mark up to the latest edge at least one minute old:
+// 11:50 PM Eastern, one minute before the job runs. From one edge to the next is 25
+// hours on the night the clocks go back and 23 on the night they go forward.
+describe('readWindow', () => {
+  const win = (text, readTo) => {
+    const { start, end } = readWindow(new Date(text), readTo ? new Date(readTo) : null);
+    return [start.toISOString(), end.toISOString()];
+  };
+  const NOV_19 = '2026-11-20T04:50:00.000Z';
+  const NOV_20 = '2026-11-21T04:50:00.000Z';
+  const NOV_21 = '2026-11-22T04:50:00.000Z';
+
+  test('with no mark, a nightly run reads from the edge of the night before up to its own', () => {
+    // Nov 20 2026, 11:51:02 PM EST: up to 11:50:00 PM, not up to now.
+    expect(win('2026-11-21T04:51:02Z')).toEqual([NOV_19, NOV_20]);
+    // At its scheduled time to the millisecond, and held up past midnight.
+    expect(win('2026-11-21T04:51:00.000Z')).toEqual([NOV_19, NOV_20]);
+    expect(win('2026-11-21T05:20:00Z')).toEqual([NOV_19, NOV_20]);
+    // By hand the next day, up to the last millisecond of the minute after
+    // the next edge: that edge is not a minute old, so a page view of just
+    // before it can still be on its way into the table.
+    expect(win('2026-11-21T15:00:00Z')).toEqual([NOV_19, NOV_20]);
+    expect(win('2026-11-22T04:50:00.000Z')).toEqual([NOV_19, NOV_20]);
+    expect(win('2026-11-22T04:50:59.999Z')).toEqual([NOV_19, NOV_20]);
+  });
+
+  test('with no mark, the night the clocks go back is 25 hours and the night they go forward 23', () => {
+    // Nov 1 2026, 11:51:02 PM EST. The edge before it was Oct 31, 11:50 PM EDT.
+    expect(win('2026-11-02T04:51:02Z')).toEqual(['2026-11-01T03:50:00.000Z', '2026-11-02T04:50:00.000Z']);
+    // Mar 14 2027, 11:51:02 PM EDT. The edge before it was Mar 13, 11:50 PM EST.
+    expect(win('2027-03-15T03:51:02Z')).toEqual(['2027-03-14T04:50:00.000Z', '2027-03-15T03:50:00.000Z']);
+  });
+
+  test('a run starts at the mark: the next night, and each night whose run failed', () => {
+    // The night after a finished run: it starts where that run ended.
+    expect(win('2026-11-22T04:51:02Z', NOV_20)).toEqual([NOV_20, NOV_21]);
+    // The run of Nov 20 failed: the run of Nov 21 reads both nights.
+    expect(win('2026-11-22T04:51:02Z', NOV_19)).toEqual([NOV_19, NOV_21]);
+    // No run finished since Sep 30: every night since is read.
+    expect(win('2026-11-22T04:51:02Z', '2026-10-01T03:50:00.000Z')).toEqual(['2026-10-01T03:50:00.000Z', NOV_21]);
+  });
+
+  test('a mark at or past the latest edge a minute old leaves nothing to read', () => {
+    expect(win('2026-11-21T20:00:00Z', NOV_20)).toEqual([NOV_20, NOV_20]);
+    expect(win('2026-11-21T20:00:00Z', NOV_21)).toEqual([NOV_20, NOV_20]);
+  });
+});
+
+describe('scheduler wiring', () => {
+  test('runs nightly at 11:51 PM ET under runExclusive, with a lazy require and a job_health rethrow', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+    // The job runs one minute after the edge of its read (EDGE_AT).
+    const [hour, minute] = EDGE_AT.split(':');
+    expect(`cron.schedule('${Number(minute) + 1} ${Number(hour)} * * *'`).toBe("cron.schedule('51 23 * * *'");
+    const i = src.indexOf("cron.schedule('51 23 * * *'");
+    expect(i).toBeGreaterThan(-1);
+    const block = src.slice(i, src.indexOf('timezone', i) + 40);
+    expect(block).toContain("runExclusive('tab-reload-check'");
+    expect(block).toContain("require('./tab-reload-check')");
+    expect(block).toContain('result.delivery.ok === false');
+    expect(block).toContain("timezone: 'America/New_York'");
+    // #3208 rule. failing-jobs-check.test.js also checks that no fixed or hourly job shares the minute.
+    expect(src.match(/cron\.schedule\('51 23 \* \* \*'/g)).toHaveLength(1);
+  });
+});

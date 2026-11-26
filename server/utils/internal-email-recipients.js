@@ -1,6 +1,11 @@
 // news.wavespestcontrol.com is the newsletter's sending subdomain (owner
 // 2026-10-31): its copies land in contact@ and must read as ours, not a customer.
 const DEFAULT_INTERNAL_DOMAINS = ['wavespestcontrol.com', 'news.wavespestcontrol.com'];
+// Every mail domain Waves owns, whatever INTERNAL_EMAIL_DOMAINS says (that setting replaces the
+// defaults above for isInternalEmailRecipient): the defaults and wavesflorida.com, which
+// access-code-capture.js OWN_EMAIL_DOMAINS also reads as ours. For a caller that must never
+// treat a Waves address as a customer's (pest-insider/tool-block.js).
+const WAVES_OWNED_EMAIL_DOMAINS = [...DEFAULT_INTERNAL_DOMAINS, 'wavesflorida.com'];
 const DEFAULT_INTERNAL_EMAILS = [
   'contact@wavespestcontrol.com',
   'newsletter@wavespestcontrol.com',
@@ -64,8 +69,10 @@ function assertInternalEmailRecipient(email, context = {}) {
 }
 
 module.exports = {
+  WAVES_OWNED_EMAIL_DOMAINS,
   normalizeEmail,
   isValidEmail,
+  internalEmailAllowlist,
   isInternalEmailRecipient,
   assertInternalEmailRecipient,
 };

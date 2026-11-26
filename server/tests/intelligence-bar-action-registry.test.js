@@ -382,7 +382,7 @@ const SCOPE_SNAPSHOT = {
   record: [
     // reads: a customer or record selector confines the rows to one customer
     'check_customer_status', 'compute_estimate', 'draft_review_reply', 'list_agent_review_drafts', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
-    'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_customer_text_status', 'get_estimate_detail',
+    'get_call_log', 'get_closeout_bill_preview', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_customer_text_status', 'get_estimate_detail',
     'get_open_commitments', 'get_service_history',
     // billing readers (W9): one customer's invoices / one invoice, by customer or invoice selector
     'get_customer_invoices', 'get_invoice_detail',
@@ -400,6 +400,8 @@ const SCOPE_SNAPSHOT = {
     // reads both); correct_invoice_address's invoice_number is resolved to invoice_id by the route before validation.
     // accept_estimate carries estimate_id + customer_id (validateRecordTarget binds the estimate to that customer).
     'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address', 'accept_estimate',
+    // send_estimate carries estimate_id (+ optional customer_id): validateRecordTarget binds the estimate to the named customer.
+    'send_estimate',
     // create_customer_link carries customer_id: the link is that customer's own.
     'create_customer_link', 'send_autopay_setup_link',
     // send_invoice carries invoice_id (or invoice_number, bound like resend_receipt's).
@@ -435,6 +437,8 @@ const SCOPE_SNAPSHOT = {
     'create_agent_estimate_draft',
     // reprice_future_visits carries customer_id; every visit it changes is that customer's own.
     'reprice_future_visits',
+    // book_plan_visits carries customer_id (and an optional property_id); the series it books is that customer's own.
+    'book_plan_visits',
     'create_appointment', 'create_customer', 'create_pending_estimate', 'merge_customers', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',
     'save_customer_estimate', 'send_email_reply', 'send_sms', 'set_estimate_presentation', 'set_primary_property', 'remove_customer_property', 'submit_review_reply',
     'switch_appointment_property', 'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'trigger_review_request', 'update_customer',

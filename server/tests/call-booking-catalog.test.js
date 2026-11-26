@@ -16,6 +16,7 @@ const {
   reServiceLaneForPlanRow,
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
+  callServiceBooksAtPrice,
   resolveCallFollowUpPlan,
   callBookingInvoiceOnComplete,
   callFollowUpBillingShape,
@@ -889,6 +890,42 @@ describe('resolveCallBookingPrice', () => {
       .toEqual({ price: 350, source: 'catalog' });
   });
 
+  // The call booker's agreed-one-time-job hold: it keeps a one-time service only when a call booking can
+  // price that service.
+  test('callServiceBooksAtPrice: the named service is a one-time row a call booking can put that price on', () => {
+    expect(callServiceBooksAtPrice(CATALOG, roach.name, 250)).toBe(true);
+    expect(callServiceBooksAtPrice(CATALOG, ` ${roach.name.toUpperCase()} `, 250)).toBe(true);
+    // A plan row never takes a visit price; a name the catalog does not hold has no row.
+    expect(callServiceBooksAtPrice(CATALOG, CATALOG[2].name, 250)).toBe(false);
+    expect(callServiceBooksAtPrice(CATALOG, 'Some Service Nobody Sells', 250)).toBe(false);
+    expect(callServiceBooksAtPrice(CATALOG, null, 250)).toBe(false);
+    // No price, a price out of the booking's bounds, or a price the booking would round: not that price.
+    expect(callServiceBooksAtPrice(CATALOG, roach.name, null)).toBe(false);
+    expect(callServiceBooksAtPrice(CATALOG, roach.name, 3.5)).toBe(false);
+    expect(callServiceBooksAtPrice(CATALOG, roach.name, 250.004)).toBe(false);
+    // A fixed row's list price that equals a rejected quote is not the quote (the fallback, not the call's price).
+    const fixedAtBound = { ...roach, pricing_type: 'fixed', base_price: 3.5 };
+    expect(resolveCallBookingPrice({ quotedPrice: 3.5, catalogRow: fixedAtBound })).toEqual({ price: 3.5, source: 'catalog' });
+    expect(callServiceBooksAtPrice([fixedAtBound], roach.name, 3.5)).toBe(false);
+    // No catalog.
+    expect(callServiceBooksAtPrice(null, roach.name, 250)).toBe(false);
+    expect(callServiceBooksAtPrice([], roach.name, 250)).toBe(false);
+  });
+
+  // The call booking check ties a price to a visit by the service name alone. The booking's own lookup also
+  // bridges a short name, a key and a renamed label; a reading that names the row that way is no hold.
+  test('callServiceBooksAtPrice: the name must be the row\'s own current name, not a bridged one', () => {
+    const named = { id: 'svc-one-time', service_key: 'pest_one_time', name: 'One-Time Pest Control Service', short_name: 'One-Time Pest', billing_type: 'one_time', pricing_type: 'variable', base_price: null };
+    const services = [...CATALOG, named];
+    expect(callServiceBooksAtPrice(services, named.name, 250)).toBe(true);
+    expect(callServiceBooksAtPrice(services, ` ${named.name.toUpperCase()} `, 250)).toBe(true); // case and outer spaces do not count
+    for (const bridged of [named.short_name, named.service_key, 'One-Time Pest Control']) {
+      // The booking's lookup still finds the row by each of these.
+      expect(resolveCallBookingCatalogService({ extracted: { specific_service_name: bridged }, transcription: '', services })).toBe(named);
+      expect(callServiceBooksAtPrice(services, bridged, 250)).toBe(false);
+    }
+  });
+
   test('recurring services never take the catalog fallback', () => {
     expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: CATALOG[2] }))
       .toEqual({ price: null, source: null });
@@ -1696,6 +1733,26 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(log.wheres).not.toContainEqual({ id: 'kid-1' });
   });
 
+  // The report's reminder sync and the technician's notice both read the window the child keeps.
+  test('a shifted child is reported with the window it keeps: to the caller, after what the report already holds, and to its technician', async () => {
+    const notice = jest.spyOn(require('../services/tech-visit-notifications'), 'notifyVisitRescheduled').mockResolvedValue(undefined);
+    try {
+      const kid = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
+      const { conn } = fakeConn({ kids: [kid], updatedCount: 1 });
+      const earlier = { id: 'kid-0', previousDate: '2026-07-09', date: '2026-07-12', windowStart: null, windowEnd: null };
+      const report = { shifted: [earlier] };
+      expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report })).toBe(1);
+      expect(report).toEqual({ shifted: [earlier, { id: 'kid-1', previousDate: '2026-07-16', date: '2026-07-19', windowStart: '09:00:00', windowEnd: '10:00:00' }] });
+      expect(notice.mock.calls).toEqual([[expect.objectContaining({
+        visitId: 'kid-1', technicianId: 't1',
+        previous: { date: '2026-07-16', windowStart: '09:00:00', windowEnd: '10:00:00' },
+        snapshot: { date: '2026-07-19', windowStart: '09:00:00', windowEnd: '10:00:00' },
+      })]]);
+    } finally {
+      notice.mockRestore();
+    }
+  });
+
   test.each([null, '09:00:00'])('rebases or clears a shifted child dispatch marker with window %s', async (windowStart) => {
     const { conn, log } = fakeConn({ kids: [{
       id: 'kid-1', day: '2026-07-16', new_day: '2026-07-19',
@@ -1752,11 +1809,43 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
     const shifted = await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
     expect(shifted).toBe(0);
-    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('2026-07-16 → 2026-07-19'), expect.objectContaining({
+    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('(2026-07-16 → 2026-07-19 — slot booked)'), expect.objectContaining({
       // Opens the follow-up that kept its date, on that day.
       link: '/admin/dispatch?tab=schedule&date=2026-07-16&appointment=kid-1',
       metadata: expect.objectContaining({ parentServiceId: 'svc-parent' }),
     }));
+  });
+
+  // GATE_TECH_SHIFT_HOURS (D4): an automatic move passes shiftLive; the office's own move does not.
+  test('shiftLive: a child the change of day takes out of its technician\'s shift keeps its date, reason "shift"; without the option the shift is not read', async () => {
+    const eligibility = require('../services/technician-eligibility');
+    const { notifyAdmin } = require('../services/notification-service');
+    const kid = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
+    const lost = jest.spyOn(eligibility, 'shiftLostByDayChange');
+    const run = (answer, options = { shiftLive: true }) => {
+      lost.mockReset().mockResolvedValue(answer);
+      const { conn } = fakeConn({ kids: [kid] });
+      const report = {};
+      return shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report, ...options })
+        .then((shifted) => ({ shifted, report }));
+    };
+    try {
+      notifyAdmin.mockClear();
+      const kept = await run({ startMin: 600, endMin: 1200 });
+      expect(kept).toEqual({ shifted: 0, report: { skipped: [{ id: 'kid-1', day: '2026-07-16', newDay: '2026-07-19', reason: 'shift' }] } });
+      // The rule is asked of the child's own row and technician, from its day to its new day.
+      expect(lost.mock.calls.map((call) => call.slice(1))).toEqual([['t1', kid, '2026-07-16', '2026-07-19']]);
+      expect(occupancy.findConflictingVisits).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining("(2026-07-16 → 2026-07-19 — outside the technician's shift)"), expect.objectContaining({
+        link: '/admin/dispatch?tab=schedule&date=2026-07-16&appointment=kid-1',
+      }));
+      // The shift holds it on the new day, or did not hold it where it was: it moves.
+      expect((await run(null)).shifted).toBe(1);
+      expect((await run({ startMin: 600, endMin: 1200 }, {})).shifted).toBe(1);
+      expect(lost).not.toHaveBeenCalled();
+    } finally {
+      lost.mockRestore();
+    }
   });
 
   test('the card links a follow-up proven to still sit on its day, never a "changed" entry that sorts first', async () => {

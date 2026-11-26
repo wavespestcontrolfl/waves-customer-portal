@@ -35,11 +35,32 @@ function ErrorNotice({ children }) {
   return <div role="alert" style={{ background: "#FEE2E2", color: D.red, padding: 12, borderRadius: 8, margin: "12px 0" }}>{children}</div>;
 }
 
+// The flex rule as the run recorded it (config.js flexPolicyFacts): the night freeze in hours, the widest band, and
+// whether a day-only promise also froze a visit. A run saved before those fields existed states only what every flex
+// run had in common: the 5-day band, and a freeze near the visit's date.
+function flexPolicyText(config) {
+  const parts = ["Flexible rule: checks plan visits from tomorrow."];
+  const hours = Number(config.flexFreezeHours);
+  if (Number.isInteger(hours) && hours > 1) {
+    const told = config.dayOnlyPromise === true ? "its day or time" : "its time";
+    parts.push(`A visit is frozen ${hours} hours before it, once its ${hours - 1}-hour reminder is sent, or once the customer was told ${told}.`);
+  } else {
+    parts.push("A visit is frozen close to its date, or once its reminder is sent.");
+  }
+  parts.push("A move to another day lands at least 5 days out, within 5 days of the visit's date.");
+  if (Number(config.flexWideRadiusDays) === 7 && Number(config.flexBimonthlyRadiusDays) === 6) {
+    parts.push("A bimonthly visit may move up to 6 days, and a visit that repeats every 12 weeks or less often (quarterly, longer) up to 7 days, when the nearest other visit of its series is 56 days away or more.");
+  } else if (Number(config.flexWideRadiusDays) === 7) {
+    parts.push("A visit that repeats every 8 weeks or less often (bimonthly, quarterly, longer) may move up to 7 days, when the nearest other visit of its series is 56 days away or more.");
+  }
+  return parts.join(" ");
+}
+
 // The day-move rule in force for a run. Runs recorded before guardMode existed
 // carry only routeTiersEnabled, so that is the fallback.
 function policyText(config) {
   const mode = config.guardMode || (config.routeTiersEnabled ? "tiers" : "legacy");
-  if (mode === "flex") return "Flexible rule: checks plan visits from tomorrow. A visit is frozen 73 hours before it, or once its 72-hour reminder is sent. A move to another day lands at least 5 days out, within 5 days of the visit's date.";
+  if (mode === "flex") return flexPolicyText(config);
   if (mode === "tiers") return "Tiered routing: evaluates visits from 7 days out, with reminder freezes and a five-day destination floor.";
   return `Evaluates visits more than ${config.lockWindowDays} days out.`;
 }

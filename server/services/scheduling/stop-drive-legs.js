@@ -95,11 +95,12 @@ function stopPieces(members) {
       chain = null;
       prevLoose = null;
       if (!byVisit.has(m.visitId)) {
-        const piece = { id: m.id, rows: [], open: false, ids: [] };
+        const piece = { id: m.id, rows: [], open: false, ids: [], all: [] };
         byVisit.set(m.visitId, piece);
         pieces.push(piece);
       }
       byVisit.get(m.visitId).rows.push(row);
+      byVisit.get(m.visitId).all.push(m.id);
       if (NOT_REACHED.has(m.status)) { byVisit.get(m.visitId).open = true; byVisit.get(m.visitId).ids.push(m.id); }
       continue;
     }
@@ -108,11 +109,12 @@ function stopPieces(members) {
       chain.work = chain.state.coMerged;
       if (NOT_REACHED.has(m.status)) { chain.open = true; chain.ids.push(m.id); }
       chain.startedWork += workUnderWay(row);
+      chain.all.push(m.id);
     } else {
       const state = { ...startCoVisitChain(row), arrivalMin: 0 };
       state.clock = state.coMerged;
       const open = NOT_REACHED.has(m.status);
-      chain = { id: m.id, start: minutesOf(m.windowStart), work: state.coMerged, state, open, ids: open ? [m.id] : [], startedWork: workUnderWay(row) };
+      chain = { id: m.id, start: minutesOf(m.windowStart), work: state.coMerged, state, open, ids: open ? [m.id] : [], all: [m.id], startedWork: workUnderWay(row) };
       pieces.push(chain);
     }
     prevLoose = m;
@@ -145,7 +147,7 @@ function stopPieces(members) {
     if (!piece.range) {
       piece.split = rows.map((r) => ({
         id: r.id, start: minutesOf(r.window_start), work: workDuration(r), range: null,
-        open: NOT_REACHED.has(r.status), ids: NOT_REACHED.has(r.status) ? [r.id] : [],
+        open: NOT_REACHED.has(r.status), ids: NOT_REACHED.has(r.status) ? [r.id] : [], all: [r.id],
         startedWork: workUnderWay(r),
       }));
     }
@@ -179,23 +181,28 @@ function seqRow(id, p, st) {
 function planRoute(stops, legs) {
   const unknown = legs.findIndex((l) => l == null);
   const upTo = unknown === -1 ? stops.length : unknown + 1;
-  if (upTo < 2) return null;
+  if (upTo < 1) return null;
   const seq = [];
   const legIn = new Map();
   // Every piece of a stop answers for its card: a later piece that misses
   // its own promise (a split visit's 13:00 member) still makes it late.
   const piecesOf = new Map();
+  // Every row of each piece (reached or not), for the planned-blocks view.
+  const membersOf = new Map();
+  const pieceOf = new Map();
   stops.slice(0, upTo).forEach((st, i) => {
     piecesOf.set(st.legs[0].id, []);
     stopPieces(st.members).forEach((p, j) => {
       const id = `${i}:${j}`;
       // Only work the tech has not reached can still run late.
       if (p.open) piecesOf.get(st.legs[0].id).push({ id, ids: p.ids });
+      membersOf.set(id, p.all);
+      pieceOf.set(id, p);
       if (j === 0 && i > 0) legIn.set(id, legs[i - 1]);
       seq.push(seqRow(id, p, st));
     });
   });
-  return { seq, legIn, piecesOf, startMin: minutesOf(seq[0].window_start) };
+  return { seq, legIn, piecesOf, membersOf, pieceOf, startMin: minutesOf(seq[0].window_start) };
 }
 
 // The last time a visit was touched: en route, check-in or check-out.
@@ -352,6 +359,39 @@ function stopOrder(a, b) {
     || ((a.routeOrder ?? Infinity) - (b.routeOrder ?? Infinity));
 }
 
+// The physical stops of a day, in the order the list shows. A visit group is
+// one stop wherever its rows sort (route-model.js physicalStops groups every
+// visit_id the same way): placed at its earliest member, located by its first
+// member with a pin (groupUnit's rule). Its legs show on that earliest card
+// only (`legs`): the list renders each member at its own time, so a later
+// member's card would otherwise claim legs that point backwards. Then
+// back-to-back stops at the same pin merge too (two services at one address
+// without a group).
+function buildStops(rows) {
+  const units = [];
+  const groups = new Map();
+  for (const s of [...rows].sort(stopOrder)) {
+    if (!s.visitId) { units.push({ anchor: s, members: [s], legs: [s] }); continue; }
+    if (!groups.has(s.visitId)) {
+      const unit = { anchor: s, members: [], legs: [s] };
+      groups.set(s.visitId, unit);
+      units.push(unit);
+    }
+    const unit = groups.get(s.visitId);
+    unit.members.push(s);
+    if (!hasGeo(unit.anchor) && hasGeo(s)) unit.anchor = s;
+  }
+  const stops = [];
+  for (const unit of units) {
+    const last = stops[stops.length - 1];
+    if (last && samePlace(last.anchor, unit.anchor)) {
+      last.members.push(...unit.members);
+      last.legs.push(...unit.legs);
+    } else stops.push(unit);
+  }
+  return stops;
+}
+
 /**
  * Sets `driveFromPrevMin` / `driveToNextMin` (number or null) and
  * `firstStop` / `lastStop` in place on one technician's services. Each leg
@@ -381,34 +421,7 @@ function attachDriveLegs(services, { now = null } = {}) {
     s.driveLateWindowEnd = null;
     s.driveLegUnknown = false;
   }
-  // A visit group is one stop wherever its rows sort (route-model.js
-  // physicalStops groups every visit_id the same way): placed at its
-  // earliest member, located by its first member with a pin (groupUnit's
-  // rule). Its legs show on that earliest card only (`legs`): the list
-  // renders each member at its own time, so a later member's card would
-  // otherwise claim legs that point backwards. Then back-to-back stops at
-  // the same pin merge too (two services at one address without a group).
-  const units = [];
-  const groups = new Map();
-  for (const s of [...rows].sort(stopOrder)) {
-    if (!s.visitId) { units.push({ anchor: s, members: [s], legs: [s] }); continue; }
-    if (!groups.has(s.visitId)) {
-      const unit = { anchor: s, members: [], legs: [s] };
-      groups.set(s.visitId, unit);
-      units.push(unit);
-    }
-    const unit = groups.get(s.visitId);
-    unit.members.push(s);
-    if (!hasGeo(unit.anchor) && hasGeo(s)) unit.anchor = s;
-  }
-  const stops = [];
-  for (const unit of units) {
-    const last = stops[stops.length - 1];
-    if (last && samePlace(last.anchor, unit.anchor)) {
-      last.members.push(...unit.members);
-      last.legs.push(...unit.legs);
-    } else stops.push(unit);
-  }
+  const stops = buildStops(rows);
   if (stops.length) {
     stops[0].legs.forEach((s) => { s.firstStop = true; });
     stops[stops.length - 1].legs.forEach((s) => { s.lastStop = true; });
@@ -444,4 +457,4 @@ function attachDriveLegs(services, { now = null } = {}) {
   }
 }
 
-module.exports = { attachDriveLegs };
+module.exports = { attachDriveLegs, buildStops, planRoute, legBetween, stopOrder, hasGeo, minutesOf, NOT_A_STOP };

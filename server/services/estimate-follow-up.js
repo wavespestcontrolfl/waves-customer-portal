@@ -156,18 +156,25 @@ async function hasInboundSmsSince(est, cutoff) {
     .where((q) => { q.whereNull("messages.message_type").orWhere("messages.message_type", "not like", "job\\_%"); })
     .where("messages.created_at", ">=", cutoff)
     .first("messages.id");
-  if (est.customer_id) {
-    q.andWhere(function () {
-      this.where("conversations.customer_id", est.customer_id);
-      if (est.customer_phone)
-        this.orWhere("conversations.contact_phone", est.customer_phone);
-    });
-  } else if (est.customer_phone) {
-    q.andWhere("conversations.contact_phone", est.customer_phone);
-  } else {
-    return false;
-  }
+  // The estimate can hold the phone as staff typed it ("(941) 555-0123"); an inbound text's
+  // conversation holds Twilio's E.164 form. Match either, or a lead's reply is never seen.
+  const phones = replyPhoneForms(est.customer_phone);
+  if (!est.customer_id && !phones.length) return false;
+  q.andWhere(function () {
+    if (est.customer_id) this.where("conversations.customer_id", est.customer_id);
+    for (const phone of phones) this.orWhere("conversations.contact_phone", phone);
+  });
   return !!(await q);
+}
+
+// The stored phone and its E.164 form, without blanks or repeats. utils/phone phoneMatchDigits
+// gives the full digits only for an E.164 number or a plain US one (ten digits, or 1 + ten), so
+// a foreign number typed without "+" is never matched to a US conversation by its last ten digits.
+function replyPhoneForms(phone) {
+  const stored = String(phone || "").trim();
+  if (!stored) return [];
+  const [full] = require("../utils/phone").phoneMatchDigits(stored);
+  return [...new Set([stored, full ? `+${full}` : null].filter(Boolean))];
 }
 
 // Email arm (owner 2026-11-02, option A: an email reply pauses the follow-up
@@ -229,8 +236,81 @@ async function hasInboundEmailSince(est, cutoff) {
 // handle it live. An inbound EMAIL in the same window pauses it too (SMS arm
 // checked first). Soft-fails if the tables aren't
 // present (e.g. fresh env) so we don't break the whole follow-up loop.
-async function hasRepliedRecently(est, days = 14, { throwOnError = false } = {}) {
-  const cutoff = new Date(Date.now() - days * 86400000);
+async function hasRepliedRecently(est, days = 14, { sinceEstimate = false, ...opts } = {}) {
+  const now = Date.now();
+  const windowStart = new Date(now - days * 86400000);
+  // GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE (owner 2026-11-21) applies to the engagement engine's follow-up EMAILS only
+  // (it passes { sinceEstimate: true }). safetyGate (the text stages, the deferred text replay, the payment-step follow-up)
+  // never passes it and keeps the full window, gate on or off. The gate is read at CALL time and defensively: many suites
+  // mock the whole feature-gates module with a bare object.
+  const clamp = sinceEstimate === true && require("../config/feature-gates").estimateReplyPauseSinceEstimateLive?.() === true;
+  const cutoff = clamp ? await replyPauseWindowStart(est, windowStart, now) : windowStart;
+  return hasRepliedSince(est, cutoff, opts);
+}
+
+// The estimate's own creation time as epoch ms, or null when it cannot be read as a time that is not in the future.
+function estimateCreatedMs(est, now) {
+  const raw = est && est.created_at;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const ms = new Date(raw).getTime();
+  return Number.isFinite(ms) && ms <= now ? ms : null;
+}
+
+// Is there another estimate that was sent to the same person, made before OR after this one? Same person = the same
+// customer_id, a phone in one of the stored forms or with the same last ten digits in any format, or an address a reply
+// can come from (expectedReplyAddresses: the estimate's own address and the customer's address on file, never ours).
+// A missed match shortens the pause, so the match is generous: a false match only keeps today's window, the safe side.
+// A person with no identifier at all matches nothing (the reply arms cannot match them either), so no read is made.
+// The window moves only for a person whose only sent estimate is this one; anyone who was sent another estimate at any
+// time is in a conversation with the office and keeps the full pause. The customers read can throw: the caller catches it.
+async function hasOtherSentEstimate(est) {
+  const customerId = est.customer_id || null;
+  const phones = replyPhoneForms(est.customer_phone);
+  const digits = String(est.customer_phone || "").replace(/\D/g, "");
+  const addresses = await expectedReplyAddresses(est);
+  if (!customerId && !phones.length && !addresses.length) return false;
+  const row = await db("estimates")
+    .whereNot("id", est.id)
+    .whereNotNull("sent_at")
+    .andWhere(function () {
+      if (customerId) this.where("customer_id", customerId);
+      for (const phone of phones) this.orWhere("customer_phone", phone);
+      if (digits.length >= 10) {
+        this.orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)]);
+      }
+      if (addresses.length) this.orWhereRaw("LOWER(TRIM(customer_email)) = ANY(?)", [addresses]);
+    })
+    .first("id");
+  return !!row;
+}
+
+// Reply-pause window start, gate on (owner 2026-11-21, option A). The 14 days also reach back BEFORE the estimate
+// existed, so the inquiry text a new prospect sent ("can I get a quote?") switched off every follow-up for that
+// estimate. For a person's ONLY sent estimate the window starts at the estimate's creation instead, when that is
+// later than the 14-day start. A person who has been sent another estimate, before or after this one, is in a live
+// conversation with the office (a re-quote), so for them the deliberate 14-day pause keeps covering their earlier replies.
+// created_at, never sent_at: a resend overwrites estimates.sent_at, so sent_at would forget a reply made between the
+// first send and the resend. created_at never moves and is never later than any send.
+// Any doubt keeps today's window (it pauses more and sends less): an unreadable or future created_at, a created_at
+// older than the window (nothing to clamp, no extra read), or a failed other-estimate read. The failed read falls
+// back on the replay path too: today's window is the safe side there, so it never throws. Only the error code or
+// name is logged (a knex message carries phone numbers and addresses).
+async function replyPauseWindowStart(est, windowStart, now) {
+  const createdMs = estimateCreatedMs(est, now);
+  if (createdMs === null || createdMs <= windowStart.getTime()) return windowStart;
+  try {
+    if (await hasOtherSentEstimate(est)) return windowStart;
+  } catch (e) {
+    const reason = (e && (e.code || e.name)) || "error";
+    logger.warn(`[est-followup] reply-pause window check skipped for estimate ${est && est.id}: ${reason}`);
+    return windowStart;
+  }
+  return new Date(createdMs);
+}
+
+// The two reply arms (text, then email) since an instant: the reply-pause window above is "the last N days", the 2-hour
+// estimate_sent email asks "since the send that enrolled them".
+async function hasRepliedSince(est, cutoff, { throwOnError = false } = {}) {
   try {
     if (await hasInboundSmsSince(est, cutoff)) return true;
     return await hasInboundEmailSince(est, cutoff);
@@ -1920,6 +2000,8 @@ module.exports = EstimateFollowUp;
 module.exports.deferredFollowupStillEligible = deferredFollowupStillEligible;
 // The replay's provider-boundary check (deferred-replay-registry).
 module.exports.followupTextProviderCheck = followupTextProviderCheck;
+// The reply check since an instant (the 2-hour estimate_sent stop, automation-runner.js).
+module.exports.hasRepliedSince = hasRepliedSince;
 module.exports._private = {
   sendDualChannel,
   estimateEmailPayload,
@@ -1941,6 +2023,8 @@ module.exports._private = {
   LEGACY_STAGE_TEMPLATES,
   mintStageLinks,
   hasRepliedRecently,
+  hasRepliedSince,
+  TERMINAL_STATUSES,
   wasRecentlyOpened,
   estimateMidCheckout,
   followupMayStillSend,

@@ -165,7 +165,25 @@ const CLEAN_LIVE_STATUSES = new Set(['live', 'redirected']);
 // body still fail.
 const PLAIN_TEXT_PATH_RE = /\.txt$/i;
 
+// A legal page (terms, privacy, accessibility, cookies) carries noindex on
+// purpose: each site keeps its own copy and none of them should rank. An
+// engine that cites one still lands on a working page. On 2026-11-23 a spoke's
+// own terms page (HTTP 200, full page, robots noindex) rang as "broken".
+// Only the noindex signal is excused, and only on such a path: a not-found
+// phrase, a bot wall or an error still fails.
+const LEGAL_PATH_RE = /^\/(terms|terms-of-service|terms-and-conditions|terms-of-use|privacy|privacy-policy|accessibility|accessibility-statement|cookie-policy|cookies)\/?$/i;
+
+function legalNoindexStatus(shared) {
+  if (shared.live_status !== 'noindex' || shared.soft_not_found === true) return null;
+  let pathname = '';
+  try { pathname = new URL(shared.final_url).pathname; } catch { return null; }
+  if (!LEGAL_PATH_RE.test(pathname)) return null;
+  return shared.redirect_target_url ? 'redirected' : 'live';
+}
+
 function effectiveLiveStatus(shared) {
+  const legal = legalNoindexStatus(shared);
+  if (legal) return legal;
   if (shared.live_status !== 'soft_404' || shared.non_html !== true || shared.soft_not_found !== false) return shared.live_status;
   if (!/^text\/plain\b/i.test(String(shared.content_type || ''))) return shared.live_status;
   let pathname = '';

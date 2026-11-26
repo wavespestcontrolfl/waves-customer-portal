@@ -162,7 +162,11 @@ export default function WinLossSlicesCard() {
             <div>
               <div className="text-ui-body text-zinc-500 mb-1">
                 Win rate by lookup state ({data.resolved} resolved,{" "}
-                {data.winRatePct ?? 0}% overall)
+                {data.winRatePct ?? 0}% overall
+                {data.wonBookedOtherWay > 0
+                  ? `, incl. ${data.wonBookedOtherWay} booked another way`
+                  : ""}
+                )
               </div>
               <Table>
                 <TBody>
@@ -315,6 +319,11 @@ export default function WinLossSlicesCard() {
                     <TD className="py-1 text-zinc-700">Accepted afterwards</TD>
                     <TD className="py-1 text-right font-medium text-zinc-900 tabular-nums">
                       {stillDeciding.wonAfter}
+                      {stillDeciding.wonBookedAfter > 0 && (
+                        <span className="ml-1 text-zinc-500 font-normal">
+                          +{stillDeciding.wonBookedAfter} booked another way
+                        </span>
+                      )}
                     </TD>
                   </TR>
                   <TR className="border-b border-hairline">

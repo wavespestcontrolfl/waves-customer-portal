@@ -18,10 +18,16 @@ jest.mock('../services/appointment-reminders', () => ({
 
 const {
   FLEX_TIER_RADIUS_DAYS,
+  FLEX_TIER_WIDE_RADIUS_DAYS,
+  FLEX_TIER_BIMONTHLY_RADIUS_DAYS,
+  FLEX_TIER_WIDEST_MIN_INTERVAL_DAYS,
+  FLEX_TIER_WIDE_MIN_INTERVAL_DAYS,
+  flexRadiusDaysFor,
   FLEX_TIER_FREEZE_HOURS,
   seriesPosition,
   loadSeriesNeighbors,
   flexTierMoveWindow,
+  flexBandRadius,
   flexWindowAdmits,
   ownScheduleFrozen,
   destinationFrozen,
@@ -31,6 +37,10 @@ const { MIN_DESTINATION_DAYS_OUT } = require('../services/auto-dispatch/route-ti
 describe('constants match the approved policy', () => {
   test('±5 days, 73h freeze, shared destination floor', () => {
     expect(FLEX_TIER_RADIUS_DAYS).toBe(5);
+    expect(FLEX_TIER_WIDE_RADIUS_DAYS).toBe(7); // owner 2026-11-22: 7-day range; 3 months or longer since 11-24
+    expect(FLEX_TIER_BIMONTHLY_RADIUS_DAYS).toBe(6); // owner 2026-11-24: "make it 6 for bi monthly"
+    expect(FLEX_TIER_WIDE_MIN_INTERVAL_DAYS).toBe(56);
+    expect(FLEX_TIER_WIDEST_MIN_INTERVAL_DAYS).toBe(84);
     expect(FLEX_TIER_FREEZE_HOURS).toBe(73);
     expect(MIN_DESTINATION_DAYS_OUT).toBe(5); // reused from route-tiers, not re-derived
   });
@@ -178,6 +188,229 @@ describe('flexTierMoveWindow — the ±5 days are measured from the durable orig
       origDate: '2026-09-18', anchorDate: '2026-09-16', today, neighbors: { prev: '2026-09-15' },
     });
     expect(w).toEqual({ dateFrom: '2026-09-16', dateTo: '2026-09-21' });
+  });
+});
+
+describe('flexRadiusDaysFor — ±7 for a plan of 3 months or longer, ±6 for 2 months, ±5 for everything else', () => {
+  const { MONTH_RECURRENCE_INTERVALS } = require('../services/rebooker');
+
+  test.each(Object.entries(MONTH_RECURRENCE_INTERVALS))('month pattern %s (every %i month(s))', (pattern, months) => {
+    expect(flexRadiusDaysFor({ recurring_pattern: pattern })).toBe(months >= 3 ? 7 : (months === 2 ? 6 : 5));
+  });
+
+  test('the month table reads: monthly is the only narrow one', () => {
+    expect(Object.keys(MONTH_RECURRENCE_INTERVALS).filter((k) => flexRadiusDaysFor({ recurring_pattern: k }) === 5)).toEqual(['monthly']);
+  });
+
+  test('custom: 55 days is 5, 56 to 83 days is 6, 84 days is 7; a missing, zero or non-numeric interval is 5', () => {
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 55 })).toBe(5);
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 56 })).toBe(6);
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 83 })).toBe(6);
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 84 })).toBe(7);
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: '90' })).toBe(7);
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: 365 })).toBe(7);
+    for (const bad of [undefined, null, 0, -90, '', 'abc', NaN, Infinity * 0]) {
+      expect(flexRadiusDaysFor({ recurring_pattern: 'custom', recurring_interval_days: bad })).toBe(5);
+    }
+    expect(flexRadiusDaysFor({ recurring_pattern: 'custom' })).toBe(5);
+  });
+
+  test('every other named pattern is 5, and the interval column is ignored outside custom', () => {
+    for (const pattern of ['monthly_nth_weekday', 'every_6_weeks', 'weekly', 'biweekly', 'daily', 'lawn_rounds_9', 'seasonal_feb_oct']) {
+      expect(flexRadiusDaysFor({ recurring_pattern: pattern, recurring_interval_days: 120 })).toBe(5);
+    }
+  });
+
+  test('null, undefined, unknown, a non-string pattern, a prototype key and a row with no pattern all fail closed to 5', () => {
+    expect(flexRadiusDaysFor(null)).toBe(5);
+    expect(flexRadiusDaysFor(undefined)).toBe(5);
+    expect(flexRadiusDaysFor({})).toBe(5);
+    for (const pattern of [null, undefined, '', 'every_other_tuesday', 'Quarterly', 7, {}, 'constructor', 'toString', '__proto__']) {
+      expect(flexRadiusDaysFor({ recurring_pattern: pattern })).toBe(5);
+    }
+  });
+});
+
+describe('flexBandRadius — the wide band needs the pattern AND room in the series', () => {
+  const origDate = '2026-09-21';
+
+  test('7 with no other live occurrence (nearestDays null), and with the nearest one exactly 56 days away', () => {
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: null } })).toBe(7);
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { prev: '2026-07-27', next: '2026-11-16', nearestDays: 56 } })).toBe(7);
+  });
+
+  test('a live occurrence closer than 56 days reads 5 (a plan labeled bimonthly that runs 9 visits a year), 0 included', () => {
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: 55 } })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: 40 } })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: 0 } })).toBe(5);
+  });
+
+  test('an entry without the fact reads 5 (fail closed): the prev / next bounds alone never widen the band', () => {
+    expect(flexBandRadius({ radiusDays: 7, neighbors: {} })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7 })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 7, neighbors: { prev: '2026-01-01', next: '2027-01-01' } })).toBe(5);
+    for (const bad of [undefined, NaN, '90', -1]) expect(flexBandRadius({ radiusDays: 7, neighbors: { nearestDays: bad } })).toBe(5);
+  });
+
+  test('the 2-month band is 6 with room in the series, and 5 with a live occurrence closer than 56 days', () => {
+    expect(flexBandRadius({ radiusDays: 6, neighbors: { nearestDays: null } })).toBe(6);
+    expect(flexBandRadius({ radiusDays: 6, neighbors: { nearestDays: 56 } })).toBe(6);
+    expect(flexBandRadius({ radiusDays: 6, neighbors: { nearestDays: 55 } })).toBe(5);
+    expect(flexBandRadius({ radiusDays: 6, neighbors: {} })).toBe(5);
+  });
+
+  test('the narrow band never widens; a bad radius reads 5', () => {
+    expect(flexBandRadius({ radiusDays: 5, neighbors: { nearestDays: null } })).toBe(5);
+    for (const bad of [undefined, null, 0, 4, 8, 30, NaN, '7', '6']) expect(flexBandRadius({ radiusDays: bad, neighbors: { nearestDays: null } })).toBe(5);
+  });
+
+  test('flexTierMoveWindow applies it: radius 7 with the next visit 40 days ahead is the ±5 window', () => {
+    const today = '2026-09-01';
+    const near = { next: '2026-10-31', nearestDays: 40 };
+    expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: near, radiusDays: 7 }))
+      .toEqual(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: near }));
+    expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: near, radiusDays: 7 }))
+      .toEqual({ dateFrom: '2026-09-16', dateTo: '2026-09-26' });
+    expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: { next: '2026-12-21', nearestDays: 91 }, radiusDays: 7 }))
+      .toEqual({ dateFrom: '2026-09-14', dateTo: '2026-09-28' });
+  });
+});
+
+describe('flexTierMoveWindow — the radius a caller passes', () => {
+  const today = '2026-09-01';
+  const origDate = '2026-09-21';
+
+  test('radius 7 reaches 7 days each side of BOTH the current date and the anchor (the anchor still limits it)', () => {
+    expect(flexTierMoveWindow({
+      origDate, anchorDate: origDate, today, neighbors: { nearestDays: null }, radiusDays: 7,
+    })).toEqual({ dateFrom: '2026-09-14', dateTo: '2026-09-28' });
+    // Already 6 days past its anchor: one more day out, not seven.
+    expect(flexTierMoveWindow({
+      origDate: '2026-09-22', anchorDate: '2026-09-16', today, neighbors: { nearestDays: null }, radiusDays: 7,
+    })).toEqual({ dateFrom: '2026-09-15', dateTo: '2026-09-23' });
+    // The anchor's own lower edge binds too: anchor 09-16 reaches back to 09-09, the current date to 09-15.
+    expect(flexTierMoveWindow({
+      origDate: '2026-09-22', anchorDate: '2026-09-16', today, neighbors: { nearestDays: null }, radiusDays: 7,
+    }).dateFrom).toBe('2026-09-15');
+  });
+
+  test('the neighbor clamp and the destination floor still apply at radius 7', () => {
+    expect(flexTierMoveWindow({
+      origDate, anchorDate: origDate, today, neighbors: { prev: '2026-09-19', next: '2026-09-24' }, radiusDays: 7,
+    })).toEqual({ dateFrom: '2026-09-20', dateTo: '2026-09-23' });
+    // 09-04 is 3 days out: the 5-day floor lifts the lower edge to 09-06; the current date stays reachable.
+    expect(flexTierMoveWindow({
+      origDate: '2026-09-04', anchorDate: '2026-09-04', today, neighbors: { nearestDays: null }, radiusDays: 7,
+    })).toEqual({ dateFrom: '2026-09-04', dateTo: '2026-09-11', dayMoveFrom: '2026-09-06' });
+  });
+
+  test('radius 7 admits a 7-day move; radius 5 refuses the same destination', () => {
+    const wide = flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: { nearestDays: null }, radiusDays: 7 });
+    const narrow = flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: {}, radiusDays: 5 });
+    expect(flexWindowAdmits(wide, origDate, '2026-09-28')).toBe(true);
+    expect(flexWindowAdmits(wide, origDate, '2026-09-29')).toBe(false);
+    expect(flexWindowAdmits(narrow, origDate, '2026-09-27')).toBe(false);
+    expect(flexWindowAdmits(narrow, origDate, '2026-09-26')).toBe(true);
+  });
+
+  test('no radius, or a radius that is not exactly 5 or 7, equals the old ±5 result', () => {
+    const inputs = [
+      { origDate, anchorDate: origDate, today, neighbors: {} },
+      { origDate: '2026-09-22', anchorDate: '2026-09-16', today, neighbors: {} },
+      { origDate: '2026-09-04', anchorDate: '2026-09-04', today, neighbors: { next: '2026-09-09' } },
+      { origDate, anchorDate: origDate, today, neighbors: { prev: '2026-09-19', next: '2026-09-24' } },
+    ];
+    for (const input of inputs) {
+      const expected = flexTierMoveWindow(input);
+      expect(flexTierMoveWindow({ ...input, radiusDays: 5 })).toEqual(expected);
+      for (const bad of [0, 6, 30, NaN, '7', null, undefined, -7, 7.5]) {
+        expect(flexTierMoveWindow({ ...input, radiusDays: bad })).toEqual(expected);
+      }
+    }
+    expect(flexTierMoveWindow({ origDate, anchorDate: origDate, today, neighbors: {} })).toEqual({ dateFrom: '2026-09-16', dateTo: '2026-09-26' });
+  });
+});
+
+describe('loadSeriesNeighbors — withRadius (the apply-time read)', () => {
+  const rows = {
+    p1: [
+      { id: 'p1', scheduled_date: '2026-09-01', recurring_pattern: 'quarterly' },
+      { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly' },
+      { id: 's2', scheduled_date: '2027-03-01', recurring_pattern: 'monthly' },
+    ],
+  };
+  const services = [{ id: 's1', recurring_parent_id: 'p1' }, { id: 's2', recurring_parent_id: 'p1' }];
+
+  test('off by default: entries are exactly {prev, next}', async () => {
+    const map = await loadSeriesNeighbors(seriesDbStub(rows), services);
+    expect(map.get('s1')).toEqual({ prev: '2026-09-01', next: '2027-03-01' });
+  });
+
+  test('on: each entry carries the radius of its OWN row as the read saw it', async () => {
+    const map = await loadSeriesNeighbors(seriesDbStub(rows), services, { withRadius: true });
+    expect(map.get('s1')).toEqual({ prev: '2026-09-01', next: '2027-03-01', radiusDays: 7, nearestDays: 90 });
+    expect(map.get('s2')).toEqual({ prev: '2026-12-01', next: null, radiusDays: 5, nearestDays: 90 });
+  });
+
+  test('nearestDays is by ACTUAL date: a sibling due 40 days later and rescheduled to 70 days later does not narrow the band', async () => {
+    const moved = { p1: [
+      { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'bimonthly' },
+      { id: 's2', scheduled_date: '2027-02-09', date_exception: true, date_exception_cadence_date: '2027-01-10', recurring_pattern: 'bimonthly' },
+    ] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(moved), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    // The crossing guard still sees the old cadence date; the band reads where the sibling is now.
+    expect(entry).toMatchObject({ next: '2027-01-10', nearestDays: 70, radiusDays: 6 }); // bimonthly: ±6 (owner 2026-11-24)
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(6);
+  });
+
+  test('a sibling rescheduled onto the visit\'s own date is 0 days away: the band is narrow', async () => {
+    const same = { p1: [
+      { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly' },
+      { id: 's2', scheduled_date: '2026-12-01', date_exception: true, date_exception_cadence_date: '2027-03-01', recurring_pattern: 'quarterly' },
+    ] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(same), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    expect(entry.nearestDays).toBe(0);
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(5);
+  });
+
+  test('a live sibling with no readable date still counts (0 days): the band is narrow, the crossing guard ignores it', async () => {
+    const blank = { p1: [
+      { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly' },
+      { id: 's2', scheduled_date: null, recurring_pattern: 'quarterly' },
+    ] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(blank), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    expect(entry).toEqual({ prev: null, next: null, radiusDays: 7, nearestDays: 0 });
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(5);
+  });
+
+  test('a skipped, rescheduled or no-show sibling does not narrow the band; the crossing guard still sees its slot', async () => {
+    for (const status of ['skipped', 'rescheduled', 'no_show']) {
+      const rows = { p1: [
+        { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly', status: 'confirmed' },
+        { id: 's2', scheduled_date: '2027-01-10', recurring_pattern: 'quarterly', status },
+        { id: 's3', scheduled_date: '2027-03-01', recurring_pattern: 'quarterly', status: 'confirmed' },
+      ] };
+      const entry = (await loadSeriesNeighbors(seriesDbStub(rows), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+      expect(entry).toEqual({ prev: null, next: '2027-01-10', radiusDays: 7, nearestDays: 90 });
+      expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(7);
+    }
+  });
+
+  test('a scheduled sibling 40 days away still narrows the band', async () => {
+    const rows = { p1: [
+      { id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly', status: 'confirmed' },
+      { id: 's2', scheduled_date: '2027-01-10', recurring_pattern: 'quarterly', status: 'pending' },
+    ] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(rows), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    expect(entry.nearestDays).toBe(40);
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(5);
+  });
+
+  test('a series with no other live occurrence: nearestDays null, the pattern alone decides', async () => {
+    const alone = { p1: [{ id: 's1', scheduled_date: '2026-12-01', recurring_pattern: 'quarterly' }] };
+    const entry = (await loadSeriesNeighbors(seriesDbStub(alone), [{ id: 's1', recurring_parent_id: 'p1' }], { withRadius: true })).get('s1');
+    expect(entry).toEqual({ prev: null, next: null, radiusDays: 7, nearestDays: null });
+    expect(flexBandRadius({ radiusDays: entry.radiusDays, neighbors: entry })).toBe(7);
   });
 });
 

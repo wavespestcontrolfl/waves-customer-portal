@@ -695,7 +695,7 @@ describe('D. restore wording and the remaining window', () => {
 });
 
 describe('allowed: the untouched automatic primary', () => {
-  test('a county meter reclaimed-water match (GATE_LAWN_RECLAIMED_HALF_N) is derived, like the neighborhood stamp, not operator history', async () => {
+  test('a county meter reclaimed-water match is derived, like the neighborhood stamp, not operator history', async () => {
     db.__state.properties = [{ ...autoPrimary(), reclaimed_water: true, reclaimed_water_source: 'county_meter', reclaimed_water_checked_at: new Date() }];
     expect((await preview()).preview).toBe(true);
   });
