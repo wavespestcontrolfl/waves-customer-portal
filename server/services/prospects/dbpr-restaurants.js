@@ -477,14 +477,23 @@ function readReportTables(page) {
 }
 
 // Whether the page's rows cannot be tied to its visit in time: any row (a 35 row or not) whose visit label does not
-// read; a follow-up note dated on or before the page's own visit (that visit was not the first: the page and the
-// file disagree); or, on a page with no visit labels, text that names a later visit in a form the labels do not read
-// ("From follow-up:", "call back").
-function cannotPlaceInTime(entries, pageDate, followUp) {
-  const allNotes = entries.map((entry) => visitNotes(entry.parts.join(' ')));
+// read; a follow-up note dated on a day that does not exist, or on or before the page's own visit (that visit was not
+// the first: the page and the file disagree); or text that names a later visit in a form the labels do not read.
+function cannotPlaceInTime(entries, pageDate) {
+  const texts = entries.map((entry) => entry.parts.join(' '));
+  const allNotes = texts.map(visitNotes);
   if (allNotes.some((notes) => notes.unreadable)) return true;
-  if (allNotes.some((notes) => (notes.notes || []).some((note) => note.date !== null && note.date <= pageDate))) return true;
-  return !followUp && entries.some((entry) => LATER_VISIT_WORD_RE.test(compact(entry.parts.join(' '))));
+  const dates = allNotes.flatMap((notes) => (notes.notes || []).map((note) => note.date)).filter((date) => date !== null);
+  if (dates.some((date) => !isCalendarDay(date) || date <= pageDate)) return true;
+  // With the labels that read taken out, any later-visit word left ("From follow-up:", "call back") is one that
+  // does not read: on a labelled page or not.
+  return texts.some((text) => LATER_VISIT_WORD_RE.test(compact(text.replace(VISIT_NOTE_RE, ' '))));
+}
+
+// Whether a YYYY-MM-DD string is a real calendar day ("2026-13-01" and "2026-02-30" are not).
+function isCalendarDay(date) {
+  const day = new Date(`${date}T00:00:00Z`);
+  return !Number.isNaN(day.getTime()) && day.toISOString().slice(0, 10) === date;
 }
 
 /**
@@ -534,7 +543,7 @@ function parseInspectionReport(html, { violation35 = null, visitDate = null, vis
   // A follow-up report (any violations row labelled with its visit) ties each row to a visit, so an unlabelled 35 row
   // on it cannot be tied to one. A 35 row whose text shows no word (only a joiner, say) cannot answer either.
   const followUp = entries.some((entry) => !visitNotes(entry.parts.join(' ')).routine);
-  if (cannotPlaceInTime(entries, parseUsDate(visits[0].date), followUp)) return null;
+  if (cannotPlaceInTime(entries, parseUsDate(visits[0].date))) return null;
   if (unreadable || rows35.some((row) => row.notes.unreadable || !hasWord(row.text) || (followUp && row.notes.routine))) return null;
   // The read visit's own 35 rows: every row of a routine report; on a follow-up report, those with the initial note.
   const ofVisit = rows35.filter((row) => row.notes.routine || row.notes.notes.some((note) => note.date === null));

@@ -302,6 +302,12 @@ describe('parseInspectionReport', () => {
     const labelled = '<tr><td>35A-02-8</td><td>Basic - From initial inspection : Live flies.</td></tr>';
     const empty = '<tr><td>22-01-4</td><td>From initial inspection : Floor dirty. - From follow-up inspection 2026-11-16:</td></tr>';
     expect(parse(reportPage(`${labelled}${empty}`), { violation35: 1 })).toBeNull();
+    // On a labelled page too, a later-visit label that does not read gives no answer.
+    expect(parse(reportPage('<tr><td>35A-02-8</td><td>From initial inspection: - From follow-up: Live flies.</td></tr>'), { violation35: 1 })).toBeNull();
+    // A follow-up dated on a day that does not exist cannot be placed after the visit.
+    const door = '<tr><td>35B-01-4</td><td>Basic - From initial inspection : Gap under the door.</td></tr>';
+    const odd = '<tr><td>35A-02-8</td><td>Basic - From initial inspection : Live flies. - From follow-up inspection 2026-13-01: Seen.</td></tr>';
+    expect(parse(reportPage(`${door}${odd}`), { violation35: 2 })).toBeNull();
   });
   test('a follow-up note dated on or before the page\'s visit date gives no answer: that visit was not the first', () => {
     const cited = (date) => `<tr><td>35A-02-8</td><td>Basic - From initial inspection : Live roaches. - From follow-up inspection ${date}: Still seen.</td></tr>`;
