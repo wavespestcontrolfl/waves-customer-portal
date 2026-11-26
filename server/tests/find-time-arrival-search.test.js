@@ -164,6 +164,8 @@ test('only the nightly auto-dispatch search passes arrivalSearch to find-time', 
     'services/auto-dispatch/candidate-slots.js',
     'services/auto-dispatch/config.js',
     'services/auto-dispatch/index.js',
+    // The night run's rain term (shadow): its drier-date search is the night run's own arrival search.
+    'services/auto-dispatch/rain-term.js',
     'services/scheduling/find-time.js',
   ]);
 });
