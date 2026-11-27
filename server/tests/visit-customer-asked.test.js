@@ -41,7 +41,7 @@ function fakeDbh({ rows = [], booking = { customer_notes: null, source: 'direct'
     calls.push(['table', table]);
     const q = {};
     for (const m of ['where', 'whereIn', 'whereNotNull', 'whereRaw', 'orderBy', 'orderByRaw', 'limit', 'join']) {
-      q[m] = (...args) => { calls.push([table, m, ...args]); if (m === 'where' && args[0]?.id) q.id = args[0].id; if (m === 'where' && args[0]?.is_primary) q.primary = true; if (m === 'where' && args[0]?.source === 'customer_portal_reschedule') q.resched = true; return q; };
+      q[m] = (...args) => { calls.push([table, m, ...args]); if (m === 'where' && args[0]?.id) q.id = args[0].id; if (m === 'where' && args[0]?.is_primary) q.primary = true; if (m === 'where' && args[0]?.source === 'customer_portal_reschedule') q.resched = true; if (m === 'where' && table === 'self_booked_appointments') q.bookingWhere = args[0]; return q; };
     }
     q.select = async () => {
       if (table === 'property_preferences' || table === 'customer_access_codes') {
@@ -57,7 +57,11 @@ function fakeDbh({ rows = [], booking = { customer_notes: null, source: 'direct'
       if (fail) throw Object.assign(new Error('boom with customer text'), { code: 'ECONNRESET' });
       if (table === 'customer_properties') return (q.primary ? props.find((p) => p.is_primary) : props.find((p) => p.id === q.id)) || undefined;
       if (table === 'customers') return customer;
-      return table === 'self_booked_appointments' ? booking : undefined;
+      if (table === 'self_booked_appointments') {
+        const bound = q.bookingWhere || {};
+        return booking && (!booking.customer_id || booking.customer_id === bound.customer_id) && (!bound.id || bound.id === (booking.id || bound.id)) ? booking : undefined;
+      }
+      return undefined;
     };
     return q;
   };
@@ -834,6 +838,36 @@ describe('customerAskedFacts: office-only words show nothing, in every free-text
   test('ordinary words in the same kinds still show', async () => {
     const row = formRow({ subject: 'Ants in the kitchen', description: 'Ants in the kitchen', metadata: { writer: 'portal_form' } });
     expect((await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).items).toHaveLength(1);
+  });
+});
+
+describe('customerAskedFacts: the booking row must be this customer\'s', () => {
+  const svc = { ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Please text first' };
+  test('the lookup binds both the booking id and the visit\'s customer', async () => {
+    const dbh = fakeDbh({ booking: { customer_id: 'cust-1', customer_notes: 'Please text first', source: 'direct' } });
+    expect((await customerAskedFacts(svc, dbh)).items[0].text).toBe('Please text first');
+    expect(dbh.calls.find((c) => c[0] === 'self_booked_appointments' && c[1] === 'where')[2]).toEqual({ id: 'sb-1', customer_id: 'cust-1' });
+  });
+  test('a booking row of another customer yields no note, even though the visit notes carry words', async () => {
+    expect(await customerAskedFacts(svc, fakeDbh({ booking: { customer_id: 'cust-9', customer_notes: 'Other words', source: 'direct' } }))).toBeNull();
+  });
+});
+
+describe('customerAskedFacts: the complete request text passes every screen on both branches', () => {
+  const OFFICE = 'The tech killed my plants with the spray';
+  test('a typed request whose SUBJECT differs from its description is screened as one text', async () => {
+    const row = formRow({ subject: 'Gate 4521 problem', description: 'Please call me', metadata: { writer: 'portal_form' } });
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).toBeNull();
+    const office = formRow({ subject: OFFICE, description: 'Please call me', metadata: { writer: 'portal_form' } });
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [office] }))).toBeNull();
+  });
+  test('a row marked portal_flow, or a card row, is not trusted: its subject shows only if it passes every screen', async () => {
+    const flowBad = formRow({ subject: 'Lawn care at $149 per visit', description: 'x', metadata: { writer: 'portal_flow' } });
+    const flowOffice = formRow({ subject: OFFICE, description: 'x', metadata: { writer: 'portal_flow' } });
+    const cardBad = formRow({ subject: 'Open the gate with 4521', description: 'x', source: 'portal_chat' });
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [flowBad, flowOffice, cardBad] }))).toBeNull();
+    const ok = formRow({ subject: 'Lawn care review requested', description: 'x', metadata: { writer: 'portal_flow' } });
+    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [ok] }))).items[0].text).toBe('Lawn care review requested');
   });
 });
 

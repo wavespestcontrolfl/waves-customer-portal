@@ -208,6 +208,15 @@ function selfBookedNoteText(notes, customerNotes = null) {
   return text && !LEGACY_NOTE_RE.test(text) && !GENERATED_BOOKING_NOTE_RE.test(text) ? text : null;
 }
 
+// The WHOLE customer-authored portion of a booking's notes line, continuation lines included: what the customer typed, up to the
+// appendix the booking flow or a later writer adds. A legacy request is read from its first matching line only (legacyRequestText);
+// a screen that must see everything the customer wrote (holdText) reads this.
+function customerNotesPortion(notes) {
+  const text = String(notes || '');
+  const match = /(?:^|\n)\s*Self-booked\.\s*Notes:\s*([\s\S]+)$/.exec(text) || /(?:^|\n)\s*(Re-service request[\s\S]*)$/.exec(text);
+  return match ? compact(match[1].split(NOTE_APPENDIX_RE)[0].split(NOTE_RECORD_BOUNDARY_RE)[0]) : '';
+}
+
 // The booking's own words as { source, text, quoted, lead } before the scrub,
 // or null. Quote rule (owner 2026-09-26): the picker and a text are the
 // customer's exact words; a call is a paraphrase and office words are staff's.
@@ -226,7 +235,7 @@ function bookingWords(visit, lane) {
   if (labels.length) return { source: 'request_form', text: `Picked: ${labels.join(', ')}`, quoted: false, lead: null };
   if (visit.customer_request != null) return null;
   const legacy = legacyRequestText(visit.notes);
-  return legacy ? { source: 'request_form', text: legacy, quoted: true, lead: null } : null;
+  return legacy ? { source: 'request_form', text: legacy, quoted: true, lead: null, fullText: customerNotesPortion(visit.notes) } : null;
 }
 
 // Everything over the cap goes except the booking item and the newest others.
@@ -393,7 +402,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
 
   const booking = bookingWords(visit, lane);
   const bookingId = `booking:${visit.id}`;
-  const held = (candidate) => Boolean(holdText) && [candidate.text, candidate.screenText].some((text) => text && holdText(String(text)));
+  const held = (candidate) => Boolean(holdText) && [candidate.text, candidate.screenText, candidate.fullText].some((text) => text && holdText(String(text)));
   const bookingItem = booking && !held(booking) ? buildItem({ id: bookingId, at: anchor, ...booking }) : null;
   // A text that repeats the booking words (before or after the scrub) is the
   // same ask, not a second one.

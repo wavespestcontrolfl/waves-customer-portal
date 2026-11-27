@@ -140,7 +140,8 @@ async function reserviceItems(svc, dbh, codes) {
 // form (routes/booking.js) always stamps `source` ('direct', a fleet site, 'reservice_link'), and the AI assistant's
 // book_appointment (availability.confirmBooking) writes none. Only the form's row holds words the customer typed.
 async function typedBookingRow(svc, dbh) {
-  const row = await dbh('self_booked_appointments').where({ id: svc.self_booking_id }).first('customer_notes', 'source');
+  // The row must be this visit's own customer's: a mismatched id (a merge, a bad link) yields no note.
+  const row = await dbh('self_booked_appointments').where({ id: svc.self_booking_id, customer_id: svc.customer_id }).first('customer_notes', 'source');
   return row && row.source ? row : null;
 }
 
@@ -312,16 +313,20 @@ function rescheduleNote(description, createdAt, now = new Date()) {
   return null;
 }
 
-// The words of a portal request row. A row whose subject is an independently generated service label shows that label: a
-// card or chat row, and a pricing flow ('portal_flow', whose generated description holds prices, never shown). A typed
+// The words of a portal request row. A row whose subject is an independently generated service label shows that label when it
+// passes every screen: a card or chat row, and a pricing flow ('portal_flow', whose generated description holds prices, never shown). A typed
 // portal form row (and an older row with only the stamp) derives its subject FROM the description: its first 80 characters,
 // which can carry what the description's screen held, so a held description shows nothing at all. A description that starts
 // with its subject is shown alone.
 function requestRowText(row, codes = null) {
   const subject = compact(row.subject);
-  if (row.source || metaOf(row)?.writer === 'portal_flow') return subject;
+  const passes = (text) => screenOk(text, codes) && !officeOnly(text);
+  // A label the client or the server wrote (a card or chat row, or a row naming itself a pricing flow) is trusted for nothing:
+  // its subject shows only if it passes every screen.
+  if (row.source || metaOf(row)?.writer === 'portal_flow') return passes(subject) ? subject : '';
   const description = compact(row.description);
-  if (!description || !screenOk(description, codes) || officeOnly(description)) return '';
+  // The complete outgoing request text, subject and description together, passes every screen or nothing shows.
+  if (!description || !passes(compact(`${subject} ${description}`))) return '';
   return description.toLowerCase().startsWith(subject.toLowerCase()) ? description : `${subject}: ${description}`;
 }
 

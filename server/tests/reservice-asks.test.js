@@ -686,3 +686,22 @@ describe('gatherReserviceAsks: holdText screens the ORIGINAL text, before the sc
     expect(out.items).toHaveLength(1);
   });
 });
+
+describe('gatherReserviceAsks: holdText sees the whole customer-authored legacy notes, continuation lines included', () => {
+  const hold = (text) => /photos\.example\.dev/.test(text);
+  const notes = 'Self-booked. Notes: Re-service request: ants are back\nPhotos are at photos.example.dev/yard — Unit: 5';
+
+  test('a legacy request whose later line is held is dropped; its first line alone would have passed', async () => {
+    expect(_test.legacyRequestText(notes)).toBe('ants are back');
+    const held = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ visit: baseVisit({ notes }) }), now: NOW, holdText: hold });
+    expect(held.items).toEqual([]);
+    const open = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ visit: baseVisit({ notes }) }), now: NOW });
+    expect(open.items.map((i) => i.text)).toEqual(['ants are back']);
+  });
+
+  test('lines appended by other writers are not part of the customer portion', async () => {
+    const withReschedule = 'Self-booked. Notes: Re-service request: ants are back — Unit: 5 | RESCHEDULE REQUEST: see photos.example.dev/x';
+    const out = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ visit: baseVisit({ notes: withReschedule }) }), now: NOW, holdText: hold });
+    expect(out.items.map((i) => i.text)).toEqual(['ants are back']);
+  });
+});
