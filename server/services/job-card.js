@@ -1667,6 +1667,12 @@ const LINE_RATE_RE = /(\d+(?:\.\d+)?)(?:\s*[-–]\s*(\d+(?:\.\d+)?))?\s*(%|(?:fl
 const FL_OZ_PER = { floz: 1, qt: 32, pt: 16, tbsp: 0.5, tsp: 1 / 6 };
 // `conditional`: the whole line is an "if needed" line, so every clause is its use and the rate sits in the same clause as the condition
 // ("Distance IGR on live whitefly finds only: whiteflies 6-8 fl oz/100 gal"); the standard-rate filter would drop all of it.
+// True when the rate lineRate would read is a stated per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage (a product name's "6% Fe").
+function lineRateIsDilution(raw, { conditional = false } = {}) {
+  const text = lineClauses(String(raw || '').replace(/\([^)]*\)/g, ' ')).filter((clause) => conditional || !CONDITIONAL_LINE_RE.test(clause)).join(', ');
+  const m = LINE_RATE_RE.exec(text);
+  return Boolean(m && m[3] !== '%' && m[4]);
+}
 function lineRate(raw, { conditional = false } = {}) {
   const text = lineClauses(String(raw || '').replace(/\([^)]*\)/g, ' ')).filter((clause) => conditional || !CONDITIONAL_LINE_RE.test(clause)).join(', ');
   const m = LINE_RATE_RE.exec(text);
@@ -2393,8 +2399,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     ratePerGallon: mix.amount != null ? perGallon : null,
     ...(governedRate?.text ? { rateText: governedRate.text } : {}),
     ...(governedRows.length ? { governedRates: governedRows.map(({ warnings: _w, ...row }) => row) } : {}),
-    rateSource: governedRate ? 'governed' : (planned ? 'plan' : (protocolPerGallon ? 'protocol' : 'catalog')),
-    rateVerified: Boolean(product.label_verified_at),
+    rateSource: governedRate ? 'governed' : (planned ? 'plan' : ((protocolPerGallon || lineOnlyBand) ? 'protocol' : 'catalog')),
+    // A protocol-only dilution (no catalog per-gallon band) is not verified by the catalog row's label check.
+    rateVerified: Boolean(product.label_verified_at) && !(lineOnlyBand && !protocolPerGallon),
     tankMixable,
     sprayCheck,
     context: protocolLine ? { line: protocolLine.addon, conditional: !protocolLine.selected } : { line: null },
@@ -2442,11 +2449,12 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     // per-gallon band, else the label band.
     const band = protocolBandOfLine || (!labelPerGallon && line.explicitDilution && line.rate ? line.rate : null);
     const used = band || labelPerGallon || null;
-    if (!used) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: [], ...(line.conditional ? { conditional: true } : {}) };
-    const lineCarrier = lineCarrierOf(band, line);
-    const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier });
+    const lineCarrier = used ? lineCarrierOf(band, line) : null;
     const rigWarning = rigVolumeWarning({ lineCarrier, ...rigCtx });
+    // The row's own conditions ride with it whether or not a number can be worked out for it.
     const warning = [line.conditional && `Listed as "if needed" on ${line.name} — confirm the call before mixing`, line.conditional && line.useText && `Applies to: ${line.useText}`, line.labelHold, rigWarning].filter(Boolean);
+    if (!used) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: warning, ...(line.conditional ? { conditional: true } : {}) };
+    const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier });
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
     return {
       service: line.name, amount, amountMax: amountMax ?? null, unit, ratePerGallon: used, fromCard: Boolean(band),
@@ -2573,7 +2581,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     return {
       rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
       // The line itself states a per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage read off a product name ("6% Fe").
-      explicitDilution: /(?:\/|\bper\b)\s*(?:100\s*)?gal/i.test(String(h.hit.raw || '')),
+      explicitDilution: lineRateIsDilution(h.hit.raw, { conditional: h.hit.selected === false }),
       ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),
       ...(h.hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(h.hit.raw || '')).replace(/\s+/g, ' ').trim(), 2000) } : {}),
       ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
@@ -2589,14 +2597,14 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     // booked area rate rides beside it under its service name.
     const conditionalTankHits = hits.filter(({ hit }) => hit.selected === false && !hit.governed);
     const lead = tankHits[0] || conditionalTankHits[0] || selected;
-    const rateHits = tankHits.length ? tankHits : (lead === selected ? selectedHits : [lead]);
+    const rateHits = tankHits.length ? tankHits : (lead === selected ? selectedHits : conditionalTankHits);
     const governedRows = selectedHits.filter((h) => h.hit.governed).map((h) => ({ service: h.c.name, ...governedRateOf(h.hit.governed, h.c.scope) })).filter((row) => row.ratePer1000);
     // Two booked services can select the same product at different rates (a home cockroach visit with Tekko Pro at its label's
     // 2 fl oz per gallon, plus a flea add-on at 0.66 in the shared tank). The request names only the product, so no one rate is the
     // right one: the dose carries a warning. Each service's line goes along (conflictLines) so the warning can name the rates that pass the
     // same label check a single dose does (conflictText).
     // An "if needed" line of the same product on another booked service is a row of its own, marked as needing the call confirmed.
-    const conditionalHits = tankHits.length ? hits.filter(({ hit }) => hit.selected === false && !hit.governed) : [];
+    const conditionalHits = tankHits.length ? conditionalTankHits : [];
     const conflictHits = [...rateHits, ...conditionalHits];
     const ratesDisagree = conflictLinesOf(conflictHits);
     // A hold on any selected service's line holds the dose: the request names only the product, so another service's rate
