@@ -1214,6 +1214,8 @@ function hasBannedCustomerCopy(text, opts = {}) {
     t = labelFactsLib.stripLabelSentences(labelFactsLib.stripHandoffDeadlines(t), opts.labelFactsText || '');
     // ...and a bare yes / ok / "you can" answering a re-entry or rain question the customer asked (opts.asked)
     if (labelFactsLib.hasUngroundedLabelClaim(t, opts.bankSentences) || labelFactsLib.answersAskedLabelQuestion(t, opts.asked, opts.bankSentences)) return true;
+    // ...and a "labeled for <pest>" claim that is not a verbatim PRODUCT NOTES copy (texting AI gap 5)
+    if (labelFactsLib.hasUnbackedLabeledForClaim(t, opts.bankSentences)) return true;
   }
   return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
 }

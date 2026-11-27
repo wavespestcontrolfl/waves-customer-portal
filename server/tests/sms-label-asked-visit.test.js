@@ -30,6 +30,16 @@ describe('namedServiceFamilies: service-shaped words only', () => {
     ['Can the dog go on the lawn?', []],
     ['I still see roaches in the kitchen', []],
     ['The lawn guy and the pest control tech both came', ['interior_pest', 'lawn']],
+    // specialty services: named only as a service; a bed bug heat treatment is never also the chemical one
+    ['Can the cat come back after the flea treatment?', ['flea']],
+    ['how long after the roach service can we cook', ['cockroach']],
+    ['is the cockroach treatment dry', ['cockroach']],
+    ['When can we sleep in the room after the bed bug treatment?', ['bed_bug']],
+    ['after the bed bug heat treatment can we go back in', ['bed_bug_heat']],
+    // "bed bug spray" is the bed bug service, never the general "bug spray"
+    ['is the bed bug spray dry?', ['bed_bug']],
+    ['is the bug spray dry?', ['interior_pest']],
+    ['fleas are everywhere', []],
   ])('%s', (text, families) => {
     expect([...labelFactsLib.namedServiceFamilies(text)].sort()).toEqual(families.sort());
   });
@@ -39,11 +49,18 @@ describe('pickAskedVisitDate', () => {
   const days = [day('2026-11-24', ['interior_pest']), day('2026-11-18', ['lawn']), day('2026-11-12', ['lawn'])];
   const pick = (text, list = days) => labelFactsLib.pickAskedVisitDate(list, [text], TODAY);
 
-  test('nothing named, or the latest visit named: the latest visit, as before (null)', () => {
+  test('nothing named: the latest visit, as before (null)', () => {
     expect(pick('When can the dog go out?')).toBeNull();
     expect(pick('Can my dog go on the lawn now?')).toBeNull();
-    expect(pick('Is the pest control spray dry yet?')).toBeNull();
     expect(pick('You came yesterday, can the dog go out?')).toBeNull(); // yesterday IS the latest visit
+  });
+
+  test('the latest visit named by its service: pinned to that visit only when it certainly had the service', () => {
+    expect(pick('Is the pest control spray dry yet?')).toBe('2026-11-24');
+    // a latest visit of a service type no family covers is not certainly it: none on file, never its figures
+    expect(pick('Is the pest control spray dry yet?', [day('2026-11-24', [], true), day('2026-11-18', ['interior_pest'])])).toBe(labelFactsLib.NO_ASKED_VISIT);
+    expect(pick('Is the flea treatment dry yet?', [day('2026-11-24', ['flea'])])).toBe('2026-11-24');
+    expect(pick('Is the bed bug heat treatment done?', [day('2026-11-24', ['bed_bug'])])).toBe(labelFactsLib.NO_ASKED_VISIT);
   });
 
   test('one service named: the newest visit of the window that had it', () => {
@@ -66,16 +83,19 @@ describe('pickAskedVisitDate', () => {
     // a date that is no visit of the window, or a vague "last week": no pick (labelFactsForInbound then gives none on file)
     expect(pick('Is the Nov 15 treatment dry?')).toBeNull();
     expect(pick('Is the treatment from last week dry?')).toBeNull();
-    // a date and a service that disagree: no pick
-    expect(pick('the Nov 18 pest control visit')).toBeNull();
+    // a date and a service that disagree: none on file
+    expect(pick('the Nov 18 pest control visit')).toBe(labelFactsLib.NO_ASKED_VISIT);
+    // a named service with a date that matches no visit: none on file
+    expect(pick('the Nov 15 lawn treatment')).toBe(labelFactsLib.NO_ASKED_VISIT);
   });
 
   test('a short follow-up takes the service named earlier in the thread', () => {
     expect(labelFactsLib.pickAskedVisitDate(days, ['is it ok now?', 'when can the dog go out after the lawn treatment'], TODAY)).toBe('2026-11-18');
   });
 
-  test('no recent visit at all: the latest visit (null)', () => {
-    expect(labelFactsLib.pickAskedVisitDate([], ['after the lawn treatment?'], TODAY)).toBeNull();
+  test('no recent visit at all: none on file for a named service, never an older latest visit; nothing named keeps the latest (null)', () => {
+    expect(labelFactsLib.pickAskedVisitDate([], ['after the lawn treatment?'], TODAY)).toBe(labelFactsLib.NO_ASKED_VISIT);
+    expect(labelFactsLib.pickAskedVisitDate([], ['when can the dog go out?'], TODAY)).toBeNull();
   });
 });
 
@@ -181,6 +201,12 @@ describe('the asked-about visit: read and send-time recheck (mock knex)', () => 
     return conn;
   }
 
+  // fetchLabelFacts reads "today" from the clock: freeze it (Date only; the timeout race keeps real timers)
+  beforeEach(() => {
+    jest.useFakeTimers({ now: new Date('2026-11-25T17:00:00Z'), doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick', 'queueMicrotask', 'hrtime', 'performance'] });
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
   test('fetchLabelFacts reads the lawn visit the customer named, with every later record beside it', async () => {
     const out = await labelFactsLib.fetchLabelFacts({ customerId: 'c1', conn: fakeConn({ products: { r1: [ANT_GEL], r9: [BARRIER] } }), inbound: ['when can the dog go out after the lawn treatment?'] });
     expect(out).toMatchObject({ serviceDate: '2026-11-18', recordIds: ['r1'], asked: true, latestDate: '2026-11-24', sinceRecordIds: ['r1', 'r9'] });
@@ -190,6 +216,21 @@ describe('the asked-about visit: read and send-time recheck (mock knex)', () => 
     expect(latest.asked).toBeUndefined();
     // a named service no recent visit had: none on file
     expect(await labelFactsLib.fetchLabelFacts({ customerId: 'c1', conn: fakeConn({ products: { r9: [BARRIER] } }), inbound: ['is the mosquito spray dry?'] })).toBeNull();
+  });
+
+  test('the named visit is picked inside the SAME read-only transaction as its products', async () => {
+    const trx = fakeConn({ products: { r1: [ANT_GEL], r9: [BARRIER] } });
+    const used = [];
+    const outer = jest.fn(() => { throw new Error('read outside the transaction'); });
+    outer.transaction = jest.fn(async (fn, opts) => { used.push(opts); return fn((table) => { used.push(table); return trx(table); }); });
+    const out = await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', conn: outer, today: TODAY, inbound: ['when can the dog go out after the lawn treatment?'] });
+    expect(out).toMatchObject({ serviceDate: '2026-11-18', asked: true });
+    expect(outer).not.toHaveBeenCalled();
+    expect(outer.transaction).toHaveBeenCalledTimes(1);
+    expect(used[0]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+    expect(used).toContain('service_records');
+    // a named service no visit of the window certainly had: none on file, inside the same read
+    expect(await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', conn: outer, today: TODAY, inbound: ['is the mosquito spray dry?'] })).toBeNull();
   });
 
   test('an asked-about date outside the window, or after the latest visit, reads nothing', async () => {
@@ -214,5 +255,29 @@ describe('the asked-about visit: read and send-time recheck (mock knex)', () => 
     expect(await check(fakeConn({ products: { r1: [ROACH_GEL] } }))).toBe('label_facts_changed');
     // an edited note is no longer an authorized copy
     expect(await labelFactsLib.labelFactsSendBlockReason({ snapshot, body: body.replace('queen', 'king'), conn: fakeConn(), today: TODAY })).toBe('label_facts_unauthorized_claim');
+  });
+
+  test('send time: every "labeled for" claim must be a verbatim, still-verified note of the visit, else refuse', async () => {
+    const facts = labelFactsLib.labelFactsForInbound(
+      await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', conn: fakeConn(), today: TODAY, serviceDate: '2026-11-18' }),
+      ['Will this get the ghost ants?'], TODAY,
+    );
+    const section = labelFactsLib.renderLabelFactsSection(facts);
+    const note = labelFactsLib.labelSentencesIn(section).map((s) => s.text).find((t) => t.includes('labeled for'));
+    expect(note).toBeTruthy();
+    const snapshot = labelFactsLib.labelFactsSnapshotFor({ labelFacts: facts, reply: `Good question. ${note}`, sectionText: section, asked: [] });
+    const check = (body, snap = snapshot) => labelFactsLib.labelFactsSendBlockReason({ snapshot: snap, body, conn: fakeConn(), today: TODAY });
+    expect(await check(`Good question. ${note}`)).toBeNull();
+    // no section at all, a paraphrase, or another pest beside the copied note: unbacked
+    expect(await check('That product is labeled for ghost ants.', null)).toBe('label_facts_unauthorized_claim');
+    expect(await check('Good question. The gel is labeled for ghost ants.')).toBe('label_facts_unauthorized_claim');
+    expect(await check(`Good question. ${note} It is also labeled for termites.`)).toBe('label_facts_unauthorized_claim');
+    expect(await check('Good news, the label covers fleas.', null)).toBe('label_facts_unauthorized_claim');
+    // the copied note is no longer true of the visit (the product changed): refused
+    expect(await labelFactsLib.labelFactsSendBlockReason({ snapshot, body: `Good question. ${note}`, conn: fakeConn({ products: { r1: [BARRIER] } }), today: TODAY })).toBe('label_facts_changed');
+    expect(labelFactsLib.hasUnbackedLabeledForClaim('We will be out Tuesday.')).toBe(false);
+    // a verbatim COMPANY FACTS sentence is company wording, not a claim about the visit
+    const companyLabeled = require('../services/sms-company-facts').COMPANY_FACTS.join(' ').split(/(?<=[.!?])\s+/).find((t) => /labeled for/.test(t));
+    if (companyLabeled) expect(labelFactsLib.hasUnbackedLabeledForClaim(companyLabeled.replace(/^[A-Z][^:.]{0,40}:\s+/, ''))).toBe(false);
   });
 });

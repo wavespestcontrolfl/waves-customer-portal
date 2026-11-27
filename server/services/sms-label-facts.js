@@ -251,13 +251,20 @@ function productFromRow(row, frozen) {
  * product with no verified snapshot is omitted and counted (so the whole visit
  * is none on file), an adjuvant / water conditioner is omitted.
  */
-async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateString(), serviceDate = null } = {}) {
+async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateString(), serviceDate = null, inbound = null } = {}) {
   if (!customerId) return null;
   // `serviceDate` (texting AI gap 5): the visit the customer asked about (pickAskedVisitDate), an EARLIER performed visit of the last
   // LABEL_VISIT_WINDOW_DAYS days. Every guard below holds for it as for the latest visit; null = the latest performed visit.
   // (an asked-about visit is never older than the window; a later one than the latest visit is refused inside the read)
   const wanted = serviceDate == null ? null : String(serviceDate);
   if (wanted !== null && (dateOnlyString(wanted) !== wanted || wanted < isoAddDays(today, -LABEL_VISIT_WINDOW_DAYS))) return null;
+  // `inbound` (the customer's texts, current first; only without `serviceDate`): the visit they ask about is picked from the SAME read
+  // as its products (pickAskedVisitDate over readRecentVisitDays), so a visit landing in between can never answer for the one named.
+  const texts = wanted === null && inbound != null ? [].concat(inbound).filter((t) => typeof t === 'string') : [];
+  const readOn = async (c) => {
+    const pick = texts.length ? pickAskedVisitDate(await readRecentVisitDays(c, customerId, today), texts, today) : wanted;
+    return pick === NO_ASKED_VISIT ? null : readLastVisitLabelFactsOnce({ customerId, conn: c, today, wanted: pick });
+  };
   // ONE consistent read: the newest performed date, the stale-visit guards and the products must all come from the same snapshot, or a
   // visit that lands between two queries leaves the facts describing a visit that is no longer the last one. A connection that can open
   // transactions (knex) reads inside a REPEATABLE READ, READ ONLY transaction; any other connection is re-checked after the read
@@ -269,10 +276,10 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
     return conn.transaction(async (trx) => {
       // The server cancels a slow read itself (a JS-side timeout cannot release the pooled connection); the 3 s race in fetchLabelFacts stays the outer guard.
       if (typeof trx.raw === 'function') await trx.raw(`SET LOCAL statement_timeout = '${LABEL_FACTS_STATEMENT_TIMEOUT_MS}ms'`);
-      return readLastVisitLabelFactsOnce({ customerId, conn: trx, today, wanted });
+      return readOn(trx);
     }, { isolationLevel: 'repeatable read', readOnly: true });
   }
-  const facts = await readLastVisitLabelFactsOnce({ customerId, conn, today, wanted });
+  const facts = await readOn(conn);
   if (!facts) return null;
   return await isStillTheLastVisit({ customerId, conn, today, serviceDate: facts.serviceDate, recordIds: facts.recordIds, sinceRecordIds: facts.sinceRecordIds }) ? facts : null;
 }
@@ -382,21 +389,13 @@ async function fetchLabelFacts({ customerId, conn = db, timeoutMs = LABEL_FACTS_
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('label facts timeout')), timeoutMs);
     });
-    return await Promise.race([readAskedVisitLabelFacts({ customerId, conn, inbound }), timeout]);
+    return await Promise.race([readLastVisitLabelFacts({ customerId, conn, inbound }), timeout]);
   } catch (err) {
     logger.warn(`[sms-label-facts] lookup failed (${err.message}); section omitted`);
     return null;
   } finally {
     if (timer) clearTimeout(timer);
   }
-}
-
-async function readAskedVisitLabelFacts({ customerId, conn, inbound, today = etDateString() }) {
-  const texts = inbound == null ? [] : [].concat(inbound).filter((t) => typeof t === 'string');
-  if (!texts.length) return readLastVisitLabelFacts({ customerId, conn, today });
-  const pick = pickAskedVisitDate(await readRecentVisitDays(conn, customerId, today), texts, today);
-  if (pick === NO_ASKED_VISIT) return null;
-  return readLastVisitLabelFacts({ customerId, conn, today, ...(pick ? { serviceDate: pick } : {}) });
 }
 
 // ---- Which visit is the customer asking about: the service or date they name (texting AI gap 5) ----------------------------------
@@ -434,17 +433,25 @@ async function readRecentVisitDays(conn, customerId, today) {
 // that is only ever the service (fertilizer, weed control, pest control, mosquito spray ...). A pest name ("roaches", "fleas") is the
 // pest, not the service, so it names no family.
 const SERVICE_NOUN_SRC = '(?:treatments?|services?|visits?|spray(?:s|ing)?|applications?|appointments?|care|program|plan|tech(?:nician)?s?|guys?|man|crew|team|people|company)';
+// The specialty treatments come first and are named only as a service ("flea treatment", "roach service", "bed bug heat treatment"); a
+// bed bug service is the heat guide when heat is named, else the chemical one. "bed bug spray" is never the general "bug spray".
 const NAMED_SERVICE_FAMILIES = [
+  { family: 'bed_bug_heat', re: /\bbed\s*bugs?\s+heat\b|\bheat\s+(?:treatments?|services?|remediation|visits?)\b/ },
+  { family: 'bed_bug', re: new RegExp(`\\bbed\\s*bugs?\\s+(?:control|${SERVICE_NOUN_SRC})\\b`) },
+  { family: 'flea', re: new RegExp(`\\bfleas?\\s+(?:control|${SERVICE_NOUN_SRC})\\b`) },
+  { family: 'cockroach', re: new RegExp(`\\b(?:cock)?roach(?:es)?\\s+(?:control|${SERVICE_NOUN_SRC})\\b`) },
   { family: 'lawn', re: new RegExp(`\\b(?:lawn\\s+${SERVICE_NOUN_SRC}|fertiliz\\w*|weed\\s+(?:control|killer|treatment|spray)|turf\\s+${SERVICE_NOUN_SRC})\\b`) },
-  { family: 'interior_pest', re: new RegExp(`\\b(?:pest\\s+(?:control|${SERVICE_NOUN_SRC})|perimeter\\s+${SERVICE_NOUN_SRC}|bug\\s+spray(?:ing)?|exterminat\\w*)\\b`) },
+  { family: 'interior_pest', re: new RegExp(`\\b(?:pest\\s+(?:control|${SERVICE_NOUN_SRC})|perimeter\\s+${SERVICE_NOUN_SRC}|(?<!\\bbed\\s?)bug\\s+spray(?:ing)?|exterminat\\w*)\\b`) },
   { family: 'mosquito', re: new RegExp(`\\bmosquito(?:e?s)?\\s+(?:control|${SERVICE_NOUN_SRC})\\b`) },
   { family: 'termite', re: new RegExp(`\\btermites?\\s+(?:control|bait|${SERVICE_NOUN_SRC})\\b`) },
   { family: 'rodent', re: new RegExp(`\\b(?:rodent|rat|mouse|mice)\\s+(?:control|trapping|${SERVICE_NOUN_SRC})\\b`) },
 ];
-/** The prep guide families a text names by a service word (a Set; empty when none). */
+/** The prep guide families a text names by a service word (a Set; empty when none). A heat bed bug service is never also the chemical one. */
 function namedServiceFamilies(text) {
   const canon = canonText(text).toLowerCase();
-  return new Set(NAMED_SERVICE_FAMILIES.filter(({ re }) => re.test(canon)).map(({ family }) => family));
+  const found = new Set(NAMED_SERVICE_FAMILIES.filter(({ re }) => re.test(canon)).map(({ family }) => family));
+  if (found.has('bed_bug_heat')) found.delete('bed_bug');
+  return found;
 }
 /** The ONE prep guide family a text names, or null (none, or two: ambiguous). */
 function namedServiceFamily(text) {
@@ -455,32 +462,35 @@ function namedServiceFamily(text) {
 const NO_ASKED_VISIT = Symbol('no asked visit');
 /**
  * Which visit's label facts a text asks for, deterministically, from `days` (readRecentVisitDays) and `texts` (the current text first):
- *   null           the latest visit, as before: nothing clearly named, two services named, or a date that matches no one earlier visit
- *                  (labelFactsForInbound then reads the date reference as another visit: none on file);
- *   'YYYY-MM-DD'   an EARLIER visit day of the window: the text's date references all resolve to that one day (inboundRefersToOtherVisit,
- *                  the same resolver the none-on-file rule uses), or the text names ONE service and that day is the newest with it;
- *   NO_ASKED_VISIT the text names one service and no visit of the window certainly had it: none on file (the latest visit's
- *                  figures would answer for another service).
+ *   null           the latest visit, as before: no service named and no date that resolves (an unresolved date: labelFactsForInbound
+ *                  then reads it as another visit, none on file), or two services named;
+ *   'YYYY-MM-DD'   the visit day asked about (the latest one included, so the read is pinned to it): the text's date references all
+ *                  resolve to that one earlier day (inboundRefersToOtherVisit, the resolver the none-on-file rule uses), or the text names
+ *                  ONE service and that day is the newest that certainly had it, with no newer day of an unmatched service type;
+ *   NO_ASKED_VISIT the text names one service and no visit of the window is certainly it (none had it, a newer day has a service type
+ *                  no family covers, no visit in the window, or a named date that disagrees): none on file.
  * The service words come from the current text, and from the thread too when the current text is a short follow-up; date references
  * from the current text only (an older row's relative words mean its own day: labelFactsForInbound reads those).
  */
 function pickAskedVisitDate(days, texts, today = etDateString()) {
   const list = [].concat(texts || []).filter((t) => typeof t === 'string');
-  if (!list.length || inboundOverCap(list) || !Array.isArray(days) || !days.length) return null;
+  if (!list.length || inboundOverCap(list)) return null;
   const sources = inboundIsElliptical(list) ? list : list.slice(0, 1);
   const families = new Set(sources.flatMap((text) => [...namedServiceFamilies(text)]));
   if (families.size > 1) return null;
   const [family] = [...families];
+  // a named service with no visit in the window: none on file, never an older latest visit
+  if (!Array.isArray(days) || !days.length) return family ? NO_ASKED_VISIT : null;
   const latest = days[0].date;
   if (inboundRefersToOtherVisit(list[0], latest, today)) {
     const resolved = days.filter((d) => d.date !== latest && !inboundRefersToOtherVisit(list[0], d.date, today) && (!family || d.families.has(family)));
-    return resolved.length === 1 ? resolved[0].date : null;
+    if (resolved.length === 1) return resolved[0].date;
+    return family ? NO_ASKED_VISIT : null;
   }
   if (!family) return null;
+  // the newest day that certainly had the service, and no newer day whose service no family covers (it could be the one): else none
   const first = days.find((d) => d.families.has(family) || d.unknown);
-  if (!first) return NO_ASKED_VISIT;
-  if (first.date === latest) return null;
-  return first.families.has(family) ? first.date : NO_ASKED_VISIT;
+  return first && first.families.has(family) ? first.date : NO_ASKED_VISIT;
 }
 
 function plural(n, unit) { return `${n} ${unit}${n === 1 ? '' : 's'}`; }
@@ -1865,7 +1875,17 @@ const isHandoffBase = (base) => isDeferral(peelFriendlyEnds(base)) || /^(?:.*\s)
 function replyClaimsUngroundedLabelTiming(body, sectionText, asked = [], bankSentences = null) {
   if (overCap(body, MAX_REPLY_CHARS)) return true;
   const stripped = stripLabelSentences(stripHandoffDeadlines(sanctionSafeOnceDry(body)), sectionText);
-  return hasUngroundedLabelClaim(stripped, bankSentences) || answersAskedLabelQuestion(stripped, asked, bankSentences);
+  return hasUngroundedLabelClaim(stripped, bankSentences) || answersAskedLabelQuestion(stripped, asked, bankSentences)
+    || hasUnbackedLabeledForClaim(stripped, bankSentences);
+}
+
+// A "labeled for <pest>" claim (texting AI gap 5) reaches a customer only as a whole verbatim copy of a PRODUCT NOTES line of the
+// visit, which the strip above has already replaced by its marker: any such wording left in the REMAINDER (a paraphrase, another pest,
+// a claim with no section at all) is unbacked and holds the reply. A verbatim COMPANY FACTS (or the draft's own bank) sentence is
+// owner-approved company wording, never a claim about this visit: it is masked first, as the timing guard masks it.
+const LABELED_FOR_CLAIM_RE = /\blabell?ed\s+(?:for|against|to\s+(?:control|kill|treat))\b|\blabels?\s+(?:covers?|lists?|includes?)\b/i;
+function hasUnbackedLabeledForClaim(stripped, bankSentences = null) {
+  return LABELED_FOR_CLAIM_RE.test(markCompanySentences(canonText(stripped), bankSentences));
 }
 
 // ---- Send-time recheck ---------------------------------------------------
@@ -2140,6 +2160,7 @@ module.exports = {
   inboundRefersToOtherVisit,
   sanctionSafeOnceDry,
   replyClaimsUngroundedLabelTiming,
+  hasUnbackedLabeledForClaim,
   stripHandoffDeadlines,
   askedLabelKinds,
   inboundIsElliptical,
