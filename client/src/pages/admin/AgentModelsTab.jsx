@@ -110,12 +110,13 @@ export default function AgentModelsTab() {
 
   // Inbound-content lanes that still fold instructions into the Gemini user
   // turn (either direct-fetch callers or shared-adapter callers that omit
-  // `system`). Lanes routed through services/llm/call.js with a separated
-  // `system` prompt use native `systemInstruction` and are excluded.
+  // `system`). Suppress the warning only when the server explicitly reports
+  // `geminiFoldsSystem === false` so mixed-version rollouts or rollbacks
+  // keep the warning visible.
   const geminiInboundLanes = useMemo(() => {
     if (!data) return [];
     return data.lanes
-      .filter((l) => l.inbound && l.geminiFoldsSystem && laneChanged(l))
+      .filter((l) => l.inbound && l.geminiFoldsSystem !== false && laneChanged(l))
       .filter((l) => legsOf(l).some((leg) => { const id = effectiveLeg(leg); return id && id !== leg.model && catalog[id]?.provider === "gemini"; }))
       .map((l) => l.name);
   }, [data, laneChanged, effectiveLeg, catalog]);

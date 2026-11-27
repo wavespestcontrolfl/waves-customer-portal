@@ -63,7 +63,7 @@ const {
   buildRefereePrompt,
 } = require('./plant-engine-prompts');
 
-const PROMPT_VERSION = 'photo-id-v2-plant-1';
+const PROMPT_VERSION = 'photo-id-v2-plant-2';
 // Gemini's reasoning shares this budget with the JSON answer, and the plant
 // prompts (three identity slots, a condition index) run longer than the pest
 // ones: at 2048 a lawn read came back cut off in the 2026-09-28 photo eval,

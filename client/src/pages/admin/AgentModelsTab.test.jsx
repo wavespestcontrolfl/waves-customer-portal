@@ -384,6 +384,21 @@ describe("AgentModelsTab", () => {
             retry: null,
             also: [],
           },
+          {
+            id: "legacy_omitted_flag",
+            name: "Legacy API inbound lane",
+            describe: "Server response predates geminiFoldsSystem flag",
+            area: "sms",
+            continuity: "verified",
+            inbound: true,
+            lock: null,
+            fanout: false,
+            applies: "restart",
+            primary: { model: "g1", selector: null, pinEnv: "PIN_LEGACY_INBOUND", setEnv: "PIN_LEGACY_INBOUND", pinned: true, unpinnedModel: "g1", accepts: { providers: ["gemini"], cap: "text", deep: false }, live: true },
+            fallback: null,
+            retry: null,
+            also: [],
+          },
         ];
         return data;
       }
@@ -401,14 +416,24 @@ describe("AgentModelsTab", () => {
     expect(screen.queryByText(/Moves inbound customer content onto Gemini/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
 
+    const legacyCard = screen.getByText("Legacy API inbound lane").closest(".p-4");
+    fireEvent.click(within(legacyCard).getByRole("button", { name: /Change/ }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Gemini 4
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
+    let warning = await screen.findByText(/Moves inbound customer content onto Gemini without a systemInstruction boundary/);
+    expect(warning).toHaveTextContent(/Legacy API inbound lane/);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
     const contactCard = screen.getByText("Contact dictation decoder").closest(".p-4");
     fireEvent.click(within(contactCard).getByRole("button", { name: /Change/ }));
     dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Gemini 4
     fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
-    const warning = await screen.findByText(/Moves inbound customer content onto Gemini without a systemInstruction boundary/);
+    warning = await screen.findByText(/Moves inbound customer content onto Gemini without a systemInstruction boundary/);
     expect(warning).toHaveAttribute("role", "alert");
     expect(warning).toHaveTextContent(/Contact dictation decoder/);
+    expect(warning).toHaveTextContent(/Legacy API inbound lane/);
     expect(warning).not.toHaveTextContent(/Shared Gemini lane/);
   });
 });
