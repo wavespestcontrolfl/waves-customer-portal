@@ -2792,16 +2792,17 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
         if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 250));
       }
     }
+    const contactRole = held.contact.role || 'service';
     if (queued) {
-      logger.info(`[appt-remind] ${messageType} to ${held.contact.role || 'contact'} held outside the 8AM-8PM ET send window — queued for ${held.nextAllowedAt}`);
+      logger.info(`[appt-remind] ${messageType} to ${contactRole} held outside the 8AM-8PM ET send window — queued for ${held.nextAllowedAt}`);
       queuedPhones.push(held.contact.phone);
       continue;
     }
-    logger.error(`[appt-remind] held ${messageType} requeue failed for ${held.contact.role || 'contact'} (customer ${customer.id}) after 3 attempts: ${lastErr?.message}`);
+    logger.error(`[appt-remind] held ${messageType} requeue failed for ${contactRole} (customer ${customer.id}) after 3 attempts: ${lastErr?.message}`);
     try {
       const { raiseAdminAlert } = require('./admin-alert-compose');
-      const noticeWords = String(messageType || 'appointment').replace(/_/g, ' ').slice(0, 28);
-      const roleWords = String(held.contact.role || 'service').replace(/_/g, ' ').slice(0, 18);
+      const noticeWords = String(messageType).replace(/_/g, ' ').slice(0, 28);
+      const roleWords = String(contactRole).replace(/_/g, ' ').slice(0, 18);
       await raiseAdminAlert('comms', {
         area: 'Comms',
         action: 'send a held appointment notice manually',
@@ -2813,7 +2814,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
         who: 'person',
       }, {
         bell: true,
-        detail: `A ${messageType} text to a ${held.contact.role || 'service'} contact was held for the 8 AM window but could not be queued, and the notice was already finalized for the other contact — send it from the composer.`,
+        detail: `A ${messageType} text to a ${contactRole} contact was held for the 8 AM window but could not be queued, and the notice was already finalized for the other contact — send it from the composer.`,
         metadata: {
           customerId: customer.id,
           scheduledServiceId: metaExtra.scheduled_service_id || null,
