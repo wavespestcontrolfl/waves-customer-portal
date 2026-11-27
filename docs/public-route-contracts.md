@@ -6265,7 +6265,10 @@ review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoac
 regular_standalone knockdown on the home footprint (since 2026-11-26, new quotes
 only: on the home's total living area, so a two-story home prices as a one-story
 home of the same size; a draft stored before that keeps its footprint price,
-estimate stamp `legacyWholeHomeSizing`); species / severity /
+estimate stamp `legacyWholeHomeSizing`; when the wizard keeps its 2,000 sq ft
+placeholder and the server's own lookup measured the home, the cockroach and bed
+bug treatments price on the measured living area, as flea does, and a
+customer-confirmed size still wins); species / severity /
 price override stay staff-scoped, the site prices the native scale; the
 included second visit is booked at completion at no charge). It prices
 instantly but never mints a self-book slot (`bookingUrl` null, like bed

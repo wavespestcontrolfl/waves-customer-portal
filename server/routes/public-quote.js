@@ -1855,13 +1855,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
     const treeShrubFootprintSqFt = trustedTreeShrubFootprintSqFt(trustedTurf, trustedRecord);
-    // Flea only: no home size was posted (the 2,000 default is about to be substituted) and the server's own lookup measured a
-    // residential home. Both fields are set here, never read from the body, and reach only priceFlea (nothing else changes).
+    // No home size was posted (the 2,000 default is about to be substituted) and the server's own lookup measured a residential
+    // home. Both fields are set here, never read from the body, and are read only by the services that size on the home's total
+    // living area (flea, cockroach, bed bug: resolveWholeHomeSize), so they are set whatever the request asks for; nothing else changes.
     // The wizard's untouched confirm-step placeholder (a wizard-shaped request, exactly 2,000, buildingSizeConfirmed not true) is the
     // default too, never a customer-supplied size; a confirmed 2,000 sq ft home is genuine, and a direct API caller's explicit size
     // (no enriched profile) is always genuine.
     const homeSizeIsDefault = !(Number(homeSqFt) > 0) || (wizardShaped && buildingSizeConfirmed !== true && Number(homeSqFt) === 2000);
-    const fleaMeasuredHomeSqFt = !commercialDetected && services?.flea && homeSizeIsDefault
+    const fleaMeasuredHomeSqFt = !commercialDetected && homeSizeIsDefault
       ? trustedFleaHomeSqFt(trustedTurf, trustedRecord)
       : null;
     // Pest above the 5,500 sq ft table (owner 2026-11-26, new quotes): the price rises with the footprint, the living area over
@@ -3522,6 +3523,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             exteriorStatus: item.exteriorStatus ?? null,
             // Flea size rule the row was quoted under (estimate-flea-size-replay reads it; an unstamped flea row replays as pre-2026-11-26).
             ...(item.fleaSizeBasis ? { fleaSizeBasis: item.fleaSizeBasis, footprintUsed: item.footprintUsed ?? null, footprintSource: item.footprintSource ?? null, ...(item.fleaPostedHomeSqFt ? { fleaPostedHomeSqFt: item.fleaPostedHomeSqFt } : {}) } : {}),
+            // Cockroach and bed bug rows: the size the row priced on and its source (the replay restores a lookup-measured home from it).
+            ...(item.homeSizeBasis ? { homeSizeBasis: item.homeSizeBasis, footprintUsed: item.footprintUsed, footprintSource: item.footprintSource, fleaPostedHomeSqFt: item.fleaPostedHomeSqFt } : {}),
             // Palm-injection lines carry cadence ONLY as appsPerYear (the
             // palm pricer emits no visits/frequency) — dropping it here
             // left the mirrored draft cadence-less, so a palm-only handoff

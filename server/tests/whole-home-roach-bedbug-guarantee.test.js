@@ -163,6 +163,27 @@ describe('bed bug treatment prices on the whole home', () => {
     expect(heat({ wholeHomeSizingLegacy: true }, { footprint: 1500 }).sqftBasedPrice).toBe(3000);
   });
 
+  test('whole-home heat heats the resolved whole home, the size the modifier steps on (homeSqFt 1,500 beside livingAreaSqFt 3,000 heats 3,000)', () => {
+    // homeSqFt equal to buildingSqFt may be a building measurement, so the resolver takes the explicit living area: 3,000.
+    const property = { homeSqFt: 1500, buildingSqFt: 1500, livingAreaSqFt: 3000, stories: 2 };
+    const heatOptions = { rooms: 2, method: 'HEAT', equipment: 'INHOUSE', heatScope: 'WHOLE_HOME', severity: 'light', prepStatus: 'ready', occupancyType: 'singleFamily' };
+    const line = sp.priceBedBugTreatment(property, heatOptions);
+    expect(line).toMatchObject({ footprintUsed: 3000, heatAreaSqFt: 3000, sqftBasedPrice: 6000 });
+    expect(line.multipliers.footprint).toBe(1.1);
+    // Through the engine too, and the hybrid method reads the same area.
+    const engineLine = lineOf(generateEstimate({ ...property, lotSqFt: 9000, services: { bedBug: heatOptions } }), 'bed_bug');
+    expect(engineLine).toMatchObject({ footprintUsed: 3000, heatAreaSqFt: 3000, sqftBasedPrice: 6000 });
+    expect(sp.priceBedBugTreatment(property, { ...heatOptions, method: 'HYBRID' }).heatAreaSqFt).toBe(3000);
+    // A heat area of the treatment's own still wins for the heat charge.
+    expect(sp.priceBedBugTreatment(property, { ...heatOptions, heatAreaSqFt: 2200 }).sqftBasedPrice).toBe(4400);
+    // A quote priced before the rule: main's two areas, unchanged (heat on homeSqFt 1,500, the modifier on the 750 footprint).
+    const legacy = sp.priceBedBugTreatment({ ...property, wholeHomeSizingLegacy: true }, heatOptions);
+    expect(legacy).toMatchObject({ footprintUsed: 750, heatAreaSqFt: 1500, sqftBasedPrice: 3000 });
+    // No size evidence (an association aggregate): nothing throws, the heat area is read as before and the line goes to review.
+    const aggregate = sp.priceBedBugTreatment({ homeSqFt: 120000, stories: 1, footprintUnknown: true }, heatOptions);
+    expect(aggregate).toMatchObject({ heatAreaSqFt: 120000, requiresManualReview: true });
+  });
+
   test('with no size at all the modifier stays 1 and the line goes to review, as before', () => {
     const line = sp.priceBedBugTreatment({}, { rooms: 1, method: 'CHEMICAL', severity: 'light', prepStatus: 'ready', occupancyType: 'singleFamily' });
     expect(line.multipliers.footprint).toBe(1);
@@ -240,6 +261,36 @@ describe('the yearly rodent guarantee prices on the whole home', () => {
       rodentGuarantee: { homeSqFt: 4500, stories: 2, eligibility: GUARANTEE_SERVICES.rodentGuarantee.eligibility },
     });
     expect(legacy.price).toBe(299);
+  });
+
+  test('a story count in the guarantee\'s own options scales a footprint as the same count on the property does (2,300 footprint x 2 = 4,600: $299)', () => {
+    const eligibility = GUARANTEE_SERVICES.rodentGuarantee.eligibility;
+    const inOptions = (extra) => lineOf(generateEstimate({ footprintSqFt: 2300, lotSqFt: 9000, ...extra, services: { rodentGuarantee: { stories: 2, eligibility } } }), 'rodent_guarantee');
+    const onProperty = (extra) => lineOf(generateEstimate({ footprintSqFt: 2300, stories: 2, lotSqFt: 9000, ...extra, services: GUARANTEE_SERVICES }), 'rodent_guarantee');
+    expect(inOptions()).toMatchObject({ tier: 'estate', price: 299 });
+    expect(onProperty()).toMatchObject({ tier: 'estate', price: 299 });
+    // A living area is never scaled: 2,300 sq ft of living area on two stories stays a complex home.
+    expect(guarantee(2300, 1, {}, { rodentGuarantee: { stories: 2, eligibility } })).toMatchObject({ tier: 'complex', price: 249 });
+    // A quote priced before the rule: main's price for both (the profile's ground-floor footprint).
+    expect(inOptions({ legacyWholeHomeSizing: true }).price).toBe(249);
+    expect(onProperty({ legacyWholeHomeSizing: true }).price).toBe(249);
+  });
+
+  test('a size that may be the ground floor only (two-story, buildingSqFt alone) puts the guarantee line in review', () => {
+    const building = (extra) => lineOf(generateEstimate({ buildingSqFt: 2300, stories: 2, lotSqFt: 9000, ...extra, services: GUARANTEE_SERVICES }), 'rodent_guarantee');
+    const line = building();
+    // Priced as a living area (never inflated), but a ground-floor reading would be 4,600 sq ft and the $299 tier: a person confirms.
+    expect(line.price).toBe(249);
+    expect(line.requiresManualReview).toBe(true);
+    expect(line.manualReviewReasons).toEqual(['home_size_source_unclear']);
+    expect(line.warnings).toEqual([expect.stringMatching(/ground floor only/)]);
+    // A clear size, a caller's own homeSqFt and a quote priced before the rule carry no mark (the legacy line is main's, key for key).
+    for (const clear of [guarantee(2300, 2), building({ legacyWholeHomeSizing: true }),
+      guarantee(2300, 2, { buildingSqFt: 2300 }, { rodentGuarantee: { homeSqFt: 2300, eligibility: GUARANTEE_SERVICES.rodentGuarantee.eligibility } })]) {
+      expect(clear).not.toHaveProperty('requiresManualReview');
+      expect(clear).not.toHaveProperty('manualReviewReasons');
+      expect(clear).not.toHaveProperty('warnings');
+    }
   });
 
   test('no size known keeps the 2,000 default', () => {
@@ -469,6 +520,75 @@ describe('replay: a quote priced before this change keeps the ground-floor basis
 });
 
 
+describe('website quote: the server lookup\'s measured home replaces the wizard\'s 2,000 sq ft placeholder for every whole-home service', () => {
+  const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+  const { fleaSizeReplayOverrides, fleaPriceRecord, generateWithFleaRecord } = require('../services/estimate-flea-size-replay');
+  // What public-quote.js hands the engine when the wizard kept its placeholder and the lookup measured a 2,800 sq ft home.
+  const website = (services) => ({ homeSqFt: 2000, stories: 2, lotSqFt: 9000, propertyType: 'single_family', services, fleaMeasuredHomeSqFt: 2800, homeSqFtIsDefault: true });
+  const placeholderOnly = (services) => ({ homeSqFt: 2000, stories: 2, lotSqFt: 9000, propertyType: 'single_family', services });
+  // The compact row the public writer stores (the fields it carries for a whole-home row).
+  const compact = (line) => ({
+    service: line.service, name: line.label, price: line.price, legacyWholeHomeSizing: line.legacyWholeHomeSizing,
+    homeSizeBasis: line.homeSizeBasis, footprintUsed: line.footprintUsed, footprintSource: line.footprintSource, fleaPostedHomeSqFt: line.fleaPostedHomeSqFt,
+  });
+
+  test('cockroach quotes $289 on the measured 2,800 sq ft home, not $239 on the placeholder; bed bug and the plan-added roach follow', () => {
+    const line = lineOf(generateEstimate(website(ROACH_SERVICES)), 'pest_initial_roach');
+    expect(line).toMatchObject({ price: 289, footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000 });
+    expect(line.requiresManualReview).toBe(false);
+    expect(lineOf(generateEstimate(placeholderOnly(ROACH_SERVICES)), 'pest_initial_roach').price).toBe(239);
+    expect(lineOf(generateEstimate(website(bedBugServices(1))), 'bed_bug')).toMatchObject({ price: 519, footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000 });
+    expect(lineOf(generateEstimate(website({ pest: { frequency: 'quarterly', roachType: 'regular' } })), 'pest_initial_roach')).toMatchObject({ price: 169, footprintUsed: 2800 });
+    expect(lineOf(generateEstimate(website(GUARANTEE_SERVICES)), 'rodent_guarantee').tier).toBe('complex');
+    // The pest plan itself stays on the footprint of the posted size (out of scope).
+    expect(lineOf(generateEstimate(website({ pest: { frequency: 'quarterly' } })), 'pest_control').footprintUsed)
+      .toBe(lineOf(generateEstimate(placeholderOnly({ pest: { frequency: 'quarterly' } })), 'pest_control').footprintUsed);
+    // A quote priced before the rule ignores the measurement: main's footprint price.
+    expect(lineOf(generateEstimate({ ...website(ROACH_SERVICES), legacyWholeHomeSizing: true }), 'pest_initial_roach')).toMatchObject({ price: 202.5, footprintSource: 'footprint' });
+  });
+
+  test('the route sends the measurement whatever the request asks for, but only while the home size is the default; a confirmed size wins', () => {
+    const route = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
+    // Not tied to a flea request any more: the cockroach and bed bug pricers read the same two keys.
+    expect(route).toMatch(/const fleaMeasuredHomeSqFt = !commercialDetected && homeSizeIsDefault\n\s+\? trustedFleaHomeSqFt\(trustedTurf, trustedRecord\)\n\s+: null;/);
+    // The default test is unchanged: no posted size, or the wizard's untouched 2,000 placeholder (never a confirmed size).
+    expect(route).toContain("const homeSizeIsDefault = !(Number(homeSqFt) > 0) || (wizardShaped && buildingSizeConfirmed !== true && Number(homeSqFt) === 2000);");
+    expect(route).toContain("...(fleaMeasuredHomeSqFt ? { fleaMeasuredHomeSqFt, homeSqFtIsDefault: true } : {}),");
+    // Its compact row writer keeps the size, its source and the posted size on a cockroach or bed bug row.
+    expect(route).toContain('...(item.homeSizeBasis ? { homeSizeBasis: item.homeSizeBasis, footprintUsed: item.footprintUsed, footprintSource: item.footprintSource, fleaPostedHomeSqFt: item.fleaPostedHomeSqFt } : {}),');
+    // Without the two keys (a customer-confirmed 2,000 sq ft home) the posted size prices: $239.
+    expect(lineOf(generateEstimate(placeholderOnly(ROACH_SERVICES)), 'pest_initial_roach')).toMatchObject({ price: 239, footprintSource: 'homeSqFt' });
+  });
+
+  test('the replay restores the measurement from the stored cockroach row only, so a view or accept keeps $289', async () => {
+    const fresh = generateEstimate(website(ROACH_SERVICES));
+    const row = compact(lineOf(fresh, 'pest_initial_roach'));
+    const published = { engineInputs: website(ROACH_SERVICES), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [row] } };
+    expect(fleaSizeReplayOverrides(published)).toMatchObject({ fleaMeasuredHomeSqFt: 2800, homeSqFtIsDefault: true });
+    // The mapped result an Admin save stores keeps the same record, for the bed bug row too.
+    expect(fleaSizeReplayOverrides({ result: mapV1ToLegacyShape(fresh) })).toMatchObject({ fleaMeasuredHomeSqFt: 2800, homeSqFtIsDefault: true });
+    expect(fleaSizeReplayOverrides({ result: mapV1ToLegacyShape(generateEstimate(website(bedBugServices(1)))) })).toMatchObject({ fleaMeasuredHomeSqFt: 2800 });
+    const replayed = await serverRecomputeFromEstimateData(published, { needsSync: () => false, replaySavedPricingKnobs: true });
+    expect(replayed.recomputed).toBe(true);
+    expect(lineOf(replayed.rawEngineResult, 'pest_initial_roach').price).toBe(289);
+    // A copy in the stored inputs with no measured row behind it never prices (a browser cannot supply a measurement).
+    const forged = { engineInputs: { ...website(ROACH_SERVICES), fleaMeasuredHomeSqFt: 5000 }, engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [compact(lineOf(generateEstimate(placeholderOnly(ROACH_SERVICES)), 'pest_initial_roach'))] } };
+    expect(fleaSizeReplayOverrides(forged)).toMatchObject({ fleaMeasuredHomeSqFt: undefined, homeSqFtIsDefault: undefined });
+    const forgedReplay = await serverRecomputeFromEstimateData(forged, { needsSync: () => false, replaySavedPricingKnobs: true });
+    expect(lineOf(forgedReplay.rawEngineResult, 'pest_initial_roach').price).toBe(239);
+  });
+
+  test('a staff revision keeps the measured home while the home size is left alone, and re-prices when it is edited', () => {
+    const row = compact(lineOf(generateEstimate(website(ROACH_SERVICES)), 'pest_initial_roach'));
+    const stored = { engineInputs: placeholderOnly(ROACH_SERVICES), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [row] } };
+    const record = fleaPriceRecord({ status: 'sent', address: '1 Sample Way' }, stored);
+    expect(record).toMatchObject({ basis: 'measured_home', measuredHomeSqFt: 2800, postedHomeSqFt: 2000 });
+    const revised = (inputs) => lineOf(generateWithFleaRecord(generateEstimate, inputs, record), 'pest_initial_roach');
+    expect(revised(placeholderOnly(ROACH_SERVICES))).toMatchObject({ price: 289, footprintUsed: 2800 });
+    expect(revised({ ...placeholderOnly(ROACH_SERVICES), homeSqFt: 2400 })).toMatchObject({ price: 239, footprintUsed: 2400 });
+  });
+});
+
 describe('the deprecated browser estimator mirrors the server on total living area', () => {
   const clientEstimatorPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
   let calculateEstimate;
@@ -515,6 +635,87 @@ describe('the deprecated browser estimator mirrors the server on total living ar
     const withoutStamp = (metadata) => Object.fromEntries(Object.entries(metadata || {}).filter(([key]) => key !== 'legacyWholeHomeSizing'));
     const older = { ...current, pricingMetadata: withoutStamp(current.pricingMetadata), routingMetadata: withoutStamp(current.routingMetadata) };
     expect(replay.savedLegacyWholeHomeSizingSignal({ inputs, result: older })).toEqual({ legacyWholeHomeSizing: true });
+  });
+
+  describe('a browser-priced save (the server could not price it)', () => {
+    const { guardWholeHomeSizingOnClientFallbackSave, resolveServerAuthoritativePricing } = require('../services/admin-estimate-persistence');
+    const inputs = { homeSqFt: 2800, stories: 2, lotSqFt: 9000, propertyType: 'single_family', svcRoach: true, roachType: 'REGULAR' };
+    const withoutStamp = (metadata) => Object.fromEntries(Object.entries(metadata || {}).filter(([key]) => key !== 'legacyWholeHomeSizing'));
+    const currentBundle = (extraInputs) => ({ inputs: { ...inputs, ...extraInputs }, result: calculateEstimate({ ...inputs, ...extraInputs }) });
+    // A page cached before the rule: no stamp anywhere, and the cockroach treatment priced on the 1,400 sq ft ground floor.
+    const cachedBundle = (extraInputs) => {
+      const save = currentBundle(extraInputs);
+      const result = { ...save.result, pricingMetadata: withoutStamp(save.result.pricingMetadata), routingMetadata: withoutStamp(save.result.routingMetadata) };
+      for (const row of [...(result.oneTime.items || []), ...(result.oneTime.specItems || [])]) {
+        if (row.service === 'pest_initial_roach') row.price = 202.5;
+      }
+      return { ...save, result };
+    };
+    const stampOf = (save) => replay.savedLegacyWholeHomeSizingSignal(save).legacyWholeHomeSizing;
+    const guard = (save, storedEstimateData = null) => guardWholeHomeSizingOnClientFallbackSave(save, { storedEstimateData });
+
+    test('a cached page cannot save a new cockroach quote at the footprint price: refused, never stored as a legacy quote', () => {
+      const stale = cachedBundle();
+      expect(stampOf(stale)).toBe(true);
+      expect(() => guard(stale)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      // A posted legacy stamp does not help: only a stored estimate can be on the footprint basis.
+      const forged = cachedBundle();
+      forged.result.pricingMetadata.legacyWholeHomeSizing = true;
+      expect(() => guard(forged)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      // The same for a rodent guarantee row in any shape, and whatever the story count says.
+      expect(() => guard({ result: { lineItems: [{ service: 'rodent_guarantee', price: 249 }] } })).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard({ result: { oneTime: { specItems: [{ name: 'Cockroach Treatment Service', price: 239 }] } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard(cachedBundle({ stories: 1 }))).toThrow(expect.objectContaining({ statusCode: 409 }));
+      // A stored send snapshot or a line stamp posted back by the cached page is not the browser saying it priced the new rule.
+      const withSnapshot = { ...cachedBundle(), sendSnapshot: { legacyWholeHomeSizing: false } };
+      expect(() => guard(withSnapshot)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      const withLineStamp = cachedBundle();
+      withLineStamp.result.lineItems = [{ service: 'pest_initial_roach', price: 202.5, legacyWholeHomeSizing: false }];
+      expect(() => guard(withLineStamp)).toThrow(expect.objectContaining({ statusCode: 409 }));
+    });
+
+    test('the current page saves at the whole-home price and is stamped new', () => {
+      const save = currentBundle();
+      expect(() => guard(save)).not.toThrow();
+      expect(save.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
+      expect([...(save.result.oneTime.items || []), ...(save.result.oneTime.specItems || [])].find((row) => row.service === 'pest_initial_roach').price).toBe(289);
+    });
+
+    test('the footprint basis comes only from the stored estimate: a legacy quote re-saved by a cached page stays legacy, by the current page it takes the new price and stamp', () => {
+      const storedLegacy = cachedBundle();
+      const resaved = cachedBundle();
+      expect(() => guard(resaved, storedLegacy)).not.toThrow();
+      expect(stampOf(resaved)).toBe(true);
+      const repriced = currentBundle();
+      expect(() => guard(repriced, storedLegacy)).not.toThrow();
+      expect(stampOf(repriced)).toBe(false);
+      // A stored estimate priced under the new rule gives a cached page no footprint basis.
+      const storedNew = currentBundle();
+      expect(() => guard(cachedBundle(), storedNew)).toThrow(expect.objectContaining({ statusCode: 409 }));
+    });
+
+    test('a save with no cockroach or guarantee row is not refused, and is stamped by the server: new on a first save', () => {
+      const pestOnly = cachedBundle({ svcRoach: false, roachType: 'NONE', svcPest: true, pestFreq: 4 });
+      expect(() => guard(pestOnly)).not.toThrow();
+      expect(pestOnly.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
+    });
+
+    test('the check sits on the CLIENT_FALLBACK decision; a server price is untouched', async () => {
+      const price = (estimateData, recompute) => resolveServerAuthoritativePricing({
+        estimateData, clientPreview: { monthlyTotal: 0, annualTotal: 0, onetimeTotal: 202.5 }, quoteRequired: false, now: () => new Date('2026-11-27T15:00:00Z'), recompute,
+      });
+      for (const reason of ['NO_INPUTS', 'ENGINE_ERROR']) {
+        const recompute = async () => ({ recomputed: false, reason, ...(reason === 'ENGINE_ERROR' ? { error: new Error('down') } : {}) });
+        await expect(price(cachedBundle(), recompute)).rejects.toMatchObject({ statusCode: 409 });
+        const current = currentBundle();
+        const out = await price(current, recompute);
+        expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
+        expect(stampOf(current)).toBe(false);
+      }
+      const served = cachedBundle();
+      const out = await price(served, async () => ({ recomputed: true, serverResult: { recurring: {} }, serverTotals: { monthlyTotal: 0, annualTotal: 0, onetimeTotal: 289 } }));
+      expect(out.audit.pricing_authority).toBe('SERVER');
+    });
   });
 
   test('the plan-added cockroach treatment sizes on the whole home in the browser too', () => {

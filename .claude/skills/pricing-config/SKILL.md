@@ -107,7 +107,10 @@ environment that carries the row (prod does), **editing
   size. Quotes made before it keep the footprint
   (`pricingMetadata.legacyWholeHomeSizing`; an unstamped priced estimate, or
   inputs-only asking for one of the three, reads the same). Plan-wide stamp:
-  a service added to a legacy estimate stays on the footprint.
+  a service added to a legacy estimate stays on the footprint. A browser-priced
+  save naming a cockroach or guarantee row needs the stamp `false` unless the
+  stored estimate is legacy (409 otherwise: a cached page cannot save a new
+  footprint-priced quote).
 - **Specialty prices of 2026-11-26 (evening, new quotes only; no gate, ships live)**: three CODE constants, not
   Settings, behind ONE estimate stamp `pricingMetadata.legacySpecialty1126` (true = priced before; a priced
   estimate with no stamp, or inputs-only asking for bed bug, mosquito or a stinging insect, reads true and keeps

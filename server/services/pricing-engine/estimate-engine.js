@@ -276,7 +276,7 @@ const {
   pricePlugging, pluggingAreaRequiredLine, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee, barrelMeasurementHold,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
-  resolvePalmCount, resolveWholeHomeSqFt,
+  resolvePalmCount, resolveGuaranteeHomeSize,
   normalizeRoachType, assertFinitePriceFields,
   priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled, buildPricingError,
 } = require('./service-pricing');
@@ -1319,14 +1319,19 @@ function generateEstimate(input) {
   const property = calculatePropertyProfile(propertyProfileInput);
 
   // ── 2. Derive property-driven pricing modifiers (v2 port) ─
-  // Whole-home sizing inputs for the cockroach treatment, bed bug treatment and rodent guarantee (priceFlea's twin of these
-  // keys is set on its own call below). calculatePropertyProfile clears footprintUnknown once a measured footprint exists and
+  // Whole-home sizing inputs for the flea package, cockroach treatment, bed bug treatment and rodent guarantee.
+  // calculatePropertyProfile clears footprintUnknown once a measured footprint exists and
   // derives footprint = homeSqFt / stories when none was supplied, so the pricers need the caller's original flag and footprint.
   // wholeHomeSizingLegacy: a quote priced before the rule keeps the ground-floor basis it was sold on.
   const wholeHomeSizing = {
     wholeHomeFootprintUnknown: input.footprintUnknown === true,
     wholeHomeExplicitFootprint: input.footprintSqFt ?? input.footprint ?? null,
     wholeHomeSizingLegacy: legacyWholeHomeSizing(input),
+    // Public website quote, no home size posted: the server lookup's measured whole home replaces the route's 2,000 default
+    // (both keys are set by the route or restored by the replay from a stored row, never read from a client body). The input
+    // keys keep the name flea gave them; resolveWholeHomeSize reads them for every whole-home service.
+    fleaMeasuredHomeSqFt: input.fleaMeasuredHomeSqFt,
+    fleaHomeSqFtIsDefault: input.homeSqFtIsDefault === true,
   };
 
   const modifiers = deriveModifiers(property);
@@ -2411,14 +2416,10 @@ function generateEstimate(input) {
       // Server-derived replay signal only (estimate-flea-size-replay.js): a stored estimate quoted on the
       // ground-floor footprint keeps that size basis. Absent = the live whole-home rule.
       fleaSizeBasis: input.fleaSizeBasisReplay,
-      // calculatePropertyProfile clears footprintUnknown once a measured footprint exists; the flea sizing needs the original flag.
-      wholeHomeFootprintUnknown: wholeHomeSizing.wholeHomeFootprintUnknown,
-      // Public website quote, no home size posted: the server lookup's measured whole home replaces the 2,000 default (flea only).
-      fleaMeasuredHomeSqFt: input.fleaMeasuredHomeSqFt,
-      fleaHomeSqFtIsDefault: input.homeSqFtIsDefault === true,
-      // The footprint the caller supplied. The profile's own footprint is homeSqFt / stories when none was supplied, so it
-      // cannot tell a measurement from a derivation (and would divide a building footprint by stories twice).
-      wholeHomeExplicitFootprint: wholeHomeSizing.wholeHomeExplicitFootprint,
+      // The caller's original footprintUnknown flag, the footprint it supplied (the profile's own footprint is homeSqFt / stories
+      // when none was supplied, so it cannot tell a measurement from a derivation) and the lookup's measured whole home.
+      // priceFlea keeps its own basis key (fleaSizeBasis) and does not read wholeHomeSizingLegacy.
+      ...wholeHomeSizing,
     });
     lineItems.push(result);
   }
@@ -2786,12 +2787,15 @@ function generateEstimate(input) {
     // rows, and a section row has no aggregate equivalent-point fields.
     const exclusionResult = rodentExclusionV2Summary
       || lineItems.find(li => li.service === 'rodent_exclusion' || li.service === 'exclusion');
+    // One story count for the whole line: a count in the guarantee's own options scales a footprint and picks the tier alike.
+    const guaranteeStories = opts.stories || property.stories || 1;
+    // A caller's own homeSqFt is the total living area (the Admin V2 path passes it). The fallback is the home's TOTAL living
+    // area too (owner 2026-11-26 "whole home"), with a review mark when that size may be the ground floor only; a quote priced
+    // before that falls back to the ground-floor footprint, as sold (resolveGuaranteeHomeSize reads wholeHomeSizingLegacy).
+    const guaranteeSize = resolveGuaranteeHomeSize({ ...property, ...wholeHomeSizing, stories: guaranteeStories }, opts.homeSqFt);
     const guaranteeOpts = {
-      // A caller's own homeSqFt is the total living area (the Admin V2 path passes it). The fallback is the home's TOTAL living
-      // area too (owner 2026-11-26 "whole home"); a quote priced before that falls back to the ground-floor footprint, as sold
-      // (resolveWholeHomeSqFt reads wholeHomeSizingLegacy).
-      homeSqFt: opts.homeSqFt || resolveWholeHomeSqFt({ ...property, ...wholeHomeSizing }) || 2000,
-      stories: opts.stories || property.stories || 1,
+      homeSqFt: guaranteeSize.homeSqFt || 2000,
+      stories: guaranteeStories,
       roofType: exclusionRoofType(opts.roofType || property.roofType || 'shingle'),
       eligibility: opts.eligibility || {},
     };
@@ -2806,7 +2810,7 @@ function generateEstimate(input) {
         + (services.exclusion?.specialty || 0)
       );
     }
-    const result = priceRodentGuarantee(guaranteeOpts);
+    const result = { ...priceRodentGuarantee(guaranteeOpts), ...guaranteeSize.reviewFields };
     // A held exclusion (barrel footage pending) is not warranty eligible, so no separate guarantee is added either.
     if (result.eligible && exclusionResult?.warrantyEligible !== false) lineItems.push(result);
   }

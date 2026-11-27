@@ -178,6 +178,54 @@ describe('POST /api/public/quote/calculate: flea size from the server lookup whe
     expect((await quote()).one_time_total).toBe(350);
   });
 
+  // Whole-home sizing (owner 2026-11-26): the cockroach and bed bug treatments read the same server measurement flea does.
+  describe('cockroach and bed bug treatments use the server measurement too', () => {
+    const db = require('../models/db');
+    const LOOKUP_2800 = { enriched: { storiesSource: 'verified', stories: 2, footprint: 1400, homeSqFt: 2800 }, propertyRecord: null };
+    const PLAN_WITH_ROACH = { pest: { frequency: 'quarterly', roachType: 'regular' } };
+    const BED_BUG = { bedBug: { rooms: 1, method: 'chemical', severity: 'light', prepStatus: 'ready', occupancyType: 'singleFamily' } };
+    // The draft row the quote stored (the compact engine result the replay reads).
+    const storedRow = (service) => {
+      const drafts = db.__recorded.filter((entry) => entry.row && entry.row.estimate_data);
+      const data = drafts[drafts.length - 1].row.estimate_data;
+      const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+      return parsed.engineResult.lineItems.find((line) => line.service === service);
+    };
+    const wizard = (services, extra = {}) => quote({ homeSqFt: 2000, stories: 2, buildingSizeConfirmed: false, enriched: {}, services, ...extra });
+
+    test('the wizard\'s untouched 2,000 sq ft placeholder on a home the lookup measured at 2,800 sq ft: the plan-added cockroach treatment prices 2,800', async () => {
+      mockServerLookup = null;
+      const placeholder = await wizard(PLAN_WITH_ROACH);
+      const placeholderRow = storedRow('pest_initial_roach');
+      mockServerLookup = LOOKUP_2800;
+      const measured = await wizard(PLAN_WITH_ROACH);
+      const measuredRow = storedRow('pest_initial_roach');
+      expect(placeholderRow).toMatchObject({ footprintUsed: 2000, footprintSource: 'homeSqFt' });
+      // The stored row carries the size, its source and the posted size it replaced: the replay restores the measurement from it.
+      expect(measuredRow).toMatchObject({ homeSizeBasis: 'total_living_area', footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000 });
+      const { pricePestInitialRoach } = require('../services/pricing-engine/service-pricing');
+      const bracket = (homeSqFt) => pricePestInitialRoach({ homeSqFt, stories: 2 }, { roachType: 'regular' }).price;
+      expect(bracket(2800)).toBeGreaterThan(bracket(2000));
+      expect(measured.one_time_total - placeholder.one_time_total).toBe(bracket(2800) - bracket(2000));
+      // The pest plan itself is unchanged by the lookup (it stays on the footprint of the posted size).
+      expect(measured.monthly_total).toBe(placeholder.monthly_total);
+    });
+
+    test('a customer-confirmed 2,000 sq ft home is never replaced', async () => {
+      mockServerLookup = LOOKUP_2800;
+      await wizard(PLAN_WITH_ROACH, { buildingSizeConfirmed: true });
+      expect(storedRow('pest_initial_roach')).toMatchObject({ footprintUsed: 2000, footprintSource: 'homeSqFt' });
+    });
+
+    test('the bed bug treatment steps on the measured home as well', async () => {
+      mockServerLookup = LOOKUP_2800;
+      await wizard(BED_BUG);
+      expect(storedRow('bed_bug')).toMatchObject({ footprintUsed: 2800, footprintSource: 'lookup_measured_home' });
+      await wizard(BED_BUG, { buildingSizeConfirmed: true });
+      expect(storedRow('bed_bug')).toMatchObject({ footprintUsed: 2000 });
+    });
+  });
+
   test('trustedFleaHomeSqFt is the trusted footprint x the trusted stories, or null', () => {
     const { trustedFleaHomeSqFt } = require('../routes/public-quote')._internals;
     expect(trustedFleaHomeSqFt(LOOKUP.enriched, null)).toBe(3000);

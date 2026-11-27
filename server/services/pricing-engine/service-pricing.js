@@ -1892,6 +1892,8 @@ function pricePestInitialRoach(property, options = {}) {
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
     homeSizeBasis: footprintResolution.homeSizeBasis,
+    // Present only when the server lookup's measured home replaced the posted size (a website quote).
+    ...footprintResolution.postedSizeFields,
     requiresManualReview: footprintResolution.requiresManualReview || manualReviewReasons.length > 0,
     manualReviewReasons,
     warnings,
@@ -8115,14 +8117,24 @@ function normalizeBedBugOptions(property = {}, options) {
   // the modifier stays 1 and priceBedBugTreatment routes the line to review, as before.
   const homeSizeBasis = wholeHomeBasisOf(property);
   let homeSizeResolution = null;
-  let footprint = groundFloorFootprint;
-  if (homeSizeBasis === HOME_SIZE_BASIS_TOTAL) {
+  let footprint;
+  // The area a whole-home heat treatment heats when the caller gave no heat area of its own. Ground-floor basis: the profile's
+  // homeSqFt, as sold. Whole-home basis: the resolved whole home, the same size the modifier steps on, so one treatment never
+  // prices on two areas (homeSqFt 1,500 beside livingAreaSqFt 3,000 heats 3,000).
+  let wholeHomeHeatAreaSqFt = property.homeSqFt;
+  if (homeSizeBasis === HOME_SIZE_BASIS_GROUND_FLOOR) {
+    footprint = groundFloorFootprint;
+  } else {
     homeSizeResolution = resolveWholeHomeBasisSize({
       ...property,
       stories,
       ...(hasOptionFootprint ? { footprint: options.footprint, wholeHomeExplicitFootprint: options.footprint } : {}),
     });
-    footprint = homeSizeResolution.wasDefaulted ? undefined : homeSizeResolution.footprint;
+    // No size evidence (the resolver's 2,000 fallback is not a measurement): the modifier stays 1 and the heat area is read as before.
+    if (!homeSizeResolution.wasDefaulted) {
+      footprint = homeSizeResolution.footprint;
+      wholeHomeHeatAreaSqFt = footprint;
+    }
   }
 
   const equipmentValue = options.equipment ?? options.bedbugEquipment;
@@ -8144,7 +8156,7 @@ function normalizeBedBugOptions(property = {}, options) {
     assertEnum(heatScope, BED_BUG.heat.heatScope.allowed, 'heatScope');
     if (heatScope === 'WHOLE_HOME') {
       heatAreaSqFt = readBedBugPropertyNumber(
-        options.heatAreaSqFt ?? options.heatSqFt ?? options.homeSqFt ?? property.homeSqFt ?? property.squareFootage,
+        options.heatAreaSqFt ?? options.heatSqFt ?? options.homeSqFt ?? wholeHomeHeatAreaSqFt ?? property.squareFootage,
       );
     }
   }
@@ -8704,6 +8716,8 @@ function priceBedBugTreatment(property, options) {
   result.footprintSource = footprintResolution.source;
   result.footprintWasDefaulted = footprintResolution.wasDefaulted;
   result.homeSizeBasis = normalized.homeSizeBasis;
+  // Present only when the server lookup's measured home replaced the posted size (a website quote; whole-home basis only).
+  Object.assign(result, sized?.postedSizeFields);
   result.requiresManualReview = footprintResolution.requiresManualReview;
   result.manualReviewReasons = footprintResolution.manualReviewReasons;
   result.warnings = uniqueWarnings(result.warnings, footprintResolution.warnings);
@@ -8922,6 +8936,10 @@ function resolveWholeHomeSize(property = {}) {
       requiresManualReview: false,
       manualReviewReasons: [],
       warnings: [],
+      // The size the request posted, which the measured home replaced. It rides onto a cockroach or bed bug row under the key
+      // the flea row gave it (priceFlea writes its own): a revision of the sent quote compares it to tell whether the operator
+      // edited the size (estimate-flea-size-replay generateWithFleaRecord).
+      postedSizeFields: Number(property.homeSqFt) > 0 ? { fleaPostedHomeSqFt: Math.round(Number(property.homeSqFt)) } : {},
     };
   }
   const stories = positiveStories(property.stories);
@@ -8962,13 +8980,23 @@ function resolveWholeHomeSize(property = {}) {
   return resolvePestFootprint(property);
 }
 
-// The home size the rodent guarantee tiers on when the caller passed no homeSqFt, or null when the property carries no size
-// evidence (the 2,000 fallback is not a measurement): the total living area, or, for a quote priced before the rule
-// (property.wholeHomeSizingLegacy), the profile's own ground-floor footprint exactly as the guarantee read it then.
-function resolveWholeHomeSqFt(property = {}) {
-  if (wholeHomeBasisOf(property) === HOME_SIZE_BASIS_GROUND_FLOOR) return property.footprint || null;
-  const resolution = resolveWholeHomeSize(property);
-  return resolution.wasDefaulted ? null : resolution.footprint;
+// The home size the rodent guarantee tiers on, and the review fields its line carries (reviewFields: empty when the size is clear).
+// A caller's own homeSqFt is the total living area and is read as given. Without one: homeSqFt is null when the property
+// carries no size evidence (the 2,000 fallback is not a measurement). Live rule: the total living area, and when that size may
+// be the ground floor only (a building measurement on a multi-story home) the shared resolver's review reason and warning go
+// on the line. The caller passes the story count the guarantee prices with in property.stories, so a footprint is scaled by the
+// same count that picks the tier. A quote priced before the rule (property.wholeHomeSizingLegacy): the profile's own
+// ground-floor footprint exactly as the guarantee read it then, and no review mark.
+function resolveGuaranteeHomeSize(property = {}, callerHomeSqFt) {
+  if (callerHomeSqFt) return { homeSqFt: callerHomeSqFt, reviewFields: {} };
+  if (wholeHomeBasisOf(property) === HOME_SIZE_BASIS_GROUND_FLOOR) return { homeSqFt: property.footprint || null, reviewFields: {} };
+  const sized = resolveWholeHomeBasisSize(property);
+  return {
+    homeSqFt: sized.wasDefaulted ? null : sized.footprint,
+    reviewFields: sized.sizeReviewReasons.length
+      ? { requiresManualReview: true, manualReviewReasons: sized.sizeReviewReasons, warnings: sized.sizeWarnings }
+      : {},
+  };
 }
 
 // The size the cockroach treatment and the bed bug treatment price on, under the basis the estimate was priced with. Live rule:
@@ -10980,7 +11008,7 @@ function applyRodentBundle(componentTotal, bundle) {
 
 module.exports = {
   assertFinitePriceFields,
-  resolveWholeHomeSqFt,
+  resolveGuaranteeHomeSize,
   barrelMeasurementHold,
   oneTimeLawnPlateauMonthly,
   calcBermudaRemovalAnnualCost,
