@@ -142,7 +142,8 @@ test('a single-home session (gate on, scoped=false) pins its one property and st
   expect(ok.status).toBe(201);
   const insert = log.find((e) => e[0] === 'insert');
   expect(insert).toBeTruthy();
-  expect(insert[1].metadata).toBeUndefined(); // unscoped: today's row shape
+  // Unscoped: no property stamp, only the writer's mark (the tech Visit Brief reads it).
+  expect(JSON.parse(insert[1].metadata)).toEqual({ writer: 'portal_form' });
 });
 
 test('the same covered issue under the PRIMARY selection is still steered to the re-service picker', async () => {

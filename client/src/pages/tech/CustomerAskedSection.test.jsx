@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // "Customer asked" on the tech Visit Brief (facts.customer_asked): labels, ET date, pest names, text; nothing when
-// the key is absent or empty; the first member that has it carries a grouped stop.
+// the key is absent or empty; a grouped stop merges every member's list.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
@@ -40,10 +40,25 @@ describe('CustomerAskedSection', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('uses the first member that has items on a grouped stop', () => {
-    render(<CustomerAskedSection memberBits={bits({ items: [] }, { items: [ITEMS[3]] }, { items: [ITEMS[0]] })} />);
+  it('merges every member of a grouped stop: shared items once, each reason and note kept with its service', () => {
+    const shared = ITEMS[0];
+    const memberBits = [
+      { service: { id: 'a', serviceType: 'Pest Control' }, facts: { customer_asked: { items: [shared, ITEMS[1], ITEMS[3]] } } },
+      { service: { id: 'b', serviceType: 'Lawn Care' }, facts: { customer_asked: { items: [shared, { ...ITEMS[3], text: 'Mow after noon' }] } } },
+      { service: { id: 'c', serviceType: 'Mosquito' }, facts: null },
+    ];
+    render(<CustomerAskedSection memberBits={memberBits} />);
+    expect(screen.getAllByText('Lawn Care: Brown patch by the gate')).toHaveLength(1);
+    expect(screen.getByText('Booking note · Pest Control · Nov 20')).toBeInTheDocument();
+    expect(screen.getByText('Booking note · Lawn Care · Nov 20')).toBeInTheDocument();
+    expect(screen.getByText('Return visit reason · Pest Control · Nov 20 · Ants, Spiders')).toBeInTheDocument();
     expect(screen.getByText('Please text before you arrive')).toBeInTheDocument();
-    expect(screen.queryByText('Lawn Care: Brown patch by the gate')).not.toBeInTheDocument();
+    expect(screen.getByText('Mow after noon')).toBeInTheDocument();
+  });
+
+  it('names no service on a single-service stop', () => {
+    render(<CustomerAskedSection memberBits={[{ service: { id: 'a', serviceType: 'Pest Control' }, facts: { customer_asked: { items: [ITEMS[3]] } } }]} />);
+    expect(screen.getByText('Booking note · Nov 20')).toBeInTheDocument();
   });
 
   it('shows in the Visit Brief panel from the served facts', () => {

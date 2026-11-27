@@ -754,7 +754,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         location_on_property: validLocation,
         photos: JSON.stringify(photoData),
         status: 'new',
-        ...((requestProperty || value.photoIdSource || isCancellation) ? { metadata: JSON.stringify({
+        metadata: JSON.stringify({
+          // The writer's mark: this row is the customer's own portal form, so its description is their words
+          // (the tech Visit Brief shows it; the cancel flow's null-source rows carry office text instead).
+          writer: 'portal_form',
           ...(requestProperty ? { propertyId: requestProperty.id, property: requestProperty } : {}),
           ...(value.photoIdSource ? { photoIdSource: value.photoIdSource } : {}),
           // The submission as made: retries read it (submittedCancel).
@@ -764,7 +767,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             adverseEvent: value.adverseEvent === true,
             safetyComplaint: value.safetyComplaint === true,
           } } : {}),
-        }) } : {}),
+        }),
       })
       .returning('*');
 

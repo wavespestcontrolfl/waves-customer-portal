@@ -601,3 +601,15 @@ describe('selfBookedNoteText', () => {
     expect(selfBookedNoteText('Self-booked. Notes: Re-service request: ants are back')).toBeNull();
   });
 });
+
+describe('selfBookedNoteText: multiline and the original booking', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  test('keeps continuation lines up to the booking appendix', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Side gate sticks.\nPlease text first. — Unit: 5')).toBe('Side gate sticks. Please text first.');
+  });
+  test('the original booking customer_notes win when given', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Cut short', 'Side gate sticks.\nPlease text first.')).toBe('Side gate sticks. Please text first.');
+    expect(selfBookedNoteText('Self-booked via portal', 'Beware of the dog')).toBe('Beware of the dog');
+    expect(selfBookedNoteText('x', 'Re-service request: ants are back')).toBeNull();
+  });
+});

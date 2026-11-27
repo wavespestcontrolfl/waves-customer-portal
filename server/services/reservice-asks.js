@@ -189,16 +189,17 @@ function legacyRequestText(notes) {
   return null;
 }
 
-// The note a customer typed when self-booking ("Self-booked. Notes: Please text first — Unit: 5"), without the
-// appendix the booking flow adds. A re-service request line is bookingWords' and is not returned here.
-function selfBookedNoteText(notes) {
-  for (const segment of String(notes || '').split('\n')) {
-    const match = /^Self-booked\.\s*Notes:\s*(.+)$/.exec(segment.trim());
-    if (!match) continue;
-    const text = compact(match[1].split(NOTE_APPENDIX_RE)[0]);
-    return text && !LEGACY_NOTE_RE.test(text) ? text : null;
+// The note a customer typed when self-booking. The original booking's customer_notes win when the caller has them
+// (the self_booked_appointments row, untouched by later edits). Otherwise it is read from the visit's notes line
+// ("Self-booked. Notes: Please text first — Unit: 5"): everything after the lead up to the appendix the booking flow
+// adds, continuation lines included. A re-service request line is bookingWords' and is not returned here.
+function selfBookedNoteText(notes, customerNotes = null) {
+  let text = compact(customerNotes);
+  if (!text) {
+    const match = /(?:^|\n)\s*Self-booked\.\s*Notes:\s*([\s\S]+)$/.exec(String(notes || ''));
+    text = match ? compact(match[1].split(NOTE_APPENDIX_RE)[0]) : '';
   }
-  return null;
+  return text && !LEGACY_NOTE_RE.test(text) ? text : null;
 }
 
 // The booking's own words as { source, text, quoted, lead } before the scrub,
