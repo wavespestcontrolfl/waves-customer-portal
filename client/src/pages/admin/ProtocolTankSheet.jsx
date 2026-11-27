@@ -4,6 +4,7 @@ import { productLabelLink } from "../../lib/product-label";
 import { FieldDocument, FieldDocumentBody, FieldFooter, FieldMasthead, FieldTitle } from "../../components/FieldDocument";
 import { Button, Card } from "../../components/ui";
 import "./protocol-tank-sheet.css";
+import { tankCoverageLines } from "./protocolTankOptions";
 
 const TANK_MIX_CATEGORIES = new Set([
   "water_conditioner", "dry_wg_wdg_wp_df", "liquid_flowable_sc", "ec_ew",
@@ -12,7 +13,13 @@ const TANK_MIX_CATEGORIES = new Set([
 
 const unitText = (unit) => String(unit || "").replaceAll("_", " ");
 const num = (value) => Number(value).toLocaleString("en-US", { maximumFractionDigits: 3 });
-const fillText = (fill) => `${num(fill.amount)} ${unitText(fill.amountUnit)}${fill.metricAmount ? ` (${num(fill.metricAmount)} ${fill.metricUnit})` : ""}`;
+// A per-gallon label band ("0.2-0.8 fl oz per gal") gives its 4 gal fill as a range.
+const fillText = (fill) => `${num(fill.amount)}${fill.amountMax ? ` to ${num(fill.amountMax)}` : ""} ${unitText(fill.amountUnit)}${fill.metricAmount ? ` (${num(fill.metricAmount)} ${fill.metricUnit})` : ""}`;
+// What a FlowZone fill is sized on: the label's per-gallon spot rate (owner 2026-11-27), or the sprayer whose number it uses (a
+// test or an owner estimate: the sheet's sprayer line says which).
+// A per-gallon label rate names its source and, when the label states one, the spray volume it is applied at.
+const labelVolume = (fill) => (fill.carrierGalPer1000 ? `, sprayed at ${num(fill.carrierGalPer1000)} gal per 1,000 sq ft` : "");
+const flowZoneBasis = (fill) => (fill.carrierSource === "label_per_gallon" ? ` · label spot rate per gallon${labelVolume(fill)}` : fill.sprayerName ? ` · ${fill.sprayerName}` : "");
 const CARRIER_SOURCE = { row: "from the program row", line: "protocol line" };
 const isSpreader = (item) => item.tankAmounts?.application === "spreader";
 const nameKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -140,19 +147,41 @@ function surfactantNote(item, products) {
   return products.find((other) => mixReady(other) && other.tankAmounts?.surfactantNote && mixesInto(other, item))?.tankAmounts.surfactantNote || null;
 }
 
-// A program volume the sprayer's test does not put out (server: the pass count), named for the use it applies to.
+// A program volume the sprayer number does not put out (server: volumeChecks), named for the use it applies to. The fill is sized on
+// the label volume; the line says how to put it on (owner 2026-11-27: no pass counts).
 const sentenceCase = (text) => text.charAt(0).toUpperCase() + text.slice(1);
-// "Use the other sprayer" only when the server found another sprayer on this sheet tested at the label volume.
-function volumeAdvice({ labelGalPer1000: label, testedGalPer1000: tested, passes, otherSprayerName }) {
-  const other = otherSprayerName ? `, or use ${otherSprayerName} (tested at ${num(label)})` : "";
-  if (passes) return `Make ${passes} passes, or slow down to reach the label volume.`;
-  return `${tested > label ? "Speed up" : "Slow down"} to reach ${num(label)}${other}.`;
+function volumeText({ use, labelGalPer1000: label, sprayerGalPer1000: sprayer }) {
+  const volume = `Label volume ${num(label)} gal per 1,000 sq ft`;
+  const advice = label > sprayer
+    ? `${volume}: mix one 1,000 sq ft dose in ${num(label)} gal and spray all of it on 1,000 sq ft, in crossing passes until the tank is used.`
+    : `${volume}: this sprayer puts down more. Mix one 1,000 sq ft dose in ${num(label)} gal and cover 1,000 sq ft.`;
+  return use ? `${sentenceCase(use)}: ${advice}` : advice;
 }
-const volumeText = (check) => [
-  check.use ? `${sentenceCase(check.use)}:` : null,
-  `Label volume is ${num(check.labelGalPer1000)} gal per 1,000. ${check.sprayerName || "This sprayer"} was tested at ${num(check.testedGalPer1000)}.`,
-  volumeAdvice(check),
-].filter(Boolean).join(" ");
+// The 100 gal and full-tank lines: one pair per big tank, each named, when no sprayer is picked and the tanks' numbers differ
+// (server: tankOptions); else the selected tank's pair.
+function bigTankRows(amounts) {
+  const tanks = amounts.tankOptions || [{ sprayerName: null, per100Gal: amounts.per100Gal, fullTank: amounts.fullTank }];
+  return tanks.flatMap(({ sprayerName, per100Gal, fullTank }) => {
+    const named = sprayerName ? ` · ${sprayerName}` : "";
+    return [
+      per100Gal && [`100 gal tank${named}`, fillText(per100Gal)],
+      fullTank && [`Full ${num(fullTank.gallons)} gal tank${named}`, fillText(fullTank)],
+    ].filter(Boolean);
+  });
+}
+// One line per distinct text, naming the sprayers it is for: a check comes only for a sprayer whose number differs from the label
+// volume, so a line can apply to one sprayer on the sheet and not another.
+function volumeLines(checks) {
+  const groups = new Map();
+  for (const check of checks) {
+    const text = volumeText(check);
+    groups.set(text, [...(groups.get(text) || []), check]);
+  }
+  return [...groups].map(([text, group]) => {
+    const names = [...new Set(group.map((check) => check.sprayerName).filter(Boolean))];
+    return names.length ? `${text} (${names.join(", ")})` : text;
+  });
+}
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
   held: "City hold: do not apply at this visit.",
@@ -168,8 +197,10 @@ const useRows = (useFills = []) => useFills.flatMap((use) => [["100 gal", use.pe
 const headingFill = (fill, backpack) => `${fillText(fill)} / ${num(fill.gallons)} gal${fill === backpack ? " FlowZone" : ""}`;
 
 // The card heading: the full tank, else 100 gal, else FlowZone. A card with only per-use fills (October Velista with no FlowZone
-// test) shows the first of them, never "No amount".
+// test) shows the first of them, never "No amount". With a line per big tank (tankOptions), each tank's full tank, named.
 function amountHeading(amounts) {
+  const tanks = (amounts.tankOptions || []).filter((tank) => tank.fullTank);
+  if (tanks.length) return tanks.map((tank) => `${headingFill(tank.fullTank)} ${tank.sprayerName}`).join("; ");
   const main = amounts.fullTank || amounts.per100Gal || amounts.backpack4Gal;
   if (main) return headingFill(main, amounts.backpack4Gal);
   const use = (amounts.useFills || []).find((entry) => entry.per100Gal || entry.backpack4Gal);
@@ -184,10 +215,10 @@ function amountRows(amounts) {
     return { rows: [["Rate", rate || "Rate not on file. Use the label rate."]], heading: rate ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} / 1,000 sq ft` : "No amount" };
   }
   const rows = [["Rate", amounts.concentrationPercent ? `${num(amounts.concentrationPercent)}% of the spray volume` : rate || "Not on file. Use the label rate."]];
-  if (amounts.per100Gal) rows.push(["100 gal tank", fillText(amounts.per100Gal)]);
-  if (amounts.fullTank) rows.push([`Full ${num(amounts.fullTank.gallons)} gal tank`, fillText(amounts.fullTank)]);
+  rows.push(...bigTankRows(amounts));
   // A backpack amount names the FlowZone unit whose test it used.
-  if (amounts.backpack4Gal) rows.push(["FlowZone 4 gal", `${fillText(amounts.backpack4Gal)}${amounts.backpack4Gal.sprayerName ? ` · ${amounts.backpack4Gal.sprayerName} test` : ""}`]);
+  if (amounts.backpack4Gal) rows.push(["FlowZone 4 gal", `${fillText(amounts.backpack4Gal)}${flowZoneBasis(amounts.backpack4Gal)}`]);
+  else if (amounts.labelRateHold) rows.push(["FlowZone 4 gal", `${amounts.labelRateHold}.`]);
   else if (amounts.backpackMissing) rows.push(["FlowZone 4 gal", "No FlowZone test on file. Test it to show this."]);
   if (amounts.fixedCarrierGalPer1000) rows.push(["Spray volume", `${num(amounts.fixedCarrierGalPer1000)} gal per 1,000 sq ft (${CARRIER_SOURCE[amounts.fixedCarrierSource]})`]);
   rows.push(...useRows(amounts.useFills));
@@ -210,7 +241,7 @@ function productCautions(item, exclusions, products) {
     // The program's required notes for this product, selected or not (the sheet-wide warnings list only the selected ones).
     ...(item.gateNotes || []).filter((note) => note.severity === "required").map((note) => note.text),
     surfactantNote(item, products),
-    ...(amounts?.volumeChecks || []).map(volumeText),
+    ...volumeLines(amounts?.volumeChecks || []),
   ].filter(Boolean);
 }
 
@@ -239,13 +270,14 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
           <p className="mt-2 font-medium">Reference amounts. Yearly and visit limits are checked on the job card, not here.</p>
           <p className="mt-2">{plan.visit?.objective}</p>
         </div>
-        {equipment?.carrierGalPer1000 > 0 && (
+        {tankCoverageLines(equipment).map((line) => <p key={line} className="protocol-tank-meta">{line}</p>)}
+        {equipment?.carrierGalPer1000 > 0 && !equipment.tankOptions && (
           <p className="protocol-tank-meta">
             Carrier: {equipment.carrierGalPer1000} gal per 1,000 sq ft · Full-tank coverage: {Number(equipment.tankCoverageSqft).toLocaleString("en-US")} sq ft
           </p>
         )}
         {[...(plan.warnings || []), ...(plan.blocks || [])].map((warning, index) => (
-          <p key={`${warning.code}-${index}`} className="text-alert-fg">{warning.message}</p>
+          <p key={`${warning.code}-${index}`} className={warning.severity === "note" ? undefined : "text-alert-fg"}>{warning.message}</p>
         ))}
         {safetyRules.map((rule) => <p key={rule} className="text-alert-fg">{rule}</p>)}
         {plan.mixCheck?.status === "unavailable" && <p className="font-medium text-alert-fg">{MIX_CHECK_UNAVAILABLE}</p>}
