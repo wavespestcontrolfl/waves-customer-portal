@@ -555,16 +555,36 @@ const CUSTOMER_PICK_LOG_MARKER = 'customer_pick';
 // The day a move left. A booking that ends a customer-pick hand-off left the provisional
 // due date, which was never booked: its "from" is the slot the hand-off took the visit
 // off (the hand-off row's own original date).
-function bookedFrom(last, logs) {
+function handOffBefore(last, logs) {
   const sameVisit = logs.filter((l) => String(l.scheduled_service_id) === String(last.scheduled_service_id));
   const before = sameVisit[sameVisit.indexOf(last) + 1];
-  const fromHandOff = before && before.notes === CUSTOMER_PICK_LOG_MARKER
-    && calendarDay(before.new_date) === calendarDay(last.original_date);
-  return fromHandOff ? before.original_date : last.original_date;
+  return before && before.notes === CUSTOMER_PICK_LOG_MARKER
+    && calendarDay(before.new_date) === calendarDay(last.original_date) ? before : null;
+}
+function bookedFrom(last, logs) {
+  const handOff = handOffBefore(last, logs);
+  return handOff ? handOff.original_date : last.original_date;
+}
+// A row is a move only when the slot it left is one the customer could have been told.
+// A placement is not: (i) a same-day row that left no hour (a no-hour due date got its
+// first hour), and (ii) Auto-Dispatch's first placement (reason and actor
+// 'auto_dispatch', auto-dispatch/apply.js, from a row with no window: its unplaced
+// due-date shape). Auto-Dispatch sends no text of its own, so no message proves the
+// customer knew that due date. The exception is a booking that ends a customer-pick
+// hand-off: the hand-off left a booked slot, and that slot is its "from" (bookedFrom).
+const AUTO_DISPATCH_ACTOR = 'auto_dispatch';
+function isPlacement(last, logs) {
+  if (handOffBefore(last, logs)) return false;
+  if (loggedStart(last.original_window) != null) return false;
+  const sameDay = calendarDay(last.original_date) === calendarDay(last.new_date);
+  const autoDispatch = last.reason_code === AUTO_DISPATCH_ACTOR && last.initiated_by === AUTO_DISPATCH_ACTOR;
+  return sameDay || autoDispatch;
 }
 function provenLastMove(visit, logs) {
   const last = logs.find((l) => String(l.scheduled_service_id) === String(visit.id) && logMovedSlot(l));
   if (!last || last.notes === CUSTOMER_PICK_LOG_MARKER || calendarDay(last.new_date) !== calendarDay(visit.scheduled_date)) return null;
+  // the newest change was a placement: nothing is stated (never an older move behind it)
+  if (isPlacement(last, logs)) return null;
   const movedAt = toDate(last.created_at);
   if (!movedAt) return null;
   const toStart = loggedStart(last.new_window);
@@ -642,7 +662,7 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow,
       .whereNotNull('new_date')
       .orderBy('created_at', 'desc').orderBy('id', 'desc')
       .limit(500)
-      .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'notes', 'created_at'),
+      .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'reason_code', 'initiated_by', 'notes', 'created_at'),
   ]);
   // UPCOMING SERVICES' own row rule: an en-route or on-site visit today whose status
   // still reads `rescheduled` is listed there, so it is live here too.

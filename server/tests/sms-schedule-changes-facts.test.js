@@ -174,6 +174,30 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
     expect((await read([now], [booked, handOff], [listedFor(now)])).moves.map((m) => m.logId)).toEqual(['rl-9']);
   });
 
+  test('a same-day row that left no hour is a placement (a due date got its first hour), never a move', async () => {
+    const placed = move({ original_date: '2026-12-04', original_window: null, reason_code: 'reschedule', initiated_by: 'office' });
+    expect((await read([visit()], [placed])).moves).toEqual([]);
+    // the newest change is the placement: an older move behind it is not stated either
+    expect((await read([visit()], [placed, move({ id: 'rl-0', created_at: new Date('2026-11-20T15:00:00Z') })])).moves).toEqual([]);
+    // a same-day re-time from a told hour is still a move
+    expect((await read([visit()], [move({ original_date: '2026-12-04' })])).moves).toHaveLength(1);
+  });
+
+  test("Auto-Dispatch's first placement (from a row with no window) is not a move, on any day; its re-time of a placed visit is", async () => {
+    const ad = { reason_code: 'auto_dispatch', initiated_by: 'auto_dispatch' };
+    expect((await read([visit()], [move({ ...ad, original_window: null })])).moves).toEqual([]);
+    expect((await read([visit()], [move({ ...ad })])).moves.map((m) => m.logId)).toEqual(['rl-1']);
+    // a staff move of a windowless visit to another day: the customer knew that day
+    expect((await read([visit()], [move({ original_window: null, reason_code: 'reschedule', initiated_by: 'office' })])).moves).toHaveLength(1);
+  });
+
+  test('Auto-Dispatch booking a visit after a customer-pick hand-off is a move from the booked day', async () => {
+    const handOff = move({ id: 'rl-1', original_date: '2026-11-27', new_date: '2026-12-04', new_window: null, notes: 'customer_pick', created_at: new Date('2026-11-24T15:00:00Z') });
+    const booked = move({ id: 'rl-9', original_date: '2026-12-04', original_window: null, new_date: '2026-12-05', reason_code: 'auto_dispatch', initiated_by: 'auto_dispatch', created_at: new Date('2026-11-25T15:00:00Z') });
+    const now = visit({ scheduled_date: '2026-12-05' });
+    expect((await read([now], [booked, handOff], [listedFor(now)])).moves[0]).toMatchObject({ logId: 'rl-9', fromDate: '2026-11-27' });
+  });
+
   test('a booking that ends a customer-pick hand-off moved from the booked slot, never the provisional due date', async () => {
     const handOff = move({ id: 'rl-1', original_date: '2026-11-27', new_date: '2026-12-04', new_window: null, notes: 'customer_pick', created_at: new Date('2026-11-24T15:00:00Z') });
     const booked = move({ id: 'rl-9', original_date: '2026-12-04', original_window: null, new_date: '2026-12-05', new_window: '13:00:00-14:00:00', created_at: new Date('2026-11-25T15:00:00Z') });
