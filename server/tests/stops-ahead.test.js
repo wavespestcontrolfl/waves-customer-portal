@@ -3,6 +3,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 const logger = require('../services/logger');
 const {
   computeStopsAhead,
+  peekStopsAhead,
   STOPS_AHEAD_DISPLAY_CAP,
   NOT_A_STOP_STATUSES,
   NOT_A_ROUTE_STOP_STATUSES,
@@ -39,7 +40,7 @@ function baseSvc(overrides = {}) {
 function makeDb({
   svcRow, siblings = [], countN = 0, beforeAll, othersAll, doneBefore = 0,
   atBefore = 0, enrouteBefore = 0, progressedBeyond = 0, groupFloor = null,
-  reReadFloor = null, rawFloor, rawError = null,
+  reReadFloor = null, rawFloor, rawError = null, tied = 0, countError = null, targetRows = 1, siblingAdvanced = 0, openStopsToday = 1, memberIds = ['svc-self'],
 } = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
@@ -62,6 +63,7 @@ function makeDb({
       return Promise.resolve({ rows });
     }
     if (/WITH target/.test(sql)) {
+      if (countError) return Promise.reject(countError);
       return Promise.resolve({
         rows: [{
           ahead: countN,
@@ -71,6 +73,12 @@ function makeDb({
           at_before: atBefore,
           enroute_before: enrouteBefore,
           progressed_beyond: progressedBeyond,
+          tied,
+          target_rows: targetRows,
+          sibling_advanced: siblingAdvanced,
+          t_technician_id: 'tech-1', t_customer_id: 'customer-1', t_scheduled_date: TODAY, t_window_start: '10:00:00',
+          member_ids: memberIds,
+          open_stops_today: openStopsToday,
           group_floor: groupFloor,
         }],
       });
@@ -398,5 +406,72 @@ describe('isServiceDateToday', () => {
     expect(isServiceDateToday(null, TODAY)).toBe(false);
     expect(isServiceDateToday(undefined, TODAY)).toBe(false);
     expect(isServiceDateToday('not-a-date', TODAY)).toBe(false);
+  });
+});
+
+// peekStopsAhead (texting AI route status, gap 4): the tracker's clamped figure with NO write, stricter on order.
+describe('peekStopsAhead', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_STOPS_AWAY = 'true';
+  });
+  afterAll(() => { delete process.env.GATE_STOPS_AWAY; });
+
+  test('gate off: no count and no read', async () => {
+    process.env.GATE_STOPS_AWAY = '';
+    const db = makeDb({ svcRow: baseSvc(), countN: 1 });
+    expect(await peekStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
+    expect(db.raw).not.toHaveBeenCalled();
+  });
+  test('returns the real count and the truck phase without writing the floor', async () => {
+    const db = makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 2, atBefore: 1 });
+    expect(await peekStopsAhead(db, 'svc-self', { today: TODAY })).toEqual({
+      stopsAhead: 2, atStop: true, headingToStop: false,
+      // read in the SAME count statement: the stop identity, its open lines, the customer's open stops today
+      stop: { technicianId: 'tech-1', customerId: 'customer-1', date: TODAY, windowStart: '10:00:00' },
+      memberIds: ['svc-self'], openStopsToday: 1,
+    });
+    expect(db.updateCalls()).toHaveLength(0);
+    expect(db.reReadCalls()).toHaveLength(0);
+    const [countSql] = db.countCall();
+    for (const col of ['AS tied', 'AS target_rows', 'AS sibling_advanced', 'AS member_ids', 'AS open_stops_today']) expect(countSql).toContain(col);
+    // the open-stop count uses the customer-facing tracker rule, not raw status alone
+    expect(countSql).toContain("COALESCE(o.track_state, 'scheduled') NOT IN ('complete', 'cancelled')");
+    expect(countSql).toContain("(o.status <> 'rescheduled' OR o.track_state IN ('en_route', 'on_property'))");
+    // a sibling the tracker cancelled is not an open line, and counts as moved on
+    expect(countSql).toContain("AND (m.track_state IS NULL OR m.track_state NOT IN ('complete', 'cancelled'))");
+    expect(countSql).toContain("sib.track_state IN ('en_route', 'on_property', 'complete', 'cancelled')");
+    expect(db.raw).toHaveBeenCalledTimes(2); // the eligibility read + the one count statement
+    // track_state is a Postgres ENUM: a literal outside it fails the whole statement (tracker included)
+    const TRACK_ENUM = new Set(['scheduled', 'en_route', 'on_property', 'complete', 'cancelled']);
+    for (const m of countSql.matchAll(/track_state(?:,\s*'scheduled'\))?\s*(?:NOT\s+)?(?:IN\s*\(([^)]*)\)|<>\s*('[a-z_]+')|=\s*('[a-z_]+'))/g)) {
+      const literals = (m[1] || m[2] || m[3]).match(/'([a-z_]+)'/g).map((x) => x.slice(1, -1));
+      for (const v of literals) expect(TRACK_ENUM.has(v)).toBe(true);
+    }
+  });
+  test('a floor below the real count (a stop was added ahead) gives no count, never the lower number', async () => {
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 0 }), 'svc-self', { today: TODAY })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 1, groupFloor: null }), 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 1 });
+    // a floor ABOVE the live count: the tech finished a stop since the tracker last saved; the count may fall
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 3 }), 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 2 });
+  });
+  test('the count statement lost its target, or a sibling advanced in that snapshot: no "next stop" from all-zero counts', async () => {
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 0, targetRows: 0 }), 'svc-self', { today: TODAY })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 0, siblingAdvanced: 1 }), 'svc-self', { today: TODAY })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 0 }), 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 0 });
+  });
+  test('a live stop tied on route position, or a target with no window, gives no count', async () => {
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 1, tied: 1 }), 'svc-self', { today: TODAY })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc({ window_start: null }), countN: 1 }), 'svc-self', { today: TODAY })).toBeNull();
+  });
+  test('above the cap is null as on the tracker; the persisting path ignores ties', async () => {
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: STOPS_AHEAD_DISPLAY_CAP + 1 }), 'svc-self', { today: TODAY })).toBeNull();
+    const db = makeDb({ svcRow: baseSvc(), countN: 1, tied: 1 });
+    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 1 });
+  });
+  test('a read failure throws under peek (the tracker path still returns null)', async () => {
+    const err = new Error('pool exhausted');
+    await expect(peekStopsAhead(makeDb({ svcRow: baseSvc(), countError: err }), 'svc-self', { today: TODAY })).rejects.toThrow('pool exhausted');
+    expect(await computeStopsAhead(makeDb({ svcRow: baseSvc(), countError: err }), 'svc-self', { today: TODAY })).toBeNull();
   });
 });

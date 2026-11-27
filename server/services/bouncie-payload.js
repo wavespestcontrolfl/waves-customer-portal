@@ -94,9 +94,42 @@ function pickLatestSample(payload = {}) {
   return best;
 }
 
+// A block's own time, in every shape pointFromSource reads (timestamp / ts, also nested gps,
+// location or position).
+function timeFromSource(source) {
+  if (!source || typeof source !== 'object') return null;
+  const gps = source.gps || source.location || source.position || null;
+  return firstPresent(source.timestamp, source.ts, gps?.timestamp, gps?.ts) ?? null;
+}
+
+// The time the trip-end block itself states.
+function explicitTripEndTime(payload = {}) {
+  return timeFromSource(payload.end);
+}
+
+// The time a trip-end happened: its own block's time, else the event's own time. Never the
+// time of an envelope GPS sample (gps / location / position), which can be older than the stop.
+function tripEndTime(payload = {}) {
+  const readable = [explicitTripEndTime(payload), payload.timestamp, payload.ts]
+    .find((value) => value != null && Number.isFinite(Date.parse(String(value))));
+  return readable ?? null;
+}
+
 function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayload(payload)) {
   if (canonicalEventType === 'trip-data') {
     return pointFromSource(pickLatestSample(payload));
+  }
+  // A trip-end is where the truck stopped, and the arrival detector stamps this point with the
+  // end time. So only the trip-end's own end block gives its position: never the departure
+  // (start / connect) point, and never another sample (top level, location, position,
+  // disconnect) whose age is unknown. With no end position the receiver falls back to the
+  // truck's last location under its 10-minute freshness check (engineOffPoint). An end position
+  // with no readable time (neither its own nor the event's) is no point: it is never written.
+  if (canonicalEventType === 'trip-end') {
+    const point = pointFromSource(payload.end);
+    if (!point) return null;
+    if (!Number.isFinite(Date.parse(point.reported_at ?? ''))) point.reported_at = tripEndTime(payload);
+    return Number.isFinite(Date.parse(point.reported_at ?? '')) ? point : null;
   }
   return (
     pointFromSource(payload) ||
@@ -223,6 +256,8 @@ function webhookDedupeKey(payload = {}, canonicalEventType = eventTypeFromPayloa
 }
 
 module.exports = {
+  explicitTripEndTime,
+  tripEndTime,
   eventTypeFromPayload,
   extractImei,
   firstPresent,

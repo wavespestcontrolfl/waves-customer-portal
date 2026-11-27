@@ -2276,6 +2276,48 @@ async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
   return discarded.length;
 }
 
+// home_notes (UNIQUE customer_id, "About this home"): staff-typed text must survive a merge. When both profiles have a
+// note the kept customer's row becomes "<kept body>\n(merged) <archived body>" and the archived row goes; a note only the
+// archived profile had is simply repointed (the sweep's own update), one only the kept profile has never reaches here. The
+// table allows 2100 characters (two full 1000-character notes plus the 10-character joint), so two saved notes always fit; a
+// chain of merges that would pass it aborts the merge (nothing is cut) so a person shortens one note first. The journal
+// lists this table in collision_handlers, so the revert endpoint refuses the merge: undo cannot split a joined note. No
+// body is read into any log or journal field; only the table name is recorded. A failed join UPDATE is rethrown as the
+// operation and database error code only.
+const HOME_NOTE_JOINT = '\n(merged) ';
+const HOME_NOTE_TABLE_MAX = 2100;
+async function mergeHomeNotes(trx, table, column, winnerId, loserId, { performedById = null } = {}) {
+  const rows = new Map();
+  for (const id of [winnerId, loserId].sort()) rows.set(id, await trx(table).where(column, id).forUpdate().first());
+  const loserRow = rows.get(loserId);
+  const winnerRow = rows.get(winnerId);
+  if (!loserRow) return 'no loser note';
+  // The writes name home_notes and customer_id literally (not the handler's table/column arguments): the annual-prepay
+  // dynamic-writer ratchet counts only writes through a dynamic table, and this one never touches another table.
+  if (!winnerRow) return trx('home_notes').where('customer_id', loserId).update({ customer_id: winnerId });
+  const joined = `${winnerRow.body}${HOME_NOTE_JOINT}${loserRow.body}`;
+  if (joined.length > HOME_NOTE_TABLE_MAX) {
+    throw new Error(`home notes are too long to join (${joined.length} characters, limit ${HOME_NOTE_TABLE_MAX}): shorten one note, then merge again`);
+  }
+  try {
+    await trx('home_notes').where('customer_id', winnerId).update({
+      body: joined,
+      revision: Number(winnerRow.revision) + 1,
+      // The joined text is nobody's single edit: the author is the admin who ran the merge, or none (the byline then shows
+      // the date alone), never the kept customer's last editor.
+      updated_by_type: 'admin',
+      updated_by_id: performedById || null,
+      updated_at: trx.fn.now(),
+    });
+  } catch (err) {
+    // A failed UPDATE's message can carry its bound values (both notes), and merge errors are logged: only the operation and
+    // the database error code go on.
+    throw Object.assign(new Error(`home note join failed (update, ${(err && err.code) || 'unknown'})`), { code: 'home_note_join_failed' });
+  }
+  await trx('home_notes').where('customer_id', loserId).del();
+  return 'joined the two notes on the kept customer';
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
   customer_pin_suggestions: repointPinSuggestions,
   service_contact_notification_prefs: foldContactNotificationPrefs,
@@ -2315,6 +2357,9 @@ const UNIQUE_COLLISION_HANDLERS = {
   // one profile no longer counts for the discount; familyMultiHomeEligible
   // requires 2+ live members).
   multi_home_family_members: repointRowwiseDropCollisions,
+  // UNIQUE(customer_id): both duplicate profiles holding an "About this home" note — typed staff text, never dropped:
+  // the two are joined into the kept customer's one row (mergeHomeNotes).
+  home_notes: mergeHomeNotes,
 };
 
 // Customer ids also hide behind polymorphic recipient columns the
@@ -3960,7 +4005,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         if (uniqueViolation && handler) {
           // copyNewSod is the executor's own premise test (the one the move stamp uses), so the
           // preference fill and the stamp can never disagree about whether the home moved.
-          repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId, { copyNewSod: sodFollowsMerge, timerPremise });
+          repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId, { copyNewSod: sodFollowsMerge, timerPremise, performedById });
           // The handler moved/merged/deleted rows that are NOT in
           // repointedIds — this merge can no longer be replayed backwards.
           if (!collisionHandlers.includes(table)) collisionHandlers.push(table);
@@ -4997,7 +5042,10 @@ const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'cus
   // r41: executing a health-alert action stamps the alert's updated_at and
   // mints kept-owner side effects (interactions, retention credits, a comp
   // visit) — a journaled alert acted on since the merge must refuse.
-  'customer_health_alerts']);
+  'customer_health_alerts',
+  // A home note only the archived customer had moves with the plain sweep; staff who then rewrite it for the kept
+  // customer stamp updated_at, and the undo must not carry that edited text back to the restored profile.
+  'home_notes']);
 
 // The undo's email-clear guard probes every surface that delivers to a
 // denormalized copy of the customer email. This table MIRRORS the canonical
@@ -5233,6 +5281,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   invoice_followup_sequences: ['created_at', 'updated_at'],
   newsletter_subscribers: ['created_at', 'updated_at'],
   customer_properties: ['created_at', 'updated_at'],
+  // explicit pair (20261127134200): the staff note's last edit stamp.
+  home_notes: ['created_at', 'updated_at'],
   // created_at ONLY (20260617120000, 20260401000107, 20260424000014,
   // 20260511000002) — append-only ledgers/authorizations/audit rows; no
   // in-place update to detect.
@@ -7697,12 +7747,15 @@ async function predictCollisionFolds(database, winner, loser) {
       throw e;
     }
   };
-  for (const table of ['notification_prefs', 'property_preferences']) {
+  const bothRowsText = {
+    notification_prefs: 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped',
+    property_preferences: 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped',
+    home_notes: 'both records have an About this home note: the two notes are joined into one on the surviving record',
+  };
+  for (const [table, text] of Object.entries(bothRowsText)) {
     const rows = await read(table, ['customer_id']);
-    const owners = new Set(rows.map((r) => String(r.customer_id)));
-    if (owners.has(String(winnerId)) && owners.has(String(loserId))) {
-      details[table] = 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped';
-    }
+    const owners = new Set((Array.isArray(rows) ? rows : []).map((r) => String(r.customer_id)));
+    if (owners.has(String(winnerId)) && owners.has(String(loserId))) details[table] = text;
   }
   // executeMerge initializes an addressed winner's missing primary before the
   // FK sweep. If the loser owns a primary, that deliberate collision invokes
@@ -7926,6 +7979,7 @@ module.exports = {
     isEmptyValue,
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
+    mergeHomeNotes,
     repointWeekPlansKeepAvailable,
     foldContactNotificationPrefs,
     pruneDiscardedContactPrefs,

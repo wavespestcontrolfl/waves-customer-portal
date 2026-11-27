@@ -183,6 +183,7 @@ describe('Atticus Antapex WSG name is the one protocols.json and the service lib
     expect(text).not.toContain('"Alpine WSG"');
     // The flea and bed bug cards (2026-11-25) name it too; the retired pest visit 2 no longer does.
     // The vehicle roach job card (2026-11-26) names it twice more: its line and its starting products.
-    expect((text.match(/"Atticus Antapex WSG"/g) || []).length).toBe(13);
+    // The Mix Amounts rows (2026-11-27) name it 7 more times: pest 1 and 3, cockroach 1 and 4, flea 1, bed bug 2 and 3.
+    expect((text.match(/"Atticus Antapex WSG"/g) || []).length).toBe(20);
   });
 });

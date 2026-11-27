@@ -22,7 +22,7 @@ const StripeService = require('../services/stripe');
 const dedupe = require('../services/customer-dedupe');
 const {
   phone10, normalizeStreetKey, namesCompatible, addressCompat, pickWinner,
-  mergeSingletonPrefRow, repointRowwiseDropCollisions, mergeConversationRows, resetFkCache,
+  mergeSingletonPrefRow, repointRowwiseDropCollisions, mergeConversationRows, mergeHomeNotes, resetFkCache,
 } = dedupe._test;
 
 // Chainable knex stub: every builder method returns the chain; awaiting the
@@ -562,6 +562,85 @@ describe('findDuplicateGroups', () => {
 // ---------------------------------------------------------------------------
 // Singleton preference-row merge semantics
 // ---------------------------------------------------------------------------
+
+describe('mergeHomeNotes ("About this home" staff notes: never lose text)', () => {
+  function stubTrx({ winnerNote, loserNote }) {
+    const state = { updated: null, deleted: false, repointed: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('first')) return q.args('where')[1] === 'L' ? loserNote : winnerNote;
+      if (q.called('del')) { state.deleted = true; return 1; }
+      if (q.called('update')) {
+        const patch = q.args('update')[0];
+        if ('body' in patch) state.updated = patch; else state.repointed = patch;
+        return 1;
+      }
+      return [];
+    }));
+    trx.fn = { now: () => 'NOW' };
+    return { trx, state };
+  }
+
+  it('both profiles have a note: the kept row holds both texts, the archived row goes', async () => {
+    const { trx, state } = stubTrx({ winnerNote: { id: 'n1', body: 'Gate sticks.', revision: 3 }, loserNote: { id: 'n2', body: 'Dog inside.', revision: 1 } });
+    await mergeHomeNotes(trx, 'home_notes', 'customer_id', 'W', 'L');
+    expect(state.updated).toEqual({
+      body: 'Gate sticks.\n(merged) Dog inside.', revision: 4, updated_by_type: 'admin', updated_by_id: null, updated_at: 'NOW',
+    });
+    expect(state.deleted).toBe(true);
+    expect(state.repointed).toBeNull();
+  });
+
+  it('the joined note is authored by the admin who ran the merge, never the kept customer\'s last editor', async () => {
+    const { trx, state } = stubTrx({ winnerNote: { id: 'n1', body: 'a', revision: 1, updated_by_id: 'tech-9', updated_by_type: 'technician' }, loserNote: { id: 'n2', body: 'b', revision: 1 } });
+    await mergeHomeNotes(trx, 'home_notes', 'customer_id', 'W', 'L', { performedById: 'adm-1' });
+    expect(state.updated).toMatchObject({ updated_by_type: 'admin', updated_by_id: 'adm-1' });
+  });
+
+  it('only the archived profile has a note: it is repointed to the kept customer, text unchanged', async () => {
+    const { trx, state } = stubTrx({ winnerNote: undefined, loserNote: { id: 'n2', body: 'Dog inside.' } });
+    await mergeHomeNotes(trx, 'home_notes', 'customer_id', 'W', 'L');
+    expect(state.repointed).toEqual({ customer_id: 'W' });
+    expect(state.updated).toBeNull();
+    expect(state.deleted).toBe(false);
+  });
+
+  it('only the kept profile has a note: nothing changes', async () => {
+    const { trx, state } = stubTrx({ winnerNote: { id: 'n1', body: 'Gate sticks.' }, loserNote: undefined });
+    await mergeHomeNotes(trx, 'home_notes', 'customer_id', 'W', 'L');
+    expect(state).toEqual({ updated: null, deleted: false, repointed: null });
+  });
+
+  it('two full 1000-character notes always fit the table; a chain that would pass 2100 aborts and cuts nothing', async () => {
+    const full = { winnerNote: { id: 'n1', body: 'a'.repeat(1000) }, loserNote: { id: 'n2', body: 'b'.repeat(1000) } };
+    const ok = stubTrx(full);
+    await mergeHomeNotes(ok.trx, 'home_notes', 'customer_id', 'W', 'L');
+    expect(ok.state.updated.body).toHaveLength(2010);
+    const tooLong = stubTrx({ winnerNote: { id: 'n1', body: 'a'.repeat(2010) }, loserNote: { id: 'n2', body: 'b'.repeat(500) } });
+    await expect(mergeHomeNotes(tooLong.trx, 'home_notes', 'customer_id', 'W', 'L')).rejects.toThrow(/too long to join/);
+    expect(tooLong.state).toEqual({ updated: null, deleted: false, repointed: null });
+  });
+
+  it('a failed join update is rethrown as the operation and database code only: neither note text reaches the message', async () => {
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('first')) return q.args('where')[1] === 'L' ? { id: 'n2', body: 'archived private text', revision: 1 } : { id: 'n1', body: 'kept private text', revision: 1 };
+      if (q.called('update')) {
+        const err = new Error('update "home_notes" set "body" = \'kept private text\n(merged) archived private text\' - invalid byte sequence');
+        err.code = '22021';
+        throw err;
+      }
+      return [];
+    }));
+    trx.fn = { now: () => 'NOW' };
+    const err = await mergeHomeNotes(trx, 'home_notes', 'customer_id', 'W', 'L').catch((e) => e);
+    expect(err.message).toBe('home note join failed (update, 22021)');
+    expect(err.message).not.toMatch(/private text/);
+    expect(err.code).toBe('home_note_join_failed');
+  });
+
+  it('is the registered unique-collision handler for home_notes', () => {
+    expect(dedupe._test.UNIQUE_COLLISION_HANDLERS.home_notes).toBe(mergeHomeNotes);
+  });
+});
 
 describe('mergeSingletonPrefRow', () => {
   function stubTrx({ loserRow, winnerRow }) {
