@@ -358,6 +358,7 @@ function minimumWeekPay({
 
 function computePaycheck({
   payDate,
+  workWeekEnd = null,
   payFrequency = 'weekly',
   hourlyRate,
   regularMinutes = 0,
@@ -384,12 +385,12 @@ function computePaycheck({
   validateW4(w4);
   const rateCents = nonNegativeCents(hourlyRate, 'Hourly rate');
   if (rateCents === 0n) throw new Error('No pay rate set');
-  // The floor on the PAY DATE. It only rises, so a rate that clears it on the pay date also
-  // cleared it on every day of the work week before.
-  const day = validCalendarDate(payDate);
-  const floor = floridaMinimumWageCentsFor(day);
+  // Validate the Florida minimum wage against the work week when supplied (falling back to payDate),
+  // so hours worked before a Sept 30 step-up but paid on the Friday after aren't rejected retroactively.
+  const floorDay = (workWeekEnd && validCalendarDate(workWeekEnd)) || validCalendarDate(payDate);
+  const floor = floridaMinimumWageCentsFor(floorDay);
   if (rateCents < floor) {
-    throw new Error(`Hourly rate ${dollarsText(rateCents)} is below the Florida minimum wage of ${dollarsText(floor)} on ${day}`);
+    throw new Error(`Hourly rate ${dollarsText(rateCents)} is below the Florida minimum wage of ${dollarsText(floor)} on ${floorDay}`);
   }
   if (!Number.isInteger(reemploymentRateBp) || reemploymentRateBp < 0) {
     throw new Error('reemploymentRateBp must be a whole number of basis points');

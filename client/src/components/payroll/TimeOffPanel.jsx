@@ -164,7 +164,14 @@ export default function TimeOffPanel({ call, weekStart, refreshKey, onChanged })
   const latestLoad = useRef(load);
   useEffect(() => { latestLoad.current = load; }, [load]);
 
-  if (enabled !== true) return null;
+  if (enabled === false) return null;
+  if (enabled !== true) {
+    if (!error) return null;
+    return <div role="alert" className="flex flex-wrap items-center gap-2 text-ui-caption text-alert-fg">
+      <span>Could not load time off: {error}</span>
+      <Button type="button" variant="secondary" size="sm" onClick={load}>Retry</Button>
+    </div>;
+  }
 
   const set = key => event => setForm(prev => ({ ...prev, [key]: event.target.value }));
   const reset = () => { setForm(blankForm()); setEditing(null); };

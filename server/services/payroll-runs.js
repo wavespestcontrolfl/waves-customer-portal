@@ -328,6 +328,7 @@ function buildCheck({
   try {
     pay = computePaycheck({
       payDate,
+      workWeekEnd: addStaffWorkDays(weekStart, 6),
       payFrequency: 'weekly',
       hourlyRate: tech.pay_rate,
       regularMinutes: tech.regular_minutes,
@@ -552,10 +553,19 @@ const runColumns = (conn) => [
   ...(timeOffOn() ? ['unpaid_time_off', 'bank_payouts'] : []),
 ];
 
+const storedTimeOff = (row) => (
+  Number(row.pto_minutes || 0) > 0
+  || Number(row.holiday_minutes || 0) > 0
+  || Number(row.pto_pay_cents || 0) > 0
+  || Number(row.holiday_pay_cents || 0) > 0
+);
+
 const checkColumns = (conn) => [
   'id', 'run_id', 'technician_id', 'employee_name', 'hourly_rate', 'regular_minutes', 'overtime_minutes',
   ...MONEY_KEYS,
-  ...(timeOffOn() ? [...TIME_OFF_COLUMNS, 'pto_earned_minutes', conn.raw("calc_snapshot->'ptoBank' as pto_bank")] : []),
+  // Always read stored PTO/holiday columns so finalized stubs and exports never drop paid time off if the gate toggles off.
+  ...TIME_OFF_COLUMNS,
+  ...(timeOffOn() ? ['pto_earned_minutes', conn.raw("calc_snapshot->'ptoBank' as pto_bank")] : []),
   ...PAY_LINE_KEYS, ...UNEMPLOYMENT_COLUMNS, ...SIMPLE_COLUMNS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
   // The minimum paid week, read whatever the gates are: a check that paid one shows it.
   'minimum_week_minutes', 'minimum_week_pay_cents',
@@ -604,7 +614,7 @@ function serializeCheck(row) {
       simpleDeferralCents: Number(row.simple_deferral_cents),
       simpleEmployerCents: Number(row.simple_employer_cents),
     } : {}),
-    ...(timeOffOn() ? {
+    ...(timeOffOn() || storedTimeOff(row) ? {
       ptoMinutes: Number(row.pto_minutes || 0),
       holidayMinutes: Number(row.holiday_minutes || 0),
       ptoHours: hoursText(row.pto_minutes),

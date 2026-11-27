@@ -145,6 +145,20 @@ router.use((req, res, next) => {
   return next();
 });
 
+// Single capability read so the Payroll UI does not have to fire 404-generating probes for every dark sub-gate.
+router.get('/capabilities', (req, res) => {
+  const on = (fn) => typeof fn === 'function' && fn();
+  res.json({
+    forms: on(payrollFormFiguresLive),
+    timeOff: on(payrollTimeOffLive),
+    payLines: on(payrollPayLinesLive),
+    familyEmployee: on(payrollFamilyEmployeeLive),
+    mercuryStatus: on(payrollMercuryStatusLive),
+    mercuryPay: on(payrollMercuryPayLive),
+    productionShare: on(payrollProductionShareLive),
+  });
+});
+
 // Ids and error codes only: a database error can carry the bound values.
 function fail(res, what, err) {
   if (err && err.name === 'PayrollError') return res.status(err.status).json({ error: err.message });

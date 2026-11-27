@@ -1343,9 +1343,11 @@ async function buildPnlReport(db, startDate, endDate) {
       checks: payRun.checks,
       wages: payRun.wages,
       employerTaxes: payRun.employerTaxes,
+      employeeBenefits: payRun.employeeBenefits || 0,
+      retirementContributions: payRun.retirementContributions || 0,
       total: payRun.total,
       bankLinesLeftOut: leftOut,
-      note: 'Wages and employer payroll taxes come from finalized pay runs, by pay date. '
+      note: 'Wages, employer payroll taxes, employer HSA (Line 14), and SIMPLE IRA employer match (Line 19) come from finalized pay runs, by pay date. '
         + 'Bank payroll payments in the "Payroll (counted from pay runs)" category are left out '
         + 'so nothing counts twice. A deposit paid in January for December wages stays in December.',
     };

@@ -194,6 +194,64 @@ describe('poller decisions', () => {
     // The transaction already linked to the payment is found by its id.
     expect(poller.transactionFor({ ...row, mercury_transaction_id: 'z' }, [{ id: 'z', requestId: null, amountCents: 1, note: null, counterpartyId: 'x' }]).id).toBe('z');
     expect(poller.transactionFor(row, [{ id: 'd', requestId: null, amountCents: 81240, note: 'waves-pay:p1', counterpartyId: 'rec-1' }]).id).toBe('d');
+    // An inbound credit / ACH return (isOutbound === false) with the same amount must not match an outbound payout.
+    expect(poller.transactionFor(row, [
+      { id: 'ret', requestId: 'req-1', amountCents: 81240, isOutbound: false, note: 'waves-pay:p1', counterpartyId: 'rec-1' },
+    ])).toBeNull();
+  });
+
+  test('mercuryHoldsSameAmount ignores requests/transactions already owned by other checks but still blocks untracked duplicates', async () => {
+    const now = new Date('2026-11-13T15:00:00Z');
+    const priorPaymentId = '11111111-1111-4111-8111-111111111111';
+    const currentPaymentId = '22222222-2222-4222-8222-222222222222';
+    const client = {
+      listRequests: jest.fn(async () => [{
+        requestId: 'req-last-week',
+        recipientId: 'rec-1',
+        amountCents: 81240,
+        status: 'approved',
+        createdAt: '2026-11-09T15:00:00Z',
+        memo: `waves-pay:${priorPaymentId}`,
+      }]),
+      listTransactions: jest.fn(async () => [{
+        id: 'tx-last-week',
+        requestId: 'req-last-week',
+        counterpartyId: 'rec-1',
+        amountCents: 81240,
+        isOutbound: true,
+        status: 'sent',
+        createdAt: '2026-11-09T16:00:00Z',
+        note: `waves-pay:${priorPaymentId}`,
+      }]),
+    };
+    // Prior week's already-tracked paycheck does not deadlock retrying this week's timed-out check.
+    expect(await mercury.mercuryHoldsSameAmount(client, {
+      recipientId: 'rec-1',
+      amountCents: 81240,
+      now,
+      attemptAt: '2026-11-13T14:55:00Z',
+      excludeRequestIds: new Set(['req-last-week']),
+      excludeTransactionIds: new Set(['tx-last-week']),
+      paymentId: currentPaymentId,
+    })).toBe(false);
+    // An untracked request without another check's note still blocks retry.
+    client.listRequests.mockResolvedValueOnce([{
+      requestId: 'req-untracked',
+      recipientId: 'rec-1',
+      amountCents: 81240,
+      status: 'pendingApproval',
+      createdAt: '2026-11-13T14:56:00Z',
+      memo: null,
+    }]);
+    expect(await mercury.mercuryHoldsSameAmount(client, {
+      recipientId: 'rec-1',
+      amountCents: 81240,
+      now,
+      attemptAt: '2026-11-13T14:55:00Z',
+      excludeRequestIds: new Set(['req-last-week']),
+      excludeTransactionIds: new Set(['tx-last-week']),
+      paymentId: currentPaymentId,
+    })).toBe(true);
   });
 
   test('a sent payment read again: a failed, reversed or refunded transaction is returned; a posted day fills in once', () => {

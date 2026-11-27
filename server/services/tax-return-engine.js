@@ -534,6 +534,8 @@ async function gatherInputs(year) {
     const payRun = await payRunTotals(db, start, end);
     if (payRun.wages) expense_lines.push({ line: '26', amount: round2(payRun.wages) });
     if (payRun.employerTaxes) expense_lines.push({ line: '23', amount: round2(payRun.employerTaxes) });
+    if (payRun.employeeBenefits) expense_lines.push({ line: '14', amount: round2(payRun.employeeBenefits) });
+    if (payRun.retirementContributions) expense_lines.push({ line: '19', amount: round2(payRun.retirementContributions) });
   }
   const fees = (pnl.operatingExpenses?.categories || []).find((c) => c.name === STRIPE_FEES_CATEGORY);
   if (fees && num(fees.amount)) expense_lines.push({ line: '10', amount: round2(fees.amount) });

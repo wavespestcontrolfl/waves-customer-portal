@@ -213,12 +213,19 @@ async function dispatch(row, client, conn = db) {
       patch = { state: 'unknown', error: 'Mercury did not answer. The request may or may not have reached it.' };
     }
   }
+  let saved = 0;
   try {
-    await conn('payroll_payments').where({ id: row.id, state: 'queued' }).update({ ...patch, updated_at: conn.fn.now() });
+    saved = Number(await conn('payroll_payments').where({ id: row.id, state: 'queued' }).update({ ...patch, updated_at: conn.fn.now() }));
   } catch (err) {
     // The row stays queued; the poller turns a stale queued row into unknown. Report it as unknown now.
     logger.error(`[payroll-mercury] payment ${row.id} outcome not saved (${(err && (err.code || err.name)) || 'error'})`);
     return { state: 'unknown', error: 'The result could not be saved.' };
+  }
+  if (!saved) {
+    // Another worker (e.g., the stale-queued poller) already transitioned this row out of `queued`.
+    // Never falsely claim the Mercury request id was saved.
+    logger.warn(`[payroll-mercury] payment ${row.id} left queued before outcome could be saved`);
+    return { state: 'unknown', error: 'Payment state changed while saving Mercury answer. Reload before retrying.' };
   }
   if (patch.state === 'failed') await alerts.raisePaymentAlert('failed', { ...row, ...patch });
   return { state: patch.state, error: patch.error || null };
@@ -232,7 +239,10 @@ async function planSend(conn, runId) {
     .select('c.id', 'c.employee_name', 'c.net_cents', 'c.technician_id', 't.mercury_recipient_id');
   const existing = new Map();
   if (checks.length) {
-    const rows = await conn('payroll_payments').whereIn('check_id', checks.map((c) => c.id)).select('check_id', 'state');
+    const rows = await conn('payroll_payments')
+      .whereIn('check_id', checks.map((c) => c.id))
+      .orderBy('attempt', 'asc')
+      .select('check_id', 'state');
     for (const row of rows) existing.set(row.check_id, row.state);
   }
   const eligible = [];
@@ -279,6 +289,7 @@ async function sendRun(runId, actor, { client = createClient(), conn = db } = {}
 
 async function unpaidPayrollTaxCents(conn) {
   const rows = await conn('tax_filing_calendar').where('source_key', 'like', 'payroll:%')
+    .whereNot('source_key', 'like', 'payroll:simple_%')
     .whereNotIn('status', ['filed', 'paid']).select('amount_due');
   return rows.reduce((sum, row) => sum + Math.round(Number(row.amount_due || 0) * 100), 0);
 }
@@ -365,10 +376,23 @@ async function loadSendableCheck(conn, checkId) {
   return check;
 }
 
-// True when Mercury shows a request or transaction of this amount to this recipient that could be the unknown attempt
-// or a recent twin: any still-open request whatever its age, and any request or transaction made in the last 7 days or
-// since the attempt was made, whichever reaches further back.
-async function mercuryHoldsSameAmount(client, { recipientId, amountCents, now, attemptAt }) {
+const WAVES_PAY_NOTE_RE = /\bwaves-pay:([0-9a-f-]{36})\b/i;
+
+function isOtherWavesPaymentNote(text, paymentId) {
+  if (!paymentId || typeof text !== 'string') return false;
+  const match = WAVES_PAY_NOTE_RE.exec(text);
+  return Boolean(match && match[1].toLowerCase() !== String(paymentId).toLowerCase());
+}
+
+// True when Mercury shows an untracked request or outbound transaction of this amount to this recipient that could be
+// the unknown attempt or a duplicate: any still-open request whatever its age, and any request or outbound transaction
+// made in the last 7 days or since the attempt was made, whichever reaches further back. Requests and transactions
+// already linked to OTHER paychecks (or stamped with another payment's waves-pay:<id> note) are excluded so last
+// week's identical paycheck never deadlocks retrying this week's timed-out payment.
+async function mercuryHoldsSameAmount(client, {
+  recipientId, amountCents, now, attemptAt,
+  excludeRequestIds = new Set(), excludeTransactionIds = new Set(), paymentId = null,
+}) {
   const weekAgo = now.getTime() - SEND_AGAIN_LOOKBACK_DAYS * DAY_MS;
   const since = Math.min(weekAgo, attemptAt ? new Date(attemptAt).getTime() - ATTEMPT_SLACK_MS : weekAgo);
   const recent = (iso) => Boolean(iso) && new Date(iso).getTime() >= since;
@@ -376,22 +400,46 @@ async function mercuryHoldsSameAmount(client, { recipientId, amountCents, now, a
     client.listRequests(),
     client.listTransactions({ start: etDateString(new Date(since)) }),
   ]);
-  const requestHit = requests.some((r) => r.recipientId === recipientId && r.amountCents === amountCents
-    && (r.status === 'pendingApproval' || (recent(r.createdAt) && r.status !== 'rejected' && r.status !== 'cancelled')));
-  const transactionHit = transactions.some((t) => t.counterpartyId === recipientId && t.amountCents === amountCents
-    && recent(t.createdAt) && !['failed', 'cancelled', 'blocked'].includes(t.status));
+  const requestHit = requests.some((r) => {
+    if (r.requestId && excludeRequestIds.has(r.requestId)) return false;
+    if (isOtherWavesPaymentNote(r.memo, paymentId)) return false;
+    return r.recipientId === recipientId && r.amountCents === amountCents
+      && (r.status === 'pendingApproval' || (recent(r.createdAt) && r.status !== 'rejected' && r.status !== 'cancelled'));
+  });
+  const transactionHit = transactions.some((t) => {
+    if (t.isOutbound === false) return false;
+    if (t.id && excludeTransactionIds.has(t.id)) return false;
+    if (t.requestId && excludeRequestIds.has(t.requestId)) return false;
+    if (isOtherWavesPaymentNote(t.note, paymentId)) return false;
+    return t.counterpartyId === recipientId && t.amountCents === amountCents
+      && recent(t.createdAt) && !['failed', 'cancelled', 'blocked'].includes(t.status);
+  });
   return requestHit || transactionHit;
 }
 
 // The unknown attempt went to the recipient and account it stored. If the account has changed since, this client cannot
 // look there: fail closed rather than miss the original request.
-async function assertUnknownCleared(client, before, check, now) {
+async function assertUnknownCleared(client, before, check, now, conn = db) {
   if (before.account_id !== client.accountId) {
     throw new PayrollError(409, 'The Mercury account changed since that request. Check the old account in Mercury yourself before you send again.');
   }
+  const otherRows = await conn('payroll_payments')
+    .whereNot({ check_id: check.id })
+    .where(function tracked() { this.whereNotNull('mercury_request_id').orWhereNotNull('mercury_transaction_id'); })
+    .select('mercury_request_id', 'mercury_transaction_id');
+  const excludeRequestIds = new Set(otherRows.map((r) => r.mercury_request_id).filter(Boolean));
+  const excludeTransactionIds = new Set(otherRows.map((r) => r.mercury_transaction_id).filter(Boolean));
   let held;
   try {
-    held = await mercuryHoldsSameAmount(client, { recipientId: before.recipient_id, amountCents: Number(before.amount_cents), now, attemptAt: before.created_at });
+    held = await mercuryHoldsSameAmount(client, {
+      recipientId: before.recipient_id,
+      amountCents: Number(before.amount_cents),
+      now,
+      attemptAt: before.created_at,
+      excludeRequestIds,
+      excludeTransactionIds,
+      paymentId: before.id,
+    });
   } catch (err) { throw await readFailure(err); }
   if (held) throw new PayrollError(409, 'Mercury already shows a request or payment of this amount to this person in the last 7 days. Check Mercury first.');
 }
@@ -409,7 +457,7 @@ async function sendAgain(checkId, input, actor, { client = createClient(), conn 
   if (mode === 'confirm') {
     if (!v.confirmNothingWaiting) throw new PayrollError(409, 'Confirm that nothing is waiting in Mercury first.');
     const stored = await conn('payroll_payments').where({ id: before.id }).first('recipient_id', 'account_id', 'amount_cents', 'created_at');
-    await assertUnknownCleared(client, { ...before, ...stored }, check, now);
+    await assertUnknownCleared(client, { ...before, ...stored }, check, now, conn);
   }
   const queued = await conn.transaction(async (trx) => {
     await lockPayrollMutations(trx);
@@ -465,6 +513,18 @@ async function linkRequest(paymentId, input, actor, { client = createClient(), c
   const v = validate(linkSchema, input);
   requireReady(client, { pay: false });
   const actorId = actorOf(actor);
+  // Pre-check before touching Mercury so a bad state or already-linked request never makes an HTTP call,
+  // and read Mercury OUTSIDE the global payroll advisory lock so a slow Mercury response cannot stall payroll.
+  const preview = await conn('payroll_payments').where({ id: paymentId }).first('id', 'state');
+  if (!preview) throw new PayrollError(404, 'Payment not found.');
+  if (preview.state !== 'unknown') throw new PayrollError(409, 'Only a payment with an unknown outcome can be linked to a request.');
+  const preTaken = await conn('payroll_payments').where({ mercury_request_id: v.requestId }).whereNot({ id: paymentId }).first('id');
+  if (preTaken) throw new PayrollError(400, 'That request is already linked to another payment.');
+  let request;
+  try { request = await client.getRequest(v.requestId); } catch (err) {
+    if (err instanceof MercuryError && err.kind === 'not_found') throw new PayrollError(400, 'Mercury has no request with that id.');
+    throw await readFailure(err);
+  }
   const result = await conn.transaction(async (trx) => {
     await lockPayrollMutations(trx);
     const payment = await trx('payroll_payments').where({ id: paymentId }).forUpdate().first();
@@ -472,11 +532,6 @@ async function linkRequest(paymentId, input, actor, { client = createClient(), c
     if (payment.state !== 'unknown') throw new PayrollError(409, 'Only a payment with an unknown outcome can be linked to a request.');
     const taken = await trx('payroll_payments').where({ mercury_request_id: v.requestId }).whereNot({ id: paymentId }).first('id');
     if (taken) throw new PayrollError(400, 'That request is already linked to another payment.');
-    let request;
-    try { request = await client.getRequest(v.requestId); } catch (err) {
-      if (err instanceof MercuryError && err.kind === 'not_found') throw new PayrollError(400, 'Mercury has no request with that id.');
-      throw await readFailure(err);
-    }
     const mismatch = linkMismatch(payment, request);
     if (mismatch) throw new PayrollError(400, mismatch);
     const state = LINK_STATES[request.status];
@@ -585,6 +640,6 @@ async function setMercuryRecipient(technicianId, input, actor, { client = create
 module.exports = {
   OPEN_STATES, BLOCKING_STATES, RETRY_STATES, KEY_STALE_DAYS,
   mercuryStatusOn, mercuryPayOn, approveBy, dayLabel, canSendAgainOf, failureText,
-  viewForChecks, latestPayments, planSend, dispatch,
+  viewForChecks, latestPayments, planSend, dispatch, mercuryHoldsSameAmount,
   sendRun, sendPreview, sendAgain, linkRequest, linkMismatch, recordPaper, assertNoOpenPayments, setMercuryRecipient,
 };

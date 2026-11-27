@@ -145,6 +145,16 @@ const weekMinimumSchema = Joi.object({
     const day = typeof value === 'string' ? validCalendarDate(value.trim()) : null;
     return day || helpers.message('Last day must be a date (YYYY-MM-DD)');
   }),
+  // Optional effective Monday for a minimum-hours change (defaults to the current staff week).
+  // Allows applying the minimum to an unfinalized prior workweek before its pay run is drafted.
+  fromWeek: Joi.any().custom((value, helpers) => {
+    if (value == null || value === '') return undefined;
+    const day = typeof value === 'string' ? validCalendarDate(value.trim()) : null;
+    if (!day || staffWeekStartForWorkDate(day) !== day) {
+      return helpers.message('Effective week must be the Monday of a pay week (YYYY-MM-DD)');
+    }
+    return day;
+  }),
   // What the page showed: a save from a page read before another change is refused (409), so an old tab never
   // puts back a full-week minimum another tab ended. Left out = no check (a caller with no page).
   shown: Joi.object({
@@ -529,14 +539,22 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
           .whereRaw('unpaid_time_off @> ?::jsonb', [JSON.stringify([{ technicianId: tech.id }])]).first('id');
       if (paid) throw new PayrollError(409, LAST_DAY_PAID(week));
     }
+    const effectiveWeek = v.fromWeek || staffWeekStartForWorkDate(etDateString());
+    if (v.fromWeek && !sameHours(v.hours, tech.paid_week_minimum_hours)) {
+      const paidAfter = await trx('payroll_checks').where({ technician_id: tech.id, status: 'finalized' })
+        .where('week_start', '>=', effectiveWeek).first('id');
+      if (paidAfter) {
+        throw new PayrollError(409, `A final pay run already paid this employee for the week of ${effectiveWeek} or later. Void that pay run first or pick a later week.`);
+      }
+    }
     await trx('technicians').where({ id: technicianId })
       .update({ paid_week_minimum_hours: v.hours, paid_week_minimum_last_day: lastDay, updated_at: trx.fn.now() });
-    // A change of the hours applies from the pay week it is saved in (payroll_week_minimum_changes): a pay run reads
-    // the minimum of its own week, so a week paid late, voided and made again, or reopened keeps its own minimum
+    // A change of the hours applies from the pay week it is saved in (or explicit fromWeek) via payroll_week_minimum_changes:
+    // a pay run reads the minimum of its own week, so a week paid late, voided and made again, or reopened keeps its own minimum
     // (owner 2026-11-23 *a*). A second change in the same week replaces that week's row.
     if (!sameHours(v.hours, tech.paid_week_minimum_hours)) {
       await trx('payroll_week_minimum_changes')
-        .insert({ technician_id: tech.id, from_week: staffWeekStartForWorkDate(etDateString()), hours: v.hours })
+        .insert({ technician_id: tech.id, from_week: effectiveWeek, hours: v.hours })
         .onConflict(['technician_id', 'from_week']).merge(['hours', 'created_at']);
     }
     await recordAuditEvent({
