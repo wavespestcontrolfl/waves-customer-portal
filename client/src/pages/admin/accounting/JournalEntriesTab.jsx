@@ -90,10 +90,31 @@ export default function JournalEntriesTab({ onChanged }) {
     loadData();
   }, [loadData]);
 
-  const totalDebitCents = lines.reduce((sum, l) => sum + (parseDollarsToCents(l.debit) || 0), 0);
-  const totalCreditCents = lines.reduce((sum, l) => sum + (parseDollarsToCents(l.credit) || 0), 0);
+  const analyzedLines = lines.map((l, idx) => {
+    const debitCents = parseDollarsToCents(l.debit) || 0;
+    const creditCents = parseDollarsToCents(l.credit) || 0;
+    const hasAmount = debitCents > 0 || creditCents > 0;
+    const hasMemo = Boolean(l.memo && l.memo.trim());
+    const hasAnyValue = Boolean(l.accountId) || hasAmount || hasMemo;
+    return {
+      idx,
+      accountId: l.accountId,
+      debitCents,
+      creditCents,
+      memo: l.memo.trim() || null,
+      hasAmount,
+      hasAnyValue,
+      missingAccount: (hasAmount || hasMemo) && !l.accountId,
+      missingAmount: Boolean(l.accountId) && !hasAmount,
+      dualSided: debitCents > 0 && creditCents > 0,
+    };
+  });
+  const populatedLines = analyzedLines.filter((l) => l.hasAnyValue);
+  const invalidLine = populatedLines.find((l) => l.missingAccount || l.missingAmount || l.dualSided) || null;
+  const totalDebitCents = populatedLines.reduce((sum, l) => sum + l.debitCents, 0);
+  const totalCreditCents = populatedLines.reduce((sum, l) => sum + l.creditCents, 0);
   const diffCents = totalDebitCents - totalCreditCents;
-  const balanced = totalDebitCents > 0 && diffCents === 0;
+  const balanced = populatedLines.length >= 2 && !invalidLine && totalDebitCents > 0 && diffCents === 0;
 
   const updateLine = (idx, patch) => {
     setLines((prev) => prev.map((row, i) => (i === idx ? { ...row, ...patch } : row)));
@@ -101,17 +122,29 @@ export default function JournalEntriesTab({ onChanged }) {
 
   const handlePostJe = async (e) => {
     e.preventDefault();
-    setSaving(true);
     setFormError("");
+    if (invalidLine) {
+      if (invalidLine.missingAccount) {
+        setFormError(`Line ${invalidLine.idx + 1} has an amount or memo but no selected account.`);
+      } else if (invalidLine.dualSided) {
+        setFormError(`Line ${invalidLine.idx + 1} cannot have both a debit and a credit.`);
+      } else {
+        setFormError(`Line ${invalidLine.idx + 1} has an account selected but no debit or credit amount.`);
+      }
+      return;
+    }
+    if (populatedLines.length < 2 || !balanced) {
+      setFormError("A journal entry requires at least 2 balanced lines where debits equal credits.");
+      return;
+    }
+    setSaving(true);
     try {
-      const payloadLines = lines
-        .filter((l) => l.accountId && (parseDollarsToCents(l.debit) || parseDollarsToCents(l.credit)))
-        .map((l) => ({
-          accountId: l.accountId,
-          debitCents: parseDollarsToCents(l.debit) || 0,
-          creditCents: parseDollarsToCents(l.credit) || 0,
-          memo: l.memo.trim() || null,
-        }));
+      const payloadLines = populatedLines.map((l) => ({
+        accountId: l.accountId,
+        debitCents: l.debitCents,
+        creditCents: l.creditCents,
+        memo: l.memo,
+      }));
       await postJson("/journal-entries", {
         idempotencyKey: jeKey,
         entryDate,
@@ -366,7 +399,9 @@ export default function JournalEntriesTab({ onChanged }) {
               <span>Debits: <strong className="font-mono">{formatCents(totalDebitCents)}</strong></span>
               <span>Credits: <strong className="font-mono">{formatCents(totalCreditCents)}</strong></span>
               <Badge tone={balanced ? "strong" : "alert"}>
-                {balanced ? "Balanced ($0.00)" : `Difference: ${formatCents(diffCents)}`}
+                {invalidLine
+                  ? `Line ${invalidLine.idx + 1} incomplete`
+                  : (balanced ? "Balanced ($0.00)" : `Difference: ${formatCents(diffCents)}`)}
               </Badge>
             </div>
           </DialogBody>

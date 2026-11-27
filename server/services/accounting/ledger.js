@@ -297,6 +297,19 @@ async function resolveOpeningBalanceItems(items, { conn = db } = {}) {
     if (!acct.active) {
       throw new AccountingError(409, `Opening balance item ${idx + 1}: account ${acct.code} is inactive`);
     }
+    const rawBal = item.balanceCents ?? item.balance_cents;
+    if (
+      rawBal === null
+      || rawBal === undefined
+      || typeof rawBal === 'boolean'
+      || (typeof rawBal === 'string' && rawBal.trim() === '')
+      || !Number.isSafeInteger(Number(rawBal))
+    ) {
+      throw new AccountingError(
+        400,
+        `Opening balance item ${idx + 1} (${acct.code} ${acct.name}): balanceCents must be an exact integer in cents`,
+      );
+    }
     const supplied = item.normalBalance ?? item.normal_balance;
     if (supplied != null && supplied !== '' && supplied !== acct.normal_balance) {
       throw new AccountingError(
@@ -307,7 +320,7 @@ async function resolveOpeningBalanceItems(items, { conn = db } = {}) {
     return {
       accountId: acct.id,
       accountCode: acct.code,
-      balanceCents: item.balanceCents ?? item.balance_cents,
+      balanceCents: Number(rawBal),
       normalBalance: acct.normal_balance,
     };
   });

@@ -33,6 +33,7 @@ export async function accountingFetch(path, options = {}) {
 export const getJson = (path) => accountingFetch(path);
 export const postJson = (path, body) => accountingFetch(path, { method: "POST", body: JSON.stringify(body) });
 export const patchJson = (path, body) => accountingFetch(path, { method: "PATCH", body: JSON.stringify(body) });
+export const deleteJson = (path, body) => accountingFetch(path, { method: "DELETE", ...(body ? { body: JSON.stringify(body) } : {}) });
 
 export function formatCents(cents) {
   const n = Math.trunc(Number(cents) || 0);

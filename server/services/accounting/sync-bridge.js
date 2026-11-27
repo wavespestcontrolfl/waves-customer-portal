@@ -503,10 +503,20 @@ function buildCoveredPrepayVisitPayload(inv, issueDate, serviceLine, isCommercia
   };
 }
 
-function buildInvoiceGlPayload(inv, prepayInvoiceIds) {
-  const issueDate = dateCellText(inv.service_date)
+const ISSUED_STATEMENT_STATUSES = ['finalized', 'sent', 'viewed', 'processing', 'paid'];
+const EXCLUDED_PREPAY_TERM_STATUSES = ['cancelled', 'canceled', 'void', 'payment_pending'];
+
+function invoiceIssueDate(inv) {
+  return dateCellText(inv.service_date)
     || timestampToEtDate(inv.sent_at)
+    || timestampToEtDate(inv.statement_finalized_at)
+    || timestampToEtDate(inv.statement_sent_at)
+    || dateCellText(inv.statement_period_end)
     || timestampToEtDate(inv.created_at);
+}
+
+function buildInvoiceGlPayload(inv, prepayInvoiceIds) {
+  const issueDate = invoiceIssueDate(inv);
   if (!issueDate) return null;
 
   const isCommercial = isCommercialProperty(inv.property_type);
@@ -543,42 +553,62 @@ async function loadBookedInvoiceState(conn, invoiceId) {
     .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
     .join('gl_accounts as a', 'a.id', 'l.account_id')
     .where('e.status', 'posted')
-    .whereNull('e.reversed_by_entry_id')
     .where((q) => {
       q.where({ 'e.source_type': 'invoice', 'e.source_id': String(invoiceId) })
         .orWhere({ 'e.source_type': 'unearned_recognition', 'e.source_id': `covered-inv:${invoiceId}` });
     })
-    .select('e.id as entry_id', 'a.code', 'l.debit_cents', 'l.credit_cents');
+    .select('e.id as entry_id', 'e.reversed_by_entry_id', 'a.code', 'l.debit_cents', 'l.credit_cents');
 
   const bookedByCode = new Map();
-  const entryIds = new Set();
+  const allEntryIds = new Set();
+  const activeEntryIds = new Set();
   for (const r of rows) {
-    entryIds.add(r.entry_id);
-    const net = Number(r.debit_cents) - Number(r.credit_cents);
-    bookedByCode.set(r.code, (bookedByCode.get(r.code) || 0) + net);
+    allEntryIds.add(r.entry_id);
+    if (!r.reversed_by_entry_id) {
+      activeEntryIds.add(r.entry_id);
+      const net = Number(r.debit_cents) - Number(r.credit_cents);
+      bookedByCode.set(r.code, (bookedByCode.get(r.code) || 0) + net);
+    }
   }
-  return { bookedByCode, entryCount: entryIds.size };
+  return { bookedByCode, entryCount: activeEntryIds.size, totalEntryCount: allEntryIds.size };
+}
+
+async function reverseSupersededPrepayVisitIfAny(trx, inv, adjDate, ctx) {
+  if (!inv.annual_prepay_covered_term_id || !inv.scheduled_service_id) return true;
+  const visitJe = await trx('gl_journal_entries')
+    .where({ idempotency_key: `unearned-visit:${inv.scheduled_service_id}`, status: 'posted' })
+    .whereNull('reversed_by_entry_id')
+    .first('id', 'reversed_by_entry_id', trx.raw('entry_date::text as entry_date'));
+  if (!visitJe) return true;
+  return reverseOrPreview(
+    visitJe,
+    adjDate || dateCellText(visitJe.entry_date),
+    `Superseded by covered invoice ${inv.invoice_number || inv.id}`,
+    ctx,
+    'invoices',
+    { connOverride: trx },
+  );
 }
 
 async function syncSingleInvoiceRow(inv, prepayInvoiceIds, ctx) {
   const desired = buildInvoiceGlPayload(inv, prepayInvoiceIds);
-  const fallbackDate = dateCellText(inv.service_date)
-    || timestampToEtDate(inv.sent_at)
-    || timestampToEtDate(inv.created_at);
+  const fallbackDate = invoiceIssueDate(inv);
   const updatedDate = timestampToEtDate(inv.updated_at);
   const baseDate = desired?.entryDate || fallbackDate;
   const adjDate = updatedDate && baseDate && updatedDate >= baseDate ? updatedDate : baseDate;
 
   const reconcile = async (trx) => {
-    const { bookedByCode, entryCount } = await loadBookedInvoiceState(trx, inv.id);
-    if (entryCount === 0) {
+    const { bookedByCode, totalEntryCount } = await loadBookedInvoiceState(trx, inv.id);
+    if (!(await reverseSupersededPrepayVisitIfAny(trx, inv, adjDate, ctx))) return;
+
+    if (totalEntryCount === 0) {
       if (!desired) return;
       await postOrPreview(desired, ctx, 'invoices', { connOverride: trx });
       return;
     }
 
     if (!adjDate) return;
-    const adjEntry = buildInvoiceDeltaEntry(inv, desired ? desired.lines : [], bookedByCode, adjDate, entryCount);
+    const adjEntry = buildInvoiceDeltaEntry(inv, desired ? desired.lines : [], bookedByCode, adjDate, totalEntryCount);
     if (!adjEntry) {
       ctx.stats.invoices.skipped += 1;
       return;
@@ -593,15 +623,29 @@ async function syncSingleInvoiceRow(inv, prepayInvoiceIds, ctx) {
   }
 }
 
-async function reconcileVoidedInvoices(conn, from, to, ctx) {
-  const voided = await conn('gl_journal_entries as e')
-    .join('invoices as i', conn.raw("(e.source_type = 'invoice' AND e.source_id = i.id::text) OR (e.source_type = 'unearned_recognition' AND e.source_id = 'covered-inv:' || i.id::text)"))
+async function reconcileVoidedInvoices(conn, from, to, ctx, hasPayerStatements = false) {
+  let q = conn('gl_journal_entries as e')
+    .join('invoices as i', conn.raw("(e.source_type = 'invoice' AND e.source_id = i.id::text) OR (e.source_type = 'unearned_recognition' AND e.source_id = 'covered-inv:' || i.id::text)"));
+  if (hasPayerStatements) q = q.leftJoin('payer_statements as ps', 'ps.id', 'i.payer_statement_id');
+
+  const voided = await q
     .where('e.status', 'posted')
     .whereNull('e.reversed_by_entry_id')
-    .where((q) => q.whereIn('i.status', ['void', 'cancelled', 'canceled']).orWhereNotNull('i.archived_at'))
-    .where((q) => {
-      q.whereBetween('e.entry_date', [from, to])
+    .where((sub) => {
+      sub.whereIn('i.status', ['void', 'cancelled', 'canceled']).orWhereNotNull('i.archived_at');
+      if (hasPayerStatements) {
+        sub.orWhere((draftStmt) => {
+          draftStmt.where('i.status', 'draft')
+            .where((unissued) => unissued.whereNull('i.payer_statement_id').orWhereNotIn('ps.status', ISSUED_STATEMENT_STATUSES));
+        });
+      }
+    })
+    .where((sub) => {
+      sub.whereBetween('e.entry_date', [from, to])
         .orWhereRaw("DATE(COALESCE(i.archived_at, i.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+      if (hasPayerStatements) {
+        sub.orWhereRaw("ps.updated_at IS NOT NULL AND DATE(ps.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+      }
     })
     .select(
       'e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'),
@@ -617,6 +661,7 @@ async function reconcileVoidedInvoices(conn, from, to, ctx) {
 
 async function syncInvoices(conn, from, to, ctx) {
   if (!(await conn.schema.hasTable('invoices'))) return;
+  const hasPayerStatements = await conn.schema.hasTable('payer_statements');
 
   const prepayInvoiceIds = new Set();
   if (await conn.schema.hasTable('annual_prepay_terms')) {
@@ -626,12 +671,38 @@ async function syncInvoices(conn, from, to, ctx) {
     for (const t of termRows) prepayInvoiceIds.add(String(t.prepay_invoice_id));
   }
 
-  const rows = await conn('invoices as i')
-    .leftJoin('customers as c', 'c.id', 'i.customer_id')
-    .whereNotIn('i.status', ['draft', 'scheduled', 'sending', 'void', 'cancelled', 'canceled'])
+  let q = conn('invoices as i').leftJoin('customers as c', 'c.id', 'i.customer_id');
+  if (hasPayerStatements) q = q.leftJoin('payer_statements as ps', 'ps.id', 'i.payer_statement_id');
+
+  const selectCols = [
+    'i.id', 'i.invoice_number', 'i.customer_id', 'i.scheduled_service_id', 'i.subtotal', 'i.discount_amount', 'i.tax_amount', 'i.total',
+    'i.credit_applied', 'i.line_items', 'i.service_type', 'i.annual_prepay_term_id', 'i.annual_prepay_covered_term_id',
+    conn.raw('i.service_date::text as service_date'), 'i.sent_at', 'i.created_at', 'i.updated_at',
+    'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
+  ];
+  if (hasPayerStatements) {
+    selectCols.push(
+      'ps.status as statement_status',
+      'ps.finalized_at as statement_finalized_at',
+      'ps.sent_at as statement_sent_at',
+      conn.raw('ps.period_end::text as statement_period_end'),
+    );
+  }
+
+  const rows = await q
     .whereNull('i.archived_at')
-    .where((q) => {
-      q.whereRaw(
+    .where((st) => {
+      st.whereNotIn('i.status', ['draft', 'scheduled', 'sending', 'void', 'cancelled', 'canceled']);
+      if (hasPayerStatements) {
+        st.orWhere((stmtChild) => {
+          stmtChild.where('i.status', 'draft')
+            .whereNotNull('i.payer_statement_id')
+            .whereIn('ps.status', ISSUED_STATEMENT_STATUSES);
+        });
+      }
+    })
+    .where((win) => {
+      win.whereRaw(
         "COALESCE(i.service_date, DATE(i.sent_at AT TIME ZONE 'America/New_York'), DATE(i.created_at AT TIME ZONE 'America/New_York')) BETWEEN ?::date AND ?::date",
         [from, to],
       ).orWhere((edited) => {
@@ -640,27 +711,151 @@ async function syncInvoices(conn, from, to, ctx) {
             this.select(conn.raw('1'))
               .from('gl_journal_entries as ge')
               .where('ge.status', 'posted')
-              .whereNull('ge.reversed_by_entry_id')
               .where((sub) => {
                 sub.whereRaw("ge.source_type = 'invoice' AND ge.source_id = i.id::text")
                   .orWhereRaw("ge.source_type = 'unearned_recognition' AND ge.source_id = 'covered-inv:' || i.id::text");
               });
           });
       });
+      if (hasPayerStatements) {
+        win.orWhere((stmtWin) => {
+          stmtWin.whereNotNull('i.payer_statement_id')
+            .whereIn('ps.status', ISSUED_STATEMENT_STATUSES)
+            .whereRaw(
+              "DATE(COALESCE(ps.finalized_at, ps.sent_at, ps.period_end::timestamp) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+              [from, to],
+            );
+        });
+      }
     })
-    .select(
-      'i.id', 'i.invoice_number', 'i.customer_id', 'i.subtotal', 'i.discount_amount', 'i.tax_amount', 'i.total',
-      'i.credit_applied', 'i.line_items', 'i.service_type', 'i.annual_prepay_term_id', 'i.annual_prepay_covered_term_id',
-      conn.raw('i.service_date::text as service_date'), 'i.sent_at', 'i.created_at', 'i.updated_at',
-      'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
-    );
+    .select(...selectCols);
 
   for (const inv of rows) {
     if (isTestCustomerRow(inv)) continue;
     await syncSingleInvoiceRow(inv, prepayInvoiceIds, ctx);
   }
 
-  await reconcileVoidedInvoices(conn, from, to, ctx);
+  await reconcileVoidedInvoices(conn, from, to, ctx, hasPayerStatements);
+}
+
+/**
+ * Pure: determine earned revenue to recognize from 2300 Unearned Revenue when an
+ * annual-prepay covered visit completes without creating a base invoice.
+ */
+function computePrepayVisitRecognitionCents(visit, term = null) {
+  if (!visit) return 0;
+  const prepaid = safeNonNegCents(visit.prepaid_amount);
+  if (prepaid > 0) return prepaid;
+  const est = safeNonNegCents(visit.estimated_price);
+  if (est > 0) return est;
+  const termPrepay = safeNonNegCents(term?.prepay_amount ?? visit.term_prepay_amount);
+  const visitCount = Math.trunc(Number(term?.coverage_visit_count ?? visit.coverage_visit_count) || 0);
+  if (termPrepay > 0 && visitCount > 0) return Math.round(termPrepay / visitCount);
+  const monthly = safeNonNegCents(term?.monthly_rate ?? visit.term_monthly_rate);
+  return monthly > 0 ? monthly : 0;
+}
+
+async function hasCoveredInvoiceForVisit(trx, visitId) {
+  const row = await trx('invoices')
+    .where({ scheduled_service_id: visitId })
+    .whereNotNull('annual_prepay_covered_term_id')
+    .whereNotIn('status', ['void', 'cancelled', 'canceled'])
+    .whereNull('archived_at')
+    .first('id');
+  return Boolean(row);
+}
+
+async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
+  const hasVisits = await conn.schema.hasTable('scheduled_services');
+  const hasTerms = await conn.schema.hasTable('annual_prepay_terms');
+  if (!hasVisits || !hasTerms) return;
+  if (typeof conn.schema.hasColumn === 'function'
+    && !(await conn.schema.hasColumn('scheduled_services', 'annual_prepay_term_id'))) {
+    return;
+  }
+
+  const visits = await conn('scheduled_services as ss')
+    .join('annual_prepay_terms as apt', 'apt.id', 'ss.annual_prepay_term_id')
+    .leftJoin('customers as c', 'c.id', 'ss.customer_id')
+    .where('ss.status', 'completed')
+    .whereNotNull('ss.annual_prepay_term_id')
+    .whereNotIn('apt.status', EXCLUDED_PREPAY_TERM_STATUSES)
+    .whereRaw(
+      "COALESCE(DATE(ss.completed_at AT TIME ZONE 'America/New_York'), ss.scheduled_date) BETWEEN ?::date AND ?::date",
+      [from, to],
+    )
+    .whereNotExists(function coveredInvoiceExists() {
+      this.select(conn.raw('1'))
+        .from('invoices as ci')
+        .whereRaw('ci.scheduled_service_id = ss.id')
+        .whereNotNull('ci.annual_prepay_covered_term_id')
+        .whereNotIn('ci.status', ['void', 'cancelled', 'canceled'])
+        .whereNull('ci.archived_at');
+    })
+    .select(
+      'ss.id', 'ss.customer_id', 'ss.annual_prepay_term_id', 'ss.service_type',
+      'ss.prepaid_amount', 'ss.estimated_price', 'ss.completed_at',
+      conn.raw('ss.scheduled_date::text as scheduled_date'),
+      'apt.prepay_amount as term_prepay_amount', 'apt.monthly_rate as term_monthly_rate',
+      'apt.coverage_visit_count',
+      'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
+    );
+
+  for (const visit of visits) {
+    if (isTestCustomerRow(visit)) continue;
+    const recognitionDate = timestampToEtDate(visit.completed_at) || dateCellText(visit.scheduled_date);
+    const amountCents = computePrepayVisitRecognitionCents(visit);
+    if (!recognitionDate || amountCents <= 0) continue;
+
+    const isCommercial = isCommercialProperty(visit.property_type);
+    const entry = rules.buildUnearnedRecognitionEntry({
+      sourceId: `covered-visit:${visit.id}`,
+      idempotencyKey: `unearned-visit:${visit.id}`,
+      recognitionDate,
+      amountCents,
+      serviceLine: isCommercial ? 'commercial' : (visit.service_type || 'pest'),
+      isCommercial,
+      customerId: visit.customer_id,
+      scheduledServiceId: visit.id,
+      memo: `Annual prepay covered visit completed (${visit.service_type || 'service'})`,
+    });
+
+    const applyVisit = async (trx) => {
+      if (await hasCoveredInvoiceForVisit(trx, visit.id)) {
+        ctx.stats.invoices.skipped += 1;
+        return;
+      }
+      await postOrPreview(entry, ctx, 'invoices', { connOverride: trx });
+    };
+
+    if (ctx.dryRun) {
+      await applyVisit(ctx.conn);
+    } else {
+      await withEntitySyncLock(ctx.conn, `gl-sync-prepay-visit:${visit.id}`, applyVisit);
+    }
+  }
+
+  // Reverse any visit-level recognition whose visit was un-completed/canceled or whose term was voided/canceled.
+  const revokedVisits = await conn('gl_journal_entries as e')
+    .join('scheduled_services as ss', conn.raw("e.idempotency_key = 'unearned-visit:' || ss.id::text"))
+    .leftJoin('annual_prepay_terms as apt', 'apt.id', 'ss.annual_prepay_term_id')
+    .where('e.status', 'posted')
+    .whereNull('e.reversed_by_entry_id')
+    .where((sub) => {
+      sub.where('ss.status', '<>', 'completed')
+        .orWhereNull('ss.annual_prepay_term_id')
+        .orWhereIn('apt.status', EXCLUDED_PREPAY_TERM_STATUSES);
+    })
+    .where((win) => {
+      win.whereBetween('e.entry_date', [from, to])
+        .orWhereRaw("DATE(ss.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    })
+    .select('e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'), 'ss.status as visit_status', 'ss.updated_at');
+
+  for (const row of revokedVisits) {
+    const revDate = timestampToEtDate(row.updated_at) || dateCellText(row.entry_date);
+    await reverseOrPreview(row, revDate, `Prepaid visit no longer completed (${row.visit_status})`, ctx, 'invoices');
+  }
 }
 
 // ── 2. Estimate Deposits ─────────────────────────────────────────────────────
@@ -882,7 +1077,10 @@ async function syncSinglePaymentRow(pay, invoiceMaps, auditMarkers, statementInv
     await applyPayment(ctx.conn);
   } else {
     try {
-      await withEntitySyncLock(ctx.conn, `gl-sync-payment:${pay.stripe_payment_intent_id || pay.id}`, applyPayment);
+      const lockKey = pay.stripe_payment_intent_id
+        ? `gl-sync-pi:${pay.stripe_payment_intent_id}`
+        : `gl-sync-payment:${pay.id}`;
+      await withEntitySyncLock(ctx.conn, lockKey, applyPayment);
     } catch (err) {
       if (err?.code !== 'ABORT_GAP_REPLACEMENT') throw err;
     }
@@ -976,6 +1174,47 @@ async function hasExistingPaymentEntryForPi(conn, piId) {
   return Boolean(existing);
 }
 
+async function hasGenuinePaymentRowForPi(conn, piId, hasPayments) {
+  if (!piId || !hasPayments) return false;
+  const row = await conn('payments')
+    .where({ stripe_payment_intent_id: piId })
+    .whereRaw("COALESCE(metadata->>'source', '') <> 'invoice_refund'")
+    .first('id');
+  return Boolean(row);
+}
+
+/**
+ * Pure: recover settled gross + documented card surcharge for a paid Stripe invoice
+ * that has no payments row so 1050 Stripe Clearing matches the payout while 1100 A/R clears to $0.00.
+ */
+function computeGapReceiptAmounts(inv) {
+  const creditCents = safeNonNegCents(inv?.credit_applied);
+  const principalDueCents = Math.max(0, billedInvoicePrincipalCents(inv) - creditCents);
+  const settledGrossCents = Math.max(0, safeNonNegCents(inv?.total) - creditCents);
+  const grossCents = Math.max(principalDueCents, settledGrossCents);
+  const surchargeCents = Math.max(0, grossCents - principalDueCents);
+  return { grossCents, surchargeCents };
+}
+
+async function postGapReceiptSerialized({ piId, fallbackKey, hasPayments, entry, ctx }) {
+  const applyGap = async (trx) => {
+    if (await hasGenuinePaymentRowForPi(trx, piId, hasPayments)) {
+      ctx.stats.payments.skipped += 1;
+      return;
+    }
+    if (await hasExistingPaymentEntryForPi(trx, piId)) {
+      ctx.stats.payments.skipped += 1;
+      return;
+    }
+    await postOrPreview(entry, ctx, 'payments', { connOverride: trx });
+  };
+  if (ctx.dryRun) {
+    await applyGap(ctx.conn);
+  } else {
+    await withEntitySyncLock(ctx.conn, piId ? `gl-sync-pi:${piId}` : `gl-sync-payment:${fallbackKey}`, applyGap);
+  }
+}
+
 async function syncStripeInvoiceGapPayments(conn, from, to, ctx) {
   if (!(await conn.schema.hasTable('invoices'))) return;
   const hasPayments = await conn.schema.hasTable('payments');
@@ -1005,28 +1244,32 @@ async function syncStripeInvoiceGapPayments(conn, from, to, ctx) {
 
   for (const inv of gapInvoices) {
     if (isTestCustomerRow(inv)) continue;
-    if (await hasExistingPaymentEntryForPi(conn, inv.stripe_payment_intent_id)) {
-      ctx.stats.payments.skipped += 1;
-      continue;
-    }
-    const grossCents = Math.max(0, billedInvoicePrincipalCents(inv) - safeNonNegCents(inv.credit_applied));
+    const { grossCents, surchargeCents } = computeGapReceiptAmounts(inv);
     const paymentDate = timestampToEtDate(inv.paid_at);
     if (!paymentDate || grossCents <= 0) continue;
 
     const serviceLine = isCommercialProperty(inv.property_type) ? 'commercial' : (inv.service_type || 'pest');
-    await postOrPreview(rules.buildPaymentEntry({
+    const entry = rules.buildPaymentEntry({
       paymentId: `gap:${inv.id}`,
       idempotencyKey: `payment:gap:${inv.id}`,
       paymentDate,
       grossCents,
       feeCents: 0,
+      surchargeCents,
       method: 'stripe',
       invoiceId: inv.id,
       customerId: inv.customer_id,
       serviceLine,
       reference: inv.stripe_payment_intent_id,
       memo: 'Stripe receipt (invoice gap recovery)',
-    }), ctx, 'payments');
+    });
+    await postGapReceiptSerialized({
+      piId: inv.stripe_payment_intent_id,
+      fallbackKey: `gap:${inv.id}`,
+      hasPayments,
+      entry,
+      ctx,
+    });
   }
 
   if (hasPayments) {
@@ -1059,16 +1302,12 @@ async function syncRefundedGapReceiptMarkers(conn, from, to, ctx) {
   for (const m of markers) {
     const customerId = m.customer_id || m.invoice_customer_id || null;
     if (isTestCustomerRow({ ...m, customer_id: customerId })) continue;
-    if (await hasExistingPaymentEntryForPi(conn, m.stripe_payment_intent_id)) {
-      ctx.stats.payments.skipped += 1;
-      continue;
-    }
     const grossCents = dollarsToCents(m.amount);
     const paymentDate = timestampToEtDate(m.paid_at) || dateCellText(m.payment_date);
     if (!paymentDate || !grossCents || grossCents <= 0) continue;
 
     const serviceLine = isCommercialProperty(m.property_type) ? 'commercial' : (m.service_type || null);
-    await postOrPreview(rules.buildPaymentEntry({
+    const entry = rules.buildPaymentEntry({
       paymentId: `gap:${m.invoice_id || m.id}`,
       idempotencyKey: `payment:gap:${m.invoice_id || m.id}`,
       paymentDate,
@@ -1081,7 +1320,14 @@ async function syncRefundedGapReceiptMarkers(conn, from, to, ctx) {
       serviceLine,
       reference: m.stripe_payment_intent_id || m.id,
       memo: 'Stripe receipt (refunded gap invoice recovery)',
-    }), ctx, 'payments');
+    });
+    await postGapReceiptSerialized({
+      piId: m.stripe_payment_intent_id,
+      fallbackKey: `gap:${m.invoice_id || m.id}`,
+      hasPayments: true,
+      entry,
+      ctx,
+    });
   }
 }
 
@@ -1221,14 +1467,96 @@ function buildDepositOutflowEntry(dep, txnKey, amountCents, entryDate, customerI
   });
 }
 
+const OUTFLOW_SOURCE_TYPES = [
+  'refund', 'refund_reversal', 'deposit_refund', 'deposit_refund_reversal', 'dispute', 'dispute_reversal',
+];
+
+function isDisputeOutflow(row) {
+  const cat = String(row?.reporting_category || '').trim().toLowerCase();
+  if (cat === 'dispute' || cat === 'dispute_reversal') return true;
+  return /dispute/i.test(String(row?.type || ''));
+}
+
+function proratedDisputeSurchargeCents(row, absCents) {
+  const payGross = safeNonNegCents(row.payment_amount);
+  if (payGross <= 0) return 0;
+  const fullSurcharge = extractSurchargeCents({
+    amount: row.payment_amount,
+    surcharge_amount_cents: row.payment_surcharge_cents,
+    base_amount_cents: row.payment_base_cents,
+    metadata: row.payment_metadata,
+  }, payGross);
+  if (fullSurcharge <= 0) return 0;
+  if (absCents >= payGross) return Math.min(fullSurcharge, absCents - 1);
+  const part = Math.round((absCents * fullSurcharge) / payGross);
+  return part > 0 && part < absCents ? part : 0;
+}
+
+async function findExistingOutflowEntryByTxn(conn, txnKey) {
+  const existing = await conn('gl_journal_entries')
+    .where({ reference: String(txnKey), status: 'posted' })
+    .whereIn('source_type', OUTFLOW_SOURCE_TYPES)
+    .whereNull('reversed_by_entry_id')
+    .first('id', 'idempotency_key', 'reversed_by_entry_id', conn.raw('entry_date::text as entry_date'));
+  if (!existing) return null;
+  const lines = await conn('gl_journal_lines as l')
+    .join('gl_accounts as a', 'a.id', 'l.account_id')
+    .where('l.entry_id', existing.id)
+    .select('a.code as account_code', 'l.debit_cents', 'l.credit_cents', 'l.invoice_ref');
+  return { ...existing, lines };
+}
+
+/**
+ * Atomically deduplicate & reclassify a Stripe outflow by `stripe_txn_id` so an outflow
+ * initially booked as an unlinked refund that later matches a deposit or dispute never
+ * posts a second cash credit to 1050 Stripe Clearing.
+ */
+async function applyOutflowEntryAtomic(trx, txnKey, entry, entryDate, ctx) {
+  const prior = await findExistingOutflowEntryByTxn(trx, txnKey);
+  let reversedPrior = false;
+  if (prior) {
+    if (prior.idempotency_key === entry.idempotencyKey
+      || paymentLineSignature(prior.lines) === paymentLineSignature(entry.lines)) {
+      ctx.stats.refunds.skipped += 1;
+      return false;
+    }
+    reversedPrior = await reverseOrPreview(
+      prior,
+      entryDate,
+      `Reclassified Stripe outflow ${txnKey}`,
+      ctx,
+      'refunds',
+      { connOverride: trx },
+    );
+    if (!reversedPrior) return false;
+  }
+  const posted = await postOrPreview(entry, ctx, 'refunds', { connOverride: trx });
+  if (reversedPrior && !posted && !ctx.dryRun) {
+    ctx.stats.refunds.reversed = Math.max(0, ctx.stats.refunds.reversed - 1);
+    const err = new Error('ABORT_OUTFLOW_RECLASS');
+    err.code = 'ABORT_OUTFLOW_RECLASS';
+    throw err;
+  }
+  return posted;
+}
+
+async function runWithOutflowLock(conn, lockKey, dryRun, fn) {
+  if (dryRun) return fn(conn);
+  try {
+    return await withEntitySyncLock(conn, lockKey, fn);
+  } catch (err) {
+    if (err?.code === 'ABORT_OUTFLOW_RECLASS') return false;
+    throw err;
+  }
+}
+
 async function tryHandleUnlinkedDepositOutflow({ row, absCents, amountCents, txnKey, entryDate, customerId, reason, depositMaps, ctx }) {
   const depCheck = findMatchingDepositForOutflow(row, absCents, depositMaps);
   if (depCheck.deposit) {
-    await postOrPreview(
-      buildDepositOutflowEntry(depCheck.deposit, txnKey, amountCents, entryDate, customerId, reason),
-      ctx,
-      'refunds',
-    );
+    const entry = buildDepositOutflowEntry(depCheck.deposit, txnKey, amountCents, entryDate, customerId, reason);
+    await runWithOutflowLock(ctx.conn, `gl-sync-outflow:${txnKey}`, ctx.dryRun, (trx) => (
+      applyOutflowEntryAtomic(trx, txnKey, entry, entryDate, ctx)
+    ));
     return true;
   }
   if (depCheck.ambiguous) {
@@ -1241,6 +1569,29 @@ async function tryHandleUnlinkedDepositOutflow({ row, absCents, amountCents, txn
     return true;
   }
   return false;
+}
+
+function buildDisputeOutflowEntry({ row, linkedInv, stmtChildren, amountCents, absCents, txnKey, entryDate, customerId, reason }) {
+  const surchargeCents = proratedDisputeSurchargeCents(row, absCents);
+  const principalCents = absCents - surchargeCents;
+  const arAllocations = stmtChildren
+    ? allocateStatementPrincipalAcrossInvoices(principalCents, stmtChildren)
+    : null;
+  const isCommercial = isCommercialProperty(linkedInv?.property_type || row.property_type);
+  const common = {
+    txnId: txnKey,
+    grossCents: absCents,
+    surchargeCents,
+    customerId,
+    invoiceId: arAllocations ? null : (linkedInv?.id || null),
+    arAllocations,
+    serviceLine: isCommercial ? 'commercial' : (linkedInv?.service_type || null),
+    reference: txnKey,
+    reason,
+  };
+  return amountCents < 0
+    ? rules.buildDisputeWithdrawalEntry({ ...common, idempotencyKey: `dispute:spt:${txnKey}`, disputeDate: entryDate })
+    : rules.buildDisputeReinstatementEntry({ ...common, idempotencyKey: `dispute-reversal:spt:${txnKey}`, reversalDate: entryDate });
 }
 
 function buildOutflowRefundEntry({ row, linkedInv, amountCents, absCents, taxCents, txnKey, expectedKey, entryDate, customerId, reason }) {
@@ -1260,7 +1611,7 @@ function buildOutflowRefundEntry({ row, linkedInv, amountCents, absCents, taxCen
     : rules.buildRefundReversalEntry({ ...common, txnId: txnKey, idempotencyKey: expectedKey, reversalDate: entryDate });
 }
 
-async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, cumRefundsByInvoice, ctx) {
+async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumRefundsByInvoice, ctx) {
   const amountCents = dollarsToCents(row.amount);
   const entryDate = timestampToEtDate(row.created_at_stripe);
   if (!entryDate || !amountCents) return;
@@ -1273,7 +1624,20 @@ async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, cumRefundsByI
     : `Stripe ${row.reporting_category || row.type || 'refund'}`;
 
   const linkedInv = resolveOutflowLinkedInvoice(row, invoiceMaps);
-  if (!linkedInv) {
+  const stmtChildren = row.payment_statement_id != null ? stmtMap.get(String(row.payment_statement_id)) : null;
+
+  // Collectible disputes restore 1100 A/R (and proportional 4085 surcharge) so replacement payments never drive A/R negative.
+  if (isDisputeOutflow(row) && (linkedInv || stmtChildren)) {
+    const disputeEntry = buildDisputeOutflowEntry({
+      row, linkedInv, stmtChildren, amountCents, absCents, txnKey, entryDate, customerId, reason,
+    });
+    await runWithOutflowLock(ctx.conn, `gl-sync-outflow:${txnKey}`, ctx.dryRun, (trx) => (
+      applyOutflowEntryAtomic(trx, txnKey, disputeEntry, entryDate, ctx)
+    ));
+    return;
+  }
+
+  if (!linkedInv && !stmtChildren) {
     const handled = await tryHandleUnlinkedDepositOutflow({
       row, absCents, amountCents, txnKey, entryDate, customerId, reason, depositMaps, ctx,
     });
@@ -1281,28 +1645,40 @@ async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, cumRefundsByI
   }
 
   const expectedKey = amountCents < 0 ? `refund:spt:${txnKey}` : `refund-reversal:spt:${txnKey}`;
-  const existing = await ctx.conn('gl_journal_entries').where({ idempotency_key: expectedKey }).first('id');
-  if (existing) {
-    ctx.stats.refunds.skipped += 1;
-    return;
-  }
-
-  // Allocate sales tax from cumulative refunded gross per invoice so separate partial refunds never over-reverse tax.
   const invKey = linkedInv ? String(linkedInv.id) : null;
-  const cum = invKey ? (cumRefundsByInvoice.get(invKey) || { grossCents: 0, taxCents: 0 }) : { grossCents: 0, taxCents: 0 };
-  const signedDelta = amountCents < 0 ? absCents : -absCents;
-  const taxCents = computeIncrementalRefundTaxCents(cum.grossCents, cum.taxCents, signedDelta, linkedInv, row.payment_amount);
+  const lockKey = invKey ? `gl-sync-refund-inv:${invKey}` : `gl-sync-outflow:${txnKey}`;
 
-  const entry = buildOutflowRefundEntry({
-    row, linkedInv, amountCents, absCents, taxCents, txnKey, expectedKey, entryDate, customerId, reason,
-  });
-  const posted = await postOrPreview(entry, ctx, 'refunds');
-  if (posted && invKey) {
-    cumRefundsByInvoice.set(invKey, {
-      grossCents: Math.max(0, cum.grossCents + signedDelta),
-      taxCents: Math.max(0, cum.taxCents + (amountCents < 0 ? taxCents : -taxCents)),
+  await runWithOutflowLock(ctx.conn, lockKey, ctx.dryRun, async (trx) => {
+    const existing = await trx('gl_journal_entries').where({ idempotency_key: expectedKey }).first('id');
+    if (existing) {
+      ctx.stats.refunds.skipped += 1;
+      return false;
+    }
+
+    // Re-read booked refund tax inside the invoice lock on live runs so concurrent syncs never double-reverse tax cents.
+    let cum = { grossCents: 0, taxCents: 0 };
+    if (invKey) {
+      if (ctx.dryRun) {
+        cum = cumRefundsByInvoice.get(invKey) || cum;
+      } else {
+        const freshMap = await loadPriorRefundTotalsByInvoice(trx, [invKey]);
+        cum = freshMap.get(invKey) || cum;
+      }
+    }
+    const signedDelta = amountCents < 0 ? absCents : -absCents;
+    const taxCents = computeIncrementalRefundTaxCents(cum.grossCents, cum.taxCents, signedDelta, linkedInv, row.payment_amount);
+    const entry = buildOutflowRefundEntry({
+      row, linkedInv, amountCents, absCents, taxCents, txnKey, expectedKey, entryDate, customerId, reason,
     });
-  }
+    const posted = await applyOutflowEntryAtomic(trx, txnKey, entry, entryDate, ctx);
+    if (posted && invKey && ctx.dryRun) {
+      cumRefundsByInvoice.set(invKey, {
+        grossCents: Math.max(0, cum.grossCents + signedDelta),
+        taxCents: Math.max(0, cum.taxCents + (amountCents < 0 ? taxCents : -taxCents)),
+      });
+    }
+    return posted;
+  });
 }
 
 async function syncStripeRefundsAndOutflows(conn, from, to, ctx) {
@@ -1316,6 +1692,8 @@ async function syncStripeRefundsAndOutflows(conn, from, to, ctx) {
       'spt.amount', 'spt.description', 'spt.customer_id', 'spt.invoice_id', 'spt.payment_id',
       'spt.created_at_stripe',
       'lp.customer_id as payment_customer_id', 'lp.amount as payment_amount',
+      'lp.base_amount_cents as payment_base_cents', 'lp.surcharge_amount_cents as payment_surcharge_cents',
+      'lp.statement_id as payment_statement_id',
       'lp.metadata as payment_metadata', 'lp.stripe_payment_intent_id as payment_pi',
       'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
     );
@@ -1325,15 +1703,19 @@ async function syncStripeRefundsAndOutflows(conn, from, to, ctx) {
     customer_id: r.customer_id || r.payment_customer_id,
   }));
   const { ids, pis, customerIds } = collectOutflowInvoiceRefs(nonTestRows);
-  const [invoiceMaps, depositMaps] = await Promise.all([
+  const statementIds = [...new Set(nonTestRows.map((r) => r.payment_statement_id).filter((id) => id != null))];
+  const [invoiceMaps, depositMaps, stmtMap] = await Promise.all([
     loadInvoicesForLinks(conn, ids, pis),
     loadDepositsForOutflows(conn, customerIds),
+    loadStatementChildInvoices(conn, statementIds),
   ]);
   const resolvedInvIds = [...new Set([...invoiceMaps.byId.keys()])];
-  const cumRefundsByInvoice = await loadPriorRefundTotalsByInvoice(conn, resolvedInvIds);
+  const cumRefundsByInvoice = ctx.dryRun
+    ? await loadPriorRefundTotalsByInvoice(conn, resolvedInvIds)
+    : new Map();
 
   for (const row of nonTestRows) {
-    await syncSingleOutflowRow(row, invoiceMaps, depositMaps, cumRefundsByInvoice, ctx);
+    await syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumRefundsByInvoice, ctx);
   }
 }
 
@@ -1367,47 +1749,57 @@ async function syncManualRefunds(conn, from, to, ctx) {
     const refundDate = timestampToEtDate(pay.refunded_at) || dateCellText(pay.payment_date);
     if (!refundDate || cumRefundCents <= 0) continue;
 
-    const priorRow = await conn('gl_journal_lines as l')
-      .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
-      .where('e.status', 'posted')
-      .where('e.source_type', 'refund')
-      .whereNull('e.reversed_by_entry_id')
-      .where((q) => {
-        q.where('e.idempotency_key', `refund:manual:${pay.id}`)
-          .orWhere('e.idempotency_key', 'like', `refund:manual:${pay.id}:%`);
-      })
-      .first(conn.raw('COALESCE(SUM(l.credit_cents), 0)::bigint as booked_cents'));
-
-    const alreadyBooked = Math.trunc(Number(priorRow?.booked_cents) || 0);
-    const deltaCents = cumRefundCents - alreadyBooked;
-    if (deltaCents <= 0) {
-      ctx.stats.refunds.skipped += 1;
-      continue;
-    }
-
     const marker = auditMarkers.get(String(pay.id)) || null;
     const linkedInv = linkedInvoiceForPayment(pay, invoiceMaps, marker);
-    const cumTax = computeProratedRefundTaxCents(cumRefundCents, linkedInv, pay.amount);
-    const prevTax = computeProratedRefundTaxCents(alreadyBooked, linkedInv, pay.amount);
-    const deltaTax = Math.max(0, Math.min(deltaCents, cumTax - prevTax));
-    const method = resolvePaymentMethod(pay, linkedInv, marker);
-    const serviceLine = isCommercialProperty(linkedInv?.property_type || pay.property_type)
-      ? 'commercial'
-      : (linkedInv?.service_type || null);
+    const lockKey = linkedInv ? `gl-sync-refund-inv:${linkedInv.id}` : `gl-sync-manual-refund:${pay.id}`;
 
-    await postOrPreview(rules.buildRefundEntry({
-      refundId: `manual:${pay.id}:${cumRefundCents}`,
-      idempotencyKey: `refund:manual:${pay.id}:${cumRefundCents}`,
-      refundDate,
-      subtotalCents: deltaCents - deltaTax,
-      taxCents: deltaTax,
-      method,
-      customerId: pay.customer_id,
-      invoiceId: linkedInv?.id || null,
-      serviceLine,
-      reference: pay.id,
-      reason: `Manual customer refund (${method})`,
-    }), ctx, 'refunds');
+    const applyManualRefund = async (trx) => {
+      const priorRow = await trx('gl_journal_lines as l')
+        .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+        .where('e.status', 'posted')
+        .where('e.source_type', 'refund')
+        .whereNull('e.reversed_by_entry_id')
+        .where((q) => {
+          q.where('e.idempotency_key', `refund:manual:${pay.id}`)
+            .orWhere('e.idempotency_key', 'like', `refund:manual:${pay.id}:%`);
+        })
+        .first(trx.raw('COALESCE(SUM(l.credit_cents), 0)::bigint as booked_cents'));
+
+      const alreadyBooked = Math.trunc(Number(priorRow?.booked_cents) || 0);
+      const deltaCents = cumRefundCents - alreadyBooked;
+      if (deltaCents <= 0) {
+        ctx.stats.refunds.skipped += 1;
+        return;
+      }
+
+      const cumTax = computeProratedRefundTaxCents(cumRefundCents, linkedInv, pay.amount);
+      const prevTax = computeProratedRefundTaxCents(alreadyBooked, linkedInv, pay.amount);
+      const deltaTax = Math.max(0, Math.min(deltaCents, cumTax - prevTax));
+      const method = resolvePaymentMethod(pay, linkedInv, marker);
+      const serviceLine = isCommercialProperty(linkedInv?.property_type || pay.property_type)
+        ? 'commercial'
+        : (linkedInv?.service_type || null);
+
+      await postOrPreview(rules.buildRefundEntry({
+        refundId: `manual:${pay.id}:${cumRefundCents}`,
+        idempotencyKey: `refund:manual:${pay.id}:${cumRefundCents}`,
+        refundDate,
+        subtotalCents: deltaCents - deltaTax,
+        taxCents: deltaTax,
+        method,
+        customerId: pay.customer_id,
+        invoiceId: linkedInv?.id || null,
+        serviceLine,
+        reference: pay.id,
+        reason: `Manual customer refund (${method})`,
+      }), ctx, 'refunds', { connOverride: trx });
+    };
+
+    if (ctx.dryRun) {
+      await applyManualRefund(ctx.conn);
+    } else {
+      await withEntitySyncLock(ctx.conn, lockKey, applyManualRefund);
+    }
   }
 }
 
@@ -1543,17 +1935,20 @@ async function loadBookedExpenseState(conn, expenseId) {
     .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
     .join('gl_accounts as a', 'a.id', 'l.account_id')
     .where({ 'e.status': 'posted', 'e.source_type': 'expense', 'e.source_id': String(expenseId) })
-    .whereNull('e.reversed_by_entry_id')
-    .select('e.id as entry_id', 'a.code', 'l.debit_cents', 'l.credit_cents');
+    .select('e.id as entry_id', 'e.reversed_by_entry_id', 'a.code', 'l.debit_cents', 'l.credit_cents');
 
   const bookedByCode = new Map();
-  const entryIds = new Set();
+  const allEntryIds = new Set();
+  const activeEntryIds = new Set();
   for (const r of rows) {
-    entryIds.add(r.entry_id);
-    const net = Number(r.debit_cents) - Number(r.credit_cents);
-    bookedByCode.set(r.code, (bookedByCode.get(r.code) || 0) + net);
+    allEntryIds.add(r.entry_id);
+    if (!r.reversed_by_entry_id) {
+      activeEntryIds.add(r.entry_id);
+      const net = Number(r.debit_cents) - Number(r.credit_cents);
+      bookedByCode.set(r.code, (bookedByCode.get(r.code) || 0) + net);
+    }
   }
-  return { bookedByCode, entryCount: entryIds.size };
+  return { bookedByCode, entryCount: activeEntryIds.size, totalEntryCount: allEntryIds.size };
 }
 
 async function backfillExpenseVendorIfNeeded(exp, matchedVendor, trx, ctx) {
@@ -1610,8 +2005,8 @@ async function syncSingleExpenseRow(exp, mapped, matchedVendor, ctx) {
   const adjDate = updatedDate && updatedDate >= entryDate ? updatedDate : entryDate;
 
   const reconcile = async (trx) => {
-    const { bookedByCode, entryCount } = await loadBookedExpenseState(trx, exp.id);
-    if (entryCount === 0) {
+    const { bookedByCode, totalEntryCount } = await loadBookedExpenseState(trx, exp.id);
+    if (totalEntryCount === 0) {
       if (!desired) return;
       await postOrPreview(desired, ctx, 'expenses', { connOverride: trx });
       return;
@@ -1622,7 +2017,7 @@ async function syncSingleExpenseRow(exp, mapped, matchedVendor, ctx) {
       sourceType: 'expense',
       sourceId: exp.id,
       keyPrefix: 'expense-adj',
-      revisionSeq: entryCount,
+      revisionSeq: totalEntryCount,
       desiredLines: desired ? desired.lines : [],
       bookedByCode,
       adjustmentDate: adjDate,
@@ -1646,7 +2041,7 @@ async function syncSingleExpenseRow(exp, mapped, matchedVendor, ctx) {
   }
 }
 
-async function reconcileDeletedExpenses(conn, from, to, ctx) {
+async function reconcileRemovedOrExcludedExpenses(conn, from, to, ctx) {
   const deleted = await conn('gl_journal_entries as e')
     .where({ 'e.source_type': 'expense', 'e.status': 'posted' })
     .whereNull('e.reversed_by_entry_id')
@@ -1661,6 +2056,30 @@ async function reconcileDeletedExpenses(conn, from, to, ctx) {
     const entryDay = dateCellText(row.entry_date);
     const revDate = today >= entryDay && today <= to ? today : (to >= entryDay ? to : entryDay);
     await reverseOrPreview(row, revDate, 'Source expense deleted', ctx, 'expenses');
+  }
+
+  // Also reverse booked expenses that were recategorized into excluded categories (payroll, depreciation, home office).
+  const movedExcluded = await conn('gl_journal_entries as e')
+    .join('expenses as ex', conn.raw('ex.id::text = e.source_id'))
+    .leftJoin('expense_categories as ec', 'ec.id', 'ex.category_id')
+    .where({ 'e.source_type': 'expense', 'e.status': 'posted' })
+    .whereNull('e.reversed_by_entry_id')
+    .whereRaw("(COALESCE(ec.name, '') = 'Payroll (counted from pay runs)' OR COALESCE(ec.irs_line, '') IN ('13', '30'))")
+    .where((win) => {
+      win.whereBetween('e.entry_date', [from, to])
+        .orWhereRaw("DATE(ex.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    })
+    .select(
+      'e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'),
+      'ex.updated_at', 'ec.name as category_name',
+    );
+
+  for (const row of movedExcluded) {
+    const entryDay = dateCellText(row.entry_date);
+    const updatedDay = timestampToEtDate(row.updated_at);
+    const revDate = updatedDay && updatedDay >= entryDay ? updatedDay : entryDay;
+    const label = row.category_name || 'excluded category';
+    await reverseOrPreview(row, revDate, `Expense recategorized to ${label} (excluded from expense sync)`, ctx, 'expenses');
   }
 }
 
@@ -1720,7 +2139,7 @@ async function syncExpenses(conn, from, to, ctx) {
   }
 
   ctx.stats.expenses.unmatched_contractor_vendors = Array.from(unmatchedContractors.values());
-  await reconcileDeletedExpenses(conn, from, to, ctx);
+  await reconcileRemovedOrExcludedExpenses(conn, from, to, ctx);
 }
 
 // ── 7. Payroll Runs (Finalized Posts + Voided Run Reversals) ─────────────────
@@ -1838,7 +2257,7 @@ async function syncSubledgersToGl({ fromDate = null, toDate = null, dryRun = fal
     invoices: makeBucket({ adjusted: 0, would_adjust: 0, reversed: 0, would_reverse: 0 }),
     deposits: makeBucket(),
     payments: makeBucket({ reversed: 0, would_reverse: 0 }),
-    refunds: makeBucket({ needs_review: [] }),
+    refunds: makeBucket({ reversed: 0, would_reverse: 0, needs_review: [] }),
     stripe_fees: makeBucket(),
     stripe_payouts: makeBucket(),
     expenses: makeBucket({
@@ -1856,6 +2275,7 @@ async function syncSubledgersToGl({ fromDate = null, toDate = null, dryRun = fal
 
   const ctx = { dryRun: Boolean(dryRun), actorId, requestMeta, stats, conn, caches };
   await syncInvoices(conn, from, to, ctx);
+  await syncCompletedAnnualPrepayVisits(conn, from, to, ctx);
   await syncEstimateDeposits(conn, from, to, ctx);
   await syncPayments(conn, from, to, ctx);
   await syncStripeInvoiceGapPayments(conn, from, to, ctx);
@@ -1880,6 +2300,9 @@ module.exports = {
   allocateStatementPrincipalAcrossInvoices,
   splitDepositRefundCents,
   findMatchingDepositForOutflow,
+  computePrepayVisitRecognitionCents,
+  computeGapReceiptAmounts,
+  isDisputeOutflow,
   buildExpenseSplits,
   buildInvoiceGlPayload,
   buildInvoiceDeltaEntry,

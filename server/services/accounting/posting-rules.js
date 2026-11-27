@@ -23,7 +23,21 @@ const SERVICE_LINE_REVENUE_CODE = {
 function revenueAccountCodeFor(serviceLine, isCommercial = false) {
   if (isCommercial) return SYSTEM_CODES.REV_COMMERCIAL_PEST;
   const key = String(serviceLine || '').trim().toLowerCase();
-  return SERVICE_LINE_REVENUE_CODE[key] || SYSTEM_CODES.REV_OTHER;
+  if (!key) return SYSTEM_CODES.REV_OTHER;
+  if (SERVICE_LINE_REVENUE_CODE[key]) return SERVICE_LINE_REVENUE_CODE[key];
+  if (/\bcommercial\b|\bbusiness\b|\bhoa\b|\bproperty\s+m(?:ana)?g(?:emen)?t\b/.test(key)) {
+    return SYSTEM_CODES.REV_COMMERCIAL_PEST;
+  }
+  if (/\btermite\b|\bwdo\b|\btrench|\bbait\s*station|\brodent\b|\bexclusion\b|\btrapping\b|\bproject\b|\bwildlife\b|\binsulation\b/.test(key)) {
+    return SYSTEM_CODES.REV_TERMITE_PROJECTS;
+  }
+  if (/\blawn\b|\bturf\b|\bshrub\b|\btree\b|\bpalm\b|\bornamental\b|\bfertiliz|\bweed\b|\bchinch\b/.test(key)) {
+    return SYSTEM_CODES.REV_LAWN_TREE_SHRUB;
+  }
+  if (/\bpest\b|\bmosquito\b|\bant\b|\broach\b|\bflea\b|\btick\b|\bspider\b|\bwasp\b|\bwaveguard\b|\bquarterly\b|\bbi-?monthly\b|\bgeneral\b/.test(key)) {
+    return SYSTEM_CODES.REV_RESIDENTIAL_PEST;
+  }
+  return SYSTEM_CODES.REV_OTHER;
 }
 
 function posInt(value, field) {
@@ -764,15 +778,175 @@ function buildDepreciationEntry({ sourceId, entryDate, amountCents, assetName = 
   };
 }
 
+function buildDisputeReceivableLines({ principalCents, invoiceId, arAllocations, customerId, serviceLine, isReinstatement }) {
+  const validAllocs = Array.isArray(arAllocations)
+    ? arAllocations.filter((a) => a && Number(a.amountCents) > 0)
+    : [];
+  const memo = isReinstatement ? 'Dispute won — re-apply to invoice A/R' : 'Dispute — restore invoice A/R';
+  if (!validAllocs.length) {
+    return [{
+      accountCode: SYSTEM_CODES.ACCOUNTS_RECEIVABLE,
+      debitCents: isReinstatement ? 0 : principalCents,
+      creditCents: isReinstatement ? principalCents : 0,
+      customerId,
+      invoiceRef: invoiceId ? String(invoiceId) : null,
+      serviceLine,
+      paymentMethod: 'stripe',
+      memo,
+    }];
+  }
+
+  let allocSum = 0;
+  const lines = validAllocs.map((a) => {
+    const amt = posInt(a.amountCents, 'arAllocations[].amountCents');
+    allocSum += amt;
+    return {
+      accountCode: SYSTEM_CODES.ACCOUNTS_RECEIVABLE,
+      debitCents: isReinstatement ? 0 : amt,
+      creditCents: isReinstatement ? amt : 0,
+      customerId: a.customerId || customerId || null,
+      invoiceRef: a.invoiceId ? String(a.invoiceId) : null,
+      serviceLine: a.serviceLine || serviceLine || null,
+      paymentMethod: 'stripe',
+      memo,
+    };
+  });
+  if (allocSum !== principalCents) {
+    throw new AccountingError(400, `arAllocations sum (${allocSum}c) must equal principal (${principalCents}c)`);
+  }
+  return lines;
+}
+
+function buildDisputeAllocationLines({ grossCents, surchargeCents, invoiceId, arAllocations, customerId, serviceLine, isReinstatement }) {
+  const principalCents = grossCents - surchargeCents;
+  const invRef = invoiceId ? String(invoiceId) : null;
+  const clearingLine = {
+    accountCode: SYSTEM_CODES.STRIPE_CLEARING,
+    debitCents: isReinstatement ? grossCents : 0,
+    creditCents: isReinstatement ? 0 : grossCents,
+    customerId,
+    invoiceRef: invRef,
+    serviceLine,
+    paymentMethod: 'stripe',
+    memo: isReinstatement ? 'Dispute won — funds reinstated to Stripe' : 'Dispute chargeback withdrawn by Stripe',
+  };
+  const arLines = buildDisputeReceivableLines({
+    principalCents, invoiceId, arAllocations, customerId, serviceLine, isReinstatement,
+  });
+  const surchargeLines = surchargeCents > 0
+    ? [{
+      accountCode: SYSTEM_CODES.REV_CARD_SURCHARGE,
+      debitCents: isReinstatement ? 0 : surchargeCents,
+      creditCents: isReinstatement ? surchargeCents : 0,
+      customerId,
+      invoiceRef: invRef,
+      paymentMethod: 'stripe',
+      memo: isReinstatement ? 'Card surcharge reinstated on won dispute' : 'Card surcharge reversed on dispute',
+    }]
+    : [];
+  return isReinstatement
+    ? [clearingLine, ...arLines, ...surchargeLines]
+    : [...arLines, ...surchargeLines, clearingLine];
+}
+
+/**
+ * 5c. Stripe Dispute Withdrawal (Collectible Receivable Reopened).
+ *     DR 1100 A/R (principal, allocated across statement children if applicable)
+ *     DR 4085 Card Surcharge (if collected on disputed charge)
+ *     CR 1050 Stripe Clearing (gross disputed funds)
+ */
+function buildDisputeWithdrawalEntry({
+  txnId,
+  idempotencyKey = null,
+  disputeDate,
+  grossCents,
+  surchargeCents = 0,
+  customerId = null,
+  invoiceId = null,
+  arAllocations = null,
+  serviceLine = null,
+  reference = null,
+  reason = null,
+}) {
+  const gross = posInt(grossCents, 'grossCents');
+  const sur = posInt(surchargeCents, 'surchargeCents');
+  if (gross <= 0) throw new AccountingError(400, 'Dispute withdrawal grossCents must be positive');
+  if (sur >= gross) throw new AccountingError(400, 'surchargeCents must be less than grossCents');
+
+  return {
+    entryDate: disputeDate,
+    entryType: 'operational',
+    basisScope: 'both',
+    sourceType: 'dispute',
+    sourceId: String(txnId),
+    idempotencyKey: idempotencyKey || `dispute:spt:${txnId}`,
+    reference: reference || String(txnId),
+    memo: reason ? `Stripe dispute — ${reason}` : 'Stripe dispute — A/R restored for collection',
+    lines: buildDisputeAllocationLines({
+      grossCents: gross, surchargeCents: sur, invoiceId, arAllocations, customerId, serviceLine, isReinstatement: false,
+    }),
+  };
+}
+
+/**
+ * 5d. Stripe Dispute Reinstatement (Dispute Won — Mirror of Withdrawal).
+ *     DR 1050 Stripe Clearing (gross reinstated funds)
+ *     CR 1100 A/R (principal)
+ *     CR 4085 Card Surcharge (if present)
+ */
+function buildDisputeReinstatementEntry({
+  txnId,
+  idempotencyKey = null,
+  reversalDate,
+  grossCents,
+  surchargeCents = 0,
+  customerId = null,
+  invoiceId = null,
+  arAllocations = null,
+  serviceLine = null,
+  reference = null,
+  reason = null,
+}) {
+  const gross = posInt(grossCents, 'grossCents');
+  const sur = posInt(surchargeCents, 'surchargeCents');
+  if (gross <= 0) throw new AccountingError(400, 'Dispute reinstatement grossCents must be positive');
+  if (sur >= gross) throw new AccountingError(400, 'surchargeCents must be less than grossCents');
+
+  return {
+    entryDate: reversalDate,
+    entryType: 'operational',
+    basisScope: 'both',
+    sourceType: 'dispute_reversal',
+    sourceId: String(txnId),
+    idempotencyKey: idempotencyKey || `dispute-reversal:spt:${txnId}`,
+    reference: reference || String(txnId),
+    memo: reason ? `Stripe dispute won — ${reason}` : 'Stripe dispute won — funds reinstated',
+    lines: buildDisputeAllocationLines({
+      grossCents: gross, surchargeCents: sur, invoiceId, arAllocations, customerId, serviceLine, isReinstatement: true,
+    }),
+  };
+}
+
+function parseOpeningBalanceCents(item, label) {
+  const rawVal = item?.balanceCents ?? item?.balance_cents;
+  const missing = rawVal == null || typeof rawVal === 'boolean' || (typeof rawVal === 'string' && rawVal.trim() === '');
+  if (missing) {
+    throw new AccountingError(400, `Opening balance item (${label}) requires an integer balanceCents`);
+  }
+  const raw = Number(rawVal);
+  if (!Number.isSafeInteger(raw)) {
+    throw new AccountingError(400, `Opening balance item (${label}) balanceCents must be a safe integer in cents`);
+  }
+  return raw;
+}
+
 function buildOpeningBalanceLine(item) {
-  const raw = Math.trunc(Number(item.balanceCents) || 0);
+  const label = item?.accountCode || item?.accountId || 'unknown';
+  const raw = parseOpeningBalanceCents(item, label);
   if (raw === 0) return null;
   const normalBalance = item.normalBalance ?? item.normal_balance;
   if (normalBalance !== 'debit' && normalBalance !== 'credit') {
-    throw new AccountingError(
-      400,
-      `Opening balance item (${item.accountCode || item.accountId || 'unknown'}) requires explicit normalBalance ("debit" or "credit")`,
-    );
+    throw new AccountingError(400, `Opening balance item (${label}) requires explicit normalBalance ("debit" or "credit")`);
   }
   const isDebit = normalBalance === 'debit';
   const debitCents = (isDebit && raw > 0) || (!isDebit && raw < 0) ? Math.abs(raw) : 0;
@@ -839,6 +1013,8 @@ module.exports = {
   buildRefundReversalEntry,
   buildDepositRefundEntry,
   buildDepositRefundReversalEntry,
+  buildDisputeWithdrawalEntry,
+  buildDisputeReinstatementEntry,
   buildStripePayoutEntry,
   buildExpenseEntry,
   buildTransferEntry,

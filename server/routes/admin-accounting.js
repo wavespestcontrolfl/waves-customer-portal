@@ -345,6 +345,30 @@ router.get('/reconciliations/:id', async (req, res) => {
   }
 });
 
+router.patch('/reconciliations/:id', requireFullAccess, async (req, res) => {
+  try {
+    const workspace = await reconciliation.updateReconciliation(req.params.id, {
+      ...(req.body || {}),
+      ...actorContext(req),
+    });
+    res.json(workspace);
+  } catch (err) {
+    fail(res, 'updateReconciliation', err);
+  }
+});
+
+router.delete('/reconciliations/:id', requireFullAccess, async (req, res) => {
+  try {
+    const result = await reconciliation.cancelReconciliation(req.params.id, {
+      reason: req.body?.reason || req.query?.reason || '',
+      ...actorContext(req),
+    });
+    res.json(result);
+  } catch (err) {
+    fail(res, 'cancelReconciliation', err);
+  }
+});
+
 router.patch('/reconciliations/:id/lines', requireFullAccess, async (req, res) => {
   try {
     const workspace = await reconciliation.toggleClearedLines(req.params.id, {

@@ -347,10 +347,19 @@ function computeCashFlowStatement(accounts, periodSums, openingSums, { from, to 
 
 // ── Database Query Helpers ───────────────────────────────────────────────────
 
-async function queryAccountSums(conn, { from = null, to = null, basis = 'accrual' } = {}) {
+async function queryAccountSums(conn, { from = null, to = null, basis = 'accrual', excludeClosing = false } = {}) {
   let q = conn('gl_journal_lines as l')
     .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
     .where('e.status', 'posted');
+
+  if (excludeClosing) {
+    q = q
+      .leftJoin('gl_journal_entries as close_orig', 'close_orig.id', 'e.reverses_entry_id')
+      .where('e.entry_type', '<>', 'closing')
+      .where((sub) => {
+        sub.whereNull('close_orig.id').orWhere('close_orig.entry_type', '<>', 'closing');
+      });
+  }
 
   if (from) q = q.where('e.entry_date', '>=', from);
   if (to) q = q.where('e.entry_date', '<=', to);
@@ -471,63 +480,99 @@ async function loadFallbackInvoiceProfiles(conn, missingUuids, revIdByCode, prof
   }
 }
 
-async function loadInvoiceProfilesForCashBasis(conn, invoiceRefs, revIdByCode) {
-  const profiles = new Map();
-  if (!invoiceRefs.length) return profiles;
+/**
+ * Pure: compute an invoice's A/R, FL sales tax, and revenue split profile using ONLY
+ * invoice GL entries (and reversals of invoice entries) posted on or before `asOfDate`.
+ * Keeps later invoice edits/adjustments from mutating historical locked cash-basis reports.
+ */
+function buildInvoiceProfileAsOf(invoiceLines, asOfDate) {
+  if (!Array.isArray(invoiceLines) || !invoiceLines.length) return null;
+  let arNet = 0;
+  let taxNet = 0;
+  const revByAccount = new Map();
+  let matchedAny = false;
 
-  const glLines = await conn('gl_journal_lines as l')
-    .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
-    .join('gl_accounts as a', 'a.id', 'l.account_id')
-    .where('e.status', 'posted')
-    .where('e.source_type', 'invoice')
-    .whereIn('e.source_id', invoiceRefs)
-    .select('e.source_id', 'a.id as account_id', 'a.code', 'a.account_type', 'l.debit_cents', 'l.credit_cents');
-
-  const rawByInvoice = new Map();
-  for (const r of glLines) {
-    const key = String(r.source_id);
-    const rec = rawByInvoice.get(key) || { arNet: 0, taxNet: 0, revByAccount: new Map() };
+  for (const r of invoiceLines) {
+    const entryDay = dateCellText(r.entry_date);
+    if (asOfDate && entryDay && entryDay > asOfDate) continue;
+    matchedAny = true;
     const dr = Number(r.debit_cents);
     const cr = Number(r.credit_cents);
-    if (r.code === SYSTEM_CODES.ACCOUNTS_RECEIVABLE) rec.arNet += (dr - cr);
-    if (r.code === SYSTEM_CODES.SALES_TAX_PAYABLE) rec.taxNet += (cr - dr);
+    if (r.code === SYSTEM_CODES.ACCOUNTS_RECEIVABLE) arNet += (dr - cr);
+    if (r.code === SYSTEM_CODES.SALES_TAX_PAYABLE) taxNet += (cr - dr);
     if (r.account_type === 'revenue') {
-      rec.revByAccount.set(r.account_id, (rec.revByAccount.get(r.account_id) || 0) + (cr - dr));
+      revByAccount.set(r.account_id, (revByAccount.get(r.account_id) || 0) + (cr - dr));
     }
-    rawByInvoice.set(key, rec);
   }
-  for (const [key, rec] of rawByInvoice.entries()) {
-    const revenueSplits = [];
-    for (const [accountId, amountCents] of rec.revByAccount.entries()) {
-      if (amountCents > 0) revenueSplits.push({ accountId, amountCents });
-    }
-    profiles.set(key, {
-      arDebitedCents: Math.max(0, rec.arNet),
-      taxCents: Math.max(0, rec.taxNet),
-      revenueSplits,
+  if (!matchedAny) return null;
+
+  const revenueSplits = [];
+  for (const [accountId, amountCents] of revByAccount.entries()) {
+    if (amountCents > 0) revenueSplits.push({ accountId, amountCents });
+  }
+  return {
+    arDebitedCents: Math.max(0, arNet),
+    taxCents: Math.max(0, taxNet),
+    revenueSplits,
+  };
+}
+
+async function loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, maxReceiptDate = null) {
+  const linesByInvoice = new Map();
+  const fallbackProfiles = new Map();
+  if (!invoiceRefs.length) return { linesByInvoice, fallbackProfiles };
+
+  let q = conn('gl_journal_lines as l')
+    .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+    .leftJoin('gl_journal_entries as orig', 'orig.id', 'e.reverses_entry_id')
+    .join('gl_accounts as a', 'a.id', 'l.account_id')
+    .where('e.status', 'posted')
+    .where((sub) => {
+      sub.where((inv) => inv.where('e.source_type', 'invoice').whereIn('e.source_id', invoiceRefs))
+        .orWhere((rev) => rev.where('e.source_type', 'reversal')
+          .where('orig.source_type', 'invoice')
+          .whereIn('orig.source_id', invoiceRefs));
     });
+  if (maxReceiptDate) q = q.where('e.entry_date', '<=', maxReceiptDate);
+
+  const glLines = await q.select(
+    conn.raw("COALESCE(CASE WHEN e.source_type = 'reversal' THEN orig.source_id ELSE e.source_id END, e.source_id) as inv_source_id"),
+    conn.raw('e.entry_date::text as entry_date'),
+    'a.id as account_id',
+    'a.code',
+    'a.account_type',
+    'l.debit_cents',
+    'l.credit_cents',
+  );
+
+  for (const r of glLines) {
+    const key = String(r.inv_source_id);
+    const list = linesByInvoice.get(key) || [];
+    list.push(r);
+    linesByInvoice.set(key, list);
   }
 
   const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const missingUuids = invoiceRefs.filter((ref) => !profiles.has(ref) && uuidRe.test(ref));
-  await loadFallbackInvoiceProfiles(conn, missingUuids, revIdByCode, profiles);
-  return profiles;
+  const missingUuids = invoiceRefs.filter((ref) => !linesByInvoice.has(ref) && uuidRe.test(ref));
+  await loadFallbackInvoiceProfiles(conn, missingUuids, revIdByCode, fallbackProfiles);
+  return { linesByInvoice, fallbackProfiles };
 }
 
 function cashBasisReceiptWhere(q) {
-  q.whereIn('e.source_type', ['payment', 'deposit_refund', 'deposit_refund_reversal'])
+  q.whereIn('e.source_type', ['payment', 'deposit_refund', 'deposit_refund_reversal', 'dispute', 'dispute_reversal'])
     .orWhere((rev) => rev.where('e.source_type', 'reversal')
-      .whereIn('orig.source_type', ['payment', 'deposit_refund', 'deposit_refund_reversal']));
+      .whereIn('orig.source_type', ['payment', 'deposit_refund', 'deposit_refund_reversal', 'dispute', 'dispute_reversal']));
 }
 
 /**
  * Cash-basis revenue helper: on cash basis, revenue is recognized when payments settle
  * (clearing 1100 A/R or 2300 Unearned Revenue), EXCLUDING collected Florida sales tax
- * via cumulative invoice revenue/tax allocation (zero rounding drift across partial receipts),
- * and including signed payment reversals & deposit refunds on their posting dates.
+ * via date-effective cumulative invoice revenue/tax allocation (so later invoice edits
+ * never drift historical locked months), and including signed payment reversals,
+ * deposit refunds, and Stripe disputes/reinstatements on their posting dates.
  */
 async function queryCashBasisSums(conn, { from, to }) {
-  const baseSums = await queryAccountSums(conn, { from, to, basis: 'cash' });
+  const baseSums = await queryAccountSums(conn, { from, to, basis: 'cash', excludeClosing: true });
 
   const activityRows = await conn('gl_journal_lines as l')
     .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
@@ -542,6 +587,7 @@ async function queryCashBasisSums(conn, { from, to }) {
     .orderBy('e.entry_number', 'asc')
     .orderBy('l.line_order', 'asc')
     .select(
+      conn.raw('e.entry_date::text as entry_date'),
       'l.invoice_ref',
       'l.service_line',
       'a.code as account_code',
@@ -564,8 +610,8 @@ async function queryCashBasisSums(conn, { from, to }) {
     ),
   ];
 
-  const [invoiceProfiles, priorReceiptRows] = await Promise.all([
-    loadInvoiceProfilesForCashBasis(conn, invoiceRefs, revIdByCode),
+  const [{ linesByInvoice, fallbackProfiles }, priorReceiptRows] = await Promise.all([
+    loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, to),
     invoiceRefs.length
       ? conn('gl_journal_lines as l')
         .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
@@ -589,7 +635,10 @@ async function queryCashBasisSums(conn, { from, to }) {
     const invKey = row.account_code === SYSTEM_CODES.ACCOUNTS_RECEIVABLE && row.invoice_ref
       ? String(row.invoice_ref)
       : null;
-    const profile = invKey ? invoiceProfiles.get(invKey) : null;
+    const receiptDay = dateCellText(row.entry_date);
+    const profile = invKey
+      ? (buildInvoiceProfileAsOf(linesByInvoice.get(invKey), receiptDay) || fallbackProfiles.get(invKey) || null)
+      : null;
     const priorCum = invKey ? (cumByInvoice.get(invKey) || 0) : 0;
     const allocations = allocateCumulativeCashReceipt(priorCum, signedCents, profile, row.service_line, revIdByCode);
     if (invKey) cumByInvoice.set(invKey, priorCum + signedCents);
@@ -622,7 +671,7 @@ async function getProfitAndLoss({ from = null, to = null, basis = 'accrual', con
   const accounts = await loadAccountsOrdered(conn);
   const sums = cleanBasis === 'cash'
     ? await queryCashBasisSums(conn, { from: start, to: end })
-    : await queryAccountSums(conn, { from: start, to: end, basis: 'accrual' });
+    : await queryAccountSums(conn, { from: start, to: end, basis: 'accrual', excludeClosing: true });
 
   return computeProfitAndLoss(accounts, sums, { from: start, to: end, basis: cleanBasis });
 }
@@ -642,7 +691,7 @@ async function getCashFlowStatement({ from = null, to = null, conn = db } = {}) 
 
   const accounts = await loadAccountsOrdered(conn);
   const [periodSums, openingSums] = await Promise.all([
-    queryAccountSums(conn, { from: start, to: end, basis: 'accrual' }),
+    queryAccountSums(conn, { from: start, to: end, basis: 'accrual', excludeClosing: true }),
     conn('gl_journal_lines as l')
       .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
       .where('e.status', 'posted')
@@ -992,6 +1041,7 @@ module.exports = {
   computeCashFlowStatement,
   allocateCashReceiptToRevenue,
   allocateCumulativeCashReceipt,
+  buildInvoiceProfileAsOf,
   summarizeSalesTaxLines,
   summarize1099VendorLines,
   getTrialBalance,

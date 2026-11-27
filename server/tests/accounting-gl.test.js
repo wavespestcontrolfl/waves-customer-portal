@@ -50,10 +50,17 @@ const {
   computeCashFlowStatement,
   allocateCashReceiptToRevenue,
   allocateCumulativeCashReceipt,
+  buildInvoiceProfileAsOf,
   summarizeSalesTaxLines,
   summarize1099VendorLines,
 } = require('../services/accounting/statements');
-const { computeReconciliationMath, startReconciliation, toggleClearedLines } = require('../services/accounting/reconciliation');
+const {
+  computeReconciliationMath,
+  startReconciliation,
+  updateReconciliation,
+  cancelReconciliation,
+  toggleClearedLines,
+} = require('../services/accounting/reconciliation');
 const { lockPeriod } = require('../services/accounting/periods');
 const {
   syncSubledgersToGl,
@@ -66,6 +73,9 @@ const {
   allocateStatementPrincipalAcrossInvoices,
   splitDepositRefundCents,
   findMatchingDepositForOutflow,
+  computePrepayVisitRecognitionCents,
+  computeGapReceiptAmounts,
+  isDisputeOutflow,
   buildExpenseSplits,
   buildInvoiceGlPayload,
   buildInvoiceDeltaEntry,
@@ -1330,5 +1340,165 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
         { accountCode: '4000', debitCents: 0, creditCents: 25000 },
       ],
     }, { conn: idemTrx })).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_CONFLICT' });
+  });
+
+  test('Pass-4: disputes restore A/R (no negative A/R on replacement pay), gap receipts include surcharge, and prepay visits recognize without base invoice', () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+
+    // 1. Collectible dispute lifecycle: Invoice ($100) -> Stripe pay ($102.90 w/ $2.90 surcharge) -> Dispute withdrawal (-$102.90) -> Replacement pay ($100)
+    const disputeCycle = accumulateEntries(accounts, [
+      rules.buildInvoiceEntry({ invoiceId: 'inv-disp-1', issueDate: '2026-11-01', subtotalCents: 10000, taxCents: 0 }),
+      rules.buildPaymentEntry({ paymentId: 'pay-disp-1', paymentDate: '2026-11-02', grossCents: 10290, surchargeCents: 290, method: 'stripe', invoiceId: 'inv-disp-1' }),
+      rules.buildDisputeWithdrawalEntry({ txnId: 'dp_1', disputeDate: '2026-11-10', grossCents: 10290, surchargeCents: 290, invoiceId: 'inv-disp-1' }),
+      rules.buildPaymentEntry({ paymentId: 'pay-disp-2', paymentDate: '2026-11-15', grossCents: 10000, surchargeCents: 0, method: 'ach_direct', invoiceId: 'inv-disp-1' }),
+    ]);
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+    expect(bal(disputeCycle, SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(disputeCycle, SYSTEM_CODES.REV_RESIDENTIAL_PEST)).toBe(10000);
+    expect(bal(disputeCycle, SYSTEM_CODES.REV_CARD_SURCHARGE)).toBe(0);
+    expect(bal(disputeCycle, SYSTEM_CODES.STRIPE_CLEARING)).toBe(0);
+    expect(bal(disputeCycle, SYSTEM_CODES.CHECKING_PRIMARY)).toBe(10000);
+    expect(isDisputeOutflow({ reporting_category: 'dispute' })).toBe(true);
+    expect(isDisputeOutflow({ reporting_category: 'refund' })).toBe(false);
+
+    // 2. Gap receipt recovery preserves collected card surcharge ($102.90 gross = $100 principal + $2.90 surcharge)
+    const gapInv = { subtotal: '100.00', discount_amount: '0', tax_amount: '0', total: '102.90', credit_applied: '0', line_items: '[]' };
+    expect(computeGapReceiptAmounts(gapInv)).toEqual({ grossCents: 10290, surchargeCents: 290 });
+
+    // 3. Completed annual-prepay covered visit without base invoice derives recognition amount from visit/term
+    expect(computePrepayVisitRecognitionCents({ prepaid_amount: '95.00', estimated_price: '100.00' })).toBe(9500);
+    expect(computePrepayVisitRecognitionCents({ prepaid_amount: null, estimated_price: '0', term_prepay_amount: '600.00', coverage_visit_count: 6 })).toBe(10000);
+
+    // 4. Draft payer-statement child invoice accrues cleanly using statement finalization date
+    const stmtChild = {
+      id: 'inv-stmt-1',
+      status: 'draft',
+      payer_statement_id: 42,
+      statement_status: 'finalized',
+      statement_finalized_at: '2026-11-20T15:00:00Z',
+      subtotal: '250.00',
+      discount_amount: '0',
+      tax_amount: '17.50',
+      total: '267.50',
+      service_type: 'Commercial Quarterly Pest Control',
+      property_type: 'commercial',
+    };
+    const stmtJe = buildInvoiceGlPayload(stmtChild, new Set());
+    expect(stmtJe.entryDate).toBe('2026-11-20');
+    expect(validateJournalEntryInput(stmtJe).totalCents).toBe(26750);
+  });
+
+  test('Pass-4: service labels map to real revenue accounts, malformed opening balances fail 400, and historical cash profiles ignore later edits', () => {
+    // 1. Real Waves service labels map to canonical revenue accounts instead of 4095 Other
+    expect(rules.revenueAccountCodeFor('Quarterly Pest Control', false)).toBe(SYSTEM_CODES.REV_RESIDENTIAL_PEST);
+    expect(rules.revenueAccountCodeFor('Bi-Monthly Mosquito Control', false)).toBe(SYSTEM_CODES.REV_RESIDENTIAL_PEST);
+    expect(rules.revenueAccountCodeFor('Lawn & Shrub Fertilization', false)).toBe(SYSTEM_CODES.REV_LAWN_TREE_SHRUB);
+    expect(rules.revenueAccountCodeFor('Termite Monitoring & Bait Stations', false)).toBe(SYSTEM_CODES.REV_TERMITE_PROJECTS);
+    expect(rules.revenueAccountCodeFor('Rodent Exclusion Project', false)).toBe(SYSTEM_CODES.REV_TERMITE_PROJECTS);
+    expect(rules.revenueAccountCodeFor('Commercial Kitchen Service', false)).toBe(SYSTEM_CODES.REV_COMMERCIAL_PEST);
+
+    // 2. Malformed opening balances throw 400 instead of silently turning into 0
+    expect(() => rules.buildOpeningBalanceEntry({
+      asOfDate: '2026-01-01',
+      items: [{ accountCode: '1010', balanceCents: 'not-a-number', normalBalance: 'debit' }],
+    })).toThrow(/safe integer in cents/i);
+    expect(() => rules.buildOpeningBalanceEntry({
+      asOfDate: '2026-01-01',
+      items: [{ accountCode: '1010', balanceCents: 12.5, normalBalance: 'debit' }],
+    })).toThrow(/safe integer in cents/i);
+    expect(() => rules.buildOpeningBalanceEntry({
+      asOfDate: '2026-01-01',
+      items: [{ accountCode: '1010', balanceCents: '', normalBalance: 'debit' }],
+    })).toThrow(/requires an integer balanceCents/i);
+
+    // 3. Historical cash-basis invoice profile ignores invoice edits posted AFTER the cash receipt date
+    const invoiceLines = [
+      // Nov 1: $100 revenue + $7 tax = $107 A/R
+      { entry_date: '2026-11-01', account_id: 'ar', code: SYSTEM_CODES.ACCOUNTS_RECEIVABLE, account_type: 'asset', debit_cents: 10700, credit_cents: 0 },
+      { entry_date: '2026-11-01', account_id: 'rev-4010', code: SYSTEM_CODES.REV_COMMERCIAL_PEST, account_type: 'revenue', debit_cents: 0, credit_cents: 10000 },
+      { entry_date: '2026-11-01', account_id: 'tax', code: SYSTEM_CODES.SALES_TAX_PAYABLE, account_type: 'liability', debit_cents: 0, credit_cents: 700 },
+      // Dec 10: tax corrected to $0 (DR 2100 700 / CR 1100 700)
+      { entry_date: '2026-12-10', account_id: 'tax', code: SYSTEM_CODES.SALES_TAX_PAYABLE, account_type: 'liability', debit_cents: 700, credit_cents: 0 },
+      { entry_date: '2026-12-10', account_id: 'ar', code: SYSTEM_CODES.ACCOUNTS_RECEIVABLE, account_type: 'asset', debit_cents: 0, credit_cents: 700 },
+    ];
+    const novProfile = buildInvoiceProfileAsOf(invoiceLines, '2026-11-15');
+    expect(novProfile.arDebitedCents).toBe(10700);
+    expect(novProfile.taxCents).toBe(700);
+    const decProfile = buildInvoiceProfileAsOf(invoiceLines, '2026-12-15');
+    expect(decProfile.arDebitedCents).toBe(10000);
+    expect(decProfile.taxCents).toBe(0);
+  });
+
+  test('Pass-4: in-progress reconciliations can be corrected or canceled with critical audit events', async () => {
+    const acctId = '00000000-0000-4000-8000-000000000001';
+    const recId = '00000000-0000-4000-8000-000000000055';
+    const audited = [];
+    let deletedRec = false;
+
+    const makeConn = () => {
+      const conn = (table) => {
+        const state = { whereObj: null };
+        const chain = {
+          join: () => chain,
+          leftJoin: () => chain,
+          where: (o) => { if (o && typeof o === 'object') state.whereObj = o; return chain; },
+          whereNot: () => chain,
+          whereIn: () => chain,
+          whereNull: () => chain,
+          orWhere: () => chain,
+          forUpdate: () => chain,
+          orderBy: () => chain,
+          select: () => {
+            if (table === 'gl_journal_lines') return Promise.resolve([]);
+            if (table === 'gl_journal_lines as l') return Promise.resolve([]);
+            return chain;
+          },
+          first: () => {
+            if (table === 'gl_reconciliations' && state.whereObj?.status === 'reconciled') return Promise.resolve(null);
+            if (table === 'gl_reconciliations') {
+              return Promise.resolve({
+                id: recId, account_id: acctId, status: 'in_progress',
+                statement_start_date: null, statement_end_date: '2026-11-30',
+                opening_balance_cents: 10000, ending_balance_cents: 25000, notes: null,
+              });
+            }
+            if (table === 'gl_accounts') {
+              return Promise.resolve({ id: acctId, code: '1010', name: 'Checking', account_type: 'asset', normal_balance: 'debit' });
+            }
+            return Promise.resolve(null);
+          },
+          update: () => ({ returning: () => Promise.resolve([{ id: 'l1' }]) }),
+          del: () => { deletedRec = true; return Promise.resolve(1); },
+          insert: (row) => { audited.push({ table, row }); return { returning: () => Promise.resolve([{ id: 'audit-1' }]) }; },
+        };
+        return chain;
+      };
+      conn.raw = (sql) => sql;
+      conn.fn = { now: () => new Date() };
+      conn.transaction = (cb) => cb(conn);
+      return conn;
+    };
+
+    await updateReconciliation(recId, {
+      statementEndDate: '2026-11-30',
+      endingBalanceCents: 20000,
+      actorId: '00000000-0000-4000-8000-000000000099',
+      conn: makeConn(),
+    });
+    expect(audited.some((a) => a.row.action === 'accounting.reconciliation.update')).toBe(true);
+
+    const canceled = await cancelReconciliation(recId, {
+      reason: 'Wrong statement selected',
+      actorId: '00000000-0000-4000-8000-000000000099',
+      conn: makeConn(),
+    });
+    expect(canceled.canceled).toBe(true);
+    expect(deletedRec).toBe(true);
+    expect(audited.some((a) => a.row.action === 'accounting.reconciliation.cancel')).toBe(true);
   });
 });

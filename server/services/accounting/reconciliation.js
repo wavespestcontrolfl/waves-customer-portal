@@ -461,11 +461,189 @@ async function reopenReconciliation(reconciliationId, { reason = '', actorId = n
   });
 }
 
+function resolveReconciliationPatch(rec, prior, { statementStartDate, statementEndDate, openingBalanceCents, endingBalanceCents, notes }) {
+  const nextEnd = statementEndDate !== undefined
+    ? assertValidDate(statementEndDate, 'statementEndDate')
+    : dateCellText(rec.statement_end_date);
+  const nextStart = statementStartDate !== undefined
+    ? (statementStartDate ? assertValidDate(statementStartDate, 'statementStartDate') : null)
+    : dateCellText(rec.statement_start_date);
+  if (nextStart && nextStart > nextEnd) {
+    throw new AccountingError(400, 'statementStartDate cannot be after statementEndDate');
+  }
+  const nextEnding = endingBalanceCents !== undefined ? Number(endingBalanceCents) : Number(rec.ending_balance_cents);
+  if (!Number.isSafeInteger(nextEnding)) {
+    throw new AccountingError(400, 'endingBalanceCents must be an exact integer in cents');
+  }
+  if (prior) {
+    const priorEnd = dateCellText(prior.statement_end_date);
+    if (priorEnd && nextEnd <= priorEnd) {
+      throw new AccountingError(409, `Statement end date (${nextEnd}) must be after the latest finalized statement (${priorEnd}).`, 'STATEMENT_DATE_ORDER');
+    }
+  }
+  let nextOpening = Number(rec.opening_balance_cents);
+  if (openingBalanceCents !== undefined) {
+    const supplied = Number(openingBalanceCents);
+    if (!Number.isSafeInteger(supplied)) {
+      throw new AccountingError(400, 'openingBalanceCents must be an exact integer in cents');
+    }
+    if (prior && supplied !== Number(prior.ending_balance_cents)) {
+      throw new AccountingError(
+        409,
+        `Opening balance ($${(supplied / 100).toFixed(2)}) must match the prior finalized statement ending balance ($${(Number(prior.ending_balance_cents) / 100).toFixed(2)}).`,
+        'OPENING_BALANCE_MISMATCH',
+      );
+    }
+    nextOpening = supplied;
+  }
+  const nextNotes = notes !== undefined ? (notes ? String(notes).trim().slice(0, 500) : null) : rec.notes;
+  return { nextStart, nextEnd, nextOpening, nextEnding, nextNotes };
+}
+
+async function updateReconciliation(reconciliationId, {
+  statementStartDate,
+  statementEndDate,
+  openingBalanceCents,
+  endingBalanceCents,
+  notes,
+  actorId = null,
+  requestMeta = {},
+  conn = db,
+} = {}) {
+  const validId = assertOptionalUuid(reconciliationId, 'reconciliationId');
+  if (!validId) throw new AccountingError(400, 'reconciliationId is required');
+
+  return conn.transaction(async (trx) => {
+    const rec = await trx('gl_reconciliations')
+      .where({ id: validId })
+      .forUpdate()
+      .select(
+        '*',
+        trx.raw('statement_start_date::text as statement_start_date'),
+        trx.raw('statement_end_date::text as statement_end_date'),
+      )
+      .first();
+    if (!rec) throw new AccountingError(404, 'Reconciliation not found');
+    if (rec.status !== 'in_progress') {
+      throw new AccountingError(409, 'Only an in-progress reconciliation can be edited');
+    }
+
+    const prior = await trx('gl_reconciliations')
+      .where({ account_id: rec.account_id, status: 'reconciled' })
+      .whereNot({ id: validId })
+      .orderBy('statement_end_date', 'desc')
+      .select(trx.raw('statement_end_date::text as statement_end_date'), 'ending_balance_cents')
+      .first();
+
+    const { nextStart, nextEnd, nextOpening, nextEnding, nextNotes } = resolveReconciliationPatch(rec, prior, {
+      statementStartDate, statementEndDate, openingBalanceCents, endingBalanceCents, notes,
+    });
+
+    if (nextEnd < dateCellText(rec.statement_end_date)) {
+      await trx('gl_journal_lines')
+        .where({ reconciliation_id: validId })
+        .whereIn('entry_id', function laterEntries() {
+          this.select('id').from('gl_journal_entries').where('entry_date', '>', nextEnd);
+        })
+        .update({ reconciliation_id: null, cleared_at: null });
+    }
+
+    const account = await trx('gl_accounts').where({ id: rec.account_id }).first();
+    const clearedLines = await trx('gl_journal_lines')
+      .where({ reconciliation_id: validId })
+      .select('debit_cents', 'credit_cents');
+    const math = computeReconciliationMath(account, nextOpening, nextEnding, clearedLines);
+
+    await trx('gl_reconciliations')
+      .where({ id: validId })
+      .update({
+        statement_start_date: nextStart,
+        statement_end_date: nextEnd,
+        opening_balance_cents: nextOpening,
+        ending_balance_cents: nextEnding,
+        cleared_balance_cents: math.cleared_balance_cents,
+        difference_cents: math.difference_cents,
+        cleared_line_count: math.cleared_line_count,
+        notes: nextNotes,
+        updated_at: trx.fn.now(),
+      });
+
+    await recordAuditEvent({
+      actor_type: actorId ? 'technician' : 'system',
+      actor_id: actorId,
+      action: 'accounting.reconciliation.update',
+      resource_type: 'gl_reconciliation',
+      resource_id: validId,
+      metadata: {
+        account_code: account.code,
+        statement_end_date: nextEnd,
+        opening_balance_cents: nextOpening,
+        ending_balance_cents: nextEnding,
+        difference_cents: math.difference_cents,
+      },
+      ip_address: requestMeta.ip || null,
+      user_agent: requestMeta.userAgent || null,
+      critical: true,
+      trx,
+    });
+
+    return getReconciliationWorkspace(validId, { conn: trx });
+  });
+}
+
+async function cancelReconciliation(reconciliationId, { reason = '', actorId = null, requestMeta = {}, conn = db } = {}) {
+  const validId = assertOptionalUuid(reconciliationId, 'reconciliationId');
+  if (!validId) throw new AccountingError(400, 'reconciliationId is required');
+
+  return conn.transaction(async (trx) => {
+    const rec = await trx('gl_reconciliations')
+      .where({ id: validId })
+      .forUpdate()
+      .select('*', trx.raw('statement_end_date::text as statement_end_date'))
+      .first();
+    if (!rec) throw new AccountingError(404, 'Reconciliation not found');
+    if (rec.status !== 'in_progress') {
+      throw new AccountingError(409, 'Only an in-progress reconciliation can be canceled');
+    }
+
+    const account = await trx('gl_accounts').where({ id: rec.account_id }).first('code');
+    const released = await trx('gl_journal_lines')
+      .where({ reconciliation_id: validId })
+      .update({ reconciliation_id: null, cleared_at: null })
+      .returning('id');
+
+    await trx('gl_reconciliations').where({ id: validId }).del();
+
+    await recordAuditEvent({
+      actor_type: actorId ? 'technician' : 'system',
+      actor_id: actorId,
+      action: 'accounting.reconciliation.cancel',
+      resource_type: 'gl_reconciliation',
+      resource_id: validId,
+      metadata: {
+        account_code: account?.code || null,
+        statement_end_date: dateCellText(rec.statement_end_date),
+        ending_balance_cents: Number(rec.ending_balance_cents),
+        released_line_count: Array.isArray(released) ? released.length : 0,
+        reason: String(reason || '').trim().slice(0, 300) || 'Canceled in-progress reconciliation',
+      },
+      ip_address: requestMeta.ip || null,
+      user_agent: requestMeta.userAgent || null,
+      critical: true,
+      trx,
+    });
+
+    return { canceled: true, id: validId };
+  });
+}
+
 module.exports = {
   RECONCILABLE_SUB_TYPES,
   computeReconciliationMath,
   listReconciliations,
   startReconciliation,
+  updateReconciliation,
+  cancelReconciliation,
   getReconciliationWorkspace,
   toggleClearedLines,
   finishReconciliation,

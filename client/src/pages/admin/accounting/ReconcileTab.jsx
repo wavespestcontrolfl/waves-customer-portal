@@ -18,7 +18,7 @@ import {
   TD,
 } from "../../../components/ui";
 import { etDateString } from "../../../lib/timezone";
-import { getJson, postJson, patchJson, formatCents, parseDollarsToCents } from "./api";
+import { getJson, postJson, patchJson, deleteJson, formatCents, parseDollarsToCents } from "./api";
 
 const RECONCILABLE_SUB_TYPES = new Set([
   "checking", "savings", "stripe_clearing", "undeposited_funds", "credit_card", "loan_payable",
@@ -38,6 +38,11 @@ export default function ReconcileTab({ onChanged }) {
   const [accountId, setAccountId] = useState("");
   const [endDate, setEndDate] = useState(today);
   const [endingBalance, setEndingBalance] = useState("");
+
+  // Edit in-progress statement form
+  const [editingStmt, setEditingStmt] = useState(false);
+  const [editEndDate, setEditEndDate] = useState("");
+  const [editEndingBalance, setEditEndingBalance] = useState("");
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -115,6 +120,58 @@ export default function ReconcileTab({ onChanged }) {
     }
   };
 
+  const openEditStatement = () => {
+    if (!workspace) return;
+    setEditEndDate(workspace.reconciliation.statement_end_date || today);
+    setEditEndingBalance((Number(workspace.reconciliation.ending_balance_cents || 0) / 100).toFixed(2));
+    setEditingStmt(true);
+    setError("");
+  };
+
+  const handleSaveStatement = async (e) => {
+    e.preventDefault();
+    if (!workspace) return;
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    try {
+      const endingBalanceCents = parseDollarsToCents(editEndingBalance);
+      if (endingBalanceCents === null) throw new Error("Enter a valid statement ending balance.");
+      const ws = await patchJson(`/reconciliations/${workspace.reconciliation.id}`, {
+        statementEndDate: editEndDate,
+        endingBalanceCents,
+      });
+      setWorkspace(ws);
+      setEditingStmt(false);
+      setSuccess("Statement details updated.");
+      await loadList();
+    } catch (err) {
+      setError(err.message || "Could not update statement details.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCancelSession = async () => {
+    if (!workspace) return;
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    try {
+      await deleteJson(`/reconciliations/${workspace.reconciliation.id}`, {
+        reason: "Canceled unfinished reconciliation session",
+      });
+      setWorkspace(null);
+      setEditingStmt(false);
+      setSuccess("In-progress reconciliation canceled and cleared lines released.");
+      await loadList();
+    } catch (err) {
+      setError(err.message || "Could not cancel reconciliation.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleFinish = async () => {
     if (!workspace) return;
     setBusy(true);
@@ -156,20 +213,44 @@ export default function ReconcileTab({ onChanged }) {
                 Difference: {formatCents(workspace.reconciliation.difference_cents)}
               </Badge>
               {workspace.reconciliation.status === "in_progress" ? (
-                <Button
-                  variant="primary"
-                  disabled={workspace.reconciliation.difference_cents !== 0}
-                  loading={busy}
-                  onClick={handleFinish}
-                >
-                  Finish Reconciliation
-                </Button>
+                <>
+                  <Button
+                    variant="primary"
+                    disabled={workspace.reconciliation.difference_cents !== 0}
+                    loading={busy}
+                    onClick={handleFinish}
+                  >
+                    Finish Reconciliation
+                  </Button>
+                  <Button variant="secondary" disabled={busy} onClick={openEditStatement}>
+                    Edit Statement
+                  </Button>
+                  <Button variant="secondary" disabled={busy} onClick={handleCancelSession}>
+                    Cancel Session
+                  </Button>
+                </>
               ) : (
                 <Badge tone="strong">Reconciled</Badge>
               )}
-              <Button variant="secondary" onClick={() => setWorkspace(null)}>Back to List</Button>
+              <Button variant="secondary" onClick={() => { setWorkspace(null); setEditingStmt(false); }}>Back to List</Button>
             </div>
           </CardHeader>
+          {editingStmt && workspace.reconciliation.status === "in_progress" ? (
+            <div className="border-b border-hairline border-zinc-200 bg-zinc-50 px-5 py-3">
+              <form onSubmit={handleSaveStatement} className="flex flex-wrap items-end gap-3">
+                <div>
+                  <label className="block text-14 font-medium text-zinc-700 mb-1" htmlFor="rec-edit-date">Statement Ending Date</label>
+                  <Input id="rec-edit-date" type="date" required value={editEndDate} onChange={(e) => setEditEndDate(e.target.value)} />
+                </div>
+                <div>
+                  <label className="block text-14 font-medium text-zinc-700 mb-1" htmlFor="rec-edit-end">Statement Ending Balance ($)</label>
+                  <Input id="rec-edit-end" required value={editEndingBalance} onChange={(e) => setEditEndingBalance(e.target.value)} />
+                </div>
+                <Button variant="primary" type="submit" loading={busy}>Save Statement</Button>
+                <Button variant="secondary" type="button" onClick={() => setEditingStmt(false)}>Cancel</Button>
+              </form>
+            </div>
+          ) : null}
           <CardBody className="p-0">
             <Table>
               <THead>
