@@ -145,6 +145,22 @@ const normEmail = (v) => String(v || '').trim().toLowerCase();
 // The Stripe profile's own record names this customer, and nobody else (no payer, not deleted).
 const ownsProfile = (owner, customer) => !owner.deleted && !owner.payerId && String(owner.customerId) === String(customer.id);
 
+// The Stripe side of one job: the profile's own record must name this customer (not a payer, not another customer,
+// not deleted, not blank), so a stale local link that no other local row shares still cannot redirect someone else's
+// profile. Stripe already holding the address (an earlier try that applied but lost its response) needs no second
+// write; otherwise the write uses this attempt's own idempotency key. Answers 'updated', 'stripe_owner' or
+// 'not_configured' (no Stripe key on this process); a Stripe error throws.
+async function pushToStripe(job, customer, email) {
+  const StripeService = require('./stripe');
+  const opts = { timeout: STRIPE_TIMEOUT_MS, maxNetworkRetries: 0 };
+  const owner = await StripeService.readCustomerOwner(customer.stripe_customer_id, opts);
+  if (!owner) return 'not_configured';
+  if (!ownsProfile(owner, customer)) return 'stripe_owner';
+  if (normEmail(owner.email) === normEmail(email)) return 'updated';
+  return StripeService.updateCustomerEmail(customer.stripe_customer_id, email,
+    { ...opts, idempotencyKey: `stripe-email-sync:${job.id}:${customer.stripe_customer_id}:${job.attempts}` });
+}
+
 async function processJob(jobId) {
   return db.transaction(async (trx) => {
     const claimed = await claim(trx, jobId);
@@ -179,17 +195,9 @@ async function processJob(jobId) {
       return 'recheck';
     }
 
-    const StripeService = require('./stripe');
-    const opts = { timeout: STRIPE_TIMEOUT_MS, maxNetworkRetries: 0 };
     let outcome;
     try {
-      // The Stripe profile's own record must name this customer (not a payer, not another customer, not deleted,
-      // not blank): a stale local link that no other local row shares still cannot redirect someone else's profile.
-      const owner = await StripeService.readCustomerOwner(customer.stripe_customer_id, opts);
-      if (!owner) return 'not_configured'; // untouched: a process with a key takes it (drainDue)
-      if (!ownsProfile(owner, customer)) return end('skipped', 'stripe_owner', true);
-      outcome = await StripeService.updateCustomerEmail(customer.stripe_customer_id, email,
-        { ...opts, idempotencyKey: `stripe-email-sync:${job.id}:${customer.stripe_customer_id}` });
+      outcome = await pushToStripe(job, customer, email);
     } catch (err) {
       const attempts = job.attempts + 1;
       const code = String(err.code || err.type || err.name || 'stripe_error').slice(0, 80);
@@ -199,6 +207,7 @@ async function processJob(jobId) {
       return attempts >= MAX_ATTEMPTS ? giveUp(trx, job, customer) : 'retry';
     }
     // No Stripe key on this process: untouched, a process with a key takes it (drainDue).
+    if (outcome === 'stripe_owner') return end('skipped', 'stripe_owner', true);
     return outcome === 'not_configured' ? 'not_configured' : end('done', 'updated');
   });
 }

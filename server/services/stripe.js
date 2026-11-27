@@ -830,10 +830,11 @@ const StripeService = {
     const stripe = getStripe();
     if (!stripe) return null;
     const c = await stripe.customers.retrieve(stripeCustomerId, {}, { timeout, maxNetworkRetries });
-    return { deleted: Boolean(c.deleted), customerId: c.metadata?.waves_customer_id || null, payerId: c.metadata?.waves_payer_id || null };
+    return { deleted: Boolean(c.deleted), customerId: c.metadata?.waves_customer_id || null, payerId: c.metadata?.waves_payer_id || null, email: c.email || null };
   },
 
-  // idempotencyKey: the sync passes one per job and profile, so a retry after a lost response replays the same write.
+  // idempotencyKey: the sync passes one per job, profile and attempt (a retry reads Stripe's email first, so a lost
+  // response that did apply finishes without a second write, and a cached error never blocks the next attempt).
   async updateCustomerEmail(stripeCustomerId, email, { timeout = 10000, maxNetworkRetries = 0, idempotencyKey } = {}) {
     const stripe = getStripe();
     if (!stripe) return 'not_configured';
