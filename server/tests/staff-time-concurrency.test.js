@@ -1133,3 +1133,23 @@ describe('Admin adds a missed shift', () => {
     await expect(timeTracking.adminAddEntry(request({ technician_id: 'tech-1' }))).rejects.toMatchObject({ statusCode: 404 });
   });
 });
+
+describe('adminEditEntry entry_type validation (Codex P2)', () => {
+  test('accepts admin_time and rejects unknown entry_type with 400 before querying', async () => {
+    jest.clearAllMocks();
+    await expect(timeTracking.adminEditEntry('entry-1', {
+      entry_type: 'bogus_type',
+      edit_reason: 'Fix typo',
+      edited_by: 'admin-1',
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(db.transaction).not.toHaveBeenCalled();
+
+    installTransaction([{ label: 'entry', table: 'time_entries', firstValue: undefined }], []);
+    await expect(timeTracking.adminEditEntry('entry-1', {
+      entry_type: 'admin_time',
+      edit_reason: 'Fix office hours',
+      edited_by: 'admin-1',
+    })).rejects.toThrow('Entry not found.');
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+});

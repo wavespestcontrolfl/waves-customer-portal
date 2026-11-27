@@ -152,7 +152,7 @@ async function resolveOwnerInterviewContext(conn, dateStrs) {
   let scopeToOwner = false;
   try {
     const techs = await conn('technicians')
-      .where({ is_active: true })
+      .where({ employment_status: 'active' })
       .select('id', 'email', 'role', 'field_dispatchable');
     if (Array.isArray(techs) && techs.length > 0) {
       const configured = String(process.env.IB_FULL_ACCESS_EMAILS || 'contact@wavespestcontrol.com')
@@ -165,8 +165,11 @@ async function resolveOwnerInterviewContext(conn, dateStrs) {
       const activeFieldCount = techs.filter((t) => t.field_dispatchable !== false).length;
       scopeToOwner = Boolean(ownerTechId && activeFieldCount > 1);
     }
-  } catch {
-    // Unit-test mocks without technicians table fall through cleanly.
+  } catch (err) {
+    // Re-throw real Postgres errors (e.g., schema/SQLSTATE other than missing table)
+    // so an open transaction is never silently left aborted; only unit-test mocks
+    // without a technicians table fall through cleanly.
+    if (err && typeof err.code === 'string' && err.code !== '42P01') throw err;
   }
 
   const absentDates = new Set();
@@ -181,8 +184,8 @@ async function resolveOwnerInterviewContext(conn, dateStrs) {
         const d = scheduledDateStr(a.absence_date);
         if (d) absentDates.add(d);
       }
-    } catch {
-      // Best-effort: absence table may be omitted in unit mocks.
+    } catch (err) {
+      if (err && typeof err.code === 'string' && err.code !== '42P01') throw err;
     }
   }
   return { ownerTechId, scopeToOwner, absentDates };

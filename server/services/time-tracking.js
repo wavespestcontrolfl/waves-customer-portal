@@ -585,12 +585,12 @@ function autoCloseReviewedBy(entry, updates, editedBy) {
   return { auto_close_reviewed_at: new Date(), auto_close_reviewed_by: editedBy || null };
 }
 
-const ALLOWED_ENTRY_TYPES = new Set(['shift', 'job', 'break', 'drive']);
+const ALLOWED_ENTRY_TYPES = new Set(['shift', 'job', 'break', 'drive', 'admin_time']);
 const MAX_EDITED_ENTRY_MINUTES = 24 * 60;
 
 function validateAdminEditInput({ clock_in, clock_out, entry_type, edit_reason }) {
   if (entry_type !== undefined && entry_type !== null && !ALLOWED_ENTRY_TYPES.has(entry_type)) {
-    throw staffTimeHttpError(400, 'entry_type must be shift, job, break, or drive.');
+    throw staffTimeHttpError(400, 'entry_type must be shift, job, break, drive, or admin_time.');
   }
   if (edit_reason !== undefined && (typeof edit_reason !== 'string' || !edit_reason.trim())) {
     throw staffTimeHttpError(400, 'edit_reason cannot be empty.');

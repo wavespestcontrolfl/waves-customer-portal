@@ -243,11 +243,11 @@ postgres('payroll pay runs', () => {
       const first = (await draft(W1)).body.run;
       expect(first.checks.map((c) => c.name)).toEqual(['Sample Alpha']);
       expect(Object.fromEntries(first.blocked.map((b) => [b.name, b.reason]))).toEqual({ 'Sample NoRate': 'No pay rate set' });
-      // Pay date Fri 2026-10-09: the floor is $15.00 (it was $14.00 until 29 Sep 2026).
+      // Work week W3 (Mon 2026-09-28..Sun 2026-10-04, paid Fri 2026-10-09): the floor on 2026-10-04 is $15.00 (was $14.00 until 29 Sep 2026).
       const third = (await draft(W3)).body.run;
       expect(third.checks.map((c) => c.name)).toEqual(['Sample Alpha']);
       expect(Object.fromEntries(third.blocked.map((b) => [b.name, b.reason]))).toEqual({
-        'Sample UnderFloor': 'Hourly rate $14.99 is below the Florida minimum wage of $15.00 on 2026-10-09',
+        'Sample UnderFloor': 'Hourly rate $14.99 is below the Florida minimum wage of $15.00 on 2026-10-04',
       });
       expect(await count('payroll_checks')).toBe(2);
     });

@@ -1498,8 +1498,7 @@ async function previewWeek(technicianId, weekStart, conn = db) {
   const { frozen, recordedNone, stops, days } = weekRowsOf(paidWeek, week);
   const prompts = week && !recordedNone ? { toSet: week.takeBackToSet, answers: week.takeBackAnswers } : { toSet: [], answers: [] };
   const { applied, result, outstanding } = weekFigures({ frozen, recordedNone, stops, week, settings, days });
-  // GET /production-share/preview is strictly read-only: refund flag alerts are raised when pay runs evaluate/draft,
-  // not as a side-effect of opening the preview screen.
+  await require('./production-share-refund-alerts').raiseRefundFlagAlerts({ technicianId: id, weekStart, stops: paidWeek ? [] : stops, takeBackToSet: prompts.toSet });
   // The conflict tuples stay on the server: the page gets the stop's revision.
   const shown = stops.map((stop) => { const copy = { ...stop }; delete copy.conflictTuples; delete copy.refundInvoices; return copy; });
   return {

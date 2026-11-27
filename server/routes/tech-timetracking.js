@@ -71,7 +71,8 @@ router.post('/start-job/:jobId', async (req, res, next) => {
   } catch (err) {
     if (err.message.includes('Must be clocked in')) return res.status(409).json({ error: err.message });
     if (err.code === 'job_not_assigned') return res.status(404).json({ error: err.message });
-    if (err.code === 'street_level_hold' || err.code === 'job_already_completed' || err.code === 'VISIT_ON_HOLD') {
+    if (err.code === 'street_level_hold') return res.status(409).json({ error: err.message, code: 'street_level_hold' });
+    if (err.code === 'job_already_completed' || err.code === 'VISIT_ON_HOLD') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
     if (err.statusCode || err.status) {
