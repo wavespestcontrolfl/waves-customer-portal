@@ -9175,7 +9175,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // only; the preflight above cannot see a spray a concurrent completion commits).
         if (!resumingCommittedCompletion && insertedServiceProducts.length) {
           // The cap re-check under the customer lock stays, but a breach is a warning (owner 2026-11-26), once per completion.
-          const capWarning = await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id, capsAreWarnings: true });
+          const capWarning = await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
           if (capWarning && !lawnWarningFindings.some((finding) => finding.limitType === BERMUDA_STEP_LIMIT_TYPE)) lawnWarningFindings.push(bermudaStepFinding(capWarning));
         }
         if (insertedServiceProducts.length) {

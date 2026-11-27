@@ -45,7 +45,7 @@ describe('a bermuda removal step past its limit: recorded, flagged, alerted', ()
     expect(source).toContain('if (bermudaLimitMessage) lawnWarningFindings.push(bermudaStepFinding(bermudaLimitMessage));');
     expect(source).toContain('bermudaLimitMessage === require(\'./lawn-bermuda-removal\').NOT_CONFIGURED_MESSAGE');
     expect(source).toContain('if (bermudaAreaMessage) {'); // the area data-entry check no longer hides behind the limit message
-    expect(source).toContain('enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id, capsAreWarnings: true })');
+    expect(source).toContain('enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id })');
   });
 
   test('one office alert names the limit, and the alert rules accept it', async () => {

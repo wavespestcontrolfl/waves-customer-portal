@@ -545,11 +545,11 @@ async function capViolation(knex, visit, sprayed) {
 // code lawn_bermuda_limit_reached and the transaction rolls back. The preflight
 // (bermudaLimitViolation, before any write) stays; this closes the race after it.
 // A fresh attempt only (the caller skips a resume). Gate off or no step: nothing.
-// `capsAreWarnings` (the completion's call, owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED"): a cap
-// breach is returned as the message for the completion to record and alert instead of throwing. The pair rule and the
-// not-configured refusal still throw (data entry and setup, not a cap). Returns the cap message, or nothing.
+// A cap breach (owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED") is returned as the message for the
+// completion to record and alert, never thrown. The pair rule and the not-configured refusal still throw (data entry and
+// setup, not a cap). Returns the cap message, or nothing.
 const LOCK_NAMESPACE = 'bermuda-removal-step';
-async function enforceStepLimitsInTransaction(trx, products, { serviceId, capsAreWarnings = false } = {}) {
+async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return;
   const { recognition, fusilade, unconfigured } = await submittedStepProducts(trx, products);
   if (!recognition && !fusilade) return;
@@ -571,7 +571,7 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId, capsAr
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
   const message = (unconfigured && stepVisit) ? NOT_CONFIGURED_MESSAGE : await capViolation(trx, visit, sprayed);
-  if (message && (!capsAreWarnings || message === NOT_CONFIGURED_MESSAGE)) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
+  if (message === NOT_CONFIGURED_MESSAGE) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
   return message || undefined;
 }
 
