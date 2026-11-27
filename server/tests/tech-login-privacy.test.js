@@ -156,7 +156,6 @@ describe('M5: the promise routes answer 404 for a customer outside the technicia
     addHumanCommitment: jest.fn(async () => ({ id: 'new' })),
   }));
   jest.mock('../services/call-reschedule-proposals', () => ({
-    enabled: () => true,
     listProposals: jest.fn(async () => []),
     dismissProposal: jest.fn(async () => ({ ok: true })),
     previewProposal: jest.fn(),

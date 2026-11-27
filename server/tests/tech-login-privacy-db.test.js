@@ -10,7 +10,6 @@ const { randomUUID } = require('crypto');
 
 // Read when the gate map loads, so it is set before any require.
 process.env.GATE_CALL_COMMITMENTS = 'true';
-process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
 
 const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
@@ -32,7 +31,6 @@ jest.mock('../middleware/admin-auth', () => {
 
 afterAll(async () => {
   delete process.env.GATE_CALL_COMMITMENTS;
-  delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
   delete process.env.GATE_TECH_LOGIN_PRIVACY;
   if (!SKIP) await require('../models/db').destroy();
 });

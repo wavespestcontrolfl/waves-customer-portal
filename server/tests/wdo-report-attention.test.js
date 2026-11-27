@@ -20,14 +20,12 @@ jest.mock('../services/admin-alert-episodes', () => ({
   closeAdminAlertKeys: jest.fn().mockResolvedValue(0),
   closeAdminAlertIds: jest.fn().mockResolvedValue(0),
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const episodes = require('../services/admin-alert-episodes');
 const logger = require('../services/logger');
-const { isEnabled } = require('../config/feature-gates');
 const { runWdoReportAttentionSweep, _private } = require('../services/wdo-report-attention');
 
 function chain(overrides = {}) {
@@ -128,16 +126,7 @@ describe('findAttentionItems — held reports that nobody is releasing', () => {
 });
 
 describe('runWdoReportAttentionSweep', () => {
-  test('gated off → skipped, no queries', () => {
-    isEnabled.mockReturnValue(false);
-    return runWdoReportAttentionSweep().then((r) => {
-      expect(r).toEqual({ skipped: true, reason: 'gated_off' });
-      expect(db).not.toHaveBeenCalled();
-    });
-  });
-
   test('clean lane → no bell', async () => {
-    isEnabled.mockReturnValue(true);
     db.mockImplementation(() => chain());
     const r = await runWdoReportAttentionSweep();
     expect(r.clean).toBe(true);
@@ -145,7 +134,6 @@ describe('runWdoReportAttentionSweep', () => {
   });
 
   test('uncovered stall rings one bell with item metadata', async () => {
-    isEnabled.mockReturnValue(true);
     db.mockImplementation((table) => {
       if (table === 'projects') {
         // First projects query = signedUnsent, second = stuckHolds. Return one
@@ -172,7 +160,6 @@ describe('runWdoReportAttentionSweep', () => {
   });
 
   test('already-covered items stay silent', async () => {
-    isEnabled.mockReturnValue(true);
     db.mockImplementation((table) => {
       if (table === 'projects' || table === 'projects as p') {
         return chain({
@@ -195,7 +182,6 @@ describe('runWdoReportAttentionSweep', () => {
   });
 
   test('a query failure fails the sweep loudly instead of reporting clean', async () => {
-    isEnabled.mockReturnValue(true);
     db.mockImplementation((table) => {
       if (table === 'projects') {
         return chain({ select: jest.fn().mockRejectedValue(new Error('relation missing')) });
@@ -207,7 +193,6 @@ describe('runWdoReportAttentionSweep', () => {
   });
 
   test('stuck-appt query allowlists active visit states', async () => {
-    isEnabled.mockReturnValue(true);
     let apptChain;
     db.mockImplementation((table) => {
       if (table === 'scheduled_services as ss') {
@@ -233,7 +218,6 @@ describe('runWdoReportAttentionSweep', () => {
   });
 
   test('held pay-before-report drafts are excluded from signed-unsent', async () => {
-    isEnabled.mockReturnValue(true);
     const projectsChains = [];
     db.mockImplementation((table) => {
       const c = chain();
@@ -261,7 +245,6 @@ describe('runWdoReportAttentionSweep', () => {
   });
 
   test('a failed bell insert fails the sweep instead of recording a ring', async () => {
-    isEnabled.mockReturnValue(true);
     NotificationService.notifyAdmin.mockResolvedValue(null); // insert failed
     db.mockImplementation((table) => {
       if (table === 'projects' || table === 'projects as p') {
@@ -316,7 +299,6 @@ describe('runWdoReportAttentionSweep — rings', () => {
   const standingRow = (id, ids) => ({ id, metadata: { dedupeKey: KEY(...ids), item_ids: ids } });
 
   beforeEach(() => {
-    isEnabled.mockReturnValue(true);
   });
 
   test('the ring carries bellDefault; the rest of the call is what it was', async () => {

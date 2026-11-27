@@ -28,7 +28,7 @@ successful completion or expiry removes the pending request.
 ## Existing controls
 
 - Measurement: `GATE_SCHEDULE_QUALITY_MEASUREMENTS`.
-- Warning cards: measurement plus `GATE_SCHEDULE_QUALITY_ALERTS`.
+- Warning cards: measurement (`GATE_SCHEDULE_QUALITY_MEASUREMENTS`).
 - Guarded repair: `GATE_ROUTE_REORDER` and `GATE_ROUTE_REORDER_REPAIR`.
 - Background retry scheduling: the existing `GATE_CRON_JOBS` control.
 

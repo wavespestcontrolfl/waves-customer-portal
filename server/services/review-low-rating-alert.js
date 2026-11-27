@@ -25,13 +25,12 @@
  * justify a model). Internal only: nothing is sent to the reviewer. The item
  * names the reviewer and the stars and never quotes the review: a customer's
  * own words carry dates and exclamation marks the alert rules forbid, and the
- * Reviews page shows the text. Gate: GATE_REVIEW_ALERT, read at call time
- * (reviewLowRatingAlertLive). Never throws: a failed pass must not fail the
+ * Reviews page shows the text. Never throws: a failed pass must not fail the
  * review sync.
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { reviewLowRatingAlertLive, alertEpisodesLive } = require('../config/feature-gates');
+const { alertEpisodesLive } = require('../config/feature-gates');
 
 // Error code / constraint only: a knex error's message renders the SQL, and a
 // notification write carries the reviewer's name (AGENTS.md: no PII in logs).
@@ -101,7 +100,7 @@ async function activationBoundary(conn = db) {
   const now = rows[0].now;
   await conn('system_settings').insert({
     key: ACTIVATION_SETTINGS_KEY, value: new Date(now).toISOString(), category: 'reviews',
-    description: 'First live run of GATE_REVIEW_ALERT; Google reviews written before it never ring the bad-review bell.',
+    description: 'First live run of the bad-review bell; Google reviews written before it never ring the bad-review bell.',
   }).onConflict('key').ignore();
   const settled = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
   return new Date(settled?.value || now);
@@ -143,9 +142,8 @@ function keyIndex(openMetadata) {
 }
 
 // Called at the start of every review sync: fixes the boundary on the first
-// gated one, before its pull. Gate off = nothing. Never throws.
+// one, before its pull. Never throws.
 async function recordActivation(conn = db) {
-  if (!reviewLowRatingAlertLive()) return null;
   try {
     return await activationBoundary(conn);
   } catch (err) {
@@ -160,7 +158,6 @@ async function recordActivation(conn = db) {
  */
 async function syncLowRatingReviewAlerts({ conn = db, now = new Date() } = {}) {
   const out = { raised: 0, failed: 0, closed: 0 };
-  if (!reviewLowRatingAlertLive()) return { ...out, skipped: 'gate_off' };
   // One pass at a time (pre-push audit P1): the close step judges open items
   // against THIS pass's snapshot, so an overlapping pass (a manual sync during
   // the hourly one) could close an item the other just raised. A pass that

@@ -27,9 +27,8 @@ jest.mock('../models/db', () => {
   fn.transaction = jest.fn();
   return fn;
 });
-// Lazily required by runScheduleQualityAlertsOnly — no existing test in this
-// file sets GATE_SCHEDULE_QUALITY_ALERTS, so the real module is never
-// otherwise exercised here.
+// Lazily required by runScheduleQualityAlertsOnly — the real module is never
+// exercised here.
 jest.mock('../services/scheduling/quality-alerts', () => ({
   refreshScheduleQualityAlerts: jest.fn(),
 }));

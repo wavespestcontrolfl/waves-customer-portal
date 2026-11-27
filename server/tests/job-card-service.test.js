@@ -1299,29 +1299,23 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
   test('the scheduled T&S guide keeps the mix and warns beside it for an unverified product label (owner 2026-11-26)', async () => {
-    process.env.GATE_PROTOCOL_SOP = 'true';
-    try {
-      const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
-        products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: null }] });
-      const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
-      const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
-      expect(card.protocol.procedure.fieldGuide.month).toBe('Jan');
-      expect(card.protocol.procedure.fieldGuide.products.tritek.mix).toEqual([1.28, 1.28]);
-      expect(card.protocol.procedure.fieldGuide.products.tritek.mixWarning).toBe('Label rate not yet verified');
-      expect(card.protocol.procedure.fieldGuide.products.tritek.summary).not.toMatch(/Mix withheld/);
-      expect(card.protocol.procedure.fieldGuide.products.tritek.url).toMatch(/brandt/);
-      // Holding a job must not mutate the shared admin reference.
-      expect(require('../config/tree-shrub-field-guide.json').products.tritek.mix).toEqual([1.28, 1.28]);
-    } finally {
-      delete process.env.GATE_PROTOCOL_SOP;
-    }
+    const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
+      products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: null }] });
+    const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
+    const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(card.protocol.procedure.fieldGuide.month).toBe('Jan');
+    expect(card.protocol.procedure.fieldGuide.products.tritek.mix).toEqual([1.28, 1.28]);
+    expect(card.protocol.procedure.fieldGuide.products.tritek.mixWarning).toBe('Label rate not yet verified');
+    expect(card.protocol.procedure.fieldGuide.products.tritek.summary).not.toMatch(/Mix withheld/);
+    expect(card.protocol.procedure.fieldGuide.products.tritek.url).toMatch(/brandt/);
+    // Holding a job must not mutate the shared admin reference.
+    expect(require('../config/tree-shrub-field-guide.json').products.tritek.mix).toEqual([1.28, 1.28]);
   });
 
   // Owner 2026-10-29 ("i just want to warn techs"): weather never withholds a guide
   // mix. A missing forecast shows it with no warning; an open label review (the label, not the weather) shows it with a
   // warning (owner 2026-11-26: warned, never blocked).
   test('the T&S guide shows a mix when only the forecast is missing, and a mix with a warning when a label review is open', async () => {
-    process.env.GATE_PROTOCOL_SOP = 'true';
     const sourceCheck = require('../services/epa-product-label').checkEpaSource;
     try {
       const guide = async (oil) => {
@@ -1346,7 +1340,6 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(held.mix).toEqual([1.28, 1.28]);
       expect(held.mixWarning).toBe('Label weather review still open, see product checks');
     } finally {
-      delete process.env.GATE_PROTOCOL_SOP;
       delete process.env.GATE_LABEL_PIPELINE;
     }
   });
