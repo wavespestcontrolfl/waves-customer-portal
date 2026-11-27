@@ -333,7 +333,9 @@ const MATCH_RULES = [
     // close-out already reads these keys as regular pest work, and a service no rule claims gets no card (below).
     serviceKeys: ['pest_general_quarterly', 'pest_general_monthly', 'pest_initial_cleanout',
       'pest_general_bimonthly', 'pest_general_semiannual', 'one_time_pest_control', 'pest_re_service', 'pest_rodent_quarterly'],
-    terms: ['pest', 'quarterly', 'bimonthly', 'bi-monthly', 'monthly', 'perimeter'],
+    // "re-service", "callback", "semi-annual" and "recurring": the names the close-out reads as regular pest work with the house mix
+    // (client lib/pest-default-mix.js). Another line's re-service ("Lawn Care Re-Service") is that line's program by its name.
+    terms: ['pest', 'quarterly', 'bimonthly', 'bi-monthly', 'monthly', 'perimeter', 're-service', 'reservice', 'callback', 'semi-annual', 'semiannual', 'recurring'],
   },
   {
     programKey: 'tree_shrub',

@@ -234,6 +234,8 @@ it('a bed bug visit whose card lists no products (the inspection, a follow-up) s
 });
 
 // A service with no protocol card (owner pick D18): the close-out states it in place of a list of the card's actions.
+// The fixture is a service with no typed findings form and no specialty form: those keep their own close-out and never
+// offered the general pest actions (wildlife trapping, bee and wasp).
 function stubFetchWithActions(actionsResponse) {
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     if (String(url).includes('/completion-actions')) return { ok: true, json: async () => actionsResponse };
@@ -243,9 +245,9 @@ function stubFetchWithActions(actionsResponse) {
 const NO_CARD_NOTE = 'Inspection only, no product: this service has no protocol card.';
 
 it('a service with no protocol card shows "Inspection only, no product" on the close-out', async () => {
-  stubFetchWithActions({ serviceType: 'Wildlife Trapping Service', programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
+  stubFetchWithActions({ serviceType: 'Courtesy Visit', programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
   await act(async () => {
-    render(<CompletionPanel service={cockroachService({ serviceType: 'Wildlife Trapping Service', completionProfile: { serviceKey: 'wildlife_trapping' }, findingsSchema: null })} products={cockroachCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+    render(<CompletionPanel service={cockroachService({ serviceType: 'Courtesy Visit', completionProfile: null, findingsSchema: null })} products={cockroachCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
   });
   expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
   expect(screen.queryByText('Protocol actions unavailable.')).toBeNull();

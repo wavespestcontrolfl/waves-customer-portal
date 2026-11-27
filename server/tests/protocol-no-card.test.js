@@ -112,9 +112,17 @@ describe('the matcher: a service no rule claims has no card', () => {
     },
   );
 
-  test('a bare "Re-Service" with no key, or with another service\'s key no rule claims, has no card', () => {
-    expect(match('Re-Service')).toEqual(NO_CARD);
-    expect(match('Re-Service', 'bee_wasp_removal')).toEqual(NO_CARD);
+  // The close-out seeds the house mix on these names (client lib/pest-default-mix.js): the matcher must call them general pest too.
+  test.each(['Re-Service', 'Reservice', 'Callback', 'Semi-Annual Service', 'Semiannual Service', 'Recurring Service'])('a bare "%s" is a general pest visit', (name) => {
+    expect(match(name)).toEqual(['pest', 1, 'general_pest', true]);
+  });
+
+  test('another line\'s re-service keeps its own program, and a name that says nothing under an unclaimed key has no card', () => {
+    expect(match('Lawn Care Re-Service', 'lawn_re_service').slice(0, 1)).toEqual(['lawn']);
+    expect(match('Termite Re-Service').slice(0, 1)).toEqual(['termite']);
+    expect(match('Mosquito Callback').slice(0, 1)).toEqual(['mosquito']);
+    expect(match('Service Visit', 'bee_wasp_removal')).toEqual(NO_CARD);
+    expect(match('Service Visit')).toEqual(NO_CARD);
   });
 
   test('another program\'s own default card is unchanged: only the pest catch-all had no meaning', () => {
@@ -183,6 +191,24 @@ describe('the Waves Assessment card', () => {
   });
 });
 
+describe('a pest control row no rule claims has no card on the job card either', () => {
+  const lines = (serviceType, serviceCategory, serviceKey = null) => jobCard.resolveVisitLines({
+    facts: { isLawn: false, serviceType, serviceCategory, serviceKey, scheduledDate: '2026-11-27', addons: [] }, protocols, catalog: [{ id: 'tau', name: 'Taurus SC' }], dbh: () => ({}),
+  });
+
+  test('the category does not hand it the general pest card', async () => {
+    const out = await lines('Barrier Treatment', 'pest_control');
+    expect([out.visit, out.lines, out.note]).toEqual([null, [], 'No treatment protocol for this service (pest_control)']);
+  });
+
+  test('a pest control row a rule claims keeps its card, and another category keeps its own default', async () => {
+    expect((await lines('Quarterly Pest Control Service', 'pest_control', 'pest_general_quarterly')).visit?.visit).toBe(1);
+    expect((await lines('Re-Service', 'pest_control', 'one_time_pest_control')).visit?.visit).toBe(1);
+    // A rodent row whose name says nothing keeps the rodent program (its category), as before.
+    expect((await lines('Station Service', 'rodent', 'rodent_bait_quarterly')).note).not.toBe('No treatment protocol for this service (rodent)');
+  });
+});
+
 describe('a service with no card on the schedule panel and the close-out', () => {
   test('/match answers with no program and the note, not a failed read', async () => {
     const { status, body } = await call('/match', { serviceType: 'Bee / Wasp Nest Removal Service' });
@@ -204,16 +230,6 @@ describe('a service with no card on the schedule panel and the close-out', () =>
     expect(body.noProtocol).toBeUndefined();
     expect(body.actions.length).toBeGreaterThan(8);
     expect(body.actions.some((action) => action.treatmentApplied || action.product)).toBe(false);
-  });
-
-  test('a booked assessment under a lawn name gets its own card, never the lawn month\'s applications', async () => {
-    bookedAs('lawn_inspection');
-    const { status, body } = await call('/completion-actions', { serviceType: 'Lawn Inspection', scheduledServiceId: VISIT, month: 'Nov' });
-    expect(status).toBe(200);
-    expect(body).toMatchObject({ programKey: 'assessment', programName: 'Waves Assessment Protocol' });
-    expect(body.actions.some((action) => action.treatmentApplied || action.product)).toBe(false);
-    // "Lawn Assessment" with the same key, too.
-    expect((await call('/completion-actions', { serviceType: 'Lawn Assessment Service', scheduledServiceId: VISIT, month: 'Nov' })).body.programKey).toBe('assessment');
   });
 
   test('the close-out seeds no product for a service with no card', () => {

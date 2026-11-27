@@ -550,8 +550,11 @@ function addonProgramKey(category, name, protocols, serviceKey = null) {
   if (isMistingDesignConsultation({ serviceKey, name }) || isMistingSystemServiceUnconfigured({ serviceKey, name })) return null;
   if (serviceKey && rule.nonChemical?.includes(serviceKey)) return null;
   if (serviceKey && rule.keys?.[serviceKey]) return rule.keys[serviceKey];
-  const picked = matchServiceProtocol(protocols, name, { serviceKey })?.programKey;
-  return rule.any.includes(picked) ? picked : rule.fallback;
+  const match = matchServiceProtocol(protocols, name, { serviceKey });
+  // A pest control row whose name and key no rule claims has no card (the matcher's no_protocol, owner pick D18): the general
+  // pest card is not its default. Another category's fallback stays: its names need not say the line (a lawn row named "Fertilization").
+  if (match?.reason === 'no_protocol' && rule.fallback === 'pest') return null;
+  return rule.any.includes(match?.programKey) ? match.programKey : rule.fallback;
 }
 
 /**
@@ -2411,7 +2414,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     || isMistingSystemServiceUnconfigured({ serviceKey: svc.service_key, name: svc.service_type });
   // A visit with no category whose name and key no rule claims (the matcher's no_protocol: a bare "Barrier Treatment") has no card,
   // so it is no treatment either: the search never doses a product on it.
-  const noCard = !svc.service_category && matchServiceProtocol(protocols, svc.service_type, { serviceKey: svc.service_key || null }).reason === 'no_protocol';
+  const noCard = !svc.service_category && matchServiceProtocol(protocols, svc.service_type, { serviceKey: svc.service_key }).reason === 'no_protocol';
   const primaryKey = mistingNonTreatment || noCard
     ? null
     : (svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined);

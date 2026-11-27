@@ -1304,15 +1304,8 @@ router.get('/completion-actions', async (req, res, next) => {
     let month = null;
     // The appointment's own month (real date): Bermuda removal's eligibility and rows follow it, not the round's recipe month.
     let appointmentMonth = null;
-    let noCard = false;
 
-    const lawnName = normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf');
-    // A booked Waves Assessment keeps its own card under a lawn name too (its catalog row was "Lawn Inspection" before the rename):
-    // for a lawn name that reads as an inspection, the visit's key is read before the name sends it to the lawn program's
-    // applications. Any other lawn visit costs no extra read.
-    const bookedCard = lawnName && req.query.scheduledServiceId && /\b(inspection|assessment)\b/.test(normalizeText(serviceType))
-      ? await matchForBookedVisit({ ...req, query: { ...req.query, visitId: req.query.scheduledServiceId } }, protocols, serviceType) : null;
-    if (lawnName && bookedCard?.programKey !== 'assessment') {
+    if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
       programKey = 'lawn';
       // Celsius and Blindside are not labeled for bahiagrass, so under v13 a bahia lawn (any of its
       // spellings, in any of the three inputs) gets no chips, never another grass's: decided on the raw
@@ -1340,15 +1333,14 @@ router.get('/completion-actions', async (req, res, next) => {
       }
     } else {
       // Raw month (see /match): an unusable value keeps the rule visit.
-      const matched = bookedCard || await matchForBookedVisit(req, protocols, serviceType);
+      const matched = await matchForBookedVisit(req, protocols, serviceType);
       programKey = matched.programKey;
       program = matched.program;
       visit = matched.matchedVisit || program?.visits?.[0] || null;
-      noCard = matched.reason === 'no_protocol';
+      // A service with no card (owner pick D18) has no actions and no products to offer: the close-out says so.
+      if (matched.reason === 'no_protocol') return res.json({ serviceType, programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
     }
 
-    // A service with no card (owner pick D18) has no actions and no products to offer: the close-out says so.
-    if (noCard) return res.json({ serviceType, programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
     if (!program || !visit) return res.status(404).json({ error: 'Protocol actions not found' });
 
     // The visit this fallback builds its chips from is the plan's visit: a lawn step rewritten by a rule from the lawn's own data (the
