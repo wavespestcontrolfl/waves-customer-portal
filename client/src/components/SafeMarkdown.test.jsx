@@ -60,6 +60,14 @@ describe('SafeMarkdown', () => {
     expect(container.querySelector('table tbody strong')).toHaveTextContent('$920');
   });
 
+  it('preserves escaped pipes inside markdown table cells without dropping trailing cells', () => {
+    const { container } = render(
+      <SafeMarkdown markdown={'| Rule | Formula | Notes |\n|---|---|---|\n| Pay | $23/hr \\| 22% | Final cell |'} />,
+    );
+    const cells = [...container.querySelectorAll('table tbody td')].map((td) => td.textContent);
+    expect(cells).toEqual(['Pay', '$23/hr | 22%', 'Final cell']);
+  });
+
   it('falls back to literal text when a table exceeds the rendered cell budget', () => {
     const headers = Array.from({ length: 10 }, (_, i) => `C${i}`).join(' | ');
     const sep = Array.from({ length: 10 }, () => '---').join(' | ');

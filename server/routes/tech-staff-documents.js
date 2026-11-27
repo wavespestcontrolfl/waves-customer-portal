@@ -19,10 +19,15 @@ router.use((req, res, next) => {
 const uuid = Joi.string().uuid();
 const actor = req => ({ id: req.technicianId, role: req.techRole });
 const requestEvidence = req => ({ ip: req.ip, user_agent: req.get('user-agent') });
-const pdfFilename = detail => {
+const pdfFilename = (detail, { acknowledgment, record } = {}) => {
   const rawKey = String(detail.document?.template_key || 'staff-document').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '');
   const versionNumber = detail.version?.version_number ? `-v${detail.version.version_number}` : '';
-  return `${rawKey || 'staff-document'}${versionNumber}.pdf`;
+  const suffix = acknowledgment?.id
+    ? `-acknowledged-${String(acknowledgment.id).replace(/[^a-z0-9-]+/gi, '').slice(0, 8)}`
+    : record?.id
+      ? `-record-${String(record.id).replace(/[^a-z0-9-]+/gi, '').slice(0, 8)}`
+      : '';
+  return `${rawKey || 'staff-document'}${versionNumber}${suffix}.pdf`;
 };
 const handle = fn => async (req, res, next) => {
   try { await fn(req, res); }
@@ -139,7 +144,7 @@ router.get('/:id/pdf', handle(async (req, res) => {
   }
   const { renderStaffDocumentPdf } = require('../services/pdf/staff-document-pdf');
   const pdf = await renderStaffDocumentPdf(detail, { acknowledgment, record });
-  res.type('application/pdf').set('Content-Disposition', `attachment; filename="${pdfFilename(detail)}"`).send(pdf);
+  res.type('application/pdf').set('Content-Disposition', `attachment; filename="${pdfFilename(detail, { acknowledgment, record })}"`).send(pdf);
 }));
 
 module.exports = router;

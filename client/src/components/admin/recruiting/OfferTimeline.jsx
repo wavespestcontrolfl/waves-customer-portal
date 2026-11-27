@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "../../ui";
 import SafeMarkdown from "../../SafeMarkdown";
+import { isNativeApp } from "../../../native/nativeFile";
 import { fetchSignedCopy, reviseOffer, setChecklistItem, withdrawOffer } from "./offerApi";
 import "./offer-print.css";
 import OfferFirstDays from "./OfferFirstDays";
@@ -89,9 +90,11 @@ export function SignedCopyView({ copy, onClose }) {
         )}
       </DialogBody>
       <DialogFooter className="waves-field-no-print">
-        <Button size="sm" variant="secondary" onClick={() => window.print()}>
-          Print / Save PDF
-        </Button>
+        {!isNativeApp() && (
+          <Button size="sm" variant="secondary" onClick={() => window.print()}>
+            Print / Save PDF
+          </Button>
+        )}
         <Button size="sm" onClick={onClose}>
           Close
         </Button>

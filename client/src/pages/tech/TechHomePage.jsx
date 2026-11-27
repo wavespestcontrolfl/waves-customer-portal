@@ -1662,6 +1662,11 @@ const SIGNOFF_FEEDBACK_TONE = {
   ok: { background: '#ECFDF5', border: '1px solid #A7F3D0', color: '#065F46' },
 };
 
+function isValidSignoffName(value) {
+  const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
+  return cleaned.length >= 3 && cleaned.length <= 180 && /^\S+(\s+\S+)+$/.test(cleaned);
+}
+
 function summarizeSignoffWeek(weekly, fallbackWeekStart) {
   const unpaidLunchMin = parseFloat(weekly.unpaid_meal_minutes) || 0;
   const otMin = parseFloat(weekly.overtime_minutes) || 0;
@@ -1756,7 +1761,7 @@ export function TimecardSignoffCard({ techName }) {
   // week, show paid hours (regular + overtime, both from the server) and the
   // lunch taken off. With none (gate off), the card is exactly as before.
   const summary = summarizeSignoffWeek(weekly, weekStart);
-  const canSign = attested && Boolean(signature.trim());
+  const canSign = attested && isValidSignoffName(signature);
   const disabled = submitting || !canSign;
   const feedbackTone = feedback ? SIGNOFF_FEEDBACK_TONE[feedback.isError ? 'error' : 'ok'] : null;
 

@@ -43,7 +43,27 @@ const MAX_TABLE_ROWS = 200;
 const MAX_TABLE_CELLS = 1000;
 
 function splitTableCells(line) {
-  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+  const trimmed = line.trim();
+  const inner = trimmed.startsWith("|") ? trimmed.slice(1) : trimmed;
+  const cells = [];
+  let current = "";
+  let endedWithUnescapedPipe = false;
+  for (let i = 0; i < inner.length; i += 1) {
+    if (inner[i] === "\\" && inner[i + 1] === "|") {
+      current += "|";
+      endedWithUnescapedPipe = false;
+      i += 1;
+    } else if (inner[i] === "|") {
+      cells.push(current.trim());
+      current = "";
+      endedWithUnescapedPipe = true;
+    } else {
+      current += inner[i];
+      endedWithUnescapedPipe = false;
+    }
+  }
+  if (!endedWithUnescapedPipe) cells.push(current.trim());
+  return cells;
 }
 
 function tryParseTable(lines, startIndex, remainingCells) {

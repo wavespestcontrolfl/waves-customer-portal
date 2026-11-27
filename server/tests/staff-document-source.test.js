@@ -64,6 +64,9 @@ test('renders markdown pipe tables, ordered lists, and mixed paragraph+bullet bl
   expect(html).toContain('<td><strong>$920</strong></td>');
   expect(html).not.toContain('<script>');
   expect(html).toMatch(/&(?:lt|#x3C);script/);
+  const escaped = renderSource(source('## Escaped {#escaped}\n| Rule | Formula | Notes |\n|---|---|---|\n| Pay | $23/hr \\| 22% | Final cell |'), values).sections[0].html;
+  expect(escaped).toContain('<td>$23/hr | 22%</td>');
+  expect(escaped).toContain('<td>Final cell</td>');
 });
 test('shared values cannot issue with embedded decision markers or merge placeholders', () => {
   for (const pay_schedule of ['[DECISION: approve the pay dates]', '[DECISION: confirm payday', '[OWNER: pick one', '{{approved.pay_dates}}']) {

@@ -155,7 +155,8 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
     if (ack) query.set('acknowledgment', ack.id);
     if (needsPreview) { query.set('effective_at', effective); query.set('preview_hash', preview.preview_hash); }
     const blob = await request(`/${document.id}/pdf?${query}`);
-    await downloadPdfBlob(blob, `${document.template_key}-v${version.version_number}${ack ? '-acknowledged' : ''}.pdf`);
+    const shortAck = ack?.id ? `-${String(ack.id).replace(/[^a-z0-9-]+/gi, '').slice(0, 8)}` : '';
+    await downloadPdfBlob(blob, `${document.template_key}-v${version.version_number}${ack ? `-acknowledged${shortAck}` : ''}.pdf`);
   }
 
   return <article className="staff-document-reader">

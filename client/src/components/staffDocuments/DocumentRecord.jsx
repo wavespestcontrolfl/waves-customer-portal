@@ -205,7 +205,9 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
     try {
       const blob = await request(`/${detail.document.id}/pdf?version=${version.id}&record=${record.id}`);
       const slug = detail.document.template_key || 'staff-record';
-      await downloadPdfBlob(blob, `${slug}-v${version.version_number || 1}-${record.completed_at ? 'signed' : 'record'}.pdf`);
+      const isSigned = Boolean(record.completed_at && state.isSignatureForm && signedNameValid(record.answers?.['signed-name']));
+      const shortId = String(record.id || '').replace(/[^a-z0-9-]+/gi, '').slice(0, 8);
+      await downloadPdfBlob(blob, `${slug}-v${version.version_number || 1}-${isSigned ? 'signed' : 'record'}${shortId ? `-${shortId}` : ''}.pdf`);
     } catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }

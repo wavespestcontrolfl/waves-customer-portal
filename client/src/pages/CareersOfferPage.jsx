@@ -855,69 +855,71 @@ function OpenOffer({ token, data, outdated, onApplied, onRefused, onReload, onRe
       <h1 style={H1_STYLE}>Your job offer</h1>
       <BrandCard padding={24}>
         <OfferLetterContent data={data} />
-        <TextConsent token={token} initial={data.textConsent} version={data.version} snapshot={data} onPending={setConsentPending} onStale={onRecheck} onUnknown={markUnknown} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} onRead={onRead} locked={blocked} />
-        <SignBlock
-          name={name}
-          onName={setName}
-          agreed={agreed}
-          onAgreed={setAgreed}
-          busy={anyBusy}
-          saving={accept.busy}
-          frozen={accept.frozen}
-          onAccept={() => {
-            accept.run('/accept', { signedName: name.trim(), version: data.version });
-          }}
-        />
-        {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
-        <LostBanner action={accept} />
-        {unknown > 0 && (
-          <div style={ERROR_BANNER_STYLE} role="alert">
-            {REFRESH_ERROR}
-            <div style={{ marginTop: 8 }}>
-              <BrandButton variant="secondary" disabled={rechecking} onClick={recheck}>
-                {rechecking ? 'Checking…' : 'Check again'}
-              </BrandButton>
+        <div className="waves-field-no-print">
+          <TextConsent token={token} initial={data.textConsent} version={data.version} snapshot={data} onPending={setConsentPending} onStale={onRecheck} onUnknown={markUnknown} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} onRead={onRead} locked={blocked} />
+          <SignBlock
+            name={name}
+            onName={setName}
+            agreed={agreed}
+            onAgreed={setAgreed}
+            busy={anyBusy}
+            saving={accept.busy}
+            frozen={accept.frozen}
+            onAccept={() => {
+              accept.run('/accept', { signedName: name.trim(), version: data.version });
+            }}
+          />
+          {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
+          <LostBanner action={accept} />
+          {unknown > 0 && (
+            <div style={ERROR_BANNER_STYLE} role="alert">
+              {REFRESH_ERROR}
+              <div style={{ marginTop: 8 }}>
+                <BrandButton variant="secondary" disabled={rechecking} onClick={recheck}>
+                  {rechecking ? 'Checking…' : 'Check again'}
+                </BrandButton>
+              </div>
             </div>
-          </div>
-        )}
-        <OutdatedBanner outdated={outdated} unresolved={unresolved} />
-
-        <div style={{ display: 'grid', gap: 10, marginTop: 14 }} className="waves-field-no-print">
-          {!isNativeApp() && (
-            <BrandButton fullWidth variant="secondary" disabled={anyBusy} onClick={() => window.print()}>
-              Print / Save PDF copy
-            </BrandButton>
           )}
-          <BrandButton fullWidth variant="secondary" disabled={anyBusy} onClick={() => setPanel(panel === 'date' ? 'none' : 'date')}>
-            Ask for another start date
-          </BrandButton>
-          <BrandButton fullWidth variant="ghost" disabled={anyBusy} onClick={() => setPanel(panel === 'decline' ? 'none' : 'decline')}>
-            Decline
-          </BrandButton>
-        </div>
+          <OutdatedBanner outdated={outdated} unresolved={unresolved} />
 
-        {panel === 'date' && (
-          <DateRequestPanel
-            busy={dateReq.busy}
-            frozen={dateReq.frozen}
-            locked={anyBusy}
-            error={dateReq.error}
-            onCancel={() => setPanel('none')}
-            onSubmit={(payload) => dateReq.run('/date-request', { ...payload, version: data.version })}
-          />
-        )}
-        <LostBanner action={dateReq} />
-        {panel === 'decline' && (
-          <DeclinePanel
-            busy={decline.busy}
-            frozen={decline.frozen}
-            locked={anyBusy}
-            error={decline.error}
-            onCancel={() => setPanel('none')}
-            onSubmit={(payload) => decline.run('/decline', { ...payload, version: data.version })}
-          />
-        )}
-        <LostBanner action={decline} />
+          <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+            {!isNativeApp() && (
+              <BrandButton fullWidth variant="secondary" disabled={anyBusy} onClick={() => window.print()}>
+                Print / Save PDF copy
+              </BrandButton>
+            )}
+            <BrandButton fullWidth variant="secondary" disabled={anyBusy} onClick={() => setPanel(panel === 'date' ? 'none' : 'date')}>
+              Ask for another start date
+            </BrandButton>
+            <BrandButton fullWidth variant="ghost" disabled={anyBusy} onClick={() => setPanel(panel === 'decline' ? 'none' : 'decline')}>
+              Decline
+            </BrandButton>
+          </div>
+
+          {panel === 'date' && (
+            <DateRequestPanel
+              busy={dateReq.busy}
+              frozen={dateReq.frozen}
+              locked={anyBusy}
+              error={dateReq.error}
+              onCancel={() => setPanel('none')}
+              onSubmit={(payload) => dateReq.run('/date-request', { ...payload, version: data.version })}
+            />
+          )}
+          <LostBanner action={dateReq} />
+          {panel === 'decline' && (
+            <DeclinePanel
+              busy={decline.busy}
+              frozen={decline.frozen}
+              locked={anyBusy}
+              error={decline.error}
+              onCancel={() => setPanel('none')}
+              onSubmit={(payload) => decline.run('/decline', { ...payload, version: data.version })}
+            />
+          )}
+          <LostBanner action={decline} />
+        </div>
 
         {data.expiresAt && (
           <p style={{ ...BODY_STYLE, marginTop: 18, fontSize: 14, color: MUTED, textAlign: 'center' }}>
