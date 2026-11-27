@@ -37,6 +37,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { savepointRead } = require('../utils/savepoint-read');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 
 // The concentration rule (the date of the 0.03% ruling, the house mix, units) lives in the shared module, so the
@@ -45,6 +46,20 @@ const { TAURUS_LOW_RATE_SINCE, taurusConcentration } = require('../../shared/tau
 
 // The close-out picker's own identity rule (client lib/taurus-yearly-limit.js: /^taurus\s*sc\b/i on the trimmed name).
 const TAURUS_NAME_PATTERN = '^\\s*taurus\\s*sc\\M';
+
+// The rows that count at all (not retracted, this year, a Taurus SC product): shared by the one-visit and the
+// batched reads so the two cannot disagree on what a Taurus application is.
+const COUNTED_ROWS_SQL = `
+  pah.retracted_at IS NULL
+    AND pah.application_date >= CAST(:yearStart AS date)
+    AND pah.application_date < CAST(:nextYearStart AS date)
+    AND (
+      pah.product_id IN (SELECT pc.id FROM products_catalog pc WHERE pc.name ~* :namePattern)
+      OR EXISTS (
+        SELECT 1 FROM service_products sp
+        WHERE sp.id = pah.service_product_id AND sp.product_name ~* :namePattern
+      )
+    )`;
 
 const LEDGER_SQL = `
   SELECT pah.id,
@@ -58,16 +73,7 @@ const LEDGER_SQL = `
   FROM property_application_history pah
   LEFT JOIN service_records sr ON sr.id = pah.service_record_id
   LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
-  WHERE pah.retracted_at IS NULL
-    AND pah.application_date >= CAST(:yearStart AS date)
-    AND pah.application_date < CAST(:nextYearStart AS date)
-    AND (
-      pah.product_id IN (SELECT pc.id FROM products_catalog pc WHERE pc.name ~* :namePattern)
-      OR EXISTS (
-        SELECT 1 FROM service_products sp
-        WHERE sp.id = pah.service_product_id AND sp.product_name ~* :namePattern
-      )
-    )
+  WHERE ${COUNTED_ROWS_SQL}
     AND NOT EXISTS (
       SELECT 1 FROM service_records cur
       WHERE cur.id = pah.service_record_id AND cur.scheduled_service_id = CAST(:visitId AS uuid)
@@ -79,6 +85,30 @@ const LEDGER_SQL = `
       OR (pah.customer_id = :customerId
           AND (CAST(:propertyId AS uuid) IS NULL OR COALESCE(pah.property_id, ss.property_id) IS NULL))
     )
+`;
+
+// The same count for many (customer, home) pairs at once: pairs is a JSON list of { customer_id, property_id }.
+// No visit is left out (the visits asked about are not completed yet). Each row says which pair it counts for.
+const BATCH_LEDGER_SQL = `
+  SELECT q.customer_id AS q_customer_id,
+         q.property_id AS q_property_id,
+         pah.id,
+         pah.service_record_id,
+         to_char(pah.application_date, 'YYYY-MM-DD') AS application_date,
+         pah.application_rate,
+         pah.rate_unit,
+         pah.quantity_applied,
+         pah.quantity_unit,
+         pah.dilution_rate
+  FROM property_application_history pah
+  LEFT JOIN service_records sr ON sr.id = pah.service_record_id
+  LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
+  JOIN jsonb_to_recordset(CAST(:pairs AS jsonb)) AS q(customer_id uuid, property_id uuid) ON (
+    (q.property_id IS NOT NULL AND COALESCE(pah.property_id, ss.property_id) = q.property_id)
+    OR (pah.customer_id = q.customer_id
+        AND (q.property_id IS NULL OR COALESCE(pah.property_id, ss.property_id) IS NULL))
+  )
+  WHERE ${COUNTED_ROWS_SQL}
 `;
 
 /** The first day of a calendar year and of the next, as YYYY-MM-DD. */
@@ -131,7 +161,15 @@ async function yearAnswer(knex, visit, bounds) {
   });
   const rows = result?.rows;
   if (!Array.isArray(rows)) throw new Error('no rows');
-  // One application per service record (a row with no record is its own application), at its highest concentration.
+  const { high, low } = tallyApplications(rows);
+  return {
+    high, low, count: high + low, year: bounds.year,
+    eligible: taurusEligible({ high, low }), eligibleHigh: taurusEligible({ high, low }, { rate: 'high' }),
+  };
+}
+
+// One application per service record (a row with no record is its own application), at its highest concentration.
+function tallyApplications(rows) {
   const byApplication = new Map();
   for (const row of rows) {
     const key = row.service_record_id ? `record:${row.service_record_id}` : `row:${row.id}`;
@@ -140,11 +178,7 @@ async function yearAnswer(knex, visit, bounds) {
   }
   const kinds = [...byApplication.values()];
   const high = kinds.filter((kind) => kind === 'high').length;
-  const low = kinds.length - high;
-  return {
-    high, low, count: kinds.length, year: bounds.year,
-    eligible: taurusEligible({ high, low }), eligibleHigh: taurusEligible({ high, low }, { rate: 'high' }),
-  };
+  return { high, low: kinds.length - high };
 }
 
 /**
@@ -164,7 +198,12 @@ async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
   const visitYear = /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? Number(day.slice(0, 4)) : nowBounds.year;
   const years = visitYear === nowBounds.year ? [nowBounds] : [yearBoundsOf(visitYear), nowBounds];
   try {
-    const answers = await Promise.all(years.map((bounds) => yearAnswer(knex, visit, bounds)));
+    // One savepoint around the reads: a query error must not abort a transaction this runs in (the buy list's snapshot, a close-out).
+    const answers = await savepointRead(knex, async (k) => {
+      const out = [];
+      for (const bounds of years) out.push(await yearAnswer(k, visit, bounds));
+      return out;
+    });
     const shown = answers.find((a) => !a.eligible) || answers.find((a) => !a.eligibleHigh) || answers[0];
     return {
       ...shown,
@@ -181,7 +220,73 @@ async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
   }
 }
 
+const pairKey = (visit) => `${visit.customer_id}|${visit.property_id || ''}`;
+
+// Whether a projected application (at the home `app`) is one the ledger would count for `visit`'s home: the
+// SAME matching as LEDGER_SQL. An application is recorded at its own property (null when it has none). The
+// visit counts it when it has a property and the application is at that property (whoever the account is), or
+// when it is the same account and either side has no property.
+const countsFor = (visit, app) => Boolean(visit.property_id && app.property_id === visit.property_id)
+  || (app.customer_id === visit.customer_id && (!visit.property_id || !app.property_id));
+
+/**
+ * Whether the house mix will still carry Taurus SC on each of these booked visits, projected: the ledger's count
+ * for the home (the same rule as taurusYearlyCount, read once per year for every home), then each visit in date
+ * order takes one 0.03% application when one fits, and that application counts for EVERY home the ledger would
+ * count it for (two accounts at one property share it; a visit with no property charges the whole account).
+ * Each visit is judged in the ET calendar year of its own date only, so a December run covering a January 1 visit
+ * reads the new year (the one-visit count, which also asks about today's year, is the close-out's, not this).
+ * An unknown history (no customer, or the read failed) leaves Taurus off, as the close-outs do.
+ * @param {{ id: string, customer_id?: string|null, property_id?: string|null, scheduled_date?: string|Date|null, window_start?: string|null }[]} visits
+ * @returns {Promise<{ fits: Map<string, boolean>, failed: boolean }>}
+ */
+async function projectTaurusEligibility(visits, { knex = db, now = new Date() } = {}) {
+  const thisYear = etYearBounds(now).year;
+  const plan = visits.map((visit) => {
+    const day = String(dateOnlyString(visit.scheduled_date));
+    // Visits the same day are judged in the order they are driven: window start, an unset time last, then id.
+    const at = `${day}T${visit.window_start ? String(visit.window_start).slice(0, 8) : '99'}`;
+    return { visit, at, bounds: yearBoundsOf(Number(day.slice(0, 4)) || thisYear) };
+  });
+  const homes = plan.filter(({ visit }) => visit.customer_id);
+  const fits = new Map(plan.map(({ visit }) => [visit.id, false]));
+  const pairs = [...new Map(homes.map(({ visit }) => [pairKey(visit), { customer_id: visit.customer_id, property_id: visit.property_id || null }])).values()];
+  const years = new Map(homes.map(({ bounds }) => [bounds.year, bounds]));
+  const counts = new Map();
+  try {
+    await savepointRead(knex, async (k) => {
+      for (const bounds of years.values()) {
+        const result = await k.raw(BATCH_LEDGER_SQL, {
+          pairs: JSON.stringify(pairs), yearStart: bounds.yearStart, nextYearStart: bounds.nextYearStart, namePattern: TAURUS_NAME_PATTERN,
+        });
+        const byHome = new Map();
+        for (const row of result.rows) {
+          const key = `${row.q_customer_id}|${row.q_property_id || ''}`;
+          byHome.set(key, [...(byHome.get(key) || []), row]);
+        }
+        for (const { customer_id: customer, property_id: property } of pairs) {
+          const key = `${customer}|${property || ''}`;
+          counts.set(`${bounds.year}|${key}`, tallyApplications(byHome.get(key) || []));
+        }
+      }
+    });
+  } catch (err) {
+    // No driver message: it can echo SQL and bound values.
+    logger.warn(`[taurus-yearly] projected counts unavailable: ${err?.code || err?.name || 'Error'}`);
+    return { fits, failed: true };
+  }
+  const used = [];
+  for (const { visit, bounds } of homes.sort((a, b) => a.at.localeCompare(b.at) || String(a.visit.id).localeCompare(String(b.visit.id)))) {
+    const ledger = counts.get(`${bounds.year}|${pairKey(visit)}`);
+    const projected = used.filter((app) => app.year === bounds.year && countsFor(visit, app)).length;
+    const fit = taurusEligible({ high: ledger.high, low: ledger.low + projected });
+    fits.set(visit.id, fit);
+    if (fit) used.push({ customer_id: visit.customer_id, property_id: visit.property_id || null, year: bounds.year });
+  }
+  return { fits, failed: false };
+}
+
 module.exports = {
-  taurusYearlyCount, taurusEligible, applicationConcentration, etYearBounds,
+  taurusYearlyCount, projectTaurusEligibility, taurusEligible, applicationConcentration, etYearBounds,
   TAURUS_LOW_RATE_SINCE, TAURUS_NAME_PATTERN,
 };

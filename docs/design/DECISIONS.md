@@ -3609,3 +3609,19 @@ Owner 2026-11-25 ("both", on the Neon call archive lane's two asks). **Decision.
 **Reasoning:** It is the first lane that sends audio through `llm/call.js`, on a single Gemini leg (no other leg takes audio). Each listen is a paid call, so the spend rules are code constants: $0.83 a day at most (the top of the approved $0.33 to $0.83), a claim with the worst-case cost before every call, one attempt a call, and no call without a price row.
 
 **Revisit if:** the first week's Google bill differs from the stored estimates, the notes prove wrong on calls the owner checks, or staff want a bell for an upset customer (that would be a new decision: this one is notes only).
+
+## 2026-11-27 — A weekly buy list on Monday, per technician and per supply store
+
+Owner 2026-11-27: "once a week look at upcoming appts, and buy for the entire week, based on current inventory ... we are hiring a 2nd tech, this tech's SiteOne location is the Sarasota branch, so ideally all purchases for him would be based on this branch". **Decision.** Every Monday at 7:00 AM ET (Monday to Saturday) each technician with something to buy gets one admin alert: what to buy for that Monday-to-Saturday week, in whole vendor packs, with the supply store set on his Team record (`technicians.supply_store`) and an estimated cost. Tuesday to Saturday a recheck rings again only when a list grows, and closes an alert with nothing left to buy. Next week's run closes the old week's alert. Keep one unopened container of the everyday pest liquids on the shelf as a floor, not an extra container every week.
+
+**Context:** Stock was reordered one product at a time when it dropped under a threshold, and a technician's week was not looked at as a whole. The lawn forecast already plans lawn products per visit. The pest tank mix and the yard-sign kit were never counted against the week's visits.
+
+**Reasoning:** Step one only. It writes admin alerts and orders nothing, so it ships with no gate. Stock is one company count; two technicians' lists share it in first-visit order. Lawn need comes from the WaveGuard forecast over the week's own date range, the pest tank mix from a tested server copy of the client's house mix, and the kit from the per-visit supplies the close-out deducts. Visits of types the list does not plan (roach, flea, bed bug, mosquito, rodent, tree and shrub) are counted in a warning so the list never reads as complete when it is not. N/P fertilizer is listed but held June 1 to Sept 30.
+
+**The spare container, in plain words.** The owner asked to keep one unopened container of the everyday pest liquids (CrossCheck, Taurus SC). The portal counts volume, not containers, so it cannot know a container is unopened. The rule is one container's worth. After the week's need, if less than one pack size of the liquid would remain (on hand + on order + what the list buys - the week's need), the list buys one more pack, once for the company. If a pack size is not on file, the list warns instead. It never tells a technician to check the shelf.
+
+**Cost estimate.** Each pack is costed the way the Inventory price comparison costs a row: stated shipping and tax, the price-sync worker's landed unit price, a shipping estimate, or a vendor shipping rule. A row whose delivery cannot be turned into a pack cost is left unpriced, with a note. The sticker price is never shown as the full cost. A row with stated shipping plus a delivery or hazmat estimate says "plus shipping".
+
+**Branch.** A technician's supply store picks the price row. A row whose branch name, as whole words, is part of the store text wins ("SiteOne Sarasota" matches "Sarasota"); there is no fuzzy matching. With no match the line keeps the usual price and says so.
+
+**Revisit if:** the owner wants the list ordered for him (that is a new, spend-bearing decision), a stock count per technician or per truck replaces the one company count, or the unplanned visit types need their own product plans.

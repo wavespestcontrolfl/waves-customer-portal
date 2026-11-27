@@ -2038,6 +2038,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // MONDAY-SATURDAY 7:00AM ET — Weekly buy list (owner 2026-11-27: "once a week
+  // look at upcoming appts, and buy for the entire week, based on current
+  // inventory"). Monday: one admin alert per technician with what to buy for the
+  // Monday-Saturday week from that technician's supply store, and an end to last
+  // week's alerts. Tuesday-Saturday: the same run counted from today; it rings
+  // again only when a list grows, and closes an alert with nothing left to buy.
+  // Admin notifications only (no gate, no order, no customer message). A failure
+  // throws so job_health goes red. A deploy kill retries: a second run the same
+  // day dedupes onto the standing alerts.
+  // =========================================================================
+  const runWeeklyBuyListTick = () => runExclusive('weekly-buy-list', async () => {
+    const result = await require('./procurement/weekly-buy-alert').runWeeklyBuyList();
+    logger.info(`[weekly-buy-list] ${JSON.stringify(result)}`);
+  }).catch((err) => logger.error(`Weekly buy list failed: ${err.message}`));
+  cron.schedule('0 7 * * 1-6', runWeeklyBuyListTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('weekly-buy-list', runWeeklyBuyListTick);
+
+  // =========================================================================
   // MONTHLY, 1st at 9:00AM ET — SiteOne savings-programs check (owner
   // 2026-10-26). Signs in with the order bot's stored SiteOne login (read-only),
   // reads the Early Order Programs, promotions and Partners points, compares

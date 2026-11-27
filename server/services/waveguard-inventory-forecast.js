@@ -1,7 +1,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { buildPlanForService, customerBillingModeColumnExists } = require('./waveguard-plan-engine');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { savepointScope } = require('../utils/savepoint-read');
+const { etDateString, addETDays, validCalendarDate } = require('../utils/datetime-et');
 const { describeInventoryConversion } = require('./inventory-units');
 const { lawnPlanProgramApplies } = require('./lawn-completion-defaults');
 
@@ -40,6 +41,19 @@ function forecastBound(value, { name, fallback, max }) {
   return Math.max(1, Math.min(max, Math.floor(n)));
 }
 
+// The window a forecast covers: an explicit range (the weekly buy list's Monday-Saturday
+// week) takes both ends or neither, real calendar dates, start not after end; absent, the
+// rolling window from today for `days`. Anything else is a 400, like a bad days or limit.
+function forecastRange(startDate, endDate, days) {
+  if (startDate == null && endDate == null) return { startDate: etDateString(), endDate: etDateString(addETDays(new Date(), days)) };
+  const start = validCalendarDate(startDate);
+  const end = validCalendarDate(endDate);
+  if (!start || !end || start > end) {
+    throw Object.assign(new Error('startDate and endDate must be real dates, start not after end'), { statusCode: 400, isOperational: true });
+  }
+  return { startDate: start, endDate: end };
+}
+
 function summarizeForecastStatus(row) {
   if (row.unitMismatchCount > 0) return 'unit_mismatch';
   if (row.onHand == null) return 'not_tracked';
@@ -56,11 +70,62 @@ function forecastPriority(status, firstShortDate) {
   return 'low';
 }
 
-async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, limit = 150, knex = db } = {}) {
+// The per-visit row a planned line adds under its product (names and place only; the amounts are added by the caller).
+function appointmentOf({ item, service, plan, customerName, amount, amountUnit, inventoryUnit }) {
+  return {
+    serviceId: service.id,
+    customerId: service.customer_id,
+    customerName,
+    serviceType: service.service_type,
+    scheduledDate: service.scheduled_date,
+    city: service.city,
+    waveguardTier: service.waveguard_tier,
+    protocolWindowTitle: plan?.protocol?.structured?.window?.title || plan?.closeout?.protocolWindowTitle || null,
+    amount,
+    unit: amountUnit,
+    inventoryUnit,
+    substitution: item.substitution || null,
+  };
+}
+
+// One planned line of one visit into the product's demand row. Returns true when it added demand (a line whose
+// product has no id, or whose amount is missing or not positive, adds none).
+function addPlanItem({ item, service, plan, customerName, ensureRow }) {
+  const amount = numberOrNull(item?.mix?.amount);
+  if (!item?.product?.id || !amount || amount <= 0) return false;
+  const inventory = item.product.inventory || {};
+  const amountUnit = item.mix?.amountUnit || item.mix?.rateUnit || inventory.unit || null;
+  const row = ensureRow(item.product, inventory, amountUnit);
+  const appointment = appointmentOf({ item, service, plan, customerName, amount, amountUnit, inventoryUnit: row.inventoryUnit || amountUnit });
+  const conversion = describeInventoryConversion(amount, amountUnit, row.inventoryUnit || amountUnit);
+  appointment.inventoryAmount = conversion.amount;
+  appointment.conversionConfidence = conversion.confidence;
+  if (conversion.convertible && conversion.amount != null) {
+    row.committedDemand = exact(row.committedDemand + conversion.amount);
+    if (conversion.confidence !== 'exact_unit') row.conversionConfidence = conversion.confidence;
+    row.appointments.push(appointment);
+  } else {
+    row.unconvertedDemand = exact(row.unconvertedDemand + amount);
+    row.unitMismatchCount += 1;
+    row.conversionConfidence = 'needs_review';
+    row.mismatchAppointments.push(appointment);
+  }
+  return true;
+}
+
+// Extra narrowing a caller wants applied BEFORE the limit (the weekly buy list drops rescheduled, skipped and no-show
+// visits and estimate-slot holds; filtering them after the limit would let them push booked visits out of the window).
+// `excludeStatuses`: more statuses to leave out; `bookedOnly`: no estimate-slot hold (no customer with a reservation stamp).
+function narrowBooked(query, { excludeStatuses = [], bookedOnly = false } = {}) {
+  if (excludeStatuses.length) query.whereNotIn('ss.status', excludeStatuses);
+  if (bookedOnly) query.where((q) => q.whereNotNull('ss.customer_id').orWhereNull('ss.reservation_expires_at'));
+  return query;
+}
+
+async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, limit = 150, knex = db, startDate: rangeStart, endDate: rangeEnd, narrow } = {}) {
   const safeDays = forecastBound(days, { name: 'days', fallback: DEFAULT_FORECAST_DAYS, max: 90 });
   const safeLimit = forecastBound(limit, { name: 'limit', fallback: 150, max: 300 });
-  const startDate = etDateString();
-  const endDate = etDateString(addETDays(new Date(), safeDays));
+  const { startDate, endDate } = forecastRange(rangeStart, rangeEnd, safeDays);
   // One schema probe for the whole batch — the planner would otherwise
   // probe information_schema once per forecasted service (Codex #4365 r4 P2).
   const billingModeColumnExists = await customerBillingModeColumnExists(knex);
@@ -93,7 +158,7 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
         });
     });
   }
-  const services = await servicesQuery
+  const services = await narrowBooked(servicesQuery, narrow)
     .select(
       'ss.id',
       'ss.customer_id',
@@ -113,6 +178,8 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
 
   const productMap = new Map();
   const errors = [];
+  const noUsablePlan = [];
+  const partialPlan = [];
   const skippedNonProgram = [];
 
   function ensureRow(product, inventory, demandUnit) {
@@ -140,7 +207,8 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
 
   for (const service of services) {
     try {
-      const plan = await buildPlanForService(service.id, { db: knex, billingModeColumnExists });
+      // A savepoint: a query error inside the plan must not abort the transaction the forecast runs in (the buy list's snapshot).
+      const plan = await savepointScope(knex, (k) => buildPlanForService(service.id, { db: k, billingModeColumnExists }));
       const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
       // Under the lawn completion gates the planner withholds EVERY product
       // when the assigned protocol version/window cannot be resolved
@@ -166,41 +234,13 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
         skippedNonProgram.push({ serviceId: service.id, scheduledDate: service.scheduled_date, customerName });
         continue;
       }
-      for (const item of plan?.mixCalculator?.items || []) {
-        if (!item?.product?.id) continue;
-        const amount = numberOrNull(item.mix?.amount);
-        if (!amount || amount <= 0) continue;
-        const inventory = item.product.inventory || {};
-        const amountUnit = item.mix?.amountUnit || item.mix?.rateUnit || inventory.unit || null;
-        const row = ensureRow(item.product, inventory, amountUnit);
-        const appointment = {
-          serviceId: service.id,
-          customerId: service.customer_id,
-          customerName,
-          serviceType: service.service_type,
-          scheduledDate: service.scheduled_date,
-          city: service.city,
-          waveguardTier: service.waveguard_tier,
-          protocolWindowTitle: plan?.protocol?.structured?.window?.title || plan?.closeout?.protocolWindowTitle || null,
-          amount,
-          unit: amountUnit,
-          inventoryUnit: row.inventoryUnit || amountUnit,
-          substitution: item.substitution || null,
-        };
-        const conversion = describeInventoryConversion(amount, amountUnit, row.inventoryUnit || amountUnit);
-        appointment.inventoryAmount = conversion.amount;
-        appointment.conversionConfidence = conversion.confidence;
-        if (conversion.convertible && conversion.amount != null) {
-          row.committedDemand = exact(row.committedDemand + conversion.amount);
-          if (conversion.confidence !== 'exact_unit') row.conversionConfidence = conversion.confidence;
-          row.appointments.push(appointment);
-        } else {
-          row.unconvertedDemand = exact(row.unconvertedDemand + amount);
-          row.unitMismatchCount += 1;
-          row.conversionConfidence = 'needs_review';
-          row.mismatchAppointments.push(appointment);
-        }
-      }
+      const added = (plan?.mixCalculator?.items || []).map((item) => addPlanItem({ item, service, plan, customerName, ensureRow }));
+      // A plan with a block, or lines that gave no amount, adds no demand: say so, never "nothing needed" (the
+      // weekly buy list warns "no usable plan"). A plan with no lines and no block is a visit with no products.
+      if (!added.some(Boolean) && ((plan?.propertyGate?.blocks || []).length || added.length)) noUsablePlan.push(service.id);
+      // Some lines gave an amount and some did not (no product, no rate, no amount): the visit is planned, but a product
+      // of it is missing from the totals.
+      if (added.some(Boolean) && !added.every(Boolean)) partialPlan.push(service.id);
     } catch (err) {
       errors.push({
         serviceId: service.id,
@@ -252,6 +292,13 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
     endDate,
     days: safeDays,
     serviceCount: services.length,
+    // The visits the forecast looked at (for a caller that must tell a visit it left out from one it planned).
+    serviceIds: services.map((service) => service.id),
+    // Visits whose plan added no demand although it had a block or lines (missing lawn area, no turf profile, no
+    // program for the grass, no protocol visit, lines with no amount): their need is unknown, not zero. Ids only.
+    noUsablePlan,
+    // Visits planned for some lines only (a line with no product, no rate or no amount is missing from the totals). Ids only.
+    partialPlan,
     productCount: products.length,
     statusCounts,
     products,
@@ -298,8 +345,10 @@ async function ownForecastServiceIds(forecast, actor, knex) {
 async function forecastForTechnician(forecast, actor, knex = db) {
   const own = await ownForecastServiceIds(forecast, actor, knex);
   const project = (entry) => (own.has(String(entry.serviceId)) ? entry : withoutCustomerFields(entry));
+  // serviceIds, noUsablePlan and partialPlan are for procurement (the weekly buy list): they name visits of other technicians too.
+  const { serviceIds: _internal, noUsablePlan: _unusable, partialPlan: _partial, ...visible } = forecast;
   return {
-    ...forecast,
+    ...visible,
     products: (forecast.products || []).map((row) => ({
       ...row,
       appointments: (row.appointments || []).map(project),
