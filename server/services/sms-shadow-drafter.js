@@ -6228,19 +6228,24 @@ function openTimesWithheldReason({ timesAsked, missedVisitListed, missedRebook, 
 // Gap 1: the thread's booking talk, read only for a live real-answers draft that the webhook's own test did not already
 // call scheduling (a gratitude "thanks" never; sms-open-times-intent threadBookingIntent). asOf (a late draft) is the inbound time.
 function threadOpenTimesIntent({ frozen, liveOpenTimes, schedulingIntent, intent, context, inboundMessage, inboundPhone, asOf }) {
-  if (frozen || !liveOpenTimes || schedulingIntent || intent?.intent === GRATITUDE_INTENT || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { carried: false, reason: null, texts: [] };
-  return openTimesIntent.threadBookingIntent({ smsHistory: context?.smsHistory, inboundMessage, inboundPhone, now: asOf instanceof Date ? asOf : Date.now() });
+  if (frozen || !liveOpenTimes || schedulingIntent || intent?.intent === GRATITUDE_INTENT || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { carried: false, reason: null, texts: [], laneText: inboundMessage };
+  const found = openTimesIntent.threadBookingIntent({ smsHistory: context?.smsHistory, inboundMessage, inboundPhone, now: asOf instanceof Date ? asOf : Date.now() });
+  // laneText: what the re-service lane decision reads. A carried follow-up ("Anytime is fine" after "the ants are back, can you
+  // come again?") is judged with the customer's own booking text, so a covered pest report still books through the free
+  // re-service page (Codex pre-push r2).
+  return { ...found, laneText: found.carried ? [...found.customerTexts, inboundMessage].join('\n') : inboundMessage };
 }
 
 // What draftShadowReply stores and decides from the OPEN TIMES outcome: `stamp` = the intended_actions keys (open_times_withheld,
-// open_times_from_thread; {} when neither applies), `schedulingFromThread` = the thread's booking talk put real times in front
-// of the model, so the draft is a scheduling draft from then on. Empty for a frozen replay and with the real-answers gate off.
+// open_times_from_thread; {} when neither applies), `schedulingFromThread` = the thread's booking talk made this a booking reply,
+// so the draft is a scheduling draft from then on, whether or not times came back (a failed or empty lookup must not route a
+// booking reply around the scheduling delivery rules). Empty for a frozen replay and with the real-answers gate off.
 function openTimesTraceFor({ frozen, threadIntent, ...withheldInputs }) {
   if (frozen || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { stamp: {}, schedulingFromThread: false };
   const withheld = openTimesWithheldReason(withheldInputs);
   return {
     stamp: { ...(withheld ? { open_times_withheld: withheld } : {}), ...(threadIntent.carried ? { open_times_from_thread: threadIntent.reason } : {}) },
-    schedulingFromThread: threadIntent.carried && !withheld,
+    schedulingFromThread: threadIntent.carried,
   };
 }
 
@@ -6381,7 +6386,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live draft resolves eligibility through the
   // existing re-service mechanism.
   const reserviceState = presetFactsBlock ? null : await fetchReserviceFactState({ customerId: context?.customer?.id || null });
-  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage, context });
+  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage: threadIntent.laneText, context });
   // PORTAL SELF-CANCEL: a frozen replay keeps its own line (or none); a live gate-on draft asks the shared verdict.
   const portalCancelAvailable = presetFactsBlock || !gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? null : await portalCancelFact.fetchPortalCancelAvailable({ customerId: context?.customer?.id || null });
@@ -6424,7 +6429,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // B1: a covered pest report offers the free re-service booking page's own openings (a section of its own, never OPEN TIMES)
   const reserviceOpenings = presetFactsBlock
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock, RESERVICE_OPENINGS_HEADER_PREFIX), offer: null }
-    : await fetchReserviceOpeningsData({ reserviceState, reserviceLaneDecides, inboundMessage, context });
+    : await fetchReserviceOpeningsData({ reserviceState, reserviceLaneDecides, inboundMessage: threadIntent.laneText, context });
   const offerDays = [...openTimesDays, ...reserviceOpenings.days];
   // Gap 1: why this draft has no OPEN TIMES although the text asked for times (stored on the draft row by draftShadowReply).
   const openTimesTrace = openTimesTraceFor({
@@ -6882,7 +6887,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       allowAck: true, // the silent shadow row records an ACK; it never leaves the shadow lane (deliverableReply below)
       ...(asOfDate ? { asOf: asOfDate } : {}),
     });
-    // Gap 1: a follow-up whose OPEN TIMES came from the thread's booking talk is a scheduling draft from here on (the suggest
+    // Gap 1: a follow-up the thread's booking talk carried is a scheduling draft from here on, times or not (the suggest
     // and auto-send rules for scheduling drafts, and the stored scheduling_intent the scheduling-card rollback reads).
     const draftSchedulingIntent = Boolean(schedulingIntent) || openTimesTrace.schedulingFromThread;
     if (!parsed) {

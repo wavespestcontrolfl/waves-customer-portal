@@ -19,7 +19,7 @@ function intent(inboundMessage, smsHistory, phone = ME) {
 }
 
 describe('threadBookingIntent: a follow-up carries the thread booking talk', () => {
-  const staffAsk = { direction: 'outbound', type: 'manual', body: 'We have Monday at 9 a.m. open. Would this work for you?', date: ago(2) };
+  const staffAsk = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'We have Monday at 9 a.m. open. Would this work for you?', date: ago(2) };
 
   test.each([
     'Anytime is fine',
@@ -37,7 +37,7 @@ describe('threadBookingIntent: a follow-up carries the thread booking talk', () 
 
   test("the customer's own earlier booking ask carries a follow-up", () => {
     const rows = [{ direction: 'inbound', fromPhone: ME, body: 'Can you come out and do the ants again?', date: ago(1) }];
-    expect(intent('Anytime is fine', rows)).toEqual({ carried: true, reason: 'prior_inbound', texts: ['Can you come out and do the ants again?'] });
+    expect(intent('Anytime is fine', rows)).toEqual({ carried: true, reason: 'prior_inbound', texts: ['Can you come out and do the ants again?'], customerTexts: ['Can you come out and do the ants again?'] });
   });
 
   test('an earlier text with only a time word is not a booking ask', () => {
@@ -46,18 +46,18 @@ describe('threadBookingIntent: a follow-up carries the thread booking talk', () 
   });
 
   test('an automated reminder never carries it; the walk goes past it to the human reply', () => {
-    const reminder = { direction: 'outbound', type: 'appointment_reminder', body: 'Reminder: your visit is tomorrow. Reply C to confirm or R to reschedule?', date: ago(1) };
+    const reminder = { direction: 'outbound', type: 'appointment_reminder', toPhone: ME, body: 'Reminder: your visit is tomorrow. Reply C to confirm or R to reschedule?', date: ago(1) };
     expect(intent('Yes', [reminder]).carried).toBe(false);
     expect(intent('Yes', [reminder, staffAsk]).carried).toBe(true);
   });
 
   test('a staff reply that asks nothing ends the booking talk', () => {
-    const done = { direction: 'outbound', type: 'manual', body: 'You are all set for Monday at 9.', date: ago(1) };
+    const done = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'You are all set for Monday at 9.', date: ago(1) };
     expect(intent('ok', [done, staffAsk]).carried).toBe(false);
   });
 
   test('a staff question about something else does not carry it', () => {
-    const q = { direction: 'outbound', type: 'manual', body: 'Any roach sightings since the visit?', date: ago(1) };
+    const q = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Any roach sightings since the visit?', date: ago(1) };
     expect(intent('Yes', [q]).carried).toBe(false);
   });
 
@@ -72,8 +72,49 @@ describe('threadBookingIntent: a follow-up carries the thread booking talk', () 
   });
 
   test('only the last four earlier texts are read', () => {
-    const filler = Array.from({ length: 4 }, () => ({ direction: 'outbound', type: 'reminder', body: 'Reminder text', date: ago(1) }));
+    const filler = Array.from({ length: 4 }, () => ({ direction: 'outbound', type: 'reminder', toPhone: ME, body: 'Reminder text', date: ago(1) }));
     expect(intent('Anytime is fine', [...filler, staffAsk]).carried).toBe(false);
+  });
+
+  test('a human reply sent to another contact on the account never decides (Codex pre-push r2)', () => {
+    expect(intent('Anytime is fine', [{ ...staffAsk, toPhone: OTHER }]).carried).toBe(false);
+    expect(intent('Anytime is fine', [{ ...staffAsk, toPhone: null }]).carried).toBe(false);
+    // ...and a reply to the other contact does not end this sender's booking talk either
+    const mine = [{ ...staffAsk, toPhone: OTHER, body: 'You are all set.' }, staffAsk];
+    expect(intent('Anytime is fine', mine).carried).toBe(true);
+  });
+
+  test('a staff question about pests, not booking, does not carry "Yes" ("are you" is not a booking word)', () => {
+    const q = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Are you still seeing ants?', date: ago(1) };
+    expect(intent('Yes', [q]).carried).toBe(false);
+    const q2 = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Are you still seeing them in the kitchen?', date: ago(1) };
+    expect(intent('Yes, a few', [q2]).carried).toBe(false);
+    const q3 = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Good morning! Are you still seeing ants?', date: ago(1) };
+    expect(intent('Yes', [q3]).carried).toBe(false);
+  });
+
+  test('a staff question naming a day or a time of day carries it', () => {
+    const q = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Does Thursday afternoon work?', date: ago(1) };
+    expect(intent('Yes', [q]).carried).toBe(true);
+    const q2 = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'I can come by around 5?', date: ago(1) };
+    expect(intent('ok', [q2]).carried).toBe(true);
+  });
+
+  test('a bare date answers "what day works?" (Codex pre-push r2)', () => {
+    const q = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'What day works for you?', date: ago(1) };
+    expect(intent('12/3', [q]).carried).toBe(true);
+    expect(intent('Dec 3?', [q]).carried).toBe(true);
+  });
+
+  test("the customer's request before a generic staff question rides with it, oldest first (Codex pre-push r2)", () => {
+    const req = { direction: 'inbound', fromPhone: ME, body: 'Can you come out for a lawn treatment?', date: ago(3) };
+    const otherReq = { direction: 'inbound', fromPhone: OTHER, body: 'Spouse here, pest please', date: ago(2.5) };
+    const q = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Sure. What day works for you?', date: ago(2) };
+    const older = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Earlier reply', date: ago(4) };
+    const oldReq = { direction: 'inbound', fromPhone: ME, body: 'Older text', date: ago(5) };
+    expect(intent('Anytime is fine', [q, otherReq, req, older, oldReq])).toEqual({
+      carried: true, reason: 'staff_asked', texts: [req.body, q.body], customerTexts: [req.body],
+    });
   });
 
   test('not a follow-up shape: long text, reaction, no reply words, no sender phone', () => {
@@ -256,7 +297,7 @@ describe('draftShadowReply: thread follow-ups get OPEN TIMES; the withhold reaso
     jest.resetModules();
   });
 
-  const staffAsk = () => ({ direction: 'outbound', type: 'manual', body: 'We can come Monday. What time works for you?', date: new Date(Date.now() - 3600e3).toISOString() });
+  const staffAsk = () => ({ direction: 'outbound', type: 'manual', toPhone: ME, body: 'We can come Monday. What time works for you?', date: new Date(Date.now() - 3600e3).toISOString() });
 
   test('"Anytime is fine" after a staff booking question: OPEN TIMES shown, scheduling draft, thread reason stored', async () => {
     const { row, actions, getAvailableSlots, resolveDeliveryMode } = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [staffAsk()] });
@@ -276,11 +317,12 @@ describe('draftShadowReply: thread follow-ups get OPEN TIMES; the withhold reaso
     expect(actions).not.toHaveProperty('open_times_from_thread');
   });
 
-  test('times asked but the finder offers none: open_times_withheld = no_open_days; the thread follow-up stays non-scheduling', async () => {
-    const { row, actions } = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [staffAsk()], days: [] });
+  test('times asked but the finder offers none: open_times_withheld = no_open_days; still a scheduling draft (delivery rules hold)', async () => {
+    const { row, actions, resolveDeliveryMode } = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [staffAsk()], days: [] });
     expect(actions.open_times_withheld).toBe('no_open_days');
     expect(actions.open_times_from_thread).toBe('staff_asked');
-    expect(row.scheduling_intent).toBe(false);
+    expect(row.scheduling_intent).toBe(true);
+    expect(resolveDeliveryMode.mock.calls[0][0].schedulingIntent).toBe(true);
   });
 
   test('times asked with no city to look up: no_location', async () => {
@@ -296,7 +338,7 @@ describe('draftShadowReply: thread follow-ups get OPEN TIMES; the withhold reaso
     const PEST = { service_key: 'pest_control', name: 'Pest Control' };
 
     test('a lawn booking ask, then "Anytime is fine": the identity step reads the ask and the times are sized for lawn, not the pest visit', async () => {
-      const ask = { direction: 'outbound', type: 'manual', body: 'Happy to add a lawn treatment. What day works for you?', date: at(1) };
+      const ask = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Happy to add a lawn treatment. What day works for you?', date: at(1) };
       const { identityPrompts, getAvailableSlots, actions } = await runDraft({
         inboundMessage: 'Anytime is fine', smsHistory: [ask], upcomingServices: [pestVisit], serviceHistory: [lawnDone], services: [PEST, LAWN],
         identity: (prompt) => (prompt.includes('lawn treatment') ? { ok: true, json: { about: 'new_service', visit: null, service: 'lawn_care' } } : IDENTITY_NONE),
@@ -307,18 +349,29 @@ describe('draftShadowReply: thread follow-ups get OPEN TIMES; the withhold reaso
       expect(actions.open_times_withheld).toBeUndefined();
     });
 
+    test("the customer's lawn request before a generic staff question sizes lawn times (Codex pre-push r2)", async () => {
+      const req = { direction: 'inbound', fromPhone: ME, body: 'Can you come out for a lawn treatment?', date: at(2) };
+      const ask = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Sure. What day works for you?', date: at(1) };
+      const { identityPrompts, getAvailableSlots } = await runDraft({
+        inboundMessage: 'Anytime is fine', smsHistory: [ask, req], upcomingServices: [pestVisit], services: [PEST, LAWN],
+        identity: (prompt) => (prompt.includes('lawn treatment') ? { ok: true, json: { about: 'new_service', visit: null, service: 'lawn_care' } } : IDENTITY_NONE),
+      });
+      expect(identityPrompts[0]).toContain(JSON.stringify(req.body));
+      expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1', serviceType: 'Lawn Care' });
+    });
+
     test('the thread names no service and the customer has a pest visit booked and a lawn visit done: withheld, never the pest times', async () => {
-      const ask = { direction: 'outbound', type: 'manual', body: 'We can come out. What day works for you?', date: at(1) };
+      const ask = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'We can come out. What day works for you?', date: at(1) };
       const { getAvailableSlots, actions, row } = await runDraft({
         inboundMessage: 'Anytime is fine', smsHistory: [ask], upcomingServices: [pestVisit], serviceHistory: [lawnDone], services: [PEST, LAWN],
       });
       expect(getAvailableSlots).not.toHaveBeenCalled();
       expect(actions.open_times_withheld).toBe('identity_uncertain:thread_ambiguous');
-      expect(row.scheduling_intent).toBe(false);
+      expect(row.scheduling_intent).toBe(true);
     });
 
     test('the thread names no service and the customer has one job: the visit ladder still sizes it', async () => {
-      const ask = { direction: 'outbound', type: 'manual', body: 'We can come out. What day works for you?', date: at(1) };
+      const ask = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'We can come out. What day works for you?', date: at(1) };
       const { getAvailableSlots, actions } = await runDraft({
         inboundMessage: 'Anytime is fine', smsHistory: [ask], upcomingServices: [pestVisit], serviceHistory: [{ type: 'Pest Control', date: '2026-09-02' }], services: [PEST, LAWN],
       });
@@ -327,7 +380,7 @@ describe('draftShadowReply: thread follow-ups get OPEN TIMES; the withhold reaso
     });
 
     test('a text the webhook already calls scheduling keeps today\'s identity step: no thread text, the ladder decides', async () => {
-      const ask = { direction: 'outbound', type: 'manual', body: 'Happy to add a lawn treatment. What day works for you?', date: at(1) };
+      const ask = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Happy to add a lawn treatment. What day works for you?', date: at(1) };
       const { identityPrompts, getAvailableSlots } = await runDraft({
         inboundMessage: 'Can I move my appointment?', schedulingIntent: true, smsHistory: [ask], upcomingServices: [pestVisit], serviceHistory: [lawnDone], services: [PEST, LAWN],
       });
@@ -342,5 +395,54 @@ describe('draftShadowReply: thread follow-ups get OPEN TIMES; the withhold reaso
     expect(row.scheduling_intent).toBe(false);
     expect(actions).not.toHaveProperty('open_times_withheld');
     expect(actions).not.toHaveProperty('open_times_from_thread');
+  });
+});
+
+describe('a carried follow-up to a covered pest report books through the free re-service page (Codex pre-push r2)', () => {
+  beforeEach(() => {
+    process.env.SHADOW_DRAFT_VERIFY = 'false';
+    process.env.SHADOW_FEWSHOT = 'false';
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    process.env.GATE_SMS_PROMPT_B1 = 'true';
+  });
+  afterEach(() => {
+    for (const k of ['SHADOW_DRAFT_VERIFY', 'SHADOW_FEWSHOT', 'GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_B1']) delete process.env[k];
+    for (const m of ['../services/availability', '../services/call-booking-catalog', '../services/llm/call', '@anthropic-ai/sdk',
+      '../services/reservice-scheduler', '../routes/reservice-public']) jest.dontMock(m);
+    jest.resetModules();
+  });
+
+  test('"Anytime is fine" after "The ants are back, can you come again?": re-service openings, never ordinary OPEN TIMES', async () => {
+    const getAvailableSlots = jest.fn(async () => ({ days: [{ date: '2026-06-16', fullDate: 'Tuesday, June 16', slots: [{ startTime24: '09:00' }] }] }));
+    const reserviceOpenings = jest.fn(async () => ({ days: [{ date: '2026-06-17', slots: [{ start_time: '10:00' }] }] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: jest.fn(async (policy, payload) => (payload?.laneId === 'sms_service_identity' ? IDENTITY_NONE : {
+        ok: true, text: JSON.stringify({ reply: 'ok', intended_actions: [], missing_info: null }), model: 'fixture',
+      })),
+    }));
+    jest.doMock('@anthropic-ai/sdk', () => jest.fn(() => ({ messages: { create: jest.fn() } })));
+    jest.doMock('../services/reservice-scheduler', () => ({
+      ...jest.requireActual('../services/reservice-scheduler'),
+      reserviceSelfServeEnabled: () => true,
+      loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], bookable: ['pest'], open: {}, verified: true, hasRecurringPlan: true }),
+    }));
+    jest.doMock('../routes/reservice-public', () => ({ _internals: { reserviceOpeningsFor: reserviceOpenings } }));
+    jest.resetModules();
+    const context = {
+      summary: 'Test customer', customer: { id: 'cust-1' },
+      serviceHistory: [{ type: 'Quarterly Pest', date: '2026-05-20' }],
+      smsHistory: [{ direction: 'inbound', fromPhone: ME, body: 'The ants are back, can you come again?', date: new Date(Date.now() - 3600e3).toISOString() }],
+    };
+    const result = await require('../services/sms-shadow-drafter').generateGroundedDraft({
+      client: {}, context, inboundMessage: 'Anytime is fine', inboundPhone: ME, intent: { intent: 'GENERAL' }, schedulingIntent: false,
+      city: 'Venice', voiceProfile: null, liveOpenTimes: true,
+    });
+    expect(reserviceOpenings).toHaveBeenCalledWith('cust-1', { lanes: ['pest'] });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(result.factsBlock).toContain('FREE RE-SERVICE OPENINGS');
+    expect(result.factsBlock).not.toContain('OPEN TIMES (real');
+    expect(result.openTimesTrace.stamp).toEqual({ open_times_from_thread: 'prior_inbound' });
   });
 });

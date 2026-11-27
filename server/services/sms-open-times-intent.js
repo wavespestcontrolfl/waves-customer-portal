@@ -4,11 +4,14 @@
  * 2026-11-26 "BUILD 1-6"). Pure and deterministic: no database read, no model call.
  *
  *   threadBookingIntent({ smsHistory, inboundMessage, inboundPhone, now })
- *     -> { carried: boolean, reason: 'prior_inbound' | 'staff_asked' | null, texts: string[] }
+ *     -> { carried, reason: 'prior_inbound' | 'staff_asked' | null, texts: string[], customerTexts: string[] }
  *   A short follow-up ("Anytime is fine", "Yes, please!", "Totally flexible") carries the booking talk of the
  *   thread: the customer's own earlier text asked to book or move a visit, or the last staff reply asked which
- *   day or time works. `texts` is that booking text: the drafter's job identity step reads it with the follow-up,
- *   so the times are sized for the job the thread named (Codex #8658 r1). Reminders, receipts and other automated texts never carry it (only the human reply
+ *   day or time works. `texts` is that booking talk (the staff question and the
+ *   customer's request before it): the drafter's job identity step reads it with the follow-up, so the times are sized
+ *   for the job the thread named (Codex #8658 r1). `customerTexts` is the customer's own part, which the re-service
+ *   lane decision reads. Only rows of this sender count: a reply sent to another contact on the account is skipped.
+ *   Reminders, receipts and other automated texts never carry it (only the human reply
  *   types of sms-response-policy count), and a staff reply that asks nothing ends the booking talk.
  *
  *   namedDayMatcher(text)
@@ -17,7 +20,7 @@
  *   ("Thursday, December 3"): the names that day answers. The drafter adds the first day the picker offers for
  *   each name, even past its first three days; the picker's own horizon still bounds it.
  */
-const { hasSchedulingIntent, hasRescheduleOrAwayIntent, isSmsReaction, outboundAsksForReply } = require('./sms-intent');
+const { hasRescheduleOrAwayIntent, isSmsReaction, outboundAsksForReply } = require('./sms-intent');
 const { HUMAN_REPLY_TYPES } = require('./sms-response-policy');
 const { phoneIdentityKey } = require('../utils/phone');
 
@@ -32,48 +35,82 @@ const FOLLOW_UP_RE = /\b(?:yes|yeah|yea|yep|yup|sure|ok|okay|k|please|pls|sounds
 // time word ("thanks for coming today") is not a booking ask. A staff question may carry one or any scheduling word.
 const BOOKING_RE = /\b(?:availab\w*|slots?|time ?frame|reschedul\w*|book\w*|schedul\w*|appointment|appt|works? for you|good time|good day|what day|which day|what time|come (?:out|back|by|over)|when can you|can you come|another (?:day|time))\b/i;
 
+// A staff question about booking or timing: a booking word, a named day or date, or a time of day. sms-intent's wide scheduling test
+// is not used here: its "are you" makes "Are you still seeing ants?" a booking question (Codex pre-push r2). A greeting
+// ("Good morning") is not a time of day.
+const STAFF_TIME_RE = /\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\b\.?|p\.?m\b\.?)|(?<!good\s)(?:morning|afternoon|evening)|tomorrow|tonight|next week|come|stop by)/i;
+
+// A short reply: reply words, or a bare day or date ("12/3", "Dec 3?") answering "what day works?".
 function isFollowUpShape(text) {
   const body = String(text || '').trim();
   if (!body || body.length > FOLLOW_UP_MAX_CHARS || isSmsReaction(body)) return false;
-  return FOLLOW_UP_RE.test(body.replace(/[‘’]/g, "'"));
+  return FOLLOW_UP_RE.test(body.replace(/[\u2018\u2019]/g, "'")) || namedDayMatcher(body) !== null;
 }
 
 function isBookingAsk(body) {
   return BOOKING_RE.test(body) || hasRescheduleOrAwayIntent(body);
 }
 
-// The thread rows before the current text, newest first. The current inbound text is often already the first
-// row (the webhook logs it before drafting); it is skipped once, by its body.
-function priorRows(smsHistory, inboundMessage) {
+function isStaffBookingAsk(body) {
+  return outboundAsksForReply(body) && (BOOKING_RE.test(body) || STAFF_TIME_RE.test(body) || namedDayMatcher(body) !== null);
+}
+
+// The thread rows before the current text, newest first, while they are recent: the current inbound text is often
+// already the first row (the webhook logs it before drafting) and is skipped once, by its body; an unreadable or old
+// row ends the list (the booking talk must be recent and provably so).
+function priorRows(smsHistory, inboundMessage, cutoff) {
   const rows = (Array.isArray(smsHistory) ? smsHistory : []).filter((m) => m && typeof m.body === 'string' && m.body.trim());
   const current = String(inboundMessage || '').trim();
   const skip = rows.length && rows[0].direction === 'inbound' && rows[0].body.trim() === current ? 1 : 0;
-  return rows.slice(skip, skip + THREAD_ROWS);
+  const recent = [];
+  for (const row of rows.slice(skip, skip + THREAD_ROWS)) {
+    const at = new Date(row.date).getTime();
+    if (!Number.isFinite(at) || at < cutoff) break;
+    recent.push(row);
+  }
+  return recent;
+}
+
+// Whose row it is: 'staff' (a human reply sent to this sender), 'customer' (this sender's own text), or 'skip' (an automated
+// text, another contact's text, a reply sent to another contact on the same account, or a reply with no readable number).
+function rowRole(row, sender) {
+  if (row.direction === 'outbound') {
+    if (!HUMAN_REPLY_TYPES.includes(row.type) || phoneIdentityKey(row.toPhone) !== sender) return 'skip';
+    return 'staff';
+  }
+  return row.direction === 'inbound' && phoneIdentityKey(row.fromPhone) === sender ? 'customer' : 'skip';
+}
+
+// The same sender's texts before the staff question, back to the staff reply before it: the request the question answers
+// ("Can you come out for the lawn?" -> "What day works?" -> "Anytime"), oldest first.
+function exchangeCustomerTexts(rows, sender) {
+  const texts = [];
+  for (const row of rows) {
+    const role = rowRole(row, sender);
+    if (role === 'staff') break;
+    if (role === 'customer') texts.unshift(row.body);
+  }
+  return texts;
 }
 
 function threadBookingIntent({ smsHistory, inboundMessage, inboundPhone, now = Date.now() } = {}) {
-  const none = { carried: false, reason: null, texts: [] };
+  const none = { carried: false, reason: null, texts: [], customerTexts: [] };
   const sender = phoneIdentityKey(inboundPhone);
   if (!sender || !isFollowUpShape(inboundMessage)) return none;
-  const cutoff = (now instanceof Date ? now.getTime() : Number(now)) - THREAD_WINDOW_MS;
-  for (const row of priorRows(smsHistory, inboundMessage)) {
-    const at = new Date(row.date).getTime();
-    // An unreadable or old row ends the walk: the booking talk must be recent and provably so.
-    if (!Number.isFinite(at) || at < cutoff) return none;
-    if (row.direction === 'outbound') {
-      // Automated texts (reminders, receipts, review asks) are skipped; the first human reply decides.
-      if (!HUMAN_REPLY_TYPES.includes(row.type)) continue;
-      const asked = outboundAsksForReply(row.body) && (hasSchedulingIntent(row.body) || BOOKING_RE.test(row.body));
-      return asked ? { carried: true, reason: 'staff_asked', texts: [row.body] } : none;
+  const rows = priorRows(smsHistory, inboundMessage, (now instanceof Date ? now.getTime() : Number(now)) - THREAD_WINDOW_MS);
+  for (const [i, row] of rows.entries()) {
+    const role = rowRole(row, sender);
+    // The first human reply to this sender decides: a booking question carries the follow-up, anything else ends the talk.
+    if (role === 'staff') {
+      if (!isStaffBookingAsk(row.body)) return none;
+      const customerTexts = exchangeCustomerTexts(rows.slice(i + 1), sender);
+      return { carried: true, reason: 'staff_asked', texts: [...customerTexts, row.body], customerTexts };
     }
-    // Another number's text in the thread is not this sender's booking talk.
-    if (row.direction !== 'inbound' || phoneIdentityKey(row.fromPhone) !== sender) continue;
-    if (isBookingAsk(row.body)) return { carried: true, reason: 'prior_inbound', texts: [row.body] };
+    if (role === 'customer' && isBookingAsk(row.body)) return { carried: true, reason: 'prior_inbound', texts: [row.body], customerTexts: [row.body] };
   }
   return none;
 }
 
-// Full names (and plurals), plus the abbreviations that are not also common words ("sat", "sun", "mon" are left out).
 const WEEKDAY_RE = /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)s?\b|\b(tues?|weds?|thu|thur|thurs|fri)\b\.?/gi;
 const WEEKDAY_ABBREV = { tue: 'tuesday', tues: 'tuesday', wed: 'wednesday', weds: 'wednesday', thu: 'thursday', thur: 'thursday', thurs: 'thursday', fri: 'friday' };
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
