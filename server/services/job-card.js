@@ -521,12 +521,17 @@ const RODENT_PROCEDURE_ONLY_KEYS = new Set([
   'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
   'rodent_inspection', 'rodent_exclusion', 'rodent_exclusion_only', 'rodent_trapping_exclusion',
 ]);
+// The Waves Assessment (catalog key lawn_inspection, category inspection) is a walk of the property with no product (owner pick D13,
+// 2026-11-25): its card's steps show the same way.
 // The card's visit and procedure (no product lines) for such a key, with its note, else null.
 const PROCEDURE_ONLY_NOTE = 'Trap and exclusion work: steps only, no products on this card';
+const ASSESSMENT_NOTE = 'Assessment: steps only, no products on this card';
 function procedureOnlyResolve({ category, name, serviceKey, scheduledDate, isFollowup }, protocols) {
-  if (category !== 'rodent' || !RODENT_PROCEDURE_ONLY_KEYS.has(serviceKey) || !protocols?.rodent) return null;
-  const resolved = resolveProtocolLines(name, scheduledDate, protocols, [], { programKey: 'rodent', serviceKey, isFollowup: isFollowup === true });
-  return resolved.visit && resolved.procedure ? { visit: resolved.visit, procedure: resolved.procedure, note: PROCEDURE_ONLY_NOTE } : null;
+  const [programKey, note] = category === 'rodent' && RODENT_PROCEDURE_ONLY_KEYS.has(serviceKey) ? ['rodent', PROCEDURE_ONLY_NOTE]
+    : category === 'inspection' && serviceKey === 'lawn_inspection' ? ['assessment', ASSESSMENT_NOTE] : [];
+  if (!programKey || !protocols?.[programKey]) return null;
+  const resolved = resolveProtocolLines(name, scheduledDate, protocols, [], { programKey, serviceKey, isFollowup: isFollowup === true });
+  return resolved.visit && resolved.procedure ? { visit: resolved.visit, procedure: resolved.procedure, note } : null;
 }
 
 function addonProgramKey(category, name, protocols, serviceKey = null) {
@@ -545,8 +550,11 @@ function addonProgramKey(category, name, protocols, serviceKey = null) {
   if (isMistingDesignConsultation({ serviceKey, name }) || isMistingSystemServiceUnconfigured({ serviceKey, name })) return null;
   if (serviceKey && rule.nonChemical?.includes(serviceKey)) return null;
   if (serviceKey && rule.keys?.[serviceKey]) return rule.keys[serviceKey];
-  const picked = matchServiceProtocol(protocols, name, { serviceKey })?.programKey;
-  return rule.any.includes(picked) ? picked : rule.fallback;
+  const match = matchServiceProtocol(protocols, name, { serviceKey });
+  // A pest control row whose name and key no rule claims has no card (the matcher's no_protocol, owner pick D18): the general
+  // pest card is not its default. Another category's fallback stays: its names need not say the line (a lawn row named "Fertilization").
+  if (match?.reason === 'no_protocol' && rule.fallback === 'pest') return null;
+  return rule.any.includes(match?.programKey) ? match.programKey : rule.fallback;
 }
 
 /**
@@ -2386,6 +2394,24 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   };
 }
 
+// The visit's own program for the tank search: null = no treatment (no card), undefined = no category (its name decides).
+// A categoryless misting-system visit (legacy/manual, no catalog row) is a non-treatment: null, never undefined (unknown
+// treatment), so the mix path never doses a searched product. So is a visit with no category whose name and key no rule
+// claims (the matcher's no_protocol: a bare "Barrier Treatment"): it has no card.
+function primaryProgramKey(svc, protocols) {
+  const identity = { serviceKey: svc.service_key, name: svc.service_type };
+  if (isMistingDesignConsultation(identity) || isMistingSystemServiceUnconfigured(identity)) return null;
+  // A booked Waves Assessment (key lawn_inspection) is a walk with no product: no treatment line under any name or category.
+  if (svc.service_key === 'lawn_inspection') return null;
+  if (!svc.service_category) {
+    // A lawn name ("Fertilization", "Weed Control") keeps the lawn plan, as the card does (detectServiceLine): the matcher has
+    // no lawn rule, so its no-card answer is for other names only.
+    if (detectServiceLine(svc.service_type) === 'lawn') return undefined;
+    return matchServiceProtocol(protocols, svc.service_type, { serviceKey: svc.service_key }).reason === 'no_protocol' ? null : undefined;
+  }
+  return addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key);
+}
+
 /**
  * The non-lawn protocol line that names this product — the primary visit's
  * (by catalog identity, name for a legacy row: resolveVisitProducts' rule)
@@ -2401,14 +2427,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
  */
 async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDate, deps = {}) {
   const protocols = deps.protocols || require('../config/protocols.json');
-  // A categoryless misting-system visit (legacy/manual, no catalog row) is a
-  // non-treatment too: resolve it to null (no program) rather than undefined
-  // (unknown treatment), so the mix path never doses a searched product.
-  const mistingNonTreatment = isMistingDesignConsultation({ serviceKey: svc.service_key, name: svc.service_type })
-    || isMistingSystemServiceUnconfigured({ serviceKey: svc.service_key, name: svc.service_type });
-  const primaryKey = mistingNonTreatment
-    ? null
-    : (svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined);
+  const primaryKey = primaryProgramKey(svc, protocols);
   const treatment = primaryKey !== null;
   const primaryIsLawn = treatment && (primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn');
   const addons = (await loadAddons(dbh, serviceId))
@@ -2571,5 +2590,5 @@ module.exports = {
   resolveVisitLines,
   describeLine,
   ALTERNATE_ADDRESS_BLOCK,
-  _test: { protocolBand, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { primaryProgramKey, protocolBand, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

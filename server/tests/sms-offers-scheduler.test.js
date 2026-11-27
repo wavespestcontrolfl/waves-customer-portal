@@ -594,7 +594,7 @@ describe('scheduler path has its own, longer deadline', () => {
       await jest.advanceTimersByTimeAsync(9900);
       expect(settled).toBe(false);
       await jest.advanceTimersByTimeAsync(200);
-      await expect(promise).resolves.toEqual({ block: null, days: [] });
+      await expect(promise).resolves.toEqual({ block: null, days: [], withheld: 'fetch_failed' });
     } finally {
       jest.useRealTimers();
     }
@@ -624,7 +624,7 @@ describe('scheduler path has its own, longer deadline', () => {
       const fetched = drafter.fetchOpenTimesData({ city: 'Venice', customerId: 'cust-9', schedulingIntent: true });
       await jest.advanceTimersByTimeAsync(3100);
       await expect(recheck).resolves.toEqual({ ok: false, reason: 'open_times_recheck_failed' });
-      await expect(fetched).resolves.toEqual({ block: null, days: [] });
+      await expect(fetched).resolves.toEqual({ block: null, days: [], withheld: 'fetch_failed' });
     } finally {
       jest.useRealTimers();
     }
