@@ -201,6 +201,68 @@ describe('bed bug treatment prices on the whole home', () => {
     expect(bedBug(3500, 2).homeSizeBasis).toBe('total_living_area');
     expect(bedBug(3500, 2, { legacyWholeHomeSizing: true }).homeSizeBasis).toBe('ground_floor');
   });
+
+  test('a held row (severe infestation, prep refused) carries the same size evidence a priced row does', () => {
+    const held = (overrides, extra) => lineOf(generateEstimate({
+      ...home(3000, 2, extra), services: { bedBug: { ...BED_BUG_SERVICES.bedBug, ...overrides } },
+    }), 'bed_bug');
+    for (const overrides of [{ severity: 'severe' }, { prepStatus: 'refused' }]) {
+      const line = held(overrides);
+      expect(line.quoteRequired).toBe(true);
+      expect(line).toMatchObject({ homeSizeBasis: 'total_living_area', footprintUsed: 3000, footprintSource: 'homeSqFt', footprintWasDefaulted: false });
+      // A website quote: the lookup's measured home and the posted size it replaced ride on the held row too.
+      expect(held(overrides, { homeSqFt: 2000, fleaMeasuredHomeSqFt: 3400, homeSqFtIsDefault: true })).toMatchObject({
+        quoteRequired: true, homeSizeBasis: 'total_living_area', footprintUsed: 3400, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000,
+      });
+      // An unclear size keeps its review reason beside the hold reason.
+      expect(held(overrides, { homeSqFt: undefined, buildingSqFt: 3000 }).manualReviewReasons).toEqual(expect.arrayContaining(['home_size_source_unclear']));
+      // A quote priced before the rule: the ground-floor footprint, as main held it.
+      expect(held(overrides, { legacyWholeHomeSizing: true })).toMatchObject({ homeSizeBasis: 'ground_floor', footprintUsed: 1500, footprintSource: 'footprint' });
+      expect(held(overrides, { legacyWholeHomeSizing: true })).not.toHaveProperty('fleaPostedHomeSqFt');
+    }
+  });
+});
+
+describe('a commercial building keeps the footprint path (the whole-home rule is for homes)', () => {
+  const GATE = 'GATE_COMMERCIAL_ONETIME_SCOPED';
+  let saved;
+  beforeEach(() => { saved = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
+  // What public-quote.js hands the engine for a commercial building: the measured footprint beside its 2,000 sq ft homeSqFt default.
+  const hotel = (extra = {}) => ({
+    isCommercial: true, propertyType: 'commercial', commercialSubtype: 'hotel', homeSqFt: 2000, footprintSqFt: 6000, stories: 1,
+    buildingSizeMeasured: true, lotSqFt: 20000,
+    services: { bedBug: { method: 'CHEMICAL', rooms: 2, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } }, ...extra,
+  });
+
+  test('a 6,000 sq ft one-story hotel, two rooms, light chemical: $992 on the measured building, never the 2,000 placeholder', () => {
+    const line = lineOf(generateEstimate(hotel()), 'bed_bug');
+    expect(line).toMatchObject({ price: 992, footprintUsed: 6000, footprintSource: 'footprint', homeSizeBasis: 'ground_floor' });
+    expect(line.requiresManualReview).toBe(false);
+    expect(line).not.toHaveProperty('fleaPostedHomeSqFt');
+    // The same line a quote priced before the rule replays (main's footprint path).
+    const legacy = lineOf(generateEstimate(hotel({ legacyWholeHomeSizing: true })), 'bed_bug');
+    for (const key of ['price', 'footprintUsed', 'footprintSource', 'homeSizeBasis', 'multipliers', 'requiresManualReview']) expect(line[key]).toEqual(legacy[key]);
+  });
+
+  test('story count, a lookup measurement and a stale home size never move a commercial line off its footprint', () => {
+    const base = lineOf(generateEstimate(hotel()), 'bed_bug');
+    // The building footprint is not multiplied by the stories, and a measured-home key (never sent for commercial) is not read.
+    expect(lineOf(generateEstimate(hotel({ stories: 2 })), 'bed_bug')).toMatchObject({ footprintUsed: 6000, footprintSource: 'footprint' });
+    expect(lineOf(generateEstimate(hotel({ fleaMeasuredHomeSqFt: 9000, homeSqFtIsDefault: true })), 'bed_bug')).toMatchObject({ price: base.price, footprintUsed: 6000 });
+    expect(lineOf(generateEstimate(hotel({ homeSqFt: 1200 })), 'bed_bug')).toMatchObject({ price: base.price, footprintUsed: 6000 });
+    // The same building as a home (residential): the whole-home rule applies and the living area is the size.
+    expect(lineOf(generateEstimate(hotel({ isCommercial: false, propertyType: 'single_family', commercialSubtype: undefined })), 'bed_bug'))
+      .toMatchObject({ homeSizeBasis: 'total_living_area', footprintUsed: 2000, footprintSource: 'homeSqFt' });
+  });
+
+  test('the basis helper reads the engine\'s commercial verdict, for the cockroach treatment and the guarantee size too', () => {
+    const commercial = { homeSqFt: 2000, footprintSqFt: 6000, footprint: 6000, stories: 1, wholeHomeSizingCommercial: true };
+    expect(sp.pricePestInitialRoach(commercial, { roachType: 'regular' })).toMatchObject({ homeSizeBasis: 'ground_floor', footprintUsed: 6000 });
+    expect(sp.pricePestInitialRoach({ ...commercial, wholeHomeSizingCommercial: false }, { roachType: 'regular' }))
+      .toMatchObject({ homeSizeBasis: 'total_living_area', footprintUsed: 2000 });
+    expect(sp.resolveGuaranteeHomeSize(commercial)).toEqual({ homeSqFt: 6000, reviewFields: {} });
+  });
 });
 
 describe('bed bug added rooms ($349 each, #8648) compose with the size basis', () => {
@@ -293,9 +355,28 @@ describe('the yearly rodent guarantee prices on the whole home', () => {
     }
   });
 
-  test('no size known keeps the 2,000 default', () => {
-    const line = lineOf(generateEstimate({ stories: 1, lotSqFt: 9000, services: GUARANTEE_SERVICES }), 'rodent_guarantee');
+  test('no size known keeps the 2,000 default price and sends the line to review (a quote priced before the rule: no mark)', () => {
+    const unmeasured = (extra) => lineOf(generateEstimate({ stories: 1, lotSqFt: 9000, ...extra, services: GUARANTEE_SERVICES }), 'rodent_guarantee');
+    const line = unmeasured();
     expect(line?.price).toBe(199);
+    // The shared resolver's own reason for "no usable size" rides on the line, as it does on a cockroach or bed bug line.
+    expect(line.requiresManualReview).toBe(true);
+    expect(line.manualReviewReasons).toEqual(roach(undefined, 1).manualReviewReasons);
+    expect(line.manualReviewReasons.length).toBeGreaterThan(0);
+    expect(line.manualReviewReasons).not.toContain('home_size_source_unclear');
+    expect(line.warnings.length).toBeGreaterThan(0);
+    // An association aggregate (the lookup refused to claim a size): the 2,000 default with the field-measurement reason.
+    expect(unmeasured({ homeSqFt: 90000, footprintUnknown: true })).toMatchObject({
+      price: 199, requiresManualReview: true, manualReviewReasons: ['footprint_unknown_field_measurement_required'],
+    });
+    // A two-story home with no size: the story count still picks the tier, and the review still rides.
+    expect(unmeasured({ stories: 2 })).toMatchObject({ price: 249, requiresManualReview: true });
+    // Legacy: main's line, key for key.
+    const legacy = unmeasured({ legacyWholeHomeSizing: true });
+    expect(legacy.price).toBe(199);
+    expect(legacy).not.toHaveProperty('requiresManualReview');
+    expect(legacy).not.toHaveProperty('manualReviewReasons');
+    expect(legacy).not.toHaveProperty('warnings');
   });
 
   test('the public price sweep sizes the cockroach and bed bug rows on home size (a 2-story 2,150 sq ft home reads the 2,150 bracket)', () => {

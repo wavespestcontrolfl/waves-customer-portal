@@ -912,11 +912,13 @@ function optionBooleanTrue(value) {
 // Size basis of the whole-home services (cockroach treatment, bed bug treatment, rodent guarantee). 'total_living_area' is the
 // live rule (owner 2026-11-26 "whole home"); 'ground_floor' is the rule before it (living area / stories), kept ONLY so a
 // stored estimate quoted that way replays at the price it was sent at (property.wholeHomeSizingLegacy, set by the engine from
-// the estimate's own stamp: estimate-floor-signal-replay.js savedLegacyWholeHomeSizingSignal).
+// the estimate's own stamp: estimate-floor-signal-replay.js savedLegacyWholeHomeSizingSignal), and for a COMMERCIAL building
+// (property.wholeHomeSizingCommercial, the engine's own commercial verdict): the whole-home rule is for homes, and a commercial
+// caller sends a measured building footprint beside a placeholder homeSqFt, so a commercial line keeps the footprint path exactly.
 const HOME_SIZE_BASIS_TOTAL = 'total_living_area';
 const HOME_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
 const HOME_SIZE_UNCLEAR_WARNING = 'Home size may be ground floor only: confirm total living area before sending.';
-const wholeHomeBasisOf = (property) => (property && property.wholeHomeSizingLegacy === true
+const wholeHomeBasisOf = (property) => (property && (property.wholeHomeSizingLegacy === true || property.wholeHomeSizingCommercial === true)
   ? HOME_SIZE_BASIS_GROUND_FLOOR
   : HOME_SIZE_BASIS_TOTAL);
 
@@ -8184,6 +8186,9 @@ function normalizeBedBugOptions(property = {}, options) {
       heatScope: method === 'CHEMICAL' ? undefined : heatScope,
       subcontractCost,
       quoteRequiredReason,
+      // A held row keeps the same size evidence a priced row has (priceBedBugTreatment reads both).
+      homeSizeBasis,
+      homeSizeResolution,
       urgency: options.urgency ?? options.bedbugUrgency ?? 'standard',
       afterHours: options.afterHours ?? options.isAfterHours ?? false,
       includeInternalCostBasis: options.includeInternalCostBasis === true,
@@ -8675,6 +8680,16 @@ function priceBedBugTreatment(property, options) {
     : resolvePestFootprint(property);
   const severityConfig = BED_BUG.severity[normalized.severity];
   const prepConfig = BED_BUG.prepStatus[normalized.prepStatus];
+  // The size evidence every bed bug row carries, held or priced: the size, its source, the basis, and (a website quote on the
+  // whole-home basis only) the posted size the server lookup's measured home replaced. A held row needs it as much as a priced
+  // one: the replay and a staff revision restore the measured home from the stored row.
+  const sizeEvidence = {
+    footprintUsed: footprintResolution.footprint,
+    footprintSource: footprintResolution.source,
+    footprintWasDefaulted: footprintResolution.wasDefaulted,
+    homeSizeBasis: normalized.homeSizeBasis,
+    ...sized?.postedSizeFields,
+  };
 
   if (severityConfig.quoteRequired) {
     const quote = buildBedBugQuoteRequired(normalized, 'SEVERE_INFESTATION', [
@@ -8682,9 +8697,7 @@ function priceBedBugTreatment(property, options) {
     ]);
     return {
       ...quote,
-      footprintUsed: footprintResolution.footprint,
-      footprintSource: footprintResolution.source,
-      footprintWasDefaulted: footprintResolution.wasDefaulted,
+      ...sizeEvidence,
       requiresManualReview: true,
       manualReviewReasons: combineManualReviewMetadata(footprintResolution.manualReviewReasons, ['SEVERE_INFESTATION']),
       warnings: uniqueWarnings(quote.warnings, footprintResolution.warnings),
@@ -8696,9 +8709,7 @@ function priceBedBugTreatment(property, options) {
     ]);
     return {
       ...quote,
-      footprintUsed: footprintResolution.footprint,
-      footprintSource: footprintResolution.source,
-      footprintWasDefaulted: footprintResolution.wasDefaulted,
+      ...sizeEvidence,
       requiresManualReview: true,
       manualReviewReasons: combineManualReviewMetadata(footprintResolution.manualReviewReasons, ['PREP_REFUSED']),
       warnings: uniqueWarnings(quote.warnings, footprintResolution.warnings),
@@ -8713,12 +8724,7 @@ function priceBedBugTreatment(property, options) {
   if (normalized.includeInternalCostBasis && normalized.isInternal) {
     result.internalCostBasis = BED_BUG.internalCostBasis;
   }
-  result.footprintUsed = footprintResolution.footprint;
-  result.footprintSource = footprintResolution.source;
-  result.footprintWasDefaulted = footprintResolution.wasDefaulted;
-  result.homeSizeBasis = normalized.homeSizeBasis;
-  // Present only when the server lookup's measured home replaced the posted size (a website quote; whole-home basis only).
-  Object.assign(result, sized?.postedSizeFields);
+  Object.assign(result, sizeEvidence);
   result.requiresManualReview = footprintResolution.requiresManualReview;
   result.manualReviewReasons = footprintResolution.manualReviewReasons;
   result.warnings = uniqueWarnings(result.warnings, footprintResolution.warnings);
@@ -9042,19 +9048,21 @@ function resolveWholeHomeSize(property = {}) {
 
 // The home size the rodent guarantee tiers on, and the review fields its line carries (reviewFields: empty when the size is clear).
 // A caller's own homeSqFt is the total living area and is read as given. Without one: homeSqFt is null when the property
-// carries no size evidence (the 2,000 fallback is not a measurement). Live rule: the total living area, and when that size may
-// be the ground floor only (a building measurement on a multi-story home) the shared resolver's review reason and warning go
-// on the line. The caller passes the story count the guarantee prices with in property.stories, so a footprint is scaled by the
+// carries no size evidence (the 2,000 fallback is not a measurement). Live rule: the total living area, and when there is no
+// usable size, or that size may be the ground floor only (a building measurement on a multi-story home), the shared resolver's
+// review reasons and warnings go on the line. The caller passes the story count the guarantee prices with in property.stories, so a footprint is scaled by the
 // same count that picks the tier. A quote priced before the rule (property.wholeHomeSizingLegacy): the profile's own
 // ground-floor footprint exactly as the guarantee read it then, and no review mark.
 function resolveGuaranteeHomeSize(property = {}, callerHomeSqFt) {
   if (callerHomeSqFt) return { homeSqFt: callerHomeSqFt, reviewFields: {} };
   if (wholeHomeBasisOf(property) === HOME_SIZE_BASIS_GROUND_FLOOR) return { homeSqFt: property.footprint || null, reviewFields: {} };
   const sized = resolveWholeHomeBasisSize(property);
+  // The resolver's own reasons (no usable size at all: the 2,000 fallback) and the unclear-size reason alike.
+  const manualReviewReasons = uniqueList([...sized.manualReviewReasons, ...sized.sizeReviewReasons]);
   return {
     homeSqFt: sized.wasDefaulted ? null : sized.footprint,
-    reviewFields: sized.sizeReviewReasons.length
-      ? { requiresManualReview: true, manualReviewReasons: sized.sizeReviewReasons, warnings: sized.sizeWarnings }
+    reviewFields: manualReviewReasons.length
+      ? { requiresManualReview: true, manualReviewReasons, warnings: uniqueList([...sized.warnings, ...sized.sizeWarnings]) }
       : {},
   };
 }

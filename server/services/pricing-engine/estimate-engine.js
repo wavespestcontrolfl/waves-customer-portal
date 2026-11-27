@@ -1335,21 +1335,6 @@ function generateEstimate(input) {
   const property = calculatePropertyProfile(propertyProfileInput);
 
   // ── 2. Derive property-driven pricing modifiers (v2 port) ─
-  // Whole-home sizing inputs for the flea package, cockroach treatment, bed bug treatment and rodent guarantee.
-  // calculatePropertyProfile clears footprintUnknown once a measured footprint exists and
-  // derives footprint = homeSqFt / stories when none was supplied, so the pricers need the caller's original flag and footprint.
-  // wholeHomeSizingLegacy: a quote priced before the rule keeps the ground-floor basis it was sold on.
-  const wholeHomeSizing = {
-    wholeHomeFootprintUnknown: input.footprintUnknown === true,
-    wholeHomeExplicitFootprint: input.footprintSqFt ?? input.footprint ?? null,
-    wholeHomeSizingLegacy: legacyWholeHomeSizing(input),
-    // Public website quote, no home size posted: the server lookup's measured whole home replaces the route's 2,000 default
-    // (both keys are set by the route or restored by the replay from a stored row, never read from a client body). The input
-    // keys keep the name flea gave them; resolveWholeHomeSize reads them for every whole-home service.
-    fleaMeasuredHomeSqFt: input.fleaMeasuredHomeSqFt,
-    fleaHomeSqFtIsDefault: input.homeSqFtIsDefault === true,
-  };
-
   const modifiers = deriveModifiers(property);
   // Caller-supplied overrides for modifiers the caller computed from richer
   // data than the profile carries — e.g. the property lookup's graduated
@@ -1460,6 +1445,23 @@ function generateEstimate(input) {
     delete propertyForCommercialDetection.propertyType;
   }
   const propertyIsCommercial = profileIsCommercial || isCommercialProperty(propertyForCommercialDetection, commercialContext);
+  // Whole-home sizing inputs for the flea package, cockroach treatment, bed bug treatment and rodent guarantee.
+  // calculatePropertyProfile clears footprintUnknown once a measured footprint exists and
+  // derives footprint = homeSqFt / stories when none was supplied, so the pricers need the caller's original flag and footprint.
+  // wholeHomeSizingLegacy: a quote priced before the rule keeps the ground-floor basis it was sold on.
+  // wholeHomeSizingCommercial: the whole-home rule is for homes. A commercial building keeps the footprint path exactly (a
+  // commercial caller sends a measured building footprint beside a placeholder homeSqFt, which is not a living area).
+  const wholeHomeSizing = {
+    wholeHomeFootprintUnknown: input.footprintUnknown === true,
+    wholeHomeExplicitFootprint: input.footprintSqFt ?? input.footprint ?? null,
+    wholeHomeSizingLegacy: legacyWholeHomeSizing(input),
+    wholeHomeSizingCommercial: propertyIsCommercial,
+    // Public website quote, no home size posted: the server lookup's measured whole home replaces the route's 2,000 default
+    // (both keys are set by the route or restored by the replay from a stored row, never read from a client body). The input
+    // keys keep the name flea gave them; resolveWholeHomeSize reads them for every whole-home service.
+    fleaMeasuredHomeSqFt: input.fleaMeasuredHomeSqFt,
+    fleaHomeSqFtIsDefault: input.homeSqFtIsDefault === true,
+  };
   const addCommercialManualQuote = (service) => {
     const result = buildCommercialManualQuoteResult(service, property, { commercialSubtype });
     // Dedupe only against an existing MANUAL row of the same service. A priced

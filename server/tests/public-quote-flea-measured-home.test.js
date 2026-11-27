@@ -224,6 +224,57 @@ describe('POST /api/public/quote/calculate: flea size from the server lookup whe
       await wizard(BED_BUG, { buildingSizeConfirmed: true });
       expect(storedRow('bed_bug')).toMatchObject({ footprintUsed: 2000 });
     });
+
+    // The draft the quote stored, parsed (the record a later staff revision reads).
+    const storedDraft = () => {
+      const drafts = db.__recorded.filter((entry) => entry.row && entry.row.estimate_data);
+      const data = drafts[drafts.length - 1].row.estimate_data;
+      return typeof data === 'string' ? JSON.parse(data) : data;
+    };
+
+    test('a bed bug draft held for inspection (severe infestation) keeps the measured home: a staff revision that clears the hold prices 2,800, not the placeholder', async () => {
+      const { fleaSizeReplayOverrides, fleaPriceRecord, generateWithFleaRecord } = require('../services/estimate-flea-size-replay');
+      const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+      mockServerLookup = LOOKUP_2800;
+      await wizard({ bedBug: { ...BED_BUG.bedBug, severity: 'severe' } });
+      const heldRow = storedRow('bed_bug');
+      // Held: the draft parks for a hand quote and the row has no price.
+      expect(storedDraft().quoteRequired).toBe(true);
+      expect(heldRow.price).toBeNull();
+      expect(heldRow).toMatchObject({ homeSizeBasis: 'total_living_area', footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000 });
+      // The replay restores the measurement from the held row, and so does a revision of the draft.
+      const draft = storedDraft();
+      expect(fleaSizeReplayOverrides(draft)).toMatchObject({ fleaMeasuredHomeSqFt: 2800, homeSqFtIsDefault: true });
+      const record = fleaPriceRecord({ status: 'draft', address: '123 Sample St, Parrish, FL 34219' }, draft);
+      expect(record).toMatchObject({ basis: 'measured_home', measuredHomeSqFt: 2800, postedHomeSqFt: 2000 });
+      // Staff clear the hold (light, not severe) and leave the size alone: the line prices on the measured 2,800 sq ft home.
+      const cleared = { homeSqFt: 2000, stories: 2, lotSqFt: 7500, services: { bedBug: { rooms: 1, method: 'CHEMICAL', severity: 'light', prepStatus: 'ready', occupancyType: 'singleFamily' } } };
+      const line = (estimate) => estimate.lineItems.find((item) => item.service === 'bed_bug');
+      const revised = line(generateWithFleaRecord(generateEstimate, cleared, record));
+      expect(revised).toMatchObject({ footprintUsed: 2800, footprintSource: 'lookup_measured_home' });
+      expect(revised.price).toBeGreaterThan(line(generateEstimate(cleared)).price);
+      // Staff type a different home size: that size prices, the measurement is not forced over it.
+      expect(line(generateWithFleaRecord(generateEstimate, { ...cleared, homeSqFt: 1700 }, record))).toMatchObject({ footprintUsed: 1700, footprintSource: 'homeSqFt' });
+    });
+
+    test('a commercial building keeps its measured footprint: a 6,000 sq ft one-story hotel, two rooms, light chemical, is $992 (not $962 on the 2,000 placeholder)', async () => {
+      const saved = process.env.GATE_COMMERCIAL_ONETIME_SCOPED;
+      process.env.GATE_COMMERCIAL_ONETIME_SCOPED = 'true';
+      try {
+        mockServerLookup = null;
+        const hotel = await quote({
+          homeSqFt: 2000, stories: 1, lotSqFt: 20000, buildingSizeConfirmed: false, isCommercial: true, propertyType: 'commercial', commercialSubtype: 'hotel',
+          enriched: { propertyType: 'commercial', isCommercial: true, commercialSubtype: 'hotel', footprintSqFt: 6000, stories: 1 },
+          services: { bedBug: { rooms: 2, method: 'chemical', severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } },
+        });
+        const row = storedRow('bed_bug');
+        expect(row).toMatchObject({ price: 992, footprintUsed: 6000, footprintSource: 'footprint', homeSizeBasis: 'ground_floor' });
+        expect(row.fleaPostedHomeSqFt).toBeUndefined();
+        expect(hotel.one_time_total).toBe(992);
+      } finally {
+        if (saved === undefined) delete process.env.GATE_COMMERCIAL_ONETIME_SCOPED; else process.env.GATE_COMMERCIAL_ONETIME_SCOPED = saved;
+      }
+    });
   });
 
   test('trustedFleaHomeSqFt is the trusted footprint x the trusted stories, or null', () => {

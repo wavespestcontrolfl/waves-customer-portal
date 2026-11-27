@@ -6268,7 +6268,9 @@ home of the same size; a draft stored before that keeps its footprint price,
 estimate stamp `legacyWholeHomeSizing`; when the wizard keeps its 2,000 sq ft
 placeholder and the server's own lookup measured the home, the cockroach and bed
 bug treatments price on the measured living area, as flea does, and a
-customer-confirmed size still wins); species / severity /
+customer-confirmed size still wins; a bed bug row held for inspection stores
+the same size fields, so a staff revision keeps the measured home; a
+commercial building is not a home and keeps its measured footprint); species / severity /
 price override stay staff-scoped, the site prices the native scale; the
 included second visit is booked at completion at no charge). It prices
 instantly but never mints a self-book slot (`bookingUrl` null, like bed

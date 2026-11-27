@@ -110,7 +110,9 @@ environment that carries the row (prod does), **editing
   a service added to a legacy estimate stays on the footprint. A browser-priced
   save naming a cockroach or guarantee row needs the stamp `false` unless the
   stored estimate is legacy (409 otherwise: a cached page cannot save a new
-  footprint-priced quote).
+  footprint-priced quote). Homes only: a commercial property keeps the
+  footprint path for all three. An unmeasured rodent guarantee (2,000
+  fallback) goes to review.
 - **Specialty prices of 2026-11-26 (evening, new quotes only; no gate, ships live)**: three CODE constants, not
   Settings, behind ONE estimate stamp `pricingMetadata.legacySpecialty1126` (true = priced before; a priced
   estimate with no stamp, or inputs-only asking for bed bug, mosquito or a stinging insect, reads true and keeps
