@@ -11,13 +11,15 @@ const { bookingExchange, namedDayMatcher, _internals } = require('../services/sm
 const GATE = 'GATE_SMS_REAL_ANSWERS';
 const ME = '+19415550100';
 const OTHER = '+19415550199';
+const LINE = '+19415550111'; // the Waves line the customer texted
+const LINE_2 = '+19415550122';
 const NOW = new Date('2026-11-26T15:00:00Z').getTime();
 const ago = (h) => new Date(NOW - h * 3600 * 1000).toISOString();
 const IDENTITY_NONE = { ok: true, json: { about: 'none', visit: null, service: null } };
 
-const cur = (body) => ({ id: 'log-9', direction: 'inbound', fromPhone: ME, body, date: ago(0) });
-const staff = (body, h = 1, extra = {}) => ({ direction: 'outbound', type: 'manual', toPhone: ME, body, date: ago(h), ...extra });
-const mine = (body, h) => ({ direction: 'inbound', fromPhone: ME, body, date: ago(h) });
+const cur = (body) => ({ id: 'log-9', direction: 'inbound', fromPhone: ME, toPhone: LINE, body, date: ago(0) });
+const staff = (body, h = 1, extra = {}) => ({ direction: 'outbound', type: 'manual', fromPhone: LINE, toPhone: ME, body, date: ago(h), ...extra });
+const mine = (body, h) => ({ direction: 'inbound', fromPhone: ME, toPhone: LINE, body, date: ago(h) });
 const exchange = (body, rows, phone = ME) => bookingExchange({ smsHistory: [cur(body), ...rows], currentSmsLogId: 'log-9', inboundMessage: body, inboundPhone: phone });
 
 describe('staffAsksAvailability: only explicit availability asks and visit offers', () => {
@@ -65,12 +67,22 @@ describe('bookingExchange', () => {
     expect(exchange('Anytime is fine', [mine('Can you come out and do the ants again?', 1)])).toBeNull();
   });
 
-  test('automated texts and replies to another contact are skipped; the human text to this sender decides', () => {
-    const reminder = staff('Reminder: your visit is tomorrow. Reply C to confirm?', 0.5, { type: 'appointment_reminder' });
-    const toOther = staff('What day works for you?', 0.7, { toPhone: OTHER });
-    expect(exchange('Yes', [reminder, toOther])).toBeNull();
-    expect(exchange('Yes', [reminder, toOther, staff('Would Thursday work?', 1)])).toEqual({ staffText: 'Would Thursday work?', customerTexts: ['Yes'] });
+  test('any automated, AI assistant, other-line or other-contact text inside the exchange stops it (no carry)', () => {
+    const ask = staff('What day works for you?', 1);
+    expect(exchange('Yes', [staff('Reminder: your visit is tomorrow. Reply C to confirm?', 0.5, { type: 'appointment_reminder' }), ask])).toBeNull();
+    expect(exchange('Yes', [staff('Thanks for your payment.', 0.5, { type: 'receipt' }), ask])).toBeNull();
+    expect(exchange('Yes', [staff('What day works for you?', 0.7, { toPhone: OTHER }), ask])).toBeNull();
+    expect(exchange('Yes', [{ ...mine('Friday?', 0.5), toPhone: LINE_2 }, ask])).toBeNull();
+  });
+
+  test('the staff text must be a person\'s send from the line the customer texted', () => {
+    expect(exchange('Yes', [staff('What day works for you?')])).not.toBeNull();
+    for (const type of ['ai_approved', 'ai_revised']) expect(exchange('Yes', [staff('What day works for you?', 1, { type })])).not.toBeNull();
+    for (const type of ['ai_assistant', 'ai_assistant_reply']) expect(exchange('Yes', [staff('What day works for you?', 1, { type })])).toBeNull();
+    expect(exchange('Yes', [staff('What day works for you?', 1, { fromPhone: LINE_2 })])).toBeNull();
     expect(exchange('Yes', [staff('What day works for you?', 1, { toPhone: null })])).toBeNull();
+    const noLine = { ...cur('Yes'), toPhone: null };
+    expect(bookingExchange({ smsHistory: [noLine, staff('What day works for you?')], currentSmsLogId: 'log-9', inboundMessage: 'Yes', inboundPhone: ME })).toBeNull();
   });
 
   test("another number's text inside the exchange: nothing is carried", () => {
@@ -80,8 +92,9 @@ describe('bookingExchange', () => {
   test('older than 72 hours, an undated row, or more than 8 rows back: no exchange', () => {
     expect(exchange('Yes', [staff('What day works for you?', 73)])).toBeNull();
     expect(exchange('Yes', [staff('What day works for you?', 1, { date: 'not a date' })])).toBeNull();
-    const reminders = Array.from({ length: 8 }, () => staff('Reminder', 0.5, { type: 'reminder' }));
-    expect(exchange('Yes', [...reminders, staff('What day works for you?')])).toBeNull();
+    const mineRows = Array.from({ length: 8 }, () => mine('also', 0.5));
+    expect(exchange('Yes', [...mineRows, staff('What day works for you?')])).toBeNull();
+    expect(exchange('Yes', [...mineRows.slice(1), staff('What day works for you?')])).not.toBeNull();
   });
 
   test('not a short reply: a new request, long text, a reaction, no sender phone', () => {
@@ -225,7 +238,7 @@ describe('draftShadowReply: a reply in a booking exchange gets OPEN TIMES; the w
       getContextForCustomer: jest.fn(async () => ({
         summary: 'QA customer', flags: [], upcomingServices, serviceHistory, pendingEstimate,
         // the webhook logs the drafted text (sms-1) before drafting: it is the newest row
-        smsHistory: currentRow ? [{ id: 'sms-1', direction: 'inbound', fromPhone: ME, body: inboundMessage, date: new Date().toISOString() }, ...smsHistory] : smsHistory,
+        smsHistory: currentRow ? [{ id: 'sms-1', direction: 'inbound', fromPhone: ME, toPhone: LINE, body: inboundMessage, date: new Date().toISOString() }, ...smsHistory] : smsHistory,
         customer: { id: 'customer-1', billingLane: null },
         billing: { outstandingBalance: 0, recentPayments: [] },
       })),
@@ -270,7 +283,7 @@ describe('draftShadowReply: a reply in a booking exchange gets OPEN TIMES; the w
   });
 
 
-  const staffAsk = () => ({ direction: 'outbound', type: 'manual', toPhone: ME, body: 'We can come Monday. What time works for you?', date: new Date(Date.now() - 3600e3).toISOString() });
+  const staffAsk = () => ({ direction: 'outbound', type: 'manual', fromPhone: LINE, toPhone: ME, body: 'We can come Monday. What time works for you?', date: new Date(Date.now() - 3600e3).toISOString() });
   const at = (h) => new Date(Date.now() - h * 3600e3).toISOString();
   const pestVisit = { type: 'Pest Control', date: '2026-12-08', scheduledServiceId: 'svc-pest-1' };
   const lawnDone = { type: 'Lawn Care', date: '2026-11-02' };
@@ -294,7 +307,7 @@ describe('draftShadowReply: a reply in a booking exchange gets OPEN TIMES; the w
   });
 
   test('a lawn ask and the clarification after it size lawn times, not the booked pest visit', async () => {
-    const rows = [{ direction: 'inbound', fromPhone: ME, body: 'For the lawn treatment', date: at(0.5) }, { ...staffAsk(), body: 'Sure. What day works for you?' }];
+    const rows = [{ direction: 'inbound', fromPhone: ME, toPhone: LINE, body: 'For the lawn treatment', date: at(0.5) }, { ...staffAsk(), body: 'Sure. What day works for you?' }];
     const { getAvailableSlots, identityPrompts } = await runDraft({
       inboundMessage: 'Thursday', smsHistory: rows, upcomingServices: [pestVisit], services: [PEST, LAWN], identity: pickLawn,
     });
@@ -358,6 +371,20 @@ describe('draftShadowReply: a reply in a booking exchange gets OPEN TIMES; the w
     expect(actions.open_times_withheld).toBe('no_location');
   });
 
+  test('a carried reply never gets the next-of-series pick in the identity prompt', async () => {
+    process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
+    try {
+      const series = [0, 1].map((i) => ({ type: 'Pest Control', date: `2026-12-0${i + 3}`, scheduledServiceId: `svc-${i}`, seriesKey: 'series-1', seriesExclusive: true }));
+      const carried = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [staffAsk()], upcomingServices: series });
+      expect(carried.identityPrompts[0]).toContain('Earlier in this text thread');
+      expect(carried.identityPrompts[0]).not.toContain('it is about the NEXT one');
+      const flagged = await runDraft({ inboundMessage: 'Can I move my appointment?', schedulingIntent: true, upcomingServices: series });
+      expect(flagged.identityPrompts[0]).toContain('it is about the NEXT one');
+    } finally {
+      delete process.env.GATE_SMS_OFFERS_SCHEDULER;
+    }
+  });
+
   test('gate off: no exchange, no new keys (byte-identical row shape)', async () => {
     const { row, actions, getAvailableSlots } = await runDraft({ gateOn: false, inboundMessage: 'Anytime is fine', smsHistory: [staffAsk()] });
     expect(getAvailableSlots).not.toHaveBeenCalled();
@@ -406,13 +433,13 @@ describe('a reply in a booking exchange after a covered pest report books throug
     client: {},
     context: {
       summary: 'Test customer', customer: { id: 'cust-1' }, serviceHistory: [{ type: 'Quarterly Pest', date: '2026-05-20' }],
-      smsHistory: [{ id: 'log-9', direction: 'inbound', fromPhone: ME, body: inboundMessage, date: at(0) }, ...rows],
+      smsHistory: [{ id: 'log-9', direction: 'inbound', fromPhone: ME, toPhone: LINE, body: inboundMessage, date: at(0) }, ...rows],
     },
     inboundMessage, inboundPhone: ME, intent: { intent: 'GENERAL' }, schedulingIntent: false, city: 'Venice', voiceProfile: null, liveOpenTimes: true, smsLogId: 'log-9',
   });
   const rows = [
-    { direction: 'inbound', fromPhone: ME, body: 'The ants are back in the kitchen', date: at(0.5) },
-    { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Sorry to hear that. What day works for you?', date: at(1) },
+    { direction: 'inbound', fromPhone: ME, toPhone: LINE, body: 'The ants are back in the kitchen', date: at(0.5) },
+    { direction: 'outbound', type: 'manual', fromPhone: LINE, toPhone: ME, body: 'Sorry to hear that. What day works for you?', date: at(1) },
   ];
 
   test('"Anytime is fine" after the report: re-service openings, never ordinary OPEN TIMES', async () => {
@@ -430,5 +457,14 @@ describe('a reply in a booking exchange after a covered pest report books throug
     mockDeps({ reply: { reply: '', kind: 'ABSTAIN', intended_actions: [{ type: 'none' }], missing_info: null } });
     const result = await draft('Anytime is fine', rows);
     expect(result.converged).toBe(false);
+  });
+});
+
+describe('settleDraftKind: a carried reply is never a courtesy ACK', () => {
+  const { settleDraftKind, DRAFT_KINDS } = require('../services/sms-shadow-drafter');
+  test('the same ACK settles as ACK alone and as ABSTAIN when carried', () => {
+    const ack = { kind: 'ACK', reply: '', intended_actions: [] };
+    expect(settleDraftKind(ack, { inboundMessage: 'ok', factsBlock: '', allowAck: true }).kind).toBe(DRAFT_KINDS.ACK);
+    expect(settleDraftKind(ack, { inboundMessage: 'ok', factsBlock: '', allowAck: true, carried: true }).kind).toBe(DRAFT_KINDS.ABSTAIN);
   });
 });

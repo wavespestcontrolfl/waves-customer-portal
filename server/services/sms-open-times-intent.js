@@ -7,13 +7,15 @@
  *     -> null | { staffText, customerTexts: string[] }
  *   One rule, built once: the history is cut at the row of the text being drafted (currentSmsLogId), so a later row
  *   never reads as what the text answers. Walking back from there: this sender's own texts, up to the latest human
- *   staff text sent to this sender within 72 hours of the drafted text. It is an exchange only when that staff text
+ *   staff text within 72 hours of the drafted text: the first outbound row must be a person's send (manual, ai_approved,
+ *   ai_revised) from the Waves line the customer texted to this sender, or nothing is carried. It is an exchange only when that staff text
  *   asks the customer's availability or proposes a visit in an explicit form ("what day works", "when works for you",
  *   "would Thursday work", "are you available", "we can come Monday", "I have Tuesday at 9 open"); a day or time
  *   mentioned alone never counts. The drafted text must be a short reply (a yes, timing words, a day or a date).
  *   customerTexts = this sender's texts after the staff text, oldest first, the drafted text last.
- *   Fail closed (null): no sender phone, the drafted row not in the history, an unreadable date, another number's
- *   text inside the exchange, no staff text in the window, or a staff text that does not ask.
+ *   Fail closed (null): no sender phone, the drafted row not in the history or with no Waves line, an unreadable date,
+ *   another number's text (or this customer's text to another line) inside the exchange, any automated or AI assistant
+ *   text inside it, no staff text in the window, or a staff text that does not ask.
  *
  *   namedDayMatcher(text)
  *     -> null | (dayLabel) => string[]
@@ -22,9 +24,11 @@
  *   each name, even past its first three days; the picker's own horizon still bounds it.
  */
 const { isSmsReaction } = require('./sms-intent');
-const { HUMAN_REPLY_TYPES } = require('./sms-response-policy');
 const { phoneIdentityKey } = require('../utils/phone');
 
+// A text a person at Waves sent: typed, or an AI draft a person approved or revised. The AI assistant's own sends and every
+// automated text (reminders, receipts) are not.
+const STAFF_SENT_TYPES = new Set(['manual', 'ai_approved', 'ai_revised']);
 const EXCHANGE_WINDOW_MS = 72 * 60 * 60 * 1000;
 // At most this many rows are walked back from the drafted text (the context holds 20).
 const EXCHANGE_MAX_ROWS = 8;
@@ -59,25 +63,37 @@ function isShortReply(text) {
   return AFFIRM_START_RE.test(plain) || TIMING_ANSWER_RE.test(plain) || namedDayMatcher(plain) !== null;
 }
 
+// The drafted text's own row: where it sits, when it came in, and the Waves line the customer texted. null when any is unknown.
+function draftedRow(rows, currentSmsLogId) {
+  const at = rows.findIndex((m) => m && m.id != null && String(m.id) === String(currentSmsLogId));
+  const row = rows[at];
+  const draftedAt = row ? new Date(row.date).getTime() : NaN;
+  const line = phoneIdentityKey(row?.toPhone);
+  return Number.isFinite(draftedAt) && line ? { at, draftedAt, line } : null;
+}
+
+// A person at Waves sent it, from this line to this sender (an automated text, an AI assistant send, another line or another contact: no).
+function staffSentOnThread(row, sender, line) {
+  return STAFF_SENT_TYPES.has(row.type) && phoneIdentityKey(row.toPhone) === sender && phoneIdentityKey(row.fromPhone) === line;
+}
+
+function customerTextOnThread(row, sender, line) {
+  return row.direction === 'inbound' && phoneIdentityKey(row.fromPhone) === sender && phoneIdentityKey(row.toPhone) === line;
+}
+
 function bookingExchange({ smsHistory, currentSmsLogId, inboundMessage, inboundPhone } = {}) {
   const sender = phoneIdentityKey(inboundPhone);
-  if (!sender || !currentSmsLogId || !isShortReply(inboundMessage)) return null;
   const rows = Array.isArray(smsHistory) ? smsHistory : [];
-  const at = rows.findIndex((m) => m && m.id != null && String(m.id) === String(currentSmsLogId));
-  const drafted = rows[at];
-  const draftedAt = drafted ? new Date(drafted.date).getTime() : NaN;
-  if (!Number.isFinite(draftedAt)) return null;
+  const drafted = sender && currentSmsLogId && isShortReply(inboundMessage) ? draftedRow(rows, currentSmsLogId) : null;
+  if (!drafted) return null;
   const customerTexts = [String(inboundMessage)];
-  for (const row of rows.slice(at + 1, at + 1 + EXCHANGE_MAX_ROWS)) {
+  for (const row of rows.slice(drafted.at + 1, drafted.at + 1 + EXCHANGE_MAX_ROWS)) {
     const rowAt = new Date(row?.date).getTime();
-    if (!Number.isFinite(rowAt) || draftedAt - rowAt > EXCHANGE_WINDOW_MS) return null;
-    if (row.direction === 'outbound') {
-      // Automated texts and replies to another contact on the account are not this exchange.
-      if (!HUMAN_REPLY_TYPES.includes(row.type) || phoneIdentityKey(row.toPhone) !== sender) continue;
-      return staffAsksAvailability(row.body) ? { staffText: String(row.body), customerTexts } : null;
-    }
-    // Another number's text inside the exchange: it may be someone else's answer, so nothing is carried.
-    if (row.direction !== 'inbound' || phoneIdentityKey(row.fromPhone) !== sender) return null;
+    if (!Number.isFinite(rowAt) || drafted.draftedAt - rowAt > EXCHANGE_WINDOW_MS) return null;
+    // The first outbound row decides: a person's ask on this thread carries the reply; any other outbound text stops the walk.
+    if (row.direction === 'outbound') return staffSentOnThread(row, sender, drafted.line) && staffAsksAvailability(row.body) ? { staffText: String(row.body), customerTexts } : null;
+    // Another number's text, or this customer's text to another Waves line: it may answer something else, so nothing is carried.
+    if (!customerTextOnThread(row, sender, drafted.line)) return null;
     if (typeof row.body === 'string' && row.body.trim()) customerTexts.unshift(row.body);
   }
   return null;

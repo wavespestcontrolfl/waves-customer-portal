@@ -311,10 +311,11 @@ function normalizeDraftKind(raw, reply) {
 // action and no times, and an ABSTAIN keeps no reply, no times and only its escalate / none actions (the model's escalation says why a person
 // owns the text; nothing was promised). The hand-off rules that need an escalation (a link-down re-service lane) still check for it.
 // Pure; run on every generation of the draft loop, so a revision cannot change a kind without passing through it again.
-function settleDraftKind(parsed, { inboundMessage = '', factsBlock = '', allowAck = false } = {}) {
+// carried (gap 1): the text is a reply in a booking exchange, so it is never a courtesy ACK.
+function settleDraftKind(parsed, { inboundMessage = '', factsBlock = '', allowAck = false, carried = false } = {}) {
   if (!parsed) return parsed;
   let kind = normalizeDraftKind(parsed.kind, parsed.reply);
-  if (kind === DRAFT_KINDS.ACK && !(allowAck && ackAllowed(inboundMessage, factsBlock))) kind = DRAFT_KINDS.ABSTAIN;
+  if (kind === DRAFT_KINDS.ACK && !(allowAck && !carried && ackAllowed(inboundMessage, factsBlock))) kind = DRAFT_KINDS.ABSTAIN;
   if (kind === DRAFT_KINDS.ANSWER && !String(parsed.reply || '').trim()) kind = DRAFT_KINDS.ABSTAIN;
   if (kind === DRAFT_KINDS.ACK) {
     return { ...parsed, kind, reply: ACK_REPLY, deliverableReply: '', intended_actions: [{ type: 'none' }], offered_times: [], auto_send_safe: false };
@@ -3850,7 +3851,8 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, t
   // The next-one instruction exists only for a real series (the same deterministic test the
   // fallback uses), and then every visit date carries its YEAR (Codex #6172 r2): a series
   // crossing New Year reads "Oct 2" then "Jan 2" without one, and "earliest" would be a guess.
-  const seriesNext = nextOfSeriesLive() ? nextVisitOfSeries(visits.filter((v) => v.upcoming)) : null;
+  // A carried reply (gap 1) never takes the next-of-series pick: its exchange must name the job, or OPEN TIMES is withheld.
+  const seriesNext = !threadTexts.length && nextOfSeriesLive() ? nextVisitOfSeries(visits.filter((v) => v.upcoming)) : null;
   const dateLabel = (v) => (seriesNext && visitYear(v.date) ? `${formatEtDate(v.date)}, ${visitYear(v.date)}` : formatEtDate(v.date));
   const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${dateLabel(v)})` : ''}`);
   return [
@@ -6565,7 +6567,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   };
   let { parsed, model, servedModel } = first;
   // allowAck: only the silent shadow lanes record an acknowledgement; every other caller reads an ACK as an ABSTAIN (no reply text).
-  const settle = (draft) => settleDraftKind(draft, { inboundMessage, factsBlock, allowAck });
+  const settle = (draft) => settleDraftKind(draft, { inboundMessage, factsBlock, allowAck, carried: threadIntent.carried });
   parsed = settle(parsed);
   // Kill switch / single-pass mode: no LLM verification claim, behave as
   // pre-v3 — except the offered_times check, which is deterministic and
