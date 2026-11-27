@@ -24893,13 +24893,31 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       const accessFlags = await require('../services/visit-access-flags').accessFlagsFor(db, svc);
       return accessFlags && accessFlags.length ? { ...payload, accessFlags } : payload;
     };
+    // "About this home" (services/home-note.js): the customer's one staff note rides every answer, so the tech's Visit Brief
+    // shows it at the top with no request of its own. `homeNote` is the note or null (no note yet); the key is left out when
+    // the visit has no customer, so that answer is exactly as before. The read is covered by finalRecheck (below), which also
+    // runs whenever a customer's note was looked up, whichever brief gates are on.
+    let homeNoteLooked = false;
+    const withHomeNote = async (payload) => {
+      let out = null;
+      try {
+        out = await require('../services/home-note').readHomeNote(svc);
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief home note failed for ${svc.id}: ${err.message}`);
+      }
+      // No customer: no note and nothing more to check, the answer as before. Otherwise finalRecheck below runs, even with
+      // every brief gate off, and withholds the whole answer when the visit was lost during the read or the check cannot run.
+      if (out && !out.editable) return payload;
+      homeNoteLooked = true;
+      return out ? { ...payload, homeNote: { note: out.note, customerId: out.customerId } } : payload;
+    };
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
     // access codes, the cached brief and a customer's quoted texts, so it must still be this technician's visit AND the
     // customer the brief was built for (a merge changes the visit's customer while the technician stays assigned).
-    // No longer so, or the check itself failing: the whole answer is withheld. All three gates off: no extra read.
+    // No longer so, or the check itself failing: the whole answer is withheld. All three gates off and no home note looked up: no extra read.
     const finalRecheck = async (payload) => {
-      if (!(PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
+      if (!(homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
       try {
         const stillOwned = await db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
@@ -24911,7 +24929,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return { brief: null };
       }
     };
-    const answer = async (payload) => res.json(await finalRecheck(await withAwayWatch(await withAccessFlags(await withFacts(payload)))));
+    const answer = async (payload) => res.json(await finalRecheck(await withHomeNote(await withAwayWatch(await withAccessFlags(await withFacts(payload))))));
     if (!svc.pre_service_brief) return answer({ brief: null });
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
@@ -24942,6 +24960,70 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // live facts, not the cached copy.
     await answer(served);
   } catch (err) { next(err); }
+});
+
+// GET / PUT /api/admin/schedule/:id/home-note   body { body, expectedUpdatedAt }
+// "About this home" (services/home-note.js): the customer's one short lasting staff note, read at the top of the tech
+// Visit Brief. Same assignment check as GET /:id/visit-brief (technicianCurrentVisitFilter): a technician
+// reaches only a visit assigned to them (403 otherwise, so a visit's existence is not told); an admin reaches any. The PUT
+// holds the visit row locked in its own transaction, so a reassignment landing during the save refuses it. A stale save
+// (the note changed since the editor read it) is 409 with the current note. Staff only: no customer, report or token
+// route reads this table.
+const HOME_NOTE_VISIT_COLUMNS = ['scheduled_services.id', 'scheduled_services.customer_id'];
+const homeNoteVisitRefusal = (req, res) => (isTechnicianRequest(req)
+  ? res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' })
+  : res.status(404).json({ error: 'Scheduled service not found' }));
+const isHomeNoteVisitId = (id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id));
+router.get('/:id/home-note', async (req, res, next) => {
+  try {
+    const HomeNote = require('../services/home-note');
+    if (!isHomeNoteVisitId(req.params.id)) return res.status(404).json({ error: 'Scheduled service not found' });
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first(HOME_NOTE_VISIT_COLUMNS);
+    if (!svc) return homeNoteVisitRefusal(req, res);
+    const out = await HomeNote.readHomeNote(svc);
+    // Recheck as the last read before the answer: a note read for a visit reassigned meanwhile is never sent.
+    const stillOwned = await db('scheduled_services')
+      .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.id');
+    if (!stillOwned) return homeNoteVisitRefusal(req, res);
+    HomeNote.sendHomeNote(res, out);
+  } catch (err) { next(err); }
+});
+router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, async (req, res, next) => {
+  try {
+    const HomeNote = require('../services/home-note');
+    // Required here, not in the file's shared import: that line is part of the handler chain the Intelligence Bar read catalog fingerprints.
+    const { lockOwnedLiveVisit } = require('../services/technician-visit-scope');
+    if (!isHomeNoteVisitId(req.params.id)) return res.status(404).json({ error: 'Scheduled service not found' });
+    const out = await db.transaction(async (trx) => {
+      // Same lock order as a customer merge: the customer first, then the visit (the merge locks customers, then repoints visits).
+      // The same scope as the visit-brief read: a visit that is not this technician's is refused here, before any customer lock.
+      const peek = await trx('scheduled_services')
+        .where({ 'scheduled_services.id': req.params.id })
+        .modify((q) => technicianCurrentVisitFilter(req, q))
+        .first('scheduled_services.customer_id');
+      if (!peek) {
+        throw isTechnicianRequest(req)
+          ? Object.assign(new Error('Not assigned to this service'), { status: 403, code: 'service_not_assigned' })
+          : Object.assign(new Error('Service not found'), { status: 404, code: 'not_found' });
+      }
+      if (peek.customer_id) await trx('customers').where({ id: peek.customer_id }).whereNull('deleted_at').forShare().first('id');
+      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id'], { allowCompleted: true });
+      if (String(peek.customer_id || '') !== String(svc.customer_id || '')) {
+        return { status: 409, error: 'This visit now belongs to another customer. Reload it.', code: 'customer_changed' };
+      }
+      return HomeNote.saveHomeNote(svc, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { conn: trx });
+    });
+    HomeNote.sendHomeNote(res, out);
+  } catch (err) {
+    if (err && err.code === 'service_not_assigned') return res.status(403).json({ error: err.message, code: err.code });
+    if (err && err.code === 'not_found') return res.status(404).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/schedule/:id/access-flags/:questionId   body { verdict: 'right' | 'wrong', evidenceId }
