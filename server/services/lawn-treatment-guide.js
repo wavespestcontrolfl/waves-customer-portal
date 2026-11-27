@@ -25,6 +25,7 @@
 const logger = require('./logger');
 const { worstSeverity } = require('./lawn-photo-merge');
 const { chinchCardCheck, chinchRecheckClause } = require('../config/lawn-chinch-count');
+const { isLimitedProduct } = require('./waveguard-approval-engine');
 
 const KINDS = Object.freeze(['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots']);
 const SEVERITY_RANK = Object.freeze({ none: 0, minor: 1, moderate: 2, severe: 3 });
@@ -145,8 +146,8 @@ const heldByCity = (raw) => raw?.unavailable?.kind === 'city_hold';
  * fungicide in program order is the suggestion; a product that is at a limit, whose limit could not
  * be read, or that the city holds is never suggested (no card, not a fall-through to the next).
  */
-async function addOnOffers({ candidates, rows, svc, knex, places = null, takeAllMapped = false }) {
-  const picks = Object.entries(pickAddOns(candidates, rows, { takeAllMapped })).filter(([, candidate]) => candidate);
+async function addOnOffers({ candidates, rows, svc, knex, places = null, takeAllMapped = false, successiveHeld = [] }) {
+  const picks = Object.entries(pickAddOns(candidates, rows, { takeAllMapped, successiveHeld })).filter(([, candidate]) => candidate);
   // A take-all row the pick passed over (October's Headway row follows the large patch row) is governed
   // all the same: its limit is read so a forbidden one stays out of the search, and it has no offer.
   const picked = new Set(picks.map(([, candidate]) => idOf(candidate.raw.product.id)));
@@ -157,6 +158,8 @@ async function addOnOffers({ candidates, rows, svc, knex, places = null, takeAll
   // The passed-over Group 11 rows are blocked outright: no limit read is needed, and no list or search offers them.
   // `limitWarned` (owner 2026-10-30: a yearly limit is a warning, never a block): the picks closed ONLY by a limit that was READ,
   // `{ [productId]: the limit's own words }`. They are offered (card, list, search) and are in neither `blocked` nor `unreadable`.
+  // A row whose label limit on applications in a row is reached (a third Velista) is only not suggested: it stays on the list and
+  // in the search, and the job card warns (owner 2026-11-26: such alerts never stop the job).
   const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: group11HeldAddOns(candidates, rows, { takeAllMapped }).map((c) => idOf(c.raw.product.id)), unreadable: [], limitWarned: {} };
   if (!chosen.length) return offers;
   const wide = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
@@ -221,8 +224,17 @@ const isGroup11LargePatchRow = (row, candidate) => AZOXYSTROBIN_NAME.test(row.pr
 // be Artavia). The fungus card answers a fungus seen today, so it never offers these rows; they stay on the month's add-on list.
 const PREVENTION_ONLY_TRIGGERS = Object.freeze(['mapped_large_patch_spring', 'mapped_gray_leaf_spot_prevention']);
 
+// A fungicide row whose label limit on applications in a row is reached on this lawn (waveguard-approval-engine.js
+// SUCCESSIVE_USE_LIMITS: Velista, two in a row). `successiveHeld` is the list of limits reached before this visit. The guide
+// does not suggest the row, and the next fungicide in program order is the suggestion: in December that is Artavia, on a
+// lawn that took Velista in October and November. Unlike the Group 11 row, it is not held: list, search and close-out keep it.
+const isSuccessiveHeldRow = (row, candidate, successiveHeld) => (successiveHeld || []).some((limit) => isLimitedProduct(limit, {
+  epa: candidate.raw?.product?.epa_reg_number ?? candidate.raw?.product?.epaRegNumber,
+  name: row.productName || row.product_name || candidate.raw?.product?.name || '',
+}));
+
 // The one add-on each kind may suggest: the FIRST fungicide in program order, the others by trigger.
-function pickAddOns(candidates, rows, { takeAllMapped = false } = {}) {
+function pickAddOns(candidates, rows, { takeAllMapped = false, successiveHeld = [] } = {}) {
   const order = [...rows.keys()];
   const rank = (candidate) => order.indexOf(idOf(candidate.raw?.substitution?.originalProductId || candidate.raw?.product?.id));
   const withRole = (test) => (candidates || []).filter((candidate) => {
@@ -231,7 +243,8 @@ function pickAddOns(candidates, rows, { takeAllMapped = false } = {}) {
   });
   return {
     fungus: withRole((row, candidate) => row.role === FUNGICIDE_ROLE && !PREVENTION_ONLY_TRIGGERS.includes(row.gates?.trigger)
-      && !(takeAllMapped && isGroup11LargePatchRow(row, candidate))).sort((a, b) => rank(a) - rank(b))[0] || null,
+      && !(takeAllMapped && isGroup11LargePatchRow(row, candidate))
+      && !isSuccessiveHeldRow(row, candidate, successiveHeld)).sort((a, b) => rank(a) - rank(b))[0] || null,
     caterpillars: withRole((row) => row.gates?.trigger === CATERPILLAR_TRIGGER)[0] || null,
     dry_spots: withRole((row) => row.gates?.trigger === DRY_SPOT_TRIGGER)[0] || null,
   };
