@@ -66,7 +66,7 @@ const { spreaderForLine } = require('../services/spreader-settings');
 
 // Only a spreader card (not a hand-shaker bait, a sprayed product or a SKIP line) gets a spreader number.
 const spreaderForTankLine = (product, line, amounts) => (amounts?.application === 'spreader' && amounts.applicator === 'spreader'
-  ? spreaderForLine({ productName: product.name, raw: line.raw, rate: amounts.ratePer1000, rateUnit: amounts.rateUnit })
+  ? spreaderForLine({ productName: product.name, raw: line.raw, rate: amounts.ratePer1000, rateUnit: amounts.rateUnit, substituted: Boolean(line.substitution) })
   : null);
 const { completionRateFields } = require('../utils/protocol-label-rate');
 const { addonCardHints, labelRateFor, resolveCatalogProductForName } = require('../services/completion-product-defaults');

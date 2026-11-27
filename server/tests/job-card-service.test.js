@@ -1130,6 +1130,18 @@ describe('PR review r5', () => {
     expect(halved).toMatchObject({ spreader: { setting: null, text: 'No spreader number for this rate: weigh test.' }, planned: { amount: 22.5 } });
     const [sprayed] = await build({ isLawn: true }, { raw: 'Celsius WG — weed spots', role: 'base', selected: true, product: { id: 'c', name: 'Celsius WG', rate_unit: 'oz', label_verified_at: '2026-08-01' } });
     expect(sprayed.spreader).toBeNull();
+    // A card that withholds the dose (a spray-check hold, an unverified label) gives no number either.
+    const verdicts = [{ productId: 'f', verdict: 'hold', reason: 'Synthetic hold' }];
+    const [heldCard] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04', isLawn: true }, lines: [{ raw, role: 'base', selected: true, product: bag, planMix: { amount: 45, amountUnit: 'lb', ratePer1000: 4.5, rateUnit: 'lb' } }], verdicts, packSizes: {} });
+    expect(heldCard).toMatchObject({ planned: null, spreader: null });
+    const [unverifiedCard] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: { ...bag, label_verified_at: null }, planMix: { amount: 45, amountUnit: 'lb', ratePer1000: 4.5, rateUnit: 'lb' } });
+    expect(unverifiedCard.spreader).toBeNull();
+    // A ranged line with no plan rate never takes the catalog rate's number.
+    const [ranged] = await build({ isLawn: true }, { raw: 'Topchoice Granular Insecticide — 1-2 lb per 1,000 sq ft', role: 'base', selected: true, product: { id: 't', name: 'Topchoice Granular Insecticide', rate_unit: 'lb', default_rate_per_1000: 2, label_verified_at: '2026-08-01' } });
+    expect(ranged.spreader).toMatchObject({ setting: null });
+    // An approved swap: the swapped-in bag's identity only.
+    const [swapped] = await build({ isLawn: true }, { raw, role: 'base', selected: true, substitutedFor: bag.name, product: { id: 's', name: 'Synthetic swap bag', rate_unit: 'lb', default_rate_per_1000: 4.5, label_verified_at: '2026-08-01' } });
+    expect(swapped.spreader).toMatchObject({ setting: null, text: 'No spreader number for this product: weigh test.' });
     const [pest] = await build({ isLawn: false }, { raw: 'Synthetic ant bait granule', role: 'base', selected: true, product: { id: 'a', name: 'Synthetic ant bait granule', rate_unit: 'lb', label_verified_at: '2026-08-01' } });
     expect(pest.spreader).toBeNull();
   });

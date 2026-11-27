@@ -16,12 +16,15 @@ function rowsFor(names, list = config.rows) {
   return list.filter((row) => keys.some((key) => key.includes(norm(row.productMatch))));
 }
 
-// The one rate a line states in lb per 1,000 sq ft ("3.1 lb per 1,000 sq ft"); a range states none.
-const LINE_LB = /(\d+(?:\.\d+)?)(\s*to\s*\d+(?:\.\d+)?)?\s*lbs?\s+per\s+1,?000\s*sq\.?\s*ft/i;
-function lineLbPer1000(raw) {
+// The lb per 1,000 sq ft a line states: { rate } for one rate ("3.1 lb per 1,000 sq ft"), { range: true } for a range
+// ("1 to 2 lb", "1-2 lb", "1–2 lb": no one rate, so no number), else null.
+const LINE_LB = /(\d+(?:\.\d+)?)(\s*(?:to|-|\u2013)\s*\d+(?:\.\d+)?)?\s*lbs?\s+(?:per|\/)\s*1,?000\s*sq\.?\s*ft/i;
+function lineLbRate(raw) {
   const found = LINE_LB.exec(String(raw || ''));
-  return found && !found[2] ? Number(found[1]) : null;
+  if (!found) return null;
+  return found[2] ? { range: true } : { rate: Number(found[1]) };
 }
+const lineLbPer1000 = (raw) => lineLbRate(raw)?.rate ?? null;
 
 // 9.5 reads 9½ on the sheet.
 function settingText(setting) {
@@ -60,13 +63,15 @@ const isLb = (unit) => /^lbs?$/i.test(String(unit || '').trim());
 
 /**
  * The spreader field for one granular line, or null when it does not go on with the spreader (a hand-shaker bait, a
- * product on the no-number list). `rate`/`rateUnit`: the rate the plan puts down; else the line's own lb rate.
+ * product on the no-number list). `rate`/`rateUnit`: the rate the plan puts down; else the line's own lb rate. A
+ * `substituted` line (an approved swap: the recipe text names the original bag) matches only the bag applied, at the rate
+ * passed, never the recipe's name or rate.
  */
-function spreaderForLine({ productName, raw, rate, rateUnit }) {
-  const names = [productName, lineProductName(raw)];
+function spreaderForLine({ productName, raw, rate, rateUnit, substituted = false }) {
+  const names = substituted ? [productName] : [productName, lineProductName(raw)];
   if (handShaker(raw) || rowsFor(names, config.noNumber).length) return null;
-  const lbPer1000 = isLb(rateUnit) && Number(rate) > 0 ? Number(rate) : lineLbPer1000(raw);
-  return spreaderSetting({ names, lbPer1000 });
+  const planned = isLb(rateUnit) && Number(rate) > 0 ? Number(rate) : null;
+  return spreaderSetting({ names, lbPer1000: planned ?? (substituted ? null : lineLbPer1000(raw)) });
 }
 
-module.exports = { spreaderSetting, spreaderForLine, lineLbPer1000, rowsFor, settingText, NO_RATE_NUMBER, NO_PRODUCT_NUMBER, config };
+module.exports = { spreaderSetting, spreaderForLine, lineLbRate, lineLbPer1000, rowsFor, settingText, NO_RATE_NUMBER, NO_PRODUCT_NUMBER, config };

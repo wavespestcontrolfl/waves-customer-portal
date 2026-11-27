@@ -1,6 +1,6 @@
 // The LESCO spreader number for a granular line (spreader-settings.js, config/spreader-settings.json): the product's row nearest
 // the line's rate, only within 3% of it; a field-tested row says so, a start number asks for a weigh test. Pure, no database.
-const { spreaderSetting, spreaderForLine, lineLbPer1000, settingText, config, NO_RATE_NUMBER, NO_PRODUCT_NUMBER } = require('../services/spreader-settings');
+const { spreaderSetting, spreaderForLine, lineLbRate, lineLbPer1000, settingText, config, NO_RATE_NUMBER, NO_PRODUCT_NUMBER } = require('../services/spreader-settings');
 const protocol = require('../config/lawn-protocol-v13.json');
 
 describe('the spreader number for a rate', () => {
@@ -32,6 +32,19 @@ describe('the spreader number for a rate', () => {
     expect([settingText(9.5), settingText(11), settingText(16)]).toEqual(['9½', '11', '16']);
     expect(lineLbPer1000('LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader')).toBe(3.1);
     expect(lineLbPer1000('Bag — 2 to 3 lb per 1,000 sq ft')).toBeNull();
+  });
+  test('a ranged line states no one rate in any spelling, so it gets no number without a plan rate', () => {
+    for (const raw of ['Topchoice — 1 to 2 lb per 1,000 sq ft', 'Topchoice — 1-2 lb per 1,000 sq ft', 'Topchoice — 1\u20132 lb per 1,000 sq ft']) {
+      expect(lineLbRate(raw)).toEqual({ range: true });
+      expect(spreaderForLine({ productName: 'Topchoice Granular Insecticide', raw })).toMatchObject({ setting: null, text: NO_RATE_NUMBER });
+    }
+    expect(lineLbRate('Topchoice — 2 lb per 1,000 sq ft')).toEqual({ rate: 2 });
+  });
+  test('an approved swap matches only the bag applied, at the rate passed: never the recipe bag\'s name or rate', () => {
+    const raw = 'LESCO 10-0-22 50% PolyPlus OPTI45 Turfgrass Granular Fertilizer — 4.5 lb per 1,000 sq ft, spreader';
+    expect(spreaderForLine({ productName: 'Synthetic swap bag', raw, rate: 4.5, rateUnit: 'lb', substituted: true })).toMatchObject({ setting: null, text: NO_PRODUCT_NUMBER });
+    expect(spreaderForLine({ productName: 'LESCO 44-0-0 100% PolyPlus OPTI120', raw, substituted: true })).toMatchObject({ setting: null, text: NO_RATE_NUMBER });
+    expect(spreaderForLine({ productName: 'LESCO 44-0-0 100% PolyPlus OPTI120', raw, rate: 2.27, rateUnit: 'lb', substituted: true }).setting).toBe(8);
   });
 });
 

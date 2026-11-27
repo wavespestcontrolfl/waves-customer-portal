@@ -1262,15 +1262,18 @@ function isTankMixable(product = {}) {
 }
 
 // The LESCO spreader number for a granular line (spreader-settings.js), at the rate the plan puts down (else the line's own lb
-// rate, else the catalog rate): every lawn granular, and another service's granular only when a row names its product.
-function spreaderForCard(facts, line, product) {
-  if (isTankMixable(product)) return null;
-  const names = [product.name, String(line.raw || '').split(' \u2014 ')[0]];
+// rate, else the catalog rate when the line states none; a ranged line takes no catalog rate): every lawn granular, and another
+// service's granular only when a row names its product. `withheld`: the card withholds the dose (a spray-check hold, an
+// unverified label, a block), so it gives no number either.
+function spreaderForCard(facts, line, product, withheld) {
+  if (withheld || isTankMixable(product)) return null;
+  const substituted = Boolean(line.substitutedFor);
+  const names = substituted ? [product.name] : [product.name, String(line.raw || '').split(' \u2014 ')[0]];
   if (!facts.isLawn && !spreaderSettings.rowsFor(names).length) return null;
   let rate = {};
   if (line.planMix?.ratePer1000 > 0) rate = { rate: line.planMix.ratePer1000, rateUnit: line.planMix.rateUnit };
-  else if (!spreaderSettings.lineLbPer1000(line.raw)) rate = { rate: product.default_rate_per_1000, rateUnit: product.rate_unit };
-  return spreaderSettings.spreaderForLine({ productName: product.name, raw: line.raw, ...rate });
+  else if (substituted || !spreaderSettings.lineLbRate(line.raw)) rate = { rate: product.default_rate_per_1000, rateUnit: product.rate_unit };
+  return spreaderSettings.spreaderForLine({ productName: product.name, raw: line.raw, substituted, ...rate });
 }
 
 function precautionText(product) {
@@ -1870,7 +1873,8 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // in the tank search — a held product is not dosed anywhere. The rain
     // rules never hold: owner 2026-10-29.
     const held = verdict.verdict === 'hold';
-    const plannedMix = !blocked && !tankReason && !unverified && !held ? demandMix : null;
+    const doseWithheld = blocked || unverified || held;
+    const plannedMix = !doseWithheld && !tankReason ? demandMix : null;
     // Unrounded: the client converts small doses to g / mL and rounds once.
     const planned = plannedMix ? { amount: Number(plannedMix.amount), unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
@@ -1916,7 +1920,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       labelUrl: p.label_url || null,
       sdsUrl: p.sds_url || null,
       rotation,
-      spreader: spreaderForCard(facts, line, p),
+      spreader: spreaderForCard(facts, line, p, doseWithheld),
       order: packSizes ? orderFor(p, packSizes[p.id], short ? inventory.plannedAmountInventoryUnit - onHand : null, { includePricing }) : null,
     });
   }
