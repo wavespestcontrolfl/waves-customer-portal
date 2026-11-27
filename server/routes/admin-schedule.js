@@ -24828,10 +24828,14 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a new exposure surface. Computed AFTER the single ownership-scoped
     // fetch above, so the reassignment protection covers it; fail-soft —
     // a facts outage omits the key, never 500s the brief read.
+    // "Customer asked" words are read for THIS visit date (portal messages' window, reschedule notes): finalRecheck binds the visit's
+    // scheduled_date too when they ride the answer, as GET /:id/visit-texts does.
+    let customerAskedBound = false;
     const withFacts = async (payload) => {
       if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
       try {
         const facts = await PrevisitBrief.deterministicVisitFacts(svc, undefined, { pastVisits: true, customerAsked: true });
+        if (facts.customer_asked) customerAskedBound = true;
         // Re-verify the assignment AFTER the facts queries (Codex P1 on
         // #3638): they run outside the atomic ownership-scoped fetch
         // above, so a dispatch reassignment during them would otherwise
@@ -24923,6 +24927,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       try {
         const stillOwned = await db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
+          .modify((q) => (customerAskedBound ? q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date)) : q))
           .modify((q) => technicianCurrentVisitFilter(req, q))
           .first('scheduled_services.id');
         return stillOwned ? payload : { brief: null };

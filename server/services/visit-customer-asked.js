@@ -309,18 +309,16 @@ function rescheduleNote(description, createdAt, now = new Date()) {
   return null;
 }
 
-// The words of a portal request row. A card or chat row carries a server-written description: its subject (the
-// service) only. A typed portal form row (and an older row with only the stamp) shows the customer's description once it
-// passes the body screen; a pricing flow ('portal_flow') posts a GENERATED description that holds prices: its subject
-// only. A description that fails the screen falls back to the subject, which entry() screens again. The typed form's
-// subject is the description's first 80 characters, so a description that starts with its subject is shown alone.
+// The words of a portal request row. A row whose subject is an independently generated service label shows that label: a
+// card or chat row, and a pricing flow ('portal_flow', whose generated description holds prices, never shown). A typed
+// portal form row (and an older row with only the stamp) derives its subject FROM the description: its first 80 characters,
+// which can carry what the description's screen held, so a held description shows nothing at all. A description that starts
+// with its subject is shown alone.
 function requestRowText(row, codes = null) {
   const subject = compact(row.subject);
-  if (row.source) return subject;
+  if (row.source || metaOf(row)?.writer === 'portal_flow') return subject;
   const description = compact(row.description);
-  const writer = metaOf(row)?.writer;
-  const shown = writer !== 'portal_flow' && screenOk(description, codes);
-  if (!description || !shown) return subject;
+  if (!description || !screenOk(description, codes)) return '';
   return description.toLowerCase().startsWith(subject.toLowerCase()) ? description : `${subject}: ${description}`;
 }
 
@@ -394,7 +392,10 @@ async function portalMessageItems(svc, dbh, singleSoon, codes) {
   const sequenceHeld = require('./tech-visit-texts').sequenceHeldIds(
     (rows || []).map((row) => ({ id: row.id, direction: 'inbound', message_body: row.body, created_at: row.created_at })),
   );
-  return (rows || [])
+  // A full read means older messages may sit past it: the oldest fetched one could be the reply to a held message that was not
+  // read, so it is never displayed (rows are newest first).
+  const shown = (rows || []).length >= PORTAL_READ_LIMIT ? rows.slice(0, -1) : rows || [];
+  return shown
     .filter((row) => !sequenceHeld.has(row.id))
     .filter((row) => compact(row.body) && safeMessage(compact(row.body), codes))
     .slice(0, PORTAL_ROW_LIMIT)

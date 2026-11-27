@@ -450,17 +450,18 @@ describe('customerAskedFacts: no prices on a technician screen', () => {
     expect(JSON.stringify(facts)).not.toMatch(/149|WAVES AI/);
   });
 
-  test('a typed request with an amount in its words is reduced to its subject, or dropped when the subject has one too', async () => {
-    const reduced = formRow({ subject: 'Ants in the kitchen', description: 'Ants in the kitchen, last company charged $120 and never fixed it', metadata: { writer: 'portal_form' } });
-    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [reduced] }))).items[0].text).toBe('Ants in the kitchen');
+  test('a typed request with an amount in its words shows nothing: its subject comes from the description', async () => {
+    const held = formRow({ subject: 'Ants in the kitchen', description: 'Ants in the kitchen, last company charged $120 and never fixed it', metadata: { writer: 'portal_form' } });
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [held] }))).toBeNull();
     const dropped = formRow({ subject: 'Was charged $120 twice', description: 'Was charged $120 twice, please fix', metadata: { writer: 'portal_form' } });
     expect(await customerAskedFacts(SVC, fakeDbh({ rows: [dropped] }))).toBeNull();
   });
 
-  test('an older row with only the stamp shows its description only if it passes the whole money screen', async () => {
+  test('an older row with only the stamp shows its description only if it passes the whole screen', async () => {
     expect((await customerAskedFacts(SVC, fakeDbh({ rows: [stamped('Brown patch by the gate')] }))).items[0].text).toBe('Lawn plan: Brown patch by the gate');
     for (const generated of ['Customer asked WAVES AI: "price". It is $149 per visit.', 'Quote for lawn care came to 1,200 a year', 'We were told the price would be lower', 'Total was 49.95']) {
-      expect((await customerAskedFacts(SVC, fakeDbh({ rows: [stamped(generated)] }))).items[0].text).toBe('Lawn plan');
+      // An older stamp-only row's subject is not an independent label: a held description shows nothing.
+      expect(await customerAskedFacts(SVC, fakeDbh({ rows: [stamped(generated)] }))).toBeNull();
     }
   });
 
@@ -620,14 +621,14 @@ describe('customerAskedFacts: every screen runs on the full text, before the 280
     const svc = { ...SVC, self_booking_id: 'sb-1', scheduled_date: '2026-11-27', notes: `Self-booked. Notes: ${withPriceLate}` };
     const facts = await customerAskedFacts(svc, fakeDbh({ rows: [row], booking: { customer_notes: withPriceLate, source: 'direct' }, messages: [{ body: withPriceLate, created_at: '2026-11-24T15:00:00.000Z' }] }));
     delete process.env.GATE_PORTAL_MESSAGES;
-    expect(facts.items.map((i) => i.text)).toEqual(['Ants at the back door']);
+    expect(facts).toBeNull();
   });
 
   test('a link after the cut drops the item', async () => {
     const row = formRow({ subject: 'Ants', description: withLinkLate, metadata: { writer: 'portal_form' } });
     const svc = { ...SVC, self_booking_id: 'sb-1', notes: `Self-booked. Notes: ${withLinkLate}` };
     const facts = await customerAskedFacts(svc, fakeDbh({ rows: [row], booking: { customer_notes: withLinkLate, source: 'direct' } }));
-    expect(facts.items.map((i) => i.text)).toEqual(['Ants']);
+    expect(facts).toBeNull();
   });
 });
 
@@ -648,8 +649,8 @@ describe('customerAskedFacts: the link screen is the texts screen, on every kind
     const svc = { ...SVC, self_booking_id: 'sb-1', scheduled_date: '2026-11-27', notes: `Self-booked. Notes: ${words}` };
     const facts = await customerAskedFacts(svc, fakeDbh({ rows, booking: { customer_notes: words, source: 'direct' }, messages: [{ body: words, created_at: '2026-11-24T15:00:00.000Z' }] }));
     delete process.env.GATE_PORTAL_MESSAGES;
-    // Only the typed request's subject survives; every item carrying the link is gone.
-    expect(facts.items.map((i) => i.text)).toEqual(['Ants']);
+    // The typed request's subject comes from its description, so it is held with it: nothing survives.
+    expect(facts).toBeNull();
   });
 
   test('ordinary sentences are not links', async () => {
@@ -719,9 +720,15 @@ describe('customerAskedFacts: the texts feature\'s body screen on every free-tex
     expect(await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).toBeNull();
   });
 
-  test('a typed request whose description fails falls back to its subject only when the subject passes', async () => {
+  test('a typed request whose full description is held shows nothing, though its subject alone would pass', async () => {
     const row = formRow({ subject: 'Ants in the kitchen', description: 'Ants in the kitchen. The gate code is 4521 if needed.', metadata: { writer: 'portal_form' } });
-    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).items.map((i) => i.text)).toEqual(['Ants in the kitchen']);
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).toBeNull();
+  });
+
+  test('only a generated service label may stand alone: a pricing flow row and a card or chat row keep their subject', async () => {
+    const flow = formRow({ subject: 'Lawn care review requested', description: 'Customer asked: price? It is $149.', metadata: { writer: 'portal_flow' } });
+    const card = formRow({ subject: 'Quote requested in portal chat: Lawn Care', description: 'Their words: gate 4521', source: 'portal_chat' });
+    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [flow, card] }))).items.map((i) => i.text).sort()).toEqual(['Lawn care review requested', 'Quote requested in portal chat: Lawn Care']);
   });
 
   test('credential, sign-in and payment cues are held; times, dates and plain asks are not', async () => {
@@ -782,6 +789,21 @@ describe('customerAskedFacts: portal messages are screened as a sequence, like t
   test('an ordinary short reply after an ordinary message is not held', async () => {
     const messages = [{ body: '9', created_at: at(2) }, { body: 'How many techs will come', created_at: at(1) }];
     expect((await customerAskedFacts(VISIT, fakeDbh({ messages }))).items.map((i) => i.text).sort()).toEqual(['9', 'How many techs will come']);
+  });
+});
+
+describe('customerAskedFacts: a full portal-message read never displays its oldest row', () => {
+  const VISIT = { ...SVC, scheduled_date: '2026-11-27' };
+  beforeEach(() => { process.env.GATE_PORTAL_MESSAGES = 'true'; });
+  afterAll(() => { delete process.env.GATE_PORTAL_MESSAGES; });
+  const held = (n) => ({ body: `see photos.example.dev/${n}`, created_at: `2026-11-25T${String(10 + (n % 10)).padStart(2, '0')}:00:00.000Z` });
+
+  test('with 40 rows read, the oldest (possibly the reply to an unread held message) is not shown; with fewer it is', async () => {
+    const oldest = { body: 'Please come after noon', created_at: '2026-11-21T10:00:00.000Z' };
+    const full = [...Array.from({ length: 39 }, (_, n) => held(n)), oldest];
+    expect(await customerAskedFacts(VISIT, fakeDbh({ messages: full }))).toBeNull();
+    const short = [...Array.from({ length: 38 }, (_, n) => held(n)), oldest];
+    expect((await customerAskedFacts(VISIT, fakeDbh({ messages: short }))).items.map((i) => i.text)).toEqual(['Please come after noon']);
   });
 });
 
