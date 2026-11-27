@@ -55,6 +55,22 @@ const flags = require('./flags');
 const { invoiceAmountDue, SEND_CLAIMABLE_STATUSES } = require('../../invoice-helpers');
 const { etCalendarDayOf, etDateString } = require('../../../utils/datetime-et');
 const { anchorInvoiceOf, orderByDue, dueDayOf, invoiceDaysOverdue, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
+const { recordStreamedMessage } = require('../../llm-dispatch-metrics');
+const { providerErrorReason } = require('../../llm/call');
+
+function recordCollectionsStreamRound({ message = null, t0, timedOut = false, err = null }) {
+  const errorCode = err
+    ? (timedOut ? 'anthropic_timeout' : providerErrorReason('anthropic', err))
+    : null;
+  recordStreamedMessage({
+    provider: 'anthropic',
+    requestedModel: MODEL,
+    message,
+    latencyMs: Math.round(performance.now() - t0),
+    laneId: 'voice_relay_collections',
+    errorCode,
+  });
+}
 
 // The pay link is a /pay/:token SMS, and InvoiceService.sendViaSMS only
 // CLAIMS its SEND_CLAIMABLE_STATUSES (the one sendability authority). The
@@ -897,6 +913,7 @@ class CollectionsConversation {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (this.ended) return;
       let msg;
+      const t0 = performance.now();
       const controller = new AbortController();
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; try { controller.abort(); } catch { /* no-op */ } }, STREAM_TIMEOUT_MS);
@@ -919,7 +936,9 @@ class CollectionsConversation {
           { signal: controller.signal },
         );
         msg = await stream.finalMessage();
+        recordCollectionsStreamRound({ message: msg, t0 });
       } catch (err) {
+        recordCollectionsStreamRound({ t0, timedOut, err });
         if (timedOut) {
           this.say('Sorry, that took a moment — could you say that again?');
           return;

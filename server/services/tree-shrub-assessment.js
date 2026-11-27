@@ -24,6 +24,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { anthropicText, geminiText, dispatchWithFallback } = require('./llm/call');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const {
   TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
   hideFrozenFindingsInScores, loadFrozenTechFindingsByRecord, withholdScores,
@@ -391,7 +392,7 @@ async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropic.messages.create({
+    const response = await ledgerCall('anthropic', MODELS.VISION, () => anthropic.messages.create({
       model: MODELS.VISION,
       ...anthropicEffortConfig(MODELS.VISION),
       max_tokens: anthropicMaxTokens(MODELS.VISION, 500),
@@ -402,12 +403,23 @@ async function callClaudeVision(base64Image, mimeType) {
           { type: 'text', text: visionPromptText() },
         ],
       }],
-    });
+    }), { laneId: 'tree_shrub' });
     const text = anthropicText(response);
-    if (!text) { logger.warn('[tree-shrub-assessment] Claude returned empty content'); return null; }
-    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    if (!text) {
+      ledgerCallRejected(response, 'empty_text');
+      logger.warn('[tree-shrub-assessment] Claude returned empty content');
+      return null;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    } catch (err) {
+      ledgerCallRejected(response, 'invalid_json');
+      throw err;
+    }
     normalizeTreeShrubScores(parsed);
     if (!isValidTreeShrubScores(parsed)) {
+      ledgerCallRejected(response, 'schema_invalid');
       logger.warn('[tree-shrub-assessment] Claude vision response failed schema validation');
       return null;
     }
@@ -420,24 +432,48 @@ async function callClaudeVision(base64Image, mimeType) {
 
 async function geminiVisionAttempt(model, base64Image, mimeType) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
-    body: JSON.stringify({
-      contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: visionPromptText() }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
-    }),
-  });
-  if (!response.ok) {
-    logger.error(`Tree-shrub assessment Gemini API ${response.status} (${model}): ${response.statusText}`);
+  let data;
+  try {
+    data = await ledgerCall('gemini', model, async () => {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
+        body: JSON.stringify({
+          contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: visionPromptText() }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
+        }),
+      });
+      if (!response.ok) {
+        throw Object.assign(new Error(`Gemini API ${response.status} (${model}): ${response.statusText}`), {
+          status: response.status,
+          statusText: response.statusText,
+          httpError: true,
+        });
+      }
+      return response.json();
+    }, { laneId: 'tree_shrub' });
+  } catch (err) {
+    if (err?.httpError) {
+      logger.error(`Tree-shrub assessment Gemini API ${err.status} (${model}): ${err.statusText}`);
+      return null;
+    }
+    throw err;
+  }
+  const text = geminiText(data);
+  if (!text) {
+    ledgerCallRejected(data, 'empty_text');
     return null;
   }
-  const data = await response.json();
-  const text = geminiText(data);
-  if (!text) return null;
-  const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+  let parsed;
+  try {
+    parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+  } catch (err) {
+    ledgerCallRejected(data, 'invalid_json');
+    throw err;
+  }
   normalizeTreeShrubScores(parsed);
   if (!isValidTreeShrubScores(parsed)) {
+    ledgerCallRejected(data, 'schema_invalid');
     logger.warn(`Tree-shrub assessment Gemini vision response failed schema validation (${model})`);
     return null;
   }

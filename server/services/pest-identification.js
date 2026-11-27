@@ -31,7 +31,8 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { dispatch, geminiText } = require('./llm/call');
+const { dispatch, rejectCall, geminiText } = require('./llm/call');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const {
   safePublicFirstName,
   safePublicCity,
@@ -435,6 +436,7 @@ async function callOpenAIVision(base64Image, mimeType) {
       return null;
     }
     if (isValidPestIdentification(result.json)) return normalizePestIdentification(result.json);
+    rejectCall(result, 'schema_invalid');
     logger.warn('[pest-identification] OpenAI vision response failed schema validation');
     return null;
   } catch (err) {
@@ -445,27 +447,52 @@ async function callOpenAIVision(base64Image, mimeType) {
 
 async function geminiVisionAttempt(model, base64Image, mimeType) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
-    body: JSON.stringify({
-      contents: [{
-        parts: [
-          { inline_data: { mime_type: mimeType, data: base64Image } },
-          { text: VISION_PROMPT },
-        ],
-      }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
-    }),
-  });
-  if (!response.ok) {
-    logger.error(`Pest identification Gemini API ${response.status} (${model}): ${response.statusText}`);
+  let data;
+  try {
+    data = await ledgerCall('gemini', model, async () => {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: mimeType, data: base64Image } },
+              { text: VISION_PROMPT },
+            ],
+          }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
+        }),
+      });
+      if (!response.ok) {
+        throw Object.assign(new Error(`Gemini API ${response.status} (${model}): ${response.statusText}`), {
+          status: response.status,
+          statusText: response.statusText,
+          httpError: true,
+        });
+      }
+      return response.json();
+    }, { laneId: 'pest_id' });
+  } catch (err) {
+    if (err?.httpError) {
+      logger.error(`Pest identification Gemini API ${err.status} (${model}): ${err.statusText}`);
+      return null;
+    }
+    throw err;
+  }
+  const text = geminiText(data);
+  if (!text) {
+    ledgerCallRejected(data, 'empty_text');
     return null;
   }
-  const data = await response.json();
-  const text = geminiText(data);
-  if (!text) return null;
-  return parseVisionJson(text, `Gemini (${model})`);
+  let parsed;
+  try {
+    parsed = parseVisionJson(text, `Gemini (${model})`);
+  } catch (err) {
+    ledgerCallRejected(data, 'invalid_json');
+    throw err;
+  }
+  if (!parsed) ledgerCallRejected(data, 'schema_invalid');
+  return parsed;
 }
 
 async function callGeminiVision(base64Image, mimeType) {

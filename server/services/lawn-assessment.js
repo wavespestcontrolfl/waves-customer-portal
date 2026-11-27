@@ -12,6 +12,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { anthropicText, geminiText } = require('./llm/call');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
 // Coerce a model's grass_type to a canonical key, or null when it can't tell
@@ -208,7 +209,7 @@ async function callClaudeVision(base64Image, mimeType, context = {}, deadline = 
     // With a deadline the SDK's per-attempt timeout is the ceiling and its
     // default retries are off (each retry would get the full timeout again).
     const budget = remainingMs(deadline);
-    const response = await anthropic.messages.create({
+    const response = await ledgerCall('anthropic', MODELS.VISION, () => anthropic.messages.create({
       model: MODELS.VISION,
       ...anthropicEffortConfig(MODELS.VISION),
       max_tokens: anthropicMaxTokens(MODELS.VISION, 500),
@@ -219,14 +220,25 @@ async function callClaudeVision(base64Image, mimeType, context = {}, deadline = 
           { type: 'text', text: buildVisionPrompt(context) },
         ],
       }],
-    }, budget ? { timeout: budget, maxRetries: 0 } : undefined);
+    }, budget ? { timeout: budget, maxRetries: 0 } : undefined), { laneId: 'lawn_assess' });
 
     const text = anthropicText(response);
-    if (!text) { logger.warn('[lawn-assessment] Claude returned empty content'); return null; }
-    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    if (!text) {
+      ledgerCallRejected(response, 'empty_text');
+      logger.warn('[lawn-assessment] Claude returned empty content');
+      return null;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    } catch (err) {
+      ledgerCallRejected(response, 'invalid_json');
+      throw err;
+    }
     parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
     normalizeVisionScores(parsed);
     if (!isValidVisionScores(parsed)) {
+      ledgerCallRejected(response, 'schema_invalid');
       logger.warn('[lawn-assessment] Claude vision response failed schema validation');
       return null;
     }
@@ -243,34 +255,57 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}, d
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   const budget = remainingMs(deadline);
-  const response = await fetch(url, {
-    method: 'POST',
-    ...(budget ? { signal: AbortSignal.timeout(budget) } : {}),
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
-    body: JSON.stringify({
-      contents: [{
-        parts: [
-          { inline_data: { mime_type: mimeType, data: base64Image } },
-          { text: buildVisionPrompt(context) },
-        ],
-      }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
-    }),
-  });
+  let data;
+  try {
+    data = await ledgerCall('gemini', model, async () => {
+      const response = await fetch(url, {
+        method: 'POST',
+        ...(budget ? { signal: AbortSignal.timeout(budget) } : {}),
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: mimeType, data: base64Image } },
+              { text: buildVisionPrompt(context) },
+            ],
+          }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
+        }),
+      });
+      if (!response.ok) {
+        throw Object.assign(new Error(`Gemini API ${response.status} (${model}): ${response.statusText}`), {
+          status: response.status,
+          statusText: response.statusText,
+          httpError: true,
+        });
+      }
+      return response.json();
+    }, { laneId: 'lawn_assess' });
+  } catch (err) {
+    if (err?.httpError) {
+      logger.error(`Lawn assessment Gemini API ${err.status} (${model}): ${err.statusText}`);
+      return null;
+    }
+    throw err;
+  }
 
-  if (!response.ok) {
-    logger.error(`Lawn assessment Gemini API ${response.status} (${model}): ${response.statusText}`);
+  const text = geminiText(data);
+  if (!text) {
+    ledgerCallRejected(data, 'empty_text');
     return null;
   }
 
-  const data = await response.json();
-  const text = geminiText(data);
-  if (!text) return null;
-
-  const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+  let parsed;
+  try {
+    parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+  } catch (err) {
+    ledgerCallRejected(data, 'invalid_json');
+    throw err;
+  }
   parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
   normalizeVisionScores(parsed);
   if (!isValidVisionScores(parsed)) {
+    ledgerCallRejected(data, 'schema_invalid');
     logger.warn(`Lawn assessment Gemini vision response failed schema validation (${model})`);
     return null;
   }
