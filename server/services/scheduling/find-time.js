@@ -20,7 +20,7 @@ const { techColumns, techStartPoint } = require('./tech-start-point');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays, loadTechShifts, shiftBounds } = require('../technician-eligibility');
-const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
+const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement, hasInsertionIncompatibleRow } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
 const { zoneRouteDaysLive, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { readZoneRouteDays } = require('./zone-route-days');
@@ -308,9 +308,12 @@ function travelAllowance(opts) {
 }
 
 function dayIncompatibleWithInsertion(context) {
+  if (typeof hasInsertionIncompatibleRow === 'function') return hasInsertionIncompatibleRow(context);
+  const techId = context && context.target && context.target.technician_id;
   return Boolean(context && Array.isArray(context.rows)
     && context.rows.some((r) => r && r.status !== 'completed'
-      && (r.technician_id === null || (!r.window_start && Boolean(r.time_window)))));
+      && (r.technician_id === null
+        || (techId != null && String(r.technician_id) === String(techId) && !r.window_start && Boolean(r.time_window)))));
 }
 
 function insertionOptionsFor(opts, context) {

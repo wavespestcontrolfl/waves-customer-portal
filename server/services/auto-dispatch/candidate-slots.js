@@ -1338,7 +1338,6 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     arrivalSearch: ctx.arrivalSearch === true,
     ...(ctx.arrivalSearch === true ? {
       providerTravel: false,
-      ...(service.service_type ? { serviceType: service.service_type } : {}),
       ...(service.is_recurring === true ? { isRecurring: true } : {}),
       ...(service.is_callback === true ? { isCallback: true } : {}),
     } : {}),

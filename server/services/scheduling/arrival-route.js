@@ -1483,9 +1483,11 @@ async function evaluatePlacementInSavepoint(sp, { context, row, date, autoDispat
 }
 
 function hasInsertionIncompatibleRow(context) {
+  const techId = context && context.target && context.target.technician_id;
   return Boolean(context && Array.isArray(context.rows)
     && context.rows.some((r) => r && r.status !== 'completed'
-      && (r.technician_id === null || (!r.window_start && Boolean(r.time_window)))));
+      && (r.technician_id === null
+        || (techId != null && String(r.technician_id) === String(techId) && !r.window_start && Boolean(r.time_window)))));
 }
 
 function savepointContextRefusal(context, strictPlace) {
@@ -1755,7 +1757,7 @@ module.exports = {
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
-  placeMovedVisit, INSERTION_MARGIN_MINUTES,
+  placeMovedVisit, INSERTION_MARGIN_MINUTES, hasInsertionIncompatibleRow,
   blockedIntervalsFor, loadDayScheduleBlocks,
   _internals: { clockOrder, storedOrderStale, groupRouteStops, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel, pickedShiftEnd, verifyPlacedNeighbours },
 };

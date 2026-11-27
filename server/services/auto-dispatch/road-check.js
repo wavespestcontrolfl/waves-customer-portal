@@ -159,19 +159,16 @@ const withRoad = (row, road) => ({ ...row, cand: { ...row.cand, [ROAD_RESULT]: r
  * noMoveReason), with the best slot's numbers in the audit row.
  * Never throws: a failure keeps the model's answer.
  */
-// When road data is unavailable across every required-road slot checked, a
-// later score-bar (or positive-gain) candidate may still move on the model
-// estimate under the existing fallback policy, without spending extra legs.
-function estimateFallbackRow(rows, startIndex) {
-  return (rows || []).slice(startIndex).find((row) => !needsConfirmedRoad(row)) || null;
-}
-
-function settledOrEstimateFallback(ranked, failed, floor, ctx, startIndex) {
-  if (failed.length && failed.every((f) => f.unavailable)) {
-    const fallback = estimateFallbackRow(ranked.rankedRows, startIndex);
-    if (fallback) return settled(ranked, { ...withRoad(fallback, null), floor: floorOfRow(fallback, floor, ctx) }, true);
-  }
-  return settled(ranked, failed[0], false);
+// Select up to ROAD_CHECK_SLOTS candidates to measure on Google roads. When all
+// top slots require road confirmation (nonpositive-gain minutes-rule) and a
+// later score-bar/positive-gain candidate exists, reserve the final slot for
+// that candidate so it is actually road-checked (never approved unchecked on an
+// estimate) while keeping total provider calls bounded at ROAD_CHECK_SLOTS.
+function slotsToMeasure(rankedRows) {
+  const top = (rankedRows || []).slice(0, ROAD_CHECK_SLOTS);
+  if (top.length < ROAD_CHECK_SLOTS || !top.every(needsConfirmedRoad)) return top;
+  const fallback = (rankedRows || []).slice(ROAD_CHECK_SLOTS).find((row) => !needsConfirmedRoad(row));
+  return fallback ? [...top.slice(0, ROAD_CHECK_SLOTS - 1), fallback] : top;
 }
 
 async function confirmOnRoads(ranked, ctx) {
@@ -181,8 +178,9 @@ async function confirmOnRoads(ranked, ctx) {
   if (!ranked.qualifies) return ranked;
   const floor = ctx.config.minDayMoveDriveSavingMinutes;
   const failed = [];
+  const toCheck = slotsToMeasure(ranked.rankedRows);
   try {
-    for (const row of ranked.rankedRows.slice(0, ROAD_CHECK_SLOTS)) {
+    for (const row of toCheck) {
       const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
       const requireRoad = needsConfirmedRoad(row);
       // No road answer for the best slot: for a score-bar or positive-gain slot
@@ -196,18 +194,16 @@ async function confirmOnRoads(ranked, ctx) {
       if ((!road && !requireRoad) || (road && road.saving_minutes >= checked.floor)) return settled(ranked, checked, true);
       failed.push(checked);
     }
-    return settledOrEstimateFallback(ranked, failed, floor, ctx, ROAD_CHECK_SLOTS);
+    return settled(ranked, failed[0], false);
   } catch (err) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
     // A slot roads already refused stays refused: the error only stops the search.
-    // With nothing measured yet, a nonpositive-gain minutes-rule best slot falls
-    // back to the next score-bar/positive-gain slot if any, else fails closed
-    // with roadUnavailable.
-    if (failed.length) return settledOrEstimateFallback(ranked, failed, floor, ctx, failed.length);
-    const first = ranked.rankedRows && ranked.rankedRows[0];
+    // With nothing measured yet, a nonpositive-gain minutes-rule best slot fails
+    // closed with roadUnavailable; any other best slot stands on the estimate
+    // with unchecked minutes-rule slots removed from the fallback list.
+    if (failed.length) return settled(ranked, failed[0], false);
+    const first = toCheck[0];
     if (needsConfirmedRoad(first)) {
-      const fallback = estimateFallbackRow(ranked.rankedRows, 1);
-      if (fallback) return settled(ranked, { ...withRoad(fallback, null), floor: floorOfRow(fallback, floor, ctx) }, true);
       return settled(ranked, { ...withRoad(first, null), floor: floorOfRow(first, floor, ctx), unavailable: true }, false);
     }
     return withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
