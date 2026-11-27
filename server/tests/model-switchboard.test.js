@@ -852,7 +852,7 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       const byId = Object.fromEntries(lanes.map((l) => [l.id, l]));
       for (const id of [
         'pest_id', 'lawn_assess', 'tree_shrub', 'treatment_zone', 'turf_ocr',
-        'property_trio', 'lawn_diag_vision',
+        'property_trio', 'property_v2_vision', 'lawn_diag_vision',
         'address_recovery', 'call_extraction_v1', 'transcription',
         'contact_dictation', 'photo_scoring', 'ts_watch_signals', 'call_sound_check', 'call_research', 'call_extraction',
       ]) {

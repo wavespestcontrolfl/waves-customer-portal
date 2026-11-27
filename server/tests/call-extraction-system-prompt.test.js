@@ -184,13 +184,17 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
   test('system-layout cohort hashes exclude pre-systemInstruction Gemini rows while keeping gate-off hashes unchanged', () => {
     const crypto = require('crypto');
     const schema = require('../schemas/call-extraction.model-output.schema.json');
-    const parts = buildExtractionPromptParts('', '', '', {});
-    const oldSysHash = crypto.createHash('sha256')
-      .update(`${parts.system}\n\u0000\n${parts.user}\n${JSON.stringify(schema)}`)
-      .digest('hex')
-      .slice(0, 12);
-    const oldSysVersion = `${PROMPT_VERSION}s-${oldSysHash}`;
-    expect(SYSTEM_PROMPT_HASH).not.toBe(oldSysVersion);
+    const legacyHash = (opts) => {
+      const parts = buildExtractionPromptParts('', '', '', opts);
+      return crypto.createHash('sha256')
+        .update(`${parts.system}\n\u0000\n${parts.user}\n${JSON.stringify(schema)}`)
+        .digest('hex')
+        .slice(0, 12);
+    };
+    const oldSysHash = legacyHash({});
+    const oldApsSysHash = legacyHash({ agentProposedSlotCommitment: true });
+    expect(SYSTEM_PROMPT_HASH).not.toBe(`${PROMPT_VERSION}s-${oldSysHash}`);
+    expect(SYSTEM_APS_PROMPT_HASH).not.toBe(`${PROMPT_VERSION}b-${oldApsSysHash}`);
     expect(extractionPromptVersion(['General Pest Control'], { systemLayout: true })).not.toContain(oldSysHash);
 
     const savedGate = process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
@@ -198,7 +202,7 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
     try {
       const { apsCohortVersion } = require('../scripts/v2-promotion-readiness');
       expect(apsCohortVersion([])).toBe(SYSTEM_APS_PROMPT_HASH);
-      expect(apsCohortVersion([])).not.toContain(oldSysHash);
+      expect(apsCohortVersion([])).not.toBe(`${PROMPT_VERSION}b-${oldApsSysHash}`);
     } finally {
       if (savedGate === undefined) delete process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
       else process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = savedGate;
