@@ -328,7 +328,13 @@ maybeDescribe('AI close of open call promises (live Postgres)', () => {
       const proof = (await row(w.commitment.id)).fulfillment;
       expect(proof.label).toBe('text');
       expect(proof.quote).toBeUndefined();
-      expect(JSON.stringify(proof)).not.toMatch(/4821|Ab3dE5|4242/);
+      // The proof holds random ids and hashes (a uuid can end in "4821" by chance), so
+      // scan only what is not an id, a hash or a timestamp: any quoted text would remain.
+      const readable = JSON.stringify(proof)
+        .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, '')
+        .replace(/[0-9a-f]{32,}/g, '')
+        .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/g, '');
+      expect(readable).not.toMatch(/4821|Ab3dE5|4242/);
     });
 
     test('the cached verdicts on the staff-readable row carry no quote, and a fulfilled verdict is not cached', async () => {
